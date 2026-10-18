@@ -126,7 +126,7 @@ paths:
             schema: { $ref: "#/components/schemas/ExecRequest" }
       responses:
         "200": { description: output, content: { application/json: { schema: { $ref: "#/components/schemas/ExecResult" } } } }
-        "409": { description: not running (and `wake` was not set) }
+        "409": { description: not running (and `wake` was false) }
   /v1/machines/{id}/files:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -389,7 +389,7 @@ components:
         cwd: { type: string }
         stdin: { type: string }
         timeout_ms: { type: integer, default: 300000 }
-        wake: { type: boolean, default: false }
+        wake: { type: boolean, default: true, description: Wake a sleeping machine for the command; false answers 409 when it is not running }
     ExecResult:
       type: object
       properties:

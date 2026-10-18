@@ -216,9 +216,14 @@ pub struct ExecRequest {
     pub stdin: String,
     #[serde(default)]
     pub timeout_ms: u64,
-    /// Wake a sleeping machine for the command (default false: 409 when not running).
-    #[serde(default)]
+    /// Wake a sleeping machine for the command (the default); `false` answers 409 when it is
+    /// not running.
+    #[serde(default = "default_true")]
     pub wake: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// The command's output.

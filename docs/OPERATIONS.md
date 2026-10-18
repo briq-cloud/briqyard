@@ -108,6 +108,7 @@ not a backup until sent elsewhere.
 | The process exits at once (`stopped`, `exit.code`) | `briqyard machine logs`: the image's own output. `restart.policy: on-failure` tries three times |
 | `the guest did not come up` | The kernel booted but the init did not answer on vsock within 60 s: console log, then the kernel (`kernel`) and init (`init`) paths |
 | `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk |
+| `host h_… is down` (fleet, 503) | The host missed its heartbeats for `placement.down_after_sec`: its machines answer again once it is back. `briqyard host ls`, then the host's `journalctl -u briqyardd` |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
 | `dataset is busy` | A zvol a Firecracker just released; the daemon retries for ten seconds |
 | A jail refuses to start | `<run>/<machine>/console.log` holds the jailer's own messages |

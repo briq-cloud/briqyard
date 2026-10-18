@@ -539,6 +539,17 @@ async fn forward(
     headers: &HeaderMap,
     body: Bytes,
 ) -> Response {
+    // A host that stopped answering is not asked: its machines are unreachable until it is back.
+    if host.state == "down" {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "host_down",
+            format!(
+                "host {} is down: its machines answer again once it does",
+                host.id
+            ),
+        );
+    }
     let url = format!("{}{}", host.url.trim_end_matches('/'), path);
     let mut req = st.http.request(method, &url).body(body);
     if let Some(ct) = headers.get(header::CONTENT_TYPE) {

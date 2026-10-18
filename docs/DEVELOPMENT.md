@@ -46,15 +46,48 @@ hack/vm.sh e2e         # install, then run hack/e2e.sh inside the VM
 Everything under nested virtualization is slower than on a real server; the timings are not a
 benchmark.
 
+### Two hosts on the Mac
+
+A second VM is a second host, so the fleet's placement, forwarding and host-down path run
+for real. Lima's `vzNAT` network isolates each VM (VMs reach the Mac at 192.168.64.1, not each
+other; `socket_vmnet` would fix that but needs root), so the VMs talk through ports the Mac
+forwards on every interface: in `~/.lima/fc/lima.yaml`, before `vmType: vz`,
+
+```yaml
+portForwards:
+- {guestPort: 7420, hostIP: 0.0.0.0, hostPort: 7420}
+- {guestPort: 7430, hostIP: 0.0.0.0, hostPort: 7430}
+networks:
+- vzNAT: true
+```
+
+then `limactl stop fc && limactl start fc`. The second VM, with the daemon's port forwarded as
+27420 the same way, is installed from the binaries `hack/vm.sh` built (copied out with
+`limactl copy` into `bin/`) by the bootstrap script, and registers with the fleet:
+
+```bash
+limactl start --name=fc2 --vm-type=vz --nested-virt --cpus=2 --memory=6 --disk=30 --network=vzNAT template://ubuntu
+limactl shell fc2 sudo bash -c 'cd /Users/uplab/projects/briqyard && BRIQYARD_POOL_FILE_GB=15 BRIQYARD_TOKEN=fc2-token \
+  FLEET_URL=http://192.168.64.1:7430 ADVERTISE=http://192.168.64.1:27420 bash hack/bootstrap-host.sh'
+cargo build --release -p briqyard   # the CLI, on the Mac
+PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
+  SECOND_HOST_STOP="limactl shell fc2 sudo systemctl stop briqyardd" \
+  SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" hack/fleet-two-hosts.sh
+```
+
 ## Tests
 
 - `cargo test --workspace`: unit tests (extraction and whiteouts, DNS packets, the guest
   protocol, address allocation).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
-  sleep on idle, wake on connect, a fork. 30 checks.
+  sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash.
+  46 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
-  daemon in the VM). 13 checks.
+  daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
+- `hack/fleet-two-hosts.sh`: a fleet with two hosts: tenants placed on different hosts, calls
+  forwarded to each, a host that stops answering marked down with its tenant's calls refused
+  (`host_down`) while the other host goes on, and the host back. 13 checks.
 
 ## Layout
 

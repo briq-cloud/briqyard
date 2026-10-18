@@ -87,10 +87,11 @@ enum MachineCmd {
     Rm {
         id: String,
     },
-    /// Run a command inside: briqyard machine exec ID -- cmd...
+    /// Run a command inside: briqyard machine exec ID -- cmd... (wakes a sleeping machine)
     Exec {
+        /// Fail when the machine is not running instead of waking it
         #[arg(long)]
-        wake: bool,
+        no_wake: bool,
         #[arg(long, default_value = "5m")]
         timeout: humantime::Duration,
         /// Send stdin to the command
@@ -462,7 +463,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 c.raw(DELETE, &format!("/v1/machines/{id}"), NONE).await?;
             }
             MachineCmd::Exec {
-                wake,
+                no_wake,
                 timeout,
                 stdin,
                 id,
@@ -470,7 +471,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             } => {
                 let mut req = api::ExecRequest {
                     cmd,
-                    wake,
+                    wake: !no_wake,
                     timeout_ms: timeout.as_millis() as u64,
                     ..Default::default()
                 };

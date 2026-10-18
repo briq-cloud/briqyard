@@ -9,8 +9,10 @@ ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 cleanup() {
-  for id in $(briqyard machine ls --tenant "$T" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
-  briqyard tenant rm "$T" >/dev/null 2>&1 || true
+  for t in "$T" "$T-2"; do
+    for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
+    briqyard tenant rm "$t" >/dev/null 2>&1 || true
+  done
 }
 trap cleanup EXIT
 
@@ -42,7 +44,8 @@ check "gone"              '! briqyard host ls | grep -q "$H"'
 LOCAL=$(briqyard host ls | awk 'NR>1 && $3=="ready"{print $1; exit}')
 briqyard host drain "$LOCAL"
 check "draining"          '[ "$(curl -fsS "$BRIQYARD_URL/v1/hosts" | jq -r ".[] | select(.id == \"$LOCAL\") | .state")" = draining ]'
-check "no placement while draining" '! briqyard machine run --image alpine:3.20 --name nohost --tenant "$T-2" --memory 256 -- true >/dev/null 2>&1'
+# One host: the create is refused. Several: it lands on another one. Never on the draining host.
+check "no placement on a draining host" '[ "$(briqyard machine run --image alpine:3.20 --name nohost --tenant "$T-2" --memory 256 -- true 2>/dev/null | jq -r .host)" != "$LOCAL" ]'
 briqyard host rm "$LOCAL"
 sleep 16
 check "back after rm (a static host is polled again)" 'briqyard host ls | awk "NR>1" | grep -q ready'
