@@ -1,5 +1,6 @@
 [package]
 name = "briqyard-fleet"
+description = "briqyard across hosts: placement, the forwarding API, host provisioning"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +9,14 @@ repository.workspace = true
 [dependencies]
 briqyard-api = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+async-trait = "0.1"

@@ -4,6 +4,7 @@ mod api;
 mod config;
 mod fc;
 mod guestc;
+mod heartbeat;
 mod image;
 mod ingress;
 mod machine;
@@ -80,6 +81,11 @@ async fn run(args: Args) -> Result<()> {
     let mgr = machine::Manager::new(cfg.clone(), store, zfs, images, dns).await?;
     let ing = ingress::Ingress::new(mgr.clone(), &cfg.ingress.bind, &cfg.ingress.http);
     ing.start().await?;
+    if let Some(f) = cfg.fleet.clone() {
+        if !f.url.is_empty() {
+            tokio::spawn(heartbeat::run(f, mgr.clone()));
+        }
+    }
     let state = Arc::new(api::AppState {
         mgr: mgr.clone(),
         token: cfg.token.clone(),

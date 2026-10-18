@@ -2,5 +2,441 @@ openapi: 3.1.0
 info:
   title: briqyard
   version: v0
-  description: Machines in Firecracker microVMs on one host (briqyardd) or across hosts (briqyard-fleet).
-paths: {}
+  description: |
+    Machines in Firecracker microVMs: on one host (briqyardd, port 7420) or across hosts
+    (briqyard-fleet, port 7430, the same routes plus /v1/hosts). The API is not stable yet.
+
+    Authentication: `Authorization: Bearer <token>` when the server has a token configured.
+    Every response carries `x-request-id`; error bodies repeat it as `request_id`.
+servers:
+  - url: http://127.0.0.1:7420
+    description: a daemon
+  - url: http://127.0.0.1:7430
+    description: a fleet
+paths:
+  /healthz:
+    get:
+      summary: Liveness
+      responses:
+        "200": { description: ok }
+  /v1/status:
+    get:
+      summary: The host's capacity and use
+      responses:
+        "200":
+          description: status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+  /v1/machines:
+    get:
+      summary: List machines
+      parameters:
+        - { name: tenant, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: machines
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Machine" } }
+    post:
+      summary: Create a machine (pulls the image when the host has not seen it)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateMachineRequest" }
+      responses:
+        "201":
+          description: created; `state` says whether it started (`error` carries why not)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Machine" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { description: a machine with that name exists in the tenant }
+        "503": { description: the host has no room }
+  /v1/machines/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: A machine
+      responses:
+        "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Destroy a machine, its endpoints and its disks
+      responses:
+        "204": { description: destroyed (or already gone) }
+  /v1/machines/{id}/start:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Boot a created or stopped machine
+      responses:
+        "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "409": { description: busy (starting, stopping or destroying) }
+        "503": { description: the host has no room }
+  /v1/machines/{id}/wake:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Start a machine that went to sleep (idle) or whose process ended; one stopped on request stays stopped
+      responses:
+        "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "409": { description: stopped on request, or busy }
+  /v1/machines/{id}/stop:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Stop a machine (SIGTERM to its process, SIGKILL after the timeout); disks are kept
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StopRequest" }
+      responses:
+        "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+  /v1/machines/{id}/touch:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Record use, which postpones sleep
+      responses:
+        "204": { description: recorded }
+  /v1/machines/{id}/wait:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: timeout, in: query, schema: { type: integer, default: 60, maximum: 600 }, description: seconds }
+    post:
+      summary: Wait until the machine is running
+      responses:
+        "200": { description: running, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "409": { description: it will not run (stopped, error) or did not in time }
+  /v1/machines/{id}/exec:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Run a command inside the machine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecRequest" }
+      responses:
+        "200": { description: output, content: { application/json: { schema: { $ref: "#/components/schemas/ExecResult" } } } }
+        "409": { description: not running (and `wake` was not set) }
+  /v1/machines/{id}/files:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Read a file from a running machine
+      parameters:
+        - { name: path, in: query, required: true, schema: { type: string } }
+      responses:
+        "200": { description: file, content: { application/json: { schema: { $ref: "#/components/schemas/FileResponse" } } } }
+    put:
+      summary: Write a file into a running machine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PutFileRequest" }
+      responses:
+        "204": { description: written }
+  /v1/machines/{id}/logs:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: since, in: query, schema: { type: string }, description: the `next` cursor of a previous page }
+      - { name: limit, in: query, schema: { type: integer, default: 500, maximum: 5000 } }
+    get:
+      summary: The serial console, paged
+      responses:
+        "200": { description: lines, content: { application/json: { schema: { $ref: "#/components/schemas/LogsResponse" } } } }
+  /v1/machines/{id}/snapshots:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: List snapshots
+      responses:
+        "200": { description: snapshots, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Snapshot" } } } } }
+    post:
+      summary: Snapshot both disks now
+      responses:
+        "201": { description: snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/Snapshot" } } } }
+  /v1/machines/{id}/endpoints:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Open a port of the machine to the outside; a connection wakes a sleeping machine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateEndpointRequest" }
+      responses:
+        "201": { description: endpoint, content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } }
+  /v1/endpoints:
+    get:
+      summary: List endpoints
+      responses:
+        "200": { description: endpoints, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Endpoint" } } } } }
+  /v1/endpoints/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: An endpoint
+      responses:
+        "200": { description: endpoint, content: { application/json: { schema: { $ref: "#/components/schemas/Endpoint" } } } }
+    delete:
+      summary: Close an endpoint
+      responses:
+        "204": { description: closed }
+  /v1/tenants:
+    get:
+      summary: Tenants on the host (daemon), or tenant to host (fleet)
+      responses:
+        "200": { description: tenants, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Tenant" } } } } }
+  /v1/tenants/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    delete:
+      summary: Remove an empty tenant's network
+      responses:
+        "204": { description: removed }
+        "409": { description: the tenant still has machines }
+  /v1/hosts:
+    get:
+      summary: Hosts (fleet only)
+      responses:
+        "200": { description: hosts, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Host" } } } } }
+  /v1/hosts/register:
+    post:
+      summary: A daemon's heartbeat (fleet only; `host_token`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterHostRequest" }
+      responses:
+        "204": { description: recorded }
+  /v1/hosts/{id}/drain:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Take no new tenant on this host (fleet only)
+      responses:
+        "204": { description: draining }
+  /v1/hosts/{id}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    delete:
+      summary: Forget a host (fleet only)
+      responses:
+        "204": { description: forgotten }
+components:
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Error:
+      description: error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+  schemas:
+    Size:
+      type: object
+      required: [vcpus, memory_mb]
+      properties:
+        vcpus: { type: integer, minimum: 1, maximum: 32 }
+        memory_mb: { type: integer, minimum: 128, maximum: 262144 }
+    VolumeSpec:
+      type: object
+      required: [size_gb, mount]
+      properties:
+        size_gb: { type: integer, minimum: 1 }
+        mount: { type: string, description: absolute path in the machine }
+    File:
+      type: object
+      required: [path, base64]
+      properties:
+        path: { type: string }
+        base64: { type: string }
+        mode: { type: string, description: octal digits, default "0644" }
+    RestartPolicy:
+      type: object
+      properties:
+        policy: { type: string, enum: ["no", on-failure, always], default: on-failure }
+        max_retries: { type: integer, default: 3 }
+    ForkSpec:
+      type: object
+      required: [machine_id]
+      properties:
+        machine_id: { type: string }
+        copy: { type: string, enum: [disk, config], default: disk }
+    CreateMachineRequest:
+      type: object
+      required: [tenant, name, size]
+      properties:
+        tenant: { type: string, description: owns the machine and its network; any string }
+        name: { type: string, description: a DNS label, unique in the tenant; `<name>.internal` resolves to the machine }
+        image: { type: string, description: an OCI reference; required unless `fork` is set }
+        entrypoint: { type: array, items: { type: string } }
+        cmd: { type: array, items: { type: string } }
+        env: { type: object, additionalProperties: { type: string } }
+        files: { type: array, items: { $ref: "#/components/schemas/File" } }
+        size: { $ref: "#/components/schemas/Size" }
+        volume: { $ref: "#/components/schemas/VolumeSpec" }
+        ports: { type: array, items: { type: integer } }
+        sleep: { type: string, description: '"30m", "2h", "7d" or "never"; stops the machine after that long without use' }
+        restart: { $ref: "#/components/schemas/RestartPolicy" }
+        metadata: { type: object, additionalProperties: { type: string } }
+        start: { type: boolean, default: true }
+        fork: { $ref: "#/components/schemas/ForkSpec" }
+    Exit:
+      type: object
+      properties:
+        code: { type: integer }
+        oom_killed: { type: boolean }
+        at: { type: string, format: date-time }
+        restarting: { type: boolean }
+    Machine:
+      type: object
+      properties:
+        id: { type: string }
+        tenant: { type: string }
+        name: { type: string }
+        image: { type: string }
+        image_digest: { type: string }
+        state: { type: string, enum: [created, starting, running, stopping, stopped, destroying, error] }
+        stopped_reason: { type: string, enum: [user, idle, exit], description: why it is stopped }
+        exit: { $ref: "#/components/schemas/Exit" }
+        error: { type: string }
+        ip: { type: string }
+        hostname: { type: string, description: "`<name>.internal`, follows the name" }
+        machine_host: { type: string, description: "`<id>.vm.internal`, this exact machine" }
+        size: { $ref: "#/components/schemas/Size" }
+        volume: { $ref: "#/components/schemas/VolumeSpec" }
+        ports: { type: array, items: { type: integer } }
+        sleep: { type: string }
+        restart: { $ref: "#/components/schemas/RestartPolicy" }
+        metadata: { type: object, additionalProperties: { type: string } }
+        endpoints: { type: array, items: { $ref: "#/components/schemas/Endpoint" } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        stopped_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        sleeps_at: { type: string, format: date-time, description: when it stops if nothing uses it }
+        host: { type: string, description: the host that runs it (fleet) }
+    Endpoint:
+      type: object
+      properties:
+        id: { type: string }
+        machine_id: { type: string }
+        port: { type: integer }
+        protocol: { type: string, enum: [tcp, http] }
+        host_port: { type: integer }
+        host: { type: string }
+        address: { type: string, description: '"<ip>:<host_port>" or "http://<host>"' }
+        created_at: { type: string, format: date-time }
+    CreateEndpointRequest:
+      type: object
+      required: [port]
+      properties:
+        port: { type: integer }
+        protocol: { type: string, enum: [tcp, http], default: tcp }
+        host: { type: string, description: the label before the domain, for http }
+    ExecRequest:
+      type: object
+      required: [cmd]
+      properties:
+        cmd: { type: array, items: { type: string } }
+        env: { type: object, additionalProperties: { type: string } }
+        cwd: { type: string }
+        stdin: { type: string }
+        timeout_ms: { type: integer, default: 300000 }
+        wake: { type: boolean, default: false }
+    ExecResult:
+      type: object
+      properties:
+        stdout: { type: string }
+        stderr: { type: string }
+        exit_code: { type: integer }
+        timed_out: { type: boolean }
+    PutFileRequest:
+      type: object
+      required: [path, base64]
+      properties:
+        path: { type: string }
+        base64: { type: string }
+        mode: { type: string }
+    FileResponse:
+      type: object
+      properties:
+        path: { type: string }
+        base64: { type: string }
+    LogLine:
+      type: object
+      properties:
+        ts: { type: string, format: date-time }
+        line: { type: string }
+    LogsResponse:
+      type: object
+      properties:
+        lines: { type: array, items: { $ref: "#/components/schemas/LogLine" } }
+        next: { type: string }
+    StopRequest:
+      type: object
+      properties:
+        suspend: { type: boolean, description: not supported yet; a stop }
+        timeout_sec: { type: integer, default: 10 }
+    Snapshot:
+      type: object
+      properties:
+        id: { type: string }
+        machine_id: { type: string }
+        created_at: { type: string, format: date-time }
+    Tenant:
+      type: object
+      properties:
+        id: { type: string }
+        subnet: { type: string }
+        gateway: { type: string }
+        machines: { type: integer }
+        created_at: { type: string, format: date-time }
+    Capacity:
+      type: object
+      properties:
+        memory_mb: { type: integer }
+        vcpus: { type: integer }
+    Status:
+      type: object
+      properties:
+        version: { type: string }
+        host_id: { type: string }
+        capacity: { $ref: "#/components/schemas/Capacity" }
+        used: { $ref: "#/components/schemas/Capacity" }
+        machines: { type: integer }
+        running: { type: integer }
+    Host:
+      type: object
+      properties:
+        id: { type: string }
+        url: { type: string }
+        region: { type: string }
+        provider: { type: string }
+        state: { type: string, enum: [ready, draining, down, provisioning, dry-run] }
+        capacity: { $ref: "#/components/schemas/Capacity" }
+        used: { $ref: "#/components/schemas/Capacity" }
+        machines: { type: integer }
+        tenants: { type: array, items: { type: string } }
+        last_seen: { type: string, format: date-time }
+        version: { type: string }
+    RegisterHostRequest:
+      type: object
+      required: [id, url, capacity, used, machines]
+      properties:
+        id: { type: string }
+        url: { type: string }
+        region: { type: string }
+        capacity: { $ref: "#/components/schemas/Capacity" }
+        used: { $ref: "#/components/schemas/Capacity" }
+        machines: { type: integer }
+        tenants: { type: array, items: { type: string } }
+        version: { type: string }
+    ApiError:
+      type: object
+      properties:
+        error: { type: string }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, capacity, tenant_in_use, unauthorized, host_unreachable, internal, timeout] }
+        request_id: { type: string }

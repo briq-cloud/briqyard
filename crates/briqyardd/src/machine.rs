@@ -468,6 +468,7 @@ impl Manager {
                         .filter(|e| e.rec.lock().unwrap().tenant == t.id)
                         .count(),
                     created_at: t.created_at,
+                    host: String::new(),
                 }
             })
             .collect();

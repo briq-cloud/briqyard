@@ -281,10 +281,16 @@ pub struct Snapshot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tenant {
     pub id: String,
+    #[serde(default)]
     pub subnet: String,
+    #[serde(default)]
     pub gateway: String,
+    #[serde(default)]
     pub machines: usize,
     pub created_at: DateTime<Utc>,
+    /// The host the tenant lives on (fleet).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host: String,
 }
 
 /// Compute a host has or uses.

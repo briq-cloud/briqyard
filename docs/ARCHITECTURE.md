@@ -3,7 +3,8 @@
 briqyard runs services for AI agents in Firecracker microVMs on servers you own: any OCI image,
 a durable disk, a private network per tenant, sleep when idle and wake on the next use. One
 daemon per server (`briqyardd`), an orchestrator across servers (`briqyard-fleet`), a CLI
-(`briqyard`) and an init that runs inside every microVM (`briqyard-init`).
+(`briqyard`) and an init that runs inside every microVM (`briqyard-init`). Rust, one workspace;
+the init is a static binary (musl) because the guest has no shared libraries of ours.
 
 Status: v0, in development. The API is not stable yet.
 
@@ -59,8 +60,10 @@ a database on it is as safe as the host's drive. A snapshot is `zfs snapshot`; a
 of a snapshot of both disks, taken while the source runs (crash-consistent for the data volume).
 
 The root disk is not mounted by the host, ever: the host writes nothing into guest filesystems.
-Image extraction happens once per image into a directory the host controls, with every path
-checked (`securejoin`), then `mkfs.ext4 -d` builds the disk.
+Image extraction happens once per image into a directory the host controls: layers in manifest
+order, whiteouts applied, every path resolved inside the directory (a symlink in a layer never
+leads outside, and the last component is never followed, so a rewritten link replaces the link
+rather than its target), devices skipped; then `mkfs.ext4 -d` builds the disk.
 
 ### Network
 
@@ -78,13 +81,18 @@ name on the shared HTTP port (`<endpoint>.<domain>`), both allocated by the API.
 
 ### Inside the microVM
 
-`briqyard-init` is PID 1. It mounts `/proc`, `/sys`, `/dev`, reads the config drive (`/dev/vdc`,
-a tar stream), mounts the data volume (`/dev/vdb`) at its mount path, writes the boot files, sets
-the hostname, `/etc/hosts` and `/etc/resolv.conf`, configures `eth0`, then runs the image's
-entrypoint and command with its environment. It listens on vsock port 7421 for the host: `exec`
-(a command with stdin, streamed stdout and stderr, exit code, timeout), `put` and `get` (files),
-`ping`. When the main process exits, the init prints `[briqyard] exit code=N` on the serial
-console and halts; the daemon reads it and applies the restart policy.
+`briqyard-init` is PID 1. It mounts `/proc`, `/sys`, `/dev` (plus `/dev/fd` and friends, which
+bash's `<(...)` needs), reads the config drive (`/dev/vdb`, a tar stream), mounts the data
+volume (`/dev/vdc`) at its mount path (a fresh one gets the image directory's owner and content
+and loses `lost+found`, so a database accepts it), writes the boot files, sets the hostname,
+`/etc/hosts` and `/etc/resolv.conf`, configures `eth0` over netlink, then runs the image's
+entrypoint and command with its environment and user. It listens on vsock port 7421 for the
+host: `exec` (a command with stdin, streamed stdout and stderr, exit code, timeout), `put` and
+`get` (files), `ping`, `shutdown`. PID 1 inherits every orphan on the system; the init reaps
+them with `waitid(WNOWAIT)` and leaves alone the children it waits for itself, so a command's
+exit status is never stolen. When the main process exits, the init prints
+`[briqyard] exit code=N oom=B requested=R` on the serial console and resets the machine, which
+ends Firecracker; the daemon reads the line and applies the restart policy.
 
 ### Sleep
 
@@ -96,15 +104,23 @@ vsock must be recreated under the same names on restore.
 
 ## Several servers
 
-`briqyard-fleet` offers the same machine API and places each tenant on one host: a tenant's
-machines share a host, so its private network needs no overlay. Hosts register with their
-capacity (`POST /v1/hosts/register`) and report it on a heartbeat; placement picks the host with
-the most free memory among those below a fill ceiling. A full fleet is the signal to add a host.
+`briqyard-fleet` offers the same machine API as a daemon and forwards each request to the host
+that runs the machine. It places each tenant on one host: a tenant's machines share a host, so
+its private network needs no overlay. Placement picks, among ready hosts under the fill
+ceiling, the one with the most free memory; a fork lands where its source is.
 
-Provisioners add and remove hosts through a cloud API (`hetzner`, `scaleway`, or `static` for
-servers you manage yourself). Adding a host costs money, so provisioning runs only when enabled
-and within a configured maximum; it is `dry-run` by default. A host that has been empty for the
-grace period and is above the minimum count is drained and released.
+Hosts register with their capacity and tenants (`POST /v1/hosts/register`, every 15 s, from
+the daemon's `fleet:` configuration) or are listed in the fleet's configuration and polled. A
+host silent for a minute is `down`; `POST /v1/hosts/{id}/drain` stops placing on a host. The
+registry (hosts, tenant → host, machine → host) is one JSON file.
+
+Provisioners add and release hosts through a cloud API: `hetzner-robot` (dedicated servers,
+monthly), `scaleway` (Elastic Metal, hourly), `static` (none). Adding a host costs money, so the
+autoscaler runs only when `provisioner.enabled` is set, stays in `dry_run` unless told
+otherwise, never passes `max_hosts`, and adds one host at a time: when no ready host has a
+slot of `slot_mb` left, it orders one; a provisioned host with no machine for `idle_grace`
+and above `min_hosts` is released. A new server is not a host until `hack/bootstrap-host.sh`
+has installed briqyardd on it and its first heartbeat arrives.
 
 A WireGuard mesh between hosts, so a tenant can span several, is the next step after that.
 

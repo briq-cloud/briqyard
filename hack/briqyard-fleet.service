@@ -1,0 +1,13 @@
+[Unit]
+Description=briqyard fleet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/briqyard-fleet --config /etc/briqyard/fleet.yaml
+Restart=on-failure
+RestartSec=2
+Environment=BRIQYARD_LOG=info
+
+[Install]
+WantedBy=multi-user.target

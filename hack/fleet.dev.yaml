@@ -1,0 +1,18 @@
+# briqyard-fleet configuration for the development VM: one static host, the local daemon.
+listen: 0.0.0.0:7430
+state_dir: /var/lib/briqyard-fleet
+hosts:
+  - id: local
+    url: http://127.0.0.1:7420
+    region: dev
+placement:
+  fill_ceiling: 0.85
+  down_after_sec: 60
+provisioner:
+  kind: static
+  enabled: false
+  dry_run: true
+  min_hosts: 1
+  max_hosts: 3
+  slot_mb: 8192
+  idle_grace: 2h
