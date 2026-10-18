@@ -25,6 +25,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/v1/openapi.yaml", get(openapi))
+        .route("/metrics", get(metrics))
         .route("/v1/status", get(status))
         .route("/v1/machines", get(list_machines).post(create_machine))
         .route("/v1/machines/:id", get(get_machine).delete(destroy_machine))
@@ -151,6 +152,17 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
 
 async fn openapi(State(st): S) -> Response {
     ([(header::CONTENT_TYPE, "application/yaml")], st.openapi).into_response()
+}
+
+async fn metrics(State(st): S) -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        st.mgr.metrics().await,
+    )
+        .into_response()
 }
 
 async fn status(State(st): S) -> Json<api::Status> {

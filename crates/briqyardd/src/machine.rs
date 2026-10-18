@@ -185,7 +185,18 @@ impl Entry {
     }
 }
 
+/// Counters since the daemon started, for /metrics.
+#[derive(Default)]
+pub struct Stats {
+    pub boots: std::sync::atomic::AtomicU64,
+    pub resumes: std::sync::atomic::AtomicU64,
+    pub suspends: std::sync::atomic::AtomicU64,
+    pub execs: std::sync::atomic::AtomicU64,
+    pub starts_failed: std::sync::atomic::AtomicU64,
+}
+
 struct Inner {
+    stats: Stats,
     cfg: Config,
     store: Store,
     zfs: Zfs,
@@ -234,6 +245,7 @@ impl Manager {
         tokio::fs::create_dir_all(cfg.run_dir()).await?;
         let (endpoint_events, _) = broadcast::channel(64);
         let inner = Arc::new(Inner {
+            stats: Stats::default(),
             cfg,
             store,
             zfs,
@@ -706,6 +718,52 @@ impl Manager {
         })
     }
 
+    /// The Prometheus exposition of what the host does.
+    pub async fn metrics(&self) -> String {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut by_state: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut suspended = 0;
+        {
+            let machines = self.inner.machines.lock().unwrap();
+            for e in machines.values() {
+                let r = e.rec.lock().unwrap();
+                *by_state.entry(r.state.clone()).or_default() += 1;
+                if r.suspended {
+                    suspended += 1;
+                }
+            }
+        }
+        let (used, _, total) = self.usage();
+        let cap = self.capacity();
+        let tenants = self.inner.tenants.lock().unwrap().len();
+        let endpoints = self.inner.endpoints.lock().unwrap().len();
+        let disk_free = self.disk_free_mb().await;
+        let st = &self.inner.stats;
+        let mut out = String::new();
+        out.push_str("# HELP briqyard_machines Machines on this host, by state.\n# TYPE briqyard_machines gauge\n");
+        for (state, n) in &by_state {
+            out.push_str(&format!("briqyard_machines{{state=\"{state}\"}} {n}\n"));
+        }
+        out.push_str(&format!(
+            "briqyard_machines_total {total}\nbriqyard_machines_suspended {suspended}\n"
+        ));
+        out.push_str(&format!("# TYPE briqyard_tenants gauge\nbriqyard_tenants {tenants}\n# TYPE briqyard_endpoints gauge\nbriqyard_endpoints {endpoints}\n"));
+        out.push_str(&format!("# TYPE briqyard_memory_mb gauge\nbriqyard_memory_mb{{kind=\"used\"}} {}\nbriqyard_memory_mb{{kind=\"capacity\"}} {}\n", used.memory_mb, cap.memory_mb));
+        out.push_str(&format!("# TYPE briqyard_vcpus gauge\nbriqyard_vcpus{{kind=\"used\"}} {}\nbriqyard_vcpus{{kind=\"capacity\"}} {}\n", used.vcpus, cap.vcpus));
+        out.push_str(&format!(
+            "# TYPE briqyard_disk_free_mb gauge\nbriqyard_disk_free_mb {disk_free}\n"
+        ));
+        out.push_str(&format!(
+            "# TYPE briqyard_boots_total counter\nbriqyard_boots_total {}\n# TYPE briqyard_resumes_total counter\nbriqyard_resumes_total {}\n# TYPE briqyard_suspends_total counter\nbriqyard_suspends_total {}\n# TYPE briqyard_execs_total counter\nbriqyard_execs_total {}\n# TYPE briqyard_starts_failed_total counter\nbriqyard_starts_failed_total {}\n",
+            st.boots.load(Relaxed),
+            st.resumes.load(Relaxed),
+            st.suspends.load(Relaxed),
+            st.execs.load(Relaxed),
+            st.starts_failed.load(Relaxed)
+        ));
+        out
+    }
+
     /// Free space in the pool, in MB.
     pub async fn disk_free_mb(&self) -> u64 {
         self.inner.zfs.free().await.unwrap_or(0) >> 20
@@ -1036,6 +1094,10 @@ impl Manager {
         }
         let _ = self.save(e);
         let fail = |err: anyhow::Error| -> MError {
+            self.inner
+                .stats
+                .starts_failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             {
                 let mut r = e.rec.lock().unwrap();
                 r.state = state::ERROR.into();
@@ -1222,6 +1284,12 @@ impl Manager {
             resumed = resume,
             "machine running"
         );
+        use std::sync::atomic::Ordering::Relaxed;
+        if resume {
+            self.inner.stats.resumes.fetch_add(1, Relaxed);
+        } else {
+            self.inner.stats.boots.fetch_add(1, Relaxed);
+        }
         Ok(())
     }
 
@@ -1489,6 +1557,10 @@ impl Manager {
             e.rec.lock().unwrap().state = state::STOPPING.into();
             let _ = self.save(e);
             if suspend && self.snapshot_live(e, &live).await.unwrap_or(false) {
+                self.inner
+                    .stats
+                    .suspends
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // The guest is paused and saved: end the process; the watcher settles the
                 // state with the reason set above.
                 e.rec.lock().unwrap().suspended = true;
@@ -1777,6 +1849,10 @@ impl Manager {
     }
 
     pub async fn exec(&self, id: &str, req: api::ExecRequest) -> Result<api::ExecResult, MError> {
+        self.inner
+            .stats
+            .execs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let sock = self.running_vsock(id, req.wake).await?;
         let timeout_ms = if req.timeout_ms == 0 {
             300_000
