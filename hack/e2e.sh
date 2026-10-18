@@ -94,6 +94,17 @@ check "fork has data"  '[ "$(briqyard machine exec "$F" -- psql -U postgres -tAc
 briqyard machine exec "$F" -- psql -U postgres -c "insert into t values (43)" >/dev/null
 check "fork is apart"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select count(*) from t")" = 1 ]'
 
+echo "== http ingress: host routing, wake on request"
+W=$(briqyard machine run --image nginx:alpine --name web --tenant "$T" --memory 256 --port 80 --sleep 20s | jq -r .id)
+WEP=$(briqyard endpoint add --http --host "e2e-web" "$W" 80 | jq -r .host)
+for i in $(seq 1 30); do briqyard machine exec "$W" -- wget -qO- http://127.0.0.1/ >/dev/null 2>&1 && break; sleep 1; done
+check "http endpoint host" '[ "$WEP" = "e2e-web.byard.localhost" ]'
+check "http routed by host" 'curl -fsS -H "Host: $WEP" http://127.0.0.1:8080/ | grep -qi "nginx"'
+check "http unknown host 404" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: nobody.byard.localhost" http://127.0.0.1:8080/)" = 404 ]'
+for i in $(seq 1 90); do [ "$(briqyard machine get "$W" | jq -r .state)" = stopped ] && break; sleep 2; done
+check "web slept"          '[ "$(briqyard machine get "$W" | jq -r .stopped_reason)" = idle ]'
+check "http request wakes" 'curl -fsS --max-time 90 -H "Host: $WEP" http://127.0.0.1:8080/ | grep -qi "nginx"'
+
 echo
 echo "passed $pass, failed $fail"
 [ "$fail" = 0 ]

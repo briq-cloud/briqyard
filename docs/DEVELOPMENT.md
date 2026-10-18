@@ -11,8 +11,9 @@ cargo build --release --workspace
 ```
 
 You also need a Firecracker binary and an uncompressed guest kernel. Firecracker's own CI
-publishes both; `hack/fetch-firecracker.sh` downloads the latest release and a matching kernel
-into `/usr/local/bin/firecracker` and `/var/lib/briqyard/vmlinux`.
+publishes both; `hack/bootstrap-host.sh` downloads the latest release and a matching kernel
+into `/usr/local/bin/firecracker` and `/var/lib/briqyard/vmlinux` (and does everything else a
+host needs: run it on a fresh server).
 
 A ZFS pool for the disks. For development, a file-backed one:
 
@@ -51,7 +52,9 @@ benchmark.
   protocol, address allocation).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
-  wake on connect, a fork.
+  sleep on idle, wake on connect, a fork. 30 checks.
+- `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
+  daemon in the VM). 13 checks.
 
 ## Layout
 
