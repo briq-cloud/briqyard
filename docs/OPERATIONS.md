@@ -96,6 +96,8 @@ not a backup until sent elsewhere.
   -o cat | jq`. Level with `BRIQYARD_LOG=debug` (or any `tracing` filter).
 - A machine: `briqyard machine get <id>` (state, why it stopped, its process's exit), `briqyard
   machine logs <id>` (its console; `-f` follows).
+- `briqyard machine stats <id>`: CPU time, memory and disk it uses now, from its cgroup and its
+  datasets. `briqyard machine set-sleep <id> 3h|never` changes the window without a restart.
 
 ## When something is off
 

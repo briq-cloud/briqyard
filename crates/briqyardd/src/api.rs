@@ -28,7 +28,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/metrics", get(metrics))
         .route("/v1/status", get(status))
         .route("/v1/machines", get(list_machines).post(create_machine))
-        .route("/v1/machines/:id", get(get_machine).delete(destroy_machine))
+        .route(
+            "/v1/machines/:id",
+            get(get_machine)
+                .patch(update_machine)
+                .delete(destroy_machine),
+        )
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/wake", post(wake_machine))
         .route("/v1/machines/:id/stop", post(stop_machine))
@@ -197,6 +202,14 @@ async fn create_machine(
 
 async fn get_machine(State(st): S, Path(id): Path<String>) -> Result<Json<api::Machine>, AppError> {
     Ok(Json(st.mgr.get(&id)?))
+}
+
+async fn update_machine(
+    State(st): S,
+    Path(id): Path<String>,
+    Json(req): Json<api::UpdateMachineRequest>,
+) -> Result<Json<api::Machine>, AppError> {
+    Ok(Json(st.mgr.update(&id, req)?))
 }
 
 async fn destroy_machine(State(st): S, Path(id): Path<String>) -> Result<StatusCode, AppError> {

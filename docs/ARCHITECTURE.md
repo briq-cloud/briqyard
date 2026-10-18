@@ -98,7 +98,8 @@ ends Firecracker; the daemon reads the line and applies the restart policy.
 
 Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the
 machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`). A start, an
-ingress connection or an exec on an idle machine wakes it. `sleep: "never"` keeps it on.
+ingress connection or an exec on an idle machine wakes it. `sleep: "never"` keeps it on. `PATCH
+/machines/{id} {"sleep": "3h"}` changes the window in any state, without a restart.
 
 A stop can keep a memory snapshot instead (`POST /machines/{id}/stop {"suspend": true}`, or
 `suspend_on_sleep: true` for the sleeper): the machine is paused, Firecracker writes its memory

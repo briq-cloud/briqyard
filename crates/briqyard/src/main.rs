@@ -135,6 +135,11 @@ enum MachineCmd {
     Stats {
         id: String,
     },
+    /// Change the sleep window: briqyard machine set-sleep ID 30m|never
+    SetSleep {
+        id: String,
+        sleep: String,
+    },
 }
 
 #[derive(Args)]
@@ -545,6 +550,20 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 let data = api::guest::base64_decode(&res.base64).map_err(|e| anyhow!(e))?;
                 std::io::stdout().write_all(&data)?;
             }
+            MachineCmd::SetSleep { id, sleep } => {
+                let req = api::UpdateMachineRequest {
+                    sleep: Some(sleep),
+                    metadata: None,
+                };
+                print_json(
+                    &c.call::<api::Machine>(
+                        reqwest::Method::PATCH,
+                        &format!("/v1/machines/{id}"),
+                        Some(&req),
+                    )
+                    .await?,
+                )
+            }
             MachineCmd::Stats { id } => print_json(
                 &c.call::<api::MachineStats>(GET, &format!("/v1/machines/{id}/stats"), NONE)
                     .await?,
@@ -725,14 +744,19 @@ fn doctor() {
     );
     let pool = std::process::Command::new("zpool")
         .args(["list", "-H", "-o", "name"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    check(
-        "a zfs pool",
-        !pool.trim().is_empty(),
-        "zpool create byard <device>",
-    );
+        .output();
+    let (pool_ok, pool_hint) = match &pool {
+        Ok(o) if o.status.success() => (
+            !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+            "zpool create byard <device>",
+        ),
+        Ok(_) => (
+            true,
+            "zpool needs root to answer: `sudo briqyard doctor` checks the pool",
+        ),
+        Err(_) => (false, "apt install zfsutils-linux"),
+    };
+    check("a zfs pool", pool_ok, pool_hint);
     if bad > 0 {
         eprintln!("{bad} missing");
         std::process::exit(1);

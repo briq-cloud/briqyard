@@ -62,6 +62,15 @@ paths:
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Change the sleep window or the metadata, in any state
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateMachineRequest" }
+      responses:
+        "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
     delete:
       summary: Destroy a machine, its endpoints and its disks
       responses:
@@ -393,6 +402,11 @@ components:
       properties:
         lines: { type: array, items: { $ref: "#/components/schemas/LogLine" } }
         next: { type: string }
+    UpdateMachineRequest:
+      type: object
+      properties:
+        sleep: { type: string }
+        metadata: { type: object, additionalProperties: { type: string } }
     StopRequest:
       type: object
       properties:

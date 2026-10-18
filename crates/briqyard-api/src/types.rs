@@ -261,6 +261,17 @@ pub struct LogsResponse {
     pub next: String,
 }
 
+/// Changes what can change on a live machine without a restart.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpdateMachineRequest {
+    /// A new sleep window ("30m", "never"); absent keeps the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep: Option<String>,
+    /// Replaces the metadata; absent keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<BTreeMap<String, String>>,
+}
+
 /// Stops a machine.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StopRequest {

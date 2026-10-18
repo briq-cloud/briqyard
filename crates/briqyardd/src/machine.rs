@@ -1434,26 +1434,9 @@ impl Manager {
         }
     }
 
-    /// Reads the init's exit line for this boot: `[briqyard] exit code=N oom=B requested=R`.
+    /// Reads the init's exit line for this boot.
     fn exit_from_console(&self, r: &Record) -> (i32, bool, bool) {
-        let text = self.console_since(r, 8 << 20);
-        let mut found = (255, false, false);
-        for line in text.lines() {
-            if let Some(rest) = line.split("[briqyard] exit ").nth(1) {
-                let mut code = 255;
-                let (mut oom, mut requested) = (false, false);
-                for kv in rest.split_whitespace() {
-                    match kv.split_once('=') {
-                        Some(("code", v)) => code = v.parse().unwrap_or(255),
-                        Some(("oom", v)) => oom = v == "true",
-                        Some(("requested", v)) => requested = v == "true",
-                        _ => {}
-                    }
-                }
-                found = (code, oom, requested);
-            }
-        }
-        found
+        parse_exit_line(&self.console_since(r, 8 << 20)).unwrap_or((255, false, false))
     }
 
     fn console_since(&self, r: &Record, max: u64) -> String {
@@ -1680,6 +1663,25 @@ impl Manager {
     }
 
     // --- use and sleep ---
+
+    /// Changes the sleep window or the metadata of a machine, in any state.
+    pub fn update(&self, id: &str, req: api::UpdateMachineRequest) -> Result<api::Machine, MError> {
+        let e = self.entry(id)?;
+        if let Some(sl) = &req.sleep {
+            api::parse_sleep(sl).map_err(invalid)?;
+        }
+        {
+            let mut r = e.rec.lock().unwrap();
+            if let Some(sl) = req.sleep {
+                r.sleep = if sl == "never" { String::new() } else { sl };
+            }
+            if let Some(m) = req.metadata {
+                r.metadata = m;
+            }
+        }
+        self.save(&e)?;
+        Ok(self.view(&e))
+    }
 
     pub fn touch(&self, id: &str) -> Result<(), MError> {
         let e = self.entry(id)?;
@@ -2203,6 +2205,27 @@ impl Manager {
     }
 }
 
+/// Reads the init's exit line, `[briqyard] exit code=N oom=B requested=R`; the last one wins.
+fn parse_exit_line(text: &str) -> Option<(i32, bool, bool)> {
+    let mut found = None;
+    for line in text.lines() {
+        if let Some(rest) = line.split("[briqyard] exit ").nth(1) {
+            let mut code = 255;
+            let (mut oom, mut requested) = (false, false);
+            for kv in rest.split_whitespace() {
+                match kv.split_once('=') {
+                    Some(("code", v)) => code = v.parse().unwrap_or(255),
+                    Some(("oom", v)) => oom = v == "true",
+                    Some(("requested", v)) => requested = v == "true",
+                    _ => {}
+                }
+            }
+            found = Some((code, oom, requested));
+        }
+    }
+    found
+}
+
 fn parse_log_line(line: &str) -> api::LogLine {
     let line = line.trim_end_matches(['\r', '\n']);
     if let Some((ts, rest)) = line.split_once(' ') {
@@ -2244,4 +2267,35 @@ fn host_memory_mb() -> u32 {
         })
         .map(|kb| (kb / 1024) as u32)
         .unwrap_or(4096)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_lines() {
+        let text =
+            "x\n2026-10-18T22:00:00Z [briqyard] exit code=3 oom=false requested=true\nreboot\n";
+        assert_eq!(parse_exit_line(text), Some((3, false, true)));
+        let two = "[briqyard] exit code=1 oom=false requested=false\n[briqyard] exit code=137 oom=true requested=false\n";
+        assert_eq!(parse_exit_line(two), Some((137, true, false)));
+        assert_eq!(parse_exit_line("nothing here"), None);
+    }
+
+    #[test]
+    fn log_lines() {
+        let l = parse_log_line("2026-10-18T22:00:00.123456Z hello world\n");
+        assert_eq!(l.line, "hello world");
+        assert_eq!(l.ts.timestamp(), 1_792_360_800);
+        assert_eq!(parse_log_line("no timestamp\n").line, "no timestamp");
+    }
+
+    #[test]
+    fn port_ranges() {
+        assert_eq!(port_range("20000-29999").unwrap(), (20000, 29999));
+        assert!(port_range("29999-20000").is_err());
+        assert!(port_range("x").is_err());
+        assert!(port_range("0-10").is_err());
+    }
 }

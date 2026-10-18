@@ -86,6 +86,8 @@ S=$(briqyard machine run --image postgres:16-alpine --name sleeper --tenant "$T"
 SEP=$(briqyard endpoint add "$S" 5432 | jq -r .address)
 for i in $(seq 1 90); do [ "$(briqyard machine get "$S" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "slept when idle" '[ "$(briqyard machine get "$S" | jq -r .stopped_reason)" = idle ]'
+check "set-sleep while stopped" '[ "$(briqyard machine set-sleep "$S" 45s | jq -r .sleep)" = 45s ]'
+check "set-sleep refuses a number" '! briqyard machine set-sleep "$S" 30 >/dev/null 2>&1'
 if command -v psql >/dev/null; then
   # The first connection wakes the machine; Postgres accepts TCP before it is ready, so a
   # client retries, as connection pools do.
