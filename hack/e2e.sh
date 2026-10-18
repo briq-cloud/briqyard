@@ -124,7 +124,9 @@ check "http request wakes" 'curl -fsS --max-time 90 -H "Host: $WEP" http://127.0
 if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then
   echo "== daemon crash: running machines are adopted"
   K=$(briqyard machine run --image alpine:3.20 --name survivor --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
-  sudo systemctl kill -s SIGKILL briqyardd
+  # The daemon alone (systemctl kill would signal every process of the unit, machines included).
+  sudo kill -9 "$(systemctl show -p MainPID --value briqyardd)"
+  sleep 1
   sudo systemctl start briqyardd
   for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
   check "still running"    '[ "$(briqyard machine get "$K" | jq -r .state)" = running ]'
