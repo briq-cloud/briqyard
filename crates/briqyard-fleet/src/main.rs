@@ -2,6 +2,7 @@
 //! fleet places new tenants, forwards every machine request to the right daemon, keeps the
 //! registry of hosts from their heartbeats, and adds or releases hosts through a provisioner.
 
+mod bootstrap;
 mod config;
 mod provision;
 mod registry;
@@ -33,6 +34,7 @@ struct AppState {
     policy: Policy,
     http: reqwest::Client,
     state_path: PathBuf,
+    prov: Box<dyn provision::Provisioner>,
 }
 
 impl AppState {
@@ -89,6 +91,8 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         version: String::new(),
         disk_free_mb: 0,
         empty_since: None,
+        note: String::new(),
+        bootstrap_attempts: 0,
     }
 }
 
@@ -123,15 +127,19 @@ async fn run(args: Args) -> Result<()> {
             .timeout(std::time::Duration::from_secs(900))
             .build()?,
         state_path,
+        prov: provision::build(&cfg.provisioner),
     });
     tokio::spawn(poll_static_hosts(state.clone()));
-    tokio::spawn(autoscaler(state.clone()));
+    tokio::spawn(scaler(state.clone()));
+    tokio::spawn(bootstrap::run(state.clone()));
     let app = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/v1/status", get(status))
         .route("/v1/hosts", get(list_hosts))
         .route("/v1/hosts/register", post(register_host))
+        .route("/v1/hosts/order", post(order_host))
         .route("/v1/hosts/:id/drain", post(drain_host))
+        .route("/v1/hosts/:id/retire", post(retire_host))
         .route("/v1/hosts/:id", axum::routing::delete(forget_host))
         .route("/v1/machines", get(list_machines).post(create_machine))
         .route("/v1/endpoints", get(list_endpoints))
@@ -239,7 +247,7 @@ async fn register_host(State(st): S, Json(req): Json<api::RegisterHostRequest>) 
             HostRec {
                 id: req.id,
                 url: req.url,
-                token: String::new(),
+                token: req.api_token,
                 region: req.region,
                 provider: String::new(),
                 provider_id: String::new(),
@@ -252,6 +260,8 @@ async fn register_host(State(st): S, Json(req): Json<api::RegisterHostRequest>) 
                 version: req.version,
                 disk_free_mb: req.disk_free_mb,
                 empty_since: None,
+                note: String::new(),
+                bootstrap_attempts: 0,
             },
             now,
         );
@@ -271,6 +281,129 @@ async fn drain_host(State(st): S, Path(id): Path<String>) -> Response {
         }
         None => err(StatusCode::NOT_FOUND, "not_found", "host not found"),
     }
+}
+
+/// Orders a host from the provisioner now, whether or not the autoscaler is on.
+async fn order_host(State(st): S, Json(req): Json<api::OrderHostRequest>) -> Response {
+    let reason = if req.reason.is_empty() {
+        "ordered through the API".to_string()
+    } else {
+        req.reason
+    };
+    let counted = st
+        .reg
+        .lock()
+        .unwrap()
+        .hosts
+        .values()
+        .filter(|h| h.state != "down")
+        .count();
+    if counted >= st.cfg.provisioner.max_hosts {
+        return err(
+            StatusCode::CONFLICT,
+            "max_hosts",
+            format!("the fleet has {counted} hosts, its maximum"),
+        );
+    }
+    match st.prov.create(&reason).await {
+        Ok(server) => {
+            let h = add_ordered(&st, server);
+            (StatusCode::ACCEPTED, Json(h.to_api())).into_response()
+        }
+        Err(e) => err(StatusCode::BAD_GATEWAY, "provisioner", format!("{e:#}")),
+    }
+}
+
+/// Records a server the provisioner just made.
+fn add_ordered(st: &AppState, server: provision::Server) -> HostRec {
+    let dry = st.cfg.provisioner.dry_run || server.provider_id.starts_with("dry-run-");
+    tracing::warn!(
+        provider = st.prov.name(),
+        provider_id = server.provider_id,
+        note = server.note,
+        dry_run = dry,
+        "host ordered"
+    );
+    let now = Utc::now();
+    let id = format!("h_{}", server.provider_id.replace(['/', ':'], "-"));
+    let h = HostRec {
+        id: id.clone(),
+        url: server
+            .ip
+            .map(|ip| format!("http://{ip}:7420"))
+            .unwrap_or_default(),
+        token: bootstrap::new_token(),
+        region: String::new(),
+        provider: st.prov.name().into(),
+        provider_id: server.provider_id,
+        state: if dry {
+            "dry-run".into()
+        } else {
+            "provisioning".into()
+        },
+        capacity: Default::default(),
+        used: Default::default(),
+        machines: 0,
+        tenants: vec![],
+        last_seen: now,
+        version: String::new(),
+        disk_free_mb: 0,
+        empty_since: Some(now),
+        note: server.note,
+        bootstrap_attempts: 0,
+    };
+    st.reg.lock().unwrap().hosts.insert(id, h.clone());
+    st.save();
+    h
+}
+
+/// Drains a host and releases it at the provider once nothing runs on it: at once when it is
+/// already empty, else from the scaler as soon as it is.
+async fn retire_host(State(st): S, Path(id): Path<String>) -> Response {
+    let host = {
+        let mut reg = st.reg.lock().unwrap();
+        match reg.hosts.get_mut(&id) {
+            Some(h) => {
+                if h.state == "ready" || h.state == "down" {
+                    h.state = "draining".into();
+                }
+                h.clone()
+            }
+            None => return err(StatusCode::NOT_FOUND, "not_found", "host not found"),
+        }
+    };
+    st.save();
+    let empty = host.machines == 0 && host.tenants.is_empty();
+    if empty || !matches!(host.state.as_str(), "draining") {
+        match release_host(&st, &host).await {
+            Ok(h) => return Json(h).into_response(),
+            Err(e) => return err(StatusCode::BAD_GATEWAY, "provisioner", format!("{e:#}")),
+        }
+    }
+    tracing::info!(
+        host = id,
+        machines = host.machines,
+        "host draining; released once empty"
+    );
+    Json(host.to_api()).into_response()
+}
+
+/// Releases a host at its provider (nothing to do for a static one) and forgets it.
+async fn release_host(st: &AppState, h: &HostRec) -> Result<api::Host> {
+    if !h.provider_id.is_empty() {
+        st.prov.release(&h.provider_id).await?;
+    }
+    tracing::warn!(host = h.id, provider_id = h.provider_id, "host released");
+    {
+        let mut reg = st.reg.lock().unwrap();
+        reg.hosts.remove(&h.id);
+        reg.tenants.retain(|_, x| *x != h.id);
+        reg.machines.retain(|_, x| *x != h.id);
+    }
+    st.save();
+    let mut out = h.to_api();
+    out.state = "released".into();
+    Ok(out)
 }
 
 async fn forget_host(State(st): S, Path(id): Path<String>) -> StatusCode {
@@ -300,15 +433,11 @@ async fn get_json<T: serde::de::DeserializeOwned>(
 /// Static hosts send no heartbeat of their own; the fleet asks them.
 async fn poll_static_hosts(st: Arc<AppState>) {
     loop {
-        let hosts: Vec<HostRec> = st
-            .reg
-            .lock()
-            .unwrap()
-            .hosts
-            .values()
-            .filter(|h| h.provider == "static")
-            .cloned()
-            .collect();
+        // From the configuration, not the registry: a static host forgotten through the API
+        // is back on the next poll; it leaves the fleet by leaving the configuration.
+        let now = Utc::now();
+        let hosts: Vec<HostRec> = st.cfg.hosts.iter().map(|h| static_host(h, now)).collect();
+        let mut unseen = false;
         for h in hosts {
             if let Some(s) = get_json::<api::Status>(&st, &h, "/v1/status").await {
                 let tenants: Vec<String> = get_json::<Vec<api::Tenant>>(&st, &h, "/v1/tenants")
@@ -326,22 +455,23 @@ async fn poll_static_hosts(st: Arc<AppState>) {
                 rec.version = s.version;
                 rec.disk_free_mb = s.disk_free_mb;
                 st.reg.lock().unwrap().heartbeat(rec, now);
+            } else if h.capacity.memory_mb == 0 {
+                // Never answered yet (it may be starting with us): ask again soon.
+                unseen = true;
             }
         }
         st.reg.lock().unwrap().sweep(&st.policy, Utc::now());
         st.save();
-        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(if unseen { 2 } else { 15 })).await;
     }
 }
 
 // --- the autoscaler ---
 
-async fn autoscaler(st: Arc<AppState>) {
+/// Every minute: releases the drained hosts that have emptied, and, when the autoscaler is
+/// on, adds a host when no slot is left or releases one idle past the grace.
+async fn scaler(st: Arc<AppState>) {
     let p = &st.cfg.provisioner;
-    if !p.enabled {
-        tracing::info!("autoscaler off (provisioner.enabled: false)");
-        return;
-    }
     let idle = api::parse_sleep(&p.idle_grace)
         .ok()
         .flatten()
@@ -352,97 +482,47 @@ async fn autoscaler(st: Arc<AppState>) {
         slot_mb: p.slot_mb,
         idle_grace: Duration::from_std(idle).unwrap_or(Duration::hours(2)),
     };
-    let prov: Box<dyn provision::Provisioner> = match p.kind.as_str() {
-        "hetzner-robot" => Box::new(provision::HetznerRobot::new(
-            p.hetzner.user.clone(),
-            p.hetzner.password.clone(),
-            p.hetzner.product.clone(),
-            p.hetzner.location.clone(),
-            p.hetzner.ssh_key_fingerprint.clone(),
-            p.dry_run,
-        )),
-        "scaleway" => Box::new(provision::Scaleway::new(
-            p.scaleway.secret_key.clone(),
-            p.scaleway.project_id.clone(),
-            p.scaleway.zone.clone(),
-            p.scaleway.offer_id.clone(),
-            p.scaleway.os_id.clone(),
-            p.dry_run,
-        )),
-        _ => Box::new(provision::Static),
-    };
-    tracing::info!(
-        provisioner = prov.name(),
-        dry_run = p.dry_run,
-        min = scale.min_hosts,
-        max = scale.max_hosts,
-        "autoscaler on"
-    );
+    if p.enabled {
+        tracing::info!(
+            provisioner = st.prov.name(),
+            dry_run = p.dry_run,
+            min = scale.min_hosts,
+            max = scale.max_hosts,
+            "autoscaler on"
+        );
+    } else {
+        tracing::info!("autoscaler off (provisioner.enabled: false); hosts are ordered and retired through the API");
+    }
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let retirable = st.reg.lock().unwrap().retirable();
+        for h in retirable {
+            if let Err(e) = release_host(&st, &h).await {
+                tracing::error!(host = h.id, err = %e, "release a drained host");
+            }
+        }
+        if !p.enabled {
+            continue;
+        }
         let decision = {
             let reg = st.reg.lock().unwrap();
             registry::decide(&reg, &st.policy, &scale, Utc::now())
         };
         match decision {
             registry::Decision::Nothing => {}
-            registry::Decision::AddHost => match prov.create("the fleet has no slot left").await {
+            registry::Decision::AddHost => match st.prov.create("the fleet has no slot left").await
+            {
                 Ok(server) => {
-                    tracing::warn!(
-                        provider = prov.name(),
-                        provider_id = server.provider_id,
-                        note = server.note,
-                        "host ordered; run hack/bootstrap-host.sh on it"
-                    );
-                    let now = Utc::now();
-                    let id = format!("h_{}", server.provider_id.replace(['/', ':'], "-"));
-                    st.reg.lock().unwrap().hosts.insert(
-                        id.clone(),
-                        HostRec {
-                            id,
-                            url: server
-                                .ip
-                                .map(|ip| format!("http://{ip}:7420"))
-                                .unwrap_or_default(),
-                            token: String::new(),
-                            region: String::new(),
-                            provider: prov.name().into(),
-                            provider_id: server.provider_id,
-                            state: if p.dry_run {
-                                "dry-run".into()
-                            } else {
-                                "provisioning".into()
-                            },
-                            capacity: Default::default(),
-                            used: Default::default(),
-                            machines: 0,
-                            tenants: vec![],
-                            last_seen: now,
-                            version: String::new(),
-                            disk_free_mb: 0,
-                            empty_since: Some(now),
-                        },
-                    );
-                    st.save();
+                    add_ordered(&st, server);
                 }
                 Err(e) => tracing::error!(err = %e, "add host"),
             },
             registry::Decision::ReleaseHost(id) => {
-                let provider_id = st
-                    .reg
-                    .lock()
-                    .unwrap()
-                    .hosts
-                    .get(&id)
-                    .map(|h| h.provider_id.clone())
-                    .unwrap_or_default();
-                match prov.release(&provider_id).await {
-                    Ok(()) => {
-                        tracing::warn!(host = id, provider_id, "host released");
-                        st.reg.lock().unwrap().hosts.remove(&id);
-                        st.save();
+                let host = st.reg.lock().unwrap().hosts.get(&id).cloned();
+                if let Some(h) = host {
+                    if let Err(e) = release_host(&st, &h).await {
+                        tracing::error!(host = id, err = %e, "release host");
                     }
-                    Err(e) => tracing::error!(host = id, err = %e, "release host"),
                 }
             }
         }

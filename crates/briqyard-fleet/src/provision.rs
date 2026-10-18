@@ -25,6 +25,33 @@ pub trait Provisioner: Send + Sync {
     async fn create(&self, hint: &str) -> Result<Server>;
     /// Releases a server (cancels or deletes it). In dry-run mode, says so and does nothing.
     async fn release(&self, provider_id: &str) -> Result<()>;
+    /// The server's address once the provider has delivered it; `None` while it is being set up.
+    async fn lookup(&self, _provider_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+}
+
+/// The provisioner the configuration names.
+pub fn build(p: &crate::config::Provisioner) -> Box<dyn Provisioner> {
+    match p.kind.as_str() {
+        "hetzner-robot" => Box::new(HetznerRobot::new(
+            p.hetzner.user.clone(),
+            p.hetzner.password.clone(),
+            p.hetzner.product.clone(),
+            p.hetzner.location.clone(),
+            p.hetzner.ssh_key_fingerprint.clone(),
+            p.dry_run,
+        )),
+        "scaleway" => Box::new(Scaleway::new(
+            p.scaleway.secret_key.clone(),
+            p.scaleway.project_id.clone(),
+            p.scaleway.zone.clone(),
+            p.scaleway.offer_id.clone(),
+            p.scaleway.os_id.clone(),
+            p.dry_run,
+        )),
+        _ => Box::new(Static),
+    }
 }
 
 /// Servers you manage yourself: the fleet adds and releases nothing.
@@ -159,6 +186,26 @@ impl Provisioner for HetznerRobot {
         }
         Ok(())
     }
+
+    async fn lookup(&self, provider_id: &str) -> Result<Option<String>> {
+        if provider_id.starts_with("dry-run-") {
+            return Ok(None);
+        }
+        let resp = self
+            .http
+            .get(format!(
+                "https://robot-ws.your-server.de/order/server/transaction/{provider_id}"
+            ))
+            .basic_auth(&self.user, Some(&self.password))
+            .send()
+            .await
+            .context("hetzner robot transaction")?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("hetzner robot answered {}", resp.status()));
+        }
+        let t: RobotTransaction = resp.json().await.context("hetzner robot transaction")?;
+        Ok(t.transaction.server_ip.filter(|ip| !ip.is_empty()))
+    }
 }
 
 /// Scaleway Elastic Metal. Servers are billed by the hour or the month; a delete stops the
@@ -280,5 +327,29 @@ impl Provisioner for Scaleway {
             ));
         }
         Ok(())
+    }
+
+    async fn lookup(&self, provider_id: &str) -> Result<Option<String>> {
+        if provider_id.starts_with("dry-run-") {
+            return Ok(None);
+        }
+        let resp = self
+            .http
+            .get(format!(
+                "https://api.scaleway.com/baremetal/v1/zones/{}/servers/{provider_id}",
+                self.zone
+            ))
+            .header("X-Auth-Token", &self.secret_key)
+            .send()
+            .await
+            .context("scaleway get server")?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("scaleway answered {}", resp.status()));
+        }
+        let srv: ScalewayServer = resp.json().await.context("scaleway server")?;
+        if srv.status != "ready" {
+            return Ok(None);
+        }
+        Ok(srv.ips.first().map(|i| i.address.clone()))
     }
 }

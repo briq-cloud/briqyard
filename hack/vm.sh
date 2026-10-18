@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build inside the Lima VM "fc" (the source tree is mounted there, read-only), install briqyardd
 # and (re)start it. macOS development.
-# Usage: hack/vm.sh [build|install|restart|logs|stop|shell|e2e]
+# Usage: hack/vm.sh [build|install|restart|logs|stop|shell|e2e|fleet]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 VM=${VM:-fc}
@@ -31,9 +31,11 @@ H=$VMHOME
 [ -f /var/lib/briqyard/vmlinux ] || cp "\$H/fc/vmlinux" /var/lib/briqyard/vmlinux
 [ -f /etc/briqyard/config.yaml ] || cp "$SRC/hack/config.dev.yaml" /etc/briqyard/config.yaml
 cp "$SRC/hack/briqyardd.service" /etc/systemd/system/briqyardd.service
+cp "$SRC/hack/fleet.dev.yaml" /etc/briqyard/fleet.yaml
+cp "$SRC/hack/briqyard-fleet.service" /etc/systemd/system/briqyard-fleet.service
 systemctl daemon-reload
-systemctl enable briqyardd >/dev/null 2>&1 || true
-systemctl restart briqyardd
+systemctl enable briqyardd briqyard-fleet >/dev/null 2>&1 || true
+systemctl restart briqyardd briqyard-fleet
 sleep 1
 systemctl --no-pager --lines=3 status briqyardd | grep -E "Active|msg" || true
 EOF
@@ -46,5 +48,6 @@ case "$cmd" in
   stop) limactl shell "$VM" sudo systemctl stop briqyardd ;;
   shell) limactl shell "$VM" ;;
   e2e) install; limactl shell "$VM" bash "$SRC/hack/e2e.sh" ;;
-  *) echo "usage: hack/vm.sh [build|install|restart|logs|stop|shell|e2e]"; exit 2 ;;
+  fleet) install; limactl shell "$VM" bash "$SRC/hack/fleet-smoke.sh" ;;
+  *) echo "usage: hack/vm.sh [build|install|restart|logs|stop|shell|e2e|fleet]"; exit 2 ;;
 esac

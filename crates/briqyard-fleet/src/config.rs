@@ -59,6 +59,42 @@ pub struct Provisioner {
     pub idle_grace: String,
     pub hetzner: Hetzner,
     pub scaleway: Scaleway,
+    pub bootstrap: Bootstrap,
+}
+
+/// Installing briqyardd on a server the provisioner delivered, over SSH.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Bootstrap {
+    pub enabled: bool,
+    pub ssh_user: String,
+    /// The private key the provider installed on the server.
+    pub ssh_key: PathBuf,
+    /// The script to run; empty runs the hack/bootstrap-host.sh this build ships.
+    pub script: PathBuf,
+    /// `BRIQYARD_RELEASE` for the script: where the binaries are.
+    pub release: String,
+    /// `BRIQYARD_POOL_DEVICE`: the drive for the ZFS pool (a file when empty).
+    pub pool_device: String,
+    /// `FLEET_URL`: this fleet, as the new host reaches it.
+    pub fleet_url: String,
+    /// Tries, two minutes apart, before the host is marked `failed`.
+    pub max_attempts: u32,
+}
+
+impl Default for Bootstrap {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ssh_user: "root".into(),
+            ssh_key: "/etc/briqyard/fleet_ssh_key".into(),
+            script: PathBuf::new(),
+            release: String::new(),
+            pool_device: String::new(),
+            fleet_url: String::new(),
+            max_attempts: 90,
+        }
+    }
 }
 
 impl Default for Provisioner {
@@ -73,6 +109,7 @@ impl Default for Provisioner {
             idle_grace: "2h".into(),
             hetzner: Hetzner::default(),
             scaleway: Scaleway::default(),
+            bootstrap: Bootstrap::default(),
         }
     }
 }

@@ -5,7 +5,7 @@ use crate::machine::Manager;
 use briqyard_api as api;
 use std::time::Duration;
 
-pub async fn run(cfg: FleetClient, mgr: Manager) {
+pub async fn run(cfg: FleetClient, api_token: String, mgr: Manager) {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -22,6 +22,7 @@ pub async fn run(cfg: FleetClient, mgr: Manager) {
             tenants: mgr.tenants().into_iter().map(|t| t.id).collect(),
             version: env!("CARGO_PKG_VERSION").into(),
             disk_free_mb: mgr.disk_free_mb().await,
+            api_token: api_token.clone(),
         };
         let mut r = client
             .post(format!(

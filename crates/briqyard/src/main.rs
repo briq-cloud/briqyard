@@ -218,6 +218,23 @@ enum ImageCmd {
 #[derive(Subcommand)]
 enum HostCmd {
     Ls,
+    /// Order a host from the fleet's provisioner now (dry-run unless the fleet says otherwise)
+    Order {
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
+    /// Place no new tenant on a host
+    Drain {
+        id: String,
+    },
+    /// Drain a host and release it at its provider once nothing runs on it
+    Retire {
+        id: String,
+    },
+    /// Forget a host (its machines are not touched)
+    Rm {
+        id: String,
+    },
 }
 
 struct Client {
@@ -653,7 +670,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     println!(
                         "{:<16} {:<28} {:<12} {:<14} {:<10} {:<9} {:<8} {}",
                         h.id,
-                        h.url,
+                        if h.url.is_empty() { "-" } else { &h.url },
                         h.state,
                         format!("{}/{}", h.used.memory_mb, h.capacity.memory_mb),
                         format!("{}/{}", h.used.vcpus, h.capacity.vcpus),
@@ -661,7 +678,27 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                         h.tenants.len(),
                         h.last_seen.to_rfc3339()
                     );
+                    if !h.note.is_empty() {
+                        println!("{:<16} note: {}", "", h.note);
+                    }
                 }
+            }
+            HostCmd::Order { reason } => {
+                let req = api::OrderHostRequest { reason };
+                print_json(
+                    &c.call::<api::Host>(POST, "/v1/hosts/order", Some(&req))
+                        .await?,
+                )
+            }
+            HostCmd::Drain { id } => {
+                c.raw(POST, &format!("/v1/hosts/{id}/drain"), NONE).await?;
+            }
+            HostCmd::Retire { id } => print_json(
+                &c.call::<api::Host>(POST, &format!("/v1/hosts/{id}/retire"), NONE)
+                    .await?,
+            ),
+            HostCmd::Rm { id } => {
+                c.raw(DELETE, &format!("/v1/hosts/{id}"), NONE).await?;
             }
         },
     }

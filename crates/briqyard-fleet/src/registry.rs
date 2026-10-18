@@ -39,6 +39,18 @@ pub struct HostRec {
     /// When the host last had a machine, for the release decision.
     #[serde(default)]
     pub empty_since: Option<DateTime<Utc>>,
+    /// The last thing the provisioner or the bootstrap said.
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub bootstrap_attempts: u32,
+}
+
+/// The host part of a URL (`http://10.0.0.5:7420` → `10.0.0.5`).
+pub fn url_host(url: &str) -> &str {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let rest = rest.split('/').next().unwrap_or(rest);
+    rest.rsplit_once(':').map(|(h, _)| h).unwrap_or(rest)
 }
 
 impl HostRec {
@@ -66,6 +78,7 @@ impl HostRec {
             tenants: self.tenants.clone(),
             last_seen: self.last_seen,
             version: self.version.clone(),
+            note: self.note.clone(),
         }
     }
 }
@@ -99,7 +112,32 @@ pub struct Registry {
 
 impl Registry {
     /// Applies a heartbeat. A host the fleet did not know is added as ready.
-    pub fn heartbeat(&mut self, h: HostRec, now: DateTime<Utc>) {
+    pub fn heartbeat(&mut self, mut h: HostRec, now: DateTime<Utc>) {
+        // A server the fleet ordered registers under the daemon's own id: the record made at
+        // the order (provider, its id, the token the bootstrap gave it) carries over by address.
+        if !self.hosts.contains_key(&h.id) && !h.url.is_empty() {
+            let ordered = self
+                .hosts
+                .values()
+                .find(|x| {
+                    matches!(x.state.as_str(), "provisioning" | "bootstrapped")
+                        && !x.url.is_empty()
+                        && url_host(&x.url) == url_host(&h.url)
+                })
+                .map(|x| x.id.clone());
+            if let Some(id) = ordered {
+                let old = self.hosts.remove(&id).unwrap();
+                h.provider = old.provider;
+                h.provider_id = old.provider_id;
+                if h.token.is_empty() {
+                    h.token = old.token;
+                }
+                if h.region.is_empty() {
+                    h.region = old.region;
+                }
+                h.note = old.note;
+            }
+        }
         let entry = self.hosts.entry(h.id.clone()).or_insert_with(|| HostRec {
             state: "ready".into(),
             empty_since: Some(now),
@@ -130,6 +168,15 @@ impl Registry {
         for t in h.tenants {
             self.tenants.entry(t).or_insert_with(|| entry.id.clone());
         }
+    }
+
+    /// Draining hosts that have nothing left on them: ready to be released.
+    pub fn retirable(&self) -> Vec<HostRec> {
+        self.hosts
+            .values()
+            .filter(|h| h.state == "draining" && h.machines == 0 && h.tenants.is_empty())
+            .cloned()
+            .collect()
     }
 
     /// Marks silent hosts down.
@@ -279,7 +326,58 @@ mod tests {
             version: "0.1".into(),
             disk_free_mb: 0,
             empty_since: None,
+            note: String::new(),
+            bootstrap_attempts: 0,
         }
+    }
+
+    #[test]
+    fn an_ordered_host_registers_under_its_own_id() {
+        let now = Utc::now();
+        let mut reg = Registry::default();
+        let mut ordered = host("h_srv-9", 0, 0, 0);
+        ordered.url = "http://10.0.0.9:7420".into();
+        ordered.state = "bootstrapped".into();
+        ordered.provider = "scaleway".into();
+        ordered.provider_id = "srv-9".into();
+        ordered.token = "t0k".into();
+        reg.hosts.insert(ordered.id.clone(), ordered);
+        let mut hb = host("h_byard-20261019", 64_000, 0, 0);
+        hb.url = "http://10.0.0.9:7420".into();
+        hb.provider.clear();
+        reg.heartbeat(hb, now);
+        assert!(!reg.hosts.contains_key("h_srv-9"));
+        let h = &reg.hosts["h_byard-20261019"];
+        assert_eq!(h.state, "ready");
+        assert_eq!(h.provider_id, "srv-9");
+        assert_eq!(h.token, "t0k");
+        assert_eq!(url_host("http://[::1]:7420/x"), "[::1]");
+        assert_eq!(url_host("10.0.0.5"), "10.0.0.5");
+    }
+
+    #[test]
+    fn retire_waits_for_the_host_to_empty() {
+        let now = Utc::now();
+        let mut reg = Registry::default();
+        let mut busy = host("a", 1000, 100, 1);
+        busy.tenants = vec!["t".into()];
+        reg.heartbeat(busy, now);
+        reg.hosts.get_mut("a").unwrap().state = "draining".into();
+        assert!(reg.retirable().is_empty());
+        let mut empty = host("a", 1000, 0, 0);
+        empty.tenants.clear();
+        reg.heartbeat(empty, now);
+        reg.tenants.clear();
+        assert_eq!(
+            reg.hosts["a"].state, "draining",
+            "a heartbeat keeps a drain"
+        );
+        assert_eq!(reg.retirable().len(), 1);
+        assert_eq!(
+            reg.place("t2", 10, 0, &Policy::default()),
+            None,
+            "no placement on a draining host"
+        );
     }
 
     #[test]

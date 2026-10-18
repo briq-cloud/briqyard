@@ -118,8 +118,36 @@ not a backup until sent elsewhere.
 with the fleet's `host_token`) or are listed under `hosts:` and polled. Clients use the fleet's
 URL and `token` as they would a daemon's; `briqyard host ls` shows the hosts.
 
-Provisioning is off and dry-run by default. To let the fleet add hosts, set
-`provisioner.enabled: true`, `kind: hetzner-robot` or `scaleway`, the credentials through
-`HETZNER_ROBOT_USER` / `HETZNER_ROBOT_PASSWORD` or `SCW_SECRET_KEY`, `max_hosts`, and turn
-`dry_run` off only once a dry run has shown the right order. An ordered server is a host once
-`bootstrap-host.sh` has run on it with the fleet's URL.
+### Adding and removing hosts
+
+Hosts come and go through the API, by hand or from the autoscaler; both use the same
+provisioner (`kind: hetzner-robot` or `scaleway`, credentials through `HETZNER_ROBOT_USER` /
+`HETZNER_ROBOT_PASSWORD` or `SCW_SECRET_KEY`). Every provisioner is `dry_run: true` until the
+configuration says otherwise: it records what it would order and orders nothing. Turn it off
+only once a dry run has shown the right product, location and count.
+
+```bash
+briqyard host order --reason "launch week"   # POST /v1/hosts/order: a server, state provisioning
+briqyard host ls                             # its note says what the provider and the bootstrap last did
+briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: drain, then release once empty
+briqyard host drain h_123456                 # place no new tenant on it, keep it
+briqyard host rm h_123456                    # forget it (its machines are not touched)
+```
+
+A server the fleet ordered becomes a host on its own when `provisioner.bootstrap.enabled` is
+set: every two minutes the fleet asks the provider for the server's address, then runs
+`hack/bootstrap-host.sh` on it over SSH (`ssh_user`, `ssh_key`: the key the provider installed;
+`release`, `pool_device`, `fleet_url` for the script), with a token of its own for the host's API.
+The host is `bootstrapped` once the script succeeds and `ready` at its first heartbeat; a server
+that cannot be installed after `max_attempts` is `failed`, with the last error in its note.
+Without the bootstrap, run the script yourself with `FLEET_URL` and `FLEET_TOKEN` set.
+
+A retire drains the host first (no new tenant lands on it) and releases it at the provider
+once it runs nothing: at once when it is already empty, else from the hourly pass as soon as
+its last machine is destroyed. Machines do not move between hosts: a draining host keeps its
+tenants until they are removed. A host from the `hosts:` list is retired by removing it from
+the configuration; forgotten through the API, it is back on the next poll.
+
+The autoscaler (`provisioner.enabled: true`) orders a host when no ready host has a slot of
+`slot_mb` left and releases a provisioned host empty for `idle_grace`, between `min_hosts` and
+`max_hosts`, one change a minute.

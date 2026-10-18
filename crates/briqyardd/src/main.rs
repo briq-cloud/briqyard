@@ -93,7 +93,7 @@ async fn run(args: Args) -> Result<()> {
     ing.start().await?;
     if let Some(f) = cfg.fleet.clone() {
         if !f.url.is_empty() {
-            tokio::spawn(heartbeat::run(f, mgr.clone()));
+            tokio::spawn(heartbeat::run(f, cfg.token.clone(), mgr.clone()));
         }
     }
     {

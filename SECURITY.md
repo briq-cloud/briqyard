@@ -25,7 +25,8 @@ working days and say what we will do and when. Do not open a public issue for a 
 ## What it does not protect yet
 
 - The API speaks plain HTTP with a bearer token: keep it on loopback or a private network, or
-  put TLS in front.
+  put TLS in front. A daemon's heartbeat carries its API token so the fleet can forward to it:
+  the fleet's URL needs the same care.
 - TCP endpoints bind `ingress.bind` (all interfaces by default): bind a private address or
   firewall the port range when the host has a public address.
 - A tenant spans one host; a WireGuard mesh is planned, and will keep the same rules.

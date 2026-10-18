@@ -122,12 +122,18 @@ host silent for a minute is `down`; `POST /v1/hosts/{id}/drain` stops placing on
 registry (hosts, tenant → host, machine → host) is one JSON file.
 
 Provisioners add and release hosts through a cloud API: `hetzner-robot` (dedicated servers,
-monthly), `scaleway` (Elastic Metal, hourly), `static` (none). Adding a host costs money, so the
-autoscaler runs only when `provisioner.enabled` is set, stays in `dry_run` unless told
-otherwise, never passes `max_hosts`, and adds one host at a time: when no ready host has a
-slot of `slot_mb` left, it orders one; a provisioned host with no machine for `idle_grace`
-and above `min_hosts` is released. A new server is not a host until `hack/bootstrap-host.sh`
-has installed briqyardd on it and its first heartbeat arrives.
+monthly), `scaleway` (Elastic Metal, hourly), `static` (none). `POST /v1/hosts/order` orders
+a server and `POST /v1/hosts/{id}/retire` drains a host and releases it once empty; the
+autoscaler, when `provisioner.enabled` is set, does the same on its own (no slot of `slot_mb`
+left: order one; a provisioned host empty for `idle_grace` above `min_hosts`: release it),
+one change a minute, never past `max_hosts`. Adding a host costs money, so every provisioner
+stays in `dry_run` unless told otherwise.
+
+A server becomes a host in three steps: the fleet polls the provider for its address, runs
+`hack/bootstrap-host.sh` on it over SSH (the script on stdin, the fleet's URL, its host token
+and a fresh API token in the environment) until it succeeds, and the host turns `ready` on its
+first heartbeat, which carries the daemon's own id: the record made at the order is matched by
+address and its provider fields carry over.
 
 A WireGuard mesh between hosts, so a tenant can span several, is the next step after that.
 

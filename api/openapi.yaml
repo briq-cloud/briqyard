@@ -234,6 +234,23 @@ paths:
             schema: { $ref: "#/components/schemas/RegisterHostRequest" }
       responses:
         "204": { description: recorded }
+  /v1/hosts/order:
+    post:
+      summary: Order a host from the provisioner now (fleet only; dry-run unless configured otherwise)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrderHostRequest" }
+      responses:
+        "202": { description: ordered, content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "409": { description: the fleet is at max_hosts }
+        "502": { description: the provisioner refused }
+  /v1/hosts/{id}/retire:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Drain a host and release it at its provider once nothing runs on it (fleet only)
+      responses:
+        "200": { description: draining, or released when it was already empty, content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
   /v1/hosts/{id}/drain:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
@@ -464,13 +481,18 @@ components:
         url: { type: string }
         region: { type: string }
         provider: { type: string }
-        state: { type: string, enum: [ready, draining, down, provisioning, dry-run] }
+        state: { type: string, enum: [ready, draining, down, provisioning, bootstrapped, failed, dry-run, released] }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer }
         tenants: { type: array, items: { type: string } }
         last_seen: { type: string, format: date-time }
         version: { type: string }
+        note: { type: string, description: What the provisioner or the bootstrap last said }
+    OrderHostRequest:
+      type: object
+      properties:
+        reason: { type: string }
     RegisterHostRequest:
       type: object
       required: [id, url, capacity, used, machines]
@@ -483,6 +505,8 @@ components:
         machines: { type: integer }
         tenants: { type: array, items: { type: string } }
         version: { type: string }
+        disk_free_mb: { type: integer }
+        api_token: { type: string, description: The daemon's own token, so the fleet can forward to it }
     ApiError:
       type: object
       properties:

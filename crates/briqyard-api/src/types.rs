@@ -350,7 +350,7 @@ pub struct Host {
     pub region: String,
     #[serde(default)]
     pub provider: String,
-    /// ready, draining, down, provisioning
+    /// ready, draining, down, provisioning, bootstrapped, failed, dry-run
     pub state: String,
     pub capacity: Capacity,
     pub used: Capacity,
@@ -360,6 +360,17 @@ pub struct Host {
     pub last_seen: DateTime<Utc>,
     #[serde(default)]
     pub version: String,
+    /// The last thing the provisioner or the bootstrap said about this host.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// POST /v1/hosts/order (fleet only).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct OrderHostRequest {
+    /// Why; kept in the host's note.
+    #[serde(default)]
+    pub reason: String,
 }
 
 /// What a daemon sends the fleet on start and as heartbeats.
@@ -378,6 +389,9 @@ pub struct RegisterHostRequest {
     pub version: String,
     #[serde(default)]
     pub disk_free_mb: u64,
+    /// The daemon's own API token, so the fleet can forward requests to it.
+    #[serde(default)]
+    pub api_token: String,
 }
 
 /// GET /v1/status.
