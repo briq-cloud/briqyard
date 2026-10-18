@@ -133,7 +133,14 @@ A WireGuard mesh between hosts, so a tenant can span several, is the next step a
 ## Security
 
 Every machine is a KVM virtual machine: its own kernel, its own memory, three virtio devices and
-a vsock. The daemon runs Firecracker under its `jailer` (chroot, namespaces, cgroups, seccomp)
-when `jailer` is configured, and plain otherwise (development). Guests reach only their tenant's
-bridge, the gateway's DNS, and the internet through NAT. Secrets reach the guest on its config
-drive and never through the API's responses.
+a vsock. With `jailer` configured (every deployment; only development runs without it), the
+daemon launches Firecracker through Firecracker's jailer: a chroot per machine under `jail_dir`
+holding only the kernel, the config drive, the machine's block device nodes and its sockets; a
+uid and gid of its own (`jail_uid_base` plus its place in the tenant's network, so no two
+machines share one); a new pid namespace; a cgroup v2 of its own; and Firecracker's seccomp
+filters. The daemon never mounts a guest filesystem. Guests reach only their tenant's bridge,
+the gateway's DNS, and the internet through NAT; nothing reaches a guest but the ingress.
+Secrets reach the guest on its config drive and never through the API's responses.
+
+The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API listens on
+loopback unless told otherwise; put it behind TLS or a private network before that.

@@ -68,6 +68,11 @@ async fn run(args: Args) -> Result<()> {
     for p in [&cfg.firecracker, &cfg.kernel, &cfg.init] {
         std::fs::metadata(p).with_context(|| p.display().to_string())?;
     }
+    if !cfg.jailer.as_os_str().is_empty() {
+        std::fs::metadata(&cfg.jailer).with_context(|| cfg.jailer.display().to_string())?;
+    } else {
+        tracing::warn!("no jailer configured: Firecracker runs as root, for development only");
+    }
     std::fs::create_dir_all(&cfg.data_dir)?;
     let store = store::Store::open(&cfg.state_dir())?;
     let zfs = zfs::Zfs::new(&cfg.storage.pool).await?;

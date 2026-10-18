@@ -353,7 +353,8 @@ impl Manager {
             return false;
         }
         let dir = self.inner.cfg.run_dir().join(&rec.id);
-        let (api, vsock, _, _) = fc::paths(&dir);
+        let jail = self.jail_for(&rec);
+        let (api, vsock, _, _) = fc::paths_for(&dir, jail.as_ref(), &rec.id);
         let client = fc::Client::new(&api);
         let running = match tokio::time::timeout(Duration::from_secs(3), client.info()).await {
             Ok(Ok(info)) => info["state"].as_str() == Some("Running"),
@@ -1055,19 +1056,36 @@ impl Manager {
             .map(|m| m.len())
             .unwrap_or(0);
         e.rec.lock().unwrap().console_offset = console_offset;
-        let snap_state = dir.join("snap.state");
-        let snap_mem = dir.join("snap.mem");
-        let mut resume = rec.suspended && snap_state.exists() && snap_mem.exists();
+        let jail = self.jail_for(&rec);
         let ip: Ipv4Addr = rec.ip.parse().unwrap();
+        let mut resume = rec.suspended;
         let mut proc = loop {
-            let mut proc = fc::Process::start(&cfg.firecracker, &rec.id, &dir, cfg.pci)
-                .await
-                .map_err(fail)?;
+            let mut proc =
+                fc::Process::start(&cfg.firecracker, &rec.id, &dir, cfg.pci, jail.as_ref())
+                    .await
+                    .map_err(fail)?;
             let c = proc.client.clone();
+            let (snap_state, snap_mem) = (proc.outside("snap.state"), proc.outside("snap.mem"));
+            resume = resume && snap_state.exists() && snap_mem.exists();
             if resume {
                 // Memory and state come back; the disks are where they were; the TAP has the
                 // same name. Nothing boots: the guest carries on where it was paused.
-                match c.snapshot_load(&snap_state, &snap_mem, "eth0", &tap).await {
+                let load = async {
+                    // What the snapshot's devices open again: the drives, by the names given at boot.
+                    proc.expose_file(&config_drive, "config.tar")?;
+                    proc.expose_block(&root_dev, "root")?;
+                    if let Some(d) = &data_dev {
+                        proc.expose_block(d, "data")?;
+                    }
+                    c.snapshot_load(
+                        &proc.inside("snap.state"),
+                        &proc.inside("snap.mem"),
+                        "eth0",
+                        &tap,
+                    )
+                    .await
+                };
+                match load.await {
                     Ok(()) => break proc,
                     Err(err) => {
                         tracing::warn!(machine = rec.id, err = %err, "resume from snapshot failed, booting cold");
@@ -1079,18 +1097,20 @@ impl Manager {
                 }
             }
             let configure = async {
+                let kernel = proc.expose_file(&cfg.kernel, "vmlinux")?;
+                let config = proc.expose_file(&config_drive, "config.tar")?;
+                let root = proc.expose_block(&root_dev, "root")?;
                 c.machine_config(rec.size.vcpus, rec.size.memory_mb).await?;
-                c.boot_source(&cfg.kernel, &self.boot_args()).await?;
-                c.drive("rootfs", &root_dev, true, false, "Writeback")
-                    .await?;
-                c.drive("config", &config_drive, false, true, "Unsafe")
-                    .await?;
+                c.boot_source(&kernel, &self.boot_args()).await?;
+                c.drive("rootfs", &root, true, false, "Writeback").await?;
+                c.drive("config", &config, false, true, "Unsafe").await?;
                 if let Some(d) = &data_dev {
-                    c.drive("data", d, false, false, "Writeback").await?;
+                    let data = proc.expose_block(d, "data")?;
+                    c.drive("data", &data, false, false, "Writeback").await?;
                 }
                 c.network_interface("eth0", &tap, &netw::mac_for(ip))
                     .await?;
-                c.vsock(3, &proc.vsock).await?;
+                c.vsock(3, &proc.inside("vsock.sock")).await?;
                 c.start().await?;
                 Ok::<(), anyhow::Error>(())
             };
@@ -1101,8 +1121,8 @@ impl Manager {
             break proc;
         };
         // A snapshot is for one resume: stale files would be loaded into a different boot.
-        let _ = tokio::fs::remove_file(&snap_state).await;
-        let _ = tokio::fs::remove_file(&snap_mem).await;
+        let _ = tokio::fs::remove_file(proc.outside("snap.state")).await;
+        let _ = tokio::fs::remove_file(proc.outside("snap.mem")).await;
         let (exit_tx, exit_rx) = tokio::sync::watch::channel(false);
         let live = Live {
             pid: proc.pid(),
@@ -1165,6 +1185,22 @@ impl Manager {
             "machine running"
         );
         Ok(())
+    }
+
+    /// The jail of a machine, when the daemon runs Firecracker under the jailer: one uid per
+    /// machine, from its place in the tenant's network.
+    fn jail_for(&self, rec: &Record) -> Option<fc::Jail> {
+        let cfg = &self.inner.cfg;
+        if cfg.jailer.as_os_str().is_empty() {
+            return None;
+        }
+        let uid = cfg.jail_uid_base + rec.subnet_index * 256 + rec.host_num as u32;
+        Some(fc::Jail {
+            jailer: cfg.jailer.clone(),
+            base: cfg.jail_base(),
+            uid,
+            gid: uid,
+        })
     }
 
     fn boot_args(&self) -> String {
@@ -1324,22 +1360,40 @@ impl Manager {
     /// machine. `Ok(false)`: Firecracker refused, the guest runs on; stop it the plain way.
     async fn snapshot_live(&self, e: &Arc<Entry>, live: &Live) -> Result<bool> {
         let rec = e.snapshot();
-        let dir = self.inner.cfg.run_dir().join(&rec.id);
+        // Firecracker writes next to its sockets: the run dir, or the chroot root when jailed.
+        let base = live
+            .api
+            .parent()
+            .map(|p| {
+                if p.ends_with("run") {
+                    p.parent().unwrap_or(p).to_path_buf()
+                } else {
+                    p.to_path_buf()
+                }
+            })
+            .unwrap_or_default();
+        let inside = |name: &str| -> PathBuf {
+            if self.jail_for(&rec).is_some() {
+                PathBuf::from("/").join(name)
+            } else {
+                base.join(name)
+            }
+        };
         let c = fc::Client::new(&live.api);
         if let Err(err) = c.pause().await {
             tracing::warn!(machine = rec.id, err = %err, "pause refused");
             return Ok(false);
         }
         match c
-            .snapshot_create(&dir.join("snap.state"), &dir.join("snap.mem"))
+            .snapshot_create(&inside("snap.state"), &inside("snap.mem"))
             .await
         {
             Ok(()) => Ok(true),
             Err(err) => {
                 tracing::warn!(machine = rec.id, err = %err, "snapshot refused, resuming");
                 let _ = c.resume().await;
-                let _ = tokio::fs::remove_file(dir.join("snap.state")).await;
-                let _ = tokio::fs::remove_file(dir.join("snap.mem")).await;
+                let _ = tokio::fs::remove_file(base.join("snap.state")).await;
+                let _ = tokio::fs::remove_file(base.join("snap.mem")).await;
                 Ok(false)
             }
         }
@@ -1471,6 +1525,11 @@ impl Manager {
             .await
             .context("disks")?;
         let _ = tokio::fs::remove_dir_all(self.inner.cfg.run_dir().join(id)).await;
+        if let Some(j) = self.jail_for(&rec) {
+            let _ =
+                tokio::fs::remove_dir_all(fc::jail_root(&j.base, id).parent().unwrap_or(&j.base))
+                    .await;
+        }
         self.inner.store.delete("machines", id)?;
         self.remove_machine(&e);
         tracing::info!(machine = id, "machine destroyed");

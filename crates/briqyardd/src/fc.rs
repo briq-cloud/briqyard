@@ -196,17 +196,59 @@ impl Client {
     }
 }
 
+/// How to run Firecracker under its jailer: a chroot per machine under `base`, as `uid`.
+#[derive(Clone, Debug)]
+pub struct Jail {
+    pub jailer: PathBuf,
+    pub base: PathBuf,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// One running Firecracker.
 #[allow(dead_code)] // dir, api and console are kept for operators and tests
 pub struct Process {
     pub dir: PathBuf,
     pub api: PathBuf,
+    /// The vsock Unix socket on the host.
     pub vsock: PathBuf,
     pub console: PathBuf,
     pub client: Client,
+    /// The chroot root when jailed: every path Firecracker opens is relative to it.
+    pub chroot: Option<PathBuf>,
+    uid: u32,
+    gid: u32,
     child: Child,
     pid: u32,
     done: tokio::sync::watch::Receiver<bool>,
+}
+
+/// The jail's root directory for a machine.
+pub fn jail_root(base: &Path, id: &str) -> PathBuf {
+    base.join("firecracker")
+        .join(id.replace('_', "-"))
+        .join("root")
+}
+
+/// The runtime files of a machine: the API and vsock sockets depend on whether it is jailed.
+pub fn paths_for(
+    dir: &Path,
+    jail: Option<&Jail>,
+    id: &str,
+) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let (api, vsock, console, fclog) = paths(dir);
+    match jail {
+        Some(j) => {
+            let root = jail_root(&j.base, id);
+            (
+                root.join("run/firecracker.socket"),
+                root.join("vsock.sock"),
+                console,
+                fclog,
+            )
+        }
+        None => (api, vsock, console, fclog),
+    }
 }
 
 /// A machine's runtime files inside its run dir.
@@ -222,9 +264,15 @@ pub fn paths(dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
 impl Process {
     /// Launches Firecracker for machine `id` with runtime files under `dir` and waits for its
     /// API. Nothing is configured yet.
-    pub async fn start(binary: &Path, id: &str, dir: &Path, pci: bool) -> Result<Self> {
+    pub async fn start(
+        binary: &Path,
+        id: &str,
+        dir: &Path,
+        pci: bool,
+        jail: Option<&Jail>,
+    ) -> Result<Self> {
         tokio::fs::create_dir_all(dir).await?;
-        let (api, vsock, console, fclog) = paths(dir);
+        let (api, vsock, console, fclog) = paths_for(dir, jail, id);
         let _ = tokio::fs::remove_file(&api).await;
         let _ = tokio::fs::remove_file(&vsock).await;
         let out = tokio::fs::OpenOptions::new()
@@ -232,26 +280,79 @@ impl Process {
             .append(true)
             .open(&console)
             .await?;
-        let _ = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&fclog)
-            .await?;
         // Firecracker accepts only letters, digits and dashes in an instance id; its log levels
         // are Error, Warning, Info, Debug, Trace.
         let fc_id = id.replace('_', "-");
-        let mut cmd = Command::new(binary);
-        cmd.arg("--api-sock")
-            .arg(&api)
-            .arg("--id")
-            .arg(&fc_id)
-            .arg("--log-path")
-            .arg(&fclog)
-            .arg("--level")
-            .arg("Warning");
-        if pci {
-            cmd.arg("--enable-pci");
-        }
+        let (mut cmd, chroot, uid, gid) = match jail {
+            Some(j) => {
+                // The jailer makes the chroot and drops to uid:gid; the files Firecracker opens
+                // are placed inside by `expose_*` once it answers. The root exists beforehand,
+                // owned by the jail's user, so Firecracker can write its sockets and snapshots.
+                let root = jail_root(&j.base, id);
+                // The jailer populates the root (sys, dev, the exec file, the pid file) and
+                // refuses what it finds there from a previous run; only the snapshot files
+                // are ours to keep.
+                if let Ok(mut rd) = tokio::fs::read_dir(&root).await {
+                    while let Ok(Some(entry)) = rd.next_entry().await {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        if name.starts_with("snap.") {
+                            continue;
+                        }
+                        let path = entry.path();
+                        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                            let _ = tokio::fs::remove_dir_all(&path).await;
+                        } else {
+                            let _ = tokio::fs::remove_file(&path).await;
+                        }
+                    }
+                }
+                tokio::fs::create_dir_all(root.join("run")).await?;
+                for d in [&root, &root.join("run")] {
+                    std::os::unix::fs::chown(d, Some(j.uid), Some(j.gid))?;
+                }
+                let mut cmd = Command::new(&j.jailer);
+                cmd.arg("--id")
+                    .arg(&fc_id)
+                    .arg("--exec-file")
+                    .arg(binary)
+                    .arg("--uid")
+                    .arg(j.uid.to_string())
+                    .arg("--gid")
+                    .arg(j.gid.to_string())
+                    .arg("--chroot-base-dir")
+                    .arg(&j.base)
+                    .arg("--cgroup-version")
+                    .arg("2")
+                    .arg("--new-pid-ns")
+                    .arg("--")
+                    .arg("--level")
+                    .arg("Warning");
+                if pci {
+                    cmd.arg("--enable-pci");
+                }
+                (cmd, Some(root), j.uid, j.gid)
+            }
+            None => {
+                let _ = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&fclog)
+                    .await?;
+                let mut cmd = Command::new(binary);
+                cmd.arg("--api-sock")
+                    .arg(&api)
+                    .arg("--id")
+                    .arg(&fc_id)
+                    .arg("--log-path")
+                    .arg(&fclog)
+                    .arg("--level")
+                    .arg("Warning");
+                if pci {
+                    cmd.arg("--enable-pci");
+                }
+                (cmd, None, 0, 0)
+            }
+        };
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -277,6 +378,9 @@ impl Process {
             vsock,
             console,
             client: Client::new(&api),
+            chroot,
+            uid,
+            gid,
             child,
             pid,
             done: rx,
@@ -285,7 +389,77 @@ impl Process {
             p.kill();
             return Err(e);
         }
+        let mut p = p;
+        if let Some(root) = &p.chroot {
+            // With a new pid namespace the jailer forks: the pid we spawned is its parent, and
+            // the one that matters (to kill, to adopt) is in the file the jailer writes.
+            for _ in 0..50 {
+                if let Ok(text) = tokio::fs::read_to_string(root.join("firecracker.pid")).await {
+                    if let Ok(pid) = text.trim().parse::<u32>() {
+                        p.pid = pid;
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
         Ok(p)
+    }
+
+    /// The path Firecracker must be given for a file on the host: inside the chroot when
+    /// jailed (hard-linked, or copied across filesystems, and readable by the jail's user).
+    pub fn expose_file(&self, host: &Path, name: &str) -> Result<PathBuf> {
+        let root = match &self.chroot {
+            Some(r) => r,
+            None => return Ok(host.to_path_buf()),
+        };
+        let inside = root.join(name);
+        let _ = std::fs::remove_file(&inside);
+        if std::fs::hard_link(host, &inside).is_err() {
+            std::fs::copy(host, &inside)
+                .with_context(|| format!("copy {} into the jail", host.display()))?;
+        }
+        let _ = std::os::unix::fs::chown(&inside, Some(self.uid), Some(self.gid));
+        Ok(PathBuf::from("/").join(name))
+    }
+
+    /// The path Firecracker must be given for a block device: a node inside the chroot when
+    /// jailed, owned by the jail's user.
+    pub fn expose_block(&self, dev: &Path, name: &str) -> Result<PathBuf> {
+        let root = match &self.chroot {
+            Some(r) => r,
+            None => return Ok(dev.to_path_buf()),
+        };
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(dev).with_context(|| dev.display().to_string())?;
+        let inside = root.join(name);
+        let _ = std::fs::remove_file(&inside);
+        nix::sys::stat::mknod(
+            &inside,
+            nix::sys::stat::SFlag::S_IFBLK,
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+            meta.rdev() as nix::sys::stat::dev_t,
+        )
+        .with_context(|| format!("mknod {}", inside.display()))?;
+        std::os::unix::fs::chown(&inside, Some(self.uid), Some(self.gid))?;
+        Ok(PathBuf::from("/").join(name))
+    }
+
+    /// Where Firecracker sees the vsock socket (inside the chroot when jailed) and a file name
+    /// next to its sockets, for snapshots.
+    pub fn inside(&self, name: &str) -> PathBuf {
+        match &self.chroot {
+            Some(_) => PathBuf::from("/").join(name),
+            None => self.dir.join(name),
+        }
+    }
+
+    /// The host path of a file Firecracker writes next to its sockets.
+    pub fn outside(&self, name: &str) -> PathBuf {
+        match &self.chroot {
+            Some(r) => r.join(name),
+            None => self.dir.join(name),
+        }
     }
 
     pub fn pid(&self) -> u32 {

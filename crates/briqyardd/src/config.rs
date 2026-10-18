@@ -15,8 +15,13 @@ pub struct Config {
     /// State, per-machine runtime files and the image cache.
     pub data_dir: PathBuf,
     pub firecracker: PathBuf,
-    /// The jailer binary; empty runs Firecracker without it (development).
+    /// The jailer binary; empty runs Firecracker without it (development only: the jailer is
+    /// what keeps a machine to its own user, chroot, pid namespace and cgroup).
     pub jailer: PathBuf,
+    /// Where the jailer makes each machine's chroot (default `<data_dir>/jail`).
+    pub jail_dir: PathBuf,
+    /// The first uid of the range machines run as: one per machine, from here.
+    pub jail_uid_base: u32,
     /// The uncompressed guest kernel every machine boots.
     pub kernel: PathBuf,
     /// Appended to the default boot arguments.
@@ -106,6 +111,8 @@ impl Default for Config {
             data_dir: "/var/lib/briqyard".into(),
             firecracker: "/usr/local/bin/firecracker".into(),
             jailer: PathBuf::new(),
+            jail_dir: PathBuf::new(),
+            jail_uid_base: 100_000,
             kernel: "/var/lib/briqyard/vmlinux".into(),
             kernel_args: String::new(),
             pci: false,
@@ -201,5 +208,12 @@ impl Config {
     }
     pub fn state_dir(&self) -> PathBuf {
         self.data_dir.join("state")
+    }
+    pub fn jail_base(&self) -> PathBuf {
+        if self.jail_dir.as_os_str().is_empty() {
+            self.data_dir.join("jail")
+        } else {
+            self.jail_dir.clone()
+        }
     }
 }

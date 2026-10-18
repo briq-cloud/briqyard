@@ -21,6 +21,8 @@ the AGPL-3.0.
   wake takes a quarter of a second and the processes carry on where they were.
 - **Exec, files, logs.** A command inside the machine with stdin and streamed output, files in and
   out, the serial console as logs.
+- **Jailed.** Firecracker runs under its jailer: a chroot, a uid, a pid namespace and a cgroup
+  per machine, on top of KVM.
 - **Several servers.** `briqyard-fleet` places tenants across hosts and can add or release hosts
   through a cloud API.
 
