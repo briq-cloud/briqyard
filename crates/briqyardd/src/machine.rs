@@ -258,10 +258,6 @@ impl Manager {
         &self.inner.host_id
     }
 
-    pub fn config(&self) -> &Config {
-        &self.inner.cfg
-    }
-
     fn load(&self) -> Result<()> {
         let st = &self.inner.store;
         for t in st.list::<TenantRec>("tenants")? {
@@ -582,7 +578,7 @@ impl Manager {
             })
             .map(|e| self.view(e))
             .collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.sort_by_key(|a| a.created_at);
         out
     }
 
@@ -1680,7 +1676,7 @@ impl Manager {
             .values()
             .cloned()
             .collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.sort_by_key(|a| a.created_at);
         out
     }
 
@@ -1698,7 +1694,7 @@ impl Manager {
             .filter(|e| e.machine_id == machine_id)
             .map(|e| self.endpoint_view(e))
             .collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.sort_by_key(|a| a.created_at);
         out
     }
 

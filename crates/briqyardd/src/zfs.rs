@@ -148,11 +148,21 @@ impl Zfs {
     }
 
     /// Removes a volume with its snapshots and children. Missing is success.
+    /// Removes a volume with its snapshots and children. Missing is success. A zvol stays
+    /// "busy" for a moment after its last user closes it (Firecracker exiting), so a busy
+    /// answer is retried for a few seconds.
     pub async fn destroy(&self, name: &str) -> Result<()> {
-        match self.run(&["destroy", "-r", &self.ds(name)]).await {
-            Ok(_) => Ok(()),
-            Err(e) if Self::is_missing(&e) => Ok(()),
-            Err(e) => Err(e),
+        let mut tries = 0;
+        loop {
+            match self.run(&["destroy", "-r", &self.ds(name)]).await {
+                Ok(_) => return Ok(()),
+                Err(e) if Self::is_missing(&e) => return Ok(()),
+                Err(e) if e.to_string().contains("busy") && tries < 40 => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 
@@ -179,6 +189,7 @@ impl Zfs {
             .collect())
     }
 
+    #[allow(dead_code)] // for the status page
     pub async fn used(&self, name: &str) -> Result<u64> {
         let out = self
             .run(&["get", "-H", "-p", "-o", "value", "used", &self.ds(name)])
@@ -186,6 +197,7 @@ impl Zfs {
         Ok(out.trim().parse().unwrap_or(0))
     }
 
+    #[allow(dead_code)]
     pub async fn free(&self) -> Result<u64> {
         let out = self
             .run(&["get", "-H", "-p", "-o", "value", "available", &self.pool])

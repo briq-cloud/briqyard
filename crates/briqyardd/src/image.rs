@@ -176,6 +176,7 @@ impl Builder {
         };
         if let Err(e) = self.build(&data, &image).await {
             let _ = self.zfs.destroy(&image.dataset()).await;
+            let _ = std::fs::remove_dir_all(self.dir.join(format!("extract-{}", image.key)));
             return Err(e);
         }
         std::fs::write(self.meta_path(key), serde_json::to_vec_pretty(&image)?)?;
@@ -187,11 +188,9 @@ impl Builder {
         let _ = std::fs::remove_dir_all(&scratch);
         let root = scratch.join("root");
         std::fs::create_dir_all(&root)?;
-        let layers: Vec<(String, Vec<u8>)> = data
-            .layers
-            .iter()
-            .map(|l| (l.media_type.clone(), l.data.clone()))
-            .collect();
+        // The client fetches layers concurrently and hands them back in completion order; an
+        // image is its layers applied in manifest order, so put them back in it.
+        let layers = ordered_layers(data);
         let root2 = root.clone();
         let init = self.init.clone();
         let files = tokio::task::spawn_blocking(move || -> Result<usize> {
@@ -239,6 +238,28 @@ impl Builder {
         );
         Ok(())
     }
+}
+
+/// The layers in manifest order, as (media type, bytes).
+fn ordered_layers(data: &ImageData) -> Vec<(String, Vec<u8>)> {
+    let mut layers: Vec<(String, Vec<u8>)> = data
+        .layers
+        .iter()
+        .map(|l| (l.media_type.clone(), l.data.clone()))
+        .collect();
+    if let Some(manifest) = &data.manifest {
+        let digests: Vec<String> = data.layers.iter().map(|l| l.sha256_digest()).collect();
+        let mut ordered = Vec::with_capacity(layers.len());
+        for want in &manifest.layers {
+            if let Some(i) = digests.iter().position(|d| *d == want.digest) {
+                ordered.push(layers[i].clone());
+            }
+        }
+        if ordered.len() == layers.len() {
+            layers = ordered;
+        }
+    }
+    layers
 }
 
 fn host_platform(entries: &[ImageIndexEntry]) -> Option<String> {
@@ -344,6 +365,25 @@ pub fn secure_join(root: &Path, rel: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// Like `secure_join`, but the last component is never followed: this is where something is
+/// about to be written or removed, and an existing symlink there must be replaced, not
+/// written through (a layer that rewrites `usr/bin/lzcat -> /bin/busybox` would otherwise
+/// clobber busybox itself).
+pub fn secure_join_nofollow(root: &Path, rel: &str) -> Result<PathBuf> {
+    let rel = rel.trim_end_matches('/');
+    match rel.rsplit_once('/') {
+        Some((parent, base)) if !base.is_empty() && base != ".." => {
+            Ok(secure_join(root, parent)?.join(base))
+        }
+        _ => {
+            if rel == ".." || rel.is_empty() {
+                return Ok(root.to_path_buf());
+            }
+            Ok(root.join(rel))
+        }
+    }
+}
+
 fn component(c: Component<'_>) -> Option<String> {
     match c {
         Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
@@ -377,11 +417,11 @@ pub fn extract<R: Read>(root: &Path, r: R) -> Result<usize> {
         }
         if let Some(victim) = base.strip_prefix(".wh.") {
             let parent = &clean[..clean.len() - base.len()];
-            let target = secure_join(root, &format!("{parent}{victim}"))?;
+            let target = secure_join_nofollow(root, &format!("{parent}{victim}"))?;
             remove_any(&target);
             continue;
         }
-        let dest = secure_join(root, clean)?;
+        let dest = secure_join_nofollow(root, clean)?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -394,7 +434,10 @@ pub fn extract<R: Read>(root: &Path, r: R) -> Result<usize> {
         let mtime = header.mtime().unwrap_or(0);
         match header.entry_type() {
             tar::EntryType::Directory => {
-                if !dest.is_dir() {
+                let is_real_dir = std::fs::symlink_metadata(&dest)
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false);
+                if !is_real_dir {
                     remove_any(&dest);
                     std::fs::create_dir_all(&dest)?;
                 }
@@ -544,6 +587,49 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(root.path().join("dev/null")).is_err(),
             "devices are skipped"
+        );
+    }
+
+    #[test]
+    fn rewriting_a_symlink_does_not_follow_it() {
+        let root = tempfile::tempdir().unwrap();
+        // Layer 1: merged usr: bin -> usr/bin, busybox, lzcat -> /bin/busybox.
+        extract(
+            root.path(),
+            &archive(&[
+                ("usr/bin/busybox", tar::EntryType::Regular, "", "BB"),
+                ("bin", tar::EntryType::Symlink, "usr/bin", ""),
+                ("usr/bin/lzcat", tar::EntryType::Symlink, "/bin/busybox", ""),
+            ])[..],
+        )
+        .unwrap();
+        // Layer 2 rewrites the same link: busybox must survive.
+        extract(
+            root.path(),
+            &archive(&[("usr/bin/lzcat", tar::EntryType::Symlink, "/bin/busybox", "")])[..],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("usr/bin/busybox")).unwrap(),
+            "BB"
+        );
+        assert!(std::fs::symlink_metadata(root.path().join("usr/bin/lzcat"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        // A regular file written over a symlink replaces the link, not its target.
+        extract(
+            root.path(),
+            &archive(&[("usr/bin/lzcat", tar::EntryType::Regular, "", "real")])[..],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("usr/bin/lzcat")).unwrap(),
+            "real"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("usr/bin/busybox")).unwrap(),
+            "BB"
         );
     }
 

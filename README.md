@@ -3,7 +3,7 @@
 **Open source Fly Machines for AI agents.** Run any OCI image in a Firecracker microVM on your
 own servers, with a durable disk, a private network per tenant, and sleep when idle.
 
-briqyard is the runtime under [briq](https://briq.cloud). It is written in Go and licensed under
+briqyard is the runtime under [briq](https://briq.cloud). It is written in Rust and licensed under
 the AGPL-3.0.
 
 > Status: v0, under development. Nothing here is stable yet.
@@ -28,7 +28,7 @@ the AGPL-3.0.
 | Binary | Runs | Does |
 |---|---|---|
 | `briqyardd` | on every server, as root | the machines of that server: HTTP API, Firecracker, ZFS, network, ingress |
-| `briqyard-init` | inside every microVM, as PID 1 | boots the image's command, serves exec and files over vsock |
+| `briqyard-init` | inside every microVM, as PID 1 | a static binary: boots the image's command, serves exec and files over vsock |
 | `briqyard-fleet` | once | the same API across servers; placement, host provisioning |
 | `briqyard` | on your laptop | the CLI |
 
@@ -41,12 +41,19 @@ and the Firecracker binary. On a Mac with Apple silicon (M3 or later, macOS 15 o
 VM with nested virtualization does it; see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ```bash
-make                       # builds bin/ for linux
-sudo bin/briqyardd --config /etc/briqyard/config.yaml
-briqyard machine run --image postgres:16 --env POSTGRES_PASSWORD=secret --volume 10G:/var/lib/postgresql/data --port 5432
+make                       # cargo build --release; the init is built static (musl)
+sudo target/release/briqyardd --config hack/config.dev.yaml
+briqyard machine run --image postgres:16-alpine -e POSTGRES_PASSWORD=secret --volume 10G:/var/lib/postgresql/data -p 5432 --sleep 30m
 briqyard machine exec <id> -- psql -U postgres -c 'select 1'
-briqyard endpoint add <id> 5432          # a TCP port on the host that wakes the machine
+briqyard endpoint add <id> 5432          # a TCP port on the host; a connection wakes the machine
+briqyard machine fork <id>               # a copy of its disks, taken now, as a new machine
 ```
+
+What works today, checked by `hack/e2e.sh` on every change: boot in a few seconds, exec with
+stdin, exit codes and timeouts, files in and out, names on the tenant's network, egress through
+NAT, tenant isolation, stop and start with the disk kept, exit codes and the restart policy,
+Postgres on a volume with honest `fsync`, a TCP endpoint, sleep on idle and wake on connect,
+and a fork with its data.
 
 ## License
 

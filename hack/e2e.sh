@@ -35,7 +35,7 @@ echo hello-file > /tmp/by-e2e.txt
 check "put/get file" 'briqyard machine put "$A" /tmp/by-e2e.txt /root/f.txt && [ "$(briqyard machine get-file "$A" /root/f.txt)" = hello-file ]'
 check "own name"     'briqyard machine exec "$A" -- nslookup alp.internal 2>&1 | grep -q "10\.6[4-9]\."'
 check "egress"       'briqyard machine exec "$A" -- wget -qO- -T 10 https://example.com | grep -qi "example domain"'
-check "logs"         'briqyard machine logs "$A" --limit 5 | grep -q "\[briqyard\] started"'
+check "logs"         'briqyard machine logs "$A" --limit 5000 | grep -q "\[briqyard\] started"'
 
 echo "== second machine reaches the first by name"
 B=$(briqyard machine run --image alpine:3.20 --name alp2 --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
@@ -60,8 +60,8 @@ check "exit recorded"  '[ "$(briqyard machine get "$X" | jq -r .exit.code)" = 7 
 
 echo "== postgres with a volume, endpoint, wake on connect"
 P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m | jq -r .id)
-for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-check "postgres ready" 'briqyard machine exec "$P" -- pg_isready -U postgres | grep -q accepting'
+for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
+check "postgres ready" 'briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres | grep -q accepting'
 check "volume mounted" 'briqyard machine exec "$P" -- sh -c "mount | grep -q /var/lib/postgresql/data"'
 briqyard machine exec "$P" -- psql -U postgres -c "create table t(x int); insert into t values (42);" >/dev/null
 EP=$(briqyard endpoint add "$P" 5432)
@@ -71,11 +71,25 @@ if command -v psql >/dev/null; then
   check "psql through endpoint" '[ "$(PGPASSWORD=secret psql -h ${addr%:*} -p ${addr#*:} -U postgres -tAc "select x from t")" = 42 ]'
 fi
 briqyard machine stop "$P" >/dev/null
-briqyard machine wake "$P" >/dev/null
-for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+check "wake refuses a user stop" '! briqyard machine wake "$P" >/dev/null 2>&1'
+briqyard machine start "$P" >/dev/null
+for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "data survived"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select x from t")" = 42 ]'
+
+echo "== sleep on idle, wake on connect"
+S=$(briqyard machine run --image postgres:16-alpine --name sleeper --tenant "$T" --memory 512 --volume 1G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 20s | jq -r .id)
+SEP=$(briqyard endpoint add "$S" 5432 | jq -r .address)
+for i in $(seq 1 90); do [ "$(briqyard machine get "$S" | jq -r .state)" = stopped ] && break; sleep 2; done
+check "slept when idle" '[ "$(briqyard machine get "$S" | jq -r .stopped_reason)" = idle ]'
+if command -v psql >/dev/null; then
+  # The first connection wakes the machine; Postgres accepts TCP before it is ready, so a
+  # client retries, as connection pools do.
+  pgq() { for i in 1 2 3 4 5 6; do out=$(PGPASSWORD=secret psql -h "${SEP%:*}" -p "${SEP#*:}" -U postgres -tAc "select 1" 2>/dev/null) && { echo "$out"; return 0; }; sleep 2; done; return 1; }
+  check "connect wakes it" '[ "$(pgq)" = 1 ]'
+  check "running after wake" '[ "$(briqyard machine get "$S" | jq -r .state)" = running ]'
+fi
 F=$(briqyard machine fork "$P" --name pgfork | jq -r .id)
-for i in $(seq 1 60); do briqyard machine exec "$F" -- pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+for i in $(seq 1 60); do briqyard machine exec "$F" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "fork has data"  '[ "$(briqyard machine exec "$F" -- psql -U postgres -tAc "select x from t")" = 42 ]'
 briqyard machine exec "$F" -- psql -U postgres -c "insert into t values (43)" >/dev/null
 check "fork is apart"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select count(*) from t")" = 1 ]'

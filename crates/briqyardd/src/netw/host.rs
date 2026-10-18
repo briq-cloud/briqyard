@@ -3,7 +3,6 @@
 
 use super::{bridge_name, tap_name, Subnet};
 use anyhow::{anyhow, Context, Result};
-use std::net::Ipv4Addr;
 use tokio::process::Command;
 
 async fn ip(args: &[&str]) -> Result<String> {
@@ -91,22 +90,4 @@ pub async fn default_egress_interface() -> Result<String> {
         }
     }
     Err(anyhow!("no default route"))
-}
-
-/// A host address on the interface, for endpoints' addresses.
-pub async fn host_addr(iface: &str) -> Result<Ipv4Addr> {
-    let out = ip(&["-4", "-o", "addr", "show", "dev", iface]).await?;
-    for line in out.lines() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        if let Some(i) = f.iter().position(|w| *w == "inet") {
-            if let Some(cidr) = f.get(i + 1) {
-                if let Some((ip, _)) = cidr.split_once('/') {
-                    if let Ok(a) = ip.parse() {
-                        return Ok(a);
-                    }
-                }
-            }
-        }
-    }
-    Err(anyhow!("no IPv4 address on {iface}"))
 }

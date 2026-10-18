@@ -132,12 +132,14 @@ impl Client {
             .await
     }
 
+    #[allow(dead_code)] // suspend and resume: planned
     pub async fn pause(&self) -> Result<()> {
         self.call("PATCH", "/vm", Some(r#"{"state":"Paused"}"#))
             .await
             .map(|_| ())
     }
 
+    #[allow(dead_code)]
     pub async fn resume(&self) -> Result<()> {
         self.call("PATCH", "/vm", Some(r#"{"state":"Resumed"}"#))
             .await
@@ -145,6 +147,7 @@ impl Client {
     }
 
     /// A full snapshot (VM state and memory) of a paused machine.
+    #[allow(dead_code)]
     pub async fn snapshot_create(&self, state: &Path, mem: &Path) -> Result<()> {
         self.put(
             "/snapshot/create",
@@ -154,6 +157,7 @@ impl Client {
     }
 
     /// Restores a snapshot into a fresh process and resumes it; the TAP is reopened by name.
+    #[allow(dead_code)]
     pub async fn snapshot_load(
         &self,
         state: &Path,
@@ -193,6 +197,7 @@ impl Client {
 }
 
 /// One running Firecracker.
+#[allow(dead_code)] // dir, api and console are kept for operators and tests
 pub struct Process {
     pub dir: PathBuf,
     pub api: PathBuf,
@@ -302,15 +307,6 @@ impl Process {
                 break;
             }
         }
-    }
-
-    /// Waits up to `d` for the process to exit on its own.
-    pub async fn wait_exit(&mut self, d: Duration) -> bool {
-        tokio::time::timeout(d, self.child.wait()).await.is_ok()
-    }
-
-    pub fn exited(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)))
     }
 }
 

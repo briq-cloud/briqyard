@@ -235,6 +235,9 @@ impl Client {
         let text = resp.text().await?;
         if !status.is_success() {
             if let Ok(e) = serde_json::from_str::<api::ApiError>(&text) {
+                if e.request_id.is_empty() {
+                    bail!("{} ({})", e.error, e.code);
+                }
                 bail!("{} ({}, request {})", e.error, e.code, e.request_id);
             }
             bail!("{status}: {}", text.trim());
@@ -283,8 +286,8 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 };
                 let ms: Vec<api::Machine> = c.call(GET, &path, NONE).await?;
                 println!(
-                    "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {}",
-                    "ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP", "HOST"
+                    "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} HOST",
+                    "ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP"
                 );
                 for m in ms {
                     let state = if m.stopped_reason.is_empty() {
@@ -544,8 +547,8 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             EndpointCmd::Ls => {
                 let eps: Vec<api::Endpoint> = c.call(GET, "/v1/endpoints", NONE).await?;
                 println!(
-                    "{:<18} {:<16} {:<6} {:<9} {}",
-                    "ID", "MACHINE", "PORT", "PROTOCOL", "ADDRESS"
+                    "{:<18} {:<16} {:<6} {:<9} ADDRESS",
+                    "ID", "MACHINE", "PORT", "PROTOCOL"
                 );
                 for e in eps {
                     println!(
@@ -570,8 +573,8 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             HostCmd::Ls => {
                 let hs: Vec<api::Host> = c.call(GET, "/v1/hosts", NONE).await?;
                 println!(
-                    "{:<16} {:<28} {:<12} {:<14} {:<10} {:<9} {:<8} {}",
-                    "ID", "URL", "STATE", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS", "LAST SEEN"
+                    "{:<16} {:<28} {:<12} {:<14} {:<10} {:<9} {:<8} LAST SEEN",
+                    "ID", "URL", "STATE", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS"
                 );
                 for h in hs {
                     println!(

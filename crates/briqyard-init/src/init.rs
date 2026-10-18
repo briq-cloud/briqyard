@@ -206,6 +206,15 @@ fn mount_base() {
         let _ = fs::create_dir_all(dst);
         let _ = mount(Some(*src), *dst, Some(*fstype), *flags, Some(*data));
     }
+    // What an init is expected to add to devtmpfs: bash's `<(...)` opens /dev/fd/N.
+    for (link, target) in [
+        ("/dev/fd", "/proc/self/fd"),
+        ("/dev/stdin", "/proc/self/fd/0"),
+        ("/dev/stdout", "/proc/self/fd/1"),
+        ("/dev/stderr", "/proc/self/fd/2"),
+    ] {
+        let _ = std::os::unix::fs::symlink(target, link);
+    }
     let _ = fs::create_dir_all("/dev/pts");
     let _ = mount(
         Some("devpts"),
@@ -309,6 +318,10 @@ fn setup_mounts(cfg: &Config) -> Result<()> {
         )
         .with_context(|| format!("mount {} on {}", m.device, m.path))?;
         if is_empty_volume(path) {
+            // A fresh ext4 has lost+found; a database refuses a data directory that is "not
+            // empty". Docker's named volumes are plain directories, so match that: fsck makes
+            // the directory again if it ever needs it.
+            let _ = fs::remove_dir(path.join("lost+found"));
             if let Some(meta) = &had {
                 let _ = nix::unistd::chown(path, Some(meta.uid().into()), Some(meta.gid().into()));
                 let _ = fs::set_permissions(path, fs::Permissions::from_mode(meta.mode() & 0o7777));

@@ -33,6 +33,7 @@ impl Store {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn get<T: DeserializeOwned>(&self, kind: &str, key: &str) -> Result<Option<T>> {
         match std::fs::read(self.path(kind, key)) {
             Ok(data) => Ok(Some(
