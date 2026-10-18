@@ -135,7 +135,7 @@ and a fresh API token in the environment) until it succeeds, and the host turns 
 first heartbeat, which carries the daemon's own id: the record made at the order is matched by
 address and its provider fields carry over.
 
-A WireGuard mesh between hosts, so a tenant can span several, is the next step after that.
+A WireGuard mesh between hosts, so a tenant can span several, is the next step after that: `MESH.md` is its design.
 
 ## Security
 
