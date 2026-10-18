@@ -1,0 +1,6 @@
+openapi: 3.1.0
+info:
+  title: briqyard
+  version: v0
+  description: Machines in Firecracker microVMs on one host (briqyardd) or across hosts (briqyard-fleet).
+paths: {}

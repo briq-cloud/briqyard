@@ -1,0 +1,19 @@
+# briqyardd configuration for the development VM.
+listen: 0.0.0.0:7420
+data_dir: /var/lib/briqyard
+firecracker: /usr/local/bin/firecracker
+kernel: /var/lib/briqyard/vmlinux
+init: /usr/local/bin/briqyard-init
+root_disk_gb: 8
+storage:
+  backend: zfs
+  pool: byard
+network:
+  range: 10.64.0.0/10
+ingress:
+  tcp_ports: 20000-29999
+  http: 0.0.0.0:8080
+  domain: byard.localhost
+capacity:
+  memory_mb: 12288
+  vcpus: 24
