@@ -100,6 +100,9 @@ pub struct Record {
     /// Where the current boot's console output starts.
     #[serde(default)]
     pub console_offset: u64,
+    /// Stopped with a memory snapshot: the next start resumes where it was.
+    #[serde(default)]
+    pub suspended: bool,
 }
 
 impl Record {
@@ -157,6 +160,8 @@ pub fn new_id(prefix: &str) -> String {
 struct Live {
     pid: u32,
     vsock: PathBuf,
+    /// Firecracker's API socket, for pause and snapshot.
+    api: PathBuf,
     exited: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -357,7 +362,10 @@ impl Manager {
             if st == state::RUNNING || st == state::STARTING {
                 let m = self.clone();
                 tasks.push(tokio::spawn(async move {
-                    if let Err(err) = m.stop_entry(&e, stop::IDLE, Duration::from_secs(10)).await {
+                    if let Err(err) = m
+                        .stop_entry(&e, stop::IDLE, Duration::from_secs(10), false)
+                        .await
+                    {
                         tracing::warn!(machine = e.snapshot().id, err = %err, "stop on shutdown");
                     }
                 }));
@@ -552,6 +560,7 @@ impl Manager {
             stopped_at: r.stopped_at,
             last_used_at: r.last_used_at,
             sleeps_at,
+            suspended: r.suspended,
             host: String::new(),
         }
     }
@@ -696,6 +705,7 @@ impl Manager {
             stopped_at: None,
             last_used_at: None,
             console_offset: 0,
+            suspended: false,
         };
         let mut src: Option<Arc<Entry>> = None;
         if let Some(fork) = &req.fork {
@@ -970,35 +980,59 @@ impl Manager {
             .map(|m| m.len())
             .unwrap_or(0);
         e.rec.lock().unwrap().console_offset = console_offset;
-        let mut proc = fc::Process::start(&cfg.firecracker, &rec.id, &dir, cfg.pci)
-            .await
-            .map_err(fail)?;
-        let c = proc.client.clone();
+        let snap_state = dir.join("snap.state");
+        let snap_mem = dir.join("snap.mem");
+        let mut resume = rec.suspended && snap_state.exists() && snap_mem.exists();
         let ip: Ipv4Addr = rec.ip.parse().unwrap();
-        let configure = async {
-            c.machine_config(rec.size.vcpus, rec.size.memory_mb).await?;
-            c.boot_source(&cfg.kernel, &self.boot_args()).await?;
-            c.drive("rootfs", &root_dev, true, false, "Writeback")
-                .await?;
-            c.drive("config", &config_drive, false, true, "Unsafe")
-                .await?;
-            if let Some(d) = &data_dev {
-                c.drive("data", d, false, false, "Writeback").await?;
+        let mut proc = loop {
+            let mut proc = fc::Process::start(&cfg.firecracker, &rec.id, &dir, cfg.pci)
+                .await
+                .map_err(fail)?;
+            let c = proc.client.clone();
+            if resume {
+                // Memory and state come back; the disks are where they were; the TAP has the
+                // same name. Nothing boots: the guest carries on where it was paused.
+                match c.snapshot_load(&snap_state, &snap_mem, "eth0", &tap).await {
+                    Ok(()) => break proc,
+                    Err(err) => {
+                        tracing::warn!(machine = rec.id, err = %err, "resume from snapshot failed, booting cold");
+                        proc.kill();
+                        proc.wait().await;
+                        resume = false;
+                        continue;
+                    }
+                }
             }
-            c.network_interface("eth0", &tap, &netw::mac_for(ip))
-                .await?;
-            c.vsock(3, &proc.vsock).await?;
-            c.start().await?;
-            Ok::<(), anyhow::Error>(())
+            let configure = async {
+                c.machine_config(rec.size.vcpus, rec.size.memory_mb).await?;
+                c.boot_source(&cfg.kernel, &self.boot_args()).await?;
+                c.drive("rootfs", &root_dev, true, false, "Writeback")
+                    .await?;
+                c.drive("config", &config_drive, false, true, "Unsafe")
+                    .await?;
+                if let Some(d) = &data_dev {
+                    c.drive("data", d, false, false, "Writeback").await?;
+                }
+                c.network_interface("eth0", &tap, &netw::mac_for(ip))
+                    .await?;
+                c.vsock(3, &proc.vsock).await?;
+                c.start().await?;
+                Ok::<(), anyhow::Error>(())
+            };
+            if let Err(err) = configure.await {
+                proc.kill();
+                return Err(fail(anyhow!("configure firecracker: {err}")));
+            }
+            break proc;
         };
-        if let Err(err) = configure.await {
-            proc.kill();
-            return Err(fail(anyhow!("configure firecracker: {err}")));
-        }
+        // A snapshot is for one resume: stale files would be loaded into a different boot.
+        let _ = tokio::fs::remove_file(&snap_state).await;
+        let _ = tokio::fs::remove_file(&snap_mem).await;
         let (exit_tx, exit_rx) = tokio::sync::watch::channel(false);
         let live = Live {
             pid: proc.pid(),
             vsock: proc.vsock.clone(),
+            api: proc.api.clone(),
             exited: exit_rx,
         };
         {
@@ -1006,7 +1040,10 @@ impl Manager {
             *e.stop_req.lock().unwrap() = None;
             let mut r = e.rec.lock().unwrap();
             r.pid = proc.pid();
-            r.boots += 1;
+            r.suspended = false;
+            if !resume {
+                r.boots += 1;
+            }
         }
         let _ = self.save(e);
         let watcher = self.clone();
@@ -1049,6 +1086,7 @@ impl Manager {
             name = rec.name,
             ip = rec.ip,
             pid = live.pid,
+            resumed = resume,
             "machine running"
         );
         Ok(())
@@ -1195,10 +1233,41 @@ impl Manager {
 
     // --- stop ---
 
-    pub async fn stop(&self, id: &str, timeout: Duration) -> Result<api::Machine, MError> {
+    pub async fn stop(
+        &self,
+        id: &str,
+        timeout: Duration,
+        suspend: bool,
+    ) -> Result<api::Machine, MError> {
         let e = self.entry(id)?;
-        self.stop_entry(&e, stop::USER, timeout).await?;
+        self.stop_entry(&e, stop::USER, timeout, suspend).await?;
         Ok(self.view(&e))
+    }
+
+    /// Pauses the machine and writes its memory and state next to its run files, so the next
+    /// start resumes it in well under a second. Called with the entry's lock held, on a running
+    /// machine. `Ok(false)`: Firecracker refused, the guest runs on; stop it the plain way.
+    async fn snapshot_live(&self, e: &Arc<Entry>, live: &Live) -> Result<bool> {
+        let rec = e.snapshot();
+        let dir = self.inner.cfg.run_dir().join(&rec.id);
+        let c = fc::Client::new(&live.api);
+        if let Err(err) = c.pause().await {
+            tracing::warn!(machine = rec.id, err = %err, "pause refused");
+            return Ok(false);
+        }
+        match c
+            .snapshot_create(&dir.join("snap.state"), &dir.join("snap.mem"))
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(err) => {
+                tracing::warn!(machine = rec.id, err = %err, "snapshot refused, resuming");
+                let _ = c.resume().await;
+                let _ = tokio::fs::remove_file(dir.join("snap.state")).await;
+                let _ = tokio::fs::remove_file(dir.join("snap.mem")).await;
+                Ok(false)
+            }
+        }
     }
 
     /// Asks the guest to end its process, then waits for Firecracker to exit; after the grace,
@@ -1208,6 +1277,7 @@ impl Manager {
         e: &Arc<Entry>,
         reason: &str,
         timeout: Duration,
+        suspend: bool,
     ) -> Result<(), MError> {
         let timeout = if timeout.is_zero() {
             Duration::from_secs(10)
@@ -1248,6 +1318,20 @@ impl Manager {
             *e.stop_req.lock().unwrap() = Some(reason.to_string());
             e.rec.lock().unwrap().state = state::STOPPING.into();
             let _ = self.save(e);
+            if suspend && self.snapshot_live(e, &live).await.unwrap_or(false) {
+                // The guest is paused and saved: end the process; the watcher settles the
+                // state with the reason set above.
+                e.rec.lock().unwrap().suspended = true;
+                let _ = self.save(e);
+                let settled = e.settled.notified();
+                tokio::pin!(settled);
+                settled.as_mut().enable();
+                unsafe {
+                    libc::kill(live.pid as i32, libc::SIGKILL);
+                }
+                let _ = tokio::time::timeout(Duration::from_secs(15), settled).await;
+                return Ok(());
+            }
             live
         };
         let settled = e.settled.notified();
@@ -1293,7 +1377,7 @@ impl Manager {
         };
         let st = e.snapshot().state;
         if st == state::RUNNING || st == state::STOPPING || st == state::STARTING {
-            self.stop_entry(&e, stop::USER, Duration::from_secs(5))
+            self.stop_entry(&e, stop::USER, Duration::from_secs(5), false)
                 .await?;
         }
         {
@@ -1357,8 +1441,9 @@ impl Manager {
                 .collect();
             for e in due {
                 tracing::info!(machine = e.snapshot().id, "machine idle, going to sleep");
+                let suspend = self.inner.cfg.suspend_on_sleep;
                 if let Err(err) = self
-                    .stop_entry(&e, stop::IDLE, Duration::from_secs(10))
+                    .stop_entry(&e, stop::IDLE, Duration::from_secs(10), suspend)
                     .await
                 {
                     tracing::warn!(machine = e.snapshot().id, err = %err, "sleep");

@@ -165,6 +165,9 @@ pub struct Machine {
     /// When the machine stops if nothing uses it; absent when running with no window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleeps_at: Option<DateTime<Utc>>,
+    /// Stopped with a memory snapshot: the next start resumes where it was.
+    #[serde(default)]
+    pub suspended: bool,
     /// The briqyardd that runs it (set by the fleet).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,

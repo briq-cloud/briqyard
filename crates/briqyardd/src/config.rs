@@ -30,6 +30,9 @@ pub struct Config {
     pub ingress: Ingress,
     /// The size of every root disk (thin: only written blocks take space).
     pub root_disk_gb: u32,
+    /// Sleep with a memory snapshot instead of a stop, so a wake resumes in well under a
+    /// second. Costs the machine's memory in disk while it sleeps.
+    pub suspend_on_sleep: bool,
     pub fleet: Option<FleetClient>,
     /// What the daemon advertises: memory it may hand to machines (default: the host's memory
     /// minus 2 GB) and vCPUs (default: hardware threads times 4).
@@ -101,6 +104,7 @@ impl Default for Config {
             network: Network::default(),
             ingress: Ingress::default(),
             root_disk_gb: 8,
+            suspend_on_sleep: false,
             fleet: None,
             capacity: Capacity::default(),
         }

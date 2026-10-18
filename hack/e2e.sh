@@ -94,6 +94,22 @@ check "fork has data"  '[ "$(briqyard machine exec "$F" -- psql -U postgres -tAc
 briqyard machine exec "$F" -- psql -U postgres -c "insert into t values (43)" >/dev/null
 check "fork is apart"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select count(*) from t")" = 1 ]'
 
+echo "== suspend and resume"
+C=$(briqyard machine run --image alpine:3.20 --name counter --tenant "$T" --memory 256 -- sh -c 'i=0; while :; do i=$((i+1)); echo $i > /tmp/c; sleep 1; done' | jq -r .id)
+sleep 3
+before=$(briqyard machine exec "$C" -- cat /tmp/c)
+briqyard machine stop --suspend "$C" >/dev/null
+check "suspended"        '[ "$(briqyard machine get "$C" | jq -r .suspended)" = true ]'
+t0=$(date +%s.%N)
+briqyard machine start "$C" >/dev/null
+resume=$(echo "$(date +%s.%N) - $t0" | bc)
+check "resumed ($resume s)" '[ "$(briqyard machine get "$C" | jq -r .state)" = running ]'
+check "uptime kept"      '[ "$(briqyard machine exec "$C" -- cut -d. -f1 /proc/uptime)" -ge 3 ]'
+sleep 2
+after=$(briqyard machine exec "$C" -- cat /tmp/c)
+check "process went on ($before -> $after)" '[ "$after" -gt "$before" ]'
+check "one boot in the log" '[ "$(briqyard machine logs "$C" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+
 echo "== http ingress: host routing, wake on request"
 W=$(briqyard machine run --image nginx:alpine --name web --tenant "$T" --memory 256 --port 80 --sleep 20s | jq -r .id)
 WEP=$(briqyard endpoint add --http --host "e2e-web" "$W" 80 | jq -r .host)

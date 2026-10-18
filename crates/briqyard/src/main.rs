@@ -61,7 +61,10 @@ enum MachineCmd {
     Start {
         id: String,
     },
+    /// Stop; with --suspend, keep a memory snapshot so the next start resumes
     Stop {
+        #[arg(long)]
+        suspend: bool,
         id: String,
     },
     Wake {
@@ -393,10 +396,16 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 &c.call::<api::Machine>(POST, &format!("/v1/machines/{id}/start"), NONE)
                     .await?,
             ),
-            MachineCmd::Stop { id } => print_json(
-                &c.call::<api::Machine>(POST, &format!("/v1/machines/{id}/stop"), NONE)
-                    .await?,
-            ),
+            MachineCmd::Stop { suspend, id } => {
+                let req = api::StopRequest {
+                    suspend,
+                    timeout_sec: 0,
+                };
+                print_json(
+                    &c.call::<api::Machine>(POST, &format!("/v1/machines/{id}/stop"), Some(&req))
+                        .await?,
+                )
+            }
             MachineCmd::Wake { id } => print_json(
                 &c.call::<api::Machine>(POST, &format!("/v1/machines/{id}/wake"), NONE)
                     .await?,

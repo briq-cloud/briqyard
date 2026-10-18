@@ -210,7 +210,7 @@ async fn stop_machine(
     let req = body.map(|b| b.0).unwrap_or_default();
     Ok(Json(
         st.mgr
-            .stop(&id, Duration::from_secs(req.timeout_sec))
+            .stop(&id, Duration::from_secs(req.timeout_sec), req.suspend)
             .await?,
     ))
 }
