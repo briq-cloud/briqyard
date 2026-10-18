@@ -1238,6 +1238,9 @@ impl Manager {
             base: cfg.jail_base(),
             uid,
             gid: uid,
+            cpus: rec.size.vcpus,
+            // Guest memory, plus what Firecracker itself needs around it.
+            memory_mb: rec.size.memory_mb + 256,
         })
     }
 

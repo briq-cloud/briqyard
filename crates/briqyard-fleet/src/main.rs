@@ -87,6 +87,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         tenants: vec![],
         last_seen: now,
         version: String::new(),
+        disk_free_mb: 0,
         empty_since: None,
     }
 }
@@ -249,6 +250,7 @@ async fn register_host(State(st): S, Json(req): Json<api::RegisterHostRequest>) 
                 tenants: req.tenants,
                 last_seen: now,
                 version: req.version,
+                disk_free_mb: req.disk_free_mb,
                 empty_since: None,
             },
             now,
@@ -322,6 +324,7 @@ async fn poll_static_hosts(st: Arc<AppState>) {
                 rec.machines = s.machines;
                 rec.tenants = tenants;
                 rec.version = s.version;
+                rec.disk_free_mb = s.disk_free_mb;
                 st.reg.lock().unwrap().heartbeat(rec, now);
             }
         }
@@ -416,6 +419,7 @@ async fn autoscaler(st: Arc<AppState>) {
                             tenants: vec![],
                             last_seen: now,
                             version: String::new(),
+                            disk_free_mb: 0,
                             empty_since: Some(now),
                         },
                     );
@@ -513,7 +517,16 @@ async fn create_machine(State(st): S, headers: HeaderMap, body: Bytes) -> Respon
             Some(f) => reg.host_of_machine(&f.machine_id).map(|h| h.id.clone()),
             None => None,
         }
-        .or_else(|| reg.place(&req.tenant, req.size.memory_mb, &st.policy));
+        .or_else(|| {
+            // Root disks are thin; a volume takes what it says, plus headroom.
+            let disk = req
+                .volume
+                .as_ref()
+                .map(|v| v.size_gb as u64 * 1024)
+                .unwrap_or(0)
+                + 2048;
+            reg.place(&req.tenant, req.size.memory_mb, disk, &st.policy)
+        });
         chosen.and_then(|id| reg.hosts.get(&id).cloned())
     };
     let host = match host {

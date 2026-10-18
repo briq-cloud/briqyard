@@ -203,6 +203,12 @@ pub struct Jail {
     pub base: PathBuf,
     pub uid: u32,
     pub gid: u32,
+    /// CPU time the machine may use, in whole CPUs (its vCPUs: a shared vCPU is one CPU's worth
+    /// at most, so oversubscription stays fair); 0 for no limit.
+    pub cpus: u32,
+    /// Memory the Firecracker process may use, in MB (the guest's memory plus Firecracker's
+    /// own); 0 for no limit.
+    pub memory_mb: u32,
 }
 
 /// One running Firecracker.
@@ -323,10 +329,16 @@ impl Process {
                     .arg(&j.base)
                     .arg("--cgroup-version")
                     .arg("2")
-                    .arg("--new-pid-ns")
-                    .arg("--")
-                    .arg("--level")
-                    .arg("Warning");
+                    .arg("--new-pid-ns");
+                if j.cpus > 0 {
+                    cmd.arg("--cgroup")
+                        .arg(format!("cpu.max={} 100000", j.cpus as u64 * 100_000));
+                }
+                if j.memory_mb > 0 {
+                    cmd.arg("--cgroup")
+                        .arg(format!("memory.max={}", (j.memory_mb as u64) << 20));
+                }
+                cmd.arg("--").arg("--").arg("--level").arg("Warning");
                 if pci {
                     cmd.arg("--enable-pci");
                 }

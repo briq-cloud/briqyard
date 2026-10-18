@@ -33,6 +33,9 @@ pub struct HostRec {
     pub last_seen: DateTime<Utc>,
     #[serde(default)]
     pub version: String,
+    /// Free space for disks, in MB, from the last heartbeat.
+    #[serde(default)]
+    pub disk_free_mb: u64,
     /// When the host last had a machine, for the release decision.
     #[serde(default)]
     pub empty_since: Option<DateTime<Utc>>,
@@ -114,6 +117,7 @@ impl Registry {
         entry.machines = h.machines;
         entry.tenants = h.tenants.clone();
         entry.version = h.version;
+        entry.disk_free_mb = h.disk_free_mb;
         entry.last_seen = now;
         if entry.state == "down" {
             entry.state = "ready".into();
@@ -138,8 +142,15 @@ impl Registry {
     }
 
     /// The host of a tenant, or the best host for a new one: the readiest with the most free
-    /// memory under the ceiling, and room for `need_mb`.
-    pub fn place(&mut self, tenant: &str, need_mb: u32, policy: &Policy) -> Option<String> {
+    /// memory under the ceiling, with room for `need_mb` of memory and `need_disk_mb` of disk
+    /// (a host that reports no disk figure is not held to it).
+    pub fn place(
+        &mut self,
+        tenant: &str,
+        need_mb: u32,
+        need_disk_mb: u64,
+        policy: &Policy,
+    ) -> Option<String> {
         if let Some(h) = self.tenants.get(tenant) {
             return Some(h.clone());
         }
@@ -150,6 +161,7 @@ impl Registry {
                 h.state == "ready"
                     && h.fill() < policy.fill_ceiling
                     && h.free_memory_mb() >= need_mb
+                    && (h.disk_free_mb == 0 || h.disk_free_mb >= need_disk_mb)
             })
             .max_by_key(|h| h.free_memory_mb())?;
         let id = best.id.clone();
@@ -265,6 +277,7 @@ mod tests {
             tenants: vec![],
             last_seen: Utc::now(),
             version: "0.1".into(),
+            disk_free_mb: 0,
             empty_since: None,
         }
     }
@@ -277,16 +290,23 @@ mod tests {
         reg.heartbeat(host("b", 100_000, 20_000, 2), now);
         reg.heartbeat(host("c", 100_000, 50_000, 5), now);
         let p = Policy::default();
-        assert_eq!(reg.place("t1", 512, &p).as_deref(), Some("b"));
+        assert_eq!(reg.place("t1", 512, 0, &p).as_deref(), Some("b"));
         assert_eq!(
-            reg.place("t1", 512, &p).as_deref(),
+            reg.place("t1", 512, 0, &p).as_deref(),
             Some("b"),
             "a tenant stays where it is"
         );
         // c is next; a is over the ceiling.
         reg.hosts.get_mut("b").unwrap().used.memory_mb = 99_000;
-        assert_eq!(reg.place("t2", 512, &p).as_deref(), Some("c"));
-        assert_eq!(reg.place("t3", 60_000, &p), None, "nothing has room");
+        assert_eq!(reg.place("t2", 512, 0, &p).as_deref(), Some("c"));
+        assert_eq!(reg.place("t3", 60_000, 0, &p), None, "nothing has room");
+        reg.hosts.get_mut("c").unwrap().disk_free_mb = 1000;
+        assert_eq!(
+            reg.place("t4", 512, 5000, &p),
+            None,
+            "c has memory but no disk"
+        );
+        assert_eq!(reg.place("t5", 512, 500, &p).as_deref(), Some("c"));
     }
 
     #[test]
