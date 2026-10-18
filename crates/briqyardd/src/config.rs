@@ -86,6 +86,9 @@ pub struct Ingress {
     pub domain: String,
     /// The address TCP endpoints listen on.
     pub bind: String,
+    /// The address endpoints are reported at (`Endpoint.address`): what a router on another
+    /// machine dials. Default: `bind` when it is one address, else the host's primary address.
+    pub advertise: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -158,6 +161,7 @@ impl Default for Ingress {
             http: String::new(),
             domain: "byard.localhost".into(),
             bind: "0.0.0.0".into(),
+            advertise: String::new(),
         }
     }
 }

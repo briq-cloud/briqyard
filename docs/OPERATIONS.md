@@ -50,6 +50,7 @@ briqyard status
 | `network.egress` | the default route's interface | Where machines reach the internet |
 | `ingress.tcp_ports` | `20000-29999` | Host ports handed to TCP endpoints |
 | `ingress.bind` | `0.0.0.0` | Where TCP endpoints listen. A public address makes every endpoint public: bind a private one, or firewall the range |
+| `ingress.advertise` | the host's primary address | The address endpoints are reported at (`address` on an endpoint): what a router on another machine dials, a private address when the host has one |
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
 | `capacity.memory_mb`, `capacity.vcpus` | host memory − 2 GB, threads × 4 | What the host hands out; shared vCPUs oversubscribe |
 | `fleet.url`, `fleet.token`, `fleet.advertise`, `fleet.region` | none | Register with a fleet, every 15 s |

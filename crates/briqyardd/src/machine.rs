@@ -2071,8 +2071,11 @@ impl Manager {
         let address = match e.protocol.as_str() {
             "http" => format!("http://{}", e.host),
             _ => {
-                let bind = &self.inner.cfg.ingress.bind;
-                let addr = if bind.is_empty() || bind == "0.0.0.0" {
+                let ing = &self.inner.cfg.ingress;
+                let bind = &ing.bind;
+                let addr = if !ing.advertise.is_empty() {
+                    ing.advertise.clone()
+                } else if bind.is_empty() || bind == "0.0.0.0" {
                     self.host_ip()
                         .map(|ip| ip.to_string())
                         .unwrap_or_else(|| bind.clone())
