@@ -338,6 +338,8 @@ pub struct RegisterHostRequest {
     pub tenants: Vec<String>,
     #[serde(default)]
     pub version: String,
+    #[serde(default)]
+    pub disk_free_mb: u64,
 }
 
 /// GET /v1/status.
@@ -349,6 +351,9 @@ pub struct Status {
     pub used: Capacity,
     pub machines: usize,
     pub running: usize,
+    /// Free space for disks, in MB.
+    #[serde(default)]
+    pub disk_free_mb: u64,
 }
 
 /// Every error response's body.

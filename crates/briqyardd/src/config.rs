@@ -26,6 +26,8 @@ pub struct Config {
     /// The briqyard-init binary copied into every root disk.
     pub init: PathBuf,
     pub storage: Storage,
+    /// Credentials for private registries, by host ("ghcr.io", "registry-1.docker.io").
+    pub registries: Vec<Registry>,
     pub network: Network,
     pub ingress: Ingress,
     /// The size of every root disk (thin: only written blocks take space).
@@ -37,6 +39,14 @@ pub struct Config {
     /// What the daemon advertises: memory it may hand to machines (default: the host's memory
     /// minus 2 GB) and vCPUs (default: hardware threads times 4).
     pub capacity: Capacity,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Registry {
+    pub host: String,
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -101,6 +111,7 @@ impl Default for Config {
             pci: false,
             init: "/usr/local/bin/briqyard-init".into(),
             storage: Storage::default(),
+            registries: vec![],
             network: Network::default(),
             ingress: Ingress::default(),
             root_disk_gb: 8,

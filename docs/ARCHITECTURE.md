@@ -98,9 +98,15 @@ ends Firecracker; the daemon reads the line and applies the restart policy.
 
 Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the
 machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`). A start, an
-ingress connection or an exec on an idle machine wakes it. `sleep: "never"` keeps it on. A
-memory snapshot (`suspend`) instead of a stop is planned: Firecracker supports it; the TAP and
-vsock must be recreated under the same names on restore.
+ingress connection or an exec on an idle machine wakes it. `sleep: "never"` keeps it on.
+
+A stop can keep a memory snapshot instead (`POST /machines/{id}/stop {"suspend": true}`, or
+`suspend_on_sleep: true` for the sleeper): the machine is paused, Firecracker writes its memory
+and state next to its run files, and the next start loads them into a fresh Firecracker and
+resumes, in about a quarter of a second under nested virtualization, without a boot: processes,
+connections and uptime carry on. The snapshot is used once; if it cannot be loaded, the start is
+a cold boot. The daemon suspends every running machine when it shuts down, so an upgrade costs
+each machine a quarter-second wake on its next use.
 
 ## Several servers
 

@@ -147,6 +147,9 @@ pub struct EndpointRec {
     pub created_at: DateTime<Utc>,
 }
 
+/// A console log past this size is rotated at the next cold boot.
+const CONSOLE_ROTATE_BYTES: u64 = 32 << 20;
+
 /// Makes an id: a prefix and 12 hex characters.
 pub fn new_id(prefix: &str) -> String {
     use rand::RngCore;
@@ -346,7 +349,8 @@ impl Manager {
         self.inner.store.put("machines", &rec.id, &rec)
     }
 
-    /// Stops every running machine; the daemon is going down.
+    /// Suspends every running machine (a stop when Firecracker refuses); the daemon is going
+    /// down, and after its restart each one resumes on first use in well under a second.
     pub async fn close(&self) {
         let entries: Vec<Arc<Entry>> = self
             .inner
@@ -363,7 +367,7 @@ impl Manager {
                 let m = self.clone();
                 tasks.push(tokio::spawn(async move {
                     if let Err(err) = m
-                        .stop_entry(&e, stop::IDLE, Duration::from_secs(10), false)
+                        .stop_entry(&e, stop::IDLE, Duration::from_secs(10), true)
                         .await
                     {
                         tracing::warn!(machine = e.snapshot().id, err = %err, "stop on shutdown");
@@ -606,6 +610,11 @@ impl Manager {
             }
         }
         (used, running, total)
+    }
+
+    /// Free space in the pool, in MB.
+    pub async fn disk_free_mb(&self) -> u64 {
+        self.inner.zfs.free().await.unwrap_or(0) >> 20
     }
 
     pub fn capacity(&self) -> api::Capacity {
@@ -975,7 +984,18 @@ impl Manager {
             ),
             None => None,
         };
-        let console_offset = tokio::fs::metadata(dir.join("console.log"))
+        // A console that grew past the cap is set aside: logs page the current file only, and
+        // the previous one stays for an operator.
+        let console = dir.join("console.log");
+        if tokio::fs::metadata(&console)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0)
+            > CONSOLE_ROTATE_BYTES
+        {
+            let _ = tokio::fs::rename(&console, dir.join("console.log.1")).await;
+        }
+        let console_offset = tokio::fs::metadata(&console)
             .await
             .map(|m| m.len())
             .unwrap_or(0);

@@ -197,7 +197,6 @@ impl Zfs {
         Ok(out.trim().parse().unwrap_or(0))
     }
 
-    #[allow(dead_code)]
     pub async fn free(&self) -> Result<u64> {
         let out = self
             .run(&["get", "-H", "-p", "-o", "value", "available", &self.pool])

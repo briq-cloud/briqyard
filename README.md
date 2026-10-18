@@ -17,7 +17,8 @@ the AGPL-3.0.
 - **A private network per tenant.** Machines of one tenant reach each other by name; nothing else
   reaches them. No machine has a public address.
 - **Sleep and wake.** A machine unused for its sleep window stops and keeps its disks. A
-  connection to its endpoint, or a command, wakes it.
+  connection to its endpoint, or a command, wakes it. With a memory snapshot (`--suspend`), the
+  wake takes a quarter of a second and the processes carry on where they were.
 - **Exec, files, logs.** A command inside the machine with stdin and streamed output, files in and
   out, the serial console as logs.
 - **Several servers.** `briqyard-fleet` places tenants across hosts and can add or release hosts
@@ -52,8 +53,8 @@ briqyard machine fork <id>               # a copy of its disks, taken now, as a 
 What works today, checked by `hack/e2e.sh` on every change: boot in a few seconds, exec with
 stdin, exit codes and timeouts, files in and out, names on the tenant's network, egress through
 NAT, tenant isolation, stop and start with the disk kept, exit codes and the restart policy,
-Postgres on a volume with honest `fsync`, a TCP endpoint, sleep on idle and wake on connect,
-and a fork with its data.
+Postgres on a volume with honest `fsync`, TCP and HTTP endpoints, sleep on idle and wake on
+connect, suspend and resume with the processes carrying on, and a fork with its data.
 
 ## License
 

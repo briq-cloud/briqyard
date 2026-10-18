@@ -160,6 +160,7 @@ async fn status(State(st): S) -> Json<api::Status> {
         used,
         machines,
         running,
+        disk_free_mb: st.mgr.disk_free_mb().await,
     })
 }
 

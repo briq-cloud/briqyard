@@ -21,6 +21,7 @@ pub async fn run(cfg: FleetClient, mgr: Manager) {
             machines: total,
             tenants: mgr.tenants().into_iter().map(|t| t.id).collect(),
             version: env!("CARGO_PKG_VERSION").into(),
+            disk_free_mb: mgr.disk_free_mb().await,
         };
         let mut r = client
             .post(format!(

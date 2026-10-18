@@ -62,6 +62,8 @@ pub struct Builder {
     pub dir: PathBuf,
     pub init: PathBuf,
     pub root_gb: u32,
+    /// Credentials by registry host; anything else is pulled anonymously.
+    pub registries: Vec<(String, String, String)>,
     init_hash: String,
     building: Mutex<HashMap<String, Arc<Notify>>>,
 }
@@ -77,9 +79,19 @@ impl Builder {
             dir,
             init,
             root_gb,
+            registries: vec![],
             init_hash,
             building: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn auth_for(&self, r: &Reference) -> RegistryAuth {
+        let host = r.registry();
+        self.registries
+            .iter()
+            .find(|(h, _, _)| h == host)
+            .map(|(_, u, p)| RegistryAuth::Basic(u.clone(), p.clone()))
+            .unwrap_or(RegistryAuth::Anonymous)
     }
 
     fn key(&self, digest: &str) -> String {
@@ -106,7 +118,7 @@ impl Builder {
             platform_resolver: Some(Box::new(host_platform)),
             ..Default::default()
         });
-        let auth = RegistryAuth::Anonymous;
+        let auth = self.auth_for(&r);
         let (_, digest) = client
             .pull_image_manifest(&r, &auth)
             .await
@@ -162,7 +174,7 @@ impl Builder {
             "application/vnd.oci.image.layer.v1.tar+zstd",
         ];
         let data = client
-            .pull(r, &RegistryAuth::Anonymous, accepted)
+            .pull(r, &self.auth_for(r), accepted)
             .await
             .with_context(|| format!("pull {reference}"))?;
         let config = parse_config(&data.config.data)?;

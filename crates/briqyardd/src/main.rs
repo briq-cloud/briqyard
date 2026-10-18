@@ -71,12 +71,17 @@ async fn run(args: Args) -> Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
     let store = store::Store::open(&cfg.state_dir())?;
     let zfs = zfs::Zfs::new(&cfg.storage.pool).await?;
-    let images = image::Builder::new(
+    let mut images = image::Builder::new(
         zfs.clone(),
         cfg.image_dir(),
         cfg.init.clone(),
         cfg.root_disk_gb,
     )?;
+    images.registries = cfg
+        .registries
+        .iter()
+        .map(|r| (r.host.clone(), r.username.clone(), r.password.clone()))
+        .collect();
     let dns = netw::dns::Resolver::new(&cfg.network.upstream_dns);
     let mgr = machine::Manager::new(cfg.clone(), store, zfs, images, dns).await?;
     let ing = ingress::Ingress::new(mgr.clone(), &cfg.ingress.bind, &cfg.ingress.http);
