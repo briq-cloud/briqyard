@@ -1,0 +1,13 @@
+[package]
+name = "briqyard-api"
+description = "briqyard's API types and the host–guest protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }

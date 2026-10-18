@@ -1,46 +1,41 @@
-GOOS ?= linux
-GOARCH ?= $(shell go env GOARCH)
-BIN := bin
-LDFLAGS := -s -w -X github.com/briq-cloud/briqyard/internal/version.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+CARGO ?= cargo
 
-.PHONY: all build init cli fleet check test fmt vet e2e clean vm
+.PHONY: all build check test fmt clippy e2e vm clean
 
+ARCH ?= $(shell uname -m)
+
+## build: release binaries for the machine you are on (linux for the daemon and the init)
 all: build
-
-## build: every binary for the target OS (default linux, the host's arch)
 build: init
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/briqyardd ./cmd/briqyardd
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/briqyard-fleet ./cmd/briqyard-fleet
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/briqyard ./cmd/briqyard
+	$(CARGO) build --release --workspace --exclude briqyard-init
 
-## init: the guest init, always static linux for the guest's arch (same as the host's)
+## init: the guest init, static (musl), for the guest's arch (the host's). Needs the target:
+## rustup target add $(ARCH)-unknown-linux-musl
 init:
-	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/briqyard-init ./cmd/briqyard-init
-
-## cli: the CLI for the machine you are on
-cli:
-	go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/briqyard-local ./cmd/briqyard
-
-fmt:
-	gofmt -l -w .
-
-vet:
-	go vet ./...
-
-test:
-	go test ./...
+	$(CARGO) build --release -p briqyard-init --target $(ARCH)-unknown-linux-musl
 
 ## check: what CI runs
-check: vet test
-	@test -z "$$(gofmt -l .)" || (echo "gofmt:"; gofmt -l .; exit 1)
+check: fmt-check clippy test
+
+fmt:
+	$(CARGO) fmt --all
+
+fmt-check:
+	$(CARGO) fmt --all -- --check
+
+clippy:
+	$(CARGO) clippy --workspace --all-targets -- -D warnings
+
+test:
+	$(CARGO) test --workspace
 
 ## e2e: the end-to-end suite, on a KVM host with briqyardd installed (see docs/DEVELOPMENT.md)
 e2e:
 	./hack/e2e.sh
 
-## vm: build and run the e2e suite inside the Lima VM "fc" (macOS development)
+## vm: build and install inside the Lima VM "fc" (macOS development)
 vm:
-	./hack/vm.sh
+	./hack/vm.sh install
 
 clean:
-	rm -rf $(BIN)
+	$(CARGO) clean

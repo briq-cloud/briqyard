@@ -1,37 +1,41 @@
 #!/usr/bin/env bash
-# Build for the Lima VM "fc", install briqyardd there and (re)start it. macOS development.
-# Usage: hack/vm.sh [install|restart|logs|stop|e2e|shell]
+# Build inside the Lima VM "fc" (the source tree is mounted there, read-only), install briqyardd
+# and (re)start it. macOS development.
+# Usage: hack/vm.sh [build|install|restart|logs|stop|shell|e2e]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 VM=${VM:-fc}
-ARCH=$(limactl shell "$VM" uname -m | tr -d '\r')
-case "$ARCH" in aarch64) GOARCH=arm64 ;; x86_64) GOARCH=amd64 ;; *) echo "unknown arch $ARCH"; exit 1 ;; esac
+SRC=$PWD
 cmd=${1:-install}
 VMHOME=$(limactl shell "$VM" sh -c 'echo $HOME' | tr -d '\r')
 
+# cargo cannot write into the read-only mount: lock file resolved here, target dir in the VM.
 build() {
-  GOARCH=$GOARCH make -s build
+  cargo generate-lockfile --offline 2>/dev/null || cargo generate-lockfile >/dev/null
+  # The init must be static: the guest has no shared libraries of ours. musl gives that.
+  limactl shell "$VM" bash -lc "export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR=\$HOME/target; cd '$SRC' && cargo build --release --workspace --exclude briqyard-init 2>&1 | tail -3 && cargo build --release -p briqyard-init --target \$(uname -m)-unknown-linux-musl 2>&1 | tail -3"
 }
 
 install() {
   build
-  # The home directory is mounted read-only in the VM; copy through it.
   limactl shell "$VM" sudo bash -s <<EOF
 set -e
-install -m 0755 "$PWD/bin/briqyardd" /usr/local/bin/briqyardd
-install -m 0755 "$PWD/bin/briqyard-init" /usr/local/bin/briqyard-init
-install -m 0755 "$PWD/bin/briqyard" /usr/local/bin/briqyard
-install -m 0755 "$PWD/bin/briqyard-fleet" /usr/local/bin/briqyard-fleet
+T=$VMHOME/target/release
+install -m 0755 "\$T/briqyardd" /usr/local/bin/briqyardd
+install -m 0755 "$VMHOME/target/$(limactl shell "$VM" uname -m | tr -d "\r")-unknown-linux-musl/release/briqyard-init" /usr/local/bin/briqyard-init
+install -m 0755 "\$T/briqyard" /usr/local/bin/briqyard
+install -m 0755 "\$T/briqyard-fleet" /usr/local/bin/briqyard-fleet
 mkdir -p /etc/briqyard /var/lib/briqyard
-if [ ! -f /usr/local/bin/firecracker ]; then install -m 0755 "$VMHOME/fc/firecracker" /usr/local/bin/firecracker; fi
-if [ ! -f /var/lib/briqyard/vmlinux ]; then cp "$VMHOME/fc/vmlinux" /var/lib/briqyard/vmlinux; fi
-if [ ! -f /etc/briqyard/config.yaml ]; then cp "$PWD/hack/config.dev.yaml" /etc/briqyard/config.yaml; fi
-cp "$PWD/hack/briqyardd.service" /etc/systemd/system/briqyardd.service
+H=$VMHOME
+[ -f /usr/local/bin/firecracker ] || install -m 0755 "\$H/fc/firecracker" /usr/local/bin/firecracker
+[ -f /var/lib/briqyard/vmlinux ] || cp "\$H/fc/vmlinux" /var/lib/briqyard/vmlinux
+[ -f /etc/briqyard/config.yaml ] || cp "$SRC/hack/config.dev.yaml" /etc/briqyard/config.yaml
+cp "$SRC/hack/briqyardd.service" /etc/systemd/system/briqyardd.service
 systemctl daemon-reload
 systemctl enable briqyardd >/dev/null 2>&1 || true
 systemctl restart briqyardd
 sleep 1
-systemctl --no-pager --lines=5 status briqyardd || true
+systemctl --no-pager --lines=3 status briqyardd | grep -E "Active|msg" || true
 EOF
 }
 
@@ -41,6 +45,6 @@ case "$cmd" in
   logs) limactl shell "$VM" sudo journalctl -u briqyardd -f -o cat ;;
   stop) limactl shell "$VM" sudo systemctl stop briqyardd ;;
   shell) limactl shell "$VM" ;;
-  e2e) install; limactl shell "$VM" bash "$PWD/hack/e2e.sh" ;;
+  e2e) install; limactl shell "$VM" bash "$SRC/hack/e2e.sh" ;;
   *) echo "usage: hack/vm.sh [build|install|restart|logs|stop|shell|e2e]"; exit 2 ;;
 esac
