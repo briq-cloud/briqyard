@@ -209,7 +209,6 @@ impl Zfs {
         Ok(v.split(',').map(String::from).collect())
     }
 
-    #[allow(dead_code)] // for the status page
     pub async fn used(&self, name: &str) -> Result<u64> {
         let out = self
             .run(&["get", "-H", "-p", "-o", "value", "used", &self.ds(name)])

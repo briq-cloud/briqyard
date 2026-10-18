@@ -46,6 +46,8 @@ enum Cmd {
     /// Hosts, when talking to a fleet
     #[command(subcommand)]
     Host(HostCmd),
+    /// Check this machine as a briqyard host: KVM, ZFS, nftables, Firecracker, the kernel
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -127,6 +129,10 @@ enum MachineCmd {
     },
     /// Snapshot both disks
     Snapshot {
+        id: String,
+    },
+    /// CPU, memory and disk the machine uses now
+    Stats {
         id: String,
     },
 }
@@ -539,6 +545,10 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 let data = api::guest::base64_decode(&res.base64).map_err(|e| anyhow!(e))?;
                 std::io::stdout().write_all(&data)?;
             }
+            MachineCmd::Stats { id } => print_json(
+                &c.call::<api::MachineStats>(GET, &format!("/v1/machines/{id}/stats"), NONE)
+                    .await?,
+            ),
             MachineCmd::Snapshot { id } => print_json(
                 &c.call::<api::Snapshot>(POST, &format!("/v1/machines/{id}/snapshots"), NONE)
                     .await?,
@@ -590,6 +600,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 c.raw(DELETE, &format!("/v1/tenants/{id}"), NONE).await?;
             }
         },
+        Cmd::Doctor => doctor(),
         Cmd::Image(i) => match i {
             ImageCmd::Ls => {
                 let ims: Vec<api::Image> = c.call(GET, "/v1/images", NONE).await?;
@@ -636,6 +647,96 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
         },
     }
     Ok(())
+}
+
+/// What a host needs, checked where this runs; prints one line per check.
+fn doctor() {
+    let mut bad = 0;
+    let mut check = |name: &str, ok: bool, hint: &str| {
+        println!(
+            "{} {name}{}",
+            if ok { "ok  " } else { "MISS" },
+            if ok {
+                String::new()
+            } else {
+                format!(": {hint}")
+            }
+        );
+        if !ok {
+            bad += 1;
+        }
+    };
+    check(
+        "linux",
+        cfg!(target_os = "linux"),
+        "briqyardd runs on Linux",
+    );
+    check(
+        "/dev/kvm",
+        std::path::Path::new("/dev/kvm").exists(),
+        "no KVM: a bare-metal server, or a VM with nested virtualization",
+    );
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    let on_path = |b: &str| {
+        std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .any(|d| std::path::Path::new(d).join(b).exists())
+    };
+    check(
+        "zfs",
+        on_path("zfs") && on_path("zpool"),
+        "apt install zfsutils-linux",
+    );
+    check("nft", on_path("nft"), "apt install nftables");
+    check("mkfs.ext4", on_path("mkfs.ext4"), "apt install e2fsprogs");
+    check("ip", on_path("ip"), "apt install iproute2");
+    check(
+        "firecracker",
+        exists("/usr/local/bin/firecracker"),
+        "hack/bootstrap-host.sh downloads it",
+    );
+    check(
+        "jailer",
+        exists("/usr/local/bin/jailer"),
+        "hack/bootstrap-host.sh downloads it; without it machines run as root",
+    );
+    check(
+        "guest kernel",
+        exists("/var/lib/briqyard/vmlinux"),
+        "hack/bootstrap-host.sh downloads one",
+    );
+    check(
+        "briqyard-init",
+        exists("/usr/local/bin/briqyard-init"),
+        "make init; install the static binary",
+    );
+    check(
+        "cgroup v2",
+        exists("/sys/fs/cgroup/cgroup.controllers"),
+        "the jailer needs the unified cgroup hierarchy",
+    );
+    check(
+        "ip_forward",
+        std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false),
+        "the daemon turns it on at start",
+    );
+    let pool = std::process::Command::new("zpool")
+        .args(["list", "-H", "-o", "name"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    check(
+        "a zfs pool",
+        !pool.trim().is_empty(),
+        "zpool create byard <device>",
+    );
+    if bad > 0 {
+        eprintln!("{bad} missing");
+        std::process::exit(1);
+    }
 }
 
 fn suffix() -> String {

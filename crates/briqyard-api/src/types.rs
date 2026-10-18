@@ -296,6 +296,20 @@ pub struct Tenant {
     pub host: String,
 }
 
+/// What a running machine uses, from its cgroup (jailed hosts only).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MachineStats {
+    pub state: String,
+    /// CPU time used since the machine started, in microseconds.
+    pub cpu_usec: u64,
+    /// Memory the machine's process holds now, in bytes (guest memory touched plus Firecracker's).
+    pub memory_bytes: u64,
+    /// Seconds since the current run started.
+    pub uptime_sec: u64,
+    /// Disk the machine's datasets take, in bytes.
+    pub disk_bytes: u64,
+}
+
 /// An image built on a host.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Image {

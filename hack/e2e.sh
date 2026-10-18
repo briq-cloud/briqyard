@@ -12,7 +12,12 @@ check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 cleanup() {
   echo "cleanup"
   for id in $(briqyard machine ls --tenant "$T" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
-  briqyard tenant rm "$T" >/dev/null 2>&1 || true
+  # A machine still settling refuses its destroy; try again until the tenant is empty.
+  for i in $(seq 1 10); do
+    briqyard tenant rm "$T" >/dev/null 2>&1 && break
+    for id in $(briqyard machine ls --tenant "$T" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
+    sleep 2
+  done
 }
 trap cleanup EXIT
 

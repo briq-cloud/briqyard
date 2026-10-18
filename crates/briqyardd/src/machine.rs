@@ -718,6 +718,36 @@ impl Manager {
         })
     }
 
+    /// What the machine uses now: CPU and memory from its cgroup when jailed, disk from ZFS.
+    pub async fn stats(&self, id: &str) -> Result<api::MachineStats, MError> {
+        let e = self.entry(id)?;
+        let r = e.snapshot();
+        let mut st = api::MachineStats {
+            state: r.state.clone(),
+            ..Default::default()
+        };
+        if r.state == state::RUNNING {
+            if let Some(t) = r.started_at {
+                st.uptime_sec = (Utc::now() - t).num_seconds().max(0) as u64;
+            }
+            if self.jail_for(&r).is_some() {
+                let cg = PathBuf::from("/sys/fs/cgroup/firecracker").join(r.id.replace('_', "-"));
+                if let Ok(text) = tokio::fs::read_to_string(cg.join("cpu.stat")).await {
+                    for line in text.lines() {
+                        if let Some(v) = line.strip_prefix("usage_usec ") {
+                            st.cpu_usec = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                if let Ok(text) = tokio::fs::read_to_string(cg.join("memory.current")).await {
+                    st.memory_bytes = text.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        st.disk_bytes = self.inner.zfs.used(&r.dataset()).await.unwrap_or(0);
+        Ok(st)
+    }
+
     /// The Prometheus exposition of what the host does.
     pub async fn metrics(&self) -> String {
         use std::sync::atomic::Ordering::Relaxed;

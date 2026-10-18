@@ -1,0 +1,45 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --workspace --exclude briqyard-init
+      - run: cargo build --release -p briqyard-init --target ${{ matrix.arch }}-unknown-linux-musl
+      - name: Name the binaries as bootstrap-host.sh expects them
+        run: |
+          mkdir -p dist
+          for b in briqyardd briqyard briqyard-fleet; do cp target/release/$b dist/$b-linux-${{ matrix.arch }}; done
+          cp target/${{ matrix.arch }}-unknown-linux-musl/release/briqyard-init dist/briqyard-init-linux-${{ matrix.arch }}
+          (cd dist && sha256sum * > SHA256SUMS-${{ matrix.arch }})
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/*
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "briqyard $GITHUB_REF_NAME. Install with hack/bootstrap-host.sh (BRIQYARD_RELEASE=https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME)."
+        env:
+          GH_TOKEN: ${{ github.token }}

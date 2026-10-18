@@ -37,6 +37,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/machines/:id/exec", post(exec))
         .route("/v1/machines/:id/files", get(get_file).put(put_file))
         .route("/v1/machines/:id/logs", get(logs))
+        .route("/v1/machines/:id/stats", get(stats))
         .route("/v1/machines/:id/snapshots", get(snapshots).post(snapshot))
         .route("/v1/machines/:id/endpoints", post(create_endpoint))
         .route("/v1/endpoints", get(list_endpoints))
@@ -302,6 +303,10 @@ async fn logs(
         q.since.as_deref().unwrap_or(""),
         q.limit.unwrap_or(0),
     )?))
+}
+
+async fn stats(State(st): S, Path(id): Path<String>) -> Result<Json<api::MachineStats>, AppError> {
+    Ok(Json(st.mgr.stats(&id).await?))
 }
 
 async fn snapshot(

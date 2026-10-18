@@ -144,6 +144,12 @@ paths:
       summary: The serial console, paged
       responses:
         "200": { description: lines, content: { application/json: { schema: { $ref: "#/components/schemas/LogsResponse" } } } }
+  /v1/machines/{id}/stats:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: CPU, memory and disk the machine uses now (CPU and memory on jailed hosts)
+      responses:
+        "200": { description: stats, content: { application/json: { schema: { $ref: "#/components/schemas/MachineStats" } } } }
   /v1/machines/{id}/snapshots:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -398,6 +404,14 @@ components:
         id: { type: string }
         machine_id: { type: string }
         created_at: { type: string, format: date-time }
+    MachineStats:
+      type: object
+      properties:
+        state: { type: string }
+        cpu_usec: { type: integer }
+        memory_bytes: { type: integer }
+        uptime_sec: { type: integer }
+        disk_bytes: { type: integer }
     Image:
       type: object
       properties:
