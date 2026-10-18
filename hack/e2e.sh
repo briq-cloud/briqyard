@@ -121,6 +121,19 @@ for i in $(seq 1 90); do [ "$(briqyard machine get "$W" | jq -r .state)" = stopp
 check "web slept"          '[ "$(briqyard machine get "$W" | jq -r .stopped_reason)" = idle ]'
 check "http request wakes" 'curl -fsS --max-time 90 -H "Host: $WEP" http://127.0.0.1:8080/ | grep -qi "nginx"'
 
+if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then
+  echo "== daemon crash: running machines are adopted"
+  K=$(briqyard machine run --image alpine:3.20 --name survivor --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
+  sudo systemctl kill -s SIGKILL briqyardd
+  sudo systemctl start briqyardd
+  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  check "still running"    '[ "$(briqyard machine get "$K" | jq -r .state)" = running ]'
+  check "exec after crash" '[ "$(briqyard machine exec "$K" -- hostname)" = survivor ]'
+  check "one boot"         '[ "$(briqyard machine logs "$K" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+  briqyard machine stop "$K" >/dev/null
+  check "stop after crash" '[ "$(briqyard machine get "$K" | jq -r .state)" = stopped ]'
+fi
+
 echo
 echo "passed $pass, failed $fail"
 [ "$fail" = 0 ]

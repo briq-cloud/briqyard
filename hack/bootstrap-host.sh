@@ -106,6 +106,9 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml
+# Only the daemon gets the signal: the machines (Firecracker processes in this cgroup) must
+# outlive a daemon crash, and a clean stop suspends them itself.
+KillMode=process
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536

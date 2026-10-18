@@ -306,6 +306,9 @@ impl Manager {
             let rec = e.snapshot();
             match rec.state.as_str() {
                 state::RUNNING | state::STARTING | state::STOPPING => {
+                    if rec.state == state::RUNNING && rec.pid > 0 && self.adopt(&e, rec.pid).await {
+                        continue;
+                    }
                     if rec.pid > 0 {
                         unsafe {
                             libc::kill(-(rec.pid as i32), libc::SIGKILL);
@@ -338,6 +341,58 @@ impl Manager {
                 _ => {}
             }
         }
+    }
+
+    /// Takes over a Firecracker a previous daemon left running (it crashed; a shutdown suspends
+    /// them instead): the process must be alive, be Firecracker, and answer on the machine's
+    /// API socket as running. The watcher polls the pid, since the process is nobody's child.
+    async fn adopt(&self, e: &Arc<Entry>, pid: u32) -> bool {
+        let rec = e.snapshot();
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        if comm.trim() != "firecracker" {
+            return false;
+        }
+        let dir = self.inner.cfg.run_dir().join(&rec.id);
+        let (api, vsock, _, _) = fc::paths(&dir);
+        let client = fc::Client::new(&api);
+        let running = match tokio::time::timeout(Duration::from_secs(3), client.info()).await {
+            Ok(Ok(info)) => info["state"].as_str() == Some("Running"),
+            _ => false,
+        };
+        if !running {
+            return false;
+        }
+        let (exit_tx, exit_rx) = tokio::sync::watch::channel(false);
+        let live = Live {
+            pid,
+            vsock,
+            api,
+            exited: exit_rx,
+        };
+        *e.live.lock().unwrap() = Some(live);
+        *e.stop_req.lock().unwrap() = None;
+        let watcher = self.clone();
+        let we = e.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let alive = unsafe { libc::kill(pid as i32, 0) } == 0
+                    && std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                        .map(|c| c.trim() == "firecracker")
+                        .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+            let _ = exit_tx.send(true);
+            watcher.settle_exit(&we, pid).await;
+        });
+        tracing::info!(
+            machine = rec.id,
+            pid,
+            "adopted a machine left running by a previous daemon"
+        );
+        true
     }
 
     fn save(&self, e: &Entry) -> Result<()> {
