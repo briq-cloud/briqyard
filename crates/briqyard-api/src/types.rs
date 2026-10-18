@@ -296,6 +296,19 @@ pub struct Tenant {
     pub host: String,
 }
 
+/// An image built on a host.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Image {
+    pub key: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub digest: String,
+    pub size_gb: u32,
+    pub built_at: DateTime<Utc>,
+    /// Machines whose root disk clones it.
+    pub machines: usize,
+}
+
 /// Compute a host has or uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capacity {

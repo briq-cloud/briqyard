@@ -180,6 +180,18 @@ paths:
       summary: Close an endpoint
       responses:
         "204": { description: closed }
+  /v1/images:
+    get:
+      summary: Images built on the host, with how many machines clone each
+      responses:
+        "200": { description: images, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Image" } } } } }
+  /v1/images/{key}:
+    parameters: [{ name: key, in: path, required: true, schema: { type: string } }]
+    delete:
+      summary: Remove an image no machine uses
+      responses:
+        "204": { description: removed }
+        "409": { description: machines still use it }
   /v1/tenants:
     get:
       summary: Tenants on the host (daemon), or tenant to host (fleet)
@@ -386,6 +398,15 @@ components:
         id: { type: string }
         machine_id: { type: string }
         created_at: { type: string, format: date-time }
+    Image:
+      type: object
+      properties:
+        key: { type: string }
+        ref: { type: string }
+        digest: { type: string }
+        size_gb: { type: integer }
+        built_at: { type: string, format: date-time }
+        machines: { type: integer }
     Tenant:
       type: object
       properties:

@@ -189,6 +189,26 @@ impl Zfs {
             .collect())
     }
 
+    /// The clones of a snapshot (datasets that still share its blocks).
+    pub async fn clones(&self, name: &str, snap: &str) -> Result<Vec<String>> {
+        let out = self
+            .run(&[
+                "get",
+                "-H",
+                "-p",
+                "-o",
+                "value",
+                "clones",
+                &format!("{}@{snap}", self.ds(name)),
+            ])
+            .await?;
+        let v = out.trim();
+        if v.is_empty() || v == "-" {
+            return Ok(vec![]);
+        }
+        Ok(v.split(',').map(String::from).collect())
+    }
+
     #[allow(dead_code)] // for the status page
     pub async fn used(&self, name: &str) -> Result<u64> {
         let out = self

@@ -668,6 +668,44 @@ impl Manager {
         (used, running, total)
     }
 
+    /// The images on the host.
+    pub async fn images(&self) -> Result<Vec<api::Image>, MError> {
+        Ok(self
+            .inner
+            .images
+            .list()
+            .await?
+            .into_iter()
+            .map(|(im, machines)| api::Image {
+                key: im.key,
+                reference: im.r#ref,
+                digest: im.digest,
+                size_gb: im.size_gb,
+                built_at: im.built_at,
+                machines,
+            })
+            .collect())
+    }
+
+    /// Removes an image no machine clones.
+    pub async fn delete_image(&self, key: &str) -> Result<(), MError> {
+        if !key.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(MError::NotFound);
+        }
+        match self.inner.images.remove(key).await? {
+            true => Ok(()),
+            false => Err(MError::Conflict("machines still use this image".into())),
+        }
+    }
+
+    /// Removes images unused for `keep`; runs hourly from the daemon.
+    pub async fn gc_images(&self, keep: chrono::Duration) -> usize {
+        self.inner.images.gc(keep).await.unwrap_or_else(|e| {
+            tracing::warn!(err = %e, "image gc");
+            0
+        })
+    }
+
     /// Free space in the pool, in MB.
     pub async fn disk_free_mb(&self) -> u64 {
         self.inner.zfs.free().await.unwrap_or(0) >> 20

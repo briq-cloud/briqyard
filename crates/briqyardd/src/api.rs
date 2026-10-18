@@ -43,6 +43,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/endpoints/:id",
             get(get_endpoint).delete(delete_endpoint),
         )
+        .route("/v1/images", get(list_images))
+        .route("/v1/images/:key", axum::routing::delete(delete_image))
         .route("/v1/tenants", get(list_tenants))
         .route("/v1/tenants/:id", axum::routing::delete(delete_tenant))
         .layer(middleware::from_fn_with_state(state.clone(), auth_and_log))
@@ -332,6 +334,15 @@ async fn get_endpoint(
 
 async fn delete_endpoint(State(st): S, Path(id): Path<String>) -> Result<StatusCode, AppError> {
     st.mgr.delete_endpoint(&id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_images(State(st): S) -> Result<Json<Vec<api::Image>>, AppError> {
+    Ok(Json(st.mgr.images().await?))
+}
+
+async fn delete_image(State(st): S, Path(key): Path<String>) -> Result<StatusCode, AppError> {
+    st.mgr.delete_image(&key).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

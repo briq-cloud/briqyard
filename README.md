@@ -58,6 +58,18 @@ NAT, tenant isolation, stop and start with the disk kept, exit codes and the res
 Postgres on a volume with honest `fsync`, TCP and HTTP endpoints, sleep on idle and wake on
 connect, suspend and resume with the processes carrying on, and a fork with its data.
 
+## Numbers
+
+From `hack/e2e.sh` on an Apple M4 inside a Lima VM with nested virtualization (ARM64), so a
+real x86 server does better:
+
+| | |
+|---|---|
+| Create a machine, image already on the host | about 3 s to the machine's init, 6 s with a small image pull |
+| Resume from a memory snapshot | 0.15–0.25 s |
+| Fork of a Postgres machine with its data | a ZFS clone: instant, then a cold boot |
+| Image to root disk (alpine) | 1.2 s |
+
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE). Contributions need a signed CLA; see

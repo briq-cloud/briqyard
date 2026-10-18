@@ -96,6 +96,19 @@ async fn run(args: Args) -> Result<()> {
             tokio::spawn(heartbeat::run(f, mgr.clone()));
         }
     }
+    {
+        let gc = mgr.clone();
+        let keep = chrono::Duration::days(cfg.image_keep_days as i64);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                let n = gc.gc_images(keep).await;
+                if n > 0 {
+                    tracing::info!(removed = n, "image gc");
+                }
+            }
+        });
+    }
     let state = Arc::new(api::AppState {
         mgr: mgr.clone(),
         token: cfg.token.clone(),

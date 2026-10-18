@@ -40,6 +40,9 @@ enum Cmd {
     /// Tenants: one private network each
     #[command(subcommand)]
     Tenant(TenantCmd),
+    /// Images built on the host
+    #[command(subcommand)]
+    Image(ImageCmd),
     /// Hosts, when talking to a fleet
     #[command(subcommand)]
     Host(HostCmd),
@@ -190,6 +193,15 @@ enum EndpointCmd {
 enum TenantCmd {
     Ls,
     Rm { id: String },
+}
+
+#[derive(Subcommand)]
+enum ImageCmd {
+    Ls,
+    /// Remove an image no machine uses
+    Rm {
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -576,6 +588,28 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             }
             TenantCmd::Rm { id } => {
                 c.raw(DELETE, &format!("/v1/tenants/{id}"), NONE).await?;
+            }
+        },
+        Cmd::Image(i) => match i {
+            ImageCmd::Ls => {
+                let ims: Vec<api::Image> = c.call(GET, "/v1/images", NONE).await?;
+                println!(
+                    "{:<22} {:<40} {:<9} {:<21} DIGEST",
+                    "KEY", "REF", "MACHINES", "BUILT"
+                );
+                for i in ims {
+                    println!(
+                        "{:<22} {:<40} {:<9} {:<21} {}",
+                        i.key,
+                        i.reference,
+                        i.machines,
+                        i.built_at.format("%Y-%m-%d %H:%M:%S"),
+                        &i.digest[..i.digest.len().min(19)]
+                    );
+                }
+            }
+            ImageCmd::Rm { key } => {
+                c.raw(DELETE, &format!("/v1/images/{key}"), NONE).await?;
             }
         },
         Cmd::Host(h) => match h {

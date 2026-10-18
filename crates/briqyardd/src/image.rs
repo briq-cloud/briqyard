@@ -274,6 +274,56 @@ fn ordered_layers(data: &ImageData) -> Vec<(String, Vec<u8>)> {
     layers
 }
 
+impl Builder {
+    /// Every image the host has built, with how many machines still clone it.
+    pub async fn list(&self) -> Result<Vec<(Image, usize)>> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(self.dir.join("meta"))? {
+            let entry = entry?;
+            let data = match std::fs::read(entry.path()) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let im: Image = match serde_json::from_slice(&data) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            let clones = self
+                .zfs
+                .clones(&im.dataset(), SNAP)
+                .await
+                .unwrap_or_default()
+                .len();
+            out.push((im, clones));
+        }
+        out.sort_by_key(|(im, _)| im.built_at);
+        Ok(out)
+    }
+
+    /// Removes an image nobody clones. `Ok(false)`: machines still use it.
+    pub async fn remove(&self, key: &str) -> Result<bool> {
+        let ds = format!("images/{key}");
+        if self.zfs.exists(&ds).await? && !self.zfs.clones(&ds, SNAP).await?.is_empty() {
+            return Ok(false);
+        }
+        self.zfs.destroy(&ds).await?;
+        let _ = std::fs::remove_file(self.meta_path(key));
+        Ok(true)
+    }
+
+    /// Removes images no machine clones that were built more than `keep` ago.
+    pub async fn gc(&self, keep: chrono::Duration) -> Result<usize> {
+        let mut removed = 0;
+        for (im, clones) in self.list().await? {
+            if clones == 0 && Utc::now() - im.built_at > keep && self.remove(&im.key).await? {
+                tracing::info!(image = im.r#ref, key = im.key, "image removed: unused");
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+}
+
 fn host_platform(entries: &[ImageIndexEntry]) -> Option<String> {
     let arch = match std::env::consts::ARCH {
         "aarch64" => "arm64",
