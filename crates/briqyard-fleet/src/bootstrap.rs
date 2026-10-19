@@ -96,35 +96,12 @@ async fn install(st: &AppState, host: &str, ip: &str, token: &str) -> anyhow::Re
     } else {
         std::fs::read_to_string(&b.script)?
     };
-    let fleet_url = if b.fleet_url.is_empty() {
-        format!("http://{}", st.cfg.listen)
-    } else {
-        b.fleet_url.clone()
-    };
-    let env = format!(
-        "FLEET_URL={} FLEET_TOKEN={} ADVERTISE=http://{ip}:7420 BRIQYARD_TOKEN={} BRIQYARD_RELEASE={} BRIQYARD_POOL_DEVICE={}",
-        shq(&fleet_url),
-        shq(&st.cfg.host_token),
-        shq(token),
-        shq(&b.release),
-        shq(&b.pool_device)
-    );
+    let args = ssh_args(b, &st.cfg.host_token, &st.cfg.listen, ip, token);
     let mut cmd = tokio::process::Command::new("ssh");
-    cmd.args([
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=20",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-i",
-    ])
-    .arg(&b.ssh_key)
-    .arg(format!("{}@{ip}", b.ssh_user))
-    .arg(format!("env {env} bash -s"))
-    .stdin(std::process::Stdio::piped())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped());
+    cmd.args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn()?;
     {
         use tokio::io::AsyncWriteExt;
@@ -158,6 +135,93 @@ async fn install(st: &AppState, host: &str, ip: &str, token: &str) -> anyhow::Re
     }
 }
 
+/// The `ssh` arguments: options, the key, `user@ip`, and the remote command, which puts the
+/// settings in the environment of `bash -s` (the script arrives on stdin). Every value is
+/// single-quoted for the remote shell.
+fn ssh_args(
+    b: &crate::config::Bootstrap,
+    host_token: &str,
+    listen: &str,
+    ip: &str,
+    token: &str,
+) -> Vec<String> {
+    let fleet_url = if b.fleet_url.is_empty() {
+        format!("http://{listen}")
+    } else {
+        b.fleet_url.clone()
+    };
+    let env = format!(
+        "FLEET_URL={} FLEET_TOKEN={} ADVERTISE={} BRIQYARD_TOKEN={} BRIQYARD_RELEASE={} BRIQYARD_POOL_DEVICE={}",
+        shq(&fleet_url),
+        shq(host_token),
+        shq(&format!("http://{ip}:7420")),
+        shq(token),
+        shq(&b.release),
+        shq(&b.pool_device)
+    );
+    vec![
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "ConnectTimeout=20".into(),
+        "-o".into(),
+        "StrictHostKeyChecking=accept-new".into(),
+        "-i".into(),
+        b.ssh_key.to_string_lossy().into_owned(),
+        format!("{}@{ip}", b.ssh_user),
+        format!("env {env} bash -s"),
+    ]
+}
+
 fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quoting() {
+        assert_eq!(shq("plain"), "'plain'");
+        assert_eq!(shq("it's"), "'it'\\''s'");
+        assert_eq!(shq(""), "''");
+    }
+
+    #[test]
+    fn ssh_command() {
+        let b = crate::config::Bootstrap {
+            ssh_user: "root".into(),
+            ssh_key: "/etc/briqyard/key".into(),
+            release: "https://x/v1".into(),
+            pool_device: "/dev/nvme1n1".into(),
+            ..Default::default()
+        };
+        let args = ssh_args(&b, "h0st", "0.0.0.0:7430", "10.0.0.9", "t0k'en");
+        assert_eq!(args[7], "/etc/briqyard/key");
+        assert_eq!(args[8], "root@10.0.0.9");
+        let remote = &args[9];
+        assert!(remote.starts_with("env FLEET_URL='http://0.0.0.0:7430' FLEET_TOKEN='h0st' ADVERTISE='http://10.0.0.9:7420' BRIQYARD_TOKEN='t0k'\\''en' "), "{remote}");
+        assert!(
+            remote.ends_with(
+                "BRIQYARD_RELEASE='https://x/v1' BRIQYARD_POOL_DEVICE='/dev/nvme1n1' bash -s"
+            ),
+            "{remote}"
+        );
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+        let named = crate::config::Bootstrap {
+            fleet_url: "https://fleet.example".into(),
+            ..Default::default()
+        };
+        assert!(ssh_args(&named, "", "0.0.0.0:7430", "10.0.0.9", "t")[9]
+            .contains("FLEET_URL='https://fleet.example'"));
+    }
+
+    #[test]
+    fn tokens_are_hex() {
+        let t = new_token();
+        assert_eq!(t.len(), 32);
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(t, new_token());
+    }
 }
