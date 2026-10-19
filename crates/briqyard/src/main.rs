@@ -139,6 +139,7 @@ enum MachineCmd {
     /// Change the sleep window: briqyard machine set-sleep ID 30m|never
     SetSleep {
         id: String,
+        #[arg(value_parser = sleep_arg)]
         sleep: String,
     },
 }
@@ -158,7 +159,7 @@ struct RunArgs {
     #[arg(long, default_value_t = 512)]
     memory: u32,
     /// Sleep window: 30m, 2h, never
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", value_parser = sleep_arg)]
     sleep: String,
     /// Data volume, SIZE:MOUNT (10G:/data)
     #[arg(long)]
@@ -329,29 +330,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     None => "/v1/machines".into(),
                 };
                 let ms: Vec<api::Machine> = c.call(GET, &path, NONE).await?;
-                println!(
-                    "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} HOST",
-                    "ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP"
-                );
-                for m in ms {
-                    let state = if m.stopped_reason.is_empty() {
-                        m.state.clone()
-                    } else {
-                        format!("{} ({})", m.state, m.stopped_reason)
-                    };
-                    println!(
-                        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {}",
-                        m.id,
-                        m.tenant,
-                        m.name,
-                        m.image,
-                        state,
-                        m.ip,
-                        format!("{}c/{}M", m.size.vcpus, m.size.memory_mb),
-                        m.sleep,
-                        m.host
-                    );
-                }
+                print!("{}", machine_table(&ms));
             }
             MachineCmd::Run(a) => {
                 let name = a.name.clone().unwrap_or_else(|| {
@@ -614,16 +593,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             }
             EndpointCmd::Ls => {
                 let eps: Vec<api::Endpoint> = c.call(GET, "/v1/endpoints", NONE).await?;
-                println!(
-                    "{:<18} {:<16} {:<6} {:<9} ADDRESS",
-                    "ID", "MACHINE", "PORT", "PROTOCOL"
-                );
-                for e in eps {
-                    println!(
-                        "{:<18} {:<16} {:<6} {:<9} {}",
-                        e.id, e.machine_id, e.port, e.protocol, e.address
-                    );
-                }
+                print!("{}", endpoint_table(&eps));
             }
             EndpointCmd::Rm { id } => {
                 c.raw(DELETE, &format!("/v1/endpoints/{id}"), NONE).await?;
@@ -641,20 +611,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
         Cmd::Image(i) => match i {
             ImageCmd::Ls => {
                 let ims: Vec<api::Image> = c.call(GET, "/v1/images", NONE).await?;
-                println!(
-                    "{:<22} {:<40} {:<9} {:<21} DIGEST",
-                    "KEY", "REF", "MACHINES", "BUILT"
-                );
-                for i in ims {
-                    println!(
-                        "{:<22} {:<40} {:<9} {:<21} {}",
-                        i.key,
-                        i.reference,
-                        i.machines,
-                        i.built_at.format("%Y-%m-%d %H:%M:%S"),
-                        &i.digest[..i.digest.len().min(19)]
-                    );
-                }
+                print!("{}", image_table(&ims));
             }
             ImageCmd::Rm { key } => {
                 c.raw(DELETE, &format!("/v1/images/{key}"), NONE).await?;
@@ -663,26 +620,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
         Cmd::Host(h) => match h {
             HostCmd::Ls => {
                 let hs: Vec<api::Host> = c.call(GET, "/v1/hosts", NONE).await?;
-                println!(
-                    "{:<16} {:<28} {:<12} {:<14} {:<10} {:<9} {:<8} LAST SEEN",
-                    "ID", "URL", "STATE", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS"
-                );
-                for h in hs {
-                    println!(
-                        "{:<16} {:<28} {:<12} {:<14} {:<10} {:<9} {:<8} {}",
-                        h.id,
-                        if h.url.is_empty() { "-" } else { &h.url },
-                        h.state,
-                        format!("{}/{}", h.used.memory_mb, h.capacity.memory_mb),
-                        format!("{}/{}", h.used.vcpus, h.capacity.vcpus),
-                        h.machines,
-                        h.tenants.len(),
-                        h.last_seen.to_rfc3339()
-                    );
-                    if !h.note.is_empty() {
-                        println!("{:<16} note: {}", "", h.note);
-                    }
-                }
+                print!("{}", host_table(&hs));
             }
             HostCmd::Order { reason } => {
                 let req = api::OrderHostRequest { reason };
@@ -704,6 +642,102 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
         },
     }
     Ok(())
+}
+
+/// A sleep window as the daemon reads it, refused here before the request leaves.
+fn sleep_arg(s: &str) -> Result<String, String> {
+    api::parse_sleep(s)?;
+    Ok(s.to_string())
+}
+
+// --- tables ---
+
+/// `machine ls`.
+fn machine_table(ms: &[api::Machine]) -> String {
+    let mut out = format!(
+        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} HOST\n",
+        "ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP"
+    );
+    for m in ms {
+        let state = if m.stopped_reason.is_empty() {
+            m.state.clone()
+        } else {
+            format!("{} ({})", m.state, m.stopped_reason)
+        };
+        out.push_str(&format!(
+            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {}\n",
+            m.id,
+            m.tenant,
+            m.name,
+            m.image,
+            state,
+            m.ip,
+            format!("{}c/{}M", m.size.vcpus, m.size.memory_mb),
+            m.sleep,
+            m.host
+        ));
+    }
+    out
+}
+
+/// `endpoint ls`.
+fn endpoint_table(eps: &[api::Endpoint]) -> String {
+    let mut out = format!(
+        "{:<18} {:<16} {:<6} {:<9} ADDRESS\n",
+        "ID", "MACHINE", "PORT", "PROTOCOL"
+    );
+    for e in eps {
+        out.push_str(&format!(
+            "{:<18} {:<16} {:<6} {:<9} {}\n",
+            e.id, e.machine_id, e.port, e.protocol, e.address
+        ));
+    }
+    out
+}
+
+/// `image ls`.
+fn image_table(ims: &[api::Image]) -> String {
+    let mut out = format!(
+        "{:<22} {:<40} {:<9} {:<21} DIGEST\n",
+        "KEY", "REF", "MACHINES", "BUILT"
+    );
+    for i in ims {
+        out.push_str(&format!(
+            "{:<22} {:<40} {:<9} {:<21} {}\n",
+            i.key,
+            i.reference,
+            i.machines,
+            i.built_at.format("%Y-%m-%d %H:%M:%S"),
+            &i.digest[..i.digest.len().min(19)]
+        ));
+    }
+    out
+}
+
+/// `host ls`: a line per host, and its note under it when the provisioner or the bootstrap
+/// left one.
+fn host_table(hs: &[api::Host]) -> String {
+    let mut out = format!(
+        "{:<16} {:<28} {:<12} {:<14} {:<10} {:<9} {:<8} LAST SEEN\n",
+        "ID", "URL", "STATE", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS"
+    );
+    for h in hs {
+        out.push_str(&format!(
+            "{:<16} {:<28} {:<12} {:<14} {:<10} {:<9} {:<8} {}\n",
+            h.id,
+            if h.url.is_empty() { "-" } else { &h.url },
+            h.state,
+            format!("{}/{}", h.used.memory_mb, h.capacity.memory_mb),
+            format!("{}/{}", h.used.vcpus, h.capacity.vcpus),
+            h.machines,
+            h.tenants.len(),
+            h.last_seen.to_rfc3339()
+        ));
+        if !h.note.is_empty() {
+            out.push_str(&format!("{:<16} note: {}\n", "", h.note));
+        }
+    }
+    out
 }
 
 /// What a host needs, checked where this runs; prints one line per check.
@@ -808,3 +842,6 @@ fn suffix() -> String {
         .unwrap_or(0);
     format!("{:04}", n % 10000)
 }
+
+#[cfg(test)]
+mod tests;

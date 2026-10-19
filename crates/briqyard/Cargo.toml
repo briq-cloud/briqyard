@@ -16,3 +16,6 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 humantime = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
