@@ -43,6 +43,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/machines/:id/files", get(get_file).put(put_file))
         .route("/v1/machines/:id/logs", get(logs))
         .route("/v1/machines/:id/stats", get(stats))
+        .route(
+            "/v1/machines/:id/backups",
+            get(list_backups).post(make_backup),
+        )
         .route("/v1/machines/:id/snapshots", get(snapshots).post(snapshot))
         .route("/v1/machines/:id/endpoints", post(create_endpoint))
         .route("/v1/endpoints", get(list_endpoints))
@@ -316,6 +320,22 @@ async fn logs(
         q.since.as_deref().unwrap_or(""),
         q.limit.unwrap_or(0),
     )?))
+}
+
+async fn make_backup(
+    State(st): S,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<api::Backup>), AppError> {
+    Ok((StatusCode::CREATED, Json(st.mgr.backup(&id).await?)))
+}
+
+/// The backups of a machine id, which may be a machine this host never had: the store is
+/// shared, so a restore can start from any host.
+async fn list_backups(
+    State(st): S,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<api::Backup>>, AppError> {
+    Ok(Json(st.mgr.backups(&id).await?))
 }
 
 async fn stats(State(st): S, Path(id): Path<String>) -> Result<Json<api::MachineStats>, AppError> {

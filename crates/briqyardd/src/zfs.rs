@@ -82,6 +82,23 @@ impl Zfs {
         }
     }
 
+    /// Makes the parent dataset of a name (`m/<id>` for `m/<id>/root`), for a receive.
+    pub async fn create_parent(&self, name: &str) -> Result<()> {
+        self.ensure_parent(name).await
+    }
+
+    /// Removes one snapshot. Missing is success.
+    pub async fn destroy_snapshot(&self, name: &str, snap: &str) -> Result<()> {
+        match self
+            .run(&["destroy", &format!("{}@{snap}", self.ds(name))])
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) if Self::is_missing(&e) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn ensure_parent(&self, name: &str) -> Result<()> {
         if let Some(parent) = Path::new(name).parent() {
             let p = parent.to_string_lossy();
@@ -259,6 +276,50 @@ impl Zfs {
                 let rel = clone.strip_prefix(&prefix).unwrap_or(&clone);
                 self.promote(rel).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// Starts `zfs send` of a snapshot (incremental from `from` when given), compressed as
+    /// stored; the caller reads the stream from the child's stdout and waits for it.
+    pub fn send(
+        &self,
+        name: &str,
+        snap: &str,
+        from: Option<&str>,
+    ) -> Result<tokio::process::Child> {
+        let target = format!("{}@{snap}", self.ds(name));
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("send").arg("-c");
+        if let Some(f) = from {
+            cmd.arg("-i").arg(format!("@{f}"));
+        }
+        cmd.arg(&target)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        cmd.spawn().with_context(|| format!("zfs send {target}"))
+    }
+
+    /// Starts `zfs receive` into a dataset (made or overwritten); the caller writes the stream
+    /// to the child's stdin and waits for it.
+    pub fn receive(&self, name: &str) -> Result<tokio::process::Child> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.args(["receive", "-F", "-u", &self.ds(name)])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        cmd.spawn()
+            .with_context(|| format!("zfs receive {}", self.ds(name)))
+    }
+
+    /// Waits for a send or receive child and turns a failure into its stderr.
+    pub async fn finish(child: tokio::process::Child, what: &str) -> Result<()> {
+        let out = child.wait_with_output().await.context(what.to_string())?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "{what}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
         }
         Ok(())
     }

@@ -82,6 +82,11 @@ pub struct CreateMachineRequest {
     /// Make the disks from a snapshot of another machine, taken now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<ForkSpec>,
+    /// Make the machine from a backup instead of an image: its disks as they were, its
+    /// image, command, env, files, size and volume as the backed-up machine had them unless
+    /// the request sets them. The backup may come from another host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<RestoreSpec>,
 }
 
 /// The source of a fork.
@@ -264,6 +269,47 @@ pub struct LogsResponse {
     pub lines: Vec<LogLine>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub next: String,
+}
+
+/// Which backup to restore: a machine's latest, or one by id.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RestoreSpec {
+    /// The backed-up machine (it may no longer exist).
+    pub machine_id: String,
+    /// A backup id from `GET /machines/{id}/backups`; empty or "latest" for the newest.
+    #[serde(default)]
+    pub backup: String,
+}
+
+/// A backup of a machine's disks in the object store.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Backup {
+    /// A timestamp, `20261019T231500Z`; later ids sort later.
+    pub id: String,
+    pub machine_id: String,
+    pub tenant: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    /// Bytes sent to the store for this backup.
+    pub bytes: u64,
+    /// Sent as a change since the previous backup, or whole.
+    pub incremental: bool,
+    pub disks: Vec<BackupDisk>,
+    /// The machine as it was: what a restore makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackupDisk {
+    /// `root` or `data`.
+    pub disk: String,
+    /// The object holding this disk's stream.
+    pub key: String,
+    pub bytes: u64,
+    /// The backup id this stream continues from, when incremental.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 /// Changes what can change on a live machine without a restart.

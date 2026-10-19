@@ -136,6 +136,27 @@ enum MachineCmd {
     Stats {
         id: String,
     },
+    /// Send the machine's disks to the backup store (whole, then what changed)
+    Backup {
+        id: String,
+    },
+    /// The backups of a machine id in the store, oldest first
+    Backups {
+        id: String,
+    },
+    /// A new machine from a backup: briqyard machine restore --from MACHINE_ID [--backup ID] --tenant T --name N
+    Restore {
+        #[arg(long)]
+        from: String,
+        #[arg(long, default_value = "latest")]
+        backup: String,
+        #[arg(long)]
+        tenant: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "")]
+        sleep: String,
+    },
     /// Change the sleep window: briqyard machine set-sleep ID 30m|never
     SetSleep {
         id: String,
@@ -401,6 +422,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     metadata: BTreeMap::new(),
                     start: if a.no_start { Some(false) } else { None },
                     fork: None,
+                    restore: None,
                 };
                 let m: api::Machine = c.call(POST, "/v1/machines", Some(&req)).await?;
                 print_json(&m);
@@ -559,6 +581,36 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                         Some(&req),
                     )
                     .await?,
+                )
+            }
+            MachineCmd::Backup { id } => print_json(
+                &c.call::<api::Backup>(POST, &format!("/v1/machines/{id}/backups"), NONE)
+                    .await?,
+            ),
+            MachineCmd::Backups { id } => print_json(
+                &c.call::<Vec<api::Backup>>(GET, &format!("/v1/machines/{id}/backups"), NONE)
+                    .await?,
+            ),
+            MachineCmd::Restore {
+                from,
+                backup,
+                tenant,
+                name,
+                sleep,
+            } => {
+                let req = api::CreateMachineRequest {
+                    tenant,
+                    name,
+                    sleep,
+                    restore: Some(api::RestoreSpec {
+                        machine_id: from,
+                        backup,
+                    }),
+                    ..Default::default()
+                };
+                print_json(
+                    &c.call::<api::Machine>(POST, "/v1/machines", Some(&req))
+                        .await?,
                 )
             }
             MachineCmd::Stats { id } => print_json(

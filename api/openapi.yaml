@@ -159,6 +159,17 @@ paths:
       summary: CPU, memory and disk the machine uses now (CPU and memory on jailed hosts)
       responses:
         "200": { description: stats, content: { application/json: { schema: { $ref: "#/components/schemas/MachineStats" } } } }
+  /v1/machines/{id}/backups:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: The backups of a machine id in the store, oldest first; the machine may be gone, the store is shared across hosts
+      responses:
+        "200": { description: backups, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Backup" } } } } }
+    post:
+      summary: Send the machine's disks to the backup store, whole the first time and what changed after (crash-consistent while it runs)
+      responses:
+        "201": { description: backup made, content: { application/json: { schema: { $ref: "#/components/schemas/Backup" } } } }
+        "400": { description: backups are off on this host }
   /v1/machines/{id}/snapshots:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -301,6 +312,31 @@ components:
       properties:
         policy: { type: string, enum: ["no", on-failure, always], default: on-failure }
         max_retries: { type: integer, default: 3 }
+    RestoreSpec:
+      type: object
+      required: [machine_id]
+      properties:
+        machine_id: { type: string, description: the backed-up machine; it may no longer exist }
+        backup: { type: string, description: a backup id, or "latest" (the default) }
+    Backup:
+      type: object
+      properties:
+        id: { type: string, description: a timestamp, later ids sort later }
+        machine_id: { type: string }
+        tenant: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        bytes: { type: integer }
+        incremental: { type: boolean }
+        disks:
+          type: array
+          items:
+            type: object
+            properties:
+              disk: { type: string, enum: [root, data] }
+              key: { type: string }
+              bytes: { type: integer }
+              from: { type: string, description: the backup this stream continues from }
     ForkSpec:
       type: object
       required: [machine_id]
@@ -326,6 +362,7 @@ components:
         metadata: { type: object, additionalProperties: { type: string } }
         start: { type: boolean, default: true }
         fork: { $ref: "#/components/schemas/ForkSpec" }
+        restore: { $ref: "#/components/schemas/RestoreSpec" }
     Exit:
       type: object
       properties:

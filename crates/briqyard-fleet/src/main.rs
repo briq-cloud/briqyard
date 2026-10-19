@@ -166,6 +166,12 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/tenants", get(list_tenants))
         .route("/v1/tenants/:id", axum::routing::delete(delete_tenant))
         .route("/v1/machines/:id", any(by_machine))
+        // Backups live in a store every host shares: the listing goes to any host, even for
+        // a machine that no longer exists anywhere; making one goes to the machine's host.
+        .route(
+            "/v1/machines/:id/backups",
+            get(list_backups).post(by_machine),
+        )
         .route("/v1/machines/:id/*rest", any(by_machine))
         .route("/v1/endpoints/:id", any(by_endpoint))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))
@@ -813,6 +819,42 @@ async fn locate_machine(st: &AppState, id: &str, headers: &HeaderMap) -> Option<
         }
     }
     None
+}
+
+/// The backups of a machine id, from whichever host answers: the store is shared, and the
+/// machine may be gone from every host.
+async fn list_backups(
+    State(st): S,
+    Path(params): Path<Vec<(String, String)>>,
+    headers: HeaderMap,
+) -> Response {
+    let id = params
+        .iter()
+        .find(|(k, _)| k == "id")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    let path = format!("/v1/machines/{id}/backups");
+    let known = st.reg.lock().unwrap().host_of_machine(&id).cloned();
+    let hosts: Vec<HostRec> = match known {
+        Some(h) => vec![h],
+        None => st.reg.lock().unwrap().ready(),
+    };
+    let mut last = err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no_host",
+        "no host is ready",
+    );
+    for h in hosts {
+        if h.state == "down" {
+            continue;
+        }
+        let resp = forward(&st, &h, Method::GET, &path, &headers, Bytes::new()).await;
+        if resp.status().is_success() {
+            return resp;
+        }
+        last = resp;
+    }
+    last
 }
 
 async fn by_machine(

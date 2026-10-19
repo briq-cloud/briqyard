@@ -66,6 +66,19 @@ pub struct Builder {
     pub registries: Vec<(String, String, String)>,
     init_hash: String,
     building: Mutex<HashMap<String, Arc<Notify>>>,
+    /// What a reference resolved to, and when: a tag is asked of the registry once per
+    /// `resolve_ttl`, a digest never.
+    resolved: Mutex<HashMap<String, (String, std::time::Instant)>>,
+    pub resolve_ttl: std::time::Duration,
+}
+
+/// What a reference last resolved to, kept on disk: when the registry refuses (a rate limit,
+/// an outage), the image already on the host serves.
+#[derive(Serialize, Deserialize)]
+struct Resolution {
+    reference: String,
+    digest: String,
+    at: DateTime<Utc>,
 }
 
 impl Builder {
@@ -82,6 +95,8 @@ impl Builder {
             registries: vec![],
             init_hash,
             building: Mutex::new(HashMap::new()),
+            resolved: Mutex::new(HashMap::new()),
+            resolve_ttl: std::time::Duration::from_secs(600),
         })
     }
 
@@ -119,10 +134,7 @@ impl Builder {
             ..Default::default()
         });
         let auth = self.auth_for(&r);
-        let (_, digest) = client
-            .pull_image_manifest(&r, &auth)
-            .await
-            .with_context(|| format!("pull {reference}"))?;
+        let digest = self.resolve(&client, &r, reference, &auth).await?;
         let key = self.key(&digest);
 
         // One build at a time per key.
@@ -150,6 +162,66 @@ impl Builder {
             n.notify_waiters();
         }
         result
+    }
+
+    fn resolution_path(&self, reference: &str) -> PathBuf {
+        let h = hex::encode(Sha256::digest(reference.as_bytes()));
+        self.dir.join("meta").join(format!("ref-{}.json", &h[..20]))
+    }
+
+    /// The digest a reference names: pinned in the reference, remembered from a recent answer,
+    /// asked of the registry, or, when the registry refuses, the one the host already built.
+    async fn resolve(
+        &self,
+        client: &Client,
+        r: &Reference,
+        reference: &str,
+        auth: &RegistryAuth,
+    ) -> Result<String> {
+        if let Some(d) = r.digest() {
+            return Ok(d.to_string());
+        }
+        if let Some((d, at)) = self.resolved.lock().unwrap().get(reference) {
+            if at.elapsed() < self.resolve_ttl {
+                return Ok(d.clone());
+            }
+        }
+        match client.pull_image_manifest(r, auth).await {
+            Ok((_, digest)) => {
+                self.resolved.lock().unwrap().insert(
+                    reference.to_string(),
+                    (digest.clone(), std::time::Instant::now()),
+                );
+                let rec = Resolution {
+                    reference: reference.to_string(),
+                    digest: digest.clone(),
+                    at: Utc::now(),
+                };
+                let _ = std::fs::write(
+                    self.resolution_path(reference),
+                    serde_json::to_vec(&rec).unwrap_or_default(),
+                );
+                Ok(digest)
+            }
+            Err(err) => {
+                let last: Option<Resolution> = std::fs::read(self.resolution_path(reference))
+                    .ok()
+                    .and_then(|d| serde_json::from_slice(&d).ok());
+                match last {
+                    Some(rec) if self.load(&self.key(&rec.digest)).is_some() => {
+                        tracing::warn!(
+                            image = reference,
+                            digest = rec.digest,
+                            resolved_at = %rec.at,
+                            err = %err,
+                            "registry refused; the image already on the host serves"
+                        );
+                        Ok(rec.digest)
+                    }
+                    _ => Err(anyhow!(err)).with_context(|| format!("pull {reference}")),
+                }
+            }
+        }
     }
 
     async fn ensure_locked(

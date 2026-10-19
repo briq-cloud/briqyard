@@ -6,6 +6,7 @@ use crate::fc;
 use crate::guestc;
 use crate::image::{self, Builder, ImageConfig};
 use crate::netw::{self, dns::Resolver, host, nft::Ruleset, Range, Subnet};
+use crate::objstore::ObjectStore;
 use crate::store::Store;
 use crate::zfs::Zfs;
 use anyhow::{anyhow, Context, Result};
@@ -193,6 +194,7 @@ pub struct Stats {
     pub suspends: std::sync::atomic::AtomicU64,
     pub execs: std::sync::atomic::AtomicU64,
     pub starts_failed: std::sync::atomic::AtomicU64,
+    pub backups: std::sync::atomic::AtomicU64,
 }
 
 struct Inner {
@@ -211,6 +213,10 @@ struct Inner {
     endpoint_events: broadcast::Sender<(EndpointRec, bool)>,
     /// Held while a tenant is made (its subnet index, bridge and record), see `ensure_tenant`.
     tenant_create: tokio::sync::Mutex<()>,
+    /// Where backups go; none when `backup.store` is empty.
+    backups: Option<ObjectStore>,
+    /// Boots run at once; see `boots_at_once`.
+    boot_gate: tokio::sync::Semaphore,
 }
 
 #[derive(Clone)]
@@ -245,6 +251,29 @@ impl Manager {
             cfg.network.egress.clone()
         };
         tokio::fs::create_dir_all(cfg.run_dir()).await?;
+        let boots_at_once = if cfg.boots_at_once > 0 {
+            cfg.boots_at_once
+        } else {
+            (std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(4)
+                / 2)
+            .max(2)
+        };
+        let backups = if cfg.backup.store.is_empty() {
+            None
+        } else {
+            let st = ObjectStore::open(
+                &cfg.backup.store,
+                &cfg.backup.endpoint,
+                &cfg.backup.region,
+                &std::env::var("BRIQYARD_S3_ACCESS_KEY").unwrap_or_default(),
+                &std::env::var("BRIQYARD_S3_SECRET_KEY").unwrap_or_default(),
+            )
+            .context("backup")?;
+            tracing::info!(store = st.describe(), "backups on");
+            Some(st)
+        };
         let (endpoint_events, _) = broadcast::channel(64);
         let inner = Arc::new(Inner {
             stats: Stats::default(),
@@ -261,6 +290,8 @@ impl Manager {
             endpoints: Mutex::new(HashMap::new()),
             endpoint_events,
             tenant_create: tokio::sync::Mutex::new(()),
+            backups,
+            boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),
         });
         let m = Self { inner };
         m.load()?;
@@ -875,12 +906,13 @@ impl Manager {
             "# TYPE briqyard_disk_free_mb gauge\nbriqyard_disk_free_mb {disk_free}\n"
         ));
         out.push_str(&format!(
-            "# TYPE briqyard_boots_total counter\nbriqyard_boots_total {}\n# TYPE briqyard_resumes_total counter\nbriqyard_resumes_total {}\n# TYPE briqyard_suspends_total counter\nbriqyard_suspends_total {}\n# TYPE briqyard_execs_total counter\nbriqyard_execs_total {}\n# TYPE briqyard_starts_failed_total counter\nbriqyard_starts_failed_total {}\n",
+            "# TYPE briqyard_boots_total counter\nbriqyard_boots_total {}\n# TYPE briqyard_resumes_total counter\nbriqyard_resumes_total {}\n# TYPE briqyard_suspends_total counter\nbriqyard_suspends_total {}\n# TYPE briqyard_execs_total counter\nbriqyard_execs_total {}\n# TYPE briqyard_starts_failed_total counter\nbriqyard_starts_failed_total {}\n# TYPE briqyard_backups_total counter\nbriqyard_backups_total {}\n",
             st.boots.load(Relaxed),
             st.resumes.load(Relaxed),
             st.suspends.load(Relaxed),
             st.execs.load(Relaxed),
-            st.starts_failed.load(Relaxed)
+            st.starts_failed.load(Relaxed),
+            st.backups.load(Relaxed)
         ));
         out
     }
@@ -918,14 +950,16 @@ impl Manager {
         if !api::valid_name(&req.name) {
             return Err(invalid("name must be a DNS label (a-z, 0-9, -)"));
         }
-        if req.image.is_empty() && req.fork.is_none() {
+        if req.image.is_empty() && req.fork.is_none() && req.restore.is_none() {
             return Err(invalid("image is required"));
         }
-        if !(1..=32).contains(&req.size.vcpus) {
-            return Err(invalid("size.vcpus must be 1..32"));
+        if req.fork.is_some() && req.restore.is_some() {
+            return Err(invalid("fork and restore are one or the other"));
         }
-        if !(128..=262144).contains(&req.size.memory_mb) {
-            return Err(invalid("size.memory_mb must be 128..262144"));
+        // A restore with no size takes the backup's; everything else says its size.
+        let size_from_backup = req.restore.is_some() && req.size == api::Size::default();
+        if !size_from_backup {
+            check_size(&req.size)?;
         }
         if let Some(v) = &req.volume {
             if v.size_gb < 1 || !v.mount.starts_with('/') {
@@ -990,7 +1024,48 @@ impl Manager {
             suspended: false,
         };
         let mut src: Option<Arc<Entry>> = None;
-        if let Some(fork) = &req.fork {
+        let mut restore_from: Option<api::Backup> = None;
+        if let Some(rs) = &req.restore {
+            let b = self.find_backup(&rs.machine_id, &rs.backup).await?;
+            let was: Record = serde_json::from_value(b.machine.clone().unwrap_or_default())
+                .map_err(|e| invalid(format!("backup {}: machine record: {e}", b.id)))?;
+            // The request says what it says; the backup fills the rest.
+            rec.image = was.image;
+            rec.image_key = was.image_key;
+            rec.image_digest = was.image_digest;
+            rec.image_config = was.image_config;
+            if rec.entrypoint.is_none() {
+                rec.entrypoint = was.entrypoint;
+            }
+            if rec.cmd.is_none() {
+                rec.cmd = was.cmd;
+            }
+            let mut env = was.env;
+            env.extend(rec.env.clone());
+            rec.env = env;
+            if rec.files.is_empty() {
+                rec.files = was.files;
+            }
+            if req.ports.is_empty() {
+                rec.ports = was.ports;
+            }
+            if rec.size == api::Size::default() {
+                rec.size = was.size;
+            }
+            match (&rec.volume, &was.volume) {
+                (None, Some(v)) => rec.volume = Some(v.clone()),
+                (Some(a), Some(b)) if a.mount != b.mount => {
+                    return Err(invalid("a restore keeps the backup's volume mount"))
+                }
+                (Some(_), None) => return Err(invalid("the backup has no volume to restore")),
+                _ => {}
+            }
+            if b.disks.iter().any(|d| d.disk == "data") != rec.volume.is_some() {
+                return Err(invalid("the backup's disks and the volume do not match"));
+            }
+            check_size(&rec.size)?;
+            restore_from = Some(b);
+        } else if let Some(fork) = &req.fork {
             let s = self
                 .entry(&fork.machine_id)
                 .map_err(|_| invalid("fork source not found"))?;
@@ -1023,7 +1098,11 @@ impl Manager {
         let t = self.ensure_tenant(&req.tenant).await?;
         let e = self.add_machine(rec, &t)?;
         let _guard = e.lock.lock().await;
-        if let Err(err) = self.make_disks(&e, src.as_deref(), req.fork.as_ref()).await {
+        let made = match &restore_from {
+            Some(b) => self.receive_disks(&e, b).await,
+            None => self.make_disks(&e, src.as_deref(), req.fork.as_ref()).await,
+        };
+        if let Err(err) = made {
             let rec = e.snapshot();
             self.remove_machine(&e);
             let _ = self.inner.zfs.destroy(&rec.dataset()).await;
@@ -1146,6 +1225,170 @@ impl Manager {
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             }
+        }
+        Ok(())
+    }
+
+    // --- backups ---
+
+    fn backup_store(&self) -> Result<&ObjectStore, MError> {
+        self.inner
+            .backups
+            .as_ref()
+            .ok_or_else(|| invalid("backups are off on this host (backup.store)"))
+    }
+
+    /// Sends the machine's disks to the store: whole the first time, then what changed since
+    /// the last backup whose snapshot is still on the host. A running machine's backup is
+    /// crash-consistent (what a power cut would leave); a stopped one's is clean.
+    pub async fn backup(&self, id: &str) -> Result<api::Backup, MError> {
+        let store = self.backup_store()?;
+        let e = self.entry(id)?;
+        let rec = e.snapshot();
+        if rec.state == state::DESTROYING {
+            return Err(MError::BadState(rec.state));
+        }
+        let bid = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let snap = format!("bk-{bid}");
+        let z = &self.inner.zfs;
+        let mut disks = Vec::new();
+        let mut total = 0u64;
+        let mut incremental = false;
+        for (disk, ds) in [("root", rec.root_dataset()), ("data", rec.data_dataset())] {
+            if !z.exists(&ds).await? {
+                continue;
+            }
+            let base = newest_backup_snapshot(&z.snapshots(&ds).await?);
+            z.snapshot(&ds, &snap).await?;
+            let key = format!("backups/{}/{disk}/{bid}.zfs", rec.id);
+            let mut child = z.send(&ds, &snap, base.as_deref())?;
+            let stdout = child.stdout.take().expect("piped");
+            let sent = store
+                .put(&key, stdout)
+                .await
+                .with_context(|| format!("backup {disk} of {}", rec.id))?;
+            Zfs::finish(child, "zfs send").await?;
+            if base.is_some() {
+                incremental = true;
+            }
+            total += sent;
+            disks.push(api::BackupDisk {
+                disk: disk.into(),
+                key,
+                bytes: sent,
+                from: base.map(|b| b.trim_start_matches("bk-").to_string()),
+            });
+            // The newest snapshots stay as the base of the next send; the rest go.
+            let keep = self.inner.cfg.backup.keep_snapshots.max(1) as usize;
+            let mut snaps: Vec<String> = z
+                .snapshots(&ds)
+                .await?
+                .into_iter()
+                .filter(|s| s.starts_with("bk-"))
+                .collect();
+            snaps.sort();
+            while snaps.len() > keep {
+                let old = snaps.remove(0);
+                if let Err(err) = z.destroy_snapshot(&ds, &old).await {
+                    tracing::warn!(machine = rec.id, snapshot = old, err = %err, "old backup snapshot kept");
+                }
+            }
+        }
+        let b = api::Backup {
+            id: bid.clone(),
+            machine_id: rec.id.clone(),
+            tenant: rec.tenant.clone(),
+            name: rec.name.clone(),
+            created_at: Utc::now(),
+            bytes: total,
+            incremental,
+            disks,
+            machine: Some(serde_json::to_value(&rec).unwrap_or_default()),
+        };
+        store
+            .put_bytes(
+                &format!("backups/{}/{bid}.json", rec.id),
+                &serde_json::to_vec_pretty(&b).unwrap_or_default(),
+            )
+            .await
+            .context("backup record")?;
+        self.inner
+            .stats
+            .backups
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            machine = rec.id,
+            backup = bid,
+            bytes = total,
+            incremental,
+            "backup made"
+        );
+        Ok(b)
+    }
+
+    /// The backups of a machine in the store, oldest first; the machine may be gone.
+    pub async fn backups(&self, machine_id: &str) -> Result<Vec<api::Backup>, MError> {
+        let store = self.backup_store()?;
+        let mut out = Vec::new();
+        for key in store.list(&format!("backups/{machine_id}/")).await? {
+            if !key.ends_with(".json") {
+                continue;
+            }
+            let data = store.get_bytes(&key).await?;
+            match serde_json::from_slice::<api::Backup>(&data) {
+                Ok(mut b) => {
+                    b.machine = None;
+                    out.push(b);
+                }
+                Err(err) => tracing::warn!(key, err = %err, "unreadable backup record"),
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    async fn find_backup(&self, machine_id: &str, which: &str) -> Result<api::Backup, MError> {
+        let store = self.backup_store()?;
+        let id = if which.is_empty() || which == "latest" {
+            let all = self.backups(machine_id).await?;
+            all.last()
+                .map(|b| b.id.clone())
+                .ok_or_else(|| invalid(format!("no backup of {machine_id} in the store")))?
+        } else {
+            which.to_string()
+        };
+        let data = store
+            .get_bytes(&format!("backups/{machine_id}/{id}.json"))
+            .await
+            .map_err(|_| MError::NotFound)?;
+        serde_json::from_slice(&data).map_err(|e| invalid(format!("backup {id}: {e}")))
+    }
+
+    /// Makes the machine's disks from a backup: the whole chain of streams, oldest first,
+    /// received into the new datasets.
+    async fn receive_disks(&self, e: &Arc<Entry>, b: &api::Backup) -> Result<()> {
+        let store = self.backup_store()?;
+        let rec = e.snapshot();
+        let all = self.backups(&b.machine_id).await?;
+        for disk in &b.disks {
+            let chain = backup_chain(&all, b, &disk.disk);
+            let ds = if disk.disk == "data" {
+                rec.data_dataset()
+            } else {
+                rec.root_dataset()
+            };
+            self.inner.zfs.create_parent(&ds).await?;
+            for step in chain {
+                let mut child = self.inner.zfs.receive(&ds)?;
+                let mut stdin = child.stdin.take().expect("piped");
+                let mut reader = store.get(&step.key).await?;
+                tokio::io::copy(&mut reader, &mut stdin)
+                    .await
+                    .with_context(|| format!("restore {}", step.key))?;
+                drop(stdin);
+                Zfs::finish(child, "zfs receive").await?;
+            }
+            self.inner.zfs.device(&ds).await?;
         }
         Ok(())
     }
@@ -1280,6 +1523,14 @@ impl Manager {
         let jail = self.jail_for(&rec);
         let ip: Ipv4Addr = rec.ip.parse().unwrap();
         let mut resume = rec.suspended;
+        // Boots take their turn: a host asked for many at once boots a few at a time, each
+        // with the whole timeout, instead of all of them crawling past it together.
+        let _boot_turn = self
+            .inner
+            .boot_gate
+            .acquire()
+            .await
+            .map_err(|e| fail(anyhow!(e)))?;
         let mut proc = loop {
             let mut proc =
                 fc::Process::start(&cfg.firecracker, &rec.id, &dir, cfg.pci, jail.as_ref())
@@ -1370,7 +1621,10 @@ impl Manager {
             watcher.settle_exit(&we, live.pid).await;
         });
 
-        let ready = guestc::wait_ready(&live.vsock, Duration::from_secs(60));
+        let ready = guestc::wait_ready(
+            &live.vsock,
+            Duration::from_secs(cfg.boot_timeout_sec.max(10)),
+        );
         let mut exited = live.exited.clone();
         tokio::select! {
             r = ready => {
@@ -2228,6 +2482,47 @@ fn firecracker_processes() -> Vec<(u32, String)> {
     out
 }
 
+fn check_size(size: &api::Size) -> Result<(), MError> {
+    if !(1..=32).contains(&size.vcpus) {
+        return Err(invalid("size.vcpus must be 1..32"));
+    }
+    if !(128..=262144).contains(&size.memory_mb) {
+        return Err(invalid("size.memory_mb must be 128..262144"));
+    }
+    Ok(())
+}
+
+/// The newest backup snapshot (`bk-<id>`) among a dataset's snapshots: the base of the next
+/// incremental send.
+fn newest_backup_snapshot(snaps: &[String]) -> Option<String> {
+    snaps.iter().filter(|s| s.starts_with("bk-")).max().cloned()
+}
+
+/// The streams to receive, oldest first, to get one disk of a backup: the backup's own stream
+/// preceded by the ones it continues from, back to a whole one.
+fn backup_chain<'a>(
+    all: &'a [api::Backup],
+    target: &'a api::Backup,
+    disk: &str,
+) -> Vec<&'a api::BackupDisk> {
+    let mut chain = Vec::new();
+    let mut cur = target.disks.iter().find(|d| d.disk == disk);
+    let mut guard = 0;
+    while let Some(d) = cur {
+        chain.push(d);
+        guard += 1;
+        cur = match &d.from {
+            Some(from) if guard < 10_000 => all
+                .iter()
+                .find(|b| &b.id == from)
+                .and_then(|b| b.disks.iter().find(|x| x.disk == disk)),
+            _ => None,
+        };
+    }
+    chain.reverse();
+    chain
+}
+
 /// Reads the init's exit line, `[briqyard] exit code=N oom=B requested=R`; the last one wins.
 fn parse_exit_line(text: &str) -> Option<(i32, bool, bool)> {
     let mut found = None;
@@ -2476,6 +2771,55 @@ fn write_drive(path: &Path, data: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn backup_chains() {
+        let disk = |key: &str, from: Option<&str>| api::BackupDisk {
+            disk: "root".into(),
+            key: key.into(),
+            bytes: 1,
+            from: from.map(String::from),
+        };
+        let b = |id: &str, from: Option<&str>| api::Backup {
+            id: id.into(),
+            machine_id: "m_1".into(),
+            tenant: "t".into(),
+            name: "n".into(),
+            created_at: Utc::now(),
+            bytes: 1,
+            incremental: from.is_some(),
+            disks: vec![disk(&format!("k-{id}"), from)],
+            machine: None,
+        };
+        let all = vec![
+            b("a", None),
+            b("b", Some("a")),
+            b("c", Some("b")),
+            b("d", None),
+        ];
+        let keys = |t: &api::Backup| -> Vec<String> {
+            backup_chain(&all, t, "root")
+                .iter()
+                .map(|d| d.key.clone())
+                .collect()
+        };
+        assert_eq!(keys(&all[2]), vec!["k-a", "k-b", "k-c"]);
+        assert_eq!(keys(&all[0]), vec!["k-a"]);
+        assert_eq!(keys(&all[3]), vec!["k-d"]);
+        assert!(backup_chain(&all, &all[2], "data").is_empty());
+        // A base that is not in the store ends the chain where it is.
+        let orphan = b("e", Some("zz"));
+        assert_eq!(keys(&orphan), vec!["k-e"]);
+        assert_eq!(
+            newest_backup_snapshot(&[
+                "fork-x".into(),
+                "bk-20260101T000000Z".into(),
+                "bk-20260102T000000Z".into()
+            ]),
+            Some("bk-20260102T000000Z".into())
+        );
+        assert_eq!(newest_backup_snapshot(&["fork-x".into()]), None);
+    }
 
     #[test]
     fn exit_lines() {

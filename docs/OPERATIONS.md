@@ -42,6 +42,12 @@ briqyard status
 | `pci` | `false` | Firecracker's PCI transport (needs a guest kernel with PCI) |
 | `root_disk_gb` | `8` | Size of every root disk (thin) |
 | `image_keep_days` | `14` | An image no machine uses is removed this long after it was built |
+| `image_resolve_minutes` | `10` | A tag's digest is reused this long before the registry is asked again; when the registry refuses (a rate limit), the image already on the host serves |
+| `boot_timeout_sec` | `120` | How long a guest may take to answer after its process starts |
+| `boots_at_once` | half the threads, at least 2 | Boots run at once; the rest wait their turn, each with the whole timeout |
+| `backup.store` | none | `s3://bucket/prefix` or `file:///path`; set, `POST /v1/machines/{id}/backups` works. Credentials in `BRIQYARD_S3_ACCESS_KEY` / `BRIQYARD_S3_SECRET_KEY` |
+| `backup.endpoint`, `backup.region` | none | The S3 endpoint (`https://s3.fr-par.scw.cloud`) and region |
+| `backup.keep_snapshots` | `1` | Backup snapshots kept on the host per machine (the newest is the base of the next incremental send) |
 | `suspend_on_sleep` | `false` | Sleep with a memory snapshot: wakes in a quarter second, costs the machine's memory in disk |
 | `storage.pool` | `byard` | The ZFS pool or dataset for every disk |
 | `registries[]` | none | `{host, username, password}` for private registries |
@@ -82,11 +88,25 @@ garbage-collected once no machine uses it).
 
 ## Backups
 
-The state is the `state/` directory and the ZFS datasets. `zfs snapshot -r byard/m@backup` then
-`zfs send -R` to another pool or to object storage (`zfs send | gzip | aws s3 cp - ...`) copies
-every machine's disks; the `state/` files say which is which. A machine's own `POST
-/v1/machines/{id}/snapshots` is a local snapshot of its disks (instant, copy-on-write); it is
-not a backup until sent elsewhere.
+With `backup.store` set, `briqyard machine backup <id>` (`POST /v1/machines/{id}/backups`)
+snapshots the machine's disks and streams them to the store: whole the first time, then only
+what changed since the last backup whose snapshot is still on the host (`zfs send -c -i`).
+Each backup is a record (`backups/<machine>/<id>.json`, the machine's spec included, secrets
+included: the store is as sensitive as the host) plus one object per disk. A backup of a
+running machine is crash-consistent, what a power cut would leave; stop the machine first for
+a clean one, or let the application do its own consistency (Postgres does).
+
+`briqyard machine backups <id>` lists them, from the store, so a machine that no longer exists
+still has them. `briqyard machine restore --from <machine id> [--backup <id>] --tenant T --name
+N` makes a new machine from one (`POST /v1/machines` with `restore`): the whole chain of
+streams is received into fresh datasets, and the image, command, env, files, size and volume
+come from the record unless the request sets them. Any host that reaches the store can
+restore, which is how a machine moves off a dead host.
+
+The state itself (`state/`) is small and lives only on the host; a lost host loses the records
+of machines that were never backed up, and their disks. A machine's own `POST
+/v1/machines/{id}/snapshots` is a local snapshot of its disks: instant, copy-on-write, not a
+backup until sent elsewhere.
 
 ## Watch
 

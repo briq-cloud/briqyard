@@ -56,7 +56,8 @@ What works today, checked by `hack/e2e.sh` on every change: boot in a few second
 stdin, exit codes and timeouts, files in and out, names on the tenant's network, egress through
 NAT, tenant isolation, stop and start with the disk kept, exit codes and the restart policy,
 Postgres on a volume with honest `fsync`, TCP and HTTP endpoints, sleep on idle and wake on
-connect, suspend and resume with the processes carrying on, and a fork with its data.
+connect, suspend and resume with the processes carrying on, a fork with its data, and backups
+to an S3 bucket (whole, then incremental) that restore on any host.
 
 Across servers, checked by `hack/fleet-smoke.sh` and `hack/fleet-two-hosts.sh` (two VMs under
 one fleet): tenants placed by free memory and disk, every call forwarded to the right host, a

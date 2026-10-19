@@ -9,6 +9,7 @@ mod image;
 mod ingress;
 mod machine;
 mod netw;
+mod objstore;
 mod store;
 mod zfs;
 
@@ -82,6 +83,7 @@ async fn run(args: Args) -> Result<()> {
         cfg.init.clone(),
         cfg.root_disk_gb,
     )?;
+    images.resolve_ttl = std::time::Duration::from_secs(cfg.image_resolve_minutes as u64 * 60);
     images.registries = cfg
         .registries
         .iter()

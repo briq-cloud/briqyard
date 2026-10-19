@@ -18,6 +18,9 @@ ingress:
   # Lima forwards the VM's ports to the Mac's loopback; the VM's own address is not routable
   # from there. So a router on the Mac dials endpoints at 127.0.0.1.
   advertise: 127.0.0.1
+# Backups to a directory on the host: the e2e suite backs a machine up and restores it.
+backup:
+  store: file:///var/lib/briqyard/backups
 capacity:
   memory_mb: 12288
   vcpus: 24

@@ -39,10 +39,19 @@ pub struct Config {
     pub root_disk_gb: u32,
     /// An image no machine uses is removed this many days after it was built.
     pub image_keep_days: u32,
+    /// How long a tag's resolution (which digest `alpine:3.20` is) is reused before asking the
+    /// registry again: a burst of creates makes one registry call, not one each.
+    pub image_resolve_minutes: u32,
+    /// How long a guest may take to answer after its process starts before the start fails.
+    pub boot_timeout_sec: u64,
+    /// Boots run at once; the rest wait their turn, each with the whole timeout once it
+    /// starts. 0: half the hardware threads, at least 2.
+    pub boots_at_once: u32,
     /// Sleep with a memory snapshot instead of a stop, so a wake resumes in well under a
     /// second. Costs the machine's memory in disk while it sleeps.
     pub suspend_on_sleep: bool,
     pub fleet: Option<FleetClient>,
+    pub backup: Backup,
     /// What the daemon advertises: memory it may hand to machines (default: the host's memory
     /// minus 2 GB) and vCPUs (default: hardware threads times 4).
     pub capacity: Capacity,
@@ -91,6 +100,32 @@ pub struct Ingress {
     pub advertise: String,
 }
 
+/// Where backups go. Off until `store` is set.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Backup {
+    /// `s3://bucket/prefix` or `file:///path`; empty turns backups off.
+    pub store: String,
+    /// The S3 endpoint (`https://s3.fr-par.scw.cloud`); credentials come from the
+    /// environment, `BRIQYARD_S3_ACCESS_KEY` and `BRIQYARD_S3_SECRET_KEY`.
+    pub endpoint: String,
+    pub region: String,
+    /// Backup snapshots kept on the host per machine: the newest is the base of the next
+    /// incremental send, the rest only cost space.
+    pub keep_snapshots: u32,
+}
+
+impl Default for Backup {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            endpoint: String::new(),
+            region: String::new(),
+            keep_snapshots: 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FleetClient {
@@ -128,8 +163,12 @@ impl Default for Config {
             ingress: Ingress::default(),
             root_disk_gb: 8,
             image_keep_days: 14,
+            image_resolve_minutes: 10,
+            boot_timeout_sec: 120,
+            boots_at_once: 0,
             suspend_on_sleep: false,
             fleet: None,
+            backup: Backup::default(),
             capacity: Capacity::default(),
         }
     }

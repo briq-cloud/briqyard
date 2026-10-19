@@ -94,6 +94,13 @@ exit status is never stolen. When the main process exits, the init prints
 `[briqyard] exit code=N oom=B requested=R` on the serial console and resets the machine, which
 ends Firecracker; the daemon reads the line and applies the restart policy.
 
+### Backups
+
+A backup is a ZFS snapshot of each disk streamed to an object store (`objstore.rs`: S3 or a
+directory), incremental after the first; the record beside it holds the machine's spec, so a
+restore is a create that receives the chain of streams into fresh datasets on any host that
+reaches the store. Local snapshots stay only as the base of the next incremental send.
+
 ### Sleep
 
 Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the

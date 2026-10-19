@@ -166,6 +166,11 @@ async fn start_daemon(id: &str, token: &str) -> Running {
             None => StatusCode::NOT_FOUND.into_response(),
         }
     }
+    /// The store is shared: every host answers for every machine id, with nothing here.
+    async fn backups(State(_d): D) -> Json<Vec<serde_json::Value>> {
+        Json(vec![])
+    }
+
     async fn endpoints(State(d): D) -> Json<Vec<api::Endpoint>> {
         Json(vec![api::Endpoint {
             id: format!("ep_{}", d.id),
@@ -211,6 +216,7 @@ async fn start_daemon(id: &str, token: &str) -> Running {
         .route("/v1/machines", get(list).post(create))
         .route("/v1/machines/:id", get(get_machine).delete(delete_machine))
         .route("/v1/machines/:id/start", post(start_machine))
+        .route("/v1/machines/:id/backups", get(backups))
         .route("/v1/endpoints", get(endpoints))
         .route("/v1/endpoints/:id", axum::routing::delete(delete_endpoint))
         .layer(axum::middleware::from_fn_with_state(stub.clone(), record))
@@ -1154,6 +1160,45 @@ async fn a_machine_on_a_down_host_answers_503() {
         Some("d1"),
         "a failed delete keeps the index entry"
     );
+}
+
+#[tokio::test]
+async fn backups_are_listed_from_any_host_that_is_up() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    // A machine nobody has: the store is shared, so any ready host answers.
+    let (s, _, body) = call(&f.st, "GET", "/v1/machines/m_gone/backups", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(json(&body), serde_json::json!([]));
+    let asked: usize = ds
+        .iter()
+        .map(|d| {
+            d.stub
+                .calls()
+                .iter()
+                .filter(|c| c.contains("backups"))
+                .count()
+        })
+        .sum();
+    assert_eq!(asked, 1, "one host asked, the first that answered");
+    // The host that holds the machine is the one asked; down, nothing else is tried.
+    let m = ds[0].stub.add("t1", "web", 512);
+    f.st.reg
+        .lock()
+        .unwrap()
+        .machines
+        .insert(m.id.clone(), "d1".into());
+    set_state(&f.st, "d1", "down");
+    let before = ds[0].stub.calls().len();
+    let (s, _, body) = call(
+        &f.st,
+        "GET",
+        &format!("/v1/machines/{}/backups", m.id),
+        "api",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(ds[0].stub.calls().len(), before, "a down host is not asked");
 }
 
 #[tokio::test]
