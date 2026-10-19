@@ -173,3 +173,245 @@ impl Config {
         Ok(cfg)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    const ENV_VARS: [&str; 3] = [
+        "HETZNER_ROBOT_USER",
+        "HETZNER_ROBOT_PASSWORD",
+        "SCW_SECRET_KEY",
+    ];
+
+    /// `load` reads the process environment, which every test shares: one at a time, and each
+    /// one puts the variables back as it found them.
+    static ENV: Mutex<()> = Mutex::new(());
+
+    fn with_env<T>(set: &[(&str, &str)], f: impl FnOnce() -> T) -> T {
+        let _lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(&str, Option<String>)> = ENV_VARS
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        for k in ENV_VARS {
+            std::env::remove_var(k);
+        }
+        for (k, v) in set {
+            std::env::set_var(k, v);
+        }
+        let out = f();
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        out
+    }
+
+    fn write(dir: &tempfile::TempDir, text: &str) -> PathBuf {
+        let p = dir.path().join("fleet.yaml");
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    #[test]
+    fn defaults() {
+        let cfg = with_env(&[], || Config::load(None).unwrap());
+        assert_eq!(cfg.listen, "127.0.0.1:7430");
+        assert_eq!(cfg.token, "");
+        assert_eq!(cfg.host_token, "");
+        assert_eq!(cfg.state_dir, PathBuf::from("/var/lib/briqyard-fleet"));
+        assert!(cfg.hosts.is_empty());
+        assert_eq!(cfg.placement.fill_ceiling, 0.85);
+        assert_eq!(cfg.placement.down_after_sec, 60);
+        let p = &cfg.provisioner;
+        assert_eq!(p.kind, "static");
+        assert!(p.dry_run, "a provisioner orders nothing unless told to");
+        assert!(!p.enabled);
+        assert_eq!((p.min_hosts, p.max_hosts), (1, 3));
+        assert_eq!(p.slot_mb, 8192);
+        assert_eq!(p.idle_grace, "2h");
+        assert_eq!(p.hetzner.user, "");
+        assert_eq!(p.scaleway.secret_key, "");
+        let b = &p.bootstrap;
+        assert!(!b.enabled);
+        assert_eq!(b.ssh_user, "root");
+        assert_eq!(b.ssh_key, PathBuf::from("/etc/briqyard/fleet_ssh_key"));
+        assert_eq!(b.script, PathBuf::new());
+        assert_eq!(b.max_attempts, 90);
+    }
+
+    #[test]
+    fn a_full_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            r#"
+listen: 0.0.0.0:7430
+token: api-t0k
+host_token: host-t0k
+state_dir: /tmp/fleet
+hosts:
+  - id: h1
+    url: http://10.0.0.1:7420
+    token: t1
+    region: fsn
+  - url: http://10.0.0.2:7420
+placement:
+  fill_ceiling: 0.9
+  down_after_sec: 30
+provisioner:
+  kind: scaleway
+  dry_run: false
+  enabled: true
+  min_hosts: 2
+  max_hosts: 5
+  slot_mb: 4096
+  idle_grace: 30m
+  hetzner:
+    user: '#ws+u'
+    password: p
+    product: AX102
+    location: FSN1
+    ssh_key_fingerprint: 'ab:cd'
+  scaleway:
+    secret_key: s
+    project_id: proj
+    zone: fr-par-2
+    offer_id: offer
+    os_id: os
+  bootstrap:
+    enabled: true
+    ssh_user: ubuntu
+    ssh_key: /etc/briqyard/key
+    script: /opt/bootstrap.sh
+    release: https://example/v1
+    pool_device: /dev/nvme1n1
+    fleet_url: https://fleet.example
+    max_attempts: 3
+"#,
+        );
+        let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
+        assert_eq!(cfg.listen, "0.0.0.0:7430");
+        assert_eq!(cfg.token, "api-t0k");
+        assert_eq!(cfg.host_token, "host-t0k");
+        assert_eq!(cfg.state_dir, PathBuf::from("/tmp/fleet"));
+        assert_eq!(cfg.hosts.len(), 2);
+        assert_eq!(cfg.hosts[0].id, "h1");
+        assert_eq!(cfg.hosts[0].url, "http://10.0.0.1:7420");
+        assert_eq!(cfg.hosts[0].token, "t1");
+        assert_eq!(cfg.hosts[0].region, "fsn");
+        assert_eq!(cfg.hosts[1].id, "", "a host needs only its URL");
+        assert_eq!(cfg.hosts[1].url, "http://10.0.0.2:7420");
+        assert_eq!(cfg.placement.fill_ceiling, 0.9);
+        assert_eq!(cfg.placement.down_after_sec, 30);
+        let p = &cfg.provisioner;
+        assert_eq!(p.kind, "scaleway");
+        assert!(!p.dry_run);
+        assert!(p.enabled);
+        assert_eq!((p.min_hosts, p.max_hosts), (2, 5));
+        assert_eq!(p.slot_mb, 4096);
+        assert_eq!(p.idle_grace, "30m");
+        assert_eq!(p.hetzner.user, "#ws+u");
+        assert_eq!(p.hetzner.password, "p");
+        assert_eq!(p.hetzner.product, "AX102");
+        assert_eq!(p.hetzner.location, "FSN1");
+        assert_eq!(p.hetzner.ssh_key_fingerprint, "ab:cd");
+        assert_eq!(p.scaleway.secret_key, "s");
+        assert_eq!(p.scaleway.project_id, "proj");
+        assert_eq!(p.scaleway.zone, "fr-par-2");
+        assert_eq!(p.scaleway.offer_id, "offer");
+        assert_eq!(p.scaleway.os_id, "os");
+        let b = &p.bootstrap;
+        assert!(b.enabled);
+        assert_eq!(b.ssh_user, "ubuntu");
+        assert_eq!(b.ssh_key, PathBuf::from("/etc/briqyard/key"));
+        assert_eq!(b.script, PathBuf::from("/opt/bootstrap.sh"));
+        assert_eq!(b.release, "https://example/v1");
+        assert_eq!(b.pool_device, "/dev/nvme1n1");
+        assert_eq!(b.fleet_url, "https://fleet.example");
+        assert_eq!(b.max_attempts, 3);
+    }
+
+    #[test]
+    fn a_partial_file_keeps_the_other_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "token: t\nprovisioner:\n  kind: hetzner-robot\n");
+        let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
+        assert_eq!(cfg.token, "t");
+        assert_eq!(cfg.listen, "127.0.0.1:7430");
+        assert_eq!(cfg.provisioner.kind, "hetzner-robot");
+        assert!(
+            cfg.provisioner.dry_run,
+            "dry_run stays on when the file is silent"
+        );
+        assert_eq!(cfg.provisioner.max_hosts, 3);
+        assert_eq!(cfg.provisioner.bootstrap.max_attempts, 90);
+    }
+
+    #[test]
+    fn unknown_fields_are_refused() {
+        // A typo in a setting must not silently leave the default in force.
+        let dir = tempfile::tempdir().unwrap();
+        for (text, field) in [
+            ("tokne: t\n", "tokne"),
+            ("placement:\n  fill_ceilling: 0.5\n", "fill_ceilling"),
+            ("provisioner:\n  dry: false\n", "dry"),
+            ("provisioner:\n  bootstrap:\n    enable: true\n", "enable"),
+            ("provisioner:\n  scaleway:\n    secret: s\n", "secret"),
+            ("hosts:\n  - url: http://h\n    tokn: t\n", "tokn"),
+        ] {
+            let path = write(&dir, text);
+            let err = with_env(&[], || Config::load(Some(&path)).unwrap_err());
+            let msg = format!("{err:#}");
+            assert!(msg.contains("parse config"), "{msg}");
+            assert!(msg.contains(field), "{field} named in: {msg}");
+        }
+    }
+
+    #[test]
+    fn a_missing_or_broken_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("none.yaml");
+        let err = with_env(&[], || Config::load(Some(&missing)).unwrap_err());
+        assert!(format!("{err:#}").contains("read config"), "{err:#}");
+        let path = write(&dir, "listen: [\n");
+        let err = with_env(&[], || Config::load(Some(&path)).unwrap_err());
+        assert!(format!("{err:#}").contains("parse config"), "{err:#}");
+    }
+
+    #[test]
+    fn the_environment_overrides_the_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "provisioner:\n  hetzner:\n    user: file-user\n    password: file-pass\n  scaleway:\n    secret_key: file-key\n",
+        );
+        let set = [
+            ("HETZNER_ROBOT_USER", "env-user"),
+            ("HETZNER_ROBOT_PASSWORD", "env-pass"),
+            ("SCW_SECRET_KEY", "env-key"),
+        ];
+        let cfg = with_env(&set, || Config::load(Some(&path)).unwrap());
+        assert_eq!(cfg.provisioner.hetzner.user, "env-user");
+        assert_eq!(cfg.provisioner.hetzner.password, "env-pass");
+        assert_eq!(cfg.provisioner.scaleway.secret_key, "env-key");
+        let cfg = with_env(&set, || Config::load(None).unwrap());
+        assert_eq!(cfg.provisioner.hetzner.user, "env-user");
+        assert_eq!(cfg.provisioner.scaleway.secret_key, "env-key");
+        // One variable set leaves the others to the file.
+        let cfg = with_env(&[("SCW_SECRET_KEY", "env-key")], || {
+            Config::load(Some(&path)).unwrap()
+        });
+        assert_eq!(cfg.provisioner.hetzner.user, "file-user");
+        assert_eq!(cfg.provisioner.hetzner.password, "file-pass");
+        assert_eq!(cfg.provisioner.scaleway.secret_key, "env-key");
+        // Without any, the file stands.
+        let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
+        assert_eq!(cfg.provisioner.hetzner.user, "file-user");
+        assert_eq!(cfg.provisioner.scaleway.secret_key, "file-key");
+    }
+}

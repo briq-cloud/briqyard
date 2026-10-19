@@ -80,6 +80,8 @@ pub struct HetznerRobot {
     pub location: String,
     pub ssh_key_fingerprint: String,
     pub dry_run: bool,
+    /// The Robot API; tests point it at a stub.
+    pub base_url: String,
     http: reqwest::Client,
 }
 
@@ -99,6 +101,7 @@ impl HetznerRobot {
             location,
             ssh_key_fingerprint,
             dry_run,
+            base_url: "https://robot-ws.your-server.de".into(),
             http: reqwest::Client::new(),
         }
     }
@@ -142,7 +145,7 @@ impl Provisioner for HetznerRobot {
         ];
         let resp = self
             .http
-            .post("https://robot-ws.your-server.de/order/server/transaction")
+            .post(format!("{}/order/server/transaction", self.base_url))
             .basic_auth(&self.user, Some(&self.password))
             .form(&form)
             .send()
@@ -170,7 +173,8 @@ impl Provisioner for HetznerRobot {
         let resp = self
             .http
             .post(format!(
-                "https://robot-ws.your-server.de/server/{provider_id}/cancellation"
+                "{}/server/{provider_id}/cancellation",
+                self.base_url
             ))
             .basic_auth(&self.user, Some(&self.password))
             .form(&[("cancellation_date", "now")])
@@ -194,7 +198,8 @@ impl Provisioner for HetznerRobot {
         let resp = self
             .http
             .get(format!(
-                "https://robot-ws.your-server.de/order/server/transaction/{provider_id}"
+                "{}/order/server/transaction/{provider_id}",
+                self.base_url
             ))
             .basic_auth(&self.user, Some(&self.password))
             .send()
@@ -217,6 +222,8 @@ pub struct Scaleway {
     pub offer_id: String,
     pub os_id: String,
     pub dry_run: bool,
+    /// The Scaleway API; tests point it at a stub.
+    pub base_url: String,
     http: reqwest::Client,
 }
 
@@ -236,6 +243,7 @@ impl Scaleway {
             offer_id,
             os_id,
             dry_run,
+            base_url: "https://api.scaleway.com".into(),
             http: reqwest::Client::new(),
         }
     }
@@ -283,8 +291,8 @@ impl Provisioner for Scaleway {
         let resp = self
             .http
             .post(format!(
-                "https://api.scaleway.com/baremetal/v1/zones/{}/servers",
-                self.zone
+                "{}/baremetal/v1/zones/{}/servers",
+                self.base_url, self.zone
             ))
             .header("X-Auth-Token", &self.secret_key)
             .json(&body)
@@ -312,8 +320,8 @@ impl Provisioner for Scaleway {
         let resp = self
             .http
             .delete(format!(
-                "https://api.scaleway.com/baremetal/v1/zones/{}/servers/{provider_id}",
-                self.zone
+                "{}/baremetal/v1/zones/{}/servers/{provider_id}",
+                self.base_url, self.zone
             ))
             .header("X-Auth-Token", &self.secret_key)
             .send()
@@ -336,8 +344,8 @@ impl Provisioner for Scaleway {
         let resp = self
             .http
             .get(format!(
-                "https://api.scaleway.com/baremetal/v1/zones/{}/servers/{provider_id}",
-                self.zone
+                "{}/baremetal/v1/zones/{}/servers/{provider_id}",
+                self.base_url, self.zone
             ))
             .header("X-Auth-Token", &self.secret_key)
             .send()
@@ -351,5 +359,370 @@ impl Provisioner for Scaleway {
             return Ok(None);
         }
         Ok(srv.ips.first().map(|i| i.address.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Bytes;
+    use axum::extract::{Request, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    /// One request as the stub saw it.
+    #[derive(Clone, Debug)]
+    struct Seen {
+        method: String,
+        path: String,
+        authorization: String,
+        auth_token: String,
+        content_type: String,
+        body: String,
+    }
+
+    /// A provider API on loopback: records every request and answers the next canned reply;
+    /// an unexpected request answers 500 so the test fails on it.
+    struct Canned {
+        seen: Mutex<Vec<Seen>>,
+        replies: Mutex<VecDeque<(StatusCode, String)>>,
+    }
+
+    impl Canned {
+        async fn start(replies: Vec<(StatusCode, &str)>) -> (String, Arc<Canned>) {
+            let stub = Arc::new(Canned {
+                seen: Mutex::new(vec![]),
+                replies: Mutex::new(
+                    replies
+                        .into_iter()
+                        .map(|(s, b)| (s, b.to_string()))
+                        .collect(),
+                ),
+            });
+            let app = axum::Router::new()
+                .fallback(answer)
+                .with_state(stub.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            (url, stub)
+        }
+
+        fn seen(&self) -> Vec<Seen> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    fn header(req: &Request, name: &str) -> String {
+        req.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    async fn answer(State(stub): State<Arc<Canned>>, req: Request) -> axum::response::Response {
+        let mut seen = Seen {
+            method: req.method().to_string(),
+            path: req.uri().path().to_string(),
+            authorization: header(&req, "authorization"),
+            auth_token: header(&req, "x-auth-token"),
+            content_type: header(&req, "content-type"),
+            body: String::new(),
+        };
+        let body: Bytes = axum::body::to_bytes(req.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        seen.body = String::from_utf8_lossy(&body).into_owned();
+        stub.seen.lock().unwrap().push(seen);
+        // Popped into a local: a lock guard in the tail expression would make the future !Send.
+        let next = stub.replies.lock().unwrap().pop_front();
+        match next {
+            Some((status, body)) => (status, body).into_response(),
+            None => (StatusCode::INTERNAL_SERVER_ERROR, "no canned reply").into_response(),
+        }
+    }
+
+    fn hetzner(dry_run: bool, base_url: &str) -> HetznerRobot {
+        let mut h = HetznerRobot::new(
+            "#ws+user".into(),
+            "pa55".into(),
+            "AX102".into(),
+            "FSN1".into(),
+            "ab:cd".into(),
+            dry_run,
+        );
+        if !base_url.is_empty() {
+            h.base_url = base_url.into();
+        }
+        h
+    }
+
+    fn scaleway(dry_run: bool, base_url: &str) -> Scaleway {
+        let mut s = Scaleway::new(
+            "scw-secret".into(),
+            "proj-1".into(),
+            "fr-par-2".into(),
+            "offer-9".into(),
+            "os-ubuntu".into(),
+            dry_run,
+        );
+        if !base_url.is_empty() {
+            s.base_url = base_url.into();
+        }
+        s
+    }
+
+    #[test]
+    fn the_configuration_names_the_provisioner() {
+        let mut p = crate::config::Provisioner::default();
+        assert_eq!(build(&p).name(), "static");
+        p.kind = "hetzner-robot".into();
+        assert_eq!(build(&p).name(), "hetzner-robot");
+        p.kind = "scaleway".into();
+        assert_eq!(build(&p).name(), "scaleway");
+        p.kind = "anything else".into();
+        assert_eq!(build(&p).name(), "static", "an unknown kind adds nothing");
+        // Nothing points at a stub by default.
+        assert_eq!(
+            hetzner(true, "").base_url,
+            "https://robot-ws.your-server.de"
+        );
+        assert_eq!(scaleway(true, "").base_url, "https://api.scaleway.com");
+    }
+
+    #[tokio::test]
+    async fn the_static_provisioner_adds_and_releases_nothing() {
+        let err = Static.create("x").await.unwrap_err().to_string();
+        assert!(err.contains("cannot add hosts"), "{err}");
+        assert!(Static.release("srv").await.is_err());
+        assert_eq!(Static.lookup("srv").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn dry_runs_order_nothing() {
+        // No stub behind the URL: a call that reaches the network fails to connect.
+        let h = hetzner(true, "http://127.0.0.1:1");
+        let s = h.create("launch week").await.unwrap();
+        assert!(s.provider_id.starts_with("dry-run-"), "{}", s.provider_id);
+        assert_eq!(s.ip, None);
+        assert_eq!(s.note, "DRY RUN: would order AX102 in FSN1 (launch week)");
+        h.release(&s.provider_id).await.unwrap();
+        h.release("1234").await.unwrap();
+        assert_eq!(h.lookup(&s.provider_id).await.unwrap(), None);
+
+        let sc = scaleway(true, "http://127.0.0.1:1");
+        let s = sc.create("no slot").await.unwrap();
+        assert!(
+            s.provider_id.starts_with("dry-run-byard-"),
+            "{}",
+            s.provider_id
+        );
+        assert_eq!(s.ip, None);
+        assert!(
+            s.note.starts_with(
+                "DRY RUN: would create Elastic Metal offer offer-9 in fr-par-2 as byard-"
+            ),
+            "{}",
+            s.note
+        );
+        assert!(s.note.ends_with("(no slot)"), "{}", s.note);
+        sc.release(&s.provider_id).await.unwrap();
+        sc.release("srv-1").await.unwrap();
+        assert_eq!(sc.lookup(&s.provider_id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_live_provisioner_never_touches_a_dry_run_id() {
+        let (url, stub) = Canned::start(vec![]).await;
+        let h = hetzner(false, &url);
+        h.release("dry-run-1").await.unwrap();
+        assert_eq!(h.lookup("dry-run-1").await.unwrap(), None);
+        let s = scaleway(false, &url);
+        s.release("dry-run-byard-1").await.unwrap();
+        assert_eq!(s.lookup("dry-run-byard-1").await.unwrap(), None);
+        assert!(stub.seen().is_empty(), "no request for a dry-run id");
+    }
+
+    #[tokio::test]
+    async fn hetzner_orders_a_server() {
+        let (url, stub) = Canned::start(vec![(
+            StatusCode::CREATED,
+            r#"{"transaction":{"id":"B20261019-1","status":"in process","server_ip":null}}"#,
+        )])
+        .await;
+        let s = hetzner(false, &url).create("launch week").await.unwrap();
+        assert_eq!(s.provider_id, "B20261019-1");
+        assert_eq!(s.ip, None);
+        assert_eq!(s.note, "ordered, status in process");
+        let seen = stub.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, "POST");
+        assert_eq!(seen[0].path, "/order/server/transaction");
+        assert!(
+            seen[0].authorization.starts_with("Basic "),
+            "{}",
+            seen[0].authorization
+        );
+        assert_eq!(seen[0].content_type, "application/x-www-form-urlencoded");
+        for part in [
+            "product_id=AX102",
+            "location=FSN1",
+            "authorized_key%5B%5D=ab%3Acd",
+            "dist=Ubuntu+24.04+LTS+base",
+        ] {
+            assert!(seen[0].body.contains(part), "{part} in {}", seen[0].body);
+        }
+    }
+
+    #[tokio::test]
+    async fn hetzner_refusals_carry_the_body() {
+        let (url, _stub) = Canned::start(vec![
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":{"status":400,"code":"INVALID_INPUT","message":"product not available"}}"#,
+            ),
+            (StatusCode::OK, "<html>not json</html>"),
+            (StatusCode::CONFLICT, "already cancelled"),
+            (StatusCode::NOT_FOUND, "{}"),
+        ])
+        .await;
+        let h = hetzner(false, &url);
+        let err = h.create("x").await.unwrap_err().to_string();
+        assert!(err.starts_with("hetzner robot answered 400"), "{err}");
+        assert!(err.contains("product not available"), "{err}");
+        let err = format!("{:#}", h.create("x").await.unwrap_err());
+        assert!(err.contains("hetzner robot order response"), "{err}");
+        let err = h.release("1234").await.unwrap_err().to_string();
+        assert!(
+            err.contains("409") && err.contains("already cancelled"),
+            "{err}"
+        );
+        let err = h.lookup("1234").await.unwrap_err().to_string();
+        assert!(err.contains("404"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn hetzner_cancels_and_looks_up() {
+        let (url, stub) = Canned::start(vec![
+            (StatusCode::OK, "{}"),
+            (
+                StatusCode::OK,
+                r#"{"transaction":{"id":"B1","status":"in process"}}"#,
+            ),
+            (
+                StatusCode::OK,
+                r#"{"transaction":{"id":"B1","status":"ready","server_ip":""}}"#,
+            ),
+            (
+                StatusCode::OK,
+                r#"{"transaction":{"id":"B1","status":"ready","server_ip":"1.2.3.4"}}"#,
+            ),
+        ])
+        .await;
+        let h = hetzner(false, &url);
+        h.release("1234").await.unwrap();
+        assert_eq!(h.lookup("B1").await.unwrap(), None, "no address yet");
+        assert_eq!(
+            h.lookup("B1").await.unwrap(),
+            None,
+            "an empty address is none"
+        );
+        assert_eq!(h.lookup("B1").await.unwrap().as_deref(), Some("1.2.3.4"));
+        let seen = stub.seen();
+        assert_eq!(seen[0].method, "POST");
+        assert_eq!(seen[0].path, "/server/1234/cancellation");
+        assert_eq!(seen[0].body, "cancellation_date=now");
+        assert_eq!(seen[1].method, "GET");
+        assert_eq!(seen[1].path, "/order/server/transaction/B1");
+        assert!(seen.iter().all(|s| s.authorization.starts_with("Basic ")));
+    }
+
+    #[tokio::test]
+    async fn scaleway_creates_a_server() {
+        let (url, stub) = Canned::start(vec![(
+            StatusCode::OK,
+            r#"{"id":"srv-1","status":"delivering","ips":[]}"#,
+        )])
+        .await;
+        let s = scaleway(false, &url).create("no slot").await.unwrap();
+        assert_eq!(s.provider_id, "srv-1");
+        assert_eq!(s.ip, None);
+        assert_eq!(s.note, "created, status delivering");
+        let seen = stub.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, "POST");
+        assert_eq!(seen[0].path, "/baremetal/v1/zones/fr-par-2/servers");
+        assert_eq!(seen[0].auth_token, "scw-secret");
+        assert_eq!(seen[0].content_type, "application/json");
+        let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
+        assert_eq!(body["offer_id"], "offer-9");
+        assert_eq!(body["project_id"], "proj-1");
+        assert_eq!(body["install"]["os_id"], "os-ubuntu");
+        assert_eq!(body["install"]["hostname"], body["name"]);
+        assert!(body["name"].as_str().unwrap().starts_with("byard-"));
+        assert_eq!(body["tags"], serde_json::json!(["briqyard"]));
+    }
+
+    #[tokio::test]
+    async fn scaleway_refusals_carry_the_body() {
+        let (url, _stub) = Canned::start(vec![
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"message":"insufficient permissions","type":"permissions_denied"}"#,
+            ),
+            (StatusCode::NOT_FOUND, r#"{"message":"resource not found"}"#),
+            (StatusCode::INTERNAL_SERVER_ERROR, "oops"),
+        ])
+        .await;
+        let s = scaleway(false, &url);
+        let err = s.create("x").await.unwrap_err().to_string();
+        assert!(err.starts_with("scaleway answered 403"), "{err}");
+        assert!(err.contains("insufficient permissions"), "{err}");
+        let err = s.release("srv-1").await.unwrap_err().to_string();
+        assert!(
+            err.contains("404") && err.contains("resource not found"),
+            "{err}"
+        );
+        let err = s.lookup("srv-1").await.unwrap_err().to_string();
+        assert!(err.contains("500"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn scaleway_deletes_and_looks_up() {
+        let (url, stub) = Canned::start(vec![
+            (StatusCode::NO_CONTENT, ""),
+            (
+                StatusCode::OK,
+                r#"{"id":"srv-1","status":"delivering","ips":[{"address":"5.6.7.8"}]}"#,
+            ),
+            (StatusCode::OK, r#"{"id":"srv-1","status":"ready","ips":[]}"#),
+            (
+                StatusCode::OK,
+                r#"{"id":"srv-1","status":"ready","ips":[{"address":"5.6.7.8"},{"address":"5.6.7.9"}]}"#,
+            ),
+        ])
+        .await;
+        let s = scaleway(false, &url);
+        s.release("srv-1").await.unwrap();
+        assert_eq!(
+            s.lookup("srv-1").await.unwrap(),
+            None,
+            "an address before the server is ready is not one to bootstrap"
+        );
+        assert_eq!(
+            s.lookup("srv-1").await.unwrap(),
+            None,
+            "ready without an address"
+        );
+        assert_eq!(s.lookup("srv-1").await.unwrap().as_deref(), Some("5.6.7.8"));
+        let seen = stub.seen();
+        assert_eq!(seen[0].method, "DELETE");
+        assert_eq!(seen[0].path, "/baremetal/v1/zones/fr-par-2/servers/srv-1");
+        assert_eq!(seen[1].method, "GET");
+        assert_eq!(seen[1].path, "/baremetal/v1/zones/fr-par-2/servers/srv-1");
+        assert!(seen.iter().all(|s| s.auth_token == "scw-secret"));
     }
 }
