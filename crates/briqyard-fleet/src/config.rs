@@ -47,7 +47,7 @@ impl Default for Placement {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Provisioner {
-    /// static, hetzner-robot, scaleway
+    /// static, hetzner-robot, scaleway, ovh
     pub kind: String,
     /// Says what it would do and does nothing. The default.
     pub dry_run: bool,
@@ -59,6 +59,7 @@ pub struct Provisioner {
     pub idle_grace: String,
     pub hetzner: Hetzner,
     pub scaleway: Scaleway,
+    pub ovh: Ovh,
     pub bootstrap: Bootstrap,
 }
 
@@ -109,6 +110,7 @@ impl Default for Provisioner {
             idle_grace: "2h".into(),
             hetzner: Hetzner::default(),
             scaleway: Scaleway::default(),
+            ovh: Ovh::default(),
             bootstrap: Bootstrap::default(),
         }
     }
@@ -134,6 +136,42 @@ pub struct Scaleway {
     pub zone: String,
     pub offer_id: String,
     pub os_id: String,
+}
+
+/// OVHcloud dedicated servers, ordered through the API's cart.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Ovh {
+    /// API credentials; `OVH_APPLICATION_KEY` / `OVH_APPLICATION_SECRET` / `OVH_CONSUMER_KEY`
+    /// override these.
+    pub application_key: String,
+    pub application_secret: String,
+    pub consumer_key: String,
+    /// The plan code of the server to order (`25risem01-v2` for example).
+    pub plan_code: String,
+    /// `eco` (Kimsufi, So you Start, Rise) or `baremetal` (Advance, Scale).
+    pub range: String,
+    /// The data center the server is ordered in (`gra`, `rbx`, `sbg`...).
+    pub datacenter: String,
+    /// The name of an SSH key already in the account (`/me/sshKey`), installed with Ubuntu.
+    pub ssh_key_name: String,
+    /// The OVH subsidiary the order is made under.
+    pub subsidiary: String,
+}
+
+impl Default for Ovh {
+    fn default() -> Self {
+        Self {
+            application_key: String::new(),
+            application_secret: String::new(),
+            consumer_key: String::new(),
+            plan_code: String::new(),
+            range: "eco".into(),
+            datacenter: String::new(),
+            ssh_key_name: String::new(),
+            subsidiary: "FR".into(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -170,6 +208,15 @@ impl Config {
         if let Ok(v) = std::env::var("SCW_SECRET_KEY") {
             cfg.provisioner.scaleway.secret_key = v;
         }
+        if let Ok(v) = std::env::var("OVH_APPLICATION_KEY") {
+            cfg.provisioner.ovh.application_key = v;
+        }
+        if let Ok(v) = std::env::var("OVH_APPLICATION_SECRET") {
+            cfg.provisioner.ovh.application_secret = v;
+        }
+        if let Ok(v) = std::env::var("OVH_CONSUMER_KEY") {
+            cfg.provisioner.ovh.consumer_key = v;
+        }
         Ok(cfg)
     }
 }
@@ -179,10 +226,13 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    const ENV_VARS: [&str; 3] = [
+    const ENV_VARS: [&str; 6] = [
         "HETZNER_ROBOT_USER",
         "HETZNER_ROBOT_PASSWORD",
         "SCW_SECRET_KEY",
+        "OVH_APPLICATION_KEY",
+        "OVH_APPLICATION_SECRET",
+        "OVH_CONSUMER_KEY",
     ];
 
     /// `load` reads the process environment, which every test shares: one at a time, and each
@@ -236,6 +286,10 @@ mod tests {
         assert_eq!(p.idle_grace, "2h");
         assert_eq!(p.hetzner.user, "");
         assert_eq!(p.scaleway.secret_key, "");
+        assert_eq!(p.ovh.application_key, "");
+        assert_eq!(p.ovh.plan_code, "");
+        assert_eq!(p.ovh.range, "eco");
+        assert_eq!(p.ovh.subsidiary, "FR");
         let b = &p.bootstrap;
         assert!(!b.enabled);
         assert_eq!(b.ssh_user, "root");
@@ -283,6 +337,15 @@ provisioner:
     zone: fr-par-2
     offer_id: offer
     os_id: os
+  ovh:
+    application_key: ak
+    application_secret: as
+    consumer_key: ck
+    plan_code: 25risem01-v2
+    range: baremetal
+    datacenter: gra
+    ssh_key_name: fleet
+    subsidiary: IE
   bootstrap:
     enabled: true
     ssh_user: ubuntu
@@ -325,6 +388,14 @@ provisioner:
         assert_eq!(p.scaleway.zone, "fr-par-2");
         assert_eq!(p.scaleway.offer_id, "offer");
         assert_eq!(p.scaleway.os_id, "os");
+        assert_eq!(p.ovh.application_key, "ak");
+        assert_eq!(p.ovh.application_secret, "as");
+        assert_eq!(p.ovh.consumer_key, "ck");
+        assert_eq!(p.ovh.plan_code, "25risem01-v2");
+        assert_eq!(p.ovh.range, "baremetal");
+        assert_eq!(p.ovh.datacenter, "gra");
+        assert_eq!(p.ovh.ssh_key_name, "fleet");
+        assert_eq!(p.ovh.subsidiary, "IE");
         let b = &p.bootstrap;
         assert!(b.enabled);
         assert_eq!(b.ssh_user, "ubuntu");
@@ -362,6 +433,7 @@ provisioner:
             ("provisioner:\n  dry: false\n", "dry"),
             ("provisioner:\n  bootstrap:\n    enable: true\n", "enable"),
             ("provisioner:\n  scaleway:\n    secret: s\n", "secret"),
+            ("provisioner:\n  ovh:\n    plan: x\n", "plan"),
             ("hosts:\n  - url: http://h\n    tokn: t\n", "tokn"),
         ] {
             let path = write(&dir, text);
@@ -388,20 +460,27 @@ provisioner:
         let dir = tempfile::tempdir().unwrap();
         let path = write(
             &dir,
-            "provisioner:\n  hetzner:\n    user: file-user\n    password: file-pass\n  scaleway:\n    secret_key: file-key\n",
+            "provisioner:\n  hetzner:\n    user: file-user\n    password: file-pass\n  scaleway:\n    secret_key: file-key\n  ovh:\n    application_key: file-ak\n    application_secret: file-as\n    consumer_key: file-ck\n",
         );
         let set = [
             ("HETZNER_ROBOT_USER", "env-user"),
             ("HETZNER_ROBOT_PASSWORD", "env-pass"),
             ("SCW_SECRET_KEY", "env-key"),
+            ("OVH_APPLICATION_KEY", "env-ak"),
+            ("OVH_APPLICATION_SECRET", "env-as"),
+            ("OVH_CONSUMER_KEY", "env-ck"),
         ];
         let cfg = with_env(&set, || Config::load(Some(&path)).unwrap());
         assert_eq!(cfg.provisioner.hetzner.user, "env-user");
         assert_eq!(cfg.provisioner.hetzner.password, "env-pass");
         assert_eq!(cfg.provisioner.scaleway.secret_key, "env-key");
+        assert_eq!(cfg.provisioner.ovh.application_key, "env-ak");
+        assert_eq!(cfg.provisioner.ovh.application_secret, "env-as");
+        assert_eq!(cfg.provisioner.ovh.consumer_key, "env-ck");
         let cfg = with_env(&set, || Config::load(None).unwrap());
         assert_eq!(cfg.provisioner.hetzner.user, "env-user");
         assert_eq!(cfg.provisioner.scaleway.secret_key, "env-key");
+        assert_eq!(cfg.provisioner.ovh.consumer_key, "env-ck");
         // One variable set leaves the others to the file.
         let cfg = with_env(&[("SCW_SECRET_KEY", "env-key")], || {
             Config::load(Some(&path)).unwrap()
@@ -409,9 +488,13 @@ provisioner:
         assert_eq!(cfg.provisioner.hetzner.user, "file-user");
         assert_eq!(cfg.provisioner.hetzner.password, "file-pass");
         assert_eq!(cfg.provisioner.scaleway.secret_key, "env-key");
+        assert_eq!(cfg.provisioner.ovh.application_key, "file-ak");
+        assert_eq!(cfg.provisioner.ovh.application_secret, "file-as");
+        assert_eq!(cfg.provisioner.ovh.consumer_key, "file-ck");
         // Without any, the file stands.
         let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
         assert_eq!(cfg.provisioner.hetzner.user, "file-user");
         assert_eq!(cfg.provisioner.scaleway.secret_key, "file-key");
+        assert_eq!(cfg.provisioner.ovh.application_secret, "file-as");
     }
 }
