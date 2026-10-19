@@ -254,6 +254,139 @@ pub fn decode_frame<T: for<'de> Deserialize<'de>>(body: &[u8]) -> io::Result<T> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+
+    /// Parses `input` as a `T` and checks it serializes to exactly `expected`.
+    fn round_trip<T>(input: Value, expected: Value) -> T
+    where
+        T: Serialize + for<'de> Deserialize<'de>,
+    {
+        let v: T = serde_json::from_value(input.clone()).unwrap_or_else(|e| panic!("{input}: {e}"));
+        assert_eq!(serde_json::to_value(&v).unwrap(), expected);
+        v
+    }
+
+    fn same<T>(input: Value) -> T
+    where
+        T: Serialize + for<'de> Deserialize<'de>,
+    {
+        round_trip(input.clone(), input)
+    }
+
+    #[test]
+    fn constants() {
+        // The init listens on this port and the daemon writes the drive under these names.
+        assert_eq!(PORT, 7421);
+        assert_eq!(MAX_FRAME, 4 * 1024 * 1024);
+        assert_eq!(CONFIG_NAME, "config.json");
+        assert_eq!(FILES_PREFIX, "files/");
+    }
+
+    #[test]
+    fn config() {
+        let input = json!({
+            "hostname": "db", "ip": "10.64.1.2/24", "gateway": "10.64.1.1",
+            "dns": ["10.64.1.1"], "hosts": {"cache.internal": "10.64.1.3"},
+            "entrypoint": ["docker-entrypoint.sh"], "cmd": ["postgres"],
+            "env": {"POSTGRES_PASSWORD": "x"}, "workdir": "/", "user": "postgres",
+            "mounts": [{"device": "/dev/vdc", "path": "/var/lib/postgresql/data", "fstype": "ext4"}],
+            "files": [{"path": "/etc/app.conf", "mode": 384}],
+            "stop_timeout_sec": 10
+        });
+        let c: Config = same(input);
+        assert_eq!(
+            c.hosts.get("cache.internal").map(String::as_str),
+            Some("10.64.1.3")
+        );
+        assert_eq!(c.mounts[0].path, "/var/lib/postgresql/data");
+        assert_eq!(c.files[0].mode, 0o600);
+        // Only hosts has a default: a drive from an older daemon may leave it out, nothing else.
+        let c: Config = round_trip(
+            json!({
+                "hostname": "", "ip": "", "gateway": "", "dns": [], "entrypoint": [], "cmd": [],
+                "env": {}, "workdir": "", "user": "", "mounts": [], "files": [], "stop_timeout_sec": 0
+            }),
+            json!({
+                "hostname": "", "ip": "", "gateway": "", "dns": [], "hosts": {}, "entrypoint": [],
+                "cmd": [], "env": {}, "workdir": "", "user": "", "mounts": [], "files": [],
+                "stop_timeout_sec": 0
+            }),
+        );
+        assert!(c.hosts.is_empty());
+        assert!(serde_json::from_value::<Config>(json!({"hostname": "x"})).is_err());
+    }
+
+    #[test]
+    fn request_defaults() {
+        // Only op is required; the binary fields come back as empty base64.
+        let r: Request = round_trip(
+            json!({"op": "ping"}),
+            json!({
+                "op": "ping", "cmd": [], "env": {}, "cwd": "", "stdin": "", "timeout_ms": 0,
+                "path": "", "mode": 0, "data": "", "grace_sec": 0
+            }),
+        );
+        assert!(r.stdin.is_empty());
+        assert!(serde_json::from_value::<Request>(json!({"cmd": ["ls"]})).is_err());
+    }
+
+    #[test]
+    fn request_binary_fields() {
+        let r: Request = same(json!({
+            "op": "exec", "cmd": ["cat"], "env": {"A": "1"}, "cwd": "/tmp", "stdin": "aGk=",
+            "timeout_ms": 100, "path": "/etc/x", "mode": 420, "data": "AP8=", "grace_sec": 5
+        }));
+        assert_eq!(r.stdin, b"hi");
+        assert_eq!(r.data, [0u8, 0xff]);
+        assert_eq!(r.mode, 0o644);
+        assert!(
+            serde_json::from_value::<Request>(json!({"op": "put", "data": "not base64!"})).is_err()
+        );
+    }
+
+    #[test]
+    fn response_on_the_wire() {
+        // The kind is `type`; every other field has a default.
+        let r: Response = round_trip(
+            json!({"type": "exit", "code": 3, "timed_out": true}),
+            json!({
+                "type": "exit", "data": "", "code": 3, "timed_out": true, "message": "",
+                "uptime": 0.0, "main_pid": 0
+            }),
+        );
+        assert_eq!(r.kind, "exit");
+        let r: Response = same(json!({
+            "type": "pong", "data": "", "code": 0, "timed_out": false, "message": "",
+            "uptime": 12.5, "main_pid": 42
+        }));
+        assert_eq!(r.main_pid, 42);
+        let r: Response = same(json!({
+            "type": "stdout", "data": "aGVsbG8=", "code": 0, "timed_out": false, "message": "",
+            "uptime": 0.0, "main_pid": 0
+        }));
+        assert_eq!(r.data, b"hello");
+        assert!(serde_json::from_value::<Response>(json!({"kind": "ok"})).is_err());
+    }
+
+    #[test]
+    fn response_constructors() {
+        let r = Response::new("ok");
+        assert_eq!(r.kind, "ok");
+        assert!(r.data.is_empty() && r.message.is_empty() && r.code == 0);
+        let r = Response::error("no such file");
+        assert_eq!(
+            (r.kind.as_str(), r.message.as_str()),
+            ("error", "no such file")
+        );
+        let r = Response::chunk("stderr", b"oops".to_vec());
+        assert_eq!((r.kind.as_str(), &r.data[..]), ("stderr", &b"oops"[..]));
+        let r = Response::exit(137, true);
+        assert_eq!((r.kind.as_str(), r.code, r.timed_out), ("exit", 137, true));
+        assert_eq!(
+            serde_json::to_value(Response::chunk("file", vec![1, 2, 3])).unwrap()["data"],
+            json!("AQID")
+        );
+    }
 
     #[test]
     fn base64_round_trip() {
@@ -262,6 +395,42 @@ mod tests {
             assert_eq!(base64_decode(&e).unwrap(), s.as_bytes(), "{s:?} -> {e}");
         }
         assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+        // Every byte value, at every length modulo 3.
+        let all: Vec<u8> = (0..=255).collect();
+        for n in [254, 255, 256] {
+            let e = base64_encode(&all[..n]);
+            assert_eq!(e.len() % 4, 0);
+            assert_eq!(base64_decode(&e).unwrap(), &all[..n]);
+        }
+    }
+
+    #[test]
+    fn base64_padding() {
+        assert_eq!(base64_encode(b"h"), "aA==");
+        assert_eq!(base64_encode(b"hi"), "aGk=");
+        assert_eq!(base64_encode(b"hey"), "aGV5");
+        // Padding is optional on the way in.
+        assert_eq!(base64_decode("aGk=").unwrap(), b"hi");
+        assert_eq!(base64_decode("aGk").unwrap(), b"hi");
+        assert_eq!(base64_decode("aA==").unwrap(), b"h");
+        assert_eq!(base64_decode("aA").unwrap(), b"h");
+        assert_eq!(base64_decode("").unwrap(), b"");
+        assert_eq!(base64_decode("====").unwrap(), b"");
+    }
+
+    #[test]
+    fn base64_lenient_input() {
+        // The URL alphabet and whitespace, which a JSON client may send, are accepted.
+        assert_eq!(base64_decode("+/8=").unwrap(), [0xfb, 0xff]);
+        assert_eq!(base64_decode("-_8=").unwrap(), [0xfb, 0xff]);
+        assert_eq!(base64_decode("aGVs\nbG8=\r\n").unwrap(), b"hello");
+        assert_eq!(base64_decode("aGVs bG8=").unwrap(), b"hello");
+        // Anything else is refused and names the byte.
+        for bad in ["aGk!", "aGk*", "é", "aG.k"] {
+            let e = base64_decode(bad).unwrap_err();
+            assert!(e.starts_with("invalid base64 byte "), "{bad}: {e}");
+        }
+        assert_eq!(base64_decode("aGk!").unwrap_err(), "invalid base64 byte 33");
     }
 
     #[test]
@@ -274,8 +443,111 @@ mod tests {
             ..Default::default()
         };
         write_frame(&mut buf, &req).unwrap();
+        // 4-byte big-endian length, then the JSON.
+        let n = u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize;
+        assert_eq!(n, buf.len() - 4);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&buf[4..]).unwrap()["op"],
+            "exec"
+        );
         let back: Request = read_frame(&mut &buf[..]).unwrap();
         assert_eq!(back.cmd, vec!["ls"]);
         assert_eq!(back.stdin, b"x");
+        // Two frames back to back read one at a time.
+        let mut two = buf.clone();
+        write_frame(&mut two, &Response::exit(0, false)).unwrap();
+        let mut r = &two[..];
+        let _: Request = read_frame(&mut r).unwrap();
+        let resp: Response = read_frame(&mut r).unwrap();
+        assert_eq!(resp.kind, "exit");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn frames_sync_and_async_agree() {
+        let resp = Response::chunk("stdout", b"out".to_vec());
+        let encoded = encode_frame(&resp).unwrap();
+        let mut written = Vec::new();
+        write_frame(&mut written, &resp).unwrap();
+        assert_eq!(encoded, written);
+        let back: Response = decode_frame(&encoded[4..]).unwrap();
+        assert_eq!(back.data, b"out");
+        assert!(decode_frame::<Response>(b"{not json").is_err());
+        assert!(decode_frame::<Response>(b"").is_err());
+    }
+
+    #[test]
+    fn frame_of_zero_length() {
+        // A length of zero is a frame with no JSON in it: an error, not a default value.
+        let e = read_frame::<_, Request>(&mut &[0u8, 0, 0, 0][..]).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn frame_truncated() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &Response::new("ok")).unwrap();
+        // The header promises more than follows.
+        let short = &buf[..buf.len() - 3];
+        let e = read_frame::<_, Response>(&mut &short[..]).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+        // Not even a whole header.
+        let e = read_frame::<_, Response>(&mut &buf[..2]).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(read_frame::<_, Response>(&mut &[][..]).is_err());
+    }
+
+    #[test]
+    fn frame_too_long_is_refused_before_reading_it() {
+        // A header one past the limit is refused without allocating or reading the body.
+        let hdr = ((MAX_FRAME + 1) as u32).to_be_bytes();
+        let mut r = &hdr[..];
+        let e = read_frame::<_, Response>(&mut r).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(e.to_string(), "frame too large");
+        assert!(
+            r.is_empty(),
+            "the header was consumed, nothing more was asked for"
+        );
+        let hdr = u32::MAX.to_be_bytes();
+        assert!(read_frame::<_, Response>(&mut &hdr[..]).is_err());
+    }
+
+    /// A `get` request whose JSON is exactly `len` bytes.
+    fn request_of_len(len: usize) -> Request {
+        let base = serde_json::to_vec(&Request {
+            op: "get".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .len();
+        Request {
+            op: "get".into(),
+            path: "a".repeat(len - base),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn frame_at_the_limit() {
+        let at = request_of_len(MAX_FRAME);
+        assert_eq!(serde_json::to_vec(&at).unwrap().len(), MAX_FRAME);
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &at).unwrap();
+        assert_eq!(buf.len(), 4 + MAX_FRAME);
+        let back: Request = read_frame(&mut &buf[..]).unwrap();
+        assert_eq!(back.path.len(), at.path.len());
+        assert_eq!(encode_frame(&at).unwrap().len(), 4 + MAX_FRAME);
+
+        // One byte more is refused by both writers.
+        let over = request_of_len(MAX_FRAME + 1);
+        let mut buf = Vec::new();
+        let e = write_frame(&mut buf, &over).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert!(buf.is_empty(), "nothing is written for a refused frame");
+        assert_eq!(
+            encode_frame(&over).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }
