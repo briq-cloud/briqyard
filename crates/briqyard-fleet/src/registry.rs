@@ -108,6 +108,9 @@ pub struct Registry {
     pub tenants: HashMap<String, String>,
     /// machine id → host id, learned from creates and listings.
     pub machines: HashMap<String, String>,
+    /// When each tenant was pinned by a placement (not by a heartbeat).
+    #[serde(default)]
+    pub pinned_at: HashMap<String, DateTime<Utc>>,
 }
 
 impl Registry {
@@ -165,9 +168,24 @@ impl Registry {
         } else {
             None
         };
+        // The host's list is the truth for the tenants pinned to it: a pin whose tenant the host
+        // no longer has (removed on the host, or a leftover) goes, so the name can be placed again.
+        // A pin made at placement is younger than the machine it placed: the host lists the
+        // tenant only once the create has landed, so a fresh pin is kept whatever the host says.
+        let id = entry.id.clone();
+        let pinned_at = &self.pinned_at;
+        self.tenants.retain(|t, host| {
+            *host != id
+                || h.tenants.contains(t)
+                || pinned_at
+                    .get(t)
+                    .map(|at| now - *at < Duration::minutes(10))
+                    .unwrap_or(false)
+        });
         for t in h.tenants {
-            self.tenants.entry(t).or_insert_with(|| entry.id.clone());
+            self.tenants.entry(t).or_insert_with(|| id.clone());
         }
+        self.pinned_at.retain(|t, _| self.tenants.contains_key(t));
     }
 
     /// Draining hosts that have nothing left on them: ready to be released.
@@ -213,6 +231,7 @@ impl Registry {
             .max_by_key(|h| h.free_memory_mb())?;
         let id = best.id.clone();
         self.tenants.insert(tenant.to_string(), id.clone());
+        self.pinned_at.insert(tenant.to_string(), Utc::now());
         Some(id)
     }
 
@@ -353,6 +372,45 @@ mod tests {
         assert_eq!(h.token, "t0k");
         assert_eq!(url_host("http://[::1]:7420/x"), "[::1]");
         assert_eq!(url_host("10.0.0.5"), "10.0.0.5");
+    }
+
+    #[test]
+    fn a_heartbeat_drops_pins_the_host_no_longer_has() {
+        let now = Utc::now();
+        let mut reg = Registry::default();
+        let mut a = host("a", 1000, 0, 1);
+        a.tenants = vec!["t1".into(), "t2".into()];
+        reg.heartbeat(a, now);
+        reg.heartbeat(host("b", 1000, 500, 0), now);
+        reg.tenants.insert("tb".into(), "b".into());
+        // A placement just pinned t3 to a (the emptier host); a does not list it yet: the pin stays.
+        assert_eq!(
+            reg.place("t3", 10, 0, &Policy::default()).as_deref(),
+            Some("a")
+        );
+        let mut a = host("a", 1000, 0, 1);
+        a.tenants = vec!["t2".into()];
+        reg.heartbeat(a.clone(), now);
+        assert_eq!(reg.tenants.get("t1"), None, "t1 left host a");
+        assert_eq!(
+            reg.tenants.get("t3").map(String::as_str),
+            Some("a"),
+            "a fresh pin stays"
+        );
+        reg.pinned_at
+            .insert("t3".into(), now - Duration::minutes(11));
+        reg.heartbeat(a, now);
+        assert_eq!(
+            reg.tenants.get("t3"),
+            None,
+            "an old pin the host never confirmed goes"
+        );
+        assert_eq!(reg.tenants.get("t2").map(String::as_str), Some("a"));
+        assert_eq!(
+            reg.tenants.get("tb").map(String::as_str),
+            Some("b"),
+            "another host's pin stays"
+        );
     }
 
     #[test]
