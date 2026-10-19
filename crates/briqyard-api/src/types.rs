@@ -31,17 +31,27 @@ pub struct File {
 /// What the daemon does when the main process ends on its own.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestartPolicy {
-    /// "no", "on-failure" or "always".
+    /// "no", "on-failure" or "always" (default "on-failure").
+    #[serde(default = "default_policy")]
     pub policy: String,
-    #[serde(default)]
+    /// Default 3: a request that names the policy alone must not end up with no retries.
+    #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+}
+
+fn default_policy() -> String {
+    "on-failure".into()
+}
+
+fn default_max_retries() -> u32 {
+    3
 }
 
 impl Default for RestartPolicy {
     fn default() -> Self {
         Self {
-            policy: "on-failure".into(),
-            max_retries: 3,
+            policy: default_policy(),
+            max_retries: default_max_retries(),
         }
     }
 }
@@ -428,24 +438,27 @@ pub fn parse_sleep(s: &str) -> Result<Option<std::time::Duration>, String> {
     if s.is_empty() || s == "never" {
         return Ok(None);
     }
-    let (num, unit) = s.split_at(s.len() - 1);
-    let n: u64 = num
-        .parse()
-        .map_err(|_| format!("sleep {s:?}: want \"30m\", \"2h\", \"7d\" or \"never\""))?;
+    let bad = || format!("sleep {s:?}: want \"30m\", \"2h\", \"7d\" or \"never\"");
+    // The unit is the last character, not the last byte: splitting inside a multi-byte
+    // character would panic.
+    let (num, unit) = match s.char_indices().last() {
+        Some((i, _)) => s.split_at(i),
+        None => return Err(bad()),
+    };
+    let n: u64 = num.parse().map_err(|_| bad())?;
     if n == 0 {
         return Err(format!("sleep {s:?}: must be positive"));
     }
-    let secs = match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86400,
-        _ => {
-            return Err(format!(
-                "sleep {s:?}: want \"30m\", \"2h\", \"7d\" or \"never\""
-            ))
-        }
+    let per_unit = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        _ => return Err(bad()),
     };
+    let secs = n
+        .checked_mul(per_unit)
+        .ok_or_else(|| format!("sleep {s:?}: too long"))?;
     Ok(Some(std::time::Duration::from_secs(secs)))
 }
 
@@ -462,24 +475,560 @@ pub fn valid_name(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+
+    /// Parses `input` as a `T`, then checks it serializes to exactly `expected`: the field
+    /// names the API description promises, the defaults filled in, the skipped ones absent.
+    fn round_trip<T>(input: Value, expected: Value) -> T
+    where
+        T: Serialize + for<'de> Deserialize<'de>,
+    {
+        let v: T = serde_json::from_value(input.clone()).unwrap_or_else(|e| panic!("{input}: {e}"));
+        assert_eq!(serde_json::to_value(&v).unwrap(), expected);
+        v
+    }
+
+    /// `input` round-trips to itself.
+    fn same<T>(input: Value) -> T
+    where
+        T: Serialize + for<'de> Deserialize<'de>,
+    {
+        round_trip(input.clone(), input)
+    }
+
+    fn ts() -> DateTime<Utc> {
+        "2026-01-02T03:04:05Z".parse().unwrap()
+    }
 
     #[test]
-    fn sleep_windows() {
-        assert_eq!(parse_sleep("").unwrap(), None);
-        assert_eq!(parse_sleep("never").unwrap(), None);
-        assert_eq!(parse_sleep("30m").unwrap().unwrap().as_secs(), 1800);
-        assert_eq!(parse_sleep("7d").unwrap().unwrap().as_secs(), 7 * 86400);
-        for bad in ["0m", "x", "1y", "-1h"] {
-            assert!(parse_sleep(bad).is_err(), "{bad}");
+    fn size_and_capacity() {
+        let s: Size = same(json!({"vcpus": 2, "memory_mb": 1024}));
+        assert_eq!(s.vcpus, 2);
+        assert_eq!(s.memory_mb, 1024);
+        // Both fields are required: a size with no memory is refused.
+        assert!(serde_json::from_value::<Size>(json!({"vcpus": 2})).is_err());
+        let c: Capacity = same(json!({"memory_mb": 65536, "vcpus": 16}));
+        assert_eq!(
+            c,
+            Capacity {
+                memory_mb: 65536,
+                vcpus: 16
+            }
+        );
+        assert_eq!(
+            Capacity::default(),
+            Capacity {
+                memory_mb: 0,
+                vcpus: 0
+            }
+        );
+    }
+
+    #[test]
+    fn volume_spec() {
+        let v: VolumeSpec = same(json!({"size_gb": 10, "mount": "/data"}));
+        assert_eq!(v.mount, "/data");
+        assert!(serde_json::from_value::<VolumeSpec>(json!({"size_gb": 10})).is_err());
+    }
+
+    #[test]
+    fn file() {
+        // The mode is optional and absent from the output when not given.
+        let f: File = same(json!({"path": "/etc/app.conf", "base64": "aGk="}));
+        assert_eq!(f.mode, None);
+        let f: File = same(json!({"path": "/bin/run", "base64": "", "mode": "0755"}));
+        assert_eq!(f.mode.as_deref(), Some("0755"));
+        assert!(serde_json::from_value::<File>(json!({"path": "/x"})).is_err());
+    }
+
+    #[test]
+    fn restart_policy_defaults() {
+        // The description promises on-failure with 3 retries for whatever is left out.
+        let r: RestartPolicy = round_trip(
+            json!({"policy": "always"}),
+            json!({"policy": "always", "max_retries": 3}),
+        );
+        assert_eq!(r.max_retries, 3);
+        let r: RestartPolicy = round_trip(
+            json!({"max_retries": 0}),
+            json!({"policy": "on-failure", "max_retries": 0}),
+        );
+        assert_eq!(r.policy, "on-failure");
+        let r: RestartPolicy =
+            round_trip(json!({}), json!({"policy": "on-failure", "max_retries": 3}));
+        assert_eq!(r, RestartPolicy::default());
+        let r: RestartPolicy = same(json!({"policy": "no", "max_retries": 5}));
+        assert_eq!(r.max_retries, 5);
+    }
+
+    #[test]
+    fn fork_spec() {
+        let f: ForkSpec = round_trip(
+            json!({"machine_id": "m1"}),
+            json!({"machine_id": "m1", "copy": ""}),
+        );
+        assert_eq!(f.copy, "");
+        let f: ForkSpec = same(json!({"machine_id": "m1", "copy": "config"}));
+        assert_eq!(f.copy, "config");
+        assert!(serde_json::from_value::<ForkSpec>(json!({"copy": "disk"})).is_err());
+    }
+
+    #[test]
+    fn exit() {
+        let e: Exit = same(json!({
+            "code": 137, "oom_killed": true, "at": "2026-01-02T03:04:05Z", "restarting": false
+        }));
+        assert_eq!(e.code, 137);
+        assert!(e.oom_killed);
+        assert_eq!(e.at, ts());
+    }
+
+    #[test]
+    fn create_machine_request_minimal() {
+        // tenant, name and size are enough; the collections come back empty and the
+        // optional parts stay out of the output.
+        let r: CreateMachineRequest = round_trip(
+            json!({"tenant": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}}),
+            json!({
+                "tenant": "t1", "name": "db", "image": "",
+                "env": {}, "files": [], "size": {"vcpus": 1, "memory_mb": 256},
+                "ports": [], "sleep": "", "metadata": {}
+            }),
+        );
+        assert_eq!(r.entrypoint, None);
+        assert_eq!(r.cmd, None);
+        assert_eq!(r.volume, None);
+        assert_eq!(r.restart, None);
+        assert_eq!(r.start, None);
+        assert!(r.fork.is_none());
+        for missing in [
+            json!({"name": "db", "size": {"vcpus": 1, "memory_mb": 256}}),
+            json!({"tenant": "t1", "size": {"vcpus": 1, "memory_mb": 256}}),
+            json!({"tenant": "t1", "name": "db"}),
+        ] {
+            assert!(
+                serde_json::from_value::<CreateMachineRequest>(missing.clone()).is_err(),
+                "{missing}"
+            );
         }
     }
 
     #[test]
+    fn create_machine_request_full() {
+        let input = json!({
+            "tenant": "t1", "name": "web", "image": "docker.io/library/nginx:1.27",
+            "entrypoint": ["/docker-entrypoint.sh"], "cmd": ["nginx", "-g", "daemon off;"],
+            "env": {"A": "1", "B": "2"},
+            "files": [{"path": "/etc/motd", "base64": "aGk=", "mode": "0600"}],
+            "size": {"vcpus": 2, "memory_mb": 1024},
+            "volume": {"size_gb": 5, "mount": "/data"},
+            "ports": [80, 443], "sleep": "30m",
+            "restart": {"policy": "always", "max_retries": 0},
+            "metadata": {"briq": "bq_1"}, "start": false,
+            "fork": {"machine_id": "m0", "copy": "disk"}
+        });
+        let r: CreateMachineRequest = same(input);
+        assert_eq!(
+            r.cmd.as_deref(),
+            Some(&["nginx", "-g", "daemon off;"].map(String::from)[..])
+        );
+        assert_eq!(r.env.get("B").map(String::as_str), Some("2"));
+        assert_eq!(r.files[0].mode.as_deref(), Some("0600"));
+        assert_eq!(r.ports, vec![80, 443]);
+        assert_eq!(r.start, Some(false));
+        assert_eq!(r.fork.as_ref().map(|f| f.machine_id.as_str()), Some("m0"));
+    }
+
+    #[test]
+    fn machine_minimal() {
+        let input = json!({
+            "id": "m1", "tenant": "t1", "name": "db", "image": "postgres:17",
+            "state": "running", "hostname": "db.internal", "machine_host": "m1.vm.internal",
+            "size": {"vcpus": 1, "memory_mb": 512}, "sleep": "never",
+            "restart": {"policy": "no", "max_retries": 0},
+            "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:05Z"
+        });
+        let mut expected = input.clone();
+        // What a reader always gets, even when nothing was set.
+        expected["ports"] = json!([]);
+        expected["metadata"] = json!({});
+        expected["endpoints"] = json!([]);
+        expected["suspended"] = json!(false);
+        let m: Machine = round_trip(input, expected);
+        assert_eq!(m.state, state::RUNNING);
+        assert_eq!(m.image_digest, "");
+        assert!(m.exit.is_none());
+        assert_eq!(m.started_at, None);
+        assert_eq!(m.sleeps_at, None);
+        assert_eq!(m.host, "");
+    }
+
+    #[test]
+    fn machine_full() {
+        let input = json!({
+            "id": "m1", "tenant": "t1", "name": "db", "image": "postgres:17",
+            "image_digest": "sha256:abc", "state": "stopped", "stopped_reason": "exit",
+            "exit": {"code": 1, "oom_killed": false, "at": "2026-01-02T03:04:05Z", "restarting": true},
+            "error": "boom", "ip": "10.64.0.2",
+            "hostname": "db.internal", "machine_host": "m1.vm.internal",
+            "size": {"vcpus": 1, "memory_mb": 512},
+            "volume": {"size_gb": 5, "mount": "/var/lib/postgresql/data"},
+            "ports": [5432], "sleep": "30m",
+            "restart": {"policy": "on-failure", "max_retries": 3},
+            "metadata": {"stack": "s1"},
+            "endpoints": [{
+                "id": "e1", "machine_id": "m1", "port": 5432, "protocol": "tcp",
+                "host_port": 20001, "address": "1.2.3.4:20001", "created_at": "2026-01-02T03:04:05Z"
+            }],
+            "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:05Z",
+            "started_at": "2026-01-02T03:04:05Z", "stopped_at": "2026-01-02T03:04:05Z",
+            "last_used_at": "2026-01-02T03:04:05Z", "sleeps_at": "2026-01-02T03:34:05Z",
+            "suspended": true, "host": "h1"
+        });
+        let m: Machine = same(input);
+        assert_eq!(m.stopped_reason, stop::EXIT);
+        assert_eq!(m.exit.as_ref().map(|e| e.code), Some(1));
+        assert_eq!(m.endpoints[0].host_port, Some(20001));
+        assert_eq!(m.sleeps_at.map(|t| (t - ts()).num_minutes()), Some(30));
+        assert!(m.suspended);
+    }
+
+    #[test]
+    fn endpoint() {
+        // A TCP endpoint carries host_port and no host; an HTTP one the reverse.
+        let e: Endpoint = same(json!({
+            "id": "e1", "machine_id": "m1", "port": 5432, "protocol": "tcp",
+            "host_port": 20001, "address": "1.2.3.4:20001", "created_at": "2026-01-02T03:04:05Z"
+        }));
+        assert_eq!(e.host, "");
+        let e: Endpoint = same(json!({
+            "id": "e2", "machine_id": "m1", "port": 8080, "protocol": "http",
+            "host": "app-ab12.example.test", "address": "http://app-ab12.example.test",
+            "created_at": "2026-01-02T03:04:05Z"
+        }));
+        assert_eq!(e.host_port, None);
+    }
+
+    #[test]
+    fn create_endpoint_request() {
+        let r: CreateEndpointRequest = round_trip(
+            json!({"port": 80}),
+            json!({"port": 80, "protocol": "", "host": ""}),
+        );
+        assert_eq!(r.port, 80);
+        let r: CreateEndpointRequest = same(json!({"port": 80, "protocol": "http", "host": "app"}));
+        assert_eq!(r.host, "app");
+        assert!(
+            serde_json::from_value::<CreateEndpointRequest>(json!({"protocol": "tcp"})).is_err()
+        );
+        // A port is 16 bits.
+        assert!(serde_json::from_value::<CreateEndpointRequest>(json!({"port": 70000})).is_err());
+    }
+
+    #[test]
+    fn exec_request_defaults() {
+        let r: ExecRequest = round_trip(
+            json!({"cmd": ["ls", "-l"]}),
+            json!({
+                "cmd": ["ls", "-l"], "env": {}, "cwd": "", "stdin": "",
+                "timeout_ms": 0, "wake": true
+            }),
+        );
+        assert!(r.wake, "wake defaults to true");
+        assert_eq!(r.timeout_ms, 0);
+        let r: ExecRequest = same(json!({
+            "cmd": ["cat"], "env": {"X": "1"}, "cwd": "/tmp", "stdin": "hi",
+            "timeout_ms": 5000, "wake": false
+        }));
+        assert!(!r.wake);
+        assert_eq!(r.stdin, "hi");
+        assert!(serde_json::from_value::<ExecRequest>(json!({"wake": true})).is_err());
+        // ExecRequest::default() is not what the wire gives: the derive leaves wake false, so
+        // code that builds one by hand must set it.
+        assert!(!ExecRequest::default().wake);
+    }
+
+    #[test]
+    fn exec_result() {
+        let r: ExecResult = same(json!({
+            "stdout": "ok\n", "stderr": "", "exit_code": 0, "timed_out": false
+        }));
+        assert_eq!(r.exit_code, 0);
+        assert!(serde_json::from_value::<ExecResult>(json!({"stdout": "x"})).is_err());
+    }
+
+    #[test]
+    fn files() {
+        let p: PutFileRequest = same(json!({"path": "/etc/x", "base64": "aGk="}));
+        assert_eq!(p.mode, None);
+        let p: PutFileRequest = same(json!({"path": "/etc/x", "base64": "aGk=", "mode": "0600"}));
+        assert_eq!(p.mode.as_deref(), Some("0600"));
+        let f: FileResponse = same(json!({"path": "/etc/x", "base64": "aGk="}));
+        assert_eq!(f.base64, "aGk=");
+    }
+
+    #[test]
+    fn logs() {
+        let l: LogsResponse = round_trip(
+            json!({"lines": [{"ts": "2026-01-02T03:04:05Z", "line": "[briqyard] started pid=1"}]}),
+            json!({"lines": [{"ts": "2026-01-02T03:04:05Z", "line": "[briqyard] started pid=1"}]}),
+        );
+        assert_eq!(l.next, "");
+        assert_eq!(l.lines[0].ts, ts());
+        let l: LogsResponse = same(json!({"lines": [], "next": "42"}));
+        assert_eq!(l.next, "42");
+    }
+
+    #[test]
+    fn update_machine_request() {
+        // Absent keeps the current value, so absent must stay absent on the wire.
+        let u: UpdateMachineRequest = same(json!({}));
+        assert_eq!(u.sleep, None);
+        assert_eq!(u.metadata, None);
+        let u: UpdateMachineRequest = same(json!({"sleep": "3h"}));
+        assert_eq!(u.sleep.as_deref(), Some("3h"));
+        assert_eq!(u.metadata, None);
+        let u: UpdateMachineRequest = same(json!({"metadata": {}}));
+        assert_eq!(u.metadata, Some(BTreeMap::new()));
+    }
+
+    #[test]
+    fn stop_request() {
+        let s: StopRequest = round_trip(json!({}), json!({"suspend": false, "timeout_sec": 0}));
+        assert!(!s.suspend);
+        let s: StopRequest = same(json!({"suspend": true, "timeout_sec": 30}));
+        assert_eq!(s.timeout_sec, 30);
+    }
+
+    #[test]
+    fn snapshot_and_tenant() {
+        let s: Snapshot = same(json!({
+            "id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z"
+        }));
+        assert_eq!(s.machine_id, "m1");
+        let t: Tenant = round_trip(
+            json!({"id": "t1", "created_at": "2026-01-02T03:04:05Z"}),
+            json!({
+                "id": "t1", "subnet": "", "gateway": "", "machines": 0,
+                "created_at": "2026-01-02T03:04:05Z"
+            }),
+        );
+        assert_eq!(t.host, "");
+        let t: Tenant = same(json!({
+            "id": "t1", "subnet": "10.64.1.0/24", "gateway": "10.64.1.1", "machines": 2,
+            "created_at": "2026-01-02T03:04:05Z", "host": "h1"
+        }));
+        assert_eq!(t.machines, 2);
+    }
+
+    #[test]
+    fn machine_stats() {
+        let s: MachineStats = same(json!({
+            "state": "running", "cpu_usec": 123456, "memory_bytes": 104857600,
+            "uptime_sec": 60, "disk_bytes": 2147483648u64
+        }));
+        assert_eq!(s.disk_bytes, 2 << 30);
+    }
+
+    #[test]
+    fn image_ref_field() {
+        // The reference is `ref` on the wire (a keyword in Rust, hence the rename).
+        let i: Image = same(json!({
+            "key": "k", "ref": "docker.io/library/postgres:17", "digest": "sha256:abc",
+            "size_gb": 2, "built_at": "2026-01-02T03:04:05Z", "machines": 1
+        }));
+        assert_eq!(i.reference, "docker.io/library/postgres:17");
+        assert!(serde_json::from_value::<Image>(json!({
+            "key": "k", "reference": "x", "digest": "d", "size_gb": 2,
+            "built_at": "2026-01-02T03:04:05Z", "machines": 1
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn host() {
+        let input = json!({
+            "id": "h1", "url": "http://10.0.0.5:7420", "state": "ready",
+            "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 1024, "vcpus": 2},
+            "machines": 2, "last_seen": "2026-01-02T03:04:05Z"
+        });
+        let mut expected = input.clone();
+        expected["region"] = json!("");
+        expected["provider"] = json!("");
+        expected["tenants"] = json!([]);
+        expected["version"] = json!("");
+        let h: Host = round_trip(input, expected);
+        assert_eq!(h.note, "");
+        let h: Host = same(json!({
+            "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1", "provider": "hetzner-robot",
+            "state": "draining", "capacity": {"memory_mb": 65536, "vcpus": 16},
+            "used": {"memory_mb": 1024, "vcpus": 2}, "machines": 2, "tenants": ["t1", "t2"],
+            "last_seen": "2026-01-02T03:04:05Z", "version": "0.1.0", "note": "ordered"
+        }));
+        assert_eq!(h.tenants, vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn host_requests() {
+        let o: OrderHostRequest = round_trip(json!({}), json!({"reason": ""}));
+        assert_eq!(o.reason, "");
+        let r: RegisterHostRequest = round_trip(
+            json!({
+                "id": "h1", "url": "http://10.0.0.5:7420",
+                "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
+                "machines": 0
+            }),
+            json!({
+                "id": "h1", "url": "http://10.0.0.5:7420", "region": "",
+                "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
+                "machines": 0, "tenants": [], "version": "", "disk_free_mb": 0, "api_token": ""
+            }),
+        );
+        assert_eq!(r.api_token, "");
+        let r: RegisterHostRequest = same(json!({
+            "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1",
+            "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 512, "vcpus": 1},
+            "machines": 1, "tenants": ["t1"], "version": "0.1.0", "disk_free_mb": 100000,
+            "api_token": "secret"
+        }));
+        assert_eq!(r.disk_free_mb, 100000);
+        assert!(serde_json::from_value::<RegisterHostRequest>(json!({"id": "h1"})).is_err());
+    }
+
+    #[test]
+    fn status() {
+        let s: Status = round_trip(
+            json!({
+                "version": "0.1.0", "host_id": "h1",
+                "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
+                "machines": 3, "running": 1
+            }),
+            json!({
+                "version": "0.1.0", "host_id": "h1",
+                "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
+                "machines": 3, "running": 1, "disk_free_mb": 0
+            }),
+        );
+        assert_eq!(s.running, 1);
+    }
+
+    #[test]
+    fn api_error() {
+        // request_id is left out when the error has none.
+        let e: ApiError = same(json!({"error": "no such machine", "code": "not_found"}));
+        assert_eq!(e.request_id, "");
+        let e: ApiError = same(json!({"error": "boom", "code": "internal", "request_id": "r1"}));
+        assert_eq!(e.request_id, "r1");
+    }
+
+    #[test]
+    fn state_and_stop_constants() {
+        // What the description enumerates, byte for byte.
+        assert_eq!(
+            [
+                state::CREATED,
+                state::STARTING,
+                state::RUNNING,
+                state::STOPPING,
+                state::STOPPED,
+                state::DESTROYING,
+                state::ERROR
+            ],
+            [
+                "created",
+                "starting",
+                "running",
+                "stopping",
+                "stopped",
+                "destroying",
+                "error"
+            ]
+        );
+        assert_eq!(
+            [stop::USER, stop::IDLE, stop::EXIT],
+            ["user", "idle", "exit"]
+        );
+    }
+
+    #[test]
+    fn sleep_windows() {
+        assert_eq!(parse_sleep("").unwrap(), None);
+        assert_eq!(parse_sleep("   ").unwrap(), None);
+        assert_eq!(parse_sleep("never").unwrap(), None);
+        assert_eq!(parse_sleep(" never ").unwrap(), None);
+        let secs = |s: &str| parse_sleep(s).unwrap().unwrap().as_secs();
+        assert_eq!(secs("45s"), 45);
+        assert_eq!(secs("30m"), 1800);
+        assert_eq!(secs("2h"), 7200);
+        assert_eq!(secs("7d"), 7 * 86400);
+        assert_eq!(secs(" 1m "), 60);
+        for bad in [
+            "0m", "0s", "0d", "x", "m", "1", "1y", "-1h", "1.5h", "30 m", "1h30m", "NEVER", "1M",
+        ] {
+            assert!(parse_sleep(bad).is_err(), "{bad}");
+        }
+        assert!(parse_sleep("0m").unwrap_err().contains("positive"));
+        assert!(parse_sleep("1y").unwrap_err().contains("\"30m\""));
+    }
+
+    #[test]
+    fn sleep_windows_do_not_panic() {
+        // A unit that is not one byte long used to split the string inside a character.
+        for bad in ["1é", "é", "30\u{200b}", "1時"] {
+            assert!(parse_sleep(bad).is_err(), "{bad}");
+        }
+        // A count past u64 is refused; one whose seconds would overflow too, instead of
+        // wrapping to a short window in release builds.
+        assert!(parse_sleep("99999999999999999999s").is_err());
+        assert_eq!(
+            parse_sleep(&format!("{}s", u64::MAX))
+                .unwrap()
+                .unwrap()
+                .as_secs(),
+            u64::MAX
+        );
+        assert!(parse_sleep(&format!("{}m", u64::MAX))
+            .unwrap_err()
+            .contains("too long"));
+        assert!(parse_sleep(&format!("{}d", u64::MAX / 86400 + 1)).is_err());
+        assert_eq!(
+            secs_of(&format!("{}d", u64::MAX / 86400)),
+            (u64::MAX / 86400) * 86400
+        );
+    }
+
+    fn secs_of(s: &str) -> u64 {
+        parse_sleep(s).unwrap().unwrap().as_secs()
+    }
+
+    #[test]
     fn names() {
-        for ok in ["db", "my-app", "a1", "x"] {
+        for ok in [
+            "db",
+            "my-app",
+            "a1",
+            "x",
+            "0",
+            "a-b-c",
+            "a--b",
+            &"a".repeat(63),
+        ] {
             assert!(valid_name(ok), "{ok}");
         }
-        for bad in ["", "-a", "a-", "A", "a.b", "a_b"] {
+        for bad in [
+            "",
+            "-a",
+            "a-",
+            "-",
+            "A",
+            "aB",
+            "a.b",
+            "a_b",
+            "a b",
+            "é",
+            "a/b",
+            &"a".repeat(64),
+        ] {
             assert!(!valid_name(bad), "{bad}");
         }
     }
