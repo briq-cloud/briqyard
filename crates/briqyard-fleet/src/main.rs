@@ -123,7 +123,10 @@ async fn run(args: Args) -> Result<()> {
         cfg: cfg.clone(),
         reg: Mutex::new(reg),
         policy,
+        // A forwarded call may legitimately run for minutes (an exec, a create pulling an
+        // image); a host that does not even accept the connection is given five seconds.
         http: reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(900))
             .build()?,
         state_path,
