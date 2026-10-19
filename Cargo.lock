@@ -228,7 +228,6 @@ dependencies = [
  "briqyard-api",
  "chrono",
  "clap",
- "http-body-util",
  "reqwest",
  "serde",
  "serde_json",

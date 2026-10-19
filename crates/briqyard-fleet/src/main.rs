@@ -135,7 +135,24 @@ async fn run(args: Args) -> Result<()> {
     tokio::spawn(poll_static_hosts(state.clone()));
     tokio::spawn(scaler(state.clone()));
     tokio::spawn(bootstrap::run(state.clone()));
-    let app = Router::new()
+    let app = app(state);
+    let listener = tokio::net::TcpListener::bind(&cfg.listen)
+        .await
+        .with_context(|| format!("listen {}", cfg.listen))?;
+    tracing::info!(
+        addr = cfg.listen,
+        version = env!("CARGO_PKG_VERSION"),
+        provisioner = cfg.provisioner.kind,
+        dry_run = cfg.provisioner.dry_run,
+        "briqyard-fleet listening"
+    );
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// The HTTP API: every route, behind the bearer check.
+fn app(state: Arc<AppState>) -> Router {
+    Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/v1/status", get(status))
         .route("/v1/hosts", get(list_hosts))
@@ -152,19 +169,7 @@ async fn run(args: Args) -> Result<()> {
         .route("/v1/machines/:id/*rest", any(by_machine))
         .route("/v1/endpoints/:id", any(by_endpoint))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))
-        .with_state(state);
-    let listener = tokio::net::TcpListener::bind(&cfg.listen)
-        .await
-        .with_context(|| format!("listen {}", cfg.listen))?;
-    tracing::info!(
-        addr = cfg.listen,
-        version = env!("CARGO_PKG_VERSION"),
-        provisioner = cfg.provisioner.kind,
-        dry_run = cfg.provisioner.dry_run,
-        "briqyard-fleet listening"
-    );
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(state)
 }
 
 fn err(status: StatusCode, code: &str, msg: impl Into<String>) -> Response {
@@ -436,37 +441,44 @@ async fn get_json<T: serde::de::DeserializeOwned>(
 /// Static hosts send no heartbeat of their own; the fleet asks them.
 async fn poll_static_hosts(st: Arc<AppState>) {
     loop {
-        // From the configuration, not the registry: a static host forgotten through the API
-        // is back on the next poll; it leaves the fleet by leaving the configuration.
-        let now = Utc::now();
-        let hosts: Vec<HostRec> = st.cfg.hosts.iter().map(|h| static_host(h, now)).collect();
-        let mut unseen = false;
-        for h in hosts {
-            if let Some(s) = get_json::<api::Status>(&st, &h, "/v1/status").await {
-                let tenants: Vec<String> = get_json::<Vec<api::Tenant>>(&st, &h, "/v1/tenants")
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|t| t.id)
-                    .collect();
-                let now = Utc::now();
-                let mut rec = h.clone();
-                rec.capacity = s.capacity;
-                rec.used = s.used;
-                rec.machines = s.machines;
-                rec.tenants = tenants;
-                rec.version = s.version;
-                rec.disk_free_mb = s.disk_free_mb;
-                st.reg.lock().unwrap().heartbeat(rec, now);
-            } else if h.capacity.memory_mb == 0 {
-                // Never answered yet (it may be starting with us): ask again soon.
-                unseen = true;
-            }
-        }
-        st.reg.lock().unwrap().sweep(&st.policy, Utc::now());
-        st.save();
+        let unseen = poll_static_hosts_once(&st).await;
         tokio::time::sleep(std::time::Duration::from_secs(if unseen { 2 } else { 15 })).await;
     }
+}
+
+/// One round of the poll: every static host of the configuration is asked for its status and
+/// tenants, then silent hosts are marked down. True when a host has never answered yet.
+async fn poll_static_hosts_once(st: &AppState) -> bool {
+    // From the configuration, not the registry: a static host forgotten through the API
+    // is back on the next poll; it leaves the fleet by leaving the configuration.
+    let now = Utc::now();
+    let hosts: Vec<HostRec> = st.cfg.hosts.iter().map(|h| static_host(h, now)).collect();
+    let mut unseen = false;
+    for h in hosts {
+        if let Some(s) = get_json::<api::Status>(st, &h, "/v1/status").await {
+            let tenants: Vec<String> = get_json::<Vec<api::Tenant>>(st, &h, "/v1/tenants")
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| t.id)
+                .collect();
+            let now = Utc::now();
+            let mut rec = h.clone();
+            rec.capacity = s.capacity;
+            rec.used = s.used;
+            rec.machines = s.machines;
+            rec.tenants = tenants;
+            rec.version = s.version;
+            rec.disk_free_mb = s.disk_free_mb;
+            st.reg.lock().unwrap().heartbeat(rec, now);
+        } else if h.capacity.memory_mb == 0 {
+            // Never answered yet (it may be starting with us): ask again soon.
+            unseen = true;
+        }
+    }
+    st.reg.lock().unwrap().sweep(&st.policy, Utc::now());
+    st.save();
+    unseen
 }
 
 // --- the autoscaler ---
@@ -866,3 +878,6 @@ async fn by_endpoint(
         format!("endpoint {id} not found"),
     )
 }
+
+#[cfg(test)]
+mod tests;
