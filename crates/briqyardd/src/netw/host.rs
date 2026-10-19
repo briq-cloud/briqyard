@@ -81,6 +81,11 @@ pub fn enable_forwarding() -> Result<()> {
 /// The interface of the host's default route.
 pub async fn default_egress_interface() -> Result<String> {
     let out = ip(&["-4", "route", "show", "default"]).await?;
+    default_route_device(&out)
+}
+
+/// The device of the first default route in `ip -4 route show default` output.
+fn default_route_device(out: &str) -> Result<String> {
     for line in out.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
         if let Some(i) = f.iter().position(|w| *w == "dev") {
@@ -90,4 +95,34 @@ pub async fn default_egress_interface() -> Result<String> {
         }
     }
     Err(anyhow!("no default route"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_route() {
+        assert_eq!(
+            default_route_device(
+                "default via 192.168.64.1 dev eth0 proto dhcp src 192.168.64.3 metric 100 \n"
+            )
+            .unwrap(),
+            "eth0"
+        );
+        // Several default routes: the first one, which the kernel prefers (lowest metric first).
+        let two = "default via 10.0.0.1 dev enp5s0 proto static metric 100\ndefault via 10.0.1.1 dev wlan0 proto dhcp metric 600\n";
+        assert_eq!(default_route_device(two).unwrap(), "enp5s0");
+        // A line without a device (a blackhole) does not count; the next one does.
+        let hole = "blackhole default\ndefault via 10.0.0.1 dev br0\n";
+        assert_eq!(default_route_device(hole).unwrap(), "br0");
+    }
+
+    #[test]
+    fn no_default_route() {
+        for out in ["", "\n", "default via 10.0.0.1 dev"] {
+            let err = default_route_device(out).unwrap_err();
+            assert_eq!(err.to_string(), "no default route", "{out:?}");
+        }
+    }
 }
