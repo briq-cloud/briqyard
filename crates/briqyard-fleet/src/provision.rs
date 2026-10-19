@@ -9,6 +9,7 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::sync::Mutex;
 
 /// A server a provisioner made.
 #[derive(Clone, Debug)]
@@ -50,6 +51,7 @@ pub fn build(p: &crate::config::Provisioner) -> Box<dyn Provisioner> {
             p.scaleway.os_id.clone(),
             p.dry_run,
         )),
+        "ovh" => Box::new(Ovh::new(&p.ovh, p.dry_run)),
         _ => Box::new(Static),
     }
 }
@@ -362,6 +364,430 @@ impl Provisioner for Scaleway {
     }
 }
 
+/// OVHcloud dedicated servers: the Eco range (Kimsufi, So you Start, Rise) and the Bare Metal
+/// range (Advance, Scale), ordered through the API's cart with the plan's default options.
+/// A server is billed monthly; a termination takes effect at the end of the period, once the
+/// operator confirms it from the email OVH sends.
+///
+/// The provider id is `order:<orderId>`: the server has no name until OVH delivers it.
+/// `lookup` turns the order into the server (`server_of_order`), starts the Ubuntu install
+/// with the fleet's key and answers the address; `release` terminates the server.
+///
+/// Not run against the real API yet: the request shapes follow OVH's API console.
+pub struct Ovh {
+    pub application_key: String,
+    pub application_secret: String,
+    pub consumer_key: String,
+    pub plan_code: String,
+    pub range: String,
+    pub datacenter: String,
+    pub ssh_key_name: String,
+    pub subsidiary: String,
+    pub dry_run: bool,
+    /// The OVH API (the European endpoint); tests point it at a stub.
+    pub base_url: String,
+    http: reqwest::Client,
+    /// OVH's clock minus ours, in seconds, from `/auth/time`: a signature whose timestamp is
+    /// more than a few seconds off is refused. Fetched once.
+    time_offset: Mutex<Option<i64>>,
+}
+
+/// The OS installed on a delivered server.
+const OVH_TEMPLATE: &str = "ubuntu2404-server_64";
+
+#[derive(Deserialize)]
+struct OvhCart {
+    #[serde(rename = "cartId")]
+    cart_id: String,
+}
+
+/// OVH sends its ids as numbers; a string is kept as it is, without its quotes.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OvhId {
+    Number(u64),
+    Text(String),
+}
+
+impl std::fmt::Display for OvhId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OvhId::Number(n) => write!(f, "{n}"),
+            OvhId::Text(s) => f.write_str(s),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct OvhItem {
+    #[serde(rename = "itemId")]
+    item_id: OvhId,
+}
+
+#[derive(Deserialize)]
+struct OvhOrder {
+    #[serde(rename = "orderId")]
+    order_id: OvhId,
+}
+
+#[derive(Deserialize)]
+struct OvhOrderDetail {
+    #[serde(default)]
+    domain: String,
+}
+
+#[derive(Deserialize)]
+struct OvhServer {
+    #[serde(default)]
+    ip: String,
+    #[serde(default)]
+    datacenter: String,
+    #[serde(default)]
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct OvhError {
+    message: String,
+}
+
+impl Ovh {
+    pub fn new(cfg: &crate::config::Ovh, dry_run: bool) -> Self {
+        Self {
+            application_key: cfg.application_key.clone(),
+            application_secret: cfg.application_secret.clone(),
+            consumer_key: cfg.consumer_key.clone(),
+            plan_code: cfg.plan_code.clone(),
+            range: cfg.range.clone(),
+            datacenter: cfg.datacenter.clone(),
+            ssh_key_name: cfg.ssh_key_name.clone(),
+            subsidiary: cfg.subsidiary.clone(),
+            dry_run,
+            base_url: "https://eu.api.ovh.com/1.0".into(),
+            http: reqwest::Client::new(),
+            time_offset: Mutex::new(None),
+        }
+    }
+
+    /// The cart endpoint that takes the configured range's plan codes.
+    fn cart_product(&self) -> Result<&'static str> {
+        match self.range.as_str() {
+            "eco" => Ok("eco"),
+            "baremetal" => Ok("baremetalServers"),
+            other => Err(anyhow!(
+                "ovh.range is {other:?}: it is \"eco\" (Kimsufi, So you Start, Rise) or \"baremetal\" (Advance, Scale)"
+            )),
+        }
+    }
+
+    /// `$1$` + SHA-1 of the secret, the consumer key, the method, the full URL, the body and
+    /// the timestamp, joined with `+`.
+    fn sign(&self, method: &str, url: &str, body: &str, timestamp: i64) -> String {
+        use sha1::{Digest, Sha1};
+        let material = format!(
+            "{}+{}+{method}+{url}+{body}+{timestamp}",
+            self.application_secret, self.consumer_key
+        );
+        format!("$1${:x}", Sha1::digest(material.as_bytes()))
+    }
+
+    /// OVH's time, read once, kept as an offset from ours.
+    async fn timestamp(&self) -> Result<i64> {
+        let now = chrono::Utc::now().timestamp();
+        if let Some(off) = *self.time_offset.lock().unwrap() {
+            return Ok(now + off);
+        }
+        let text = self
+            .http
+            .get(format!("{}/auth/time", self.base_url))
+            .send()
+            .await
+            .context("ovh auth time")?
+            .error_for_status()
+            .context("ovh auth time")?
+            .text()
+            .await?;
+        let theirs: i64 = text
+            .trim()
+            .parse()
+            .with_context(|| format!("ovh auth time answered {text:?}"))?;
+        *self.time_offset.lock().unwrap() = Some(theirs - now);
+        Ok(theirs)
+    }
+
+    /// One signed call. The body is sent exactly as signed. Answers the status and the text.
+    async fn call_raw(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<(reqwest::StatusCode, String)> {
+        let url = format!("{}{path}", self.base_url);
+        let body = match body {
+            Some(b) => serde_json::to_string(b)?,
+            None => String::new(),
+        };
+        let ts = self.timestamp().await?;
+        let signature = self.sign(method.as_str(), &url, &body, ts);
+        let mut req = self
+            .http
+            .request(method, &url)
+            .header("X-Ovh-Application", &self.application_key)
+            .header("X-Ovh-Consumer", &self.consumer_key)
+            .header("X-Ovh-Timestamp", ts.to_string())
+            .header("X-Ovh-Signature", signature);
+        if !body.is_empty() {
+            req = req.header("Content-Type", "application/json").body(body);
+        }
+        let resp = req.send().await.with_context(|| format!("ovh {path}"))?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        Ok((status, text))
+    }
+
+    /// A signed call that must succeed: a refusal becomes an error with OVH's message.
+    async fn call(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<String> {
+        let (status, text) = self.call_raw(method, path, body).await?;
+        if !status.is_success() {
+            let message = serde_json::from_str::<OvhError>(&text)
+                .map(|e| e.message)
+                .unwrap_or_else(|_| text.clone());
+            return Err(anyhow!("ovh answered {status} on {path}: {message}"));
+        }
+        Ok(text)
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let text = self.call(reqwest::Method::GET, path, None).await?;
+        serde_json::from_str(&text).with_context(|| format!("ovh {path} response"))
+    }
+
+    async fn post(&self, path: &str, body: &serde_json::Value) -> Result<String> {
+        self.call(reqwest::Method::POST, path, Some(body)).await
+    }
+
+    /// The server an order delivered. Assumes that, once the order is `delivered`, one of its
+    /// details carries the server's service name as `domain` (a placeholder like `*001`
+    /// before), and checks that name against the account's server list before answering it:
+    /// `lookup` reinstalls the server it answers, so a name it is not sure of is an error, never
+    /// a guess. `None` while the order is not delivered; an error for an order that will not be.
+    async fn server_of_order(&self, order_id: &str) -> Result<Option<String>> {
+        let status: String = self.get(&format!("/me/order/{order_id}/status")).await?;
+        match status.as_str() {
+            "delivered" => {}
+            "cancelled" | "cancelling" | "notPaid" | "documentsRequested" => {
+                return Err(anyhow!(
+                    "ovh order {order_id} is {status}: see it in the OVH manager"
+                ))
+            }
+            _ => return Ok(None),
+        }
+        let details: Vec<OvhOrderDetail> =
+            self.get(&format!("/me/order/{order_id}/details")).await?;
+        let servers: Vec<String> = self.get("/dedicated/server").await?;
+        let name = details
+            .iter()
+            .map(|d| d.domain.as_str())
+            .find(|d| !d.is_empty() && servers.iter().any(|s| s == d));
+        match name {
+            Some(n) => Ok(Some(n.to_string())),
+            None => Err(anyhow!(
+                "ovh order {order_id} is delivered but none of its details names a server of the account ({}): add the host by hand",
+                details
+                    .iter()
+                    .map(|d| d.domain.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+
+    /// `order:<id>` resolves through the order; anything else is a server name already.
+    async fn server_name(&self, provider_id: &str) -> Result<Option<String>> {
+        match provider_id.strip_prefix("order:") {
+            Some(id) => self.server_of_order(id).await,
+            None => Ok(Some(provider_id.to_string())),
+        }
+    }
+
+    /// Starts the Ubuntu install with the fleet's key unless one is running already (an
+    /// install in progress answers `/install/status`; none answers 404), so a lookup tried
+    /// again after a lost answer does not start a second one.
+    async fn ensure_installing(&self, name: &str) -> Result<()> {
+        let (status, text) = self
+            .call_raw(
+                reqwest::Method::GET,
+                &format!("/dedicated/server/{name}/install/status"),
+                None,
+            )
+            .await?;
+        if status.is_success() {
+            tracing::info!(server = name, "ovh install in progress");
+            return Ok(());
+        }
+        if status != reqwest::StatusCode::NOT_FOUND {
+            return Err(anyhow!(
+                "ovh answered {status} on /dedicated/server/{name}/install/status: {text}"
+            ));
+        }
+        let body = serde_json::json!({
+            "templateName": OVH_TEMPLATE,
+            "details": {"sshKeyName": self.ssh_key_name},
+        });
+        self.post(&format!("/dedicated/server/{name}/install/start"), &body)
+            .await?;
+        tracing::info!(
+            server = name,
+            template = OVH_TEMPLATE,
+            key = self.ssh_key_name,
+            "ovh install started"
+        );
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Provisioner for Ovh {
+    fn name(&self) -> &str {
+        "ovh"
+    }
+
+    async fn create(&self, hint: &str) -> Result<Server> {
+        let product = self.cart_product()?;
+        let note = format!(
+            "order {} ({} range) in {} with the plan's default options, {OVH_TEMPLATE} with key {} ({hint})",
+            self.plan_code, self.range, self.datacenter, self.ssh_key_name
+        );
+        if self.dry_run {
+            return Ok(Server {
+                provider_id: format!("dry-run-{}", chrono::Utc::now().timestamp()),
+                ip: None,
+                note: format!("DRY RUN: would {note}"),
+            });
+        }
+        let cart: OvhCart = serde_json::from_str(
+            &self
+                .post(
+                    "/order/cart",
+                    &serde_json::json!({"ovhSubsidiary": self.subsidiary}),
+                )
+                .await?,
+        )
+        .context("ovh cart response")?;
+        let cart_id = cart.cart_id;
+        self.call(
+            reqwest::Method::POST,
+            &format!("/order/cart/{cart_id}/assign"),
+            None,
+        )
+        .await?;
+        let item: OvhItem = serde_json::from_str(
+            &self
+                .post(
+                    &format!("/order/cart/{cart_id}/{product}"),
+                    &serde_json::json!({
+                        "planCode": self.plan_code,
+                        "duration": "P1M",
+                        "pricingMode": "default",
+                        "quantity": 1,
+                    }),
+                )
+                .await?,
+        )
+        .context("ovh cart item response")?;
+        let item_id = item.item_id;
+        let mut configs = vec![
+            ("dedicated_datacenter", self.datacenter.as_str()),
+            ("dedicated_os", "none_64.en"),
+        ];
+        if product == "eco" {
+            configs.push(("region", "europe"));
+        }
+        for (label, value) in configs {
+            self.post(
+                &format!("/order/cart/{cart_id}/item/{item_id}/configuration"),
+                &serde_json::json!({"label": label, "value": value}),
+            )
+            .await?;
+        }
+        let order: OvhOrder = serde_json::from_str(
+            &self
+                .post(
+                    &format!("/order/cart/{cart_id}/checkout"),
+                    &serde_json::json!({
+                        "autoPayWithPreferredPaymentMethod": true,
+                        "waiveRetractationPeriod": true,
+                    }),
+                )
+                .await?,
+        )
+        .context("ovh checkout response")?;
+        let order_id = order.order_id;
+        Ok(Server {
+            provider_id: format!("order:{order_id}"),
+            ip: None,
+            note: format!(
+                "ordered {} in {}, order {order_id}",
+                self.plan_code, self.datacenter
+            ),
+        })
+    }
+
+    async fn release(&self, provider_id: &str) -> Result<()> {
+        if self.dry_run || provider_id.starts_with("dry-run-") {
+            tracing::info!(provider_id, "DRY RUN: would terminate the OVH server");
+            return Ok(());
+        }
+        let name = match self.server_name(provider_id).await? {
+            Some(n) => n,
+            None => {
+                return Err(anyhow!(
+                    "ovh {provider_id} is not delivered yet: retire it again once it is, or cancel the order in the OVH manager"
+                ))
+            }
+        };
+        self.call(
+            reqwest::Method::POST,
+            &format!("/dedicated/server/{name}/terminate"),
+            None,
+        )
+        .await?;
+        tracing::warn!(
+            server = name,
+            "ovh termination requested: confirm it from the email OVH sends; the server is billed to the end of its period"
+        );
+        Ok(())
+    }
+
+    async fn lookup(&self, provider_id: &str) -> Result<Option<String>> {
+        if provider_id.starts_with("dry-run-") {
+            return Ok(None);
+        }
+        let name = match self.server_name(provider_id).await? {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+        let srv: OvhServer = self.get(&format!("/dedicated/server/{name}")).await?;
+        if srv.ip.is_empty() {
+            return Ok(None);
+        }
+        tracing::info!(
+            server = name,
+            ip = srv.ip,
+            datacenter = srv.datacenter,
+            state = srv.state,
+            "ovh server delivered"
+        );
+        self.ensure_installing(&name).await?;
+        Ok(Some(srv.ip))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +807,8 @@ mod tests {
         auth_token: String,
         content_type: String,
         body: String,
+        /// OVH's four headers: application, consumer, timestamp, signature.
+        ovh: [String; 4],
     }
 
     /// A provider API on loopback: records every request and answers the next canned reply;
@@ -431,6 +859,12 @@ mod tests {
             auth_token: header(&req, "x-auth-token"),
             content_type: header(&req, "content-type"),
             body: String::new(),
+            ovh: [
+                header(&req, "x-ovh-application"),
+                header(&req, "x-ovh-consumer"),
+                header(&req, "x-ovh-timestamp"),
+                header(&req, "x-ovh-signature"),
+            ],
         };
         let body: Bytes = axum::body::to_bytes(req.into_body(), 1 << 20)
             .await
@@ -475,6 +909,62 @@ mod tests {
         s
     }
 
+    fn ovh(dry_run: bool, base_url: &str) -> Ovh {
+        let cfg = crate::config::Ovh {
+            application_key: "app-key".into(),
+            application_secret: "app-secret".into(),
+            consumer_key: "consumer-key".into(),
+            plan_code: "25risem01-v2".into(),
+            range: "eco".into(),
+            datacenter: "gra".into(),
+            ssh_key_name: "fleet".into(),
+            subsidiary: "FR".into(),
+        };
+        let mut o = Ovh::new(&cfg, dry_run);
+        if !base_url.is_empty() {
+            o.base_url = base_url.into();
+        }
+        o
+    }
+
+    /// The signature OVH expects, computed here from the recipe, not through the code under test.
+    fn ovh_signature(method: &str, url: &str, body: &str, timestamp: &str) -> String {
+        use sha1::{Digest, Sha1};
+        let mut h = Sha1::new();
+        h.update(format!(
+            "app-secret+consumer-key+{method}+{url}+{body}+{timestamp}"
+        ));
+        let digest = h.finalize();
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        format!("$1${hex}")
+    }
+
+    /// Checks every OVH request the stub saw after `/auth/time`: the headers and the signature
+    /// recomputed from what was sent.
+    fn assert_signed(seen: &[Seen], base_url: &str) {
+        for s in seen {
+            if s.path == "/auth/time" {
+                assert_eq!(s.ovh, ["", "", "", ""], "the time call is not signed");
+                continue;
+            }
+            assert_eq!(s.ovh[0], "app-key", "{}", s.path);
+            assert_eq!(s.ovh[1], "consumer-key", "{}", s.path);
+            let url = format!("{base_url}{}", s.path);
+            assert_eq!(
+                s.ovh[3],
+                ovh_signature(&s.method, &url, &s.body, &s.ovh[2]),
+                "signature of {} {}",
+                s.method,
+                s.path
+            );
+            if s.body.is_empty() {
+                assert_eq!(s.content_type, "", "no body, no content type: {}", s.path);
+            } else {
+                assert_eq!(s.content_type, "application/json", "{}", s.path);
+            }
+        }
+    }
+
     #[test]
     fn the_configuration_names_the_provisioner() {
         let mut p = crate::config::Provisioner::default();
@@ -483,6 +973,8 @@ mod tests {
         assert_eq!(build(&p).name(), "hetzner-robot");
         p.kind = "scaleway".into();
         assert_eq!(build(&p).name(), "scaleway");
+        p.kind = "ovh".into();
+        assert_eq!(build(&p).name(), "ovh");
         p.kind = "anything else".into();
         assert_eq!(build(&p).name(), "static", "an unknown kind adds nothing");
         // Nothing points at a stub by default.
@@ -491,6 +983,7 @@ mod tests {
             "https://robot-ws.your-server.de"
         );
         assert_eq!(scaleway(true, "").base_url, "https://api.scaleway.com");
+        assert_eq!(ovh(true, "").base_url, "https://eu.api.ovh.com/1.0");
     }
 
     #[tokio::test]
@@ -532,6 +1025,23 @@ mod tests {
         sc.release(&s.provider_id).await.unwrap();
         sc.release("srv-1").await.unwrap();
         assert_eq!(sc.lookup(&s.provider_id).await.unwrap(), None);
+
+        let o = ovh(true, "http://127.0.0.1:1");
+        let s = o.create("launch week").await.unwrap();
+        assert!(s.provider_id.starts_with("dry-run-"), "{}", s.provider_id);
+        assert_eq!(s.ip, None);
+        assert_eq!(
+            s.note,
+            "DRY RUN: would order 25risem01-v2 (eco range) in gra with the plan's default options, ubuntu2404-server_64 with key fleet (launch week)"
+        );
+        o.release(&s.provider_id).await.unwrap();
+        o.release("order:123").await.unwrap();
+        assert_eq!(o.lookup(&s.provider_id).await.unwrap(), None);
+        // A range that is neither is refused before anything is ordered, dry run or not.
+        let mut o = ovh(true, "http://127.0.0.1:1");
+        o.range = "cloud".into();
+        let err = o.create("x").await.unwrap_err().to_string();
+        assert!(err.contains("ovh.range is \"cloud\""), "{err}");
     }
 
     #[tokio::test]
@@ -543,6 +1053,9 @@ mod tests {
         let s = scaleway(false, &url);
         s.release("dry-run-byard-1").await.unwrap();
         assert_eq!(s.lookup("dry-run-byard-1").await.unwrap(), None);
+        let o = ovh(false, &url);
+        o.release("dry-run-1").await.unwrap();
+        assert_eq!(o.lookup("dry-run-1").await.unwrap(), None);
         assert!(stub.seen().is_empty(), "no request for a dry-run id");
     }
 
@@ -724,5 +1237,378 @@ mod tests {
         assert_eq!(seen[1].method, "GET");
         assert_eq!(seen[1].path, "/baremetal/v1/zones/fr-par-2/servers/srv-1");
         assert!(seen.iter().all(|s| s.auth_token == "scw-secret"));
+    }
+
+    #[test]
+    fn ovh_signature_follows_the_recipe() {
+        // A vector computed outside Rust (python's hashlib): sha1 of
+        // "app-secret+consumer-key+GET+https://eu.api.ovh.com/1.0/me++1700000000".
+        let o = ovh(false, "");
+        let sig = o.sign("GET", "https://eu.api.ovh.com/1.0/me", "", 1700000000);
+        assert_eq!(
+            sig,
+            ovh_signature("GET", "https://eu.api.ovh.com/1.0/me", "", "1700000000")
+        );
+        assert!(sig.starts_with("$1$") && sig.len() == 3 + 40, "{sig}");
+        assert_eq!(sig, "$1$7ff65a14b20844556b102f5f06c9d6e206702042");
+        // The body and the method are part of it.
+        assert_ne!(
+            sig,
+            o.sign("POST", "https://eu.api.ovh.com/1.0/me", "", 1700000000)
+        );
+        assert_ne!(
+            sig,
+            o.sign("GET", "https://eu.api.ovh.com/1.0/me", "{}", 1700000000)
+        );
+    }
+
+    #[tokio::test]
+    async fn ovh_signs_every_request_with_the_servers_time() {
+        // OVH's clock is an hour ahead of ours: the timestamp follows theirs.
+        let theirs = chrono::Utc::now().timestamp() + 3600;
+        let (url, stub) = Canned::start(vec![
+            (StatusCode::OK, &theirs.to_string()),
+            (StatusCode::OK, r#"{"nichandle":"xx-ovh"}"#),
+            (StatusCode::OK, r#"{"nichandle":"xx-ovh"}"#),
+        ])
+        .await;
+        let o = ovh(false, &url);
+        o.call(reqwest::Method::GET, "/me", None).await.unwrap();
+        o.call(
+            reqwest::Method::POST,
+            "/me",
+            Some(&serde_json::json!({"a": 1})),
+        )
+        .await
+        .unwrap();
+        let seen = stub.seen();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0].path, "/auth/time", "the time is read first");
+        assert_eq!(seen[1].path, "/me");
+        assert_eq!(seen[2].path, "/me");
+        assert_eq!(seen[2].body, r#"{"a":1}"#);
+        for s in &seen[1..] {
+            let ts: i64 = s.ovh[2].parse().unwrap();
+            assert!((ts - theirs).abs() <= 2, "their time {theirs}, sent {ts}");
+        }
+        assert_signed(&seen, &url);
+        // The time is read once.
+        assert_eq!(seen.iter().filter(|s| s.path == "/auth/time").count(), 1);
+        // A clock that does not answer is an error, not a request with our time.
+        let o = ovh(false, "http://127.0.0.1:1");
+        let err = format!(
+            "{:#}",
+            o.call(reqwest::Method::GET, "/me", None).await.unwrap_err()
+        );
+        assert!(err.contains("ovh auth time"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn ovh_orders_a_server_through_the_cart() {
+        let (url, stub) = Canned::start(vec![
+            (StatusCode::OK, "1700000000"),
+            (
+                StatusCode::OK,
+                r#"{"cartId":"cart-1","expire":"2026-10-20T00:00:00+00:00"}"#,
+            ),
+            (StatusCode::OK, "null"),
+            (
+                StatusCode::OK,
+                r#"{"itemId":456,"cartId":"cart-1","settings":{"planCode":"25risem01-v2"}}"#,
+            ),
+            (StatusCode::OK, r#"{"label":"dedicated_datacenter","value":"gra"}"#),
+            (StatusCode::OK, r#"{"label":"dedicated_os","value":"none_64.en"}"#),
+            (StatusCode::OK, r#"{"label":"region","value":"europe"}"#),
+            (
+                StatusCode::OK,
+                r#"{"orderId":123,"url":"https://www.ovh.com/cgi-bin/order/display-order.cgi?orderId=123","prices":{}}"#,
+            ),
+        ])
+        .await;
+        let s = ovh(false, &url).create("launch week").await.unwrap();
+        assert_eq!(s.provider_id, "order:123");
+        assert_eq!(s.ip, None);
+        assert_eq!(s.note, "ordered 25risem01-v2 in gra, order 123");
+        let seen = stub.seen();
+        let calls: Vec<(&str, &str)> = seen
+            .iter()
+            .map(|s| (s.method.as_str(), s.path.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("GET", "/auth/time"),
+                ("POST", "/order/cart"),
+                ("POST", "/order/cart/cart-1/assign"),
+                ("POST", "/order/cart/cart-1/eco"),
+                ("POST", "/order/cart/cart-1/item/456/configuration"),
+                ("POST", "/order/cart/cart-1/item/456/configuration"),
+                ("POST", "/order/cart/cart-1/item/456/configuration"),
+                ("POST", "/order/cart/cart-1/checkout"),
+            ]
+        );
+        let body = |i: usize| serde_json::from_str::<serde_json::Value>(&seen[i].body).unwrap();
+        assert_eq!(body(1), serde_json::json!({"ovhSubsidiary": "FR"}));
+        assert_eq!(seen[2].body, "", "assign has no body");
+        assert_eq!(
+            body(3),
+            serde_json::json!({"planCode": "25risem01-v2", "duration": "P1M", "pricingMode": "default", "quantity": 1})
+        );
+        assert_eq!(
+            body(4),
+            serde_json::json!({"label": "dedicated_datacenter", "value": "gra"})
+        );
+        assert_eq!(
+            body(5),
+            serde_json::json!({"label": "dedicated_os", "value": "none_64.en"})
+        );
+        assert_eq!(
+            body(6),
+            serde_json::json!({"label": "region", "value": "europe"})
+        );
+        assert_eq!(
+            body(7),
+            serde_json::json!({"autoPayWithPreferredPaymentMethod": true, "waiveRetractationPeriod": true})
+        );
+        assert_signed(&seen, &url);
+
+        // The Bare Metal range goes through its own cart endpoint, without the region.
+        let (url, stub) = Canned::start(vec![
+            (StatusCode::OK, "1700000000"),
+            (StatusCode::OK, r#"{"cartId":"cart-2"}"#),
+            (StatusCode::OK, "null"),
+            (StatusCode::OK, r#"{"itemId":"789"}"#),
+            (StatusCode::OK, "{}"),
+            (StatusCode::OK, "{}"),
+            (StatusCode::OK, r#"{"orderId":"124"}"#),
+        ])
+        .await;
+        let mut o = ovh(false, &url);
+        o.range = "baremetal".into();
+        o.plan_code = "24ska01".into();
+        o.subsidiary = "IE".into();
+        let s = o.create("x").await.unwrap();
+        assert_eq!(s.provider_id, "order:124", "an id sent as a string is kept");
+        let seen = stub.seen();
+        let paths: Vec<&str> = seen.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/auth/time",
+                "/order/cart",
+                "/order/cart/cart-2/assign",
+                "/order/cart/cart-2/baremetalServers",
+                "/order/cart/cart-2/item/789/configuration",
+                "/order/cart/cart-2/item/789/configuration",
+                "/order/cart/cart-2/checkout",
+            ]
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen[1].body).unwrap(),
+            serde_json::json!({"ovhSubsidiary": "IE"})
+        );
+        assert!(seen[3].body.contains("24ska01"), "{}", seen[3].body);
+        assert!(
+            seen.iter().all(|s| !s.body.contains("europe")),
+            "no region for the Bare Metal range"
+        );
+        assert_signed(&seen, &url);
+    }
+
+    #[tokio::test]
+    async fn ovh_refusals_carry_the_message() {
+        let (url, stub) = Canned::start(vec![
+            (StatusCode::OK, "1700000000"),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"class":"Client::BadRequest","message":"Invalid plan code: 25risem01-v2","errorCode":"INVALID_ARGUMENT"}"#,
+            ),
+            (StatusCode::OK, r#"{"cartId":"cart-1"}"#),
+            (StatusCode::FORBIDDEN, "<html>forbidden</html>"),
+            (StatusCode::OK, r#"{"cartId":"cart-1"}"#),
+            (StatusCode::OK, "null"),
+            (StatusCode::OK, "not an item"),
+            (StatusCode::NOT_FOUND, r#"{"message":"This service does not exist"}"#),
+            (StatusCode::INTERNAL_SERVER_ERROR, "oops"),
+        ])
+        .await;
+        let o = ovh(false, &url);
+        let err = o.create("x").await.unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "ovh answered 400 Bad Request on /order/cart: Invalid plan code: 25risem01-v2"
+        );
+        // A refusal that is not OVH's JSON keeps the text; the step that failed is named.
+        let err = o.create("x").await.unwrap_err().to_string();
+        assert!(
+            err.contains("403")
+                && err.contains("/order/cart/cart-1/assign")
+                && err.contains("<html>forbidden</html>"),
+            "{err}"
+        );
+        let err = format!("{:#}", o.create("x").await.unwrap_err());
+        assert!(err.contains("ovh cart item response"), "{err}");
+        let err = o
+            .release("ns1.ip-1-2-3-4.eu")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("404") && err.contains("This service does not exist"),
+            "{err}"
+        );
+        let err = o.lookup("order:123").await.unwrap_err().to_string();
+        assert!(err.contains("500") && err.contains("oops"), "{err}");
+        assert_eq!(stub.seen().len(), 9, "every refusal ends the flow there");
+    }
+
+    #[tokio::test]
+    async fn ovh_looks_up_an_order() {
+        let delivered = r#""delivered""#;
+        let details = r#"[{"orderDetailId":1,"description":"Rise-1","domain":"ns1.ip-1-2-3-4.eu","detailType":"DURATION","quantity":"1"}]"#;
+        let list = r#"["ns0.ip-9-9-9-9.eu","ns1.ip-1-2-3-4.eu"]"#;
+        let server = r#"{"name":"ns1.ip-1-2-3-4.eu","ip":"1.2.3.4","datacenter":"gra2","state":"ok","os":"none_64"}"#;
+        let (url, stub) = Canned::start(vec![
+            (StatusCode::OK, "1700000000"),
+            // Not delivered: nothing more is asked.
+            (StatusCode::OK, r#""delivering""#),
+            (StatusCode::OK, r#""checking""#),
+            // Delivered, first look: the install starts.
+            (StatusCode::OK, delivered),
+            (StatusCode::OK, details),
+            (StatusCode::OK, list),
+            (StatusCode::OK, server),
+            (
+                StatusCode::NOT_FOUND,
+                r#"{"message":"No installation in progress"}"#,
+            ),
+            (StatusCode::OK, r#"{"taskId":1,"status":"todo"}"#),
+            // Delivered, looked up again (the first answer was lost): the install is running.
+            (StatusCode::OK, delivered),
+            (StatusCode::OK, details),
+            (StatusCode::OK, list),
+            (StatusCode::OK, server),
+            (StatusCode::OK, r#"{"progress":[]}"#),
+            // Delivered, no address yet.
+            (StatusCode::OK, delivered),
+            (StatusCode::OK, details),
+            (StatusCode::OK, list),
+            (StatusCode::OK, r#"{"name":"ns1.ip-1-2-3-4.eu","ip":""}"#),
+            // Delivered, but no detail names a server of the account.
+            (StatusCode::OK, delivered),
+            (
+                StatusCode::OK,
+                r#"[{"domain":"*001"},{"domain":"ns2.ip-5-5-5-5.eu"}]"#,
+            ),
+            (StatusCode::OK, list),
+            // An order that will not be delivered.
+            (StatusCode::OK, r#""cancelled""#),
+        ])
+        .await;
+        let o = ovh(false, &url);
+        assert_eq!(o.lookup("order:123").await.unwrap(), None);
+        assert_eq!(o.lookup("order:123").await.unwrap(), None);
+        assert_eq!(
+            o.lookup("order:123").await.unwrap().as_deref(),
+            Some("1.2.3.4")
+        );
+        assert_eq!(
+            o.lookup("order:123").await.unwrap().as_deref(),
+            Some("1.2.3.4")
+        );
+        assert_eq!(o.lookup("order:123").await.unwrap(), None);
+        let err = o.lookup("order:123").await.unwrap_err().to_string();
+        assert!(
+            err.contains("order 123 is delivered but none of its details names a server")
+                && err.contains("*001, ns2.ip-5-5-5-5.eu"),
+            "{err}"
+        );
+        let err = o.lookup("order:123").await.unwrap_err().to_string();
+        assert!(err.contains("order 123 is cancelled"), "{err}");
+
+        let seen = stub.seen();
+        let calls: Vec<(&str, &str)> = seen
+            .iter()
+            .map(|s| (s.method.as_str(), s.path.as_str()))
+            .collect();
+        let status = ("GET", "/me/order/123/status");
+        let details = ("GET", "/me/order/123/details");
+        let list = ("GET", "/dedicated/server");
+        let server = ("GET", "/dedicated/server/ns1.ip-1-2-3-4.eu");
+        let install_status = ("GET", "/dedicated/server/ns1.ip-1-2-3-4.eu/install/status");
+        let install_start = ("POST", "/dedicated/server/ns1.ip-1-2-3-4.eu/install/start");
+        assert_eq!(
+            calls,
+            [
+                ("GET", "/auth/time"),
+                status,
+                status,
+                status,
+                details,
+                list,
+                server,
+                install_status,
+                install_start,
+                status,
+                details,
+                list,
+                server,
+                install_status,
+                status,
+                details,
+                list,
+                server,
+                status,
+                details,
+                list,
+                status,
+            ]
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&seen[8].body).unwrap(),
+            serde_json::json!({"templateName": "ubuntu2404-server_64", "details": {"sshKeyName": "fleet"}})
+        );
+        assert_signed(&seen, &url);
+    }
+
+    #[tokio::test]
+    async fn ovh_terminates() {
+        let (url, stub) = Canned::start(vec![
+            (StatusCode::OK, "1700000000"),
+            // Not delivered: nothing to terminate yet.
+            (StatusCode::OK, r#""delivering""#),
+            // Delivered: the order's server.
+            (StatusCode::OK, r#""delivered""#),
+            (StatusCode::OK, r#"[{"domain":"ns1.ip-1-2-3-4.eu"}]"#),
+            (StatusCode::OK, r#"["ns1.ip-1-2-3-4.eu"]"#),
+            (StatusCode::OK, r#""ns1.ip-1-2-3-4.eu""#),
+            // A server name as the id.
+            (StatusCode::OK, r#""ns2.ip-5-5-5-5.eu""#),
+        ])
+        .await;
+        let o = ovh(false, &url);
+        let err = o.release("order:123").await.unwrap_err().to_string();
+        assert!(err.contains("order:123 is not delivered yet"), "{err}");
+        o.release("order:123").await.unwrap();
+        o.release("ns2.ip-5-5-5-5.eu").await.unwrap();
+        let seen = stub.seen();
+        let calls: Vec<(&str, &str)> = seen
+            .iter()
+            .map(|s| (s.method.as_str(), s.path.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("GET", "/auth/time"),
+                ("GET", "/me/order/123/status"),
+                ("GET", "/me/order/123/status"),
+                ("GET", "/me/order/123/details"),
+                ("GET", "/dedicated/server"),
+                ("POST", "/dedicated/server/ns1.ip-1-2-3-4.eu/terminate"),
+                ("POST", "/dedicated/server/ns2.ip-5-5-5-5.eu/terminate"),
+            ]
+        );
+        assert_eq!(seen[5].body, "", "terminate takes no body");
+        assert_signed(&seen, &url);
     }
 }

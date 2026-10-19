@@ -20,6 +20,7 @@ axum = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }
 async-trait = "0.1"
+sha1 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

@@ -143,10 +143,11 @@ URL and `token` as they would a daemon's; `briqyard host ls` shows the hosts.
 ### Adding and removing hosts
 
 Hosts come and go through the API, by hand or from the autoscaler; both use the same
-provisioner (`kind: hetzner-robot` or `scaleway`, credentials through `HETZNER_ROBOT_USER` /
-`HETZNER_ROBOT_PASSWORD` or `SCW_SECRET_KEY`). Every provisioner is `dry_run: true` until the
-configuration says otherwise: it records what it would order and orders nothing. Turn it off
-only once a dry run has shown the right product, location and count.
+provisioner (`kind: hetzner-robot`, `scaleway` or `ovh`, credentials through `HETZNER_ROBOT_USER` /
+`HETZNER_ROBOT_PASSWORD`, `SCW_SECRET_KEY`, or `OVH_APPLICATION_KEY` / `OVH_APPLICATION_SECRET` /
+`OVH_CONSUMER_KEY`). Every provisioner is `dry_run: true` until the configuration says
+otherwise: it records what it would order and orders nothing. Turn it off only once a dry run
+has shown the right product, location and count.
 
 ```bash
 briqyard host order --reason "launch week"   # POST /v1/hosts/order: a server, state provisioning
@@ -155,6 +156,30 @@ briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: drain
 briqyard host drain h_123456                 # place no new tenant on it, keep it
 briqyard host rm h_123456                    # forget it (its machines are not touched)
 ```
+
+**OVHcloud** (`kind: ovh`) orders a dedicated server from the Eco range (Kimsufi, So you
+Start, Rise; `ovh.range: eco`) or the Bare Metal range (Advance, Scale; `ovh.range: baremetal`)
+through the API's cart: `ovh.plan_code` (`25risem01-v2` for example, from the catalog), in
+`ovh.datacenter` (`gra`, `rbx`, `sbg`...), one month at a time, paid with the account's
+preferred payment method and the retraction period waived, with the plan's default options
+(memory, disks, bandwidth are not chosen here) and no OS. `ovh.subsidiary` is the OVH company
+the order is made under (`FR` by default). The credentials are an API application
+(`application_key`, `application_secret`) and a consumer key with rights on `/order/*`,
+`/me/order/*`, `/dedicated/server/*` and `GET /me`; every request is signed with them and
+OVH's own clock (`/auth/time`). The provider id is `order:<orderId>` until delivery. Every two
+minutes the fleet reads the order's status; once it is `delivered`, it assumes one of the
+order's details carries the server's service name as `domain` (a placeholder like `*001`
+before), checks that name against the account's server list (`GET /dedicated/server`), reads
+the server for its address, and starts an Ubuntu 24.04 install
+(`POST /dedicated/server/<name>/install/start`, template `ubuntu2404-server_64`) with the SSH
+key named `ovh.ssh_key_name`, which must already be in the account (`/me/sshKey`); the
+bootstrap then fails every two minutes until the install is done, which is expected. A
+delivered order whose details name no server of the account is an error in the host's note:
+add the host by hand. A retire terminates the server (`POST /dedicated/server/<name>/terminate`):
+OVH then emails a confirmation to accept, and the server is billed to the end of its period;
+a retire before delivery is refused (cancel the order in the OVH manager). This provisioner has
+not run against the real API yet: the request shapes follow OVH's API console, and the
+delivery assumption above is the one to check first.
 
 A server the fleet ordered becomes a host on its own when `provisioner.bootstrap.enabled` is
 set: every two minutes the fleet asks the provider for the server's address, then runs
