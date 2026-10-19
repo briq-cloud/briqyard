@@ -58,6 +58,11 @@ NAT, tenant isolation, stop and start with the disk kept, exit codes and the res
 Postgres on a volume with honest `fsync`, TCP and HTTP endpoints, sleep on idle and wake on
 connect, suspend and resume with the processes carrying on, and a fork with its data.
 
+Across servers, checked by `hack/fleet-smoke.sh` and `hack/fleet-two-hosts.sh` (two VMs under
+one fleet): tenants placed by free memory and disk, every call forwarded to the right host, a
+host that stops answering marked down with its calls refused rather than guessed, hosts
+ordered from Hetzner or Scaleway through the API and installed over SSH, retired once empty.
+
 ## Numbers
 
 From `hack/e2e.sh` on an Apple M4 inside a Lima VM with nested virtualization (ARM64), so a
