@@ -421,18 +421,10 @@ impl Process {
     /// The path Firecracker must be given for a file on the host: inside the chroot when
     /// jailed (hard-linked, or copied across filesystems, and readable by the jail's user).
     pub fn expose_file(&self, host: &Path, name: &str) -> Result<PathBuf> {
-        let root = match &self.chroot {
-            Some(r) => r,
-            None => return Ok(host.to_path_buf()),
-        };
-        let inside = root.join(name);
-        let _ = std::fs::remove_file(&inside);
-        if std::fs::hard_link(host, &inside).is_err() {
-            std::fs::copy(host, &inside)
-                .with_context(|| format!("copy {} into the jail", host.display()))?;
+        match &self.chroot {
+            Some(root) => place_file(root, host, name, self.uid, self.gid),
+            None => Ok(host.to_path_buf()),
         }
-        let _ = std::os::unix::fs::chown(&inside, Some(self.uid), Some(self.gid));
-        Ok(PathBuf::from("/").join(name))
     }
 
     /// The path Firecracker must be given for a block device: a node inside the chroot when
@@ -460,18 +452,12 @@ impl Process {
     /// Where Firecracker sees the vsock socket (inside the chroot when jailed) and a file name
     /// next to its sockets, for snapshots.
     pub fn inside(&self, name: &str) -> PathBuf {
-        match &self.chroot {
-            Some(_) => PathBuf::from("/").join(name),
-            None => self.dir.join(name),
-        }
+        inside_path(self.chroot.as_deref(), &self.dir, name)
     }
 
     /// The host path of a file Firecracker writes next to its sockets.
     pub fn outside(&self, name: &str) -> PathBuf {
-        match &self.chroot {
-            Some(r) => r.join(name),
-            None => self.dir.join(name),
-        }
+        outside_path(self.chroot.as_deref(), &self.dir, name)
     }
 
     pub fn pid(&self) -> u32 {
@@ -494,6 +480,37 @@ impl Process {
             }
         }
     }
+}
+
+/// A file name next to Firecracker's sockets, as Firecracker sees it: at the root of the
+/// chroot when jailed, in the run dir otherwise.
+fn inside_path(chroot: Option<&Path>, dir: &Path, name: &str) -> PathBuf {
+    match chroot {
+        Some(_) => PathBuf::from("/").join(name),
+        None => dir.join(name),
+    }
+}
+
+/// The same file as the host sees it.
+fn outside_path(chroot: Option<&Path>, dir: &Path, name: &str) -> PathBuf {
+    match chroot {
+        Some(r) => r.join(name),
+        None => dir.join(name),
+    }
+}
+
+/// Puts `host` at the jail root as `name` (a hard link, or a copy across filesystems), owned
+/// by the jail's user, and returns the path inside the chroot. An earlier file of that name
+/// is replaced.
+fn place_file(root: &Path, host: &Path, name: &str, uid: u32, gid: u32) -> Result<PathBuf> {
+    let inside = root.join(name);
+    let _ = std::fs::remove_file(&inside);
+    if std::fs::hard_link(host, &inside).is_err() {
+        std::fs::copy(host, &inside)
+            .with_context(|| format!("copy {} into the jail", host.display()))?;
+    }
+    let _ = std::os::unix::fs::chown(&inside, Some(uid), Some(gid));
+    Ok(PathBuf::from("/").join(name))
 }
 
 /// Copies console lines with a timestamp in front of each.
@@ -520,4 +537,351 @@ async fn stamp<R: tokio::io::AsyncRead + Unpin>(
     }
     let mut o = out.lock().await;
     let _ = o.flush().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    /// A stand-in for Firecracker's API socket: answers each connection with the next canned
+    /// response and hands back the requests it read, in order.
+    fn serve(socket: &Path, responses: Vec<&'static str>) -> tokio::task::JoinHandle<Vec<String>> {
+        let ln = UnixListener::bind(socket).unwrap();
+        tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for resp in responses {
+                let (mut s, _) = ln.accept().await.unwrap();
+                let mut req = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = s.read(&mut buf).await.unwrap();
+                    req.extend_from_slice(&buf[..n]);
+                    if n == 0 || complete(&req) {
+                        break;
+                    }
+                }
+                seen.push(String::from_utf8(req).unwrap());
+                s.write_all(resp.as_bytes()).await.unwrap();
+            }
+            seen
+        })
+    }
+
+    /// Whether the head and the body announced by Content-Length are all there.
+    fn complete(req: &[u8]) -> bool {
+        let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let head = String::from_utf8_lossy(&req[..end]).to_ascii_lowercase();
+        let len: usize = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        req.len() >= end + 4 + len
+    }
+
+    fn body(req: &str) -> serde_json::Value {
+        let (_, b) = req.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str(b).unwrap()
+    }
+
+    fn socket() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api.sock");
+        (dir, path)
+    }
+
+    const NO_CONTENT: &str =
+        "HTTP/1.1 204 No Content\r\nServer: Firecracker API\r\nConnection: keep-alive\r\n\r\n";
+
+    #[tokio::test]
+    async fn put_sends_json_and_takes_204() {
+        let (_dir, path) = socket();
+        let server = serve(&path, vec![NO_CONTENT]);
+        Client::new(&path).machine_config(2, 512).await.unwrap();
+        let seen = server.await.unwrap();
+        let req = &seen[0];
+        assert!(req.starts_with("PUT /machine-config HTTP/1.1\r\n"), "{req}");
+        assert!(
+            req.contains("\r\nContent-Type: application/json\r\n"),
+            "{req}"
+        );
+        assert!(req.contains("\r\nConnection: close\r\n"), "{req}");
+        let b = body(req);
+        assert_eq!(
+            b,
+            serde_json::json!({"vcpu_count": 2, "mem_size_mib": 512, "smt": false})
+        );
+        let len: usize = req
+            .lines()
+            .find_map(|l| l.strip_prefix("Content-Length: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(len, b.to_string().len());
+    }
+
+    #[tokio::test]
+    async fn every_call_has_its_path_and_body() {
+        let (_dir, path) = socket();
+        let server = serve(&path, vec![NO_CONTENT; 9]);
+        let c = Client::new(&path);
+        c.boot_source(Path::new("/vmlinux"), "console=ttyS0")
+            .await
+            .unwrap();
+        c.drive("rootfs", Path::new("/root"), true, false, "Writeback")
+            .await
+            .unwrap();
+        c.network_interface("eth0", "tm1", "06:b1:0a:40:00:02")
+            .await
+            .unwrap();
+        c.vsock(3, Path::new("/vsock.sock")).await.unwrap();
+        c.start().await.unwrap();
+        c.pause().await.unwrap();
+        c.resume().await.unwrap();
+        c.snapshot_create(Path::new("/snap.state"), Path::new("/snap.mem"))
+            .await
+            .unwrap();
+        c.snapshot_load(
+            Path::new("/snap.state"),
+            Path::new("/snap.mem"),
+            "eth0",
+            "tm1",
+        )
+        .await
+        .unwrap();
+        let seen = server.await.unwrap();
+        let first = |i: usize| seen[i].lines().next().unwrap().to_string();
+        assert_eq!(first(0), "PUT /boot-source HTTP/1.1");
+        assert_eq!(
+            body(&seen[0]),
+            serde_json::json!({"kernel_image_path": "/vmlinux", "boot_args": "console=ttyS0"})
+        );
+        assert_eq!(first(1), "PUT /drives/rootfs HTTP/1.1");
+        assert_eq!(
+            body(&seen[1]),
+            serde_json::json!({"drive_id": "rootfs", "path_on_host": "/root", "is_root_device": true, "is_read_only": false, "cache_type": "Writeback"})
+        );
+        assert_eq!(first(2), "PUT /network-interfaces/eth0 HTTP/1.1");
+        assert_eq!(
+            body(&seen[2]),
+            serde_json::json!({"iface_id": "eth0", "host_dev_name": "tm1", "guest_mac": "06:b1:0a:40:00:02"})
+        );
+        assert_eq!(first(3), "PUT /vsock HTTP/1.1");
+        assert_eq!(
+            body(&seen[3]),
+            serde_json::json!({"guest_cid": 3, "uds_path": "/vsock.sock"})
+        );
+        assert_eq!(first(4), "PUT /actions HTTP/1.1");
+        assert_eq!(
+            body(&seen[4]),
+            serde_json::json!({"action_type": "InstanceStart"})
+        );
+        assert_eq!(first(5), "PATCH /vm HTTP/1.1");
+        assert_eq!(body(&seen[5]), serde_json::json!({"state": "Paused"}));
+        assert_eq!(first(6), "PATCH /vm HTTP/1.1");
+        assert_eq!(body(&seen[6]), serde_json::json!({"state": "Resumed"}));
+        assert_eq!(first(7), "PUT /snapshot/create HTTP/1.1");
+        assert_eq!(body(&seen[7])["snapshot_type"], "Full");
+        assert_eq!(first(8), "PUT /snapshot/load HTTP/1.1");
+        let load = body(&seen[8]);
+        assert_eq!(load["resume_vm"], true);
+        assert_eq!(load["mem_backend"]["backend_path"], "/snap.mem");
+        assert_eq!(load["network_overrides"][0]["host_dev_name"], "tm1");
+    }
+
+    #[tokio::test]
+    async fn a_fault_is_an_api_error() {
+        let (_dir, path) = socket();
+        let fault = r#"{"fault_message":"The requested operation is not supported after starting the microVM."}"#;
+        let resp = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{fault}",
+            fault.len()
+        );
+        let server = serve(&path, vec![Box::leak(resp.into_boxed_str())]);
+        let err = Client::new(&path).start().await.unwrap_err();
+        let api = err.downcast_ref::<ApiError>().expect("an ApiError");
+        assert_eq!(api.status, 400);
+        assert_eq!(
+            api.fault,
+            "The requested operation is not supported after starting the microVM."
+        );
+        assert_eq!(err.to_string(), format!("firecracker: 400 {}", api.fault));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_fault_that_is_not_json_keeps_the_body() {
+        let (_dir, path) = socket();
+        let server = serve(
+            &path,
+            vec!["HTTP/1.1 500 Internal Server Error\r\nContent-Length: 6\r\n\r\nboom!\n"],
+        );
+        let err = Client::new(&path).start().await.unwrap_err();
+        let api = err.downcast_ref::<ApiError>().unwrap();
+        assert_eq!((api.status, api.fault.as_str()), (500, "boom!\n"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn info_reads_the_json_answer() {
+        let (_dir, path) = socket();
+        let info = r#"{"id":"m-1","state":"Running","vmm_version":"1.10.0"}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{info}",
+            info.len()
+        );
+        let server = serve(&path, vec![Box::leak(resp.into_boxed_str())]);
+        let v = Client::new(&path).info().await.unwrap();
+        assert_eq!(v["state"], "Running");
+        let seen = server.await.unwrap();
+        assert!(seen[0].starts_with("GET / HTTP/1.1\r\n"), "{}", seen[0]);
+        assert!(seen[0].contains("Content-Length: 0\r\n"), "{}", seen[0]);
+        assert!(seen[0].ends_with("\r\n\r\n"), "{}", seen[0]);
+    }
+
+    #[tokio::test]
+    async fn a_bad_status_line_is_an_error() {
+        let (_dir, path) = socket();
+        let server = serve(&path, vec!["nonsense\r\n\r\n"]);
+        let err = Client::new(&path).info().await.unwrap_err();
+        assert!(err.to_string().contains("bad status line"), "{err}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_api_gives_up_without_a_socket() {
+        let (_dir, path) = socket();
+        let t0 = std::time::Instant::now();
+        let err = Client::new(&path)
+            .wait_api(Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert!(t0.elapsed() >= Duration::from_millis(100));
+        let msg = err.to_string();
+        assert!(msg.contains("did not answer within"), "{msg}");
+        assert!(msg.contains("connect"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn wait_api_returns_once_the_api_answers() {
+        let (_dir, path) = socket();
+        let server = serve(
+            &path,
+            vec!["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"],
+        );
+        Client::new(&path)
+            .wait_api(Duration::from_secs(5))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn jail_paths() {
+        let base = Path::new("/var/lib/briqyard/jail");
+        // Firecracker takes only letters, digits and dashes in an id.
+        assert_eq!(
+            jail_root(base, "m_abc123"),
+            PathBuf::from("/var/lib/briqyard/jail/firecracker/m-abc123/root")
+        );
+        let dir = Path::new("/var/lib/briqyard/run/m_abc123");
+        assert_eq!(
+            paths(dir),
+            (
+                dir.join("api.sock"),
+                dir.join("vsock.sock"),
+                dir.join("console.log"),
+                dir.join("firecracker.log")
+            )
+        );
+        assert_eq!(paths_for(dir, None, "m_abc123"), paths(dir));
+        let jail = Jail {
+            jailer: "/usr/local/bin/jailer".into(),
+            base: base.to_path_buf(),
+            uid: 100_002,
+            gid: 100_002,
+            cpus: 1,
+            memory_mb: 512,
+        };
+        let root = jail_root(base, "m_abc123");
+        assert_eq!(
+            paths_for(dir, Some(&jail), "m_abc123"),
+            (
+                root.join("run/firecracker.socket"),
+                root.join("vsock.sock"),
+                dir.join("console.log"),
+                dir.join("firecracker.log")
+            )
+        );
+    }
+
+    #[test]
+    fn inside_and_outside() {
+        let dir = Path::new("/run/m_1");
+        let root = Path::new("/jail/firecracker/m-1/root");
+        assert_eq!(
+            inside_path(None, dir, "snap.mem"),
+            PathBuf::from("/run/m_1/snap.mem")
+        );
+        assert_eq!(
+            outside_path(None, dir, "snap.mem"),
+            PathBuf::from("/run/m_1/snap.mem")
+        );
+        assert_eq!(
+            inside_path(Some(root), dir, "snap.mem"),
+            PathBuf::from("/snap.mem")
+        );
+        assert_eq!(
+            outside_path(Some(root), dir, "snap.mem"),
+            PathBuf::from("/jail/firecracker/m-1/root/snap.mem")
+        );
+    }
+
+    #[test]
+    fn placing_a_file_in_the_jail() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host = dir.path().join("vmlinux");
+        std::fs::write(&host, b"kernel").unwrap();
+        // Not root: the chown fails and is ignored; the link is what matters.
+        let inside = place_file(&root, &host, "vmlinux", 100_000, 100_000).unwrap();
+        assert_eq!(inside, PathBuf::from("/vmlinux"));
+        assert_eq!(std::fs::read(root.join("vmlinux")).unwrap(), b"kernel");
+        // A new file of the same name replaces the earlier one.
+        let host2 = dir.path().join("config.tar");
+        std::fs::write(&host2, b"v2").unwrap();
+        place_file(&root, &host2, "vmlinux", 100_000, 100_000).unwrap();
+        assert_eq!(std::fs::read(root.join("vmlinux")).unwrap(), b"v2");
+        // A host file that does not exist cannot be placed.
+        let err = place_file(&root, &dir.path().join("missing"), "x", 0, 0).unwrap_err();
+        assert!(err.to_string().contains("into the jail"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn console_lines_are_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("console.log");
+        let f = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        let out = std::sync::Arc::new(tokio::sync::Mutex::new(f));
+        stamp(&b"one\ntwo"[..], out).await;
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text:?}");
+        for (line, want) in lines.iter().zip(["one", "two"]) {
+            let (ts, rest) = line.split_once(' ').unwrap();
+            chrono::DateTime::parse_from_rfc3339(ts).unwrap();
+            assert_eq!(rest, want);
+        }
+        // The last line gets its newline even when the source had none.
+        assert!(text.ends_with("two\n"));
+    }
 }

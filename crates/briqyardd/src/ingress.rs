@@ -178,17 +178,7 @@ impl Ingress {
                 return;
             }
         };
-        let text = String::from_utf8_lossy(&head[..end]);
-        let host = text
-            .lines()
-            .skip(1)
-            .find_map(|l| {
-                l.split_once(':')
-                    .filter(|(k, _)| k.trim().eq_ignore_ascii_case("host"))
-                    .map(|(_, v)| v.trim().to_lowercase())
-            })
-            .unwrap_or_default();
-        let host = host.split(':').next().unwrap_or("").to_string();
+        let host = host_of(&head[..end]);
         let ep = self.hosts.lock().unwrap().get(&host).cloned();
         let ep = match ep {
             Some(ep) => ep,
@@ -210,5 +200,67 @@ impl Ingress {
             return;
         }
         let _ = tokio::io::copy_bidirectional(&mut conn, &mut target).await;
+    }
+}
+
+/// The host name a request head is for: the first `Host` header, lowercased, without its
+/// port. Empty when there is none, which matches no endpoint.
+fn host_of(head: &[u8]) -> String {
+    let text = String::from_utf8_lossy(head);
+    let host = text
+        .lines()
+        .skip(1)
+        .find_map(|l| {
+            l.split_once(':')
+                .filter(|(k, _)| k.trim().eq_ignore_ascii_case("host"))
+                .map(|(_, v)| v.trim().to_lowercase())
+        })
+        .unwrap_or_default();
+    host.split(':').next().unwrap_or("").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_header() {
+        let head = b"GET / HTTP/1.1\r\nHost: app.byard.localhost\r\nAccept: */*\r\n\r\n";
+        assert_eq!(host_of(head), "app.byard.localhost");
+    }
+
+    #[test]
+    fn host_without_port_and_lowercased() {
+        assert_eq!(
+            host_of(b"GET / HTTP/1.1\r\nHost: App.Byard.Localhost:8080\r\n\r\n"),
+            "app.byard.localhost"
+        );
+        assert_eq!(
+            host_of(b"GET / HTTP/1.1\r\nhost:   x.example  \r\n\r\n"),
+            "x.example"
+        );
+        assert_eq!(
+            host_of(b"GET / HTTP/1.1\r\nHOST: X.EXAMPLE:443\r\n\r\n"),
+            "x.example"
+        );
+    }
+
+    #[test]
+    fn missing_host_is_empty() {
+        assert_eq!(host_of(b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n"), "");
+        assert_eq!(host_of(b"GET / HTTP/1.1\r\nHost:\r\n\r\n"), "");
+        assert_eq!(host_of(b""), "");
+    }
+
+    #[test]
+    fn the_request_line_is_not_a_header() {
+        // A path that looks like a header must not be read as one; only the first Host counts.
+        let head = b"GET /host:evil HTTP/1.1\r\nX-Host: a\r\nHost: one.example\r\nHost: two.example\r\n\r\n";
+        assert_eq!(host_of(head), "one.example");
+    }
+
+    #[test]
+    fn lone_newlines_are_fine() {
+        assert_eq!(host_of(b"GET / HTTP/1.1\nHost: a.example\n\n"), "a.example");
     }
 }

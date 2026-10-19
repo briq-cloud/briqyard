@@ -44,6 +44,7 @@ async fn read_response(s: &mut UnixStream) -> Result<Response> {
     Ok(guest::decode_frame(&body)?)
 }
 
+#[derive(Debug)]
 pub struct ExecOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -191,5 +192,245 @@ pub async fn wait_ready(uds: &Path, timeout: Duration) -> Result<()> {
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    /// A stand-in for Firecracker's vsock socket with the init behind it: answers the
+    /// `CONNECT` line with `handshake`, reads one request frame, writes `answers` as they
+    /// are, closes, and hands the request back.
+    fn serve(
+        uds: &Path,
+        handshake: &'static str,
+        answers: Vec<Vec<u8>>,
+    ) -> tokio::task::JoinHandle<Request> {
+        let ln = UnixListener::bind(uds).unwrap();
+        tokio::spawn(async move {
+            let (s, _) = ln.accept().await.unwrap();
+            let mut r = BufReader::new(s);
+            let mut line = String::new();
+            r.read_line(&mut line).await.unwrap();
+            assert_eq!(line, format!("CONNECT {}\n", guest::PORT));
+            let mut s = r.into_inner();
+            s.write_all(handshake.as_bytes()).await.unwrap();
+            if handshake != OK {
+                // Refused: the client hangs up, there is no request to read.
+                return Request::default();
+            }
+            let mut hdr = [0u8; 4];
+            s.read_exact(&mut hdr).await.unwrap();
+            let mut body = vec![0u8; u32::from_be_bytes(hdr) as usize];
+            s.read_exact(&mut body).await.unwrap();
+            let req: Request = guest::decode_frame(&body).unwrap();
+            for a in answers {
+                s.write_all(&a).await.unwrap();
+            }
+            req
+        })
+    }
+
+    fn frame(r: &Response) -> Vec<u8> {
+        guest::encode_frame(r).unwrap()
+    }
+
+    fn socket() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.sock");
+        (dir, path)
+    }
+
+    const OK: &str = "OK 7421\n";
+
+    #[tokio::test]
+    async fn dial_does_the_vsock_handshake() {
+        let (_dir, path) = socket();
+        let server = serve(&path, OK, vec![]);
+        let mut s = dial(&path).await.unwrap();
+        // Something must follow for the server to finish: an empty request.
+        write_request(&mut s, &Request::default()).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dial_refused_or_absent() {
+        let (_dir, path) = socket();
+        let _server = serve(&path, "nope\n", vec![]);
+        let err = dial(&path).await.unwrap_err();
+        assert_eq!(err.to_string(), "vsock connect refused: nope");
+
+        let missing = path.with_file_name("none.sock");
+        let err = dial(&missing).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains(&format!("vsock {}", missing.display())),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_streams_both_outputs_then_exit() {
+        let (_dir, path) = socket();
+        let server = serve(
+            &path,
+            OK,
+            vec![
+                frame(&Response::chunk("stdout", b"hel".to_vec())),
+                frame(&Response::chunk("stderr", b"warn\n".to_vec())),
+                frame(&Response::chunk("stdout", b"lo\n".to_vec())),
+                frame(&Response::chunk("something-new", b"ignored".to_vec())),
+                frame(&Response::exit(3, true)),
+            ],
+        );
+        let req = Request {
+            cmd: vec!["sh".into(), "-c".into(), "echo hello".into()],
+            cwd: "/work".into(),
+            stdin: b"in".to_vec(),
+            timeout_ms: 500,
+            ..Default::default()
+        };
+        let out = exec(&path, req).await.unwrap();
+        assert_eq!(out.stdout, b"hello\n");
+        assert_eq!(out.stderr, b"warn\n");
+        assert_eq!(out.code, 3);
+        assert!(out.timed_out);
+        let seen = server.await.unwrap();
+        // exec sets the op itself; the rest of the request goes through as given.
+        assert_eq!(seen.op, "exec");
+        assert_eq!(seen.cmd, vec!["sh", "-c", "echo hello"]);
+        assert_eq!(seen.cwd, "/work");
+        assert_eq!(seen.stdin, b"in");
+        assert_eq!(seen.timeout_ms, 500);
+    }
+
+    #[tokio::test]
+    async fn exec_error_frame_is_the_init_message() {
+        let (_dir, path) = socket();
+        let _server = serve(
+            &path,
+            OK,
+            vec![frame(&Response::error("no such file: /bin/nope"))],
+        );
+        let err = exec(&path, Request::default()).await.unwrap_err();
+        assert_eq!(err.to_string(), "no such file: /bin/nope");
+    }
+
+    #[tokio::test]
+    async fn exec_closed_before_exit_is_closed() {
+        let (_dir, path) = socket();
+        let _server = serve(
+            &path,
+            OK,
+            vec![frame(&Response::chunk("stdout", b"partial".to_vec()))],
+        );
+        let err = exec(&path, Request::default()).await.unwrap_err();
+        assert!(err.downcast_ref::<Closed>().is_some(), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_frame_past_the_limit_is_refused() {
+        let (_dir, path) = socket();
+        let _server = serve(
+            &path,
+            OK,
+            vec![((guest::MAX_FRAME as u32) + 1).to_be_bytes().to_vec()],
+        );
+        let err = exec(&path, Request::default()).await.unwrap_err();
+        assert_eq!(err.to_string(), "frame too large");
+    }
+
+    #[test]
+    fn output_is_capped() {
+        let mut buf = vec![0u8; MAX_OUTPUT - 3];
+        append(&mut buf, b"abcdef");
+        assert_eq!(buf.len(), MAX_OUTPUT);
+        assert_eq!(&buf[MAX_OUTPUT - 3..], b"abc");
+        // Full: nothing more is kept, and nothing panics.
+        append(&mut buf, b"xyz");
+        assert_eq!(buf.len(), MAX_OUTPUT);
+    }
+
+    #[tokio::test]
+    async fn put_sends_the_file_and_wants_ok() {
+        let (_dir, path) = socket();
+        let server = serve(&path, OK, vec![frame(&Response::new("ok"))]);
+        put(&path, "/etc/app.conf", 0o600, b"k=v\n".to_vec())
+            .await
+            .unwrap();
+        let seen = server.await.unwrap();
+        assert_eq!(seen.op, "put");
+        assert_eq!(seen.path, "/etc/app.conf");
+        assert_eq!(seen.mode, 0o600);
+        assert_eq!(seen.data, b"k=v\n");
+
+        let (_dir, path) = socket();
+        let _server = serve(&path, OK, vec![frame(&Response::new("pong"))]);
+        let err = put(&path, "/x", 0o644, vec![]).await.unwrap_err();
+        assert_eq!(err.to_string(), "guest answered pong");
+    }
+
+    #[tokio::test]
+    async fn get_reads_the_file() {
+        let (_dir, path) = socket();
+        let server = serve(
+            &path,
+            OK,
+            vec![frame(&Response::chunk("file", b"content".to_vec()))],
+        );
+        assert_eq!(get(&path, "/etc/hostname").await.unwrap(), b"content");
+        let seen = server.await.unwrap();
+        assert_eq!(
+            (seen.op.as_str(), seen.path.as_str()),
+            ("get", "/etc/hostname")
+        );
+
+        let (_dir, path) = socket();
+        let _server = serve(&path, OK, vec![frame(&Response::error("not found"))]);
+        let err = get(&path, "/nope").await.unwrap_err();
+        assert_eq!(err.to_string(), "not found");
+    }
+
+    #[tokio::test]
+    async fn ping_and_shutdown() {
+        let (_dir, path) = socket();
+        let pong = Response {
+            kind: "pong".into(),
+            uptime: 12.5,
+            main_pid: 7,
+            ..Default::default()
+        };
+        let server = serve(&path, OK, vec![frame(&pong)]);
+        let r = ping(&path).await.unwrap();
+        assert_eq!((r.uptime, r.main_pid), (12.5, 7));
+        assert_eq!(server.await.unwrap().op, "ping");
+
+        let (_dir, path) = socket();
+        let server = serve(&path, OK, vec![frame(&Response::new("ok"))]);
+        shutdown(&path, Duration::from_secs(10)).await.unwrap();
+        let seen = server.await.unwrap();
+        assert_eq!((seen.op.as_str(), seen.grace_sec), ("shutdown", 10));
+
+        let (_dir, path) = socket();
+        let _server = serve(&path, OK, vec![frame(&Response::new("ok"))]);
+        let err = ping(&path).await.unwrap_err();
+        assert_eq!(err.to_string(), "guest answered ok");
+    }
+
+    #[tokio::test]
+    async fn wait_ready_polls_until_a_pong() {
+        let (_dir, path) = socket();
+        let t0 = std::time::Instant::now();
+        let err = wait_ready(&path, Duration::from_millis(250))
+            .await
+            .unwrap_err();
+        assert!(t0.elapsed() >= Duration::from_millis(250));
+        let msg = err.to_string();
+        assert!(msg.contains("did not answer within"), "{msg}");
+        assert!(msg.contains("last: vsock"), "{msg}");
+
+        let _server = serve(&path, OK, vec![frame(&Response::new("pong"))]);
+        wait_ready(&path, Duration::from_secs(5)).await.unwrap();
     }
 }

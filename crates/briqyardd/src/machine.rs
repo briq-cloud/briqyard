@@ -449,7 +449,7 @@ impl Manager {
     async fn adopt(&self, e: &Arc<Entry>, pid: u32) -> bool {
         let rec = e.snapshot();
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        if comm.trim() != "firecracker" {
+        if !is_firecracker(&comm) {
             return false;
         }
         let dir = self.inner.cfg.run_dir().join(&rec.id);
@@ -457,7 +457,7 @@ impl Manager {
         let (api, vsock, _, _) = fc::paths_for(&dir, jail.as_ref(), &rec.id);
         let client = fc::Client::new(&api);
         let running = match tokio::time::timeout(Duration::from_secs(3), client.info()).await {
-            Ok(Ok(info)) => info["state"].as_str() == Some("Running"),
+            Ok(Ok(info)) => api_running(&info),
             _ => false,
         };
         if !running {
@@ -479,7 +479,7 @@ impl Manager {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let alive = unsafe { libc::kill(pid as i32, 0) } == 0
                     && std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                        .map(|c| c.trim() == "firecracker")
+                        .map(|c| is_firecracker(&c))
                         .unwrap_or(false);
                 if !alive {
                     break;
@@ -689,10 +689,7 @@ impl Manager {
     fn view(&self, e: &Entry) -> api::Machine {
         let r = e.snapshot();
         let sleeps_at = if r.state == state::RUNNING {
-            match (r.last_used_at, r.sleep_window()) {
-                (Some(t), Some(w)) => Some(t + chrono::Duration::from_std(w).unwrap_or_default()),
-                _ => None,
-            }
+            sleeps_at(r.last_used_at, r.sleep_window())
         } else {
             None
         };
@@ -1424,7 +1421,7 @@ impl Manager {
         if cfg.jailer.as_os_str().is_empty() {
             return None;
         }
-        let uid = cfg.jail_uid_base + rec.subnet_index * 256 + rec.host_num as u32;
+        let uid = jail_uid(cfg.jail_uid_base, rec.subnet_index, rec.host_num);
         Some(fc::Jail {
             jailer: cfg.jailer.clone(),
             base: cfg.jail_base(),
@@ -1437,18 +1434,7 @@ impl Manager {
     }
 
     fn boot_args(&self) -> String {
-        let mut args = format!(
-            "console=ttyS0 reboot=k panic=1 root=/dev/vda rw rootfstype=ext4 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd random.trust_cpu=on init={}",
-            image::INIT_PATH
-        );
-        if !self.inner.cfg.pci {
-            args.push_str(" pci=off");
-        }
-        if !self.inner.cfg.kernel_args.is_empty() {
-            args.push(' ');
-            args.push_str(&self.inner.cfg.kernel_args);
-        }
-        args
+        boot_args(self.inner.cfg.pci, &self.inner.cfg.kernel_args)
     }
 
     /// Settles the state after the Firecracker process exited.
@@ -1479,11 +1465,7 @@ impl Manager {
                 r.state = state::STOPPED.into();
                 r.stopped_reason = stop::USER.into();
             } else {
-                let again = match r.restart.policy.as_str() {
-                    "always" => true,
-                    "on-failure" => code != 0 && r.restarts < r.restart.max_retries,
-                    _ => false,
-                };
+                let again = restarts_after_exit(&r.restart, code, r.restarts);
                 r.exit = Some(api::Exit {
                     code,
                     oom_killed: oom,
@@ -1804,14 +1786,7 @@ impl Manager {
                 .filter(|e| {
                     let r = e.rec.lock().unwrap();
                     r.state == state::RUNNING
-                        && match (r.last_used_at, r.sleep_window()) {
-                            (Some(t), Some(w)) => Utc::now()
-                                .signed_duration_since(t)
-                                .to_std()
-                                .map(|d| d > w)
-                                .unwrap_or(false),
-                            _ => false,
-                        }
+                        && idle_past(r.last_used_at, r.sleep_window(), Utc::now())
                 })
                 .cloned()
                 .collect();
@@ -1859,91 +1834,7 @@ impl Manager {
     // --- config drive ---
 
     fn write_config_drive(&self, path: &Path, r: &Record, t: &TenantRec) -> Result<()> {
-        let s = self.subnet(t);
-        let mut env = r.image_config.env.clone();
-        env.extend(r.env.iter().map(|(k, v)| (k.clone(), v.clone())));
-        // Docker semantics: an entrypoint given replaces the image's and drops its cmd.
-        let (entrypoint, cmd) = match (&r.entrypoint, &r.cmd) {
-            (Some(ep), Some(c)) => (ep.clone(), c.clone()),
-            (Some(ep), None) => (ep.clone(), vec![]),
-            (None, Some(c)) => (r.image_config.entrypoint.clone(), c.clone()),
-            (None, None) => (
-                r.image_config.entrypoint.clone(),
-                r.image_config.cmd.clone(),
-            ),
-        };
-        let mut hosts = BTreeMap::new();
-        hosts.insert(r.hostname(), r.ip.clone());
-        hosts.insert(r.machine_host(), r.ip.clone());
-        let mut cfg = guest::Config {
-            hostname: r.name.clone(),
-            ip: format!("{}/24", r.ip),
-            gateway: s.gateway().to_string(),
-            dns: vec![s.gateway().to_string()],
-            hosts,
-            entrypoint,
-            cmd,
-            env,
-            workdir: r.image_config.workdir.clone(),
-            user: r.image_config.user.clone(),
-            mounts: vec![],
-            files: vec![],
-            stop_timeout_sec: 10,
-        };
-        if let Some(v) = &r.volume {
-            cfg.mounts.push(guest::Mount {
-                device: "/dev/vdc".into(),
-                path: v.mount.clone(),
-                fstype: "ext4".into(),
-            });
-        }
-        let mut files: Vec<(String, u32, Vec<u8>)> = Vec::new();
-        for f in &r.files {
-            let data =
-                guest::base64_decode(&f.base64).map_err(|e| anyhow!("file {}: {e}", f.path))?;
-            let mode = match &f.mode {
-                Some(m) if !m.is_empty() => {
-                    u32::from_str_radix(m, 8).map_err(|_| anyhow!("file {}: mode {m:?}", f.path))?
-                }
-                _ => 0o644,
-            };
-            cfg.files.push(guest::FileMeta {
-                path: f.path.clone(),
-                mode,
-            });
-            files.push((f.path.clone(), mode, data));
-        }
-        let tmp = path.with_extension("tar.tmp");
-        let mut b = tar::Builder::new(std::fs::File::create(&tmp)?);
-        let cfg_json = serde_json::to_vec(&cfg)?;
-        let mut h = tar::Header::new_gnu();
-        h.set_mode(0o600);
-        h.set_size(cfg_json.len() as u64);
-        h.set_mtime(Utc::now().timestamp() as u64);
-        b.append_data(&mut h, guest::CONFIG_NAME, &cfg_json[..])?;
-        for (p, mode, data) in &files {
-            let mut h = tar::Header::new_gnu();
-            h.set_mode(*mode);
-            h.set_size(data.len() as u64);
-            h.set_mtime(Utc::now().timestamp() as u64);
-            b.append_data(
-                &mut h,
-                format!("{}{}", guest::FILES_PREFIX, p.trim_start_matches('/')),
-                &data[..],
-            )?;
-        }
-        let mut f = b.into_inner()?;
-        // Firecracker wants a drive's size to be a multiple of 512 bytes.
-        use std::io::Write;
-        let len = f.metadata()?.len();
-        let pad = (512 - len % 512) % 512;
-        if pad > 0 {
-            f.write_all(&vec![0u8; pad as usize])?;
-        }
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        write_drive(path, &config_drive(r, self.subnet(t).gateway())?)
     }
 
     // --- exec and files ---
@@ -2200,10 +2091,7 @@ impl Manager {
             .args(["-4", "-o", "addr", "show", "dev", &self.inner.egress])
             .output()
             .ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let f: Vec<&str> = text.split_whitespace().collect();
-        let i = f.iter().position(|w| *w == "inet")?;
-        f.get(i + 1)?.split('/').next()?.parse().ok()
+        inet_of(&String::from_utf8_lossy(&out.stdout))
     }
 
     pub fn create_endpoint(
@@ -2243,14 +2131,8 @@ impl Manager {
             created_at: Utc::now(),
         };
         if proto == "tcp" {
-            let (lo, hi) = port_range(&self.inner.cfg.ingress.tcp_ports)?;
-            let used: Vec<u32> = endpoints
-                .values()
-                .filter_map(|x| x.host_port.map(|p| p as u32))
-                .collect();
-            let port = netw::first_free(used, lo as u32, hi as u32)
-                .ok_or_else(|| MError::Capacity("no tcp endpoint port left".into()))?;
-            ep.host_port = Some(port as u16);
+            let used: Vec<u16> = endpoints.values().filter_map(|x| x.host_port).collect();
+            ep.host_port = Some(free_tcp_port(&self.inner.cfg.ingress.tcp_ports, used)?);
         } else {
             if self.inner.cfg.ingress.http.is_empty() {
                 return Err(invalid(
@@ -2387,22 +2269,203 @@ fn port_range(s: &str) -> Result<(u16, u16), MError> {
 fn host_memory_mb() -> u32 {
     std::fs::read_to_string("/proc/meminfo")
         .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("MemTotal:"))
-                .and_then(|l| {
-                    l.split_whitespace()
-                        .nth(1)
-                        .and_then(|kb| kb.parse::<u64>().ok())
-                })
+        .and_then(|s| meminfo_total_mb(&s))
+        .unwrap_or(4096)
+}
+
+/// MemTotal from `/proc/meminfo`, in MB.
+fn meminfo_total_mb(text: &str) -> Option<u32> {
+    text.lines()
+        .find(|l| l.starts_with("MemTotal:"))
+        .and_then(|l| {
+            l.split_whitespace()
+                .nth(1)
+                .and_then(|kb| kb.parse::<u64>().ok())
         })
         .map(|kb| (kb / 1024) as u32)
-        .unwrap_or(4096)
+}
+
+/// The first IPv4 address in `ip -4 -o addr show` output.
+fn inet_of(text: &str) -> Option<Ipv4Addr> {
+    let f: Vec<&str> = text.split_whitespace().collect();
+    let i = f.iter().position(|w| *w == "inet")?;
+    f.get(i + 1)?.split('/').next()?.parse().ok()
+}
+
+/// What `/proc/<pid>/comm` says for a Firecracker process.
+fn is_firecracker(comm: &str) -> bool {
+    comm.trim() == "firecracker"
+}
+
+/// Whether Firecracker's `GET /` says the microVM runs.
+fn api_running(info: &serde_json::Value) -> bool {
+    info["state"].as_str() == Some("Running")
+}
+
+/// Whether a machine whose process ended on its own (exit `code`, after `restarts` restarts
+/// in a row) is started again.
+fn restarts_after_exit(policy: &api::RestartPolicy, code: i32, restarts: u32) -> bool {
+    match policy.policy.as_str() {
+        "always" => true,
+        "on-failure" => code != 0 && restarts < policy.max_retries,
+        _ => false,
+    }
+}
+
+/// When a running machine goes to sleep: its last use plus its window. None while it was
+/// never used or never sleeps.
+fn sleeps_at(last_used: Option<DateTime<Utc>>, window: Option<Duration>) -> Option<DateTime<Utc>> {
+    match (last_used, window) {
+        (Some(t), Some(w)) => Some(t + chrono::Duration::from_std(w).unwrap_or_default()),
+        _ => None,
+    }
+}
+
+/// Whether the sleep window has run out at `now`. A clock that went backwards (a last use
+/// in the future) is not idle.
+fn idle_past(
+    last_used: Option<DateTime<Utc>>,
+    window: Option<Duration>,
+    now: DateTime<Utc>,
+) -> bool {
+    match (last_used, window) {
+        (Some(t), Some(w)) => now
+            .signed_duration_since(t)
+            .to_std()
+            .map(|d| d > w)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// The uid (and gid) a jailed machine runs as: one per machine, from its place in the
+/// tenant's network, so no two machines on the host share one.
+fn jail_uid(base: u32, subnet_index: u32, host_num: u8) -> u32 {
+    base + subnet_index * 256 + host_num as u32
+}
+
+/// The guest kernel's command line.
+fn boot_args(pci: bool, extra: &str) -> String {
+    let mut args = format!(
+        "console=ttyS0 reboot=k panic=1 root=/dev/vda rw rootfstype=ext4 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd random.trust_cpu=on init={}",
+        image::INIT_PATH
+    );
+    if !pci {
+        args.push_str(" pci=off");
+    }
+    if !extra.is_empty() {
+        args.push(' ');
+        args.push_str(extra);
+    }
+    args
+}
+
+/// The lowest host port in the ingress range no endpoint holds.
+fn free_tcp_port(spec: &str, used: Vec<u16>) -> Result<u16, MError> {
+    let (lo, hi) = port_range(spec)?;
+    let used = used.into_iter().map(u32::from).collect();
+    netw::first_free(used, lo as u32, hi as u32)
+        .map(|p| p as u16)
+        .ok_or_else(|| MError::Capacity("no tcp endpoint port left".into()))
+}
+
+/// The config drive: a tar archive the init reads raw, `config.json` first and the boot
+/// files under `files/`, padded to a multiple of 512 bytes since Firecracker wants a drive
+/// that size.
+fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
+    let mut env = r.image_config.env.clone();
+    env.extend(r.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    // Docker semantics: an entrypoint given replaces the image's and drops its cmd.
+    let (entrypoint, cmd) = match (&r.entrypoint, &r.cmd) {
+        (Some(ep), Some(c)) => (ep.clone(), c.clone()),
+        (Some(ep), None) => (ep.clone(), vec![]),
+        (None, Some(c)) => (r.image_config.entrypoint.clone(), c.clone()),
+        (None, None) => (
+            r.image_config.entrypoint.clone(),
+            r.image_config.cmd.clone(),
+        ),
+    };
+    let mut hosts = BTreeMap::new();
+    hosts.insert(r.hostname(), r.ip.clone());
+    hosts.insert(r.machine_host(), r.ip.clone());
+    let mut cfg = guest::Config {
+        hostname: r.name.clone(),
+        ip: format!("{}/24", r.ip),
+        gateway: gateway.to_string(),
+        dns: vec![gateway.to_string()],
+        hosts,
+        entrypoint,
+        cmd,
+        env,
+        workdir: r.image_config.workdir.clone(),
+        user: r.image_config.user.clone(),
+        mounts: vec![],
+        files: vec![],
+        stop_timeout_sec: 10,
+    };
+    if let Some(v) = &r.volume {
+        cfg.mounts.push(guest::Mount {
+            device: "/dev/vdc".into(),
+            path: v.mount.clone(),
+            fstype: "ext4".into(),
+        });
+    }
+    let mut files: Vec<(String, u32, Vec<u8>)> = Vec::new();
+    for f in &r.files {
+        let data = guest::base64_decode(&f.base64).map_err(|e| anyhow!("file {}: {e}", f.path))?;
+        let mode = match &f.mode {
+            Some(m) if !m.is_empty() => {
+                u32::from_str_radix(m, 8).map_err(|_| anyhow!("file {}: mode {m:?}", f.path))?
+            }
+            _ => 0o644,
+        };
+        cfg.files.push(guest::FileMeta {
+            path: f.path.clone(),
+            mode,
+        });
+        files.push((f.path.clone(), mode, data));
+    }
+    let mut b = tar::Builder::new(Vec::new());
+    let cfg_json = serde_json::to_vec(&cfg)?;
+    let mut h = tar::Header::new_gnu();
+    h.set_mode(0o600);
+    h.set_size(cfg_json.len() as u64);
+    h.set_mtime(Utc::now().timestamp() as u64);
+    b.append_data(&mut h, guest::CONFIG_NAME, &cfg_json[..])?;
+    for (p, mode, data) in &files {
+        let mut h = tar::Header::new_gnu();
+        h.set_mode(*mode);
+        h.set_size(data.len() as u64);
+        h.set_mtime(Utc::now().timestamp() as u64);
+        b.append_data(
+            &mut h,
+            format!("{}{}", guest::FILES_PREFIX, p.trim_start_matches('/')),
+            &data[..],
+        )?;
+    }
+    let mut out = b.into_inner()?;
+    let pad = (512 - out.len() % 512) % 512;
+    out.resize(out.len() + pad, 0);
+    Ok(out)
+}
+
+/// Writes a drive whole, through a temp file next to it, so a crash leaves the previous
+/// drive or none, never half of one.
+fn write_drive(path: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tar.tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn exit_lines() {
@@ -2428,5 +2491,394 @@ mod tests {
         assert!(port_range("29999-20000").is_err());
         assert!(port_range("x").is_err());
         assert!(port_range("0-10").is_err());
+    }
+
+    #[test]
+    fn endpoint_ports() {
+        assert_eq!(free_tcp_port("20000-29999", vec![]).unwrap(), 20000);
+        assert_eq!(
+            free_tcp_port("20000-29999", vec![20001, 20000, 20003]).unwrap(),
+            20002
+        );
+        // A port outside the range (a stale record) does not get in the way.
+        assert_eq!(
+            free_tcp_port("20000-29999", vec![80, 30000]).unwrap(),
+            20000
+        );
+        match free_tcp_port("20000-20001", vec![20000, 20001]) {
+            Err(MError::Capacity(msg)) => assert_eq!(msg, "no tcp endpoint port left"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            free_tcp_port("nonsense", vec![]),
+            Err(MError::Invalid(_))
+        ));
+    }
+
+    fn policy(policy: &str, max_retries: u32) -> api::RestartPolicy {
+        api::RestartPolicy {
+            policy: policy.into(),
+            max_retries,
+        }
+    }
+
+    #[test]
+    fn restart_decisions() {
+        // on-failure: a non-zero exit restarts until the retries run out; a clean exit never.
+        let p = policy("on-failure", 3);
+        assert!(restarts_after_exit(&p, 1, 0));
+        assert!(restarts_after_exit(&p, 137, 2));
+        assert!(!restarts_after_exit(&p, 1, 3));
+        assert!(!restarts_after_exit(&p, 0, 0));
+        assert!(!restarts_after_exit(&policy("on-failure", 0), 1, 0));
+        // always: every time, whatever the code and however many times before.
+        let p = policy("always", 0);
+        assert!(restarts_after_exit(&p, 0, 0));
+        assert!(restarts_after_exit(&p, 1, 1000));
+        // no: never.
+        assert!(!restarts_after_exit(&policy("no", 3), 1, 0));
+        // The default policy is on-failure with three retries.
+        let d = api::RestartPolicy::default();
+        assert!(restarts_after_exit(&d, 1, 2));
+        assert!(!restarts_after_exit(&d, 1, 3));
+    }
+
+    #[test]
+    fn sleep_deadlines() {
+        let t = Utc.with_ymd_and_hms(2026, 10, 18, 22, 0, 0).unwrap();
+        let w = Some(Duration::from_secs(30 * 60));
+        assert_eq!(
+            sleeps_at(Some(t), w),
+            Some(t + chrono::Duration::minutes(30))
+        );
+        // Never used, or never sleeps: no deadline.
+        assert_eq!(sleeps_at(None, w), None);
+        assert_eq!(sleeps_at(Some(t), None), None);
+
+        let secs = |n: i64| t + chrono::Duration::seconds(n);
+        assert!(!idle_past(Some(t), w, secs(0)));
+        assert!(!idle_past(Some(t), w, secs(30 * 60)));
+        assert!(idle_past(Some(t), w, secs(30 * 60 + 1)));
+        assert!(!idle_past(None, w, secs(3600)));
+        assert!(!idle_past(Some(t), None, secs(3600)));
+        // A last use in the future (the clock went backwards) is not idle.
+        assert!(!idle_past(Some(t), w, secs(-3600)));
+    }
+
+    #[test]
+    fn a_record_knows_its_sleep_window() {
+        let mut r = record();
+        assert_eq!(r.sleep_window(), Some(Duration::from_secs(1800)));
+        r.sleep = String::new();
+        assert_eq!(r.sleep_window(), None);
+        r.sleep = "never".into();
+        assert_eq!(r.sleep_window(), None);
+        r.sleep = "3h".into();
+        assert_eq!(r.sleep_window(), Some(Duration::from_secs(3 * 3600)));
+        // A value that does not parse reads as never: the API refused it at the edge.
+        r.sleep = "soon".into();
+        assert_eq!(r.sleep_window(), None);
+    }
+
+    #[test]
+    fn adoption_checks() {
+        assert!(is_firecracker("firecracker\n"));
+        assert!(is_firecracker("firecracker"));
+        assert!(!is_firecracker("jailer\n"));
+        assert!(!is_firecracker(""));
+        assert!(api_running(
+            &serde_json::json!({"id": "m-1", "state": "Running", "vmm_version": "1.10"})
+        ));
+        assert!(!api_running(&serde_json::json!({"state": "Paused"})));
+        assert!(!api_running(&serde_json::json!({"state": "Not started"})));
+        assert!(!api_running(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn jail_uids() {
+        assert_eq!(jail_uid(100_000, 0, 2), 100_002);
+        assert_eq!(jail_uid(100_000, 3, 254), 100_000 + 3 * 256 + 254);
+        // Two machines differ in subnet or host number, never share a uid.
+        assert_ne!(jail_uid(100_000, 0, 255), jail_uid(100_000, 1, 0));
+    }
+
+    #[test]
+    fn kernel_command_line() {
+        let a = boot_args(false, "");
+        assert!(
+            a.starts_with("console=ttyS0 reboot=k panic=1 root=/dev/vda rw"),
+            "{a}"
+        );
+        assert!(a.contains(&format!("init={}", image::INIT_PATH)), "{a}");
+        assert!(a.ends_with(" pci=off"), "{a}");
+        let b = boot_args(true, "loglevel=3 quiet");
+        assert!(!b.contains("pci=off"), "{b}");
+        assert!(b.ends_with(" loglevel=3 quiet"), "{b}");
+    }
+
+    #[test]
+    fn host_facts() {
+        let meminfo = "MemTotal:       16318192 kB\nMemFree:         1234 kB\n";
+        assert_eq!(meminfo_total_mb(meminfo), Some(15935));
+        assert_eq!(meminfo_total_mb("MemFree: 1 kB\n"), None);
+        assert_eq!(meminfo_total_mb(""), None);
+
+        let addr = "2: eth0    inet 192.168.64.3/24 brd 192.168.64.255 scope global dynamic eth0\\       valid_lft 86000sec preferred_lft 86000sec\n";
+        assert_eq!(inet_of(addr), Some(Ipv4Addr::new(192, 168, 64, 3)));
+        assert_eq!(inet_of(""), None);
+        assert_eq!(inet_of("2: eth0 inet6 fe80::1/64 scope link\n"), None);
+    }
+
+    /// A machine as the manager would have made it, in the second tenant subnet.
+    fn record() -> Record {
+        let now = Utc.with_ymd_and_hms(2026, 10, 18, 22, 0, 0).unwrap();
+        Record {
+            id: "m_abc123".into(),
+            tenant: "t1".into(),
+            name: "db".into(),
+            image: "postgres:17".into(),
+            image_key: "deadbeef".into(),
+            image_digest: "sha256:abc".into(),
+            image_config: ImageConfig {
+                entrypoint: vec!["docker-entrypoint.sh".into()],
+                cmd: vec!["postgres".into()],
+                env: BTreeMap::from([
+                    ("PATH".to_string(), "/usr/bin".to_string()),
+                    ("PGDATA".to_string(), "/var/lib/postgresql/data".to_string()),
+                ]),
+                workdir: "/".into(),
+                user: "postgres".into(),
+                volumes: vec![],
+                exposed_ports: vec![5432],
+            },
+            entrypoint: None,
+            cmd: None,
+            env: BTreeMap::from([("PGDATA".to_string(), "/data/pg".to_string())]),
+            files: vec![],
+            size: api::Size {
+                vcpus: 1,
+                memory_mb: 512,
+            },
+            volume: Some(api::VolumeSpec {
+                size_gb: 2,
+                mount: "/data".into(),
+            }),
+            ports: vec![5432],
+            sleep: "30m".into(),
+            restart: api::RestartPolicy::default(),
+            metadata: BTreeMap::new(),
+            state: state::CREATED.into(),
+            stopped_reason: String::new(),
+            exit: None,
+            error: String::new(),
+            subnet_index: 1,
+            host_num: 2,
+            ip: "10.64.1.2".into(),
+            pid: 0,
+            restarts: 0,
+            boots: 0,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            stopped_at: None,
+            last_used_at: None,
+            console_offset: 0,
+            suspended: false,
+        }
+    }
+
+    /// Reads the drive back: every entry's path, mode and content.
+    fn entries(drive: &[u8]) -> Vec<(String, u32, Vec<u8>)> {
+        use std::io::Read;
+        let mut a = tar::Archive::new(drive);
+        a.entries()
+            .unwrap()
+            .map(|e| {
+                let mut e = e.unwrap();
+                let path = e.path().unwrap().to_string_lossy().into_owned();
+                let mode = e.header().mode().unwrap();
+                let mut data = Vec::new();
+                e.read_to_end(&mut data).unwrap();
+                (path, mode, data)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn config_drive_carries_the_guest_config() {
+        let r = record();
+        let gw = Ipv4Addr::new(10, 64, 1, 1);
+        let drive = config_drive(&r, gw).unwrap();
+        assert_eq!(drive.len() % 512, 0, "{}", drive.len());
+        let es = entries(&drive);
+        assert_eq!(es.len(), 1);
+        let (path, mode, data) = &es[0];
+        assert_eq!(path, guest::CONFIG_NAME);
+        assert_eq!(*mode, 0o600);
+        let cfg: guest::Config = serde_json::from_slice(data).unwrap();
+        assert_eq!(cfg.hostname, "db");
+        assert_eq!(cfg.ip, "10.64.1.2/24");
+        assert_eq!(cfg.gateway, "10.64.1.1");
+        assert_eq!(cfg.dns, vec!["10.64.1.1"]);
+        assert_eq!(cfg.hosts["db.internal"], "10.64.1.2");
+        assert_eq!(cfg.hosts["m_abc123.vm.internal"], "10.64.1.2");
+        // The image's entrypoint and cmd, since the machine gives neither.
+        assert_eq!(cfg.entrypoint, vec!["docker-entrypoint.sh"]);
+        assert_eq!(cfg.cmd, vec!["postgres"]);
+        // The machine's env over the image's.
+        assert_eq!(cfg.env["PATH"], "/usr/bin");
+        assert_eq!(cfg.env["PGDATA"], "/data/pg");
+        assert_eq!(cfg.workdir, "/");
+        assert_eq!(cfg.user, "postgres");
+        assert_eq!(cfg.mounts.len(), 1);
+        assert_eq!(cfg.mounts[0].device, "/dev/vdc");
+        assert_eq!(cfg.mounts[0].path, "/data");
+        assert_eq!(cfg.mounts[0].fstype, "ext4");
+        assert!(cfg.files.is_empty());
+        assert_eq!(cfg.stop_timeout_sec, 10);
+
+        // No volume: no mount.
+        let mut r = record();
+        r.volume = None;
+        let cfg: guest::Config =
+            serde_json::from_slice(&entries(&config_drive(&r, gw).unwrap())[0].2).unwrap();
+        assert!(cfg.mounts.is_empty());
+    }
+
+    #[test]
+    fn config_drive_follows_docker_for_entrypoint_and_cmd() {
+        let gw = Ipv4Addr::new(10, 64, 1, 1);
+        let cfg_of = |r: &Record| -> guest::Config {
+            serde_json::from_slice(&entries(&config_drive(r, gw).unwrap())[0].2).unwrap()
+        };
+        // A cmd alone keeps the image's entrypoint.
+        let mut r = record();
+        r.cmd = Some(vec![
+            "postgres".into(),
+            "-c".into(),
+            "log_min_messages=debug".into(),
+        ]);
+        let c = cfg_of(&r);
+        assert_eq!(c.entrypoint, vec!["docker-entrypoint.sh"]);
+        assert_eq!(c.cmd, vec!["postgres", "-c", "log_min_messages=debug"]);
+        // An entrypoint alone replaces the image's and drops its cmd.
+        let mut r = record();
+        r.entrypoint = Some(vec!["/bin/sh".into()]);
+        let c = cfg_of(&r);
+        assert_eq!(c.entrypoint, vec!["/bin/sh"]);
+        assert!(c.cmd.is_empty());
+        // Both given: both used.
+        let mut r = record();
+        r.entrypoint = Some(vec!["/bin/sh".into()]);
+        r.cmd = Some(vec!["-c".into(), "true".into()]);
+        let c = cfg_of(&r);
+        assert_eq!(c.entrypoint, vec!["/bin/sh"]);
+        assert_eq!(c.cmd, vec!["-c", "true"]);
+    }
+
+    #[test]
+    fn config_drive_carries_the_boot_files() {
+        let gw = Ipv4Addr::new(10, 64, 1, 1);
+        let mut r = record();
+        r.files = vec![
+            api::File {
+                path: "/etc/app/app.conf".into(),
+                base64: guest::base64_encode(b"k=v\n"),
+                mode: None,
+            },
+            api::File {
+                path: "/usr/local/bin/run".into(),
+                base64: guest::base64_encode(b"#!/bin/sh\n"),
+                mode: Some("0755".into()),
+            },
+            api::File {
+                path: "/empty".into(),
+                base64: String::new(),
+                mode: Some(String::new()),
+            },
+        ];
+        let drive = config_drive(&r, gw).unwrap();
+        assert_eq!(drive.len() % 512, 0);
+        let es = entries(&drive);
+        assert_eq!(es.len(), 4);
+        let cfg: guest::Config = serde_json::from_slice(&es[0].2).unwrap();
+        assert_eq!(cfg.files.len(), 3);
+        assert_eq!(
+            (cfg.files[0].path.as_str(), cfg.files[0].mode),
+            ("/etc/app/app.conf", 0o644)
+        );
+        assert_eq!(
+            (cfg.files[1].path.as_str(), cfg.files[1].mode),
+            ("/usr/local/bin/run", 0o755)
+        );
+        assert_eq!(
+            (cfg.files[2].path.as_str(), cfg.files[2].mode),
+            ("/empty", 0o644)
+        );
+        // Under files/, by guest path without the leading slash.
+        assert_eq!(es[1].0, "files/etc/app/app.conf");
+        assert_eq!(es[1].1, 0o644);
+        assert_eq!(es[1].2, b"k=v\n");
+        assert_eq!(es[2].0, "files/usr/local/bin/run");
+        assert_eq!(es[2].1, 0o755);
+        assert_eq!(es[2].2, b"#!/bin/sh\n");
+        assert_eq!(es[3].0, "files/empty");
+        assert!(es[3].2.is_empty());
+    }
+
+    #[test]
+    fn config_drive_refuses_a_bad_file() {
+        let gw = Ipv4Addr::new(10, 64, 1, 1);
+        let mut r = record();
+        r.files = vec![api::File {
+            path: "/x".into(),
+            base64: "not base64!".into(),
+            mode: None,
+        }];
+        let err = config_drive(&r, gw).unwrap_err();
+        assert!(err.to_string().starts_with("file /x: "), "{err}");
+
+        r.files = vec![api::File {
+            path: "/x".into(),
+            base64: guest::base64_encode(b"ok"),
+            mode: Some("rw-r--r--".into()),
+        }];
+        let err = config_drive(&r, gw).unwrap_err();
+        assert_eq!(err.to_string(), "file /x: mode \"rw-r--r--\"");
+    }
+
+    #[test]
+    fn a_drive_is_written_whole_then_renamed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.tar");
+        let data = config_drive(&record(), Ipv4Addr::new(10, 64, 1, 1)).unwrap();
+        write_drive(&path, &data).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+        assert!(!path.with_extension("tar.tmp").exists());
+        // A second write replaces the first.
+        write_drive(&path, b"x").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"x");
+        // A directory that does not exist is an error, not a panic.
+        assert!(write_drive(&dir.path().join("nope/config.tar"), b"x").is_err());
+    }
+
+    #[test]
+    fn record_names() {
+        let r = record();
+        assert_eq!(r.hostname(), "db.internal");
+        assert_eq!(r.machine_host(), "m_abc123.vm.internal");
+        assert_eq!(r.dataset(), "m/m_abc123");
+        assert_eq!(r.root_dataset(), "m/m_abc123/root");
+        assert_eq!(r.data_dataset(), "m/m_abc123/data");
+    }
+
+    #[test]
+    fn ids_have_a_prefix_and_twelve_hex_digits() {
+        let id = new_id("m");
+        let (p, hex) = id.split_once('_').unwrap();
+        assert_eq!(p, "m");
+        assert_eq!(hex.len(), 12);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+        assert_ne!(new_id("m"), new_id("m"));
     }
 }

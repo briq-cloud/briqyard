@@ -224,3 +224,214 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes the YAML to a temp file and loads it the way the daemon does.
+    fn load(yaml: &str) -> Result<Config> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        Config::load(Some(&path))
+    }
+
+    #[test]
+    fn defaults() {
+        let c = Config::load(None).unwrap();
+        assert_eq!(c.listen, "127.0.0.1:7420");
+        assert!(c.token.is_empty());
+        assert_eq!(c.data_dir, PathBuf::from("/var/lib/briqyard"));
+        assert_eq!(c.firecracker, PathBuf::from("/usr/local/bin/firecracker"));
+        assert!(c.jailer.as_os_str().is_empty());
+        assert!(c.jail_dir.as_os_str().is_empty());
+        assert_eq!(c.jail_uid_base, 100_000);
+        assert_eq!(c.kernel, PathBuf::from("/var/lib/briqyard/vmlinux"));
+        assert!(c.kernel_args.is_empty());
+        assert!(!c.pci);
+        assert_eq!(c.init, PathBuf::from("/usr/local/bin/briqyard-init"));
+        assert_eq!(c.storage.backend, "zfs");
+        assert_eq!(c.storage.pool, "byard");
+        assert!(c.registries.is_empty());
+        assert_eq!(c.network.range, "10.64.0.0/10");
+        assert!(c.network.upstream_dns.is_empty());
+        assert!(c.network.egress.is_empty());
+        assert_eq!(c.ingress.tcp_ports, "20000-29999");
+        assert!(c.ingress.http.is_empty());
+        assert_eq!(c.ingress.domain, "byard.localhost");
+        assert_eq!(c.ingress.bind, "0.0.0.0");
+        assert!(c.ingress.advertise.is_empty());
+        assert_eq!(c.root_disk_gb, 8);
+        assert_eq!(c.image_keep_days, 14);
+        assert!(!c.suspend_on_sleep);
+        assert!(c.fleet.is_none());
+        assert_eq!(c.capacity.memory_mb, 0);
+        assert_eq!(c.capacity.vcpus, 0);
+    }
+
+    #[test]
+    fn an_empty_file_is_the_defaults() {
+        // An empty document is YAML's null; serde-yaml gives every field its default.
+        let c = load("").unwrap();
+        assert_eq!(c.listen, "127.0.0.1:7420");
+        assert_eq!(c.storage.pool, "byard");
+    }
+
+    #[test]
+    fn a_missing_file_is_an_error_naming_it() {
+        let err = Config::load(Some(Path::new("/nonexistent/briqyard.yaml"))).unwrap_err();
+        assert!(
+            err.to_string().contains("/nonexistent/briqyard.yaml"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn every_section() {
+        let c = load(
+            r#"
+listen: 0.0.0.0:7420
+token: secret
+data_dir: /data
+firecracker: /opt/fc/firecracker
+jailer: /opt/fc/jailer
+jail_dir: /jails
+jail_uid_base: 200000
+kernel: /data/vmlinux
+kernel_args: "loglevel=3"
+pci: true
+init: /opt/briqyard-init
+storage:
+  backend: zfs
+  pool: tank/byard
+registries:
+  - host: ghcr.io
+    username: bot
+    password: pw
+network:
+  range: 10.128.0.0/10
+  upstream_dns: ["1.1.1.1", "9.9.9.9"]
+  egress: eth0
+ingress:
+  tcp_ports: 30000-31000
+  http: 0.0.0.0:8080
+  domain: byard.example
+  bind: 10.0.0.5
+  advertise: 203.0.113.5
+root_disk_gb: 16
+image_keep_days: 3
+suspend_on_sleep: true
+fleet:
+  url: http://fleet:7430
+  token: ft
+  advertise: http://10.0.0.5:7420
+  region: fsn1
+capacity:
+  memory_mb: 65536
+  vcpus: 128
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.listen, "0.0.0.0:7420");
+        assert_eq!(c.token, "secret");
+        assert_eq!(c.data_dir, PathBuf::from("/data"));
+        assert_eq!(c.firecracker, PathBuf::from("/opt/fc/firecracker"));
+        assert_eq!(c.jailer, PathBuf::from("/opt/fc/jailer"));
+        assert_eq!(c.jail_dir, PathBuf::from("/jails"));
+        assert_eq!(c.jail_uid_base, 200_000);
+        assert_eq!(c.kernel, PathBuf::from("/data/vmlinux"));
+        assert_eq!(c.kernel_args, "loglevel=3");
+        assert!(c.pci);
+        assert_eq!(c.init, PathBuf::from("/opt/briqyard-init"));
+        assert_eq!(c.storage.pool, "tank/byard");
+        assert_eq!(c.registries.len(), 1);
+        assert_eq!(c.registries[0].host, "ghcr.io");
+        assert_eq!(c.registries[0].username, "bot");
+        assert_eq!(c.registries[0].password, "pw");
+        assert_eq!(c.network.range, "10.128.0.0/10");
+        assert_eq!(c.network.upstream_dns, vec!["1.1.1.1", "9.9.9.9"]);
+        assert_eq!(c.network.egress, "eth0");
+        assert_eq!(c.ingress.tcp_ports, "30000-31000");
+        assert_eq!(c.ingress.http, "0.0.0.0:8080");
+        assert_eq!(c.ingress.domain, "byard.example");
+        assert_eq!(c.ingress.bind, "10.0.0.5");
+        assert_eq!(c.ingress.advertise, "203.0.113.5");
+        assert_eq!(c.root_disk_gb, 16);
+        assert_eq!(c.image_keep_days, 3);
+        assert!(c.suspend_on_sleep);
+        let f = c.fleet.unwrap();
+        assert_eq!(f.url, "http://fleet:7430");
+        assert_eq!(f.token, "ft");
+        assert_eq!(f.advertise, "http://10.0.0.5:7420");
+        assert_eq!(f.region, "fsn1");
+        assert_eq!(c.capacity.memory_mb, 65536);
+        assert_eq!(c.capacity.vcpus, 128);
+    }
+
+    #[test]
+    fn a_partial_section_keeps_the_other_defaults() {
+        let c = load("ingress:\n  http: 127.0.0.1:8080\n").unwrap();
+        assert_eq!(c.ingress.http, "127.0.0.1:8080");
+        assert_eq!(c.ingress.tcp_ports, "20000-29999");
+        assert_eq!(c.ingress.domain, "byard.localhost");
+    }
+
+    #[test]
+    fn unknown_fields_are_refused_by_name() {
+        // A typo at the top level, in a section, and in a list item: each names the field.
+        for (yaml, field) in [
+            ("listn: 127.0.0.1:1\n", "listn"),
+            ("storage:\n  pol: byard\n", "pol"),
+            ("registries:\n  - host: a\n    user: b\n", "user"),
+            ("fleet:\n  urll: x\n", "urll"),
+            ("capacity:\n  memory: 1\n", "memory"),
+        ] {
+            let err = load(yaml).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("unknown field"), "{yaml:?}: {msg}");
+            assert!(msg.contains(&format!("`{field}`")), "{yaml:?}: {msg}");
+            assert!(msg.contains("parse config"), "{yaml:?}: {msg}");
+        }
+    }
+
+    #[test]
+    fn validation() {
+        let err = load("storage:\n  backend: btrfs\n").unwrap_err();
+        assert!(err.to_string().contains("storage.backend"), "{err}");
+        assert!(err.to_string().contains("btrfs"), "{err}");
+
+        let err = load("storage:\n  pool: \"\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("storage.pool is required"),
+            "{err}"
+        );
+
+        let err = load("root_disk_gb: 0\n").unwrap_err();
+        assert!(err.to_string().contains("root_disk_gb"), "{err}");
+
+        for (field, yaml) in [
+            ("firecracker", "firecracker: bin/firecracker\n"),
+            ("kernel", "kernel: vmlinux\n"),
+            ("init", "init: ./briqyard-init\n"),
+        ] {
+            let err = load(yaml).unwrap_err();
+            assert_eq!(err.to_string(), format!("{field} must be an absolute path"));
+        }
+        // The jailer may stay empty (no jail) and is not checked for an absolute path here.
+        load("jailer: \"\"\n").unwrap();
+    }
+
+    #[test]
+    fn derived_directories() {
+        let c = load("data_dir: /data\n").unwrap();
+        assert_eq!(c.run_dir(), PathBuf::from("/data/run"));
+        assert_eq!(c.image_dir(), PathBuf::from("/data/images"));
+        assert_eq!(c.state_dir(), PathBuf::from("/data/state"));
+        assert_eq!(c.jail_base(), PathBuf::from("/data/jail"));
+
+        let c = load("data_dir: /data\njail_dir: /fast/jails\n").unwrap();
+        assert_eq!(c.jail_base(), PathBuf::from("/fast/jails"));
+        assert_eq!(c.run_dir(), PathBuf::from("/data/run"));
+    }
+}
