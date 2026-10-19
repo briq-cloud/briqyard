@@ -1970,6 +1970,8 @@ mod tests {
 
     // --- the reaper ---
 
+    // The orphan is left unwaited on purpose: reaping it is what the test checks.
+    #[allow(clippy::zombie_processes)]
     #[test]
     fn reaper_leaves_tracked_children_and_reaps_orphans() {
         track_init();
