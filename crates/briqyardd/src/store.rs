@@ -82,3 +82,134 @@ impl Store {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    struct Rec {
+        id: String,
+        n: u32,
+    }
+
+    fn open() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        (dir, store)
+    }
+
+    fn rec(id: &str, n: u32) -> Rec {
+        Rec { id: id.into(), n }
+    }
+
+    #[test]
+    fn open_makes_the_kinds() {
+        let (dir, _) = open();
+        for d in ["machines", "tenants", "endpoints", "meta"] {
+            assert!(dir.path().join(d).is_dir(), "{d}");
+        }
+        // Opening again over an existing state dir is fine.
+        Store::open(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn put_get_list_delete() {
+        let (dir, store) = open();
+        let (a, b) = (rec("m_a", 1), rec("m_b", 2));
+        store.put("machines", &a.id, &a).unwrap();
+        store.put("machines", &b.id, &b).unwrap();
+        assert_eq!(
+            store.get::<Rec>("machines", "m_a").unwrap(),
+            Some(a.clone())
+        );
+        assert!(dir.path().join("machines/m_a.json").is_file());
+
+        let mut all: Vec<Rec> = store.list("machines").unwrap();
+        all.sort_by(|x, y| x.id.cmp(&y.id));
+        assert_eq!(all, vec![a.clone(), b.clone()]);
+
+        // A put over an existing key replaces it.
+        let a2 = rec("m_a", 10);
+        store.put("machines", &a.id, &a2).unwrap();
+        assert_eq!(store.get::<Rec>("machines", "m_a").unwrap(), Some(a2));
+
+        store.delete("machines", "m_a").unwrap();
+        assert_eq!(store.get::<Rec>("machines", "m_a").unwrap(), None);
+        let all: Vec<Rec> = store.list("machines").unwrap();
+        assert_eq!(all, vec![b]);
+    }
+
+    #[test]
+    fn missing_key_is_none_and_delete_is_idempotent() {
+        let (_dir, store) = open();
+        assert_eq!(store.get::<Rec>("machines", "nope").unwrap(), None);
+        store.delete("machines", "nope").unwrap();
+        let none: Vec<Rec> = store.list("tenants").unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn writes_are_atomic() {
+        let (dir, store) = open();
+        let r = rec("m_a", 1);
+        store.put("machines", &r.id, &r).unwrap();
+        store.put_meta("host_id", "h_1").unwrap();
+        let leftovers: Vec<String> = walk(dir.path())
+            .into_iter()
+            .filter(|p| p.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        // The file is the record, pretty-printed, so an operator can read it.
+        let text = std::fs::read_to_string(dir.path().join("machines/m_a.json")).unwrap();
+        assert!(text.contains("\"id\": \"m_a\""), "{text}");
+    }
+
+    #[test]
+    fn list_skips_what_is_not_a_record() {
+        let (dir, store) = open();
+        let r = rec("m_a", 1);
+        store.put("machines", &r.id, &r).unwrap();
+        // A temp file a crash left behind, and a stray file: neither is a record.
+        std::fs::write(dir.path().join("machines/m_b.json.tmp"), b"{").unwrap();
+        std::fs::write(dir.path().join("machines/README"), b"x").unwrap();
+        let all: Vec<Rec> = store.list("machines").unwrap();
+        assert_eq!(all, vec![r]);
+    }
+
+    #[test]
+    fn a_broken_record_is_an_error_with_its_name() {
+        let (dir, store) = open();
+        std::fs::write(dir.path().join("machines/m_bad.json"), b"{not json").unwrap();
+        let err = store.get::<Rec>("machines", "m_bad").unwrap_err();
+        assert!(err.to_string().contains("machines/m_bad"), "{err:#}");
+        let err = store.list::<Rec>("machines").unwrap_err();
+        assert!(err.to_string().contains("machines/m_bad.json"), "{err:#}");
+    }
+
+    #[test]
+    fn meta_is_a_plain_string() {
+        let (dir, store) = open();
+        assert_eq!(store.get_meta("host_id").unwrap(), None);
+        store.put_meta("host_id", "h_abc").unwrap();
+        assert_eq!(store.get_meta("host_id").unwrap().as_deref(), Some("h_abc"));
+        store.put_meta("host_id", "h_def").unwrap();
+        assert_eq!(store.get_meta("host_id").unwrap().as_deref(), Some("h_def"));
+        assert!(dir.path().join("meta/host_id.json").is_file());
+        assert!(!dir.path().join("meta/host_id.json.tmp").exists());
+    }
+
+    fn walk(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            } else {
+                out.push(p.to_string_lossy().into_owned());
+            }
+        }
+        out
+    }
+}
