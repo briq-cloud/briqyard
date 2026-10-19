@@ -390,6 +390,11 @@ class Run:
 
         _, errs = parallel(list(self.machines.values()), one, self.a.workers)
         self.report_errors("destroy", errs)
+        # Whatever a failed phase left in these tenants (a fork, a retry's twin) goes too.
+        left = [m for m in self.api.call("GET", "/v1/machines", op="list") if m["tenant"].startswith(self.prefix)]
+        if left:
+            self.log(f"   {len(left)} machine(s) left by failed phases, destroying them")
+            parallel(left, one, self.a.workers)
         for t in self.tenants:
             try:
                 self.api.call("DELETE", f"/v1/tenants/{t}", op="tenant rm", expect={200, 204, 404})

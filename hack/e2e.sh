@@ -103,7 +103,9 @@ check "fork is apart"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc
 # The fork outlives its source: the clone is promoted, the source's disks go.
 briqyard machine destroy "$P" >/dev/null
 check "source destroyed under its fork" '! briqyard machine get "$P" >/dev/null 2>&1'
-check "fork still answers"  '[ "$(briqyard machine exec "$F" -- psql -U postgres -tAc "select x from t")" = 42 ]'
+# The fork holds 42 and its own 43 by now.
+fork_out=$(briqyard machine exec "$F" -- psql -U postgres -tAc "select sum(x) from t" 2>&1)
+check "fork still answers"  '[ "$fork_out" = 85 ] || { echo "       fork said: $(echo "$fork_out" | head -3 | tr "\n" "|")"; false; }'
 
 echo "== tenants made together get bridges of their own"
 for i in 1 2 3; do briqyard machine run --image alpine:3.20 --name par --tenant "$T-par$i" --memory 128 -- sleep 600 > /tmp/by-par$i.json & done; wait
