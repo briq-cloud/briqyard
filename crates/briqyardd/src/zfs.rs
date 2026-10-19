@@ -243,6 +243,26 @@ impl Zfs {
             .collect())
     }
 
+    /// Makes a clone the owner of the snapshot it was made from: the origin's snapshot moves to
+    /// the clone and the origin becomes the dependent, so the origin can be destroyed.
+    pub async fn promote(&self, name: &str) -> Result<()> {
+        self.run(&["promote", &self.ds(name)]).await?;
+        Ok(())
+    }
+
+    /// Promotes every clone of every snapshot of a dataset, so that destroying the dataset is
+    /// not refused for "dependent clones": a machine's forks outlive it.
+    pub async fn release_clones(&self, name: &str) -> Result<()> {
+        let prefix = format!("{}/", self.pool);
+        for snap in self.snapshots(name).await? {
+            for clone in self.clones(name, &snap).await? {
+                let rel = clone.strip_prefix(&prefix).unwrap_or(&clone);
+                self.promote(rel).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn used(&self, name: &str) -> Result<u64> {
         let out = self
             .run(&["get", "-H", "-p", "-o", "value", "used", &self.ds(name)])
@@ -520,6 +540,26 @@ exit 0
         // Any other refusal is an error.
         let err = f.zfs.destroy("boom").await.unwrap_err();
         assert!(err.to_string().contains("permission denied"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn releasing_clones_promotes_each_one() {
+        let f = Fake::open("byard").await.unwrap();
+        f.zfs.create("m/x/root", 1 << 20).await.unwrap();
+        f.zfs.snapshot("m/x/root", "fork-y").await.unwrap();
+        f.zfs.snapshot("m/x/root", "fork-z").await.unwrap();
+        f.answer("clones", "byard/m/y/root,byard/m/z/root\n");
+        f.calls();
+        f.zfs.release_clones("m/x/root").await.unwrap();
+        let calls = f.calls();
+        let promotes: Vec<&String> = calls.iter().filter(|c| c.starts_with("promote ")).collect();
+        assert_eq!(promotes.len(), 4, "{calls:?}");
+        assert!(calls.contains(&"promote byard/m/y/root".to_string()));
+        // No snapshot, nothing to promote.
+        f.zfs.create("m/w/root", 1 << 20).await.unwrap();
+        f.calls();
+        f.zfs.release_clones("m/w/root").await.unwrap();
+        assert!(f.calls().iter().all(|c| !c.starts_with("promote")));
     }
 
     #[tokio::test]

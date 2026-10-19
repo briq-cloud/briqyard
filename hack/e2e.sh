@@ -100,6 +100,10 @@ for i in $(seq 1 60); do briqyard machine exec "$F" -- pg_isready -h 127.0.0.1 -
 check "fork has data"  '[ "$(briqyard machine exec "$F" -- psql -U postgres -tAc "select x from t")" = 42 ]'
 briqyard machine exec "$F" -- psql -U postgres -c "insert into t values (43)" >/dev/null
 check "fork is apart"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select count(*) from t")" = 1 ]'
+# The fork outlives its source: the clone is promoted, the source's disks go.
+briqyard machine destroy "$P" >/dev/null
+check "source destroyed under its fork" '! briqyard machine get "$P" >/dev/null 2>&1'
+check "fork still answers"  '[ "$(briqyard machine exec "$F" -- psql -U postgres -tAc "select x from t")" = 42 ]'
 
 echo "== tenants made together get bridges of their own"
 for i in 1 2 3; do briqyard machine run --image alpine:3.20 --name par --tenant "$T-par$i" --memory 128 -- sleep 600 > /tmp/by-par$i.json & done; wait

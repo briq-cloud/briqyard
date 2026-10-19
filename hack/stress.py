@@ -204,9 +204,10 @@ class Run:
             return m
 
         res, errs = parallel(targets, mk, self.a.workers)
-        for i, m in res.items():
-            self.machines[targets[i]] = m
-        self.report_errors("create", errs)
+        for i, tn in enumerate(targets):
+            if i in res:
+                self.machines[tn] = res[i]
+        self.report_errors("create", errs, targets)
         self.invariants("create")
 
     def exec_all(self):
@@ -221,8 +222,9 @@ class Run:
             assert lines[0] == n, f"hostname {lines[0]} != {n}"
             assert lines[1] == f"{t}/{n}", f"boot file {lines[1]}"
             # a sibling by name, and its own id name
+            # The sibling's web server comes up a moment after its machine reports running.
             sib = f"m{(int(n[1:]) + 1) % self.a.per_tenant}"
-            self.exec(mid, ["sh", "-c", f"nslookup {sib}.internal >/dev/null && wget -qO- -T 5 http://{sib}.internal:8080/ | grep -q hello"])
+            self.exec(mid, ["sh", "-c", f"nslookup {sib}.internal >/dev/null && for i in $(seq 1 60); do wget -qO- -T 5 http://{sib}.internal:8080/ 2>/dev/null | grep -q hello && exit 0; sleep 1; done; exit 1"], timeout_ms=90000)
             # stdin and exit codes
             assert self.exec(mid, ["cat"], stdin="ping") == "ping"
             try:
@@ -240,7 +242,7 @@ class Run:
             return True
 
         _, errs = parallel(items, one, self.a.workers)
-        self.report_errors("exec", errs)
+        self.report_errors("exec", errs, [k for k, _ in items])
 
     def endpoints_all(self):
         self.phase("endpoints: a TCP port per machine, connections from many clients")
@@ -281,12 +283,15 @@ class Run:
             (t, n), m = kv
             mid = m["id"]
             suspend = int(n[1:]) % 2 == 1
-            self.exec(mid, ["sh", "-c", "echo kept > /tmp/kept"])
+            # /tmp is a tmpfs in the guest: what must survive a cold boot lives on the root disk.
+            self.exec(mid, ["sh", "-c", "echo kept > /root/kept; echo mem > /tmp/mem"])
             self.api.call("POST", f"/v1/machines/{mid}/stop", {"suspend": suspend, "timeout_sec": 10}, op="suspend" if suspend else "stop", timeout=120)
             self.wait_state(mid, {"stopped"}, timeout=120)
             self.api.call("POST", f"/v1/machines/{mid}/start", op="resume" if suspend else "start", timeout=180)
             self.wait_state(mid, {"running"}, timeout=self.a.boot_timeout)
-            assert self.exec(mid, ["cat", "/tmp/kept"]).strip() == "kept"
+            assert self.exec(mid, ["cat", "/root/kept"]).strip() == "kept"
+            if suspend:
+                assert self.exec(mid, ["cat", "/tmp/mem"]).strip() == "mem", "memory not kept through the resume"
             # the endpoint still serves after the restart
             ep = self.endpoints.get(mid)
             if ep:
@@ -298,7 +303,7 @@ class Run:
             return True
 
         _, errs = parallel(items, one, self.a.workers)
-        self.report_errors("stop/start", errs)
+        self.report_errors("stop/start", errs, [k for k, _ in items])
         self.invariants("stop/start")
 
     def fork_some(self):
@@ -307,15 +312,17 @@ class Run:
 
         def one(kv):
             (t, n), m = kv
-            self.exec(m["id"], ["sh", "-c", "echo forked > /tmp/forked"])
+            self.exec(m["id"], ["sh", "-c", "echo forked > /root/forked; sync"])
             f = self.api.call("POST", "/v1/machines", {"tenant": t, "name": f"{n}-fork", "fork": {"machine_id": m["id"], "copy": "disk"}, "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="fork", timeout=600)
-            f = self.wait_state(f["id"], {"running"}, timeout=self.a.boot_timeout)
-            assert self.exec(f["id"], ["cat", "/tmp/forked"]).strip() == "forked"
-            self.api.call("DELETE", f"/v1/machines/{f['id']}", op="destroy", timeout=180)
+            try:
+                f = self.wait_state(f["id"], {"running"}, timeout=self.a.boot_timeout)
+                assert self.exec(f["id"], ["cat", "/root/forked"]).strip() == "forked"
+            finally:
+                self.api.call("DELETE", f"/v1/machines/{f['id']}", op="destroy", timeout=180)
             return True
 
         _, errs = parallel(picks, one, self.a.workers)
-        self.report_errors("fork", errs)
+        self.report_errors("fork", errs, [k for k, _ in picks])
         self.invariants("fork")
 
     def sleep_wake(self):
@@ -393,9 +400,10 @@ class Run:
         self.invariants("destroy")
 
     # ---- reporting ----
-    def report_errors(self, phase, errs):
+    def report_errors(self, phase, errs, names=None):
         for k, e in errs.items():
-            self.log(f"   FAIL {phase} #{k}: {str(e)[:200]}")
+            who = names[k] if names and k < len(names) else f"#{k}"
+            self.log(f"   FAIL {phase} {who}: {str(e)[:200]}")
         if not errs:
             self.log(f"   ok   {phase}")
 

@@ -1724,6 +1724,16 @@ impl Manager {
         }
         let _ = host::delete_tap(id).await;
         let rec = e.snapshot();
+        // A fork is a clone of this machine's disks: it takes the snapshots over and lives on.
+        for ds in [rec.root_dataset(), rec.data_dataset()] {
+            if self.inner.zfs.exists(&ds).await.context("disks")? {
+                self.inner
+                    .zfs
+                    .release_clones(&ds)
+                    .await
+                    .context("forks of the disks")?;
+            }
+        }
         self.inner
             .zfs
             .destroy(&rec.dataset())
