@@ -81,22 +81,6 @@ briqyard machine start "$P" >/dev/null
 for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "data survived"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select x from t")" = 42 ]'
 
-echo "== backup and restore"
-B1=$(briqyard machine backup "$F" | jq -r .id)
-check "first backup is whole"   '[ "$(briqyard machine backups "$F" | jq -r ".[0].incremental")" = false ]'
-briqyard machine exec "$F" -- psql -U postgres -c "insert into t values (44)" >/dev/null
-briqyard machine exec "$F" -- sh -c "sync" >/dev/null
-B2=$(briqyard machine backup "$F" | jq -r .id)
-check "second backup is a change" '[ "$(briqyard machine backups "$F" | jq -r ".[1].incremental")" = true ]'
-briqyard machine destroy "$F" >/dev/null
-R=$(briqyard machine restore --from "$F" --tenant "$T" --name restored | jq -r .id)
-for i in $(seq 1 60); do briqyard machine exec "$R" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
-check "restored from the chain" '[ "$(briqyard machine exec "$R" -- psql -U postgres -tAc "select sum(x) from t")" = 129 ]'
-R1=$(briqyard machine restore --from "$F" --backup "$B1" --tenant "$T" --name restored1 | jq -r .id)
-for i in $(seq 1 60); do briqyard machine exec "$R1" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
-check "restored the first backup" '[ "$(briqyard machine exec "$R1" -- psql -U postgres -tAc "select sum(x) from t")" = 85 ]'
-briqyard machine destroy "$R1" >/dev/null
-
 echo "== sleep on idle, wake on connect"
 S=$(briqyard machine run --image postgres:16-alpine --name sleeper --tenant "$T" --memory 512 --volume 1G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 20s | jq -r .id)
 SEP=$(briqyard endpoint add "$S" 5432 | jq -r .address)
@@ -122,6 +106,23 @@ check "source destroyed under its fork" '! briqyard machine get "$P" >/dev/null 
 # The fork holds 42 and its own 43 by now.
 fork_out=$(briqyard machine exec "$F" -- psql -U postgres -tAc "select sum(x) from t" 2>&1)
 check "fork still answers"  '[ "$fork_out" = 85 ] || { echo "       fork said: $(echo "$fork_out" | head -3 | tr "\n" "|")"; false; }'
+
+echo "== backup and restore"
+B1=$(briqyard machine backup "$F" | jq -r .id)
+check "first backup is whole"   '[ "$(briqyard machine backups "$F" | jq -r ".[0].incremental")" = false ]'
+briqyard machine exec "$F" -- psql -U postgres -c "insert into t values (44)" >/dev/null
+briqyard machine exec "$F" -- sh -c "sync" >/dev/null
+B2=$(briqyard machine backup "$F" | jq -r .id)
+check "second backup is a change" '[ "$(briqyard machine backups "$F" | jq -r ".[1].incremental")" = true ]'
+briqyard machine destroy "$F" >/dev/null
+R=$(briqyard machine restore --from "$F" --tenant "$T" --name restored | jq -r .id)
+for i in $(seq 1 60); do briqyard machine exec "$R" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
+check "restored from the chain" '[ "$(briqyard machine exec "$R" -- psql -U postgres -tAc "select sum(x) from t")" = 129 ]'
+R1=$(briqyard machine restore --from "$F" --backup "$B1" --tenant "$T" --name restored1 | jq -r .id)
+for i in $(seq 1 60); do briqyard machine exec "$R1" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
+check "restored the first backup" '[ "$(briqyard machine exec "$R1" -- psql -U postgres -tAc "select sum(x) from t")" = 85 ]'
+briqyard machine destroy "$R1" >/dev/null
+
 
 echo "== tenants made together get bridges of their own"
 for i in 1 2 3; do briqyard machine run --image alpine:3.20 --name par --tenant "$T-par$i" --memory 128 -- sleep 600 > /tmp/by-par$i.json & done; wait

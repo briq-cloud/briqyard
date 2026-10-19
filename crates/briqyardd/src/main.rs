@@ -91,7 +91,12 @@ async fn run(args: Args) -> Result<()> {
         .collect();
     let dns = netw::dns::Resolver::new(&cfg.network.upstream_dns);
     let mgr = machine::Manager::new(cfg.clone(), store, zfs, images, dns).await?;
-    let ing = ingress::Ingress::new(mgr.clone(), &cfg.ingress.bind, &cfg.ingress.http);
+    let ing = ingress::Ingress::new(
+        mgr.clone(),
+        &cfg.ingress.bind,
+        &cfg.ingress.http,
+        std::time::Duration::from_secs(cfg.boot_timeout_sec.max(10)),
+    );
     ing.start().await?;
     if let Some(f) = cfg.fleet.clone() {
         if !f.url.is_empty() {

@@ -24,7 +24,7 @@ pub struct Ingress {
 }
 
 impl Ingress {
-    pub fn new(mgr: Manager, bind: &str, http: &str) -> Self {
+    pub fn new(mgr: Manager, bind: &str, http: &str, boot_timeout: Duration) -> Self {
         Self {
             mgr,
             bind: if bind.is_empty() {
@@ -33,7 +33,9 @@ impl Ingress {
                 bind.to_string()
             },
             http: http.to_string(),
-            wake_timeout: Duration::from_secs(90),
+            // A connection waits for the machine as long as a boot may take, plus the
+            // service's own start.
+            wake_timeout: boot_timeout + Duration::from_secs(30),
             listeners: Default::default(),
             hosts: Default::default(),
         }
