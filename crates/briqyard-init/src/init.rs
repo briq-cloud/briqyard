@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Notify;
-use tokio_vsock::{VsockAddr, VsockListener, VsockStream, VMADDR_CID_ANY};
+use tokio_vsock::{VsockAddr, VsockListener, VMADDR_CID_ANY};
 
 const CONFIG_DEVICE: &str = "/dev/vdb";
 
@@ -28,8 +28,13 @@ static CONSOLE: OnceLock<Mutex<fs::File>> = OnceLock::new();
 /// Children we spawned and wait for ourselves. The orphan reaper leaves these alone.
 static TRACKED: Mutex<Option<HashSet<i32>>> = Mutex::new(None);
 
+/// One console line: the daemon reads the `[briqyard] ` prefix.
+fn console_line(args: std::fmt::Arguments) -> String {
+    format!("[briqyard] {args}\n")
+}
+
 fn logf(args: std::fmt::Arguments) {
-    let line = format!("[briqyard] {args}\n");
+    let line = console_line(args);
     match CONSOLE.get() {
         Some(c) => {
             let _ = c.lock().unwrap().write_all(line.as_bytes());
@@ -69,8 +74,13 @@ pub fn main() {
         .build()
         .expect("runtime");
     let (code, oom, requested) = rt.block_on(run());
-    log!("exit code={code} oom={oom} requested={requested}");
+    log!("{}", exit_line(code, oom, requested));
     halt();
+}
+
+/// What the daemon reads after `[briqyard] ` when the main process has ended.
+fn exit_line(code: i32, oom: bool, requested: bool) -> String {
+    format!("exit code={code} oom={oom} requested={requested}")
 }
 
 async fn run() -> (i32, bool, bool) {
@@ -162,33 +172,48 @@ fn exit_code(s: std::process::ExitStatus) -> i32 {
 /// what nobody tracks. The spawn path holds the same lock while registering a new child.
 fn reap_orphans() {
     loop {
-        match waitid(Id::All, WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT) {
-            Ok(status) => {
-                let pid = match status.pid() {
-                    Some(p) => p,
-                    None => {
-                        std::thread::sleep(Duration::from_millis(50));
-                        continue;
-                    }
-                };
-                let tracked = TRACKED.lock().unwrap();
-                let is_ours = tracked
-                    .as_ref()
-                    .map(|t| t.contains(&pid.as_raw()))
-                    .unwrap_or(false);
-                if !is_ours {
-                    let _ = waitpid(pid, None);
-                }
-                drop(tracked);
-                if is_ours {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
+        match reap_one() {
+            Ok(Reaped::Orphan(_)) => {}
+            Ok(Reaped::Ours(_)) => std::thread::sleep(Duration::from_millis(10)),
+            Ok(Reaped::Nothing) => std::thread::sleep(Duration::from_millis(50)),
             Err(nix::errno::Errno::ECHILD) => std::thread::sleep(Duration::from_millis(100)),
             Err(nix::errno::Errno::EINTR) => {}
             Err(_) => std::thread::sleep(Duration::from_millis(100)),
         }
     }
+}
+
+/// What one look at the exited children found.
+#[derive(Debug, PartialEq, Eq)]
+enum Reaped {
+    /// Nobody tracked it: reaped.
+    Orphan(Pid),
+    /// A child we wait for ourselves: its status is left where it is.
+    Ours(Pid),
+    Nothing,
+}
+
+/// Waits (without reaping) for any exited child, then reaps it unless it is tracked.
+fn reap_one() -> nix::Result<Reaped> {
+    let status = waitid(Id::All, WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT)?;
+    let pid = match status.pid() {
+        Some(p) => p,
+        None => return Ok(Reaped::Nothing),
+    };
+    let tracked = TRACKED.lock().unwrap();
+    let is_ours = tracked
+        .as_ref()
+        .map(|t| t.contains(&pid.as_raw()))
+        .unwrap_or(false);
+    if !is_ours {
+        let _ = waitpid(pid, None);
+    }
+    drop(tracked);
+    Ok(if is_ours {
+        Reaped::Ours(pid)
+    } else {
+        Reaped::Orphan(pid)
+    })
 }
 
 fn mount_base() {
@@ -249,6 +274,7 @@ fn mount_base() {
     );
 }
 
+#[derive(Debug)]
 struct BootFile {
     path: String,
     mode: u32,
@@ -258,7 +284,13 @@ struct BootFile {
 /// Reads the raw tar on the config device.
 fn read_config_drive() -> Result<(Config, Vec<BootFile>)> {
     let f = fs::File::open(CONFIG_DEVICE).context(CONFIG_DEVICE)?;
-    let mut archive = tar::Archive::new(std::io::BufReader::with_capacity(1 << 20, f));
+    read_config_archive(std::io::BufReader::with_capacity(1 << 20, f))
+}
+
+/// Reads the config drive's tar: `config.json`, then the boot files under `files/`, whose
+/// mode comes from the tar header unless the config names one.
+fn read_config_archive<R: Read>(r: R) -> Result<(Config, Vec<BootFile>)> {
+    let mut archive = tar::Archive::new(r);
     let mut cfg: Option<Config> = None;
     let mut files = Vec::new();
     for entry in archive.entries()? {
@@ -296,14 +328,7 @@ fn read_config_drive() -> Result<(Config, Vec<BootFile>)> {
 fn setup_mounts(cfg: &Config) -> Result<()> {
     for m in &cfg.mounts {
         let path = Path::new(&m.path);
-        let had = fs::metadata(path).ok();
-        let mut staging: Option<PathBuf> = None;
-        if had.is_some() {
-            let s = PathBuf::from(format!("{}.briqyard-seed", m.path));
-            let _ = fs::rename(path, &s);
-            staging = Some(s);
-        }
-        fs::create_dir_all(path)?;
+        let seed = stage_mount_point(path)?;
         let fstype = if m.fstype.is_empty() {
             "ext4"
         } else {
@@ -317,24 +342,51 @@ fn setup_mounts(cfg: &Config) -> Result<()> {
             None::<&str>,
         )
         .with_context(|| format!("mount {} on {}", m.device, m.path))?;
-        if is_empty_volume(path) {
-            // A fresh ext4 has lost+found; a database refuses a data directory that is "not
-            // empty". Docker's named volumes are plain directories, so match that: fsck makes
-            // the directory again if it ever needs it.
-            let _ = fs::remove_dir(path.join("lost+found"));
-            if let Some(meta) = &had {
-                let _ = nix::unistd::chown(path, Some(meta.uid().into()), Some(meta.gid().into()));
-                let _ = fs::set_permissions(path, fs::Permissions::from_mode(meta.mode() & 0o7777));
-                if let Some(s) = &staging {
-                    let _ = copy_tree(s, path);
-                }
-            }
-        }
-        if let Some(s) = staging {
-            let _ = fs::remove_dir_all(s);
-        }
+        seed_mount_point(path, seed);
     }
     Ok(())
+}
+
+/// What the image had at a mount path, kept aside while the volume is mounted over it.
+struct Seed {
+    /// The image directory's metadata, when there was one.
+    had: Option<fs::Metadata>,
+    /// Where its content was moved.
+    staging: Option<PathBuf>,
+}
+
+/// Moves what the image has at `path` aside and makes an empty directory to mount on.
+fn stage_mount_point(path: &Path) -> Result<Seed> {
+    let had = fs::metadata(path).ok();
+    let mut staging: Option<PathBuf> = None;
+    if had.is_some() {
+        let s = PathBuf::from(format!("{}.briqyard-seed", path.display()));
+        let _ = fs::rename(path, &s);
+        staging = Some(s);
+    }
+    fs::create_dir_all(path)?;
+    Ok(Seed { had, staging })
+}
+
+/// After the mount: a fresh volume gets the image directory's owner, mode and content; the
+/// staged copy goes either way.
+fn seed_mount_point(path: &Path, seed: Seed) {
+    if is_empty_volume(path) {
+        // A fresh ext4 has lost+found; a database refuses a data directory that is "not
+        // empty". Docker's named volumes are plain directories, so match that: fsck makes
+        // the directory again if it ever needs it.
+        let _ = fs::remove_dir(path.join("lost+found"));
+        if let Some(meta) = &seed.had {
+            let _ = nix::unistd::chown(path, Some(meta.uid().into()), Some(meta.gid().into()));
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(meta.mode() & 0o7777));
+            if let Some(s) = &seed.staging {
+                let _ = copy_tree(s, path);
+            }
+        }
+    }
+    if let Some(s) = seed.staging {
+        let _ = fs::remove_dir_all(s);
+    }
 }
 
 fn is_empty_volume(path: &Path) -> bool {
@@ -370,19 +422,29 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
 }
 
 fn write_files(files: &[BootFile]) -> Result<()> {
+    write_files_under(Path::new("/"), files)
+}
+
+/// Writes the boot files, each at its absolute path under `root`.
+fn write_files_under(root: &Path, files: &[BootFile]) -> Result<()> {
     for f in files {
-        if let Some(parent) = Path::new(&f.path).parent() {
+        let target = root.join(f.path.trim_start_matches('/'));
+        if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mode = if f.mode & 0o777 == 0 {
-            0o644
-        } else {
-            f.mode & 0o7777
-        };
-        fs::write(&f.path, &f.data).with_context(|| f.path.clone())?;
-        let _ = fs::set_permissions(&f.path, fs::Permissions::from_mode(mode));
+        fs::write(&target, &f.data).with_context(|| f.path.clone())?;
+        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(file_mode(f.mode)));
     }
     Ok(())
+}
+
+/// The mode a file is written with: 0644 when none was given, else the permission bits.
+fn file_mode(mode: u32) -> u32 {
+    if mode & 0o777 == 0 {
+        0o644
+    } else {
+        mode & 0o7777
+    }
 }
 
 fn setup_names(cfg: &Config) {
@@ -390,6 +452,12 @@ fn setup_names(cfg: &Config) {
         let _ = nix::unistd::sethostname(&cfg.hostname);
         let _ = fs::write("/etc/hostname", format!("{}\n", cfg.hostname));
     }
+    let _ = fs::write("/etc/hosts", hosts_text(cfg));
+    let _ = fs::write("/etc/resolv.conf", resolv_text(cfg));
+}
+
+/// /etc/hosts: loopback, the machine's own name on its address, then the config's entries.
+fn hosts_text(cfg: &Config) -> String {
     let mut hosts =
         String::from("127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
     if let Some((ip, _)) = cfg.ip.split_once('/') {
@@ -400,13 +468,17 @@ fn setup_names(cfg: &Config) {
     for (name, addr) in &cfg.hosts {
         hosts.push_str(&format!("{addr}\t{name}\n"));
     }
-    let _ = fs::write("/etc/hosts", hosts);
+    hosts
+}
+
+/// /etc/resolv.conf: the config's servers, `.internal` as the search domain.
+fn resolv_text(cfg: &Config) -> String {
     let mut resolv = String::new();
     for d in &cfg.dns {
         resolv.push_str(&format!("nameserver {d}\n"));
     }
     resolv.push_str("search internal\noptions ndots:1\n");
-    let _ = fs::write("/etc/resolv.conf", resolv);
+    resolv
 }
 
 async fn setup_network(cfg: &Config) -> Result<()> {
@@ -566,9 +638,12 @@ fn look_path(name: &str, env: &[(String, String)]) -> Result<String> {
 }
 
 fn read_table(path: &str) -> Vec<Vec<String>> {
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
+    parse_table(&fs::read_to_string(path).unwrap_or_default())
+}
+
+/// A passwd or group file: one row per line, colon-separated; comments and blank lines skipped.
+fn parse_table(text: &str) -> Vec<Vec<String>> {
+    text.lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(|l| l.split(':').map(String::from).collect())
         .collect()
@@ -576,14 +651,22 @@ fn read_table(path: &str) -> Vec<Vec<String>> {
 
 /// Resolves "name", "uid", "name:group" or "uid:gid" through /etc/passwd and /etc/group.
 fn lookup_user(spec: &str) -> Result<(u32, u32, Option<String>)> {
+    lookup_user_in(spec, &read_table("/etc/passwd"), &read_table("/etc/group"))
+}
+
+/// `lookup_user` against the given passwd and group rows. Returns uid, gid and the home
+/// directory when the user has a passwd entry.
+fn lookup_user_in(
+    spec: &str,
+    passwd: &[Vec<String>],
+    groups: &[Vec<String>],
+) -> Result<(u32, u32, Option<String>)> {
     let (user, group) = match spec.split_once(':') {
         Some((u, g)) => (u, Some(g)),
         None => (spec, None),
     };
-    let passwd = read_table("/etc/passwd");
-    let groups = read_table("/etc/group");
     let mut found = None;
-    for row in &passwd {
+    for row in passwd {
         if row.len() >= 7 && (row[0] == user || row[2] == user) {
             let uid: u32 = row[2].parse().unwrap_or(0);
             let gid: u32 = row[3].parse().unwrap_or(0);
@@ -613,7 +696,11 @@ fn lookup_user(spec: &str) -> Result<(u32, u32, Option<String>)> {
 }
 
 fn supplementary_groups(uid: u32) -> Vec<u32> {
-    let passwd = read_table("/etc/passwd");
+    supplementary_groups_in(uid, &read_table("/etc/passwd"), &read_table("/etc/group"))
+}
+
+/// The groups that list the user with this uid as a member.
+fn supplementary_groups_in(uid: u32, passwd: &[Vec<String>], groups: &[Vec<String>]) -> Vec<u32> {
     let name = match passwd
         .iter()
         .find(|r| r.len() >= 3 && r[2] == uid.to_string())
@@ -621,7 +708,7 @@ fn supplementary_groups(uid: u32) -> Vec<u32> {
         Some(r) => r[0].clone(),
         None => return vec![],
     };
-    read_table("/etc/group")
+    groups
         .iter()
         .filter(|r| r.len() >= 4 && r[3].split(',').any(|m| m == name))
         .filter_map(|r| r[2].parse().ok())
@@ -686,7 +773,7 @@ async fn serve(st: Arc<State>) {
     }
 }
 
-async fn read_request(stream: &mut VsockStream) -> std::io::Result<Request> {
+async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<Request> {
     let mut hdr = [0u8; 4];
     AsyncReadExt::read_exact(&mut *stream, &mut hdr).await?;
     let n = u32::from_be_bytes(hdr) as usize;
@@ -701,7 +788,7 @@ async fn read_request(stream: &mut VsockStream) -> std::io::Result<Request> {
     guest::decode_frame(&body)
 }
 
-async fn send(stream: &Arc<tokio::sync::Mutex<VsockStream>>, resp: &Response) {
+async fn send<S: AsyncWrite + Unpin>(stream: &Arc<tokio::sync::Mutex<S>>, resp: &Response) {
     if let Ok(frame) = guest::encode_frame(resp) {
         let mut s = stream.lock().await;
         let _ = AsyncWriteExt::write_all(&mut *s, &frame).await;
@@ -709,7 +796,10 @@ async fn send(stream: &Arc<tokio::sync::Mutex<VsockStream>>, resp: &Response) {
     }
 }
 
-async fn handle(st: Arc<State>, mut stream: VsockStream) {
+async fn handle<S>(st: Arc<State>, mut stream: S)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let req = match read_request(&mut stream).await {
         Ok(r) => r,
         Err(_) => return,
@@ -739,13 +829,8 @@ async fn handle(st: Arc<State>, mut stream: VsockStream) {
                 if let Some(parent) = Path::new(&req.path).parent() {
                     fs::create_dir_all(parent)?;
                 }
-                let mode = if req.mode & 0o777 == 0 {
-                    0o644
-                } else {
-                    req.mode & 0o7777
-                };
                 fs::write(&req.path, &req.data)?;
-                fs::set_permissions(&req.path, fs::Permissions::from_mode(mode))
+                fs::set_permissions(&req.path, fs::Permissions::from_mode(file_mode(req.mode)))
             })();
             match res {
                 Ok(()) => send(&stream, &Response::new("ok")).await,
@@ -782,7 +867,10 @@ async fn handle(st: Arc<State>, mut stream: VsockStream) {
     }
 }
 
-async fn exec_op(st: &Arc<State>, stream: Arc<tokio::sync::Mutex<VsockStream>>, req: Request) {
+async fn exec_op<S>(st: &Arc<State>, stream: Arc<tokio::sync::Mutex<S>>, req: Request)
+where
+    S: AsyncWrite + Unpin + Send + 'static,
+{
     if req.cmd.is_empty() {
         send(&stream, &Response::error("empty command")).await;
         return;
@@ -902,4 +990,1050 @@ async fn exec_op(st: &Arc<State>, stream: Arc<tokio::sync::Mutex<VsockStream>>, 
         Err(_) => 126,
     };
     send(&stream, &Response::exit(code, timed_out)).await;
+}
+
+// The init is Linux-only and so are its tests: run them in the dev VM
+// (`cargo test -p briqyard-init` there). Nothing here needs /dev/kvm, a real mount or PID 1.
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use nix::sys::wait::WaitStatus;
+    use std::time::Instant;
+
+    /// Children spawned here are tracked like the init's own, so the reaper test (which
+    /// reaps any untracked exited child of this process) never steals their status.
+    fn track_init() {
+        TRACKED.lock().unwrap().get_or_insert_with(HashSet::new);
+    }
+
+    fn untrack(pid: i32) {
+        TRACKED.lock().unwrap().as_mut().unwrap().remove(&pid);
+    }
+
+    /// Spawns a process tracked under the TRACKED lock, as the init does.
+    fn spawn_tracked(cmd: &mut std::process::Command) -> std::process::Child {
+        track_init();
+        let mut tracked = TRACKED.lock().unwrap();
+        let child = cmd.spawn().unwrap();
+        tracked.as_mut().unwrap().insert(child.id() as i32);
+        child
+    }
+
+    fn state_with(cfg: Config) -> Arc<State> {
+        track_init();
+        let env = build_env(&cfg.env);
+        Arc::new(State {
+            cfg,
+            env,
+            main_pid: Mutex::new(None),
+            main_done: Notify::new(),
+            requested: Mutex::new(false),
+        })
+    }
+
+    fn state() -> Arc<State> {
+        state_with(Config::default())
+    }
+
+    /// The frames a handler wrote, in order.
+    fn frames(buf: &[u8]) -> Vec<Response> {
+        let mut r = buf;
+        let mut out = Vec::new();
+        while !r.is_empty() {
+            out.push(guest::read_frame(&mut r).unwrap());
+        }
+        out
+    }
+
+    fn text(frames: &[Response], kind: &str) -> String {
+        let mut s = Vec::new();
+        for f in frames.iter().filter(|f| f.kind == kind) {
+            s.extend_from_slice(&f.data);
+        }
+        String::from_utf8_lossy(&s).into_owned()
+    }
+
+    fn exit_of(frames: &[Response]) -> &Response {
+        let last = frames.last().expect("a response");
+        assert_eq!(last.kind, "exit", "{last:?}");
+        last
+    }
+
+    /// Runs an exec request against an in-memory sink and returns the frames it produced.
+    async fn exec(st: &Arc<State>, req: Request) -> Vec<Response> {
+        let sink = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        exec_op(st, sink.clone(), req).await;
+        let buf = sink.lock().await;
+        frames(&buf)
+    }
+
+    fn exec_req(cmd: &[&str]) -> Request {
+        Request {
+            op: "exec".into(),
+            cmd: cmd.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn proc_state(pid: i32) -> Option<char> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after = stat.rsplit_once(')')?.1;
+        after.split_whitespace().next()?.chars().next()
+    }
+
+    fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !ok() {
+            assert!(start.elapsed() < Duration::from_secs(5), "{what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    // --- the console ---
+
+    #[test]
+    fn exit_line_is_what_the_daemon_parses() {
+        assert_eq!(
+            console_line(format_args!("{}", exit_line(0, false, true))),
+            "[briqyard] exit code=0 oom=false requested=true\n"
+        );
+        assert_eq!(
+            exit_line(137, true, false),
+            "exit code=137 oom=true requested=false"
+        );
+        assert_eq!(
+            console_line(format_args!("started pid={}", 7)),
+            "[briqyard] started pid=7\n"
+        );
+    }
+
+    #[test]
+    fn exit_codes() {
+        use std::process::ExitStatus;
+        assert_eq!(exit_code(ExitStatus::from_raw(0)), 0);
+        assert_eq!(exit_code(ExitStatus::from_raw(3 << 8)), 3);
+        // Killed by a signal: 128 plus its number, as a shell reports it.
+        assert_eq!(exit_code(ExitStatus::from_raw(9)), 137);
+        assert_eq!(exit_code(ExitStatus::from_raw(15)), 143);
+    }
+
+    #[test]
+    fn argv_strings() {
+        let mut c = std::process::Command::new("/bin/sh");
+        c.args(["-c", "echo hi"]);
+        assert_eq!(argv_string(&c), "/bin/sh -c echo hi");
+        assert_eq!(argv_string(&std::process::Command::new("true")), "true");
+    }
+
+    // --- the config drive ---
+
+    fn config_json() -> String {
+        serde_json::to_string(&Config {
+            hostname: "db".into(),
+            ip: "10.64.1.2/24".into(),
+            gateway: "10.64.1.1".into(),
+            dns: vec!["10.64.1.1".into()],
+            entrypoint: vec!["/bin/sh".into()],
+            cmd: vec!["-c".into(), "true".into()],
+            files: vec![
+                guest::FileMeta {
+                    path: "/etc/app.conf".into(),
+                    mode: 0o600,
+                },
+                guest::FileMeta {
+                    path: "/bin/run.sh".into(),
+                    mode: 0,
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn tar_with(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        for (name, data, mode) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(*mode);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            b.append_data(&mut h, name, &data[..]).unwrap();
+        }
+        b.into_inner().unwrap()
+    }
+
+    #[test]
+    fn config_archive_parses_config_and_files() {
+        let mut b = tar::Builder::new(Vec::new());
+        let cfg = config_json();
+        let mut h = tar::Header::new_gnu();
+        h.set_size(cfg.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, guest::CONFIG_NAME, cfg.as_bytes())
+            .unwrap();
+        // A directory entry under files/ is not a file: skipped.
+        let mut d = tar::Header::new_gnu();
+        d.set_entry_type(tar::EntryType::Directory);
+        d.set_size(0);
+        d.set_mode(0o755);
+        d.set_cksum();
+        b.append_data(&mut d, "files/etc", &[][..]).unwrap();
+        let mut f = tar::Header::new_gnu();
+        f.set_size(4);
+        f.set_mode(0o644);
+        f.set_cksum();
+        b.append_data(&mut f, "files/etc/app.conf", &b"k=v\n"[..])
+            .unwrap();
+        let mut f = tar::Header::new_gnu();
+        f.set_size(2);
+        f.set_mode(0o755);
+        f.set_cksum();
+        b.append_data(&mut f, "files/bin/run.sh", &b"#!"[..])
+            .unwrap();
+        let mut f = tar::Header::new_gnu();
+        f.set_size(1);
+        f.set_mode(0o600);
+        f.set_cksum();
+        b.append_data(&mut f, "other/ignored", &b"x"[..]).unwrap();
+        let tar = b.into_inner().unwrap();
+
+        let (cfg, files) = read_config_archive(&tar[..]).unwrap();
+        assert_eq!(cfg.hostname, "db");
+        assert_eq!(cfg.entrypoint, vec!["/bin/sh"]);
+        assert_eq!(cfg.cmd, vec!["-c", "true"]);
+        assert_eq!(
+            files.len(),
+            2,
+            "the directory and the stray entry are not boot files"
+        );
+        // The config's mode wins over the tar header; a zero in the config keeps the header's.
+        assert_eq!(files[0].path, "/etc/app.conf");
+        assert_eq!(files[0].mode, 0o600);
+        assert_eq!(files[0].data, b"k=v\n");
+        assert_eq!(files[1].path, "/bin/run.sh");
+        assert_eq!(files[1].mode, 0o755);
+        assert_eq!(files[1].data, b"#!");
+    }
+
+    #[test]
+    fn config_archive_without_config_or_with_bad_json() {
+        let tar = tar_with(&[("files/etc/x", b"1", 0o644)]);
+        let e = read_config_archive(&tar[..]).unwrap_err();
+        assert!(e.to_string().contains("no config.json"), "{e:#}");
+        let tar = tar_with(&[(guest::CONFIG_NAME, b"{not json", 0o644)]);
+        let e = read_config_archive(&tar[..]).unwrap_err();
+        assert!(format!("{e:#}").contains("config.json"), "{e:#}");
+        // Not a tar at all.
+        assert!(read_config_archive(&b"hello"[..]).is_err());
+    }
+
+    #[test]
+    fn config_archive_file_mode_from_header_when_config_is_silent() {
+        let cfg = serde_json::to_string(&Config::default()).unwrap();
+        let tar = tar_with(&[
+            (guest::CONFIG_NAME, cfg.as_bytes(), 0o644),
+            ("files/opt/a", b"a", 0o640),
+            ("files/opt/b", b"b", 0),
+        ]);
+        let (_, files) = read_config_archive(&tar[..]).unwrap();
+        assert_eq!(files[0].mode, 0o640);
+        assert_eq!(
+            files[1].mode, 0,
+            "written as 0644 later, see write_files_under"
+        );
+    }
+
+    #[test]
+    fn boot_files_written_with_their_modes() {
+        let root = tempfile::tempdir().unwrap();
+        let files = vec![
+            BootFile {
+                path: "/etc/app/app.conf".into(),
+                mode: 0o600,
+                data: b"k=v\n".to_vec(),
+            },
+            BootFile {
+                path: "/bin/run.sh".into(),
+                mode: 0,
+                data: b"#!/bin/sh\n".to_vec(),
+            },
+            BootFile {
+                path: "/setuid".into(),
+                mode: 0o4755,
+                data: vec![],
+            },
+            BootFile {
+                path: "/extra-bits".into(),
+                mode: 0o10644,
+                data: vec![],
+            },
+        ];
+        write_files_under(root.path(), &files).unwrap();
+        let mode = |p: &str| fs::metadata(root.path().join(p)).unwrap().mode() & 0o7777;
+        assert_eq!(
+            fs::read(root.path().join("etc/app/app.conf")).unwrap(),
+            b"k=v\n"
+        );
+        assert_eq!(mode("etc/app/app.conf"), 0o600);
+        assert_eq!(mode("bin/run.sh"), 0o644, "no mode means 0644");
+        assert_eq!(mode("setuid"), 0o4755, "setuid is kept");
+        assert_eq!(
+            mode("extra-bits"),
+            0o644,
+            "only the permission bits are kept"
+        );
+        // Written again at the next boot: the content is replaced.
+        let again = vec![BootFile {
+            path: "/bin/run.sh".into(),
+            mode: 0o755,
+            data: b"new".to_vec(),
+        }];
+        write_files_under(root.path(), &again).unwrap();
+        assert_eq!(fs::read(root.path().join("bin/run.sh")).unwrap(), b"new");
+        assert_eq!(mode("bin/run.sh"), 0o755);
+    }
+
+    #[test]
+    fn file_modes() {
+        assert_eq!(file_mode(0), 0o644);
+        assert_eq!(file_mode(0o600), 0o600);
+        assert_eq!(
+            file_mode(0o4000),
+            0o644,
+            "no permission bits at all means the default"
+        );
+        assert_eq!(file_mode(0o100755), 0o755, "the file type bits are dropped");
+    }
+
+    // --- the volume ---
+
+    fn write(p: &Path, data: &[u8], mode: u32) {
+        fs::write(p, data).unwrap();
+        fs::set_permissions(p, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn names(p: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(p)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn fresh_volume_is_seeded_from_the_image_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("var/lib/app");
+        fs::create_dir_all(data.join("sub")).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o750)).unwrap();
+        write(&data.join("seed.txt"), b"seed", 0o640);
+        write(&data.join("sub/deep.txt"), b"deep", 0o600);
+        std::os::unix::fs::symlink("seed.txt", data.join("link")).unwrap();
+
+        let seed = stage_mount_point(&data).unwrap();
+        // The image's content is aside and an empty directory waits for the mount.
+        let staging = root.path().join("var/lib/app.briqyard-seed");
+        assert_eq!(seed.staging.as_deref(), Some(staging.as_path()));
+        assert!(seed.had.is_some());
+        assert!(names(&data).is_empty());
+        assert_eq!(names(&staging), ["link", "seed.txt", "sub"]);
+
+        // What a mount of a fresh ext4 leaves there.
+        fs::create_dir(data.join("lost+found")).unwrap();
+        seed_mount_point(&data, seed);
+
+        assert_eq!(
+            names(&data),
+            ["link", "seed.txt", "sub"],
+            "lost+found is gone"
+        );
+        assert_eq!(fs::read(data.join("seed.txt")).unwrap(), b"seed");
+        assert_eq!(fs::read(data.join("sub/deep.txt")).unwrap(), b"deep");
+        assert_eq!(
+            fs::read_link(data.join("link")).unwrap(),
+            Path::new("seed.txt")
+        );
+        assert_eq!(fs::metadata(&data).unwrap().mode() & 0o7777, 0o750);
+        assert_eq!(
+            fs::metadata(data.join("sub/deep.txt")).unwrap().mode() & 0o7777,
+            0o600
+        );
+        assert!(!staging.exists(), "the staged copy is removed");
+    }
+
+    #[test]
+    fn used_volume_keeps_its_content() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        write(&data.join("image.txt"), b"image", 0o644);
+        let seed = stage_mount_point(&data).unwrap();
+        // The volume already has data: nothing is seeded over it.
+        fs::create_dir(data.join("lost+found")).unwrap();
+        write(&data.join("PG_VERSION"), b"17", 0o600);
+        seed_mount_point(&data, seed);
+        assert_eq!(names(&data), ["PG_VERSION", "lost+found"]);
+        assert!(!root.path().join("data.briqyard-seed").exists());
+    }
+
+    #[test]
+    fn mount_point_the_image_does_not_have() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("new/mnt");
+        let seed = stage_mount_point(&data).unwrap();
+        assert!(seed.had.is_none());
+        assert!(seed.staging.is_none());
+        assert!(data.is_dir(), "made so the mount has somewhere to go");
+        fs::create_dir(data.join("lost+found")).unwrap();
+        seed_mount_point(&data, seed);
+        assert!(
+            names(&data).is_empty(),
+            "lost+found is removed on a fresh volume"
+        );
+    }
+
+    #[test]
+    fn empty_volume() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(is_empty_volume(root.path()));
+        fs::create_dir(root.path().join("lost+found")).unwrap();
+        assert!(
+            is_empty_volume(root.path()),
+            "only lost+found counts as empty"
+        );
+        write(&root.path().join("x"), b"", 0o644);
+        assert!(!is_empty_volume(root.path()));
+        assert!(
+            !is_empty_volume(&root.path().join("missing")),
+            "unreadable is not empty"
+        );
+    }
+
+    #[test]
+    fn copy_tree_keeps_modes_and_links() {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("src");
+        let dst = root.path().join("dst");
+        fs::create_dir_all(src.join("a/b")).unwrap();
+        fs::set_permissions(src.join("a"), fs::Permissions::from_mode(0o700)).unwrap();
+        write(&src.join("a/b/f"), b"f", 0o755);
+        std::os::unix::fs::symlink("/nowhere", src.join("dangling")).unwrap();
+        fs::create_dir(&dst).unwrap();
+        copy_tree(&src, &dst).unwrap();
+        assert_eq!(fs::metadata(dst.join("a")).unwrap().mode() & 0o7777, 0o700);
+        assert_eq!(fs::read(dst.join("a/b/f")).unwrap(), b"f");
+        assert_eq!(
+            fs::metadata(dst.join("a/b/f")).unwrap().mode() & 0o7777,
+            0o755
+        );
+        assert_eq!(
+            fs::read_link(dst.join("dangling")).unwrap(),
+            Path::new("/nowhere")
+        );
+        assert!(copy_tree(&root.path().join("missing"), &dst).is_err());
+    }
+
+    // --- names ---
+
+    #[test]
+    fn hosts_file() {
+        let mut cfg = Config {
+            hostname: "db".into(),
+            ip: "10.64.1.2/24".into(),
+            ..Default::default()
+        };
+        cfg.hosts
+            .insert("cache.internal".into(), "10.64.1.3".into());
+        cfg.hosts.insert("api.internal".into(), "10.64.1.4".into());
+        assert_eq!(
+            hosts_text(&cfg),
+            "127.0.0.1\tlocalhost\n\
+             ::1\tlocalhost ip6-localhost ip6-loopback\n\
+             10.64.1.2\tdb\n\
+             10.64.1.4\tapi.internal\n\
+             10.64.1.3\tcache.internal\n"
+        );
+        // No address, or no name: the machine's own line is left out.
+        let cfg = Config {
+            hostname: "db".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            hosts_text(&cfg),
+            "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n"
+        );
+        let cfg = Config {
+            ip: "10.64.1.2/24".into(),
+            ..Default::default()
+        };
+        assert!(!hosts_text(&cfg).contains("10.64.1.2"));
+    }
+
+    #[test]
+    fn resolv_conf() {
+        let cfg = Config {
+            dns: vec!["10.64.1.1".into(), "1.1.1.1".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolv_text(&cfg),
+            "nameserver 10.64.1.1\nnameserver 1.1.1.1\nsearch internal\noptions ndots:1\n"
+        );
+        assert_eq!(
+            resolv_text(&Config::default()),
+            "search internal\noptions ndots:1\n"
+        );
+    }
+
+    // --- users and groups ---
+
+    const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\n\
+        # a comment\n\
+        \n\
+        postgres:x:999:999::/var/lib/postgresql:/bin/sh\n\
+        short:x:7\n\
+        nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n";
+    const GROUP: &str = "root:x:0:\n\
+        postgres:x:999:\n\
+        docker:x:120:postgres,alice\n\
+        staff:x:50:alice\n";
+
+    fn lookup(spec: &str) -> Result<(u32, u32, Option<String>)> {
+        lookup_user_in(spec, &parse_table(PASSWD), &parse_table(GROUP))
+    }
+
+    #[test]
+    fn tables() {
+        let t = parse_table(PASSWD);
+        assert_eq!(t.len(), 4, "comments and blank lines are skipped");
+        assert_eq!(t[0][0], "root");
+        assert_eq!(t[2], vec!["short", "x", "7"]);
+        assert!(parse_table("").is_empty());
+    }
+
+    #[test]
+    fn user_lookup() {
+        assert_eq!(lookup("root").unwrap(), (0, 0, Some("/root".into())));
+        assert_eq!(
+            lookup("postgres").unwrap(),
+            (999, 999, Some("/var/lib/postgresql".into()))
+        );
+        // A uid finds its passwd row too, home included.
+        assert_eq!(lookup("999").unwrap(), lookup("postgres").unwrap());
+        assert_eq!(lookup("0").unwrap(), lookup("root").unwrap());
+        // A numeric user with no row: uid and gid alike, no home.
+        assert_eq!(lookup("1000").unwrap(), (1000, 1000, None));
+        assert_eq!(lookup("1000:1001").unwrap(), (1000, 1001, None));
+        // A short passwd row is ignored rather than read out of bounds: its name is unknown
+        // and its uid falls back to the numeric rule.
+        assert!(lookup("short").is_err());
+        assert_eq!(lookup("7").unwrap(), (7, 7, None));
+    }
+
+    #[test]
+    fn user_lookup_with_group() {
+        let home = Some("/var/lib/postgresql".to_string());
+        assert_eq!(lookup("postgres:docker").unwrap(), (999, 120, home.clone()));
+        assert_eq!(lookup("postgres:0").unwrap(), (999, 0, home.clone()));
+        assert_eq!(lookup("999:root").unwrap(), (999, 0, home.clone()));
+        // A numeric group with no row is taken as is.
+        assert_eq!(lookup("postgres:5000").unwrap(), (999, 5000, home));
+    }
+
+    #[test]
+    fn user_lookup_errors() {
+        for (spec, what) in [
+            ("alice", "user \"alice\" not found"),
+            ("", "user \"\" not found"),
+            ("alice:root", "user \"alice\" not found"),
+            ("postgres:nogroup", "group \"nogroup\" not found"),
+            ("postgres:", "group \"\" not found"),
+        ] {
+            let e = lookup(spec).unwrap_err().to_string();
+            assert_eq!(e, what, "{spec}");
+        }
+    }
+
+    #[test]
+    fn supplementary_groups_of_a_user() {
+        let passwd = parse_table(PASSWD);
+        let groups = parse_table(GROUP);
+        assert_eq!(supplementary_groups_in(999, &passwd, &groups), vec![120]);
+        assert!(supplementary_groups_in(65534, &passwd, &groups).is_empty());
+        assert!(
+            supplementary_groups_in(1000, &passwd, &groups).is_empty(),
+            "no passwd row"
+        );
+        // Membership is by name, exact: "alice" is not "alic".
+        let mut p = passwd.clone();
+        p.push(
+            "alic:x:2000:2000::/home/alic:/bin/sh"
+                .split(':')
+                .map(String::from)
+                .collect(),
+        );
+        assert!(supplementary_groups_in(2000, &p, &groups).is_empty());
+    }
+
+    // --- the environment and the command ---
+
+    #[test]
+    fn environment_defaults() {
+        let env = build_env(&BTreeMap::new());
+        assert_eq!(
+            env,
+            vec![
+                (
+                    "PATH".to_string(),
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+                ),
+                ("HOME".to_string(), "/root".to_string()),
+            ]
+        );
+        // The image's values win and come first.
+        let mut image = BTreeMap::new();
+        image.insert("PATH".to_string(), "/app/bin".to_string());
+        image.insert("HOME".to_string(), "/app".to_string());
+        image.insert("A".to_string(), "1".to_string());
+        let env = build_env(&image);
+        assert_eq!(env.len(), 3);
+        assert!(env.contains(&("PATH".to_string(), "/app/bin".to_string())));
+        assert!(env.contains(&("HOME".to_string(), "/app".to_string())));
+        assert!(env.contains(&("A".to_string(), "1".to_string())));
+    }
+
+    #[test]
+    fn path_lookup() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        let sbin = root.path().join("sbin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&sbin).unwrap();
+        write(&bin.join("tool"), b"", 0o755);
+        write(&sbin.join("tool"), b"", 0o755);
+        fs::create_dir(bin.join("adir")).unwrap();
+        write(&sbin.join("adir"), b"", 0o755);
+        let env = vec![(
+            "PATH".to_string(),
+            format!("{}:{}", bin.display(), sbin.display()),
+        )];
+        // First directory wins; a directory of that name is not a command.
+        assert_eq!(
+            look_path("tool", &env).unwrap(),
+            bin.join("tool").to_string_lossy()
+        );
+        assert_eq!(
+            look_path("adir", &env).unwrap(),
+            sbin.join("adir").to_string_lossy()
+        );
+        // A path is taken as given, found or not.
+        assert_eq!(look_path("/x/y", &env).unwrap(), "/x/y");
+        assert_eq!(look_path("./y", &env).unwrap(), "./y");
+        let e = look_path("missing", &env).unwrap_err().to_string();
+        assert_eq!(e, "missing: not found in PATH");
+        assert!(look_path("tool", &[]).is_err(), "no PATH, nothing found");
+    }
+
+    // --- exec ---
+
+    #[tokio::test]
+    async fn exec_streams_output_and_exit_code() {
+        let st = state();
+        let f = exec(
+            &st,
+            exec_req(&["sh", "-c", "echo out; echo err >&2; exit 3"]),
+        )
+        .await;
+        assert_eq!(text(&f, "stdout"), "out\n");
+        assert_eq!(text(&f, "stderr"), "err\n");
+        let exit = exit_of(&f);
+        assert_eq!((exit.code, exit.timed_out), (3, false));
+    }
+
+    #[tokio::test]
+    async fn exec_feeds_stdin() {
+        let st = state();
+        let mut req = exec_req(&["cat"]);
+        req.stdin = b"hello from the host".to_vec();
+        let f = exec(&st, req).await;
+        assert_eq!(text(&f, "stdout"), "hello from the host");
+        assert_eq!(exit_of(&f).code, 0);
+        // Without stdin the command reads nothing, not the init's own input.
+        let f = exec(&st, exec_req(&["cat"])).await;
+        assert_eq!(text(&f, "stdout"), "");
+        assert_eq!(exit_of(&f).code, 0);
+    }
+
+    #[tokio::test]
+    async fn exec_environment_and_directory() {
+        let st = state_with(Config {
+            env: BTreeMap::from([("FOO".to_string(), "image".to_string())]),
+            workdir: "/tmp".into(),
+            ..Default::default()
+        });
+        let f = exec(&st, exec_req(&["sh", "-c", "echo $FOO $HOME; pwd"])).await;
+        assert_eq!(text(&f, "stdout"), "image /root\n/tmp\n");
+        // The request's env replaces the image's; its cwd replaces the workdir.
+        let mut req = exec_req(&["sh", "-c", "echo $FOO; pwd"]);
+        req.env.insert("FOO".into(), "request".into());
+        req.cwd = "/".into();
+        let f = exec(&st, req).await;
+        assert_eq!(text(&f, "stdout"), "request\n/\n");
+        // No workdir and no cwd: the root.
+        let f = exec(&state(), exec_req(&["pwd"])).await;
+        assert_eq!(text(&f, "stdout"), "/\n");
+    }
+
+    #[tokio::test]
+    async fn exec_refusals() {
+        let st = state();
+        let f = exec(&st, exec_req(&[])).await;
+        assert_eq!(f.len(), 1);
+        assert_eq!(
+            (f[0].kind.as_str(), f[0].message.as_str()),
+            ("error", "empty command")
+        );
+        // Not in PATH: 127, as a shell says.
+        let f = exec(&st, exec_req(&["no-such-command-briqyard"])).await;
+        assert_eq!(
+            text(&f, "stderr"),
+            "no-such-command-briqyard: not found in PATH\n"
+        );
+        assert_eq!(exit_of(&f).code, 127);
+        // Found but cannot be run: 126.
+        let f = exec(&st, exec_req(&["/etc/passwd"])).await;
+        assert!(!text(&f, "stderr").is_empty());
+        assert_eq!(exit_of(&f).code, 126);
+        // A missing working directory is a spawn failure too.
+        let mut req = exec_req(&["pwd"]);
+        req.cwd = "/no/such/dir".into();
+        let f = exec(&st, req).await;
+        assert_eq!(exit_of(&f).code, 126);
+    }
+
+    #[tokio::test]
+    async fn exec_reports_a_signal() {
+        let f = exec(&state(), exec_req(&["sh", "-c", "kill -9 $$"])).await;
+        let exit = exit_of(&f);
+        assert_eq!((exit.code, exit.timed_out), (137, false));
+    }
+
+    #[tokio::test]
+    async fn exec_timeout_kills_the_process_group() {
+        let st = state();
+        // The shell prints its sleep's pid so the test can watch that grandchild die too.
+        let mut req = exec_req(&["sh", "-c", "sleep 60 & echo $!; wait"]);
+        req.timeout_ms = 300;
+        let start = Instant::now();
+        let f = exec(&st, req).await;
+        assert!(start.elapsed() < Duration::from_secs(10));
+        let exit = exit_of(&f);
+        assert_eq!((exit.code, exit.timed_out), (137, true));
+        let grandchild: i32 = text(&f, "stdout").trim().parse().unwrap();
+        // Killed with its group: gone, or a zombie waiting for the system's init.
+        wait_until("the grandchild sleep is killed", || {
+            matches!(proc_state(grandchild), None | Some('Z'))
+        });
+    }
+
+    #[tokio::test]
+    async fn exec_untracks_its_child() {
+        let st = state();
+        let f = exec(&st, exec_req(&["sh", "-c", "echo $$"])).await;
+        let pid: i32 = text(&f, "stdout").trim().parse().unwrap();
+        assert!(!TRACKED.lock().unwrap().as_ref().unwrap().contains(&pid));
+    }
+
+    // --- the handler over an in-memory stream ---
+
+    /// Sends one request through `handle` and returns every response it wrote.
+    async fn roundtrip(st: &Arc<State>, req: Request) -> Vec<Response> {
+        let (mut client, server) = tokio::io::duplex(1 << 20);
+        let task = tokio::spawn(handle(st.clone(), server));
+        client
+            .write_all(&guest::encode_frame(&req).unwrap())
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        client.read_to_end(&mut out).await.unwrap();
+        task.await.unwrap();
+        frames(&out)
+    }
+
+    #[tokio::test]
+    async fn handle_ping() {
+        let st = state();
+        *st.main_pid.lock().unwrap() = Some(42);
+        let f = roundtrip(
+            &st,
+            Request {
+                op: "ping".into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, "pong");
+        assert_eq!(f[0].main_pid, 42);
+        assert!(f[0].uptime > 0.0, "read from /proc/uptime");
+    }
+
+    #[tokio::test]
+    async fn handle_put_and_get() {
+        let st = state();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("deep/dir/file.txt");
+        let f = roundtrip(
+            &st,
+            Request {
+                op: "put".into(),
+                path: path.to_string_lossy().into_owned(),
+                data: b"content".to_vec(),
+                mode: 0o600,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(f[0].kind, "ok");
+        assert_eq!(fs::read(&path).unwrap(), b"content");
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+        let f = roundtrip(
+            &st,
+            Request {
+                op: "get".into(),
+                path: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(f[0].kind, "file");
+        assert_eq!(f[0].data, b"content");
+        // No mode means 0644.
+        let plain = root.path().join("plain");
+        roundtrip(
+            &st,
+            Request {
+                op: "put".into(),
+                path: plain.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(fs::metadata(&plain).unwrap().mode() & 0o7777, 0o644);
+        // A missing file is an error response, not a dropped connection.
+        let f = roundtrip(
+            &st,
+            Request {
+                op: "get".into(),
+                path: root.path().join("missing").to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(f[0].kind, "error");
+        assert!(f[0].message.contains("No such file"), "{}", f[0].message);
+    }
+
+    #[tokio::test]
+    async fn handle_unknown_op_and_bad_frames() {
+        let st = state();
+        let f = roundtrip(
+            &st,
+            Request {
+                op: "dance".into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(f[0].kind, "error");
+        assert_eq!(f[0].message, "unknown op dance");
+        // A frame past the limit, or not JSON: the connection is dropped with no answer.
+        for bad in [
+            ((guest::MAX_FRAME as u32 + 1).to_be_bytes().to_vec()),
+            [&3u32.to_be_bytes()[..], b"{x}"].concat(),
+            b"\0\0".to_vec(),
+        ] {
+            let (mut client, server) = tokio::io::duplex(1 << 16);
+            let task = tokio::spawn(handle(st.clone(), server));
+            client.write_all(&bad).await.unwrap();
+            drop(client);
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_exec() {
+        let f = roundtrip(&state(), exec_req(&["echo", "through", "vsock"])).await;
+        assert_eq!(text(&f, "stdout"), "through vsock\n");
+        assert_eq!(exit_of(&f).code, 0);
+    }
+
+    /// Plays the main process for a shutdown: a tracked child, waited for as `run` does.
+    struct Main {
+        pid: i32,
+        status: tokio::task::JoinHandle<std::process::ExitStatus>,
+    }
+
+    fn main_process(st: &Arc<State>, script: &str) -> Main {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script]);
+        cmd.kill_on_drop(false);
+        let mut tracked = TRACKED.lock().unwrap();
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id().unwrap() as i32;
+        tracked.as_mut().unwrap().insert(pid);
+        drop(tracked);
+        *st.main_pid.lock().unwrap() = Some(pid);
+        let st = st.clone();
+        let status = tokio::spawn(async move {
+            let status = child.wait().await.unwrap();
+            untrack(pid);
+            *st.main_pid.lock().unwrap() = None;
+            st.main_done.notify_waiters();
+            status
+        });
+        Main { pid, status }
+    }
+
+    #[tokio::test]
+    async fn shutdown_terminates_the_main_process() {
+        let st = state();
+        let main = main_process(&st, "sleep 60");
+        let f = roundtrip(
+            &st,
+            Request {
+                op: "shutdown".into(),
+                grace_sec: 5,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(f[0].kind, "ok");
+        assert!(
+            *st.requested.lock().unwrap(),
+            "the exit is marked as requested"
+        );
+        let status = main.status.await.unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
+        assert_eq!(*st.main_pid.lock().unwrap(), None);
+        assert!(matches!(proc_state(main.pid), None | Some('Z')));
+    }
+
+    #[tokio::test]
+    async fn shutdown_kills_after_the_grace() {
+        let st = state();
+        // Ignores SIGTERM; exec keeps it one process so SIGKILL on the pid ends it all.
+        let main = main_process(&st, "trap '' TERM; exec sleep 60");
+        // Not before the trap is set and sleep is running, or SIGTERM lands on a shell
+        // that still honours it.
+        wait_until("the main process is sleep", || {
+            fs::read_to_string(format!("/proc/{}/comm", main.pid))
+                .map(|c| c.trim() == "sleep")
+                .unwrap_or(false)
+        });
+        let start = Instant::now();
+        let f = roundtrip(
+            &st,
+            Request {
+                op: "shutdown".into(),
+                grace_sec: 1,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(f[0].kind, "ok");
+        let status = main.status.await.unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+        assert!(
+            start.elapsed() >= Duration::from_secs(1),
+            "the grace was given"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_no_main_process() {
+        let st = state();
+        let f = roundtrip(
+            &st,
+            Request {
+                op: "shutdown".into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(f[0].kind, "ok");
+        assert!(*st.requested.lock().unwrap());
+    }
+
+    // --- the reaper ---
+
+    #[test]
+    fn reaper_leaves_tracked_children_and_reaps_orphans() {
+        track_init();
+        // Ours: still running, held by its stdin. The orphan: exits at once, nobody waits.
+        let mut ours = spawn_tracked(
+            std::process::Command::new("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null()),
+        );
+        let our_pid = Pid::from_raw(ours.id() as i32);
+        let orphan = {
+            let tracked = TRACKED.lock().unwrap();
+            let child = std::process::Command::new("true").spawn().unwrap();
+            drop(tracked);
+            Pid::from_raw(child.id() as i32)
+            // `child` is dropped without a wait: a zombie until someone reaps it.
+        };
+        wait_until("the orphan exits", || {
+            proc_state(orphan.as_raw()) == Some('Z')
+        });
+
+        // Another test's tracked child may be reported first; only an orphan gets reaped,
+        // and the only orphan is ours.
+        let start = Instant::now();
+        loop {
+            match reap_one() {
+                Ok(Reaped::Orphan(p)) => {
+                    assert_eq!(p, orphan);
+                    break;
+                }
+                Ok(Reaped::Ours(p)) => assert_ne!(p, orphan),
+                Ok(Reaped::Nothing) => {}
+                Err(e) => panic!("{e}"),
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "the orphan was not reaped"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            waitpid(orphan, Some(WaitPidFlag::WNOHANG)),
+            Err(nix::errno::Errno::ECHILD),
+            "reaped: nothing left to wait for"
+        );
+
+        // Now ours exits: the reaper sees it, names it, and leaves the status for us.
+        drop(ours.stdin.take());
+        wait_until("our child exits", || {
+            proc_state(our_pid.as_raw()) == Some('Z')
+        });
+        let start = Instant::now();
+        loop {
+            match reap_one() {
+                Ok(Reaped::Ours(p)) if p == our_pid => break,
+                Ok(Reaped::Orphan(p)) => panic!("reaped {p}, which nobody here spawned"),
+                Ok(_) => {}
+                Err(e) => panic!("{e}"),
+            }
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The status is still ours to collect.
+        assert_eq!(waitpid(our_pid, None), Ok(WaitStatus::Exited(our_pid, 0)));
+        untrack(our_pid.as_raw());
+    }
 }
