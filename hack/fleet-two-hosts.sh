@@ -55,6 +55,10 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
   check "host marked down"      '[ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = down ]'
   check "b fails cleanly"       '! briqyard machine exec "$B" -- hostname >/dev/null 2>&1'
   check "a still answers"       '[ "$(briqyard machine exec "$A" -- hostname)" = a ]'
+  # A listing is never partial: the down host's tenant and the fleet-wide list refuse.
+  check "listing b's tenant refuses" '! briqyard machine ls --tenant "$T-b" >/dev/null 2>&1'
+  check "listing everything refuses" '! briqyard machine ls >/dev/null 2>&1'
+  check "listing a's tenant works"   'briqyard machine ls --tenant "$T-a" | grep -q "$A"'
   check "no placement on a down host" '[ "$(briqyard machine run --image alpine:3.20 --name c --tenant "$T-b" --memory 256 -- true 2>&1 | grep -c "no host\|down\|unavailable")" -ge 1 ]'
   eval "$SECOND_HOST_START"
   for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done

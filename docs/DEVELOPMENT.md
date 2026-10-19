@@ -87,7 +87,7 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/fleet-two-hosts.sh`: a fleet with two hosts: tenants placed on different hosts, calls
   forwarded to each, a host that stops answering marked down with its tenant's calls refused
-  (`host_down`) while the other host goes on, and the host back. 13 checks.
+  (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back. 16 checks.
 
 ## Layout
 

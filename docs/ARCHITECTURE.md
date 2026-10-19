@@ -118,7 +118,10 @@ ceiling, the one with the most free memory; a fork lands where its source is.
 
 Hosts register with their capacity and tenants (`POST /v1/hosts/register`, every 15 s, from
 the daemon's `fleet:` configuration) or are listed in the fleet's configuration and polled. A
-host silent for a minute is `down`; `POST /v1/hosts/{id}/drain` stops placing on a host. The
+host silent for a minute is `down`: its machines' calls answer 503 `host_down` until it is
+back, and a machine listing is never partial (a tenant's listing asks its host alone; a host
+that is down or does not answer fails the listing), since a control plane reads a machine
+missing from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host. The
 registry (hosts, tenant → host, machine → host) is one JSON file.
 
 Provisioners add and release hosts through a cloud API: `hetzner-robot` (dedicated servers,

@@ -650,8 +650,30 @@ async fn create_machine(State(st): S, headers: HeaderMap, body: Bytes) -> Respon
     resp
 }
 
+/// Lists machines. A listing is the truth for whoever reads it (the control plane marks a
+/// machine missing from it as gone), so it is never partial: a tenant's listing asks the
+/// tenant's host alone, and a host that is down or does not answer fails the whole listing.
 async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
-    let hosts = st.reg.lock().unwrap().ready();
+    let tenant = uri
+        .query()
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("tenant=")))
+        .map(|t| t.to_string());
+    let hosts: Vec<HostRec> = {
+        let reg = st.reg.lock().unwrap();
+        match tenant.as_deref().and_then(|t| reg.host_of_tenant(t)) {
+            Some(h) => vec![h.clone()],
+            None => {
+                let mut v: Vec<HostRec> = reg
+                    .hosts
+                    .values()
+                    .filter(|h| matches!(h.state.as_str(), "ready" | "draining" | "down"))
+                    .cloned()
+                    .collect();
+                v.sort_by(|a, b| a.id.cmp(&b.id));
+                v
+            }
+        }
+    };
     let mut all: Vec<serde_json::Value> = Vec::new();
     let path = match uri.query() {
         Some(q) => format!("/v1/machines?{q}"),
@@ -660,19 +682,28 @@ async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
     for h in hosts {
         let resp = forward(&st, &h, Method::GET, &path, &headers, Bytes::new()).await;
         if !resp.status().is_success() {
-            continue;
+            return resp;
         }
         let data = axum::body::to_bytes(resp.into_body(), 64 << 20)
             .await
             .unwrap_or_default();
-        if let Ok(ms) = serde_json::from_slice::<Vec<serde_json::Value>>(&data) {
-            let mut reg = st.reg.lock().unwrap();
-            for mut m in ms {
-                if let Some(id) = m["id"].as_str() {
-                    reg.machines.insert(id.to_string(), h.id.clone());
+        match serde_json::from_slice::<Vec<serde_json::Value>>(&data) {
+            Ok(ms) => {
+                let mut reg = st.reg.lock().unwrap();
+                for mut m in ms {
+                    if let Some(id) = m["id"].as_str() {
+                        reg.machines.insert(id.to_string(), h.id.clone());
+                    }
+                    m["host"] = serde_json::Value::String(h.id.clone());
+                    all.push(m);
                 }
-                m["host"] = serde_json::Value::String(h.id.clone());
-                all.push(m);
+            }
+            Err(e) => {
+                return err(
+                    StatusCode::BAD_GATEWAY,
+                    "host_unreachable",
+                    format!("host {}: unreadable listing: {e}", h.id),
+                )
             }
         }
     }
