@@ -209,6 +209,8 @@ struct Inner {
     tenants: Mutex<HashMap<String, TenantRec>>,
     endpoints: Mutex<HashMap<String, EndpointRec>>,
     endpoint_events: broadcast::Sender<(EndpointRec, bool)>,
+    /// Held while a tenant is made (its subnet index, bridge and record), see `ensure_tenant`.
+    tenant_create: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -258,6 +260,7 @@ impl Manager {
             tenants: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
             endpoint_events,
+            tenant_create: tokio::sync::Mutex::new(()),
         });
         let m = Self { inner };
         m.load()?;
@@ -269,6 +272,7 @@ impl Manager {
         }
         m.apply_rules().await?;
         m.recover().await;
+        m.sweep_orphans().await;
         let sleeper = m.clone();
         tokio::spawn(async move { sleeper.sleeper().await });
         Ok(m)
@@ -352,6 +356,90 @@ impl Manager {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Resources a previous daemon left with no record to own them: a crash between a resource
+    /// and its record, or a destroy cut short. A Firecracker nobody knows is ended; its run
+    /// directory, jail, TAP and disks go. Done once at start, so nothing leaks for good.
+    async fn sweep_orphans(&self) {
+        let known: std::collections::HashSet<String> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let mut swept = 0;
+        for (pid, id) in firecracker_processes() {
+            if !known.contains(&id) {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+                tracing::warn!(machine = id, pid, "firecracker with no record, ended");
+                swept += 1;
+            }
+        }
+        if let Ok(mut rd) = tokio::fs::read_dir(self.inner.cfg.run_dir()).await {
+            while let Ok(Some(e)) = rd.next_entry().await {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with("m_") && !known.contains(&name) {
+                    let _ = tokio::fs::remove_dir_all(e.path()).await;
+                    tracing::warn!(machine = name, "run directory with no record, removed");
+                    swept += 1;
+                }
+            }
+        }
+        let jails = self.inner.cfg.jail_base().join("firecracker");
+        if let Ok(mut rd) = tokio::fs::read_dir(&jails).await {
+            while let Ok(Some(e)) = rd.next_entry().await {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let id = name.replacen("m-", "m_", 1);
+                if name.starts_with("m-") && !known.contains(&id) {
+                    let _ = tokio::fs::remove_dir_all(e.path()).await;
+                    tracing::warn!(machine = id, "jail with no record, removed");
+                    swept += 1;
+                }
+            }
+        }
+        if let Ok(taps) = host::list_taps().await {
+            let owned: std::collections::HashSet<String> =
+                known.iter().map(|id| netw::tap_name(id)).collect();
+            for t in taps {
+                if t.len() == 13 && !owned.contains(&t) {
+                    let _ = host::delete_link(&t).await;
+                    tracing::warn!(tap = t, "tap with no record, removed");
+                    swept += 1;
+                }
+            }
+        }
+        if let Ok(vols) = self.inner.zfs.volumes_under("m").await {
+            let mut ids: Vec<String> = vols
+                .iter()
+                .filter_map(|v| v.strip_prefix("m/"))
+                .filter_map(|v| v.split('/').next())
+                .map(String::from)
+                .collect();
+            ids.sort();
+            ids.dedup();
+            for id in ids {
+                if !known.contains(&id) {
+                    match self.inner.zfs.destroy(&format!("m/{id}")).await {
+                        Ok(()) => {
+                            tracing::warn!(machine = id, "disks with no record, destroyed");
+                            swept += 1;
+                        }
+                        Err(err) => {
+                            tracing::warn!(machine = id, err = %err, "disks with no record")
+                        }
+                    }
+                }
+            }
+        }
+        if swept > 0 {
+            tracing::info!(swept, "orphans swept at start");
         }
     }
 
@@ -465,6 +553,12 @@ impl Manager {
     }
 
     async fn ensure_tenant(&self, id: &str) -> Result<TenantRec> {
+        if let Some(t) = self.inner.tenants.lock().unwrap().get(id) {
+            return Ok(t.clone());
+        }
+        // One tenant is made at a time: two made together would read the same free subnet
+        // index before either had taken it, and share a bridge.
+        let _creating = self.inner.tenant_create.lock().await;
         if let Some(t) = self.inner.tenants.lock().unwrap().get(id) {
             return Ok(t.clone());
         }
@@ -1575,7 +1669,9 @@ impl Manager {
                     .suspends
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // The guest is paused and saved: end the process; the watcher settles the
-                // state with the reason set above.
+                // state with the reason set above. The watcher takes the entry's lock to do
+                // it, so the lock is released before waiting, or the wait only ends when it
+                // times out.
                 e.rec.lock().unwrap().suspended = true;
                 let _ = self.save(e);
                 let settled = e.settled.notified();
@@ -1584,6 +1680,7 @@ impl Manager {
                 unsafe {
                     libc::kill(live.pid as i32, libc::SIGKILL);
                 }
+                drop(_guard);
                 let _ = tokio::time::timeout(Duration::from_secs(15), settled).await;
                 return Ok(());
             }
@@ -2206,6 +2303,37 @@ impl Manager {
         self.wake(id).await?;
         Ok(ip.parse().unwrap())
     }
+}
+
+/// Every Firecracker process on the host with the machine id it carries (`--id m-…`), read
+/// from `/proc`: what a sweep compares to the records.
+fn firecracker_processes() -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(cmd) = std::fs::read(e.path().join("cmdline")) else {
+            continue;
+        };
+        let args: Vec<&str> = cmd
+            .split(|b| *b == 0)
+            .filter_map(|a| std::str::from_utf8(a).ok())
+            .collect();
+        let Some(bin) = args.first() else { continue };
+        if !bin.ends_with("firecracker") {
+            continue;
+        }
+        if let Some(i) = args.iter().position(|a| *a == "--id") {
+            if let Some(id) = args.get(i + 1) {
+                out.push((pid, id.replacen("m-", "m_", 1)));
+            }
+        }
+    }
+    out
 }
 
 /// Reads the init's exit line, `[briqyard] exit code=N oom=B requested=R`; the last one wins.

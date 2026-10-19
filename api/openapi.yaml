@@ -427,7 +427,7 @@ components:
     StopRequest:
       type: object
       properties:
-        suspend: { type: boolean, description: not supported yet; a stop }
+        suspend: { type: boolean, description: keep a memory snapshot so the next start resumes in well under a second; a plain stop when Firecracker refuses }
         timeout_sec: { type: integer, default: 10 }
     Snapshot:
       type: object

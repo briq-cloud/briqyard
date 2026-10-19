@@ -101,11 +101,19 @@ check "fork has data"  '[ "$(briqyard machine exec "$F" -- psql -U postgres -tAc
 briqyard machine exec "$F" -- psql -U postgres -c "insert into t values (43)" >/dev/null
 check "fork is apart"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select count(*) from t")" = 1 ]'
 
+echo "== tenants made together get bridges of their own"
+for i in 1 2 3; do briqyard machine run --image alpine:3.20 --name par --tenant "$T-par$i" --memory 128 -- sleep 600 > /tmp/by-par$i.json & done; wait
+check "three tenants at once"  '[ "$(briqyard tenant ls | jq -r "[.[] | select(.id | startswith(\"$T-par\")) | .subnet] | unique | length")" = 3 ]'
+for i in 1 2 3; do briqyard machine destroy "$(jq -r .id /tmp/by-par$i.json)" >/dev/null 2>&1; briqyard tenant rm "$T-par$i" >/dev/null 2>&1 || true; done
+
 echo "== suspend and resume"
 C=$(briqyard machine run --image alpine:3.20 --name counter --tenant "$T" --memory 256 -- sh -c 'i=0; while :; do i=$((i+1)); echo $i > /tmp/c; sleep 1; done' | jq -r .id)
 sleep 3
 before=$(briqyard machine exec "$C" -- cat /tmp/c)
+t_susp=$(date +%s.%N)
 briqyard machine stop --suspend "$C" >/dev/null
+susp_s=$(echo "$(date +%s.%N) - $t_susp" | bc)
+check "suspend under 3 s (${susp_s}s)" '[ "$(echo "$susp_s < 3" | bc)" = 1 ]'
 check "suspended"        '[ "$(briqyard machine get "$C" | jq -r .suspended)" = true ]'
 t0=$(date +%s.%N)
 briqyard machine start "$C" >/dev/null

@@ -34,7 +34,12 @@ async fn link_exists(name: &str) -> bool {
 pub async fn ensure_bridge(s: &Subnet) -> Result<String> {
     let name = bridge_name(s.index);
     if !link_exists(&name).await {
-        ip(&["link", "add", &name, "type", "bridge"]).await?;
+        // Two callers may pass the check together; the second add is then "File exists".
+        match ip(&["link", "add", &name, "type", "bridge"]).await {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("File exists") => {}
+            Err(e) => return Err(e),
+        }
     }
     let gw = format!("{}/24", s.gateway());
     let addrs = ip(&["-4", "-o", "addr", "show", "dev", &name]).await?;
@@ -67,11 +72,26 @@ pub async fn ensure_tap(machine_id: &str, bridge: &str) -> Result<String> {
 
 /// Removes the machine's TAP. Missing is success.
 pub async fn delete_tap(machine_id: &str) -> Result<()> {
-    let name = tap_name(machine_id);
-    if link_exists(&name).await {
-        ip(&["link", "del", &name]).await?;
+    delete_link(&tap_name(machine_id)).await
+}
+
+/// Removes a link by name. Missing is success.
+pub async fn delete_link(name: &str) -> Result<()> {
+    if link_exists(name).await {
+        ip(&["link", "del", name]).await?;
     }
     Ok(())
+}
+
+/// The TAP interfaces on the host (every `tun` link whose name starts with "t").
+pub async fn list_taps() -> Result<Vec<String>> {
+    let out = ip(&["-o", "link", "show", "type", "tun"]).await?;
+    Ok(out
+        .lines()
+        .filter_map(|l| l.split(": ").nth(1))
+        .map(|n| n.split('@').next().unwrap_or(n).to_string())
+        .filter(|n| n.starts_with('t'))
+        .collect())
 }
 
 pub fn enable_forwarding() -> Result<()> {

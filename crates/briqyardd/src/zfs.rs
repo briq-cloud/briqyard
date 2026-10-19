@@ -209,6 +209,28 @@ impl Zfs {
         Ok(v.split(',').map(String::from).collect())
     }
 
+    /// The volumes under a dataset, as names relative to the pool (`m/<id>/root`).
+    pub async fn volumes_under(&self, name: &str) -> Result<Vec<String>> {
+        let out = self
+            .run(&[
+                "list",
+                "-H",
+                "-o",
+                "name",
+                "-t",
+                "volume",
+                "-r",
+                &self.ds(name),
+            ])
+            .await?;
+        let prefix = format!("{}/", self.pool);
+        Ok(out
+            .lines()
+            .filter_map(|l| l.strip_prefix(&prefix))
+            .map(String::from)
+            .collect())
+    }
+
     pub async fn used(&self, name: &str) -> Result<u64> {
         let out = self
             .run(&["get", "-H", "-p", "-o", "value", "used", &self.ds(name)])
