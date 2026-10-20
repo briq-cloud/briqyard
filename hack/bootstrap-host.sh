@@ -127,6 +127,7 @@ listen: $bind:${LISTEN##*:}
 token: "$API_TOKEN"
 data_dir: /var/lib/briqyard
 firecracker: /usr/local/bin/firecracker
+jailer: /usr/local/bin/jailer
 kernel: /var/lib/briqyard/vmlinux
 init: /usr/local/bin/briqyard-init
 root_disk_gb: 8
