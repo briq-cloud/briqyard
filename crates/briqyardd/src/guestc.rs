@@ -2,11 +2,45 @@
 //! vsock Unix socket.
 
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use briqyard_api::guest::{self, Request, Response};
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+/// The guest as the manager reaches it, by the machine's vsock socket: the init over vsock
+/// on the host, a mock in the manager's tests.
+#[async_trait]
+pub trait Guest: Send + Sync {
+    async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<()>;
+    async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()>;
+    async fn exec(&self, vsock: &Path, req: Request) -> Result<ExecOutput>;
+    async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()>;
+    async fn get(&self, vsock: &Path, path: &str) -> Result<Vec<u8>>;
+}
+
+/// The init behind Firecracker's vsock socket.
+pub struct Vsock;
+
+#[async_trait]
+impl Guest for Vsock {
+    async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<()> {
+        wait_ready(vsock, timeout).await
+    }
+    async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()> {
+        shutdown(vsock, grace).await
+    }
+    async fn exec(&self, vsock: &Path, req: Request) -> Result<ExecOutput> {
+        exec(vsock, req).await
+    }
+    async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()> {
+        put(vsock, path, mode, data).await
+    }
+    async fn get(&self, vsock: &Path, path: &str) -> Result<Vec<u8>> {
+        get(vsock, path).await
+    }
+}
 
 /// Connects to the init: open Firecracker's socket, ask for the guest port, wait for its OK.
 pub async fn dial(uds: &Path) -> Result<UnixStream> {

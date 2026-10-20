@@ -399,8 +399,9 @@ impl Zfs {
     }
 }
 
+/// A `zfs` that is a shell script over a directory: what the manager's tests run on too.
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake {
     use super::*;
 
     /// A stand-in for `zfs`, with the fake device root as its state: a directory per parent
@@ -418,6 +419,11 @@ case "$1" in
     if [ "$3" = "-t" ]; then
       [ -e "$DEV/$last" ] || missing "$last"
       ls "$DEV/$last"@* 2>/dev/null | sed "s|^$DEV/||"
+      exit 0
+    fi
+    if [ "$6" = "volume" ]; then
+      [ -e "$DEV/$last" ] || missing "$last"
+      find "$DEV/$last" -type f -not -name '*@*' | sed "s|^$DEV/||" | sort
       exit 0
     fi
     case "$last" in *boom*) echo "cannot open '$last': permission denied" >&2; exit 1;; esac
@@ -450,22 +456,22 @@ exit 0
     /// A stand-in for `udevadm`: nothing to settle, the call is logged.
     const FAKE_UDEVADM: &str = "#!/bin/sh\nprintf 'udevadm %s\\n' \"$*\" >> \"__LOG__\"\n";
 
-    struct Fake {
+    pub(crate) struct Fake {
         dir: tempfile::TempDir,
-        zfs: Zfs,
+        pub(crate) zfs: Zfs,
     }
 
     /// The fake binaries and the device root, before the pool is opened.
-    struct Scripts {
+    pub(crate) struct Scripts {
         dir: tempfile::TempDir,
-        zfs: PathBuf,
-        udevadm: PathBuf,
-        dev: PathBuf,
-        jail: PathBuf,
+        pub(crate) zfs: PathBuf,
+        pub(crate) udevadm: PathBuf,
+        pub(crate) dev: PathBuf,
+        pub(crate) jail: PathBuf,
     }
 
     impl Scripts {
-        fn new() -> Scripts {
+        pub(crate) fn new() -> Scripts {
             use std::os::unix::fs::PermissionsExt;
             let dir = tempfile::tempdir().unwrap();
             let dev = dir.path().join("dev");
@@ -491,42 +497,48 @@ exit 0
             }
         }
 
-        async fn open(self, pool: &str) -> Result<Fake> {
+        pub(crate) async fn open(self, pool: &str) -> Result<Fake> {
             let zfs =
                 Zfs::with_paths(pool, &self.zfs, &self.udevadm, &self.dev, &self.jail).await?;
             Ok(Fake { dir: self.dir, zfs })
         }
 
-        fn answer(&self, prop: &str, value: &str) {
+        pub(crate) fn answer(&self, prop: &str, value: &str) {
             std::fs::write(self.dev.join(format!("answer.{prop}")), value).unwrap();
         }
     }
 
     impl Fake {
-        async fn open(pool: &str) -> Result<Fake> {
+        pub(crate) async fn open(pool: &str) -> Result<Fake> {
             Scripts::new().open(pool).await
         }
 
-        fn dev(&self) -> PathBuf {
+        pub(crate) fn dev(&self) -> PathBuf {
             self.dir.path().join("dev")
         }
 
-        fn jail(&self) -> String {
+        pub(crate) fn jail(&self) -> String {
             self.dir.path().join("jail").display().to_string()
         }
 
         /// The calls so far, then forgets them.
-        fn calls(&self) -> Vec<String> {
+        pub(crate) fn calls(&self) -> Vec<String> {
             let path = self.dir.path().join("calls");
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             let _ = std::fs::remove_file(&path);
             text.lines().map(String::from).collect()
         }
 
-        fn answer(&self, prop: &str, value: &str) {
+        pub(crate) fn answer(&self, prop: &str, value: &str) {
             std::fs::write(self.dev().join(format!("answer.{prop}")), value).unwrap();
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake::{Fake, Scripts};
+    use super::*;
 
     const SETTLE: &str = "udevadm settle --timeout=15";
 
@@ -751,6 +763,25 @@ exit 0
         // Any other refusal is an error.
         let err = f.zfs.destroy("boom").await.unwrap_err();
         assert!(err.to_string().contains("permission denied"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn volumes_under_a_dataset() {
+        let f = Fake::open("byard").await.unwrap();
+        f.zfs.create("m/x/root", 1 << 20).await.unwrap();
+        f.zfs.create("m/x/data", 1 << 20).await.unwrap();
+        f.zfs.create("m/y/root", 1 << 20).await.unwrap();
+        f.zfs.snapshot("m/y/root", "s_1").await.unwrap();
+        f.calls();
+        // Names relative to the pool, volumes only: a snapshot is not one.
+        assert_eq!(
+            f.zfs.volumes_under("m").await.unwrap(),
+            vec!["m/x/data", "m/x/root", "m/y/root"]
+        );
+        assert_eq!(f.calls(), vec!["list -H -o name -t volume -r byard/m"]);
+        assert!(f.zfs.volumes_under("images").await.unwrap().is_empty());
+        let err = f.zfs.volumes_under("nope").await.unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
     }
 
     #[tokio::test]

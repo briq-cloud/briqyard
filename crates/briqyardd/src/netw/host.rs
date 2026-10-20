@@ -3,7 +3,45 @@
 
 use super::{bridge_name, nft, tap_name, Subnet, TAP_PREFIX};
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use tokio::process::Command;
+
+/// The host network as the manager drives it: the bridges, TAPs and pins below on the
+/// host, a mock in the manager's tests.
+#[async_trait]
+pub trait Net: Send + Sync {
+    async fn ensure_bridge(&self, s: &Subnet) -> Result<String>;
+    async fn delete_bridge(&self, index: u32) -> Result<()>;
+    async fn ensure_tap(&self, machine_id: &str, bridge: &str, ip: &str) -> Result<String>;
+    async fn delete_tap(&self, machine_id: &str, ip: &str) -> Result<()>;
+    async fn delete_link(&self, name: &str) -> Result<()>;
+    async fn list_taps(&self) -> Result<Vec<String>>;
+}
+
+/// iproute2 and nftables on this host.
+pub struct HostNet;
+
+#[async_trait]
+impl Net for HostNet {
+    async fn ensure_bridge(&self, s: &Subnet) -> Result<String> {
+        ensure_bridge(s).await
+    }
+    async fn delete_bridge(&self, index: u32) -> Result<()> {
+        delete_bridge(index).await
+    }
+    async fn ensure_tap(&self, machine_id: &str, bridge: &str, ip: &str) -> Result<String> {
+        ensure_tap(machine_id, bridge, ip).await
+    }
+    async fn delete_tap(&self, machine_id: &str, ip: &str) -> Result<()> {
+        delete_tap(machine_id, ip).await
+    }
+    async fn delete_link(&self, name: &str) -> Result<()> {
+        delete_link(name).await
+    }
+    async fn list_taps(&self) -> Result<Vec<String>> {
+        list_taps().await
+    }
+}
 
 async fn ip(args: &[&str]) -> Result<String> {
     let out = Command::new("ip")

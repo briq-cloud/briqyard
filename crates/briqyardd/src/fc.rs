@@ -2,6 +2,7 @@
 //! HTTP/1.1 client of our own (the requests are tiny and the socket is local).
 
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
+use tokio::sync::watch;
 
 /// Talks to one Firecracker over its API socket.
 #[derive(Clone)]
@@ -132,14 +134,12 @@ impl Client {
             .await
     }
 
-    #[allow(dead_code)] // suspend and resume: planned
     pub async fn pause(&self) -> Result<()> {
         self.call("PATCH", "/vm", Some(r#"{"state":"Paused"}"#))
             .await
             .map(|_| ())
     }
 
-    #[allow(dead_code)]
     pub async fn resume(&self) -> Result<()> {
         self.call("PATCH", "/vm", Some(r#"{"state":"Resumed"}"#))
             .await
@@ -147,7 +147,6 @@ impl Client {
     }
 
     /// A full snapshot (VM state and memory) of a paused machine.
-    #[allow(dead_code)]
     pub async fn snapshot_create(&self, state: &Path, mem: &Path) -> Result<()> {
         self.put(
             "/snapshot/create",
@@ -157,7 +156,6 @@ impl Client {
     }
 
     /// Restores a snapshot into a fresh process and resumes it; the TAP is reopened by name.
-    #[allow(dead_code)]
     pub async fn snapshot_load(
         &self,
         state: &Path,
@@ -518,6 +516,279 @@ impl Process {
     }
 }
 
+/// What a machine boots with: its files and devices as host paths, its network, its size.
+#[derive(Clone, Debug)]
+pub struct Boot {
+    pub id: String,
+    /// The machine's run dir: its sockets when not jailed, its console always.
+    pub dir: PathBuf,
+    pub jail: Option<Jail>,
+    pub vcpus: u32,
+    pub memory_mb: u32,
+    pub kernel: PathBuf,
+    pub boot_args: String,
+    pub config_drive: PathBuf,
+    pub root: PathBuf,
+    pub data: Option<PathBuf>,
+    pub tap: String,
+    pub mac: String,
+    /// Resume from the snapshot next to the sockets when there is one.
+    pub resume: bool,
+}
+
+/// A machine's VMM as the manager keeps it: the process, its sockets, and when it is gone.
+#[derive(Clone)]
+pub struct Vm {
+    pub pid: u32,
+    /// The VMM's API socket.
+    pub api: PathBuf,
+    /// The vsock Unix socket on the host: where the guest is reached.
+    pub vsock: PathBuf,
+    /// The machine's run dir.
+    pub dir: PathBuf,
+    /// The chroot root when jailed.
+    pub chroot: Option<PathBuf>,
+    /// Resumed from a snapshot rather than booted.
+    pub resumed: bool,
+    /// `true` once the process is gone and its console fully written.
+    pub exited: watch::Receiver<bool>,
+}
+
+impl Vm {
+    fn inside(&self, name: &str) -> PathBuf {
+        inside_path(self.chroot.as_deref(), &self.dir, name)
+    }
+
+    fn outside(&self, name: &str) -> PathBuf {
+        outside_path(self.chroot.as_deref(), &self.dir, name)
+    }
+}
+
+/// How machines are run: Firecracker on the host, a mock in the manager's tests.
+#[async_trait]
+pub trait Vmm: Send + Sync {
+    /// Starts a VMM for the machine and boots it, or resumes it when asked and a snapshot
+    /// is there (a resume that fails boots cold). Returns once the machine runs on the
+    /// VMM's side; the guest answering is the caller's wait.
+    async fn boot(&self, b: &Boot) -> Result<Vm>;
+
+    /// Takes over a VMM a previous daemon left: `Some` when `pid` runs machine `id` and its
+    /// API says the machine runs.
+    async fn adopt(&self, id: &str, dir: &Path, jail: Option<&Jail>, pid: u32) -> Option<Vm>;
+
+    /// Pauses the machine and writes its memory and state next to its sockets, for the
+    /// next boot to resume. An error means the VMM refused and the machine runs on.
+    async fn snapshot(&self, vm: &Vm) -> Result<()>;
+
+    /// SIGKILL to the process and to its group.
+    fn kill(&self, pid: u32);
+
+    /// The machine id the process carries, when it is a VMM of ours.
+    fn machine_of(&self, pid: u32) -> Option<String>;
+
+    /// Every VMM on the host with the machine id it carries.
+    fn processes(&self) -> Vec<(u32, String)>;
+}
+
+/// The Firecracker on this host.
+pub struct Firecracker {
+    pub binary: PathBuf,
+    /// Firecracker's PCI transport.
+    pub pci: bool,
+}
+
+#[async_trait]
+impl Vmm for Firecracker {
+    async fn boot(&self, b: &Boot) -> Result<Vm> {
+        let mut resume = b.resume;
+        let proc = loop {
+            let mut proc =
+                Process::start(&self.binary, &b.id, &b.dir, self.pci, b.jail.as_ref()).await?;
+            let c = proc.client.clone();
+            let (snap_state, snap_mem) = (proc.outside("snap.state"), proc.outside("snap.mem"));
+            resume = resume && snap_state.exists() && snap_mem.exists();
+            if resume {
+                // Memory and state come back; the disks are where they were; the TAP has the
+                // same name. Nothing boots: the guest carries on where it was paused.
+                let load = async {
+                    // What the snapshot's devices open again: the drives, by the names given at boot.
+                    proc.expose_file(&b.config_drive, "config.tar")?;
+                    proc.expose_block(&b.root, "root")?;
+                    if let Some(d) = &b.data {
+                        proc.expose_block(d, "data")?;
+                    }
+                    c.snapshot_load(
+                        &proc.inside("snap.state"),
+                        &proc.inside("snap.mem"),
+                        "eth0",
+                        &b.tap,
+                    )
+                    .await
+                };
+                match load.await {
+                    Ok(()) => break proc,
+                    Err(err) => {
+                        tracing::warn!(machine = b.id, err = %err, "resume from snapshot failed, booting cold");
+                        proc.kill();
+                        proc.wait().await;
+                        resume = false;
+                        continue;
+                    }
+                }
+            }
+            let configure = async {
+                let kernel = proc.expose_file(&b.kernel, "vmlinux")?;
+                let config = proc.expose_file(&b.config_drive, "config.tar")?;
+                let root = proc.expose_block(&b.root, "root")?;
+                c.machine_config(b.vcpus, b.memory_mb).await?;
+                c.boot_source(&kernel, &b.boot_args).await?;
+                c.drive("rootfs", &root, true, false, "Writeback").await?;
+                c.drive("config", &config, false, true, "Unsafe").await?;
+                if let Some(d) = &b.data {
+                    let data = proc.expose_block(d, "data")?;
+                    c.drive("data", &data, false, false, "Writeback").await?;
+                }
+                c.network_interface("eth0", &b.tap, &b.mac).await?;
+                c.vsock(3, &proc.inside("vsock.sock")).await?;
+                c.start().await?;
+                Ok::<(), anyhow::Error>(())
+            };
+            if let Err(err) = configure.await {
+                proc.kill();
+                proc.wait().await;
+                return Err(anyhow!("configure firecracker: {err}"));
+            }
+            break proc;
+        };
+        // A snapshot is for one resume: stale files would be loaded into a different boot.
+        let _ = tokio::fs::remove_file(proc.outside("snap.state")).await;
+        let _ = tokio::fs::remove_file(proc.outside("snap.mem")).await;
+        let (exited_tx, exited) = watch::channel(false);
+        let vm = Vm {
+            pid: proc.pid(),
+            api: proc.api.clone(),
+            vsock: proc.vsock.clone(),
+            dir: proc.dir.clone(),
+            chroot: proc.chroot.clone(),
+            resumed: resume,
+            exited,
+        };
+        tokio::spawn(async move {
+            let mut proc = proc;
+            proc.wait().await;
+            let _ = exited_tx.send(true);
+        });
+        Ok(vm)
+    }
+
+    /// The process must be alive, be Firecracker, and answer on the machine's API socket as
+    /// running. It is nobody's child, so its pid is polled for `exited`.
+    async fn adopt(&self, id: &str, dir: &Path, jail: Option<&Jail>, pid: u32) -> Option<Vm> {
+        if self.machine_of(pid).as_deref() != Some(id) {
+            return None;
+        }
+        let (api, vsock, _, _) = paths_for(dir, jail, id);
+        let client = Client::new(&api);
+        let running = match tokio::time::timeout(Duration::from_secs(3), client.info()).await {
+            Ok(Ok(info)) => api_running(&info),
+            _ => false,
+        };
+        if !running {
+            return None;
+        }
+        let (exited_tx, exited) = watch::channel(false);
+        let machine = id.to_string();
+        tokio::spawn(async move {
+            while machine_of(pid).as_deref() == Some(machine.as_str()) {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            let _ = exited_tx.send(true);
+        });
+        Some(Vm {
+            pid,
+            api,
+            vsock,
+            dir: dir.to_path_buf(),
+            chroot: jail.map(|j| jail_root(&j.base, id)),
+            resumed: false,
+            exited,
+        })
+    }
+
+    async fn snapshot(&self, vm: &Vm) -> Result<()> {
+        let c = Client::new(&vm.api);
+        c.pause().await.context("pause")?;
+        if let Err(err) = c
+            .snapshot_create(&vm.inside("snap.state"), &vm.inside("snap.mem"))
+            .await
+        {
+            let _ = c.resume().await;
+            let _ = tokio::fs::remove_file(vm.outside("snap.state")).await;
+            let _ = tokio::fs::remove_file(vm.outside("snap.mem")).await;
+            return Err(err.context("snapshot (resumed)"));
+        }
+        Ok(())
+    }
+
+    fn kill(&self, pid: u32) {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+
+    fn machine_of(&self, pid: u32) -> Option<String> {
+        machine_of(pid)
+    }
+
+    /// Read from `/proc`: what a sweep compares to the records.
+    fn processes(&self) -> Vec<(u32, String)> {
+        let mut out = Vec::new();
+        let Ok(rd) = std::fs::read_dir("/proc") else {
+            return out;
+        };
+        for e in rd.flatten() {
+            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let Ok(cmd) = std::fs::read(e.path().join("cmdline")) else {
+                continue;
+            };
+            if let Some(id) = firecracker_id(&cmd) {
+                out.push((pid, id));
+            }
+        }
+        out
+    }
+}
+
+/// The machine id a Firecracker command line carries (`firecracker --id m-… …`), as the
+/// daemon spells it; `None` for any other process.
+fn firecracker_id(cmdline: &[u8]) -> Option<String> {
+    let args: Vec<&str> = cmdline
+        .split(|b| *b == 0)
+        .filter_map(|a| std::str::from_utf8(a).ok())
+        .collect();
+    if !args.first()?.ends_with("firecracker") {
+        return None;
+    }
+    let i = args.iter().position(|a| *a == "--id")?;
+    Some(args.get(i + 1)?.replacen("m-", "m_", 1))
+}
+
+/// The machine a pid runs, by its command line: the only check before the daemon signals a
+/// pid it did not spawn (a record's pid after a reboot is someone else's).
+fn machine_of(pid: u32) -> Option<String> {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .and_then(|c| firecracker_id(&c))
+}
+
+/// Whether Firecracker's `GET /` says the microVM runs.
+fn api_running(info: &serde_json::Value) -> bool {
+    info["state"].as_str() == Some("Running")
+}
+
 /// A file name next to Firecracker's sockets, as Firecracker sees it: at the root of the
 /// chroot when jailed, in the run dir otherwise.
 fn inside_path(chroot: Option<&Path>, dir: &Path, name: &str) -> PathBuf {
@@ -817,6 +1088,33 @@ mod tests {
             .await
             .unwrap();
         server.await.unwrap();
+    }
+
+    #[test]
+    fn adoption_checks() {
+        // Only a Firecracker carrying the machine's id is ours: the binary by any path, the
+        // id as the jailer spells it.
+        let fc = b"/usr/local/bin/firecracker\0--id\0m-abc123\0--api-sock\0/run/api.sock\0";
+        assert_eq!(firecracker_id(fc).as_deref(), Some("m_abc123"));
+        assert_eq!(
+            firecracker_id(b"firecracker\0--id\0m-x\0").as_deref(),
+            Some("m_x")
+        );
+        assert_eq!(firecracker_id(b"firecracker\0--api-sock\0/x\0"), None);
+        assert_eq!(firecracker_id(b"/usr/bin/jailer\0--id\0m-abc123\0"), None);
+        assert_eq!(
+            firecracker_id(b"/bin/sh\0-c\0firecracker --id m-abc123\0"),
+            None
+        );
+        assert_eq!(firecracker_id(b""), None);
+        // This process is not a Firecracker (and there is no /proc on a Mac): never killed.
+        assert_eq!(machine_of(std::process::id()), None);
+        assert!(api_running(
+            &serde_json::json!({"id": "m-1", "state": "Running", "vmm_version": "1.10"})
+        ));
+        assert!(!api_running(&serde_json::json!({"state": "Paused"})));
+        assert!(!api_running(&serde_json::json!({"state": "Not started"})));
+        assert!(!api_running(&serde_json::json!({})));
     }
 
     #[test]

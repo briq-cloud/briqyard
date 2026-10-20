@@ -266,6 +266,7 @@ name = "briqyardd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "briqyard-api",
  "chrono",

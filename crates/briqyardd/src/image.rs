@@ -387,6 +387,28 @@ fn check_layers(manifest: &OciImageManifest) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+impl Builder {
+    /// An image as if built, for tests of what clones one: its record, its dataset and the
+    /// snapshot machines clone. `reference` pins a digest, so `ensure` asks no registry.
+    pub(crate) async fn seed(&self, reference: &str, config: ImageConfig) -> Result<Image> {
+        let r: Reference = reference.parse()?;
+        let digest = r.digest().context("the reference pins no digest")?;
+        let image = Image {
+            r#ref: reference.to_string(),
+            digest: digest.to_string(),
+            key: self.key(digest),
+            config,
+            size_gb: self.root_gb,
+            built_at: Utc::now(),
+        };
+        self.zfs.create(&image.dataset(), 1 << 20).await?;
+        self.zfs.snapshot(&image.dataset(), SNAP).await?;
+        write_private(&self.meta_path(&image.key), &serde_json::to_vec(&image)?)?;
+        Ok(image)
+    }
+}
+
 impl Builder {
     /// Every image the host has built, with how many machines still clone it.
     pub async fn list(&self) -> Result<Vec<(Image, usize)>> {
