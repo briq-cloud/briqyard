@@ -11,9 +11,9 @@ cargo build --release --workspace
 ```
 
 You also need a Firecracker binary and an uncompressed guest kernel. Firecracker's own CI
-publishes both; `hack/bootstrap-host.sh` downloads the latest release and a matching kernel
-into `/usr/local/bin/firecracker` and `/var/lib/briqyard/vmlinux` (and does everything else a
-host needs: run it on a fresh server).
+publishes both; `hack/bootstrap-host.sh` downloads the pinned release and kernel (checked
+against their digests) into `/usr/local/bin/firecracker` and `/var/lib/briqyard/vmlinux` (and
+does everything else a host needs: run it on a fresh server).
 
 A ZFS pool for the disks. For development, a file-backed one:
 

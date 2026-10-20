@@ -151,13 +151,14 @@ fn ssh_args(
         b.fleet_url.clone()
     };
     let env = format!(
-        "FLEET_URL={} FLEET_TOKEN={} ADVERTISE={} BRIQYARD_TOKEN={} BRIQYARD_RELEASE={} BRIQYARD_POOL_DEVICE={}",
+        "FLEET_URL={} FLEET_TOKEN={} ADVERTISE={} BRIQYARD_TOKEN={} BRIQYARD_RELEASE={} BRIQYARD_POOL_DEVICE={} ALLOWED_CLIENTS={}",
         shq(&fleet_url),
         shq(host_token),
         shq(&format!("http://{ip}:7420")),
         shq(token),
         shq(&b.release),
-        shq(&b.pool_device)
+        shq(&b.pool_device),
+        shq(&b.allowed_clients.join(","))
     );
     vec![
         "-o".into(),
@@ -195,6 +196,7 @@ mod tests {
             ssh_key: "/etc/briqyard/key".into(),
             release: "https://x/v1".into(),
             pool_device: "/dev/nvme1n1".into(),
+            allowed_clients: vec!["10.0.0.0/8".into(), "192.168.0.0/16".into()],
             ..Default::default()
         };
         let args = ssh_args(&b, "h0st", "0.0.0.0:7430", "10.0.0.9", "t0k'en");
@@ -204,7 +206,7 @@ mod tests {
         assert!(remote.starts_with("env FLEET_URL='http://0.0.0.0:7430' FLEET_TOKEN='h0st' ADVERTISE='http://10.0.0.9:7420' BRIQYARD_TOKEN='t0k'\\''en' "), "{remote}");
         assert!(
             remote.ends_with(
-                "BRIQYARD_RELEASE='https://x/v1' BRIQYARD_POOL_DEVICE='/dev/nvme1n1' bash -s"
+                "BRIQYARD_RELEASE='https://x/v1' BRIQYARD_POOL_DEVICE='/dev/nvme1n1' ALLOWED_CLIENTS='10.0.0.0/8,192.168.0.0/16' bash -s"
             ),
             "{remote}"
         );
