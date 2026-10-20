@@ -1,6 +1,6 @@
 # ADR 0019: Events, a watch and versions: what makes an imperative API safe to drive
 
-Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`) and ADR 0022 (the probes' reasons, marked *0022*)
+Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`) ADR 0022 (the probes' reasons, marked *0022*) and ADR 0025 (`quota_exceeded`)
 
 ## Context
 
@@ -51,6 +51,7 @@ briqyard is imperative; briq's reconciler is the declarative layer above it (`..
 | `adopted` | normal | a machine left running by a previous daemon was taken over | `pid` |
 | `host_condition` | warning when it turns true, normal when it clears | a host condition changed (ADR 0021) | `condition`, `status` |
 | `image_removed` | normal | an image was removed: under disk pressure, unused past `image_keep_days`, or on request (ADR 0021) | `image`, `digest`, `key`, `reason` |
+| `quota_exceeded` | warning | *0025*: a create or a start refused by the tenant's quota | `resource`, `limit`, `used`, `need` |
 
 `updated` and `start_failed` are two more than the first list: without `updated` a PATCH of the sleep window would not move the version, and a host's fault is not the image's (`boot_failed`). `destroying` has no event: the destroy is one critical section and `destroyed` ends it.
 

@@ -28,3 +28,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0020](0020-api-tls.md) | The daemon's API serves TLS with a self-signed certificate made once; the fleet pins its SHA-256, read at bootstrap over the pinned SSH connection |
 | [0021](0021-metrics-and-conditions.md) | Per-machine series on `/metrics` from the tick, host conditions (memory and disk pressure) that keep the fleet off a host, image removal under disk pressure, the console rotated by size, `top` from the last two ticks |
 | [0022](0022-probes.md) | Probes in the daemon (startup, readiness, liveness: exec, TCP, HTTP), a `ready` that `/wait`, the ingress and the gateway follow, and a restart backoff doubling to 5 minutes |
+| [0025](0025-scheduling-labels-quotas-logs.md) | Placement within a create's region, a tenant never across regions; `?label=` selectors on listings; quotas per tenant checked at create and at a start's reservation; logs followed as NDJSON |
