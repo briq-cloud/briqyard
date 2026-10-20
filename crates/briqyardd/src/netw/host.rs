@@ -22,13 +22,13 @@ pub trait Net: Send + Sync {
     async fn set_policy(&self, p: &nft::Policy) -> Result<()>;
     async fn unset_policy(&self, p: &nft::Policy) -> Result<()>;
     async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()>;
-    /// Counts the internet traffic of a machine's address, from zero (ADR 0017).
+    /// Counts the internet traffic of a machine's address (ADR 0017) and what its egress
+    /// limits drop (ADR 0018), from zero.
     async fn count(&self, ip: &str) -> Result<()>;
     /// Ends the count. Missing is success.
     async fn uncount(&self, ip: &str) -> Result<()>;
-    /// Bytes from and to the internet, `(in, out)`, of every counted address since it was
-    /// counted.
-    async fn counters(&self) -> Result<HashMap<String, (u64, u64)>>;
+    /// The counters of every counted address since it was counted.
+    async fn counters(&self) -> Result<HashMap<String, nft::Counters>>;
     /// Returns once a TCP connection to `ip:port` from the host is accepted, or fails at
     /// `timeout`.
     async fn wait_port(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()>;
@@ -72,7 +72,7 @@ impl Net for HostNet {
     async fn uncount(&self, ip: &str) -> Result<()> {
         nft::uncount(ip).await
     }
-    async fn counters(&self) -> Result<HashMap<String, (u64, u64)>> {
+    async fn counters(&self) -> Result<HashMap<String, nft::Counters>> {
         nft::counters().await
     }
     async fn wait_port(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()> {

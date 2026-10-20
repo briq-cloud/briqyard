@@ -116,6 +116,67 @@ impl Egress {
     }
 }
 
+/// Limits on a machine's internet traffic, through the host's NAT (ADR 0018). In a request an
+/// absent field keeps what the machine has (on create: the host's default); in a machine's
+/// view every field is there, the values in force.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressLimits {
+    /// Destination ports refused, TCP and UDP; `[]` refuses none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_ports: Option<Vec<u16>>,
+    /// New connections a minute, as many at once; 0 is no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_connections_per_minute: Option<u32>,
+    /// Mbit/s, in and out together; 0 is no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_mbit: Option<u32>,
+}
+
+impl EgressLimits {
+    /// The highest bandwidth: the kernel's byte limit overflows past about 147 Gbit/s.
+    pub const MAX_MBIT: u32 = 100_000;
+
+    /// Every port is a port and the bandwidth is within `MAX_MBIT`; the message names the
+    /// field under `limits`.
+    pub fn check(&self) -> Result<(), String> {
+        if self.blocked_ports.iter().flatten().any(|p| *p == 0) {
+            return Err("blocked_ports: 0 is not a port".into());
+        }
+        if self.bandwidth_mbit.unwrap_or(0) > Self::MAX_MBIT {
+            return Err(format!("bandwidth_mbit: at most {}", Self::MAX_MBIT));
+        }
+        Ok(())
+    }
+
+    /// This one's fields, and `under`'s where this one has none.
+    pub fn over(&self, under: &EgressLimits) -> EgressLimits {
+        EgressLimits {
+            blocked_ports: self
+                .blocked_ports
+                .clone()
+                .or_else(|| under.blocked_ports.clone()),
+            new_connections_per_minute: self
+                .new_connections_per_minute
+                .or(under.new_connections_per_minute),
+            bandwidth_mbit: self.bandwidth_mbit.or(under.bandwidth_mbit),
+        }
+    }
+}
+
+/// Packets a machine's egress limits dropped since it started, by limit (ADR 0018).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressDrops {
+    pub blocked_port: u64,
+    pub rate: u64,
+    pub bandwidth: u64,
+}
+
+impl EgressDrops {
+    pub fn total(&self) -> u64 {
+        self.blocked_port + self.rate + self.bandwidth
+    }
+}
+
 /// Makes a machine. The image is pulled if the host has not seen it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateMachineRequest {
@@ -149,6 +210,9 @@ pub struct CreateMachineRequest {
     /// Where its traffic may go; absent is `open` (a restore takes the backup's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<Egress>,
+    /// Limits on its internet traffic, over the host's defaults (a restore takes the backup's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<EgressLimits>,
     /// Start right after creating (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<bool>,
@@ -233,6 +297,11 @@ pub struct Machine {
     pub restart: RestartPolicy,
     #[serde(default)]
     pub egress: Egress,
+    /// The limits in force: the machine's own values over the host's.
+    #[serde(default)]
+    pub limits: EgressLimits,
+    #[serde(default)]
+    pub egress_drops: EgressDrops,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
     #[serde(default)]
@@ -405,6 +474,9 @@ pub struct UpdateMachineRequest {
     /// A new egress policy, applied at once to a running machine; absent keeps the current one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<Egress>,
+    /// The limits it names, applied at once; the others stay as they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<EgressLimits>,
 }
 
 /// Stops a machine.
@@ -559,6 +631,9 @@ pub struct Usage {
     /// Through the host's endpoints; out is to the client.
     pub ingress_out_bytes: u64,
     pub ingress_in_bytes: u64,
+    /// Packets its egress limits dropped (ADR 0018); absent in the hours stored before them.
+    #[serde(default)]
+    pub egress_dropped_packets: u64,
 }
 
 impl Usage {
@@ -577,6 +652,7 @@ impl Usage {
         self.internet_in_bytes += o.internet_in_bytes;
         self.ingress_out_bytes += o.ingress_out_bytes;
         self.ingress_in_bytes += o.ingress_in_bytes;
+        self.egress_dropped_packets += o.egress_dropped_packets;
     }
 }
 
@@ -882,6 +958,7 @@ mod tests {
             "ports": [80, 443], "sleep": "30m",
             "restart": {"policy": "always", "max_retries": 0},
             "metadata": {"briq": "bq_1"}, "egress": {"mode": "via", "via": "m_gw"},
+            "limits": {"blocked_ports": [25, 465], "new_connections_per_minute": 600},
             "start": false,
             "fork": {"machine_id": "m0", "copy": "disk"}
         });
@@ -890,6 +967,9 @@ mod tests {
             r.egress.as_ref().and_then(|e| e.via.as_deref()),
             Some("m_gw")
         );
+        let l = r.limits.as_ref().unwrap();
+        assert_eq!(l.blocked_ports.as_deref(), Some(&[25, 465][..]));
+        assert_eq!(l.bandwidth_mbit, None, "absent: the host's");
         assert_eq!(
             r.cmd.as_deref(),
             Some(&["nginx", "-g", "daemon off;"].map(String::from)[..])
@@ -918,6 +998,8 @@ mod tests {
         expected["endpoints"] = json!([]);
         expected["suspended"] = json!(false);
         expected["egress"] = json!({"mode": "open"});
+        expected["limits"] = json!({});
+        expected["egress_drops"] = json!({"blocked_port": 0, "rate": 0, "bandwidth": 0});
         let m: Machine = round_trip(input, expected);
         assert_eq!(m.state, state::RUNNING);
         assert_eq!(m.egress, Egress::default());
@@ -941,6 +1023,8 @@ mod tests {
             "ports": [5432], "sleep": "30m",
             "restart": {"policy": "on-failure", "max_retries": 3},
             "egress": {"mode": "none"},
+            "limits": {"blocked_ports": [25], "new_connections_per_minute": 0, "bandwidth_mbit": 100},
+            "egress_drops": {"blocked_port": 3, "rate": 0, "bandwidth": 12},
             "metadata": {"stack": "s1"},
             "endpoints": [{
                 "id": "e1", "machine_id": "m1", "port": 5432, "protocol": "tcp",
@@ -955,6 +1039,8 @@ mod tests {
         let m: Machine = same(input);
         assert_eq!(m.stopped_reason, stop::EXIT);
         assert_eq!(m.egress.mode, egress::NONE);
+        assert_eq!(m.limits.bandwidth_mbit, Some(100));
+        assert_eq!(m.egress_drops.total(), 15);
         assert_eq!(m.exit.as_ref().map(|e| e.code), Some(1));
         assert_eq!(m.endpoints[0].host_port, Some(20001));
         assert_eq!(m.sleeps_at.map(|t| (t - ts()).num_minutes()), Some(30));
@@ -1063,6 +1149,16 @@ mod tests {
             u.egress.as_ref().and_then(|e| e.via.as_deref()),
             Some("m_gw")
         );
+        assert_eq!(u.limits, None);
+        // Only the limits it names change: 0 lifts one.
+        let u: UpdateMachineRequest = same(json!({"limits": {"new_connections_per_minute": 0}}));
+        assert_eq!(
+            u.limits,
+            Some(EgressLimits {
+                new_connections_per_minute: Some(0),
+                ..Default::default()
+            })
+        );
     }
 
     #[test]
@@ -1100,6 +1196,43 @@ mod tests {
                 "egress.via must name a machine of the tenant"
             );
         }
+    }
+
+    #[test]
+    fn egress_limits() {
+        // Absent fields stay absent: a request that names none changes none.
+        let l: EgressLimits = same(json!({}));
+        assert_eq!(l, EgressLimits::default());
+        assert_eq!(l.check(), Ok(()));
+        let own: EgressLimits = same(json!({"blocked_ports": [], "bandwidth_mbit": 100}));
+        assert_eq!(own.check(), Ok(()));
+        // A machine's own fields over the host's, one by one; `[]` and 0 are values.
+        let host: EgressLimits = same(json!({
+            "blocked_ports": [25], "new_connections_per_minute": 0, "bandwidth_mbit": 0
+        }));
+        assert_eq!(
+            own.over(&host),
+            EgressLimits {
+                blocked_ports: Some(vec![]),
+                new_connections_per_minute: Some(0),
+                bandwidth_mbit: Some(100),
+            }
+        );
+        assert_eq!(EgressLimits::default().over(&host), host);
+        // The checks name the field under `limits` and what it wants.
+        let bad = |v: serde_json::Value| serde_json::from_value::<EgressLimits>(v).unwrap().check();
+        assert_eq!(
+            bad(json!({"blocked_ports": [25, 0]})).unwrap_err(),
+            "blocked_ports: 0 is not a port"
+        );
+        assert_eq!(
+            bad(json!({"bandwidth_mbit": 100_001})).unwrap_err(),
+            "bandwidth_mbit: at most 100000"
+        );
+        assert_eq!(bad(json!({"bandwidth_mbit": 100_000})), Ok(()));
+        assert!(serde_json::from_value::<EgressLimits>(json!({"blocked_ports": [70000]})).is_err());
+        let d: EgressDrops = same(json!({"blocked_port": 1, "rate": 2, "bandwidth": 3}));
+        assert_eq!(d.total(), 6);
     }
 
     #[test]
@@ -1270,7 +1403,7 @@ mod tests {
             "memory_mb_seconds": 1843200.0, "root_gb_hours": 8.0, "volume_gb_hours": 2.0,
             "disk_used_gb_hours": 0.5, "snapshot_gb_hours": 0.25, "backup_gb_hours": 0.75,
             "internet_out_bytes": 100, "internet_in_bytes": 2000,
-            "ingress_out_bytes": 300, "ingress_in_bytes": 40,
+            "ingress_out_bytes": 300, "ingress_in_bytes": 40, "egress_dropped_packets": 7,
             "closed": true
         }));
         assert_eq!(b.usage.cpu_seconds, 12.5);
@@ -1283,7 +1416,7 @@ mod tests {
             "memory_mb_seconds": 384.0, "root_gb_hours": 0.0, "volume_gb_hours": 0.0,
             "disk_used_gb_hours": 0.0, "snapshot_gb_hours": 0.0, "backup_gb_hours": 0.0,
             "internet_out_bytes": 0, "internet_in_bytes": 0,
-            "ingress_out_bytes": 0, "ingress_in_bytes": 0,
+            "ingress_out_bytes": 0, "ingress_in_bytes": 0, "egress_dropped_packets": 2,
             "closed": false, "host": "h1"
         }));
         assert_eq!(
@@ -1296,12 +1429,20 @@ mod tests {
             "size": {"vcpus": 1, "memory_mb": 256}, "closed": false
         }))
         .is_err());
+        // Except the drops: an hour stored before ADR 0018 has none, read as zero.
+        let mut old = serde_json::to_value(&b).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("egress_dropped_packets");
+        let old: UsageBucket = serde_json::from_value(old).unwrap();
+        assert_eq!(old.usage.egress_dropped_packets, 0);
         // Two measures of a machine's hour add up, field by field.
         let mut u = b.usage;
         u.add(&g.usage);
         assert_eq!(u.running_seconds, 3601.5);
         assert_eq!(u.memory_mb_seconds, 1843584.0);
         assert_eq!(u.internet_in_bytes, 2000);
+        assert_eq!(u.egress_dropped_packets, 9);
     }
 
     #[test]
@@ -1320,6 +1461,7 @@ mod tests {
                 "hostname": "db.internal", "machine_host": "m1.vm.internal",
                 "size": {"vcpus": 1, "memory_mb": 512}, "ports": [], "sleep": "never",
                 "restart": {"policy": "no", "max_retries": 0}, "egress": {"mode": "open"},
+                "limits": {}, "egress_drops": {"blocked_port": 0, "rate": 0, "bandwidth": 0},
                 "metadata": {}, "endpoints": [],
                 "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:05Z",
                 "state_changed_at": "2026-01-02T03:04:05Z", "suspended": false

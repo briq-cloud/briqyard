@@ -2,6 +2,7 @@
 
 use crate::netw;
 use anyhow::{bail, Context, Result};
+use briqyard_api as api;
 use serde::Deserialize;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,9 @@ pub struct Config {
     /// Credentials for private registries, by host ("ghcr.io", "registry-1.docker.io").
     pub registries: Vec<Registry>,
     pub network: Network,
+    /// The limits on every machine's internet traffic, unless the machine sets its own
+    /// (ADR 0018).
+    pub egress_limits: EgressLimits,
     pub ingress: Ingress,
     /// The size of every root disk (thin: only written blocks take space).
     pub root_disk_gb: u32,
@@ -90,6 +94,61 @@ pub struct Network {
     pub upstream_dns: Vec<String>,
     /// The host interface machines reach the internet through. Empty: the default route's.
     pub egress: String,
+}
+
+/// Limits on a machine's internet traffic, every field set: the host's defaults, and what a
+/// machine runs with once its own values are put over them (ADR 0018).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EgressLimits {
+    /// Destination ports refused, TCP and UDP.
+    pub blocked_ports: Vec<u16>,
+    /// New connections a minute; 0 is no limit.
+    pub new_connections_per_minute: u32,
+    /// Mbit/s, in and out together; 0 is no limit.
+    pub bandwidth_mbit: u32,
+}
+
+impl Default for EgressLimits {
+    /// Mail is what gets a server's address blocklisted first.
+    fn default() -> Self {
+        Self {
+            blocked_ports: vec![25],
+            new_connections_per_minute: 0,
+            bandwidth_mbit: 0,
+        }
+    }
+}
+
+impl EgressLimits {
+    /// These, with a machine's own values over them; the ports sorted, once each.
+    pub fn with(&self, own: &api::EgressLimits) -> EgressLimits {
+        let l = own.over(&self.view());
+        let mut blocked_ports = l.blocked_ports.unwrap_or_default();
+        blocked_ports.sort_unstable();
+        blocked_ports.dedup();
+        EgressLimits {
+            blocked_ports,
+            new_connections_per_minute: l.new_connections_per_minute.unwrap_or(0),
+            bandwidth_mbit: l.bandwidth_mbit.unwrap_or(0),
+        }
+    }
+
+    /// Nothing is limited: the machine needs nothing in the tables.
+    pub fn is_none(&self) -> bool {
+        self.blocked_ports.is_empty()
+            && self.new_connections_per_minute == 0
+            && self.bandwidth_mbit == 0
+    }
+
+    /// As the API shows them: every field there.
+    pub fn view(&self) -> api::EgressLimits {
+        api::EgressLimits {
+            blocked_ports: Some(self.blocked_ports.clone()),
+            new_connections_per_minute: Some(self.new_connections_per_minute),
+            bandwidth_mbit: Some(self.bandwidth_mbit),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -177,6 +236,7 @@ impl Default for Config {
             storage: Storage::default(),
             registries: vec![],
             network: Network::default(),
+            egress_limits: EgressLimits::default(),
             ingress: Ingress::default(),
             root_disk_gb: 8,
             image_keep_days: 14,
@@ -269,6 +329,9 @@ impl Config {
         for c in &self.ingress.allowed_clients {
             netw::cidr(c).with_context(|| format!("ingress.allowed_clients {c:?}"))?;
         }
+        if let Err(e) = self.egress_limits.view().check() {
+            bail!("egress_limits.{e}");
+        }
         self.check_exposure()
     }
 
@@ -356,6 +419,9 @@ mod tests {
         assert_eq!(c.network.range, "10.64.0.0/10");
         assert!(c.network.upstream_dns.is_empty());
         assert!(c.network.egress.is_empty());
+        assert_eq!(c.egress_limits.blocked_ports, vec![25]);
+        assert_eq!(c.egress_limits.new_connections_per_minute, 0);
+        assert_eq!(c.egress_limits.bandwidth_mbit, 0);
         assert_eq!(c.ingress.tcp_ports, "20000-29999");
         assert!(c.ingress.http.is_empty());
         assert_eq!(c.ingress.domain, "byard.localhost");
@@ -415,6 +481,10 @@ network:
   range: 10.128.0.0/10
   upstream_dns: ["1.1.1.1", "9.9.9.9"]
   egress: eth0
+egress_limits:
+  blocked_ports: [25, 465, 587]
+  new_connections_per_minute: 600
+  bandwidth_mbit: 200
 ingress:
   tcp_ports: 30000-31000
   http: 0.0.0.0:8080
@@ -456,6 +526,14 @@ capacity:
         assert_eq!(c.network.range, "10.128.0.0/10");
         assert_eq!(c.network.upstream_dns, vec!["1.1.1.1", "9.9.9.9"]);
         assert_eq!(c.network.egress, "eth0");
+        assert_eq!(
+            c.egress_limits,
+            EgressLimits {
+                blocked_ports: vec![25, 465, 587],
+                new_connections_per_minute: 600,
+                bandwidth_mbit: 200,
+            }
+        );
         assert_eq!(c.ingress.tcp_ports, "30000-31000");
         assert_eq!(c.ingress.http, "0.0.0.0:8080");
         assert_eq!(c.ingress.domain, "byard.example");
@@ -481,6 +559,59 @@ capacity:
         assert_eq!(c.ingress.http, "127.0.0.1:8080");
         assert_eq!(c.ingress.tcp_ports, "20000-29999");
         assert_eq!(c.ingress.domain, "byard.localhost");
+        // A rate set for every machine keeps port 25 blocked.
+        let c = load("egress_limits:\n  new_connections_per_minute: 600\n").unwrap();
+        assert_eq!(c.egress_limits.blocked_ports, vec![25]);
+        assert_eq!(c.egress_limits.new_connections_per_minute, 600);
+    }
+
+    #[test]
+    fn a_machine_s_limits_are_its_own_over_the_host_s() {
+        let host = EgressLimits {
+            blocked_ports: vec![465, 25],
+            new_connections_per_minute: 600,
+            bandwidth_mbit: 0,
+        };
+        // Nothing of its own: the host's, the ports in order.
+        let l = host.with(&api::EgressLimits::default());
+        assert_eq!(l.blocked_ports, vec![25, 465]);
+        assert_eq!((l.new_connections_per_minute, l.bandwidth_mbit), (600, 0));
+        // Its own, field by field; `[]` and 0 lift a host default.
+        let own = api::EgressLimits {
+            blocked_ports: Some(vec![]),
+            new_connections_per_minute: Some(0),
+            bandwidth_mbit: Some(100),
+        };
+        let l = host.with(&own);
+        assert_eq!(
+            l,
+            EgressLimits {
+                blocked_ports: vec![],
+                new_connections_per_minute: 0,
+                bandwidth_mbit: 100,
+            }
+        );
+        assert!(!l.is_none());
+        assert!(host
+            .with(&api::EgressLimits {
+                bandwidth_mbit: Some(0),
+                ..own
+            })
+            .is_none());
+        let own = api::EgressLimits {
+            blocked_ports: Some(vec![587, 25, 587]),
+            ..Default::default()
+        };
+        assert_eq!(host.with(&own).blocked_ports, vec![25, 587]);
+        // Shown with every field.
+        assert_eq!(
+            host.view(),
+            api::EgressLimits {
+                blocked_ports: Some(vec![465, 25]),
+                new_connections_per_minute: Some(600),
+                bandwidth_mbit: Some(0),
+            }
+        );
     }
 
     #[test]
@@ -493,6 +624,7 @@ capacity:
             ("fleet:\n  urll: x\n", "urll"),
             ("fleet:\n  token: x\n", "token"),
             ("capacity:\n  memory: 1\n", "memory"),
+            ("egress_limits:\n  bandwidth: 1\n", "bandwidth"),
         ] {
             let err = load(yaml).unwrap_err();
             let msg = format!("{err:#}");
@@ -518,6 +650,16 @@ capacity:
         assert!(err.to_string().contains("root_disk_gb"), "{err}");
         let err = load("usage_keep_days: 0\n").unwrap_err();
         assert_eq!(err.to_string(), "usage_keep_days must be at least 1");
+        let err = load("egress_limits:\n  blocked_ports: [0]\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "egress_limits.blocked_ports: 0 is not a port"
+        );
+        let err = load("egress_limits:\n  bandwidth_mbit: 200000\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "egress_limits.bandwidth_mbit: at most 100000"
+        );
 
         for (field, yaml) in [
             ("firecracker", "firecracker: bin/firecracker\n"),
