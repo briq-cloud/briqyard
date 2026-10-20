@@ -109,6 +109,15 @@ resolver answers internal names only, NXDOMAIN for the rest. The policy is set a
 right after the pin, taken out with it, swapped live on a running machine in one transaction, and rendered from
 the running records at daemon start.
 
+A tenant may have a gateway (ADR 0016): `PUT /v1/tenants/{id}/gateway` makes a machine of the
+daemon (`role: gateway` on its record) on the tenant's bridge, named `gateway.internal`, absent
+from the tenant's listing and counts, destroyed with the tenant. `via: gateway` names it. A
+start of such a machine (a wake too) first starts the gateway and waits for its port, under the
+tenant's lock, held until the machine is `starting`; the sleeper stops the gateway once no such
+machine runs or starts. A gateway that does not come up fails that start with `boot_failed`,
+the machine unmoved, the gateway's reason and console in its `error`. Its program is restarted
+whenever it ends on its own (`restart: always`).
+
 No machine has a public address. Something outside reaches a port through the ingress, which is
 how sleep works: a connection to a sleeping machine's endpoint starts it, waits for the port and
 then proxies. Two kinds of endpoints: a TCP port on the host (Postgres, Redis), and an HTTP host

@@ -87,14 +87,16 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   harness over a temp directory, the same fake `zfs` and a mock host (`Vmm`, `Guest`,
   `Net`; ADR 0010): create to running, boot failures, start against destroy, starts past
   capacity, stop and suspend, a caller that hangs up, crash recovery, the orphan sweep,
-  the sleeper's tick, the init's exit report, fork snapshots freed. What still needs the host: a tenant's first create (its bridge and
+  the sleeper's tick, the init's exit report, fork snapshots freed, the tenant's gateway
+  (booted once by what needs it, its failure named, slept by the tick, kept while in use). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, backups, the API
   handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
   backups to a directory store and a restore, egress policies (`via` a gateway machine, `none`,
-  back to `open`). 64 checks.
+  back to `open`), a tenant gateway (a forward proxy its consumer's start boots, HTTPS through
+  it and nothing around it, stopped by the sleeper, gone with the tenant). 76 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
