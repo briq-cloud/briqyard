@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-briqyard-api = { workspace = true }
+briqyard-api = { workspace = true, features = ["tls"] }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

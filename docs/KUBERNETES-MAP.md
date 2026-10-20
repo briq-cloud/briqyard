@@ -40,7 +40,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Namespaces | ✓ tenants | | |
 | Finalizers, owner references, garbage collection | ◐ a tenant takes its gateway; forks are independent | | — |
 | CRDs, admission webhooks, aggregated APIs | ✗ | briq is the extension layer | briq |
-| TLS to the nodes (kubelet serving certificates) | ✗ plain HTTP with a bearer between fleet and hosts | a certificate made at bootstrap, its fingerprint pinned in the host record | yard, before the first real host |
+| TLS to the nodes (kubelet serving certificates) | ✓ a self-signed certificate per host, its SHA-256 pinned in the host record at bootstrap (ADR 0020) | | |
 | AuthN, RBAC, service accounts | ◐ one API token, a metrics token, one token per host (fleet) | scoped tokens (read-only, per tenant) | yard, later |
 | API priority and fairness | ✗ | per-client request limits | yard, later |
 | Audit log | ◐ one line per request | the principal and the change on mutating calls | yard, later |
@@ -173,7 +173,7 @@ Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit 
 3. **Metrics**: per machine series and machine states on `/metrics`, host conditions, image GC and log rotation under them, `top`.
 4. **Probes**: exec, TCP, HTTP; `ready`, which the ingress and `/wait` follow; restart on liveness; a capped backoff with a `crash_loop` reason.
 5. **Backups on a schedule**, retention, delete (closes ADR 0017's storage hole).
-6. **TLS between the fleet and the hosts**, the certificate pinned at bootstrap.
+6. **TLS between the fleet and the hosts**, the certificate pinned at bootstrap. Built: ADR 0020.
 7. **Changes at the next cold boot**: image, env, command, size by PATCH.
 8. **Scheduling**: placement by region, hosts under pressure refused, labels on listings; quotas per tenant; logs follow.
 9. **The edge** (briq, in parallel): its servers, Cloudflare in front, client IPs, WebSockets. Built: up-lab/briq#277 (draft).

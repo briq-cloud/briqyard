@@ -15,6 +15,11 @@ pub struct HostRec {
     /// present. Set at the order (the bootstrap writes it into the host) or by `hosts:`.
     #[serde(default)]
     pub token: String,
+    /// The SHA-256 of the host's API certificate: the only certificate the fleet accepts from
+    /// it, and the one its heartbeats must report. Set by the bootstrap or by `hosts:`; empty
+    /// for a host on plain HTTP (ADR 0020).
+    #[serde(default)]
+    pub tls_fingerprint: String,
     #[serde(default)]
     pub region: String,
     #[serde(default)]
@@ -82,8 +87,47 @@ impl HostRec {
             last_seen: self.last_seen,
             version: self.version.clone(),
             note: self.note.clone(),
+            tls_fingerprint: self.tls_fingerprint.clone(),
         }
     }
+}
+
+/// Whether a heartbeat's TLS is what the host's record pinned: the same fingerprint (both
+/// empty for a host on plain HTTP), and an `https://` URL exactly when there is one. A host on
+/// TLS with nothing pinned is refused: the pin comes from the bootstrap or the operator, never
+/// from the heartbeat itself.
+pub fn tls_matches(pinned: &str, reported: &str, url: &str) -> Result<(), String> {
+    if reported != pinned {
+        return Err(if pinned.is_empty() {
+            format!(
+                "the host serves TLS (certificate {reported}) and no fingerprint is pinned for it: \
+                 the bootstrap pins it, or hosts[].tls_fingerprint"
+            )
+        } else if reported.is_empty() {
+            format!("the host serves plain HTTP and certificate {pinned} is pinned for it")
+        } else {
+            format!(
+                "certificate {reported} is not the one pinned ({pinned}): another machine at \
+                 this address, or a new certificate to pin"
+            )
+        });
+    }
+    if url.starts_with("https://") != !pinned.is_empty() {
+        return Err(format!(
+            "{url}: a host {} must advertise {}",
+            if pinned.is_empty() {
+                "on plain HTTP"
+            } else {
+                "with a pinned certificate"
+            },
+            if pinned.is_empty() {
+                "http://"
+            } else {
+                "https://"
+            }
+        ));
+    }
+    Ok(())
 }
 
 /// Placement settings.
@@ -138,6 +182,9 @@ impl Registry {
         entry.url = h.url;
         if !h.token.is_empty() {
             entry.token = h.token;
+        }
+        if !h.tls_fingerprint.is_empty() {
+            entry.tls_fingerprint = h.tls_fingerprint;
         }
         if !h.region.is_empty() {
             entry.region = h.region;
@@ -353,6 +400,7 @@ mod tests {
             id: id.into(),
             url: format!("http://{id}:7420"),
             token: String::new(),
+            tls_fingerprint: String::new(),
             region: "fsn".into(),
             provider: "static".into(),
             provider_id: String::new(),
@@ -386,6 +434,7 @@ mod tests {
         ordered.provider = "scaleway".into();
         ordered.provider_id = "srv-9".into();
         ordered.token = "t0k".into();
+        ordered.tls_fingerprint = "ab".repeat(32);
         reg.hosts.insert(ordered.id.clone(), ordered);
         assert_eq!(
             reg.expecting("http://10.0.0.9:7421/")
@@ -412,9 +461,36 @@ mod tests {
         );
         assert_eq!(h.provider_id, "srv-9");
         assert_eq!(h.token, "t0k", "nor the token");
+        assert_eq!(h.tls_fingerprint, "ab".repeat(32), "nor the pin");
         assert_eq!(h.capacity.memory_mb, 64_000);
         assert_eq!(url_host("http://[::1]:7420/x"), "[::1]");
         assert_eq!(url_host("10.0.0.5"), "10.0.0.5");
+    }
+
+    #[test]
+    fn a_heartbeat_must_report_the_pinned_certificate() {
+        let (a, b) = ("aa".repeat(32), "bb".repeat(32));
+        let https = "https://10.0.0.9:7420";
+        let http = "http://10.0.0.9:7420";
+        assert_eq!(tls_matches(&a, &a, https), Ok(()));
+        assert_eq!(tls_matches("", "", http), Ok(()), "a host on plain HTTP");
+        let err = tls_matches(&a, &b, https).unwrap_err();
+        assert!(
+            err.starts_with(&format!("certificate {b} is not the one pinned ({a})")),
+            "{err}"
+        );
+        // No trust on first use: TLS with nothing pinned is refused.
+        let err = tls_matches("", &b, https).unwrap_err();
+        assert!(err.contains("no fingerprint is pinned"), "{err}");
+        let err = tls_matches(&a, "", http).unwrap_err();
+        assert!(err.contains("serves plain HTTP"), "{err}");
+        // The URL the fleet dials follows the pin.
+        assert!(tls_matches(&a, &a, http)
+            .unwrap_err()
+            .contains("must advertise https://"));
+        assert!(tls_matches("", "", https)
+            .unwrap_err()
+            .contains("must advertise http://"));
     }
 
     #[test]

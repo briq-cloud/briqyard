@@ -46,6 +46,34 @@ fn global_flags_go_before_or_after_the_command() {
 }
 
 #[test]
+fn a_daemon_is_pinned_by_its_certificate() {
+    let fp = "ab".repeat(32);
+    let cli = parse(&[
+        "--url",
+        "https://10.0.0.5:7420",
+        "--tls-fingerprint",
+        &fp,
+        "status",
+    ]);
+    assert_eq!(cli.tls_fingerprint.as_deref(), Some(fp.as_str()));
+    // As openssl prints it.
+    let colons = vec!["AB"; 32].join(":");
+    let cli = parse(&["status", "--tls-fingerprint", &colons]);
+    assert_eq!(cli.tls_fingerprint.as_deref(), Some(fp.as_str()));
+    assert_eq!(
+        parse(&["status"]).tls_fingerprint,
+        None,
+        "a fleet: the web PKI"
+    );
+    assert_eq!(
+        fails(&["--tls-fingerprint", "abc", "status"]),
+        ErrorKind::ValueValidation
+    );
+    http_client(Some(&fp)).unwrap();
+    http_client(None).unwrap();
+}
+
+#[test]
 fn machine_run_takes_every_setting() {
     let cli = parse(&[
         "machine",
@@ -804,7 +832,7 @@ fn the_machine_table() {
 fn the_host_table() {
     let ready = api::Host {
         id: "h_byard-1".into(),
-        url: "http://10.0.0.9:7420".into(),
+        url: "https://10.0.0.9:7420".into(),
         region: "par".into(),
         provider: "scaleway".into(),
         state: "ready".into(),
@@ -821,6 +849,7 @@ fn the_host_table() {
         last_seen: ts(),
         version: "0.1.0".into(),
         note: String::new(),
+        tls_fingerprint: "ab".repeat(32),
     };
     let ordered = api::Host {
         id: "h_srv-9".into(),
@@ -832,26 +861,31 @@ fn the_host_table() {
         tenants: vec![],
         note: "bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
             .into(),
+        tls_fingerprint: String::new(),
         ..ready.clone()
     };
     let out = host_table(&[ready, ordered]);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 4, "a note takes a line of its own");
+    assert_eq!(lines.len(), 5, "a pin and a note take a line each");
     assert_eq!(
         lines[0],
         "ID               URL                          STATE        MEMORY MB      VCPUS      MACHINES  TENANTS  LAST SEEN"
     );
     assert_eq!(
         lines[1],
-        "h_byard-1        http://10.0.0.9:7420         ready        8192/64000     6/32       3         2        2026-10-19T08:30:00+00:00"
+        "h_byard-1        https://10.0.0.9:7420        ready        8192/64000     6/32       3         2        2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[2],
+        format!("                 tls: {}", "ab".repeat(32))
+    );
+    assert_eq!(
+        lines[3],
         "h_srv-9          -                            provisioning 0/0            0/0        0         0        2026-10-19T08:30:00+00:00",
         "no address yet shows as -"
     );
     assert_eq!(
-        lines[3],
+        lines[4],
         "                 note: bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
     );
     assert!(out.ends_with('\n'));

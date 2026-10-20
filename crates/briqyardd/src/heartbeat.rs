@@ -1,12 +1,13 @@
 //! Registers the daemon with a briqyard-fleet and keeps the registration fresh. The bearer is
-//! the daemon's own API token: the one credential the host and the fleet share.
+//! the daemon's own API token: the one credential the host and the fleet share. The heartbeat
+//! carries the API certificate's fingerprint, which the fleet checks against its pin (ADR 0020).
 
 use crate::config::FleetClient;
 use crate::machine::Manager;
 use briqyard_api as api;
 use std::time::Duration;
 
-pub async fn run(cfg: FleetClient, api_token: String, mgr: Manager) {
+pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, mgr: Manager) {
     if api_token.is_empty() {
         tracing::error!("fleet.url is set but token is empty: a fleet accepts a heartbeat only with the host's own token");
         return;
@@ -27,6 +28,7 @@ pub async fn run(cfg: FleetClient, api_token: String, mgr: Manager) {
             tenants: mgr.tenants().into_iter().map(|t| t.id).collect(),
             version: env!("CARGO_PKG_VERSION").into(),
             disk_free_mb: mgr.disk_free_mb().await,
+            tls_fingerprint: tls_fingerprint.clone(),
         };
         let r = client
             .post(format!(

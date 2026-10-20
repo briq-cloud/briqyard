@@ -65,8 +65,10 @@ then `limactl stop fc && limactl start fc`. The second VM, with the daemon's por
 27420 the same way, is installed from the binaries `hack/vm.sh` built (copied out with
 `limactl copy` into `bin/`) by the bootstrap script, and registers with the fleet, which takes
 a registration only for a host it expects: the `fc2` entry in `hack/fleet.dev.yaml` (its
-address and token). `hack/vm.sh install` copies the dev configs into `/etc/briqyard` only when
-none is there: after a change, copy them by hand and restart the units. Then
+address and token). fc2's daemon binds loopback, so it serves plain HTTP and the fleet pins no
+certificate for it; fc's dev configs say `api_tls: false` and `tls: off` (ADR 0020), so the
+suites stay on `http://`. `hack/vm.sh install` copies the fleet's config every time and the
+daemon's only when none is there: after a change, copy it by hand and restart the unit. Then
 
 ```bash
 limactl start --name=fc2 --vm-type=vz --nested-virt --cpus=2 --memory=6 --disk=30 --network=vzNAT template://ubuntu
@@ -92,7 +94,9 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   usage (hours split, counter resets, suspended and stopped machines, traffic on its machine,
   closed hours, a restart, retention, a destroyed machine, the route's range), egress limits
   (the host's under a machine's own, set at start, swapped on PATCH, withdrawn at stop and
-  destroy, none for `via` and `none`, rendered at daemon start, drops in the view and usage). What still needs the host: a tenant's first create (its bridge and
+  destroy, none for `via` and `none`, rendered at daemon start, drops in the view and usage), the API's TLS
+  (the certificate made once, the pinned verifier against a loopback server, the fleet
+  forwarding to a stub daemon over TLS, the heartbeat checked against the pin). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, backups, the API
   handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,

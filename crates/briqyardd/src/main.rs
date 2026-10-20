@@ -11,11 +11,12 @@ mod machine;
 mod netw;
 mod objstore;
 mod store;
+mod tls;
 mod usage;
 mod zfs;
 
 use anyhow::{anyhow, Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,14 +32,25 @@ struct Args {
     /// Configuration file.
     #[arg(long, default_value = "/etc/briqyard/config.yaml")]
     config: PathBuf,
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Print the SHA-256 of the API's certificate, making the certificate if there is none
+    /// yet; nothing when the API is plain HTTP. What the fleet pins (ADR 0020).
+    TlsFingerprint,
 }
 
 fn main() {
     let args = Args::parse();
     let filter = tracing_subscriber::EnvFilter::try_from_env("BRIQYARD_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    // Logs on stderr: stdout is a subcommand's answer (`tls-fingerprint`).
     tracing_subscriber::fmt()
         .json()
+        .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .with_target(false)
         .init();
@@ -62,6 +74,13 @@ async fn run(args: Args) -> Result<()> {
         return Err(anyhow!("config {} not found", args.config.display()));
     };
     let cfg = config::Config::load(path)?;
+    if let Some(Cmd::TlsFingerprint) = args.cmd {
+        if cfg.serves_tls() {
+            store::private_dir(&cfg.data_dir)?;
+            println!("{}", api_certificate(&cfg)?);
+        }
+        return Ok(());
+    }
     // Nothing the daemon writes is for other users: records, config drives and consoles hold
     // tenant secrets (ADR 0014).
     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
@@ -79,6 +98,17 @@ async fn run(args: Args) -> Result<()> {
         tracing::warn!("no jailer configured: Firecracker runs as root, for development only");
     }
     store::private_dir(&cfg.data_dir)?;
+    // Made before anything else listens, so a host that cannot serve its API starts nothing.
+    let tls = if cfg.serves_tls() {
+        let fingerprint = api_certificate(&cfg)?;
+        Some((
+            fingerprint,
+            tls::server_config(&cfg.tls_cert(), &cfg.tls_key())?,
+        ))
+    } else {
+        None
+    };
+    let fingerprint = tls.as_ref().map(|(f, _)| f.clone()).unwrap_or_default();
     let store = store::Store::open(&cfg.state_dir())?;
     let zfs = zfs::Zfs::new(&cfg.storage.pool, &cfg.jail_base()).await?;
     for d in [cfg.jail_base(), cfg.run_dir()] {
@@ -107,7 +137,12 @@ async fn run(args: Args) -> Result<()> {
     ing.start().await?;
     if let Some(f) = cfg.fleet.clone() {
         if !f.url.is_empty() {
-            tokio::spawn(heartbeat::run(f, cfg.token.clone(), mgr.clone()));
+            tokio::spawn(heartbeat::run(
+                f,
+                cfg.token.clone(),
+                fingerprint.clone(),
+                mgr.clone(),
+            ));
         }
     }
     {
@@ -123,37 +158,63 @@ async fn run(args: Args) -> Result<()> {
             }
         });
     }
-    let listener = tokio::net::TcpListener::bind(&cfg.listen)
-        .await
+    let listener = std::net::TcpListener::bind(&cfg.listen)
         .with_context(|| format!("listen {}", cfg.listen))?;
+    listener.set_nonblocking(true)?;
     let state = Arc::new(api::AppState {
         mgr: mgr.clone(),
         token: cfg.token.clone(),
         metrics_token: cfg.metrics_token.clone(),
         loopback: listener.local_addr()?.ip().is_loopback(),
         openapi: OPENAPI,
+        tls_fingerprint: fingerprint.clone(),
     });
     tracing::info!(
         addr = cfg.listen,
+        tls_fingerprint = fingerprint,
         version = env!("CARGO_PKG_VERSION"),
         host_id = mgr.host_id(),
         pool = cfg.storage.pool,
         "briqyardd listening"
     );
-    let shutdown = async {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("signal");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+    let handle = axum_server::Handle::new();
+    {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("signal");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            tracing::info!("shutting down");
+            handle.graceful_shutdown(None);
+        });
+    }
+    let app = api::router(state).into_make_service();
+    match tls {
+        Some((_, server)) => {
+            let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
+            axum_server::from_tcp_rustls(listener, config)
+                .handle(handle)
+                .serve(app)
+                .await?
         }
-        tracing::info!("shutting down");
-    };
-    axum::serve(listener, api::router(state))
-        .with_graceful_shutdown(shutdown)
-        .await?;
+        None => {
+            axum_server::from_tcp(listener)
+                .handle(handle)
+                .serve(app)
+                .await?
+        }
+    }
     tokio::time::timeout(std::time::Duration::from_secs(60), mgr.close())
         .await
         .ok();
     Ok(())
+}
+
+/// The API's certificate, made on the first call, and its fingerprint.
+fn api_certificate(cfg: &config::Config) -> Result<String> {
+    tls::ensure(&cfg.tls_cert(), &cfg.tls_key(), &cfg.tls_names())
 }

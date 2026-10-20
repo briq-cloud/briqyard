@@ -37,7 +37,7 @@ On briqyard: the router's logic (host lookup, `private`/`token`, wake, activity,
 - **Edge hosts of our own** (recommended): two small servers per region running the edge image as a service, `*.briq.run` and `*.tcp.briq.run` in DNS to both. Certificates by Let's Encrypt DNS-01 in CI, as the `*.tcp` one already is. The hosts' `ingress.allowed_clients` lists the edge until the mesh makes it the mesh range.
 - **Cloudflare in front of HTTP**: `*.briq.run` proxied gives anycast, TLS at the edge and flood absorption, with our edge hosts as origin. TCP endpoints cannot go through it without Spectrum (paid): they stay direct.
 - The edge never runs inside briqyard: tokens, teams and `briq.run` are briq's.
-- **The path from the edge to the hosts carries customers' traffic** (HTTP in clear, a database's protocol after the edge's TLS). It must ride a private network: OVH's vRack or a Scaleway private network between the edge and the hosts of a region, the mesh (`MESH.md`) across providers. TLS on the daemon's API (KUBERNETES-MAP, TLS to the nodes) covers the control path only.
+- **The path from the edge to the hosts carries customers' traffic** (HTTP in clear, a database's protocol after the edge's TLS). It must ride a private network: OVH's vRack or a Scaleway private network between the edge and the hosts of a region, the mesh (`MESH.md`) across providers. TLS on the daemon's API (ADR 0020) covers the control path only.
 
 ## 2. Volume durability
 

@@ -7604,6 +7604,7 @@ mod tests {
             metrics_token: String::new(),
             loopback: true,
             openapi: "",
+            tls_fingerprint: String::new(),
         });
         let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v1/usage", ln.local_addr().unwrap());

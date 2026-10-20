@@ -5,7 +5,7 @@
 #
 #   BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.0 \
 #   BRIQYARD_POOL_DEVICE=/dev/nvme1n1 BRIQYARD_TOKEN=... FLEET_URL=https://fleet.example \
-#   ADVERTISE=http://10.0.0.5:7420 ALLOWED_CLIENTS=10.0.0.0/8 bash bootstrap-host.sh
+#   ADVERTISE=https://10.0.0.5:7420 ALLOWED_CLIENTS=10.0.0.0/8 bash bootstrap-host.sh
 #
 # With FLEET_URL the host registers with the fleet, presenting BRIQYARD_TOKEN: the fleet must
 # expect that token at ADVERTISE's address (the host's order, or its `hosts:` entry).
@@ -14,6 +14,8 @@
 # The API and the endpoints listen on LISTEN's address (0.0.0.0:7420 by default). A public
 # address needs ALLOWED_CLIENTS (comma-separated IPv4 CIDRs: the fleet's and the routers'
 # networks) or ALLOW_PUBLIC=1 (a firewall of your own); with neither, they bind loopback.
+# Off loopback the API serves TLS with a certificate of its own (ADR 0020): the script prints
+# its fingerprint, which the fleet pins (`tls_fingerprint` in the host's `hosts:` entry).
 set -euo pipefail
 POOL=${BRIQYARD_POOL:-byard}
 POOL_DEVICE=${BRIQYARD_POOL_DEVICE:-}
@@ -144,12 +146,24 @@ ingress:
 EOF
   [ -z "$clients" ] || echo "$clients" >> /etc/briqyard/config.yaml
   if [ -n "$FLEET_URL" ]; then
+    # The API serves TLS off loopback: advertised with the scheme it serves.
+    scheme=https
+    case "$bind" in 127.*) scheme=http ;; esac
     cat >> /etc/briqyard/config.yaml <<EOF
 fleet:
   url: $FLEET_URL
-  advertise: ${ADVERTISE:-http://$(hostname -I | awk '{print $1}'):7420}
+  advertise: ${ADVERTISE:-$scheme://$(hostname -I | awk '{print $1}'):7420}
 EOF
   fi
+fi
+
+echo "== api certificate"
+# Made here, before the daemon starts, so it is there to read; kept across runs.
+fingerprint=$(/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml tls-fingerprint)
+if [ -n "$fingerprint" ]; then
+  echo "   sha256 $fingerprint: the fleet pins it (tls_fingerprint)"
+else
+  echo "   none: the API is plain HTTP (a loopback listen, or api_tls: false)"
 fi
 cat > /etc/systemd/system/briqyardd.service <<'EOF'
 [Unit]

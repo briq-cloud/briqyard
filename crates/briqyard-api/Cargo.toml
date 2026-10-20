@@ -11,3 +11,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+rustls = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+
+[features]
+# The pinned verifier and the server config the daemon, the fleet and the CLI share (ADR 0020).
+# Off for the init, which has no TLS.
+tls = ["dep:rustls", "dep:sha2", "dep:hex"]
+
+[dev-dependencies]
+rcgen = { workspace = true }
