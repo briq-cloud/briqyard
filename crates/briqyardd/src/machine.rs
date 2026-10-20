@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
@@ -199,6 +200,9 @@ pub struct EndpointRec {
 /// A console log past this size is rotated at the next cold boot.
 const CONSOLE_ROTATE_BYTES: u64 = 32 << 20;
 
+/// Idle machines the sleeper stops at once.
+const SLEEPS_AT_ONCE: usize = 8;
+
 /// Makes an id: a prefix and 12 hex characters.
 pub fn new_id(prefix: &str) -> String {
     use rand::RngCore;
@@ -216,6 +220,8 @@ struct Entry {
     stop_req: Mutex<Option<String>>,
     /// Signalled on every state change: what `wait_running` and a stop wait on.
     changed: Notify,
+    /// A use since the record was last written; read and written under `rec`'s lock.
+    unsaved_use: AtomicBool,
 }
 
 impl Entry {
@@ -226,11 +232,21 @@ impl Entry {
             live: Mutex::new(None),
             stop_req: Mutex::new(None),
             changed: Notify::new(),
+            unsaved_use: AtomicBool::new(false),
         })
     }
 
     fn snapshot(&self) -> Record {
         self.rec.lock().unwrap().clone()
+    }
+
+    /// Marks a use now. In memory only: the sleeper reads it here, and the record on disk
+    /// catches up with the next write or the sleeper's tick, so a busy machine does not
+    /// rewrite its record on every connection.
+    fn touch(&self) {
+        let mut r = self.rec.lock().unwrap();
+        r.last_used_at = Some(Utc::now());
+        self.unsaved_use.store(true, Relaxed);
     }
 
     /// The one place `state` is written: `state_changed_at` follows it and whoever waits on
@@ -614,10 +630,25 @@ impl Manager {
         });
     }
 
+    /// Writes the record: something about the machine changed.
     fn save(&self, e: &Entry) -> Result<()> {
         let rec = {
             let mut r = e.rec.lock().unwrap();
             r.updated_at = Utc::now();
+            e.unsaved_use.store(false, Relaxed);
+            r.clone()
+        };
+        self.inner.store.put("machines", &rec.id, &rec)
+    }
+
+    /// Writes a record whose last use moved since it was last written, as it is: nothing
+    /// about the machine changed, so `updated_at` stays.
+    fn flush_use(&self, e: &Entry) -> Result<()> {
+        let rec = {
+            let r = e.rec.lock().unwrap();
+            if !e.unsaved_use.swap(false, Relaxed) {
+                return Ok(());
+            }
             r.clone()
         };
         self.inner.store.put("machines", &rec.id, &rec)
@@ -1509,7 +1540,7 @@ impl Manager {
         let r = e.snapshot();
         match r.state.as_str() {
             state::RUNNING => {
-                self.touch_entry(&e);
+                e.touch();
                 return Ok(self.view(&e));
             }
             state::STOPPED if r.stopped_reason == stop::USER => {
@@ -2070,18 +2101,12 @@ impl Manager {
     }
 
     pub fn touch(&self, id: &str) -> Result<(), MError> {
-        let e = self.entry(id)?;
-        self.touch_entry(&e);
+        self.entry(id)?.touch();
         Ok(())
     }
 
-    fn touch_entry(&self, e: &Entry) {
-        e.rec.lock().unwrap().last_used_at = Some(Utc::now());
-        let _ = self.save(e);
-    }
-
-    /// Every 15 s: idle machines go to sleep, and a destroy left `destroying` (a daemon
-    /// restart, a disk that was busy) is tried again.
+    /// Every 15 s: idle machines go to sleep, uses since the last tick reach the disk, and a
+    /// destroy left `destroying` (a daemon restart, a disk that was busy) is tried again.
     async fn sleeper(self) {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
         loop {
@@ -2092,7 +2117,7 @@ impl Manager {
 
     async fn tick(&self) {
         let now = Utc::now();
-        let (due, destroying): (Vec<Arc<Entry>>, Vec<String>) = {
+        let (due, used, destroying): (Vec<Arc<Entry>>, Vec<Arc<Entry>>, Vec<String>) = {
             let machines = self.inner.machines.lock().unwrap();
             let due = machines
                 .values()
@@ -2100,6 +2125,11 @@ impl Manager {
                     let r = e.rec.lock().unwrap();
                     r.state == state::RUNNING && idle_past(r.last_used_at, r.sleep_window(), now)
                 })
+                .cloned()
+                .collect();
+            let used = machines
+                .values()
+                .filter(|e| e.unsaved_use.load(Relaxed))
                 .cloned()
                 .collect();
             // One whose lock is held has a destroy under way already.
@@ -2110,16 +2140,30 @@ impl Manager {
                 })
                 .map(|e| e.snapshot().id)
                 .collect();
-            (due, destroying)
+            (due, used, destroying)
         };
+        // Idle machines stop together, a few at a time: one stop can take its grace and a
+        // kill, and a tick with many must not take minutes.
+        let at_once = Arc::new(tokio::sync::Semaphore::new(SLEEPS_AT_ONCE));
+        let mut stops = tokio::task::JoinSet::new();
         for e in due {
-            tracing::info!(machine = e.snapshot().id, "machine idle, going to sleep");
-            let suspend = self.inner.cfg.suspend_on_sleep;
-            if let Err(err) = self
-                .stop_entry(&e, stop::IDLE, Duration::from_secs(10), suspend)
-                .await
-            {
-                tracing::warn!(machine = e.snapshot().id, err = %err, "sleep");
+            let (m, at_once) = (self.clone(), at_once.clone());
+            stops.spawn(async move {
+                let _turn = at_once.acquire().await;
+                tracing::info!(machine = e.snapshot().id, "machine idle, going to sleep");
+                let suspend = m.inner.cfg.suspend_on_sleep;
+                if let Err(err) = m
+                    .stop_entry(&e, stop::IDLE, Duration::from_secs(10), suspend)
+                    .await
+                {
+                    tracing::warn!(machine = e.snapshot().id, err = %err, "sleep");
+                }
+            });
+        }
+        while stops.join_next().await.is_some() {}
+        for e in used {
+            if let Err(err) = self.flush_use(&e) {
+                tracing::warn!(machine = e.snapshot().id, err = %err, "last use not written");
             }
         }
         for id in destroying {
@@ -2505,7 +2549,7 @@ impl Manager {
             (r.state.clone(), r.ip.clone())
         };
         if st == state::RUNNING {
-            self.touch_entry(&e);
+            e.touch();
             return Ok(ip.parse().unwrap());
         }
         if !wake {
@@ -3114,6 +3158,8 @@ mod tests {
     /// recorded, one line each, the way the fake `zfs` records its own.
     struct Mock {
         boots: Mutex<Boots>,
+        /// How long a guest takes to stop once asked.
+        stops: Mutex<Duration>,
         next_pid: std::sync::atomic::AtomicU32,
         procs: Mutex<Vec<Proc>>,
         taps: Mutex<std::collections::BTreeSet<String>>,
@@ -3124,6 +3170,7 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 boots: Mutex::new(Boots::Ready(Duration::ZERO)),
+                stops: Mutex::new(Duration::ZERO),
                 next_pid: std::sync::atomic::AtomicU32::new(1000),
                 procs: Mutex::new(Vec::new()),
                 taps: Mutex::new(Default::default()),
@@ -3133,6 +3180,10 @@ mod tests {
 
         fn boots(&self, b: Boots) {
             *self.boots.lock().unwrap() = b;
+        }
+
+        fn stops_take(&self, d: Duration) {
+            *self.stops.lock().unwrap() = d;
         }
 
         fn record(&self, line: String) {
@@ -3359,6 +3410,8 @@ mod tests {
         async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()> {
             let (pid, _, _) = self.proc_at(vsock)?;
             self.record(format!("shutdown {pid} {}s", grace.as_secs()));
+            let takes = *self.stops.lock().unwrap();
+            tokio::time::sleep(takes).await;
             self.exit(pid, 0, true);
             Ok(())
         }
@@ -3710,10 +3763,13 @@ mod tests {
         let e = h.add("m_s", state::STOPPED, 512);
         let t0 = e.snapshot().state_changed_at;
         e.set_state(state::STOPPED, |r| r.stopped_reason = stop::USER.into());
-        h.m.touch_entry(&e);
+        e.touch();
         let r = e.snapshot();
         assert_eq!(r.state_changed_at, t0);
-        assert!(r.updated_at > t0);
+        // A use is not a change to the machine; a write of one is.
+        assert_eq!(r.updated_at, t0);
+        h.m.save(&e).unwrap();
+        assert!(e.snapshot().updated_at > t0);
         e.set_state(state::STARTING, |_| {});
         let r = e.snapshot();
         assert!(r.state_changed_at > t0);
@@ -4555,6 +4611,75 @@ mod tests {
         assert_eq!(h.stored(&m.id).unwrap().boots, 1);
         use std::sync::atomic::Ordering::Relaxed;
         assert_eq!(h.m.inner.stats.resumes.load(Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn touches_are_written_once_by_the_tick() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let e = h.add("m_t", state::STOPPED, 256);
+        h.m.save(&e).unwrap();
+        let path = h.m.inner.cfg.state_dir().join("machines/m_t.json");
+        let written = || std::fs::metadata(&path).unwrap().modified().unwrap();
+        let before = h.stored("m_t").unwrap();
+        let t0 = written();
+        for _ in 0..10 {
+            h.m.touch("m_t").unwrap();
+        }
+        let used = e.snapshot().last_used_at;
+        assert!(used.is_some());
+        // Memory has the use, the API reads it there, and the disk was not written.
+        assert_eq!(h.m.get("m_t").unwrap().last_used_at, used);
+        assert_eq!(h.stored("m_t").unwrap().last_used_at, None);
+        assert_eq!(written(), t0);
+        // The tick writes it once, as the machine is: `updated_at` stays.
+        h.m.tick().await;
+        let stored = h.stored("m_t").unwrap();
+        assert_eq!(stored.last_used_at, used);
+        assert_eq!(stored.updated_at, before.updated_at);
+        let t1 = written();
+        assert!(t1 > t0);
+        // Nothing moved since: the next tick writes nothing.
+        h.m.tick().await;
+        assert_eq!(written(), t1);
+        // A change to the machine carries the use with it, and the tick has nothing left.
+        h.m.touch("m_t").unwrap();
+        e.set_state(state::STARTING, |_| {});
+        h.m.save(&e).unwrap();
+        let t2 = written();
+        assert_eq!(
+            h.stored("m_t").unwrap().last_used_at,
+            e.snapshot().last_used_at
+        );
+        h.m.tick().await;
+        assert_eq!(written(), t2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_machines_go_to_sleep_together() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let long_ago = Some(Utc::now() - chrono::Duration::hours(1));
+        for name in ["a", "b", "c"] {
+            let m = h.m.create(h.request(name)).await.unwrap();
+            h.m.entry(&m.id).unwrap().rec.lock().unwrap().last_used_at = long_ago;
+        }
+        // Each guest takes 3 s to stop: one after another, the tick would take 9.
+        h.host.stops_take(Duration::from_secs(3));
+        let t0 = tokio::time::Instant::now();
+        h.m.tick().await;
+        let took = t0.elapsed();
+        assert!(
+            took >= Duration::from_secs(3) && took < Duration::from_secs(6),
+            "{took:?}"
+        );
+        for m in h.m.list(None) {
+            assert_eq!(
+                (m.state.as_str(), m.stopped_reason.as_str()),
+                (state::STOPPED, stop::IDLE),
+                "{}",
+                m.name
+            );
+        }
     }
 
     // --- fork snapshots ---

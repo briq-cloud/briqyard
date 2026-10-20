@@ -43,7 +43,10 @@ States: `created` → `starting` → `running` → `stopping` → `stopped` → 
 → `destroying` → gone. A `stopped` machine keeps both disks. `stopped_reason` says why it
 stopped: `user`, `idle` (went to sleep), `exit` (its process ended; `exit` says how), `host`
 (the daemon stopped it: a shutdown, or a leftover of a crashed daemon; wakeable like `idle`).
-`state_changed_at` moves only with `state`; `updated_at` moves on every write, a touch included.
+`state_changed_at` moves only with `state`; `updated_at` with every change to the machine (a
+state, a setting), never with a use: `last_used_at` is kept in memory and reaches the record
+with the next change or the sleeper's tick, so a busy machine does not rewrite its record on
+every connection. The record on disk says what the machine is, not when it was last touched.
 
 A boot the guest does not survive (the image's fault: no init to run, a command that exits
 at once) leaves the machine in `error` with the console's last lines, and the request answers
@@ -131,7 +134,8 @@ reaches the store. Local snapshots stay only as the base of the next incremental
 ### Sleep
 
 Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the
-machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`). A start, an
+machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`; idle machines
+are stopped together, a few at a time, never one after another). A start, an
 ingress connection or an exec on an idle machine wakes it. `sleep: "never"` keeps it on. `PATCH
 /machines/{id} {"sleep": "3h"}` changes the window in any state, without a restart.
 
