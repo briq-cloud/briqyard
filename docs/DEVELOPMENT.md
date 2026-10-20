@@ -83,10 +83,12 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   the config drive, restart and sleep decisions).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
-  sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash.
-  46 checks.
+  sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
+  backups to a directory store and a restore. 54 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
+- `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
+  a daemon SIGKILL, host invariants between phases (ADR 0010). `--tenants 6 --per-tenant 4 --rounds 2 --crash`.
 - `hack/fleet-two-hosts.sh`: a fleet with two hosts: tenants placed on different hosts, calls
   forwarded to each, a host that stops answering marked down with its tenant's calls refused
   (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back. 16 checks.
@@ -101,5 +103,6 @@ crates/briqyard-init    PID 1 inside the guest
 crates/briqyard         the CLI
 crates/briqyard-fleet   the orchestrator across hosts
 api/openapi.yaml        the API description, served at /v1/openapi.yaml
-hack/                   dev VM, e2e, systemd unit, dev config
+hack/                   dev VM, systemd units, dev configs, the shell suites, the stress driver
+docs/adr                every technical decision; docs/research the numbers behind them
 ```

@@ -16,11 +16,12 @@ contribution. A bot asks you to sign it on your first pull request.
 
 ## Development
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). `make check` runs what CI runs: `gofmt`,
-`go vet`, the unit tests. The end-to-end suite needs a KVM host: `make e2e`.
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). `cargo fmt --check`, `cargo clippy --workspace
+--all-targets -- -D warnings` and `cargo test --workspace` are what CI runs. The end-to-end
+suites need a KVM host: `hack/e2e.sh`.
 
 ## Style
 
-Go, formatted by `gofmt`. Errors carry what failed and what was being done. Nothing in the daemon
-prints to stdout but logs, one JSON line per event. A new API field gets its OpenAPI entry in the
-same change.
+Rust, formatted by `rustfmt`, clippy clean. Errors carry what failed and what was being done.
+Nothing in the daemon prints to stdout but logs, one JSON line per event. A new API field gets
+its OpenAPI entry in the same change. A technical decision gets an ADR in `docs/adr/`.

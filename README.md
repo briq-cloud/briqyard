@@ -35,7 +35,7 @@ the AGPL-3.0.
 | `briqyard-fleet` | once | the same API across servers; placement, host provisioning |
 | `briqyard` | on your laptop | the CLI |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works, [docs/OPERATIONS.md](docs/OPERATIONS.md) to run a host, [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) to work on it.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works, [docs/adr/](docs/adr/) for why, [docs/OPERATIONS.md](docs/OPERATIONS.md) to run a host, [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) to work on it.
 
 ## Try it on one machine
 
