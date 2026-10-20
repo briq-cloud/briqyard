@@ -14,6 +14,10 @@ pub struct Config {
     pub listen: String,
     /// When set, required as `Authorization: Bearer <token>` on every request.
     pub token: String,
+    /// A token of its own for `/metrics`, so a scraper never holds the API's. Unset, the
+    /// API token is required there too, except on a loopback listener where `/metrics` and
+    /// `/v1/openapi.yaml` are open.
+    pub metrics_token: String,
     /// State, per-machine runtime files and the image cache.
     pub data_dir: PathBuf,
     pub firecracker: PathBuf,
@@ -158,6 +162,7 @@ impl Default for Config {
         Self {
             listen: "127.0.0.1:7420".into(),
             token: String::new(),
+            metrics_token: String::new(),
             data_dir: "/var/lib/briqyard".into(),
             firecracker: "/usr/local/bin/firecracker".into(),
             jailer: PathBuf::new(),

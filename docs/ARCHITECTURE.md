@@ -41,7 +41,19 @@ mount path, the ports the image listens on, and the sleep window. The daemon:
 
 States: `created` → `starting` → `running` → `stopping` → `stopped` → (`starting` again) …
 → `destroying` → gone. A `stopped` machine keeps both disks. `stopped_reason` says why it
-stopped: `user`, `idle` (went to sleep), `exit` (its process ended; `exit_code` says how).
+stopped: `user`, `idle` (went to sleep), `exit` (its process ended; `exit` says how), `host`
+(the daemon stopped it: a shutdown, or a leftover of a crashed daemon; wakeable like `idle`).
+`state_changed_at` moves only with `state`; `updated_at` moves on every write, a touch included.
+
+A boot the guest does not survive (the image's fault: no init to run, a command that exits
+at once) leaves the machine in `error` with the console's last lines, and the request answers
+409 `boot_failed` with the machine in the body; nothing restarts it, the caller reads and
+destroys it. The host's own faults answer 500. Every transition (create, start, stop, destroy,
+backup) runs in a task of its own that the request only waits on: a client that hangs up
+never leaves a machine half-moved (ADR 0011). One lock per machine orders its transitions;
+a start takes the host's memory and moves to `starting` in one step under the machines map's
+lock, so starts that race never oversubscribe it; a destroy holds the machine's lock from the
+state check to the record's removal and, when it fails, is tried again every 15 s.
 
 ### Disks
 
@@ -178,7 +190,10 @@ Secrets reach the guest on its config drive and never through the API's response
 The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API and its
 endpoints listen on loopback unless told otherwise; on an address the internet could reach it
 refuses to start until `ingress.allowed_clients` says who may connect (ADR 0012). The API is
-plain HTTP: TLS or a private network in front. What it writes is its own: umask `077`,
+plain HTTP: TLS or a private network in front. Every id a caller sends (a tenant, a machine id
+in a path) is checked (`a-z`, `0-9`, `_`, `-`, 64 at most) before it names a file or an object.
+A pid in a record is signalled only when `/proc` shows it is the Firecracker of that machine:
+after a reboot, the number is someone else's. What it writes is its own: umask `077`,
 `data_dir` and everything under it `0700`, records and config drives `0600`, the drive's copy
 in the jail `0400` for the jail's user, so no other local uid (another machine's Firecracker
 included) reads a tenant's secrets (ADR 0014). A state key is a file name: `Store::path`

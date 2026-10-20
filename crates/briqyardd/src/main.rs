@@ -122,14 +122,16 @@ async fn run(args: Args) -> Result<()> {
             }
         });
     }
-    let state = Arc::new(api::AppState {
-        mgr: mgr.clone(),
-        token: cfg.token.clone(),
-        openapi: OPENAPI,
-    });
     let listener = tokio::net::TcpListener::bind(&cfg.listen)
         .await
         .with_context(|| format!("listen {}", cfg.listen))?;
+    let state = Arc::new(api::AppState {
+        mgr: mgr.clone(),
+        token: cfg.token.clone(),
+        metrics_token: cfg.metrics_token.clone(),
+        loopback: listener.local_addr()?.ip().is_loopback(),
+        openapi: OPENAPI,
+    });
     tracing::info!(
         addr = cfg.listen,
         version = env!("CARGO_PKG_VERSION"),

@@ -38,6 +38,10 @@ pub enum MError {
     Capacity(String),
     #[error("the tenant still has machines")]
     TenantInUse,
+    /// The guest never came up or exited while booting: the image's fault, not the host's.
+    /// The machine stays, in state `error`, with the console tail in its `error`.
+    #[error("boot failed: {}", .0.error)]
+    BootFailed(Box<api::Machine>),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -92,6 +96,9 @@ pub struct Record {
     pub boots: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// When `state` last changed; written only by `Entry::set_state`.
+    #[serde(default)]
+    pub state_changed_at: DateTime<Utc>,
     #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -125,6 +132,39 @@ impl Record {
     pub fn sleep_window(&self) -> Option<Duration> {
         api::parse_sleep(&self.sleep).ok().flatten()
     }
+
+    /// Brings a record written by an earlier daemon to the current shape: `sleep` was `""`
+    /// for never, and `state_changed_at` did not exist (its best stand-in is `updated_at`).
+    fn migrate(&mut self) {
+        self.sleep = sleep_setting(&self.sleep);
+        if self.state_changed_at == DateTime::<Utc>::default() {
+            self.state_changed_at = self.updated_at;
+        }
+    }
+}
+
+/// The one way a sleep window is stored: what the API said, with "" (never) as "never".
+fn sleep_setting(s: &str) -> String {
+    let s = s.trim();
+    if s.is_empty() {
+        "never".into()
+    } else {
+        s.into()
+    }
+}
+
+/// Whether a machine in this state holds the memory it was given: from the reservation at
+/// `starting` until its process is gone.
+fn holds_memory(state: &str) -> bool {
+    matches!(state, state::STARTING | state::RUNNING | state::STOPPING)
+}
+
+/// Whether `need` MB more fit next to `used` on a host of `cap`.
+fn admit(used: u32, cap: u32, need: u32) -> Result<(), MError> {
+    match used.checked_add(need) {
+        Some(total) if total <= cap => Ok(()),
+        _ => Err(MError::Capacity(format!("{used} MB used of {cap}"))),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,6 +172,14 @@ pub struct TenantRec {
     pub id: String,
     pub subnet_index: u32,
     pub created_at: DateTime<Utc>,
+}
+
+/// A tenant as the manager holds it: its record and the subnet its index names, checked
+/// against `network.range` when the record was loaded or made.
+#[derive(Clone)]
+struct Tenant {
+    rec: TenantRec,
+    subnet: Subnet,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -176,13 +224,37 @@ struct Entry {
     live: Mutex<Option<Live>>,
     /// The reason set before asking the guest to stop; `None` when it ends on its own.
     stop_req: Mutex<Option<String>>,
-    /// Signalled when the watcher settled the state after an exit.
-    settled: Notify,
+    /// Signalled on every state change: what `wait_running` and a stop wait on.
+    changed: Notify,
 }
 
 impl Entry {
+    fn new(rec: Record) -> Arc<Self> {
+        Arc::new(Self {
+            lock: tokio::sync::Mutex::new(()),
+            rec: Mutex::new(rec),
+            live: Mutex::new(None),
+            stop_req: Mutex::new(None),
+            changed: Notify::new(),
+        })
+    }
+
     fn snapshot(&self) -> Record {
         self.rec.lock().unwrap().clone()
+    }
+
+    /// The one place `state` is written: `state_changed_at` follows it and whoever waits on
+    /// the machine is woken. `f` edits the rest of the record under the same lock.
+    fn set_state(&self, state: &str, f: impl FnOnce(&mut Record)) {
+        {
+            let mut r = self.rec.lock().unwrap();
+            if r.state != state {
+                r.state = state.into();
+                r.state_changed_at = Utc::now();
+            }
+            f(&mut r);
+        }
+        self.changed.notify_waiters();
     }
 }
 
@@ -207,8 +279,10 @@ struct Inner {
     range: Range,
     egress: String,
     host_id: String,
+    /// The address TCP endpoints are reported at, resolved once.
+    advertise: String,
     machines: Mutex<HashMap<String, Arc<Entry>>>,
-    tenants: Mutex<HashMap<String, TenantRec>>,
+    tenants: Mutex<HashMap<String, Tenant>>,
     endpoints: Mutex<HashMap<String, EndpointRec>>,
     endpoint_events: broadcast::Sender<(EndpointRec, bool)>,
     /// Held while a tenant is made (its subnet index, bridge and record), see `ensure_tenant`.
@@ -275,6 +349,11 @@ impl Manager {
             Some(st)
         };
         let (endpoint_events, _) = broadcast::channel(64);
+        let advertise = advertise_address(
+            &cfg.ingress.advertise,
+            &cfg.ingress.bind,
+            host_ip(&egress).await,
+        );
         let inner = Arc::new(Inner {
             stats: Stats::default(),
             cfg,
@@ -285,6 +364,7 @@ impl Manager {
             range,
             egress,
             host_id,
+            advertise,
             machines: Mutex::new(HashMap::new()),
             tenants: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
@@ -296,7 +376,7 @@ impl Manager {
         let m = Self { inner };
         m.load()?;
         host::enable_forwarding()?;
-        let tenants: Vec<TenantRec> = m.inner.tenants.lock().unwrap().values().cloned().collect();
+        let tenants: Vec<Tenant> = m.inner.tenants.lock().unwrap().values().cloned().collect();
         for t in &tenants {
             m.plumb_tenant(t).await?;
             m.refresh_dns(t);
@@ -313,20 +393,31 @@ impl Manager {
         &self.inner.host_id
     }
 
+    /// Reads the records. A tenant whose subnet index is outside `network.range` is refused
+    /// here, with the fix, rather than found by the first request that needs its subnet.
     fn load(&self) -> Result<()> {
         let st = &self.inner.store;
-        for t in st.list::<TenantRec>("tenants")? {
-            self.inner.tenants.lock().unwrap().insert(t.id.clone(), t);
+        for rec in st.list::<TenantRec>("tenants")? {
+            let subnet = self.inner.range.subnet(rec.subnet_index).with_context(|| {
+                format!(
+                    "tenant {}: widen network.range back, or remove the tenant",
+                    rec.id
+                )
+            })?;
+            self.inner
+                .tenants
+                .lock()
+                .unwrap()
+                .insert(rec.id.clone(), Tenant { rec, subnet });
         }
-        for r in st.list::<Record>("machines")? {
-            let e = Arc::new(Entry {
-                lock: tokio::sync::Mutex::new(()),
-                rec: Mutex::new(r.clone()),
-                live: Mutex::new(None),
-                stop_req: Mutex::new(None),
-                settled: Notify::new(),
-            });
-            self.inner.machines.lock().unwrap().insert(r.id, e);
+        for mut r in st.list::<Record>("machines")? {
+            r.migrate();
+            let id = r.id.clone();
+            self.inner
+                .machines
+                .lock()
+                .unwrap()
+                .insert(id, Entry::new(r));
         }
         for ep in st.list::<EndpointRec>("endpoints")? {
             self.inner
@@ -338,8 +429,10 @@ impl Manager {
         Ok(())
     }
 
-    /// Machines a previous daemon left: their Firecracker processes are ended and they are
-    /// marked stopped (idle, so the next use wakes them).
+    /// Machines a previous daemon left running: adopted when their Firecracker is still up
+    /// and answering, else ended (only a process that still carries the machine's id is
+    /// killed: after a reboot the pid is someone else's) and marked stopped by the host, so
+    /// the next use wakes them. Destroys cut short are resumed by the sleeper's tick.
     async fn recover(&self) {
         let entries: Vec<Arc<Entry>> = self
             .inner
@@ -351,42 +444,32 @@ impl Manager {
             .collect();
         for e in entries {
             let rec = e.snapshot();
-            match rec.state.as_str() {
-                state::RUNNING | state::STARTING | state::STOPPING => {
-                    if rec.state == state::RUNNING && rec.pid > 0 && self.adopt(&e, rec.pid).await {
-                        continue;
-                    }
-                    if rec.pid > 0 {
-                        unsafe {
-                            libc::kill(-(rec.pid as i32), libc::SIGKILL);
-                            libc::kill(rec.pid as i32, libc::SIGKILL);
-                        }
-                    }
-                    let _ = host::delete_tap(&rec.id, &rec.ip).await;
-                    {
-                        let mut r = e.rec.lock().unwrap();
-                        r.state = state::STOPPED.into();
-                        r.stopped_reason = stop::IDLE.into();
-                        r.pid = 0;
-                        r.stopped_at = Some(Utc::now());
-                    }
-                    tracing::warn!(
-                        machine = rec.id,
-                        "machine left running by a previous daemon, marked stopped"
-                    );
-                    let _ = self.save(&e);
-                }
-                state::DESTROYING => {
-                    let m = self.clone();
-                    let id = rec.id.clone();
-                    tokio::spawn(async move {
-                        if let Err(err) = m.destroy(&id).await {
-                            tracing::error!(machine = id, err = %err, "resume destroy");
-                        }
-                    });
-                }
-                _ => {}
+            if !matches!(
+                rec.state.as_str(),
+                state::RUNNING | state::STARTING | state::STOPPING
+            ) {
+                continue;
             }
+            if rec.state == state::RUNNING && rec.pid > 0 && self.adopt(&e, rec.pid).await {
+                continue;
+            }
+            if rec.pid > 0 && is_our_firecracker(rec.pid, &rec.id) {
+                unsafe {
+                    libc::kill(-(rec.pid as i32), libc::SIGKILL);
+                    libc::kill(rec.pid as i32, libc::SIGKILL);
+                }
+            }
+            let _ = host::delete_tap(&rec.id, &rec.ip).await;
+            e.set_state(state::STOPPED, |r| {
+                r.stopped_reason = stop::HOST.into();
+                r.pid = 0;
+                r.stopped_at = Some(Utc::now());
+            });
+            tracing::warn!(
+                machine = rec.id,
+                "machine left running by a previous daemon, marked stopped"
+            );
+            let _ = self.save(&e);
         }
     }
 
@@ -479,8 +562,7 @@ impl Manager {
     /// API socket as running. The watcher polls the pid, since the process is nobody's child.
     async fn adopt(&self, e: &Arc<Entry>, pid: u32) -> bool {
         let rec = e.snapshot();
-        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        if !is_firecracker(&comm) {
+        if !is_our_firecracker(pid, &rec.id) {
             return false;
         }
         let dir = self.inner.cfg.run_dir().join(&rec.id);
@@ -508,11 +590,7 @@ impl Manager {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                let alive = unsafe { libc::kill(pid as i32, 0) } == 0
-                    && std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                        .map(|c| is_firecracker(&c))
-                        .unwrap_or(false);
-                if !alive {
+                if !is_our_firecracker(pid, &rec.id) {
                     break;
                 }
             }
@@ -520,7 +598,7 @@ impl Manager {
             watcher.settle_exit(&we, pid).await;
         });
         tracing::info!(
-            machine = rec.id,
+            machine = e.snapshot().id,
             pid,
             "adopted a machine left running by a previous daemon"
         );
@@ -538,6 +616,7 @@ impl Manager {
 
     /// Suspends every running machine (a stop when Firecracker refuses); the daemon is going
     /// down, and after its restart each one resumes on first use in well under a second.
+    /// Stopped by the host, not idle: the next use wakes it whatever its sleep window says.
     pub async fn close(&self) {
         let entries: Vec<Arc<Entry>> = self
             .inner
@@ -554,7 +633,7 @@ impl Manager {
                 let m = self.clone();
                 tasks.push(tokio::spawn(async move {
                     if let Err(err) = m
-                        .stop_entry(&e, stop::IDLE, Duration::from_secs(10), true)
+                        .stop_entry(&e, stop::HOST, Duration::from_secs(10), true)
                         .await
                     {
                         tracing::warn!(machine = e.snapshot().id, err = %err, "stop on shutdown");
@@ -569,21 +648,13 @@ impl Manager {
 
     // --- tenants ---
 
-    fn subnet(&self, t: &TenantRec) -> Subnet {
-        self.inner
-            .range
-            .subnet(t.subnet_index)
-            .expect("subnet index in range")
-    }
-
-    async fn plumb_tenant(&self, t: &TenantRec) -> Result<()> {
-        let s = self.subnet(t);
-        host::ensure_bridge(&s).await?;
-        self.inner.dns.listen(s.gateway()).await?;
+    async fn plumb_tenant(&self, t: &Tenant) -> Result<()> {
+        host::ensure_bridge(&t.subnet).await?;
+        self.inner.dns.listen(t.subnet.gateway()).await?;
         Ok(())
     }
 
-    async fn ensure_tenant(&self, id: &str) -> Result<TenantRec> {
+    async fn ensure_tenant(&self, id: &str) -> Result<Tenant> {
         if let Some(t) = self.inner.tenants.lock().unwrap().get(id) {
             return Ok(t.clone());
         }
@@ -595,17 +666,20 @@ impl Manager {
         }
         let t = {
             let tenants = self.inner.tenants.lock().unwrap();
-            let used: Vec<u32> = tenants.values().map(|t| t.subnet_index).collect();
+            let used: Vec<u32> = tenants.values().map(|t| t.rec.subnet_index).collect();
             let idx = netw::first_free(used, 0, self.inner.range.count() - 1)
                 .ok_or_else(|| anyhow!("no tenant subnet left"))?;
-            TenantRec {
-                id: id.to_string(),
-                subnet_index: idx,
-                created_at: Utc::now(),
+            Tenant {
+                rec: TenantRec {
+                    id: id.to_string(),
+                    subnet_index: idx,
+                    created_at: Utc::now(),
+                },
+                subnet: self.inner.range.subnet(idx)?,
             }
         };
         self.plumb_tenant(&t).await?;
-        self.inner.store.put("tenants", id, &t)?;
+        self.inner.store.put("tenants", id, &t.rec)?;
         self.inner
             .tenants
             .lock()
@@ -646,11 +720,11 @@ impl Manager {
     }
 
     /// Republishes a tenant's names on its gateway.
-    fn refresh_dns(&self, t: &TenantRec) {
+    fn refresh_dns(&self, t: &Tenant) {
         let mut names: HashMap<String, Ipv4Addr> = HashMap::new();
         for e in self.inner.machines.lock().unwrap().values() {
             let r = e.rec.lock().unwrap();
-            if r.tenant != t.id {
+            if r.tenant != t.rec.id {
                 continue;
             }
             if let Ok(ip) = r.ip.parse::<Ipv4Addr>() {
@@ -658,10 +732,10 @@ impl Manager {
                 names.insert(r.machine_host(), ip);
             }
         }
-        self.inner.dns.set(self.subnet(t).gateway(), names);
+        self.inner.dns.set(t.subnet.gateway(), names);
     }
 
-    fn tenant_of(&self, id: &str) -> Option<TenantRec> {
+    fn tenant_of(&self, id: &str) -> Option<Tenant> {
         self.inner.tenants.lock().unwrap().get(id).cloned()
     }
 
@@ -673,19 +747,16 @@ impl Manager {
             .lock()
             .unwrap()
             .values()
-            .map(|t| {
-                let s = self.subnet(t);
-                api::Tenant {
-                    id: t.id.clone(),
-                    subnet: s.cidr(),
-                    gateway: s.gateway().to_string(),
-                    machines: machines
-                        .values()
-                        .filter(|e| e.rec.lock().unwrap().tenant == t.id)
-                        .count(),
-                    created_at: t.created_at,
-                    host: String::new(),
-                }
+            .map(|t| api::Tenant {
+                id: t.rec.id.clone(),
+                subnet: t.subnet.cidr(),
+                gateway: t.subnet.gateway().to_string(),
+                machines: machines
+                    .values()
+                    .filter(|e| e.rec.lock().unwrap().tenant == t.rec.id)
+                    .count(),
+                created_at: t.rec.created_at,
+                host: String::new(),
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -694,6 +765,11 @@ impl Manager {
 
     /// Removes an empty tenant's network. Missing is success.
     pub async fn delete_tenant(&self, id: &str) -> Result<(), MError> {
+        if !api::valid_id(id) {
+            return Err(invalid(
+                "tenant must be a-z, 0-9, _ or -, at most 64 characters",
+            ));
+        }
         let t = match self.tenant_of(id) {
             Some(t) => t,
             None => return Ok(()),
@@ -708,8 +784,8 @@ impl Manager {
         if in_use {
             return Err(MError::TenantInUse);
         }
-        self.inner.dns.unset(self.subnet(&t).gateway());
-        host::delete_bridge(t.subnet_index).await?;
+        self.inner.dns.unset(t.subnet.gateway());
+        host::delete_bridge(t.rec.subnet_index).await?;
         self.inner.tenants.lock().unwrap().remove(id);
         self.inner.store.delete("tenants", id)?;
         Ok(())
@@ -750,16 +826,13 @@ impl Manager {
             size: r.size,
             volume: r.volume.clone(),
             ports: r.ports.clone(),
-            sleep: if r.sleep.is_empty() {
-                "never".into()
-            } else {
-                r.sleep.clone()
-            },
+            sleep: r.sleep.clone(),
             restart: r.restart.clone(),
             metadata: r.metadata.clone(),
             endpoints: self.endpoints_of(&r.id),
             created_at: r.created_at,
             updated_at: r.updated_at,
+            state_changed_at: r.state_changed_at,
             started_at: r.started_at,
             stopped_at: r.stopped_at,
             last_used_at: r.last_used_at,
@@ -798,18 +871,23 @@ impl Manager {
 
     /// What running machines take, how many run, how many exist.
     pub fn usage(&self) -> (api::Capacity, usize, usize) {
-        let mut used = api::Capacity::default();
-        let (mut running, mut total) = (0, 0);
-        for e in self.inner.machines.lock().unwrap().values() {
-            let r = e.rec.lock().unwrap();
-            total += 1;
-            if r.state == state::RUNNING || r.state == state::STARTING {
-                running += 1;
-                used.memory_mb += r.size.memory_mb;
-                used.vcpus += r.size.vcpus;
-            }
-        }
-        (used, running, total)
+        let machines = self.inner.machines.lock().unwrap();
+        let (used, running) = committed(&machines);
+        (used, running, machines.len())
+    }
+
+    /// Takes the machine's memory from the host and moves it to `starting`, as one step
+    /// under the map's lock: two starts that read the same free memory cannot both take it.
+    fn reserve(&self, e: &Entry) -> Result<(), MError> {
+        let machines = self.inner.machines.lock().unwrap();
+        let (used, _) = committed(&machines);
+        let need = e.rec.lock().unwrap().size.memory_mb;
+        admit(used.memory_mb, self.capacity().memory_mb, need)?;
+        e.set_state(state::STARTING, |r| {
+            r.error.clear();
+            r.pid = 0;
+        });
+        Ok(())
     }
 
     /// The images on the host.
@@ -954,8 +1032,15 @@ impl Manager {
     // --- create ---
 
     pub async fn create(&self, req: api::CreateMachineRequest) -> Result<api::Machine, MError> {
-        if req.tenant.is_empty() || req.tenant.len() > 64 {
-            return Err(invalid("tenant is required (at most 64 characters)"));
+        if !api::valid_id(&req.tenant) {
+            return Err(invalid(
+                "tenant must be a-z, 0-9, _ or -, at most 64 characters",
+            ));
+        }
+        if let Some(rs) = &req.restore {
+            if !api::valid_id(&rs.machine_id) {
+                return Err(invalid("restore.machine_id is not a machine id"));
+            }
         }
         if !api::valid_name(&req.name) {
             return Err(invalid("name must be a DNS label (a-z, 0-9, -)"));
@@ -1008,11 +1093,7 @@ impl Manager {
             size: req.size,
             volume: req.volume.clone(),
             ports: req.ports.clone(),
-            sleep: if req.sleep == "never" {
-                String::new()
-            } else {
-                req.sleep.clone()
-            },
+            sleep: sleep_setting(&req.sleep),
             restart,
             metadata: req.metadata.clone(),
             state: state::CREATED.into(),
@@ -1027,6 +1108,7 @@ impl Manager {
             boots: 0,
             created_at: now,
             updated_at: now,
+            state_changed_at: now,
             started_at: None,
             stopped_at: None,
             last_used_at: None,
@@ -1120,10 +1202,9 @@ impl Manager {
         }
         self.save(&e)?;
         if req.start.unwrap_or(true) {
-            if let Err(err) = self.start_entry(&e).await {
-                // Created but did not start: the caller gets the machine with its error.
-                tracing::warn!(machine = e.snapshot().id, err = %err, "start after create");
-            }
+            // Created but did not start: the same answer a start would give; the machine
+            // stays, for the caller to read and destroy.
+            self.start_entry(&e).await?;
         }
         Ok(self.view(&e))
     }
@@ -1136,7 +1217,7 @@ impl Manager {
     }
 
     /// Gives the machine an address and registers it. Nothing on disk yet.
-    fn add_machine(&self, mut rec: Record, t: &TenantRec) -> Result<Arc<Entry>, MError> {
+    fn add_machine(&self, mut rec: Record, t: &Tenant) -> Result<Arc<Entry>, MError> {
         let mut machines = self.inner.machines.lock().unwrap();
         let mut used = Vec::new();
         for e in machines.values() {
@@ -1146,24 +1227,18 @@ impl Manager {
                     "a machine with that name exists in the tenant".into(),
                 ));
             }
-            if r.tenant == t.id {
+            if r.tenant == t.rec.id {
                 used.push(r.host_num as u32);
             }
         }
         let n = netw::first_free(used, 2, 254)
-            .ok_or_else(|| MError::Capacity(format!("tenant {} has no address left", t.id)))?;
-        let s = self.subnet(t);
-        rec.subnet_index = t.subnet_index;
+            .ok_or_else(|| MError::Capacity(format!("tenant {} has no address left", t.rec.id)))?;
+        rec.subnet_index = t.rec.subnet_index;
         rec.host_num = n as u8;
-        rec.ip = s.host(n as u8)?.to_string();
-        let e = Arc::new(Entry {
-            lock: tokio::sync::Mutex::new(()),
-            rec: Mutex::new(rec.clone()),
-            live: Mutex::new(None),
-            stop_req: Mutex::new(None),
-            settled: Notify::new(),
-        });
-        machines.insert(rec.id.clone(), e.clone());
+        rec.ip = t.subnet.host(n as u8)?.to_string();
+        let id = rec.id.clone();
+        let e = Entry::new(rec);
+        machines.insert(id, e.clone());
         drop(machines);
         self.refresh_dns(t);
         Ok(e)
@@ -1338,6 +1413,9 @@ impl Manager {
 
     /// The backups of a machine in the store, oldest first; the machine may be gone.
     pub async fn backups(&self, machine_id: &str) -> Result<Vec<api::Backup>, MError> {
+        if !api::valid_id(machine_id) {
+            return Err(invalid("not a machine id"));
+        }
         let store = self.backup_store()?;
         let mut out = Vec::new();
         for key in store.list(&format!("backups/{machine_id}/")).await? {
@@ -1408,18 +1486,14 @@ impl Manager {
     pub async fn start(&self, id: &str) -> Result<api::Machine, MError> {
         let e = self.entry(id)?;
         let _guard = e.lock.lock().await;
-        let st = e.snapshot().state;
-        match st.as_str() {
-            state::RUNNING => return Ok(self.view(&e)),
-            state::CREATED | state::STOPPED | state::ERROR => {}
-            other => return Err(MError::BadState(other.into())),
+        if e.snapshot().state != state::RUNNING {
+            self.start_entry(&e).await?;
         }
-        self.start_entry(&e).await?;
         Ok(self.view(&e))
     }
 
-    /// Starts a machine that went to sleep or whose process ended; one stopped on purpose
-    /// stays stopped.
+    /// Starts a machine that went to sleep, that the host stopped or whose process ended;
+    /// one stopped on purpose stays stopped.
     pub async fn wake(&self, id: &str) -> Result<api::Machine, MError> {
         let e = self.entry(id)?;
         let _guard = e.lock.lock().await;
@@ -1432,8 +1506,8 @@ impl Manager {
             state::STOPPED if r.stopped_reason == stop::USER => {
                 return Err(MError::NotRunning("stopped on request".into()))
             }
-            state::STOPPED | state::CREATED => {}
-            other => return Err(MError::BadState(other.into())),
+            state::ERROR => return Err(MError::BadState(r.state)),
+            _ => {}
         }
         self.start_entry(&e).await?;
         Ok(self.view(&e))
@@ -1448,37 +1522,29 @@ impl Manager {
         Box::pin(self.start_entry(e))
     }
 
-    /// Boots the machine. Called with the entry's lock held.
+    /// Boots the machine. Called with the entry's lock held, on a machine that is not up:
+    /// one being destroyed is refused here, whoever asks (a start, a wake, a restart).
     async fn start_entry(&self, e: &Arc<Entry>) -> Result<(), MError> {
         let cfg = &self.inner.cfg;
         let rec = e.snapshot();
-        let cap = self.capacity();
-        let (used, _, _) = self.usage();
-        if used.memory_mb + rec.size.memory_mb > cap.memory_mb {
-            return Err(MError::Capacity(format!(
-                "{} MB used of {}",
-                used.memory_mb, cap.memory_mb
-            )));
+        match rec.state.as_str() {
+            state::CREATED | state::STOPPED | state::ERROR => {}
+            other => return Err(MError::BadState(other.into())),
         }
-        {
-            let mut r = e.rec.lock().unwrap();
-            r.state = state::STARTING.into();
-            r.error.clear();
-            r.pid = 0;
-        }
+        self.reserve(e)?;
         let _ = self.save(e);
+        // The host's fault (a network, disk or Firecracker error): the machine ends in
+        // `error` and the caller gets a 500.
         let fail = |err: anyhow::Error| -> MError {
             self.inner
                 .stats
                 .starts_failed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            {
-                let mut r = e.rec.lock().unwrap();
-                r.state = state::ERROR.into();
+            e.set_state(state::ERROR, |r| {
                 r.error = format!("{err:#}");
                 r.stopped_at = Some(Utc::now());
                 r.pid = 0;
-            }
+            });
             let _ = self.save(e);
             MError::Other(err)
         };
@@ -1486,7 +1552,7 @@ impl Manager {
             Some(t) => t,
             None => return Err(fail(anyhow!("tenant network is gone"))),
         };
-        let tap = host::ensure_tap(&rec.id, &netw::bridge_name(t.subnet_index), &rec.ip)
+        let tap = host::ensure_tap(&rec.id, &netw::bridge_name(t.rec.subnet_index), &rec.ip)
             .await
             .map_err(fail)?;
         let dir = cfg.run_dir().join(&rec.id);
@@ -1598,6 +1664,7 @@ impl Manager {
             };
             if let Err(err) = configure.await {
                 proc.kill();
+                proc.wait().await;
                 return Err(fail(anyhow!("configure firecracker: {err}")));
             }
             break proc;
@@ -1636,29 +1703,35 @@ impl Manager {
             Duration::from_secs(cfg.boot_timeout_sec.max(10)),
         );
         let mut exited = live.exited.clone();
-        tokio::select! {
-            r = ready => {
-                if let Err(err) = r {
-                    if *exited.borrow() {
-                        return Err(MError::Other(anyhow!("the machine exited during boot: {}", self.last_console_lines(&rec, 5))));
-                    }
-                    unsafe { libc::kill(live.pid as i32, libc::SIGKILL); }
-                    return Err(fail(anyhow!("the guest did not come up: {err}")));
-                }
-            }
-            _ = exited.changed() => {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                return Err(MError::Other(anyhow!("the machine exited during boot: {}", self.last_console_lines(&rec, 5))));
-            }
+        let outcome = tokio::select! {
+            r = ready => r.map_err(|err| format!("the guest did not come up: {err}")),
+            // `exited` is sent once the console is fully written, so the tail is complete.
+            _ = exited.changed() => Err("the machine exited during boot".to_string()),
+        };
+        if let Err(why) = outcome {
+            // The image's fault: the process is ended here, under the lock, so the watcher
+            // finds nothing to settle and no restart policy applies. The machine stays in
+            // `error`, with the console's last lines, for the caller to read and destroy.
+            self.end_process(e, &live, Duration::ZERO).await;
+            self.inner
+                .stats
+                .starts_failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tail = self.last_console_lines(&rec, 5);
+            e.set_state(state::ERROR, |r| {
+                r.error = format!("{why}: {tail}");
+                r.stopped_at = Some(Utc::now());
+                r.pid = 0;
+            });
+            let _ = self.save(e);
+            return Err(MError::BootFailed(Box::new(self.view(e))));
         }
-        {
+        e.set_state(state::RUNNING, |r| {
             let now = Utc::now();
-            let mut r = e.rec.lock().unwrap();
-            r.state = state::RUNNING.into();
             r.started_at = Some(now);
             r.last_used_at = Some(now);
             r.stopped_reason.clear();
-        }
+        });
         let _ = self.save(e);
         tracing::info!(
             machine = rec.id,
@@ -1717,16 +1790,13 @@ impl Manager {
         let stop_req = e.stop_req.lock().unwrap().take();
         let now = Utc::now();
         let mut restart_again = false;
-        {
-            let mut r = e.rec.lock().unwrap();
+        e.set_state(state::STOPPED, |r| {
             r.pid = 0;
             r.stopped_at = Some(now);
             if let Some(reason) = stop_req {
-                r.state = state::STOPPED.into();
                 r.stopped_reason = reason.clone();
                 tracing::info!(machine = r.id, reason, "machine stopped");
             } else if requested {
-                r.state = state::STOPPED.into();
                 r.stopped_reason = stop::USER.into();
             } else {
                 let again = restarts_after_exit(&r.restart, code, r.restarts);
@@ -1736,7 +1806,6 @@ impl Manager {
                     at: now,
                     restarting: again,
                 });
-                r.state = state::STOPPED.into();
                 r.stopped_reason = stop::EXIT.into();
                 if again {
                     r.restarts += 1;
@@ -1753,9 +1822,8 @@ impl Manager {
                     tracing::info!(machine = r.id, code, oom, "machine exited");
                 }
             }
-        }
+        });
         let _ = self.save(e);
-        e.settled.notify_waiters();
         if restart_again {
             let m = self.clone();
             let e = e.clone();
@@ -1767,8 +1835,12 @@ impl Manager {
                 if r.state != state::STOPPED || r.stopped_reason != stop::EXIT {
                     return;
                 }
-                if let Err(err) = m.start_boxed(&e).await {
-                    tracing::error!(machine = r.id, err = %err, "restart");
+                match m.start_boxed(&e).await {
+                    Ok(()) => {}
+                    Err(err @ MError::BootFailed(_)) => {
+                        tracing::warn!(machine = r.id, err = %err, "restart")
+                    }
+                    Err(err) => tracing::error!(machine = r.id, err = %err, "restart"),
                 }
             });
         }
@@ -1805,6 +1877,39 @@ impl Manager {
     }
 
     // --- stop ---
+
+    /// Ends the process of a machine whose entry lock is held: asks the guest to stop and
+    /// kills after `grace` (at once when zero), waits for Firecracker to be gone, then clears
+    /// the entry itself, since the watcher cannot take the lock to settle it, and wakes whoever
+    /// waited for that.
+    async fn end_process(&self, e: &Arc<Entry>, live: &Live, grace: Duration) {
+        let mut exited = live.exited.clone();
+        if !*exited.borrow() {
+            let asked = !grace.is_zero()
+                && tokio::time::timeout(
+                    Duration::from_secs(5),
+                    guestc::shutdown(&live.vsock, grace),
+                )
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false);
+            let gone = asked
+                && tokio::time::timeout(grace + Duration::from_secs(5), exited.wait_for(|x| *x))
+                    .await
+                    .is_ok();
+            if !gone {
+                unsafe {
+                    libc::kill(live.pid as i32, libc::SIGKILL);
+                }
+                let _ = exited.wait_for(|x| *x).await;
+            }
+        }
+        *e.live.lock().unwrap() = None;
+        *e.stop_req.lock().unwrap() = None;
+        let r = e.snapshot();
+        let _ = host::delete_tap(&r.id, &r.ip).await;
+        e.changed.notify_waiters();
+    }
 
     pub async fn stop(
         &self,
@@ -1891,12 +1996,13 @@ impl Manager {
                 }
                 state::RUNNING => {}
                 state::STOPPING => {
+                    // Another stop is in flight: wait for the watcher to settle it. The wait
+                    // is registered before the lock goes, or a settle in between is missed.
+                    let settled = e.changed.notified();
+                    tokio::pin!(settled);
+                    settled.as_mut().enable();
                     drop(_guard);
-                    let _ = tokio::time::timeout(
-                        timeout + Duration::from_secs(15),
-                        e.settled.notified(),
-                    )
-                    .await;
+                    let _ = tokio::time::timeout(timeout + Duration::from_secs(15), settled).await;
                     return Ok(());
                 }
                 other => return Err(MError::BadState(other.into())),
@@ -1907,7 +2013,7 @@ impl Manager {
                 None => return Err(MError::NotRunning("no process".into())),
             };
             *e.stop_req.lock().unwrap() = Some(reason.to_string());
-            e.rec.lock().unwrap().state = state::STOPPING.into();
+            e.set_state(state::STOPPING, |_| {});
             let _ = self.save(e);
             if suspend && self.snapshot_live(e, &live).await.unwrap_or(false) {
                 self.inner
@@ -1920,7 +2026,7 @@ impl Manager {
                 // times out.
                 e.rec.lock().unwrap().suspended = true;
                 let _ = self.save(e);
-                let settled = e.settled.notified();
+                let settled = e.changed.notified();
                 tokio::pin!(settled);
                 settled.as_mut().enable();
                 unsafe {
@@ -1932,7 +2038,7 @@ impl Manager {
             }
             live
         };
-        let settled = e.settled.notified();
+        let settled = e.changed.notified();
         tokio::pin!(settled);
         settled.as_mut().enable();
         if let Err(err) = tokio::time::timeout(
@@ -1968,20 +2074,24 @@ impl Manager {
 
     // --- destroy ---
 
+    /// One critical section under the entry's lock, from the state to the record's removal:
+    /// nothing starts the machine in between, and a destroy that fails leaves it
+    /// `destroying` for the sleeper's tick to try again.
     pub async fn destroy(&self, id: &str) -> Result<(), MError> {
         let e = match self.entry(id) {
             Ok(e) => e,
             Err(_) => return Ok(()),
         };
-        let st = e.snapshot().state;
-        if st == state::RUNNING || st == state::STOPPING || st == state::STARTING {
-            self.stop_entry(&e, stop::USER, Duration::from_secs(5), false)
-                .await?;
+        let _guard = e.lock.lock().await;
+        if !self.inner.machines.lock().unwrap().contains_key(id) {
+            // A destroy that held the lock before this one finished the job.
+            return Ok(());
         }
-        {
-            let _guard = e.lock.lock().await;
-            e.rec.lock().unwrap().state = state::DESTROYING.into();
-            let _ = self.save(&e);
+        e.set_state(state::DESTROYING, |_| {});
+        let _ = self.save(&e);
+        let live = e.live.lock().unwrap().clone();
+        if let Some(live) = live {
+            self.end_process(&e, &live, Duration::from_secs(5)).await;
         }
         for ep in self.endpoints_of(id) {
             let _ = self.delete_endpoint(&ep.id);
@@ -2026,7 +2136,7 @@ impl Manager {
         {
             let mut r = e.rec.lock().unwrap();
             if let Some(sl) = req.sleep {
-                r.sleep = if sl == "never" { String::new() } else { sl };
+                r.sleep = sleep_setting(&sl);
             }
             if let Some(m) = req.metadata {
                 r.metadata = m;
@@ -2047,23 +2157,35 @@ impl Manager {
         let _ = self.save(e);
     }
 
+    /// Every 15 s: idle machines go to sleep, and a destroy left `destroying` (a daemon
+    /// restart, a disk that was busy) is tried again.
     async fn sleeper(self) {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
         loop {
             tick.tick().await;
-            let due: Vec<Arc<Entry>> = self
-                .inner
-                .machines
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|e| {
-                    let r = e.rec.lock().unwrap();
-                    r.state == state::RUNNING
-                        && idle_past(r.last_used_at, r.sleep_window(), Utc::now())
-                })
-                .cloned()
-                .collect();
+            let now = Utc::now();
+            let (due, destroying): (Vec<Arc<Entry>>, Vec<String>) = {
+                let machines = self.inner.machines.lock().unwrap();
+                let due = machines
+                    .values()
+                    .filter(|e| {
+                        let r = e.rec.lock().unwrap();
+                        r.state == state::RUNNING
+                            && idle_past(r.last_used_at, r.sleep_window(), now)
+                    })
+                    .cloned()
+                    .collect();
+                // One whose lock is held has a destroy under way already.
+                let destroying = machines
+                    .values()
+                    .filter(|e| {
+                        e.rec.lock().unwrap().state == state::DESTROYING
+                            && e.lock.try_lock().is_ok()
+                    })
+                    .map(|e| e.snapshot().id)
+                    .collect();
+                (due, destroying)
+            };
             for e in due {
                 tracing::info!(machine = e.snapshot().id, "machine idle, going to sleep");
                 let suspend = self.inner.cfg.suspend_on_sleep;
@@ -2074,41 +2196,42 @@ impl Manager {
                     tracing::warn!(machine = e.snapshot().id, err = %err, "sleep");
                 }
             }
+            for id in destroying {
+                if let Err(err) = self.destroy(&id).await {
+                    tracing::warn!(machine = id, err = %err, "resume destroy");
+                }
+            }
         }
     }
 
+    /// Blocks until the machine runs, or until it is clear it will not (within `timeout`).
     pub async fn wait_running(&self, id: &str, timeout: Duration) -> Result<api::Machine, MError> {
+        let e = self.entry(id)?;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let m = self.get(id)?;
-            match m.state.as_str() {
-                state::RUNNING => return Ok(m),
-                state::ERROR => return Err(MError::NotRunning(m.error)),
-                state::STOPPED
-                    if !(m.stopped_reason == stop::EXIT
-                        && m.exit.as_ref().map(|e| e.restarting).unwrap_or(false)) =>
-                {
-                    return Err(MError::NotRunning(format!(
-                        "stopped ({})",
-                        m.stopped_reason
-                    )))
-                }
-                _ => {}
+            // Registered before the state is read, so a change in between is not missed.
+            let changed = e.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let m = self.view(&e);
+            match will_run(&m) {
+                Some(Ok(())) => return Ok(m),
+                Some(Err(why)) => return Err(MError::NotRunning(why)),
+                None => {}
             }
-            if tokio::time::Instant::now() > deadline {
+            if tokio::time::timeout_at(deadline, changed).await.is_err() {
                 return Err(MError::NotRunning(format!(
                     "still {} after {timeout:?}",
                     m.state
                 )));
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 
     // --- config drive ---
 
-    fn write_config_drive(&self, path: &Path, r: &Record, t: &TenantRec) -> Result<()> {
-        write_drive(path, &config_drive(r, self.subnet(t).gateway())?)
+    fn write_config_drive(&self, path: &Path, r: &Record, t: &Tenant) -> Result<()> {
+        write_drive(path, &config_drive(r, t.subnet.gateway())?)
     }
 
     // --- exec and files ---
@@ -2136,10 +2259,18 @@ impl Manager {
             };
             return Err(MError::NotRunning(s));
         }
-        self.wake(id).await?;
+        self.wake_detached(id).await?;
         let live = e.live.lock().unwrap().clone();
         live.map(|l| l.vsock)
             .ok_or_else(|| MError::NotRunning("no process".into()))
+    }
+
+    /// A wake on behalf of something else (an exec, an ingress connection), which may give
+    /// up before the boot is done: the boot goes on without it.
+    async fn wake_detached(&self, id: &str) -> Result<api::Machine, MError> {
+        let m = self.clone();
+        let id = id.to_string();
+        detached(async move { m.wake(&id).await }).await
     }
 
     pub async fn exec(&self, id: &str, req: api::ExecRequest) -> Result<api::ExecResult, MError> {
@@ -2332,20 +2463,7 @@ impl Manager {
     pub fn endpoint_view(&self, e: &EndpointRec) -> api::Endpoint {
         let address = match e.protocol.as_str() {
             "http" => format!("http://{}", e.host),
-            _ => {
-                let ing = &self.inner.cfg.ingress;
-                let bind = &ing.bind;
-                let addr = if !ing.advertise.is_empty() {
-                    ing.advertise.clone()
-                } else if bind.is_empty() || bind == "0.0.0.0" {
-                    self.host_ip()
-                        .map(|ip| ip.to_string())
-                        .unwrap_or_else(|| bind.clone())
-                } else {
-                    bind.clone()
-                };
-                format!("{addr}:{}", e.host_port.unwrap_or(0))
-            }
+            _ => format!("{}:{}", self.inner.advertise, e.host_port.unwrap_or(0)),
         };
         api::Endpoint {
             id: e.id.clone(),
@@ -2357,15 +2475,6 @@ impl Manager {
             address,
             created_at: e.created_at,
         }
-    }
-
-    fn host_ip(&self) -> Option<Ipv4Addr> {
-        // Read once per call: cheap and always current.
-        let out = std::process::Command::new("ip")
-            .args(["-4", "-o", "addr", "show", "dev", &self.inner.egress])
-            .output()
-            .ok()?;
-        inet_of(&String::from_utf8_lossy(&out.stdout))
     }
 
     pub fn create_endpoint(
@@ -2456,13 +2565,106 @@ impl Manager {
         if !wake {
             return Err(MError::NotRunning(st));
         }
-        self.wake(id).await?;
+        self.wake_detached(id).await?;
         Ok(ip.parse().unwrap())
     }
 }
 
-/// Every Firecracker process on the host with the machine id it carries (`--id m-…`), read
-/// from `/proc`: what a sweep compares to the records.
+/// Runs a transition in a task of its own and waits for it: a client that hangs up drops
+/// the wait, never the transition, so no machine is left half-moved.
+pub async fn detached<T, F>(fut: F) -> Result<T, MError>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, MError>> + Send + 'static,
+{
+    match tokio::spawn(fut).await {
+        Ok(r) => r,
+        Err(err) => Err(MError::Other(anyhow!("transition task: {err}"))),
+    }
+}
+
+/// What the machines in the map hold now: memory and vCPUs committed, and how many are up.
+fn committed(machines: &HashMap<String, Arc<Entry>>) -> (api::Capacity, usize) {
+    let mut used = api::Capacity::default();
+    let mut up = 0;
+    for e in machines.values() {
+        let r = e.rec.lock().unwrap();
+        if holds_memory(&r.state) {
+            up += 1;
+            used.memory_mb += r.size.memory_mb;
+            used.vcpus += r.size.vcpus;
+        }
+    }
+    (used, up)
+}
+
+/// What `/wait` answers: running, will not run (why), or still moving.
+fn will_run(m: &api::Machine) -> Option<Result<(), String>> {
+    match m.state.as_str() {
+        state::RUNNING => Some(Ok(())),
+        state::ERROR => Some(Err(m.error.clone())),
+        state::DESTROYING => Some(Err("destroying".into())),
+        state::STOPPED
+            if !(m.stopped_reason == stop::EXIT
+                && m.exit.as_ref().map(|e| e.restarting).unwrap_or(false)) =>
+        {
+            Some(Err(format!("stopped ({})", m.stopped_reason)))
+        }
+        _ => None,
+    }
+}
+
+/// The address TCP endpoints are reported at: `ingress.advertise`, else a bind address that
+/// names one, else the egress interface's.
+fn advertise_address(advertise: &str, bind: &str, host_ip: Option<Ipv4Addr>) -> String {
+    if !advertise.is_empty() {
+        return advertise.into();
+    }
+    if !bind.is_empty() && bind != "0.0.0.0" {
+        return bind.into();
+    }
+    host_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| bind.into())
+}
+
+/// The first IPv4 address of an interface.
+async fn host_ip(interface: &str) -> Option<Ipv4Addr> {
+    let out = tokio::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "dev", interface])
+        .output()
+        .await
+        .ok()?;
+    inet_of(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The machine id a Firecracker command line carries (`firecracker --id m-… …`), as the
+/// daemon spells it; `None` for any other process.
+fn firecracker_id(cmdline: &[u8]) -> Option<String> {
+    let args: Vec<&str> = cmdline
+        .split(|b| *b == 0)
+        .filter_map(|a| std::str::from_utf8(a).ok())
+        .collect();
+    if !args.first()?.ends_with("firecracker") {
+        return None;
+    }
+    let i = args.iter().position(|a| *a == "--id")?;
+    Some(args.get(i + 1)?.replacen("m-", "m_", 1))
+}
+
+/// Whether `pid` is the Firecracker running machine `id`, by its command line: the only
+/// check before the daemon signals a pid it did not spawn (a record's pid after a reboot
+/// is someone else's).
+fn is_our_firecracker(pid: u32, id: &str) -> bool {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .and_then(|c| firecracker_id(&c))
+        .as_deref()
+        == Some(id)
+}
+
+/// Every Firecracker process on the host with the machine id it carries, read from
+/// `/proc`: what a sweep compares to the records.
 fn firecracker_processes() -> Vec<(u32, String)> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir("/proc") else {
@@ -2475,18 +2677,8 @@ fn firecracker_processes() -> Vec<(u32, String)> {
         let Ok(cmd) = std::fs::read(e.path().join("cmdline")) else {
             continue;
         };
-        let args: Vec<&str> = cmd
-            .split(|b| *b == 0)
-            .filter_map(|a| std::str::from_utf8(a).ok())
-            .collect();
-        let Some(bin) = args.first() else { continue };
-        if !bin.ends_with("firecracker") {
-            continue;
-        }
-        if let Some(i) = args.iter().position(|a| *a == "--id") {
-            if let Some(id) = args.get(i + 1) {
-                out.push((pid, id.replacen("m-", "m_", 1)));
-            }
+        if let Some(id) = firecracker_id(&cmd) {
+            out.push((pid, id));
         }
     }
     out
@@ -2605,11 +2797,6 @@ fn inet_of(text: &str) -> Option<Ipv4Addr> {
     let f: Vec<&str> = text.split_whitespace().collect();
     let i = f.iter().position(|w| *w == "inet")?;
     f.get(i + 1)?.split('/').next()?.parse().ok()
-}
-
-/// What `/proc/<pid>/comm` says for a Firecracker process.
-fn is_firecracker(comm: &str) -> bool {
-    comm.trim() == "firecracker"
 }
 
 /// Whether Firecracker's `GET /` says the microVM runs.
@@ -2939,10 +3126,23 @@ mod tests {
 
     #[test]
     fn adoption_checks() {
-        assert!(is_firecracker("firecracker\n"));
-        assert!(is_firecracker("firecracker"));
-        assert!(!is_firecracker("jailer\n"));
-        assert!(!is_firecracker(""));
+        // Only a Firecracker carrying the machine's id is ours: the binary by any path, the
+        // id as the jailer spells it.
+        let fc = b"/usr/local/bin/firecracker\0--id\0m-abc123\0--api-sock\0/run/api.sock\0";
+        assert_eq!(firecracker_id(fc).as_deref(), Some("m_abc123"));
+        assert_eq!(
+            firecracker_id(b"firecracker\0--id\0m-x\0").as_deref(),
+            Some("m_x")
+        );
+        assert_eq!(firecracker_id(b"firecracker\0--api-sock\0/x\0"), None);
+        assert_eq!(firecracker_id(b"/usr/bin/jailer\0--id\0m-abc123\0"), None);
+        assert_eq!(
+            firecracker_id(b"/bin/sh\0-c\0firecracker --id m-abc123\0"),
+            None
+        );
+        assert_eq!(firecracker_id(b""), None);
+        // This process is not a Firecracker (and there is no /proc on a Mac): never killed.
+        assert!(!is_our_firecracker(std::process::id(), "m_abc123"));
         assert!(api_running(
             &serde_json::json!({"id": "m-1", "state": "Running", "vmm_version": "1.10"})
         ));
@@ -3036,12 +3236,375 @@ mod tests {
             boots: 0,
             created_at: now,
             updated_at: now,
+            state_changed_at: now,
             started_at: None,
             stopped_at: None,
             last_used_at: None,
             console_offset: 0,
             suspended: false,
         }
+    }
+
+    /// A manager over a temp directory and a `zfs` that answers nothing: enough for every
+    /// decision that touches no process, no disk and no network.
+    struct Harness {
+        _dir: tempfile::TempDir,
+        m: Manager,
+    }
+
+    async fn harness(range: &str, memory_mb: u32) -> Harness {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("zfs");
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let init = dir.path().join("init");
+        std::fs::write(&init, b"init").unwrap();
+        let cfg = Config {
+            data_dir: dir.path().join("data"),
+            network: crate::config::Network {
+                range: range.into(),
+                ..Default::default()
+            },
+            capacity: crate::config::Capacity {
+                memory_mb,
+                vcpus: 1000,
+            },
+            ..Default::default()
+        };
+        let zfs = Zfs::with_paths(
+            "byard",
+            &bin,
+            &bin,
+            &dir.path().join("dev"),
+            &dir.path().join("jail"),
+        )
+        .await
+        .unwrap();
+        let images = Builder::new(zfs.clone(), cfg.image_dir(), init, 8).unwrap();
+        let store = Store::open(&cfg.state_dir()).unwrap();
+        let (endpoint_events, _) = broadcast::channel(64);
+        let m = Manager {
+            inner: Arc::new(Inner {
+                stats: Stats::default(),
+                range: Range::parse(&cfg.network.range).unwrap(),
+                cfg,
+                store,
+                zfs,
+                images,
+                dns: Resolver::new(&["127.0.0.1".into()]),
+                egress: "lo".into(),
+                host_id: "h_test".into(),
+                advertise: "127.0.0.1".into(),
+                machines: Mutex::new(HashMap::new()),
+                tenants: Mutex::new(HashMap::new()),
+                endpoints: Mutex::new(HashMap::new()),
+                endpoint_events,
+                tenant_create: tokio::sync::Mutex::new(()),
+                backups: None,
+                boot_gate: tokio::sync::Semaphore::new(2),
+            }),
+        };
+        Harness { _dir: dir, m }
+    }
+
+    impl Harness {
+        /// Registers a machine in `state`, as if loaded, and returns its entry.
+        fn add(&self, id: &str, state: &str, memory_mb: u32) -> Arc<Entry> {
+            let mut r = record();
+            r.id = id.into();
+            r.state = state.into();
+            r.size.memory_mb = memory_mb;
+            let e = Entry::new(r);
+            self.m
+                .inner
+                .machines
+                .lock()
+                .unwrap()
+                .insert(id.into(), e.clone());
+            e
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reservation_is_one_step() {
+        // Eight starts race for the memory of two: never more than two may take it,
+        // however they interleave.
+        for _ in 0..20 {
+            let h = harness("10.64.0.0/22", 1024).await;
+            let entries: Vec<Arc<Entry>> = (0..8)
+                .map(|i| h.add(&format!("m_{i}"), state::STOPPED, 512))
+                .collect();
+            let admitted = std::thread::scope(|s| {
+                let handles: Vec<_> = entries
+                    .iter()
+                    .map(|e| s.spawn(|| h.m.reserve(e).is_ok()))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|j| j.join().unwrap())
+                    .filter(|ok| *ok)
+                    .count()
+            });
+            assert_eq!(admitted, 2);
+            let (used, up, _) = h.m.usage();
+            assert_eq!((used.memory_mb, up), (1024, 2));
+        }
+        // What was admitted is `starting`; what was not is untouched.
+        let h = harness("10.64.0.0/22", 512).await;
+        let a = h.add("m_a", state::STOPPED, 512);
+        let b = h.add("m_b", state::STOPPED, 512);
+        assert!(h.m.reserve(&a).is_ok());
+        assert!(matches!(h.m.reserve(&b), Err(MError::Capacity(_))));
+        assert_eq!(a.snapshot().state, state::STARTING);
+        assert_eq!(b.snapshot().state, state::STOPPED);
+        // A machine on its way down still holds its memory.
+        a.set_state(state::STOPPING, |_| {});
+        assert!(matches!(h.m.reserve(&b), Err(MError::Capacity(_))));
+        assert!(admit(0, 100, 100).is_ok());
+        assert!(admit(1, 100, 100).is_err());
+        assert!(admit(u32::MAX, u32::MAX, 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_machine_being_destroyed_is_not_started() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let e = h.add("m_d", state::DESTROYING, 512);
+        for r in [
+            h.m.start("m_d").await,
+            h.m.wake("m_d").await,
+            h.m.start_entry(&e).await.map(|_| h.m.get("m_d").unwrap()),
+        ] {
+            match r {
+                Err(MError::BadState(s)) => assert_eq!(s, state::DESTROYING),
+                other => panic!("{other:?}"),
+            }
+        }
+        // Refused before anything was touched: still destroying, no error recorded.
+        let r = e.snapshot();
+        assert_eq!(
+            (r.state.as_str(), r.error.as_str()),
+            (state::DESTROYING, "")
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_running_follows_the_state() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let e = h.add("m_w", state::STARTING, 512);
+        let m = h.m.clone();
+        let waiting =
+            tokio::spawn(async move { m.wait_running("m_w", Duration::from_secs(30)).await });
+        e.set_state(state::RUNNING, |_| {});
+        assert_eq!(waiting.await.unwrap().unwrap().state, state::RUNNING);
+
+        let e = h.add("m_e", state::STARTING, 512);
+        let m = h.m.clone();
+        let waiting =
+            tokio::spawn(async move { m.wait_running("m_e", Duration::from_secs(30)).await });
+        e.set_state(state::ERROR, |r| r.error = "no init".into());
+        match waiting.await.unwrap() {
+            Err(MError::NotRunning(why)) => assert_eq!(why, "no init"),
+            other => panic!("{other:?}"),
+        }
+        // Already settled: answered at once, without a change to wait for.
+        assert_eq!(
+            h.m.wait_running("m_w", Duration::from_secs(30))
+                .await
+                .unwrap()
+                .state,
+            state::RUNNING
+        );
+        assert!(matches!(
+            h.m.wait_running("m_x", Duration::from_secs(1)).await,
+            Err(MError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn wait_decisions() {
+        let m = |state: &str, reason: &str, restarting: bool| api::Machine {
+            state: state.into(),
+            stopped_reason: reason.into(),
+            error: "why".into(),
+            exit: Some(api::Exit {
+                code: 1,
+                oom_killed: false,
+                at: Utc::now(),
+                restarting,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(will_run(&m(state::RUNNING, "", false)), Some(Ok(())));
+        assert_eq!(
+            will_run(&m(state::ERROR, "", false)),
+            Some(Err("why".into()))
+        );
+        assert_eq!(
+            will_run(&m(state::DESTROYING, "", false)),
+            Some(Err("destroying".into()))
+        );
+        assert_eq!(
+            will_run(&m(state::STOPPED, stop::USER, false)),
+            Some(Err("stopped (user)".into()))
+        );
+        assert_eq!(
+            will_run(&m(state::STOPPED, stop::EXIT, false)),
+            Some(Err("stopped (exit)".into()))
+        );
+        // A process that exited and is being restarted will run: keep waiting.
+        assert_eq!(will_run(&m(state::STOPPED, stop::EXIT, true)), None);
+        assert_eq!(will_run(&m(state::STARTING, "", false)), None);
+        assert_eq!(will_run(&m(state::STOPPING, "", false)), None);
+    }
+
+    #[tokio::test]
+    async fn state_changed_at_moves_only_with_the_state() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let e = h.add("m_s", state::STOPPED, 512);
+        let t0 = e.snapshot().state_changed_at;
+        e.set_state(state::STOPPED, |r| r.stopped_reason = stop::USER.into());
+        h.m.touch_entry(&e);
+        let r = e.snapshot();
+        assert_eq!(r.state_changed_at, t0);
+        assert!(r.updated_at > t0);
+        e.set_state(state::STARTING, |_| {});
+        let r = e.snapshot();
+        assert!(r.state_changed_at > t0);
+        assert_eq!(h.m.get("m_s").unwrap().state_changed_at, r.state_changed_at);
+    }
+
+    #[test]
+    fn records_from_before_are_migrated() {
+        let mut r = record();
+        r.sleep = String::new();
+        r.state_changed_at = DateTime::<Utc>::default();
+        r.migrate();
+        assert_eq!(r.sleep, "never");
+        assert_eq!(r.state_changed_at, r.updated_at);
+        // A current record is left alone.
+        let mut r = record();
+        r.state_changed_at = r.updated_at + chrono::Duration::seconds(5);
+        let before = r.clone();
+        r.migrate();
+        assert_eq!(r.sleep, before.sleep);
+        assert_eq!(r.state_changed_at, before.state_changed_at);
+        // One representation of "never", whatever the API was sent.
+        assert_eq!(sleep_setting(""), "never");
+        assert_eq!(sleep_setting("  "), "never");
+        assert_eq!(sleep_setting("never"), "never");
+        assert_eq!(sleep_setting(" 30m "), "30m");
+    }
+
+    #[tokio::test]
+    async fn sleep_is_stored_as_the_api_says_it() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.add("m_n", state::STOPPED, 512);
+        let set = |sleep: &str| api::UpdateMachineRequest {
+            sleep: Some(sleep.into()),
+            metadata: None,
+        };
+        assert_eq!(h.m.update("m_n", set("never")).unwrap().sleep, "never");
+        assert_eq!(h.m.update("m_n", set("")).unwrap().sleep, "never");
+        assert_eq!(h.m.update("m_n", set("3h")).unwrap().sleep, "3h");
+        assert!(matches!(
+            h.m.update("m_n", set("soon")),
+            Err(MError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_tenant_outside_the_range_is_refused_at_load() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let t = TenantRec {
+            id: "t1".into(),
+            subnet_index: 4,
+            created_at: Utc::now(),
+        };
+        h.m.inner.store.put("tenants", "t1", &t).unwrap();
+        let err = h.m.load().unwrap_err();
+        assert!(format!("{err:#}").contains("tenant t1"), "{err:#}");
+        assert!(h.m.inner.tenants.lock().unwrap().is_empty());
+        // In range: loaded with its subnet.
+        let t = TenantRec {
+            subnet_index: 3,
+            ..t
+        };
+        h.m.inner.store.put("tenants", "t1", &t).unwrap();
+        h.m.load().unwrap();
+        assert_eq!(h.m.tenants()[0].gateway, "10.64.3.1");
+    }
+
+    #[tokio::test]
+    async fn a_tenant_id_is_checked_before_it_names_a_file() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        for bad in ["", "../x", "a/b", "A"] {
+            let req = api::CreateMachineRequest {
+                tenant: bad.into(),
+                name: "db".into(),
+                image: "alpine".into(),
+                size: api::Size {
+                    vcpus: 1,
+                    memory_mb: 256,
+                },
+                ..Default::default()
+            };
+            assert!(
+                matches!(h.m.create(req).await, Err(MError::Invalid(_))),
+                "{bad}"
+            );
+            assert!(
+                matches!(h.m.delete_tenant(bad).await, Err(MError::Invalid(_))),
+                "{bad}"
+            );
+            assert!(
+                matches!(h.m.backups(bad).await, Err(MError::Invalid(_))),
+                "{bad}"
+            );
+        }
+        // A tenant that does not exist is simply gone.
+        assert!(h.m.delete_tenant("t-none").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_detached_transition_outlives_its_caller() {
+        let go = Arc::new(Notify::new());
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (g, d) = (go.clone(), done.clone());
+        let caller = tokio::spawn(async move {
+            detached(async move {
+                g.notified().await;
+                d.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok::<(), MError>(())
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        // The client hangs up: the wait goes, the work does not.
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        go.notify_one();
+        tokio::task::yield_now().await;
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst));
+        // The task's own result comes back as is; a panic in it is an internal error.
+        assert!(matches!(
+            detached(async { Err::<(), MError>(MError::NotFound) }).await,
+            Err(MError::NotFound)
+        ));
+        assert!(matches!(
+            detached::<(), _>(async { panic!("boom") }).await,
+            Err(MError::Other(_))
+        ));
+    }
+
+    #[test]
+    fn the_advertised_address() {
+        let ip = Some(Ipv4Addr::new(192, 168, 64, 3));
+        assert_eq!(advertise_address("10.0.0.5", "0.0.0.0", ip), "10.0.0.5");
+        assert_eq!(advertise_address("", "10.0.0.5", ip), "10.0.0.5");
+        assert_eq!(advertise_address("", "0.0.0.0", ip), "192.168.64.3");
+        assert_eq!(advertise_address("", "", ip), "192.168.64.3");
+        assert_eq!(advertise_address("", "0.0.0.0", None), "0.0.0.0");
     }
 
     /// Reads the drive back: every entry's path, mode and content.

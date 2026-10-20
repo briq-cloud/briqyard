@@ -48,13 +48,13 @@ paths:
             schema: { $ref: "#/components/schemas/CreateMachineRequest" }
       responses:
         "201":
-          description: created; `state` says whether it started (`error` carries why not)
+          description: created and, unless `start` is false, running
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Machine" }
         "400": { $ref: "#/components/responses/Error" }
-        "409": { description: a machine with that name exists in the tenant }
-        "503": { description: the host has no room }
+        "409": { description: "`conflict`: a machine with that name exists in the tenant; `boot_failed`: made but the guest did not come up, the body's `machine` is it, in state `error`, kept for its console and a destroy" }
+        "503": { description: "`capacity`: the host has no room" }
   /v1/machines/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -81,19 +81,19 @@ paths:
       summary: Boot a created or stopped machine
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
-        "409": { description: busy (starting, stopping or destroying) }
-        "503": { description: the host has no room }
+        "409": { description: "`bad_state`: busy (starting, stopping or destroying); `boot_failed`: the guest did not come up, the body's `machine` is it, in state `error`" }
+        "503": { description: "`capacity`: the host has no room" }
   /v1/machines/{id}/wake:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Start a machine that went to sleep (idle) or whose process ended; one stopped on request stays stopped
+      summary: Start a machine that went to sleep (idle), that the host stopped, or whose process ended; one stopped on request stays stopped
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
-        "409": { description: stopped on request, or busy }
+        "409": { description: "`not_running`: stopped on request; `bad_state`: busy or in error; `boot_failed`: the guest did not come up" }
   /v1/machines/{id}/stop:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Stop a machine (SIGTERM to its process, SIGKILL after the timeout); disks are kept
+      summary: Stop a machine (SIGTERM to its process, SIGKILL after the timeout); disks are kept. A client that hangs up does not cancel this, nor any transition.
       requestBody:
         content:
           application/json:
@@ -355,7 +355,7 @@ components:
       type: object
       required: [tenant, name, size]
       properties:
-        tenant: { type: string, description: owns the machine and its network; any string }
+        tenant: { type: string, description: "owns the machine and its network: a-z, 0-9, _ and -, at most 64 characters" }
         name: { type: string, description: a DNS label, unique in the tenant; `<name>.internal` resolves to the machine }
         image: { type: string, description: an OCI reference; required unless `fork` is set }
         entrypoint: { type: array, items: { type: string } }
@@ -387,7 +387,7 @@ components:
         image: { type: string }
         image_digest: { type: string }
         state: { type: string, enum: [created, starting, running, stopping, stopped, destroying, error] }
-        stopped_reason: { type: string, enum: [user, idle, exit], description: why it is stopped }
+        stopped_reason: { type: string, enum: [user, idle, exit, host], description: "why it is stopped: asked, the sleep window ran out, its process ended, or the daemon stopped it (a shutdown, a leftover of a crashed daemon; wakeable like idle)" }
         exit: { $ref: "#/components/schemas/Exit" }
         error: { type: string }
         ip: { type: string }
@@ -401,7 +401,8 @@ components:
         metadata: { type: object, additionalProperties: { type: string } }
         endpoints: { type: array, items: { $ref: "#/components/schemas/Endpoint" } }
         created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time, description: moves on every write, a touch included }
+        state_changed_at: { type: string, format: date-time, description: moves only when `state` does }
         started_at: { type: string, format: date-time }
         stopped_at: { type: string, format: date-time }
         last_used_at: { type: string, format: date-time }
@@ -433,7 +434,7 @@ components:
         env: { type: object, additionalProperties: { type: string } }
         cwd: { type: string }
         stdin: { type: string }
-        timeout_ms: { type: integer, default: 300000 }
+        timeout_ms: { type: integer, default: 300000, maximum: 3600000 }
         wake: { type: boolean, default: true, description: Wake a sleeping machine for the command; false answers 409 when it is not running }
     ExecResult:
       type: object
@@ -473,7 +474,7 @@ components:
       type: object
       properties:
         suspend: { type: boolean, description: keep a memory snapshot so the next start resumes in well under a second; a plain stop when Firecracker refuses }
-        timeout_sec: { type: integer, default: 10 }
+        timeout_sec: { type: integer, default: 10, maximum: 600 }
     Snapshot:
       type: object
       properties:
@@ -556,5 +557,8 @@ components:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, capacity, tenant_in_use, unauthorized, unknown_host, host_unreachable, host_down, registry, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, unauthorized, unknown_host, host_unreachable, host_down, registry, internal, timeout] }
         request_id: { type: string }
+        machine:
+          allOf: [{ $ref: "#/components/schemas/Machine" }]
+          description: with `boot_failed`, the machine left in state `error`

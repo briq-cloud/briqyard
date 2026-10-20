@@ -183,6 +183,7 @@ async fn start_daemon(id: &str, token: &str) -> Running {
                     error: "machine not found".into(),
                     code: "not_found".into(),
                     request_id: "d-req-1".into(),
+                    machine: None,
                 }),
             )
                 .into_response(),

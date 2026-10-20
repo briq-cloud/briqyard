@@ -54,6 +54,7 @@ briqyard status
 |---|---|---|
 | `listen` | `127.0.0.1:7420` | The API. A public address is refused without `ingress.allowed_clients` or `ingress.allow_public` (ADR 0012); plain HTTP, so TLS or a private network in front |
 | `token` | none | Required as `Authorization: Bearer` on every request when set |
+| `metrics_token` | none | A token of its own for `/metrics`, so a scraper never holds the API's. On a loopback `listen`, `/metrics` and `/v1/openapi.yaml` need no token at all |
 | `data_dir` | `/var/lib/briqyard` | State (`state/`), run files (`run/`), image metadata (`images/`), jails (`jail/`). All of it `0700`, root's: records and config drives hold tenant secrets |
 | `firecracker`, `jailer`, `kernel`, `init` | `/usr/local/bin/...`, `/var/lib/briqyard/vmlinux` | The binaries and the guest kernel. No `jailer`: Firecracker runs as root (development only) |
 | `jail_dir`, `jail_uid_base` | `<data_dir>/jail`, `100000` | Where chroots and memory snapshots go: the daemon mounts `<pool>/jail` there, so they land on the pool, not on `/` (ADR 0014). Each machine gets a uid of its own from this base |
@@ -136,7 +137,8 @@ backup until sent elsewhere.
 
 - `GET /healthz`: the daemon is up. `GET /v1/status`: capacity, use, free disk.
 - `GET /metrics`: Prometheus text: machines by state, memory and vCPUs used and capacity, free
-  disk, counters of boots, resumes, suspends, execs and failed starts.
+  disk, counters of boots, resumes, suspends, execs and failed starts. `metrics_token` gives
+  the scraper a token of its own.
 - Logs: one JSON line per event on stderr (journald under systemd): `journalctl -u briqyardd
   -o cat | jq`. Level with `BRIQYARD_LOG=debug` (or any `tracing` filter).
 - A machine: `briqyard machine get <id>` (state, why it stopped, its process's exit), `briqyard
@@ -148,9 +150,11 @@ backup until sent elsewhere.
 
 | Symptom | Look at |
 |---|---|
-| A create ends in `state: error` | `error` on the machine; the last console lines are in it. Then `briqyard machine logs` |
+| A create or start answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the last console lines. `briqyard machine logs`, then destroy it |
+| A machine is `stopped (host)` | The daemon stopped it: a restart of `briqyardd` without a suspend, or a crashed daemon's leftover. The next use wakes it |
+| A machine stays `destroying` | Its disks could not be destroyed (`zfs destroy` in the log); the daemon tries again every 15 s |
 | The process exits at once (`stopped`, `exit.code`) | `briqyard machine logs`: the image's own output. `restart.policy: on-failure` tries three times |
-| `the guest did not come up` | The kernel booted but the init did not answer on vsock within 60 s: console log, then the kernel (`kernel`) and init (`init`) paths |
+| `the guest did not come up` | The kernel booted but the init did not answer on vsock within `boot_timeout_sec`: console log, then the kernel (`kernel`) and init (`init`) paths |
 | `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk. `used` counts what placement reserved until the next heartbeat |
 | `host h_… is down` (fleet, 503) | The host missed its heartbeats for `placement.down_after_sec`: its machines answer again once it is back. `briqyard host ls`, then the host's `journalctl -u briqyardd` |
 | `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it |

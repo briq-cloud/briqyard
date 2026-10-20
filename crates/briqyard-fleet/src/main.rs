@@ -199,6 +199,7 @@ impl IntoResponse for Refusal {
                 error: self.error,
                 code: self.code.into(),
                 request_id: String::new(),
+                machine: None,
             }),
         )
             .into_response()
