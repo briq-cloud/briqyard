@@ -65,17 +65,23 @@ done
 V=$(briqyard machine run --image alpine:3.20 --name evia --tenant "$E" --memory 256 --egress "via:$G" -- sleep 3600 | jq -r .id)
 N=$(briqyard machine run --image alpine:3.20 --name enone --tenant "$E" --memory 256 --egress none -- sleep 3600 | jq -r .id)
 reach() { briqyard machine exec "$1" -- wget -qO- -T 3 "$2" >/dev/null 2>&1; }
+# The internet by address, so a refused name is not what makes it fail; "open again" below
+# reaches the same address from the same machine, so the refusals mean something.
+NET=$(getent ahostsv4 example.com | awk 'NR == 1 { print $1 }')
+connects() { briqyard machine exec "$1" -- nc -z -w 3 "$2" 443 >/dev/null 2>&1; }
+# nslookup exits 1 on NXDOMAIN; its output is what is checked.
+lookup() { briqyard machine exec "$1" -- nslookup "$2" 2>&1 || true; }
 check "via shown"                 '[ "$(briqyard machine get "$V" | jq -r .egress.via)" = "$G" ]'
 check "via reaches its gateway"   'reach "$V" http://egw.internal:8080/'
 check "via: no sibling"           '! reach "$V" http://eside.internal:8080/'
-check "via: no internet"          '! reach "$V" http://1.1.1.1/'
-check "via: outside name refused" 'briqyard machine exec "$V" -- nslookup example.com 2>&1 | grep -q NXDOMAIN'
-check "via: gateway name resolves" 'briqyard machine exec "$V" -- nslookup egw.internal 2>&1 | grep -q "10\.6[4-9]\."'
+check "via: no internet"          '! connects "$V" "$NET"'
+check "via: outside name refused" 'lookup "$V" example.com | grep -q NXDOMAIN'
+check "via: gateway name resolves" 'lookup "$V" egw.internal | grep -q "10\.6[4-9]\."'
 check "none reaches a sibling"    'reach "$N" http://eside.internal:8080/'
-check "none: no internet"         '! reach "$N" http://1.1.1.1/'
-check "none: outside name refused" 'briqyard machine exec "$N" -- nslookup example.com 2>&1 | grep -q NXDOMAIN'
+check "none: no internet"         '! connects "$N" "$NET"'
+check "none: outside name refused" 'lookup "$N" example.com | grep -q NXDOMAIN'
 briqyard machine set-egress "$N" open >/dev/null
-check "open again: internet"      'reach "$N" http://1.1.1.1/'
+check "open again: internet"      'connects "$N" "$NET"'
 for m in "$V" "$N" "$SIB" "$G"; do briqyard machine rm "$m" >/dev/null; done
 briqyard tenant rm "$E" >/dev/null 2>&1 || true
 
