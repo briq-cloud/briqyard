@@ -17,6 +17,8 @@ struct Daemon {
     calls: Mutex<Vec<String>>,
     machines: Mutex<Vec<api::Machine>>,
     endpoints: Mutex<Vec<api::Endpoint>>,
+    /// Tenants' gateways: the tenant and the memory it takes.
+    gateways: Mutex<Vec<(String, u32)>>,
     next: AtomicUsize,
     /// A tenant the daemon refuses to delete (answers 409), to test a failed forward.
     keep_tenant: String,
@@ -96,6 +98,7 @@ async fn start_daemon(id: &str, token: &str) -> Running {
         calls: Mutex::new(vec![]),
         machines: Mutex::new(vec![]),
         endpoints: Mutex::new(vec![]),
+        gateways: Mutex::new(vec![]),
         next: AtomicUsize::new(0),
         keep_tenant: "kept".into(),
     });
@@ -128,13 +131,65 @@ async fn start_daemon(id: &str, token: &str) -> Running {
                 .map(|id| api::Tenant {
                     id,
                     subnet: "10.1.0.0/24".into(),
-                    gateway: "10.1.0.1".into(),
+                    router: "10.1.0.1".into(),
                     machines: 1,
                     created_at: Utc::now(),
                     host: String::new(),
+                    gateway: None,
                 })
                 .collect(),
         )
+    }
+    fn tenant_of(d: &Daemon, id: &str) -> Option<api::Tenant> {
+        let machines = d.machines.lock().unwrap();
+        let gateway = d.gateways.lock().unwrap().iter().any(|(t, _)| t == id);
+        let n = machines.iter().filter(|m| m.tenant == id).count();
+        (gateway || n > 0).then(|| api::Tenant {
+            id: id.into(),
+            subnet: "10.1.0.0/24".into(),
+            router: "10.1.0.1".into(),
+            machines: n,
+            created_at: Utc::now(),
+            host: String::new(),
+            gateway: gateway.then(|| api::GatewayView {
+                state: api::state::CREATED.into(),
+                ip: "10.1.0.2".into(),
+                port: 3128,
+                machine_id: format!("m_{}_gw", d.id),
+                error: String::new(),
+            }),
+        })
+    }
+    async fn get_tenant(State(d): D, Path(id): Path<String>) -> Response {
+        match tenant_of(&d, &id) {
+            Some(t) => Json(t).into_response(),
+            None => err(StatusCode::NOT_FOUND, "not_found", "tenant not found").into_response(),
+        }
+    }
+    /// Like the daemon: a gateway that does not fit in what the host has left is refused.
+    async fn set_gateway(
+        State(d): D,
+        Path(id): Path<String>,
+        Json(spec): Json<api::GatewaySpec>,
+    ) -> Response {
+        let need = spec.size().memory_mb;
+        if d.used_mb() + need > DAEMON_MEMORY_MB {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "capacity",
+                "the host has no room",
+            )
+            .into_response();
+        }
+        d.gateways.lock().unwrap().push((id.clone(), need));
+        Json(tenant_of(&d, &id).unwrap()).into_response()
+    }
+    async fn delete_gateway(State(d): D, Path(id): Path<String>) -> Response {
+        if id == d.keep_tenant {
+            return err(StatusCode::CONFLICT, "gateway_in_use", "in use").into_response();
+        }
+        d.gateways.lock().unwrap().retain(|(t, _)| *t != id);
+        StatusCode::NO_CONTENT.into_response()
     }
     async fn delete_tenant(State(d): D, Path(id): Path<String>) -> Response {
         if id == d.keep_tenant {
@@ -257,7 +312,11 @@ async fn start_daemon(id: &str, token: &str) -> Running {
     let app = Router::new()
         .route("/v1/status", get(status))
         .route("/v1/tenants", get(tenants))
-        .route("/v1/tenants/:id", axum::routing::delete(delete_tenant))
+        .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
+        .route(
+            "/v1/tenants/:id/gateway",
+            axum::routing::put(set_gateway).delete(delete_gateway),
+        )
         .route("/v1/machines", get(list).post(create))
         .route("/v1/machines/:id", get(get_machine).delete(delete_machine))
         .route("/v1/machines/:id/start", post(start_machine))
@@ -1659,4 +1718,115 @@ async fn endpoints_are_indexed_to_their_host_and_listed_whole() {
     let (s, _, body) = call(&f.st, "GET", "/v1/endpoints", "api", None).await;
     assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
     assert_eq!(json(&body)["code"], "host_unreachable");
+}
+
+fn gateway_body() -> serde_json::Value {
+    serde_json::json!({"image": "proxy:1", "port": 3128})
+}
+
+#[tokio::test]
+async fn a_gateway_places_a_new_tenant_and_is_forwarded_to_its_host() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    // d1 is the fuller: a new tenant's gateway goes to d2, as its first machine would.
+    ds[0].stub.add("t0", "big", 50_000);
+    poll_static_hosts_once(&f.st).await;
+    let (s, headers, body) = call(
+        &f.st,
+        "PUT",
+        "/v1/tenants/t1/gateway",
+        "api",
+        Some(gateway_body()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d2");
+    let t: api::Tenant = serde_json::from_str(&body).unwrap();
+    assert_eq!(t.host, "d2", "the host is added to the body");
+    assert_eq!(t.gateway.map(|g| g.port), Some(3128));
+    assert_eq!(
+        ds[1].stub.calls().last().unwrap(),
+        "PUT /v1/tenants/t1/gateway"
+    );
+    assert_eq!(pinned(&f.st, "t1").as_deref(), Some("d2"));
+    assert_eq!(
+        saved(&f.st).tenants.get("t1").map(String::as_str),
+        Some("d2")
+    );
+    assert_eq!(
+        f.st.reg.lock().unwrap().hosts["d2"].used.memory_mb,
+        256,
+        "the gateway's size, reserved until the host reports"
+    );
+    // The tenant lives there now: its machines follow, its reads and removal go there.
+    let (s, headers, _) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t1", "sbx", 512)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(headers["x-briqyard-host"], "d2");
+    let (s, _, body) = call(&f.st, "GET", "/v1/tenants/t1", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let t: api::Tenant = serde_json::from_str(&body).unwrap();
+    assert_eq!((t.host.as_str(), t.machines), ("d2", 1));
+    assert!(t.gateway.is_some());
+    assert_eq!(ds[1].stub.calls().last().unwrap(), "GET /v1/tenants/t1");
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/tenants/t1/gateway", "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        ds[1].stub.calls().last().unwrap(),
+        "DELETE /v1/tenants/t1/gateway"
+    );
+    // A tenant the fleet never placed: no host is asked.
+    let before: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
+    let (s, _, body) = call(&f.st, "GET", "/v1/tenants/nobody", "api", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(json(&body)["code"], "not_found");
+    let (s, _, _) = call(&f.st, "DELETE", "/v1/tenants/nobody/gateway", "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let after: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn a_gateway_refused_is_answered_as_the_host_said() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    // The host filled up since the fleet looked: the first gateway's pin goes with the refusal.
+    ds[0].stub.add("t0", "big", 63_900);
+    let (s, _, body) = call(
+        &f.st,
+        "PUT",
+        "/v1/tenants/t1/gateway",
+        "api",
+        Some(gateway_body()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "capacity");
+    assert_eq!(pinned(&f.st, "t1"), None);
+    assert_eq!(saved(&f.st).tenants.get("t1"), None, "written");
+    // A removal the host refuses passes through.
+    ds[0].stub.add("kept", "sbx", 10);
+    poll_static_hosts_once(&f.st).await;
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/tenants/kept/gateway", "api", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert_eq!(json(&body)["code"], "gateway_in_use");
+    // A bad tenant id or body is refused before any host.
+    let before = ds[0].stub.calls().len();
+    for (path, body) in [
+        ("/v1/tenants/Bad/gateway", gateway_body()),
+        (
+            "/v1/tenants/t2/gateway",
+            serde_json::json!({"image": "proxy:1"}),
+        ),
+    ] {
+        let (s, _, text) = call(&f.st, "PUT", path, "api", Some(body)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{path}: {text}");
+        assert_eq!(json(&text)["code"], "invalid");
+    }
+    assert_eq!(ds[0].stub.calls().len(), before);
+    assert_eq!(pinned(&f.st, "t2"), None);
 }

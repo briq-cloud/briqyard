@@ -16,6 +16,12 @@ api() { curl -fsS -m 20 ${BRIQYARD_TOKEN:+-H "Authorization: Bearer $BRIQYARD_TO
 M=$(api /v1/machines) || { fail "api unreachable"; exit 1; }
 E=$(api /v1/endpoints) || E="[]"
 T=$(api /v1/tenants) || T="[]"
+# Tenants' gateways are machines of the daemon, not in /v1/machines: their disks, processes
+# and TAPs are counted with the rest.
+for g in $(echo "$T" | jq -r '.[].gateway.machine_id // empty'); do
+  # One destroyed since the tenants were read is gone from both.
+  m=$(api "/v1/machines/$g") && M=$(echo "$M" | jq --argjson g "$m" '. + [$g]')
+done
 
 ids=$(echo "$M" | jq -r '.[].id' | sort)
 running=$(echo "$M" | jq -r '.[] | select(.state == "running" or .state == "starting" or .state == "stopping") | .id' | sort)

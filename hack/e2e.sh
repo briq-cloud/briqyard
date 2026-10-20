@@ -11,7 +11,7 @@ bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 cleanup() {
   echo "cleanup"
-  for t in "$T" "$T-eg"; do
+  for t in "$T" "$T-eg" "$T-gw"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
     for i in $(seq 1 10); do
@@ -84,6 +84,56 @@ briqyard machine set-egress "$N" open >/dev/null
 check "open again: internet"      'connects "$N" "$NET"'
 for m in "$V" "$N" "$SIB" "$G"; do briqyard machine rm "$m" >/dev/null; done
 briqyard tenant rm "$E" >/dev/null 2>&1 || true
+
+echo "== tenant gateway: started by what needs it, stopped once nothing does"
+GT="$T-gw"
+# A forward proxy: CONNECT host:port, then bytes both ways. On the image the egress section
+# pulled, so nothing is installed at boot.
+PROXY='
+import asyncio
+async def pipe(r, w):
+    try:
+        while data := await r.read(65536):
+            w.write(data)
+            await w.drain()
+    finally:
+        w.close()
+async def handle(r, w):
+    target = (await r.readline()).split()[1].decode()
+    while (await r.readline()) not in (b"\r\n", b""):
+        pass
+    host, port = target.rsplit(":", 1)
+    ur, uw = await asyncio.open_connection(host, int(port))
+    w.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+    await w.drain()
+    await asyncio.gather(pipe(r, uw), pipe(ur, w))
+async def main():
+    await (await asyncio.start_server(handle, "0.0.0.0", 3128)).serve_forever()
+asyncio.run(main())
+'
+gw() { briqyard tenant get "$GT" | jq -r ".gateway.$1"; }
+setgw() { briqyard tenant gateway set "$GT" --image python:3.12-alpine --port 3128 -- python3 -c "$PROXY" | jq -r .gateway.machine_id; }
+GW=$(setgw)
+check "gateway made, not started"   '[ "$(gw state)" = created ]'
+check "via:gateway needs a gateway" '! briqyard machine run --image alpine:3.20 --name nogw --tenant "$T-nogw" --memory 128 --egress via:gateway -- sleep 60 >/dev/null 2>&1'
+C=$(briqyard machine run --image python:3.12-alpine --name gwc --tenant "$GT" --memory 256 --egress via:gateway -- sleep 3600 | jq -r .id)
+check "its start boots the gateway" '[ "$(gw state)" = running ]'
+check "gateway not in machine ls"   '! briqyard machine ls | grep -q "$GW" && [ "$(briqyard tenant get "$GT" | jq .machines)" = 1 ]'
+check "gateway console readable"    'briqyard machine logs "$GW" --limit 5000 | grep -q "\[briqyard\] started"'
+# busybox wget sends a proxy a plain GET, not CONNECT: Python's client does what any SDK does.
+fetch='import urllib.request; print(urllib.request.urlopen("https://example.com", timeout=10).read().decode())'
+check "https through the gateway"   'briqyard machine exec "$C" -- env https_proxy=http://gateway.internal:3128 python3 -c "$fetch" | grep -qi "example domain"'
+check "no way around it"            '! connects "$C" "$NET"'
+check "rm refused while in use"     '! briqyard tenant gateway rm "$GT" >/dev/null 2>&1'
+briqyard machine stop "$C" >/dev/null
+# The sleeper looks every 15 s.
+for i in $(seq 1 30); do [ "$(gw state)" = stopped ] && break; sleep 2; done
+check "sleeper stops the gateway"   '[ "$(gw state)" = stopped ]'
+check "rm once nothing uses it"     'briqyard tenant gateway rm "$GT" && [ "$(gw state)" = null ] && ! briqyard machine get "$GW" >/dev/null 2>&1'
+GW=$(setgw)
+briqyard machine rm "$C" >/dev/null
+check "tenant removed"              'briqyard tenant rm "$GT" && ! briqyard tenant get "$GT" >/dev/null 2>&1'
+check "gateway gone with it"        '! briqyard machine get "$GW" >/dev/null 2>&1'
 
 echo "== stop, start, exit handling"
 briqyard machine stop "$A" >/dev/null

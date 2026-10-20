@@ -261,9 +261,13 @@ are removed. To take a tenant off a host (draining, full, or gone):
 briqyard host drain h_old                          # nothing new lands there
 briqyard machine backup <id>                       # each machine of the tenant (ADR 0008)
 briqyard machine destroy <id>                      # each one, once its backup is listed
-briqyard tenant rm <tenant>                        # its network on the old host; unpins it
+briqyard tenant rm <tenant>                        # its network and gateway on the old host; unpins it
 briqyard machine restore --from <id> --tenant <tenant> --name <name>   # placed afresh
 ```
+
+A tenant's gateway (ADR 0016) is not backed up: `briqyard tenant gateway set` it again once the
+tenant is unpinned (the fleet places the tenant with it), before the restores of its
+`via:gateway` machines.
 
 `briqyard tenant unpin <tenant>` (`POST /v1/tenants/{id}/unpin`) drops the pin without asking
 the host, for a host that is down for good or a pin left on a full host. A tenant unpinned

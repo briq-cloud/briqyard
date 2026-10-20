@@ -39,6 +39,12 @@ pub enum MError {
     Capacity(String),
     #[error("the tenant still has machines")]
     TenantInUse,
+    #[error("a machine of the tenant runs through its gateway")]
+    GatewayInUse,
+    /// A call that would change or run something in a tenant's gateway through the machine
+    /// routes: the tenant's route owns it.
+    #[error("the tenant's gateway: use /v1/tenants/{0}/gateway")]
+    Gateway(String),
     /// The guest never came up or exited while booting: the image's fault, not the host's.
     /// The machine stays, in state `error`, with the console tail in its `error`.
     #[error("boot failed: {}", .0.error)]
@@ -51,11 +57,39 @@ fn invalid(msg: impl Into<String>) -> MError {
     MError::Invalid(msg.into())
 }
 
+/// A tenant id is checked before it names a file.
+fn check_tenant_id(id: &str) -> Result<(), MError> {
+    match api::valid_id(id) {
+        true => Ok(()),
+        false => Err(invalid(
+            "tenant must be a-z, 0-9, _ or -, at most 64 characters",
+        )),
+    }
+}
+
+/// `via: "gateway"` in a tenant that has none.
+fn no_gateway(tenant: &str) -> MError {
+    invalid(format!(
+        "tenant has no gateway: PUT /v1/tenants/{tenant}/gateway first"
+    ))
+}
+
+/// What a machine is to its tenant when it is not one of the tenant's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// The tenant's gateway (ADR 0016): run by the daemon, absent from the tenant's machines.
+    Gateway,
+}
+
 /// A machine as the daemon keeps it: the API view plus what running it needs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     pub id: String,
     pub tenant: String,
+    /// None for the tenant's own machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
     pub name: String,
     pub image: String,
     pub image_key: String,
@@ -118,6 +152,13 @@ pub struct Record {
 }
 
 impl Record {
+    /// One of the tenant's own machines: what the tenant's listing, counts and removal see.
+    fn is_tenants(&self) -> bool {
+        self.role.is_none()
+    }
+    fn is_gateway(&self) -> bool {
+        self.role == Some(Role::Gateway)
+    }
     pub fn hostname(&self) -> String {
         format!("{}.internal", self.name)
     }
@@ -184,7 +225,24 @@ pub struct TenantRec {
 struct Tenant {
     rec: TenantRec,
     subnet: Subnet,
+    /// The tenant's lock: held while its gateway is started, put, removed or put to sleep,
+    /// and by a machine that needs the gateway until that machine is `starting`, so the
+    /// sleeper never stops a gateway a start is about to use.
+    lock: Arc<tokio::sync::Mutex<()>>,
 }
+
+impl Tenant {
+    fn new(rec: TenantRec, subnet: Subnet) -> Self {
+        Self {
+            rec,
+            subnet,
+            lock: Default::default(),
+        }
+    }
+}
+
+/// The gateway's name in its tenant: `gateway.internal`.
+const GATEWAY_NAME: &str = "gateway";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EndpointRec {
@@ -431,7 +489,7 @@ impl Manager {
                 .tenants
                 .lock()
                 .unwrap()
-                .insert(rec.id.clone(), Tenant { rec, subnet });
+                .insert(rec.id.clone(), Tenant::new(rec, subnet));
         }
         for mut r in st.list::<Record>("machines")? {
             r.migrate();
@@ -490,6 +548,16 @@ impl Manager {
                 "machine left running by a previous daemon, marked stopped"
             );
             let _ = self.save(&e);
+        }
+        // An adopted machine that sends through its tenant's gateway needs it, and the
+        // gateway's own process may not have survived: it starts as a start would start it.
+        for gw in self.gateways_out_of_step(false) {
+            let (m, tenant) = (self.clone(), gw.snapshot().tenant);
+            tokio::spawn(async move {
+                if let Err(err) = m.ensure_gateway(&tenant).await {
+                    tracing::warn!(tenant, err = %err, "gateway an adopted machine needs");
+                }
+            });
         }
     }
 
@@ -733,14 +801,14 @@ impl Manager {
             let used: Vec<u32> = tenants.values().map(|t| t.rec.subnet_index).collect();
             let idx = netw::first_free(used, 0, self.inner.range.count() - 1)
                 .ok_or_else(|| anyhow!("no tenant subnet left"))?;
-            Tenant {
-                rec: TenantRec {
+            Tenant::new(
+                TenantRec {
                     id: id.to_string(),
                     subnet_index: idx,
                     created_at: Utc::now(),
                 },
-                subnet: self.inner.range.subnet(idx)?,
-            }
+                self.inner.range.subnet(idx)?,
+            )
         };
         self.plumb_tenant(&t).await?;
         self.inner.store.put("tenants", id, &t.rec)?;
@@ -811,7 +879,7 @@ impl Manager {
     // --- egress (ADR 0015) ---
 
     /// An egress policy a machine of `tenant` may take: one of the modes, and for `via` a
-    /// machine of the same tenant other than `me`.
+    /// machine of the same tenant other than `me`, or the tenant's gateway.
     fn check_egress(&self, e: &api::Egress, tenant: &str, me: &str) -> Result<(), MError> {
         e.check().map_err(invalid)?;
         if e.mode == api::egress::VIA {
@@ -822,7 +890,14 @@ impl Manager {
 
     /// The address of the machine a `via` policy names: fixed for that machine's life.
     fn via_target(&self, e: &api::Egress, tenant: &str, me: &str) -> Result<String, MError> {
-        let id = e.via.as_deref().unwrap_or_default();
+        let id = if e.via_gateway() {
+            self.gateway_of(tenant)
+                .ok_or_else(|| no_gateway(tenant))?
+                .snapshot()
+                .id
+        } else {
+            e.via.clone().unwrap_or_default()
+        };
         if id == me {
             return Err(invalid("egress.via names the machine itself"));
         }
@@ -831,7 +906,7 @@ impl Manager {
             .machines
             .lock()
             .unwrap()
-            .get(id)
+            .get(&id)
             .map(|e| e.snapshot())
             .filter(|r| r.state != state::DESTROYING)
             .ok_or_else(|| invalid(format!("egress.via {id}: no such machine")))?;
@@ -967,55 +1042,352 @@ impl Manager {
     }
 
     pub fn tenants(&self) -> Vec<api::Tenant> {
-        let machines = self.inner.machines.lock().unwrap();
-        let mut out: Vec<api::Tenant> = self
+        let tenants: Vec<Tenant> = self
             .inner
             .tenants
             .lock()
             .unwrap()
             .values()
-            .map(|t| api::Tenant {
-                id: t.rec.id.clone(),
-                subnet: t.subnet.cidr(),
-                gateway: t.subnet.gateway().to_string(),
-                machines: machines
-                    .values()
-                    .filter(|e| e.rec.lock().unwrap().tenant == t.rec.id)
-                    .count(),
-                created_at: t.rec.created_at,
-                host: String::new(),
-            })
+            .cloned()
             .collect();
+        let mut out: Vec<api::Tenant> = tenants.iter().map(|t| self.tenant_view(t)).collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
     }
 
-    /// Removes an empty tenant's network. Missing is success.
-    pub async fn delete_tenant(&self, id: &str) -> Result<(), MError> {
-        if !api::valid_id(id) {
-            return Err(invalid(
-                "tenant must be a-z, 0-9, _ or -, at most 64 characters",
-            ));
-        }
-        let t = match self.tenant_of(id) {
-            Some(t) => t,
-            None => return Ok(()),
-        };
-        let in_use = self
+    pub fn tenant(&self, id: &str) -> Result<api::Tenant, MError> {
+        let t = self.tenant_of(id).ok_or(MError::NotFound)?;
+        Ok(self.tenant_view(&t))
+    }
+
+    fn tenant_view(&self, t: &Tenant) -> api::Tenant {
+        let machines = self
             .inner
             .machines
             .lock()
             .unwrap()
             .values()
-            .any(|e| e.rec.lock().unwrap().tenant == id);
+            .filter(|e| {
+                let r = e.rec.lock().unwrap();
+                r.tenant == t.rec.id && r.is_tenants()
+            })
+            .count();
+        let gateway = self.gateway_of(&t.rec.id).map(|e| {
+            let r = e.snapshot();
+            api::GatewayView {
+                state: r.state,
+                ip: r.ip,
+                port: r.ports.first().copied().unwrap_or(0),
+                machine_id: r.id,
+                error: r.error,
+            }
+        });
+        api::Tenant {
+            id: t.rec.id.clone(),
+            subnet: t.subnet.cidr(),
+            router: t.subnet.gateway().to_string(),
+            machines,
+            created_at: t.rec.created_at,
+            host: String::new(),
+            gateway,
+        }
+    }
+
+    /// Removes the network of a tenant with no machine left, and its gateway first. Missing
+    /// is success.
+    pub async fn delete_tenant(&self, id: &str) -> Result<(), MError> {
+        check_tenant_id(id)?;
+        let t = match self.tenant_of(id) {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+        let in_use = self.inner.machines.lock().unwrap().values().any(|e| {
+            let r = e.rec.lock().unwrap();
+            r.tenant == id && r.is_tenants()
+        });
         if in_use {
             return Err(MError::TenantInUse);
+        }
+        {
+            let _turn = t.lock.lock().await;
+            if let Some(gw) = self.gateway_of(id) {
+                self.destroy_machine(&gw.snapshot().id).await?;
+            }
         }
         self.inner.dns.unset(t.subnet.gateway());
         self.inner.net.delete_bridge(t.rec.subnet_index).await?;
         self.inner.tenants.lock().unwrap().remove(id);
         self.inner.store.delete("tenants", id)?;
         Ok(())
+    }
+
+    // --- the tenant's gateway (ADR 0016) ---
+
+    /// Puts the tenant's gateway: made, not started, when the tenant has none (the tenant
+    /// too, when it has nothing yet); else given the new spec, a running one restarted. With
+    /// `start`, it then runs as a start that needs it would run it.
+    pub async fn set_gateway(
+        &self,
+        tenant: &str,
+        spec: api::GatewaySpec,
+    ) -> Result<api::Tenant, MError> {
+        check_tenant_id(tenant)?;
+        if spec.image.is_empty() || spec.port == 0 {
+            return Err(invalid("a gateway needs an image and a port (1..65535)"));
+        }
+        // A machine of the daemon: no window of its own, it runs while something needs it,
+        // and comes back whenever its program ends on its own.
+        let req = api::CreateMachineRequest {
+            tenant: tenant.into(),
+            name: GATEWAY_NAME.into(),
+            size: spec.size(),
+            image: spec.image,
+            cmd: spec.cmd,
+            env: spec.env,
+            volume: spec.volume_gb.map(|size_gb| api::VolumeSpec {
+                size_gb,
+                mount: "/data".into(),
+            }),
+            ports: vec![spec.port],
+            sleep: "never".into(),
+            restart: Some(api::RestartPolicy {
+                policy: "always".into(),
+                max_retries: 0,
+            }),
+            start: Some(false),
+            ..Default::default()
+        };
+        check_size(&req.size)?;
+        // Pulled before the tenant's lock: a pull may take minutes.
+        let im = self.inner.images.ensure(&req.image).await?;
+        let t = self.ensure_tenant(tenant).await?;
+        let _turn = t.lock.lock().await;
+        match self.gateway_of(tenant) {
+            None => {
+                self.create_as(req, Some(Role::Gateway)).await?;
+            }
+            Some(gw) => self.replace_gateway(&gw, req, im).await?,
+        }
+        if spec.start {
+            let gw = self.gateway_of(tenant).ok_or_else(|| no_gateway(tenant))?;
+            self.run_gateway(&gw).await?;
+        }
+        self.tenant(tenant)
+    }
+
+    /// A new spec on the same machine, address and volume: stopped if it runs, its root disk
+    /// made again when the image changed, started again. The spec it has already changes
+    /// nothing, so a control plane may put it again. Under the tenant's lock.
+    async fn replace_gateway(
+        &self,
+        gw: &Arc<Entry>,
+        req: api::CreateMachineRequest,
+        im: image::Image,
+    ) -> Result<(), MError> {
+        let was = gw.snapshot();
+        let size_gb = |v: &Option<api::VolumeSpec>| v.as_ref().map(|v| v.size_gb);
+        if size_gb(&req.volume) != size_gb(&was.volume) {
+            return Err(invalid(
+                "volume_gb is fixed for the gateway's life: DELETE the gateway to change it",
+            ));
+        }
+        if im.key == was.image_key
+            && req.cmd == was.cmd
+            && req.env == was.env
+            && req.size == was.size
+            && req.ports == was.ports
+        {
+            return Ok(());
+        }
+        let running = was.state == state::RUNNING;
+        if running {
+            self.stop_entry(gw, stop::HOST, Duration::from_secs(10), false)
+                .await?;
+        }
+        {
+            let _turn = gw.lock.lock().await;
+            let r = gw.snapshot();
+            if !matches!(
+                r.state.as_str(),
+                state::CREATED | state::STOPPED | state::ERROR
+            ) {
+                return Err(MError::BadState(r.state));
+            }
+            if im.key != r.image_key {
+                let z = &self.inner.zfs;
+                z.destroy(&r.root_dataset())
+                    .await
+                    .context("the gateway's previous root disk")?;
+                z.clone_snapshot(
+                    &format!("images/{}", im.key),
+                    image::SNAP,
+                    &r.root_dataset(),
+                )
+                .await
+                .context("the gateway's root disk")?;
+            }
+            {
+                let mut r = gw.rec.lock().unwrap();
+                r.image = req.image;
+                r.image_key = im.key;
+                r.image_digest = im.digest;
+                r.image_config = im.config;
+                r.cmd = req.cmd;
+                r.env = req.env;
+                r.size = req.size;
+                r.ports = req.ports;
+                // A memory snapshot is of the old program on the old disk: boot cold.
+                r.suspended = false;
+            }
+            self.save(gw)?;
+        }
+        if running {
+            self.run_gateway(gw).await?;
+        }
+        Ok(())
+    }
+
+    /// Stops and destroys the tenant's gateway; refused while a machine runs through it.
+    /// None is success.
+    pub async fn delete_gateway(&self, tenant: &str) -> Result<(), MError> {
+        check_tenant_id(tenant)?;
+        let Some(t) = self.tenant_of(tenant) else {
+            return Ok(());
+        };
+        let _turn = t.lock.lock().await;
+        let Some(gw) = self.gateway_of(tenant) else {
+            return Ok(());
+        };
+        if gateway_needed(&self.inner.machines.lock().unwrap(), tenant) {
+            return Err(MError::GatewayInUse);
+        }
+        self.destroy_machine(&gw.snapshot().id).await
+    }
+
+    /// The tenant's gateway machine, unless it is being destroyed.
+    fn gateway_of(&self, tenant: &str) -> Option<Arc<Entry>> {
+        self.inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .find(|e| {
+                let r = e.rec.lock().unwrap();
+                r.tenant == tenant && r.is_gateway() && r.state != state::DESTROYING
+            })
+            .cloned()
+    }
+
+    /// Makes sure the tenant's gateway runs and its port answers, and returns the tenant's
+    /// lock held: two starts that need the gateway boot it once.
+    async fn ensure_gateway(
+        &self,
+        tenant: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, MError> {
+        let t = self
+            .tenant_of(tenant)
+            .ok_or_else(|| anyhow!("tenant network is gone"))?;
+        let turn = t.lock.clone().lock_owned().await;
+        let gw = self.gateway_of(tenant).ok_or_else(|| no_gateway(tenant))?;
+        self.run_gateway(&gw).await?;
+        Ok(turn)
+    }
+
+    /// Starts the gateway unless it runs, then waits for its port, within the boot timeout.
+    /// A gateway whose port does not answer is ended and left in `error` with its console's
+    /// last lines, as a boot that fails is. Under the tenant's lock.
+    async fn run_gateway(&self, gw: &Arc<Entry>) -> Result<(), MError> {
+        let _turn = gw.lock.lock().await;
+        if gw.snapshot().state != state::RUNNING {
+            self.start_boxed(gw).await?;
+        }
+        let r = gw.snapshot();
+        let live = gw.live.lock().unwrap().clone();
+        let Some(live) = live else {
+            return Err(MError::NotRunning("the gateway has no process".into()));
+        };
+        let port = r.ports.first().copied().unwrap_or(0);
+        let ip: Ipv4Addr = r.ip.parse().map_err(anyhow::Error::from)?;
+        let timeout = Duration::from_secs(self.inner.cfg.boot_timeout_sec.max(10));
+        let mut exited = live.exited.clone();
+        let answered = tokio::select! {
+            r = self.inner.net.wait_port(ip, port, timeout) => {
+                r.map_err(|err| format!("port {port} did not answer: {err:#}"))
+            }
+            _ = exited.wait_for(|gone| *gone) => Err("the gateway exited".to_string()),
+        };
+        let Err(why) = answered else {
+            return Ok(());
+        };
+        self.end_process(gw, &live, Duration::ZERO).await;
+        let tail = self.last_console_lines(&r, 5);
+        gw.set_state(state::ERROR, |r| {
+            r.error = format!("{why}: {tail}");
+            r.stopped_at = Some(Utc::now());
+            r.pid = 0;
+        });
+        let _ = self.save(gw);
+        Err(MError::BootFailed(Box::new(self.view(gw))))
+    }
+
+    /// What a machine that needs the gateway answers when the gateway did not come up:
+    /// `boot_failed` with the machine as it is (not moved), the gateway's reason in `error`.
+    fn gateway_failed(&self, e: &Entry, err: MError) -> MError {
+        match err {
+            MError::BootFailed(gw) => {
+                let mut m = self.view(e);
+                m.error = format!("the tenant's gateway did not come up: {}", gw.error);
+                MError::BootFailed(Box::new(m))
+            }
+            other => other,
+        }
+    }
+
+    /// The gateways whose state is not what their tenant needs: running while no machine
+    /// needs them (`running`), or not running while one does (not `running`).
+    fn gateways_out_of_step(&self, running: bool) -> Vec<Arc<Entry>> {
+        let machines = self.inner.machines.lock().unwrap();
+        machines
+            .values()
+            .filter(|e| {
+                let tenant = {
+                    let r = e.rec.lock().unwrap();
+                    if !r.is_gateway() || (r.state == state::RUNNING) != running {
+                        return false;
+                    }
+                    r.tenant.clone()
+                };
+                gateway_needed(&machines, &tenant) != running
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Stops a gateway nothing needs, under its tenant's lock. A lock someone holds is a start
+    /// or a change of the gateway under way: the next tick looks again.
+    async fn sleep_gateway(&self, gw: &Arc<Entry>) {
+        let r = gw.snapshot();
+        let Some(t) = self.tenant_of(&r.tenant) else {
+            return;
+        };
+        let Ok(_turn) = t.lock.try_lock() else {
+            return;
+        };
+        if gateway_needed(&self.inner.machines.lock().unwrap(), &r.tenant) {
+            return;
+        }
+        tracing::info!(
+            machine = r.id,
+            tenant = r.tenant,
+            "gateway unused, going to sleep"
+        );
+        let suspend = self.inner.cfg.suspend_on_sleep;
+        if let Err(err) = self
+            .stop_entry(gw, stop::IDLE, Duration::from_secs(10), suspend)
+            .await
+        {
+            tracing::warn!(machine = r.id, err = %err, "gateway sleep");
+        }
     }
 
     // --- lookup and views ---
@@ -1028,6 +1400,19 @@ impl Manager {
             .get(id)
             .cloned()
             .ok_or(MError::NotFound)
+    }
+
+    /// The machine a call that changes or runs something in it acts on: every such call of
+    /// the API resolves its machine here. A tenant's gateway is read through the machine
+    /// routes (get, logs, stats) and changed only through its tenant's.
+    fn own_entry(&self, id: &str) -> Result<Arc<Entry>, MError> {
+        let e = self.entry(id)?;
+        let r = e.rec.lock().unwrap();
+        if r.is_gateway() {
+            return Err(MError::Gateway(r.tenant.clone()));
+        }
+        drop(r);
+        Ok(e)
     }
 
     fn view(&self, e: &Entry) -> api::Machine {
@@ -1087,9 +1472,8 @@ impl Manager {
         let mut out: Vec<api::Machine> = entries
             .iter()
             .filter(|e| {
-                tenant
-                    .map(|t| e.rec.lock().unwrap().tenant == t)
-                    .unwrap_or(true)
+                let r = e.rec.lock().unwrap();
+                r.is_tenants() && tenant.map(|t| r.tenant == t).unwrap_or(true)
             })
             .map(|e| self.view(e))
             .collect();
@@ -1097,11 +1481,16 @@ impl Manager {
         out
     }
 
-    /// What running machines take, how many run, how many exist.
+    /// What running machines take (gateways included), how many run, and how many machines
+    /// tenants have (gateways not counted).
     pub fn usage(&self) -> (api::Capacity, usize, usize) {
         let machines = self.inner.machines.lock().unwrap();
         let (used, running) = committed(&machines);
-        (used, running, machines.len())
+        let total = machines
+            .values()
+            .filter(|e| e.rec.lock().unwrap().is_tenants())
+            .count();
+        (used, running, total)
     }
 
     /// Takes the machine's memory from the host and moves it to `starting`, as one step
@@ -1201,7 +1590,9 @@ impl Manager {
                 }
             }
         }
-        let (used, _, total) = self.usage();
+        // Host-level: every machine on the host, gateways included.
+        let total: usize = by_state.values().sum();
+        let (used, _, _) = self.usage();
         let cap = self.capacity();
         let tenants = self.inner.tenants.lock().unwrap().len();
         let endpoints = self.inner.endpoints.lock().unwrap().len();
@@ -1260,11 +1651,16 @@ impl Manager {
     // --- create ---
 
     pub async fn create(&self, req: api::CreateMachineRequest) -> Result<api::Machine, MError> {
-        if !api::valid_id(&req.tenant) {
-            return Err(invalid(
-                "tenant must be a-z, 0-9, _ or -, at most 64 characters",
-            ));
-        }
+        self.create_as(req, None).await
+    }
+
+    /// A create, of one of the tenant's machines or of a machine with a role.
+    async fn create_as(
+        &self,
+        req: api::CreateMachineRequest,
+        role: Option<Role>,
+    ) -> Result<api::Machine, MError> {
+        check_tenant_id(&req.tenant)?;
         if let Some(rs) = &req.restore {
             if !api::valid_id(&rs.machine_id) {
                 return Err(invalid("restore.machine_id is not a machine id"));
@@ -1309,6 +1705,7 @@ impl Manager {
         let mut rec = Record {
             id: new_id("m"),
             tenant: req.tenant.clone(),
+            role,
             name: req.name.clone(),
             image: String::new(),
             image_key: String::new(),
@@ -1392,9 +1789,10 @@ impl Manager {
             check_size(&rec.size)?;
             restore_from = Some(b);
         } else if let Some(fork) = &req.fork {
-            let s = self
-                .entry(&fork.machine_id)
-                .map_err(|_| invalid("fork source not found"))?;
+            let s = self.own_entry(&fork.machine_id).map_err(|e| match e {
+                MError::NotFound => invalid("fork source not found"),
+                other => other,
+            })?;
             let sr = s.snapshot();
             if sr.tenant != req.tenant {
                 return Err(invalid("fork source belongs to another tenant"));
@@ -1572,8 +1970,8 @@ impl Manager {
     /// the last backup whose snapshot is still on the host. A running machine's backup is
     /// crash-consistent (what a power cut would leave); a stopped one's is clean.
     pub async fn backup(&self, id: &str) -> Result<api::Backup, MError> {
+        let e = self.own_entry(id)?;
         let store = self.backup_store()?;
-        let e = self.entry(id)?;
         let rec = e.snapshot();
         if rec.state == state::DESTROYING {
             return Err(MError::BadState(rec.state));
@@ -1729,7 +2127,7 @@ impl Manager {
     // --- start ---
 
     pub async fn start(&self, id: &str) -> Result<api::Machine, MError> {
-        let e = self.entry(id)?;
+        let e = self.own_entry(id)?;
         let _guard = e.lock.lock().await;
         if e.snapshot().state != state::RUNNING {
             self.start_entry(&e).await?;
@@ -1740,7 +2138,7 @@ impl Manager {
     /// Starts a machine that went to sleep, that the host stopped or whose process ended;
     /// one stopped on purpose stays stopped.
     pub async fn wake(&self, id: &str) -> Result<api::Machine, MError> {
-        let e = self.entry(id)?;
+        let e = self.own_entry(id)?;
         let _guard = e.lock.lock().await;
         let r = e.snapshot();
         match r.state.as_str() {
@@ -1778,7 +2176,18 @@ impl Manager {
         }
         // Resolved before anything moves: a `via` whose machine is gone refuses the start.
         let policy = self.policy_for(&rec)?;
+        // Through the tenant's gateway: it runs first, and the tenant's lock is kept until
+        // this machine is `starting`, which is what the sleeper looks for.
+        let gateway_turn = match rec.egress.via_gateway() {
+            true => Some(
+                self.ensure_gateway(&rec.tenant)
+                    .await
+                    .map_err(|err| self.gateway_failed(e, err))?,
+            ),
+            false => None,
+        };
         self.reserve(e)?;
+        drop(gateway_turn);
         let _ = self.save(e);
         // The host's fault (a network, disk or Firecracker error): the machine ends in
         // `error` and the caller gets a 500.
@@ -2106,7 +2515,7 @@ impl Manager {
         timeout: Duration,
         suspend: bool,
     ) -> Result<api::Machine, MError> {
-        let e = self.entry(id)?;
+        let e = self.own_entry(id)?;
         self.stop_entry(&e, stop::USER, timeout, suspend).await?;
         Ok(self.view(&e))
     }
@@ -2223,10 +2632,19 @@ impl Manager {
 
     // --- destroy ---
 
+    /// A destroy through the API: missing is success.
+    pub async fn destroy(&self, id: &str) -> Result<(), MError> {
+        match self.own_entry(id) {
+            Err(MError::NotFound) => Ok(()),
+            Err(err) => Err(err),
+            Ok(_) => self.destroy_machine(id).await,
+        }
+    }
+
     /// One critical section under the entry's lock, from the state to the record's removal:
     /// nothing starts the machine in between, and a destroy that fails leaves it
     /// `destroying` for the sleeper's tick to try again.
-    pub async fn destroy(&self, id: &str) -> Result<(), MError> {
+    async fn destroy_machine(&self, id: &str) -> Result<(), MError> {
         let e = match self.entry(id) {
             Ok(e) => e,
             Err(_) => return Ok(()),
@@ -2296,7 +2714,7 @@ impl Manager {
         id: &str,
         req: api::UpdateMachineRequest,
     ) -> Result<api::Machine, MError> {
-        let e = self.entry(id)?;
+        let e = self.own_entry(id)?;
         if let Some(sl) = &req.sleep {
             api::parse_sleep(sl).map_err(invalid)?;
         }
@@ -2307,6 +2725,8 @@ impl Manager {
         if !self.inner.machines.lock().unwrap().contains_key(id) {
             return Err(MError::NotFound);
         }
+        // Held until the record says `via: gateway`, as a start holds it.
+        let mut gateway_turn = None;
         if let Some(eg) = &req.egress {
             let mut r = e.snapshot();
             self.check_egress(eg, &r.tenant, &r.id)?;
@@ -2314,6 +2734,13 @@ impl Manager {
             if r.state == state::RUNNING {
                 r.egress = eg.clone();
                 let policy = self.policy_for(&r)?;
+                if eg.via_gateway() {
+                    gateway_turn = Some(
+                        self.ensure_gateway(&r.tenant)
+                            .await
+                            .map_err(|err| self.gateway_failed(&e, err))?,
+                    );
+                }
                 self.replace_policy(&r.id, policy).await?;
             }
         }
@@ -2330,16 +2757,18 @@ impl Manager {
             }
         }
         self.save(&e)?;
+        drop(gateway_turn);
         Ok(self.view(&e))
     }
 
     pub fn touch(&self, id: &str) -> Result<(), MError> {
-        self.entry(id)?.touch();
+        self.own_entry(id)?.touch();
         Ok(())
     }
 
-    /// Every 15 s: idle machines go to sleep, uses since the last tick reach the disk, and a
-    /// destroy left `destroying` (a daemon restart, a disk that was busy) is tried again.
+    /// Every 15 s: idle machines go to sleep, then the gateways no machine needs, uses since
+    /// the last tick reach the disk, and a destroy left `destroying` (a daemon restart, a disk
+    /// that was busy) is tried again.
     async fn sleeper(self) {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
         loop {
@@ -2394,13 +2823,22 @@ impl Manager {
             });
         }
         while stops.join_next().await.is_some() {}
+        // Then the gateways nothing needs any more, now that the machines that did may sleep.
+        for gw in self.gateways_out_of_step(true) {
+            let (m, at_once) = (self.clone(), at_once.clone());
+            stops.spawn(async move {
+                let _turn = at_once.acquire().await;
+                m.sleep_gateway(&gw).await;
+            });
+        }
+        while stops.join_next().await.is_some() {}
         for e in used {
             if let Err(err) = self.flush_use(&e) {
                 tracing::warn!(machine = e.snapshot().id, err = %err, "last use not written");
             }
         }
         for id in destroying {
-            if let Err(err) = self.destroy(&id).await {
+            if let Err(err) = self.destroy_machine(&id).await {
                 tracing::warn!(machine = id, err = %err, "resume destroy");
             }
         }
@@ -2439,7 +2877,7 @@ impl Manager {
     // --- exec and files ---
 
     async fn running_vsock(&self, id: &str, wake: bool) -> Result<PathBuf, MError> {
-        let e = self.entry(id)?;
+        let e = self.own_entry(id)?;
         let (st, reason, live) = {
             let r = e.rec.lock().unwrap();
             (
@@ -2598,7 +3036,7 @@ impl Manager {
     /// Removes a snapshot `snapshot` made, from both disks. Missing is success; a snapshot
     /// of the daemon's own (a fork's, a backup's) is not the caller's to remove.
     pub async fn delete_snapshot(&self, id: &str, snap: &str) -> Result<(), MError> {
-        let e = self.entry(id)?;
+        let e = self.own_entry(id)?;
         let r = e.snapshot();
         if !snap.starts_with("s_") || !api::valid_id(snap) {
             return Err(MError::NotFound);
@@ -2617,7 +3055,7 @@ impl Manager {
     }
 
     pub async fn snapshot(&self, id: &str) -> Result<api::Snapshot, MError> {
-        let e = self.entry(id)?;
+        let e = self.own_entry(id)?;
         let r = e.snapshot();
         let snap = new_id("s");
         self.inner.zfs.snapshot(&r.root_dataset(), &snap).await?;
@@ -2632,7 +3070,7 @@ impl Manager {
     }
 
     pub async fn snapshots(&self, id: &str) -> Result<Vec<api::Snapshot>, MError> {
-        let e = self.entry(id)?;
+        let e = self.own_entry(id)?;
         let r = e.snapshot();
         let names = self.inner.zfs.snapshots(&r.root_dataset()).await?;
         Ok(names
@@ -2705,7 +3143,7 @@ impl Manager {
         machine_id: &str,
         req: api::CreateEndpointRequest,
     ) -> Result<api::Endpoint, MError> {
-        let e = self.entry(machine_id)?;
+        let e = self.own_entry(machine_id)?;
         if req.port == 0 {
             return Err(invalid("port must be 1..65535"));
         }
@@ -2819,6 +3257,17 @@ fn committed(machines: &HashMap<String, Arc<Entry>>) -> (api::Capacity, usize) {
         }
     }
     (used, up)
+}
+
+/// Whether a machine of `tenant` that sends through its gateway is running or starting: what
+/// keeps the gateway up.
+fn gateway_needed(machines: &HashMap<String, Arc<Entry>>, tenant: &str) -> bool {
+    machines.values().any(|e| {
+        let r = e.rec.lock().unwrap();
+        r.tenant == tenant
+            && r.egress.via_gateway()
+            && matches!(r.state.as_str(), state::STARTING | state::RUNNING)
+    })
 }
 
 /// What `/wait` answers: running, will not run (why), or still moving.
@@ -3306,6 +3755,7 @@ mod tests {
         Record {
             id: "m_abc123".into(),
             tenant: "t1".into(),
+            role: None,
             name: "db".into(),
             image: "postgres:17".into(),
             image_key: "deadbeef".into(),
@@ -3400,6 +3850,8 @@ mod tests {
         calls: Mutex<Vec<String>>,
         /// Policy calls fail, as an `nft` that refuses its input.
         refuse_policies: AtomicBool,
+        /// No guest port accepts: `wait_port` answers only at its deadline.
+        silent_ports: AtomicBool,
     }
 
     impl Mock {
@@ -3412,6 +3864,7 @@ mod tests {
                 taps: Mutex::new(Default::default()),
                 calls: Mutex::new(Vec::new()),
                 refuse_policies: AtomicBool::new(false),
+                silent_ports: AtomicBool::new(false),
             })
         }
 
@@ -3726,6 +4179,15 @@ mod tests {
             let (old, new) = (policy_line(old), policy_line(new));
             self.policy_call(format!("swap_policy {old} -> {new}"))
         }
+
+        async fn wait_port(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()> {
+            self.record(format!("wait_port {ip}:{port}"));
+            if self.silent_ports.load(Relaxed) {
+                tokio::time::sleep(timeout).await;
+                return Err(anyhow!("{ip}:{port} did not accept within {timeout:?}"));
+            }
+            Ok(())
+        }
     }
 
     impl Mock {
@@ -3838,14 +4300,14 @@ mod tests {
         fn tenant(&self, id: &str) -> Tenant {
             let mut tenants = self.m.inner.tenants.lock().unwrap();
             let idx = tenants.len() as u32 + 1;
-            let t = Tenant {
-                rec: TenantRec {
+            let t = Tenant::new(
+                TenantRec {
                     id: id.into(),
                     subnet_index: idx,
                     created_at: Utc::now(),
                 },
-                subnet: self.m.inner.range.subnet(idx).unwrap(),
-            };
+                self.m.inner.range.subnet(idx).unwrap(),
+            );
             tenants.insert(id.into(), t.clone());
             t
         }
@@ -4106,7 +4568,7 @@ mod tests {
         };
         h.m.inner.store.put("tenants", "t1", &t).unwrap();
         h.m.load().unwrap();
-        assert_eq!(h.m.tenants()[0].gateway, "10.64.3.1");
+        assert_eq!(h.m.tenants()[0].router, "10.64.3.1");
     }
 
     #[tokio::test]
@@ -5429,5 +5891,652 @@ mod tests {
         assert!(matches!(patched, Err(MError::NotFound)), "{patched:?}");
         assert!(h.stored(&m.id).is_none(), "the record is not written back");
         assert!(matches!(h.m.get(&m.id), Err(MError::NotFound)));
+    }
+
+    // --- the tenant's gateway (ADR 0016) ---
+
+    const IMAGE2: &str =
+        "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000002";
+
+    fn gateway_spec(port: u16) -> api::GatewaySpec {
+        api::GatewaySpec {
+            image: IMAGE.into(),
+            env: BTreeMap::from([("TOKEN".to_string(), "t0k".to_string())]),
+            port,
+            ..Default::default()
+        }
+    }
+
+    impl Harness {
+        /// Tenant `t1` with a gateway on port 3128, not started; its machine id.
+        async fn with_gateway(&self) -> String {
+            self.ready().await;
+            let t = self.m.set_gateway("t1", gateway_spec(3128)).await.unwrap();
+            self.host.calls();
+            self.pool.calls();
+            t.gateway.unwrap().machine_id
+        }
+
+        /// A machine of `t1` that sends through the tenant's gateway.
+        fn consumer(&self, name: &str) -> api::CreateMachineRequest {
+            self.request_egress(name, "via", Some("gateway"))
+        }
+
+        fn gateway_view(&self) -> api::GatewayView {
+            self.m.tenant("t1").unwrap().gateway.expect("a gateway")
+        }
+
+        fn boots_of(calls: &[String], id: &str) -> usize {
+            let boot = format!("boot {id} ");
+            calls.iter().filter(|c| c.starts_with(&boot)).count()
+        }
+    }
+
+    const VIA_GATEWAY: &str = "via 10.64.1.3 to 10.64.1.2 host 10.64.1.1";
+
+    #[tokio::test]
+    async fn a_gateway_is_a_machine_of_the_daemon_not_of_the_tenant() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let t = h.m.set_gateway("t1", gateway_spec(3128)).await.unwrap();
+        let gw = t.gateway.clone().unwrap();
+        assert_eq!(
+            (gw.state.as_str(), gw.ip.as_str(), gw.port),
+            (state::CREATED, "10.64.1.2", 3128)
+        );
+        assert_eq!(t.machines, 0);
+        // Made, not started: disks, no process, no TAP.
+        assert!(!h.host.calls().iter().any(|c| c.starts_with("boot ")));
+        assert!(h
+            .pool
+            .dev()
+            .join(format!("byard/m/{}/root", gw.machine_id))
+            .exists());
+        // Its record says what it is; its name in the tenant is `gateway.internal`.
+        let r = h.stored(&gw.machine_id).unwrap();
+        assert_eq!(r.role, Some(Role::Gateway));
+        assert_eq!(r.env["TOKEN"], "t0k");
+        let m = h.m.get(&gw.machine_id).unwrap();
+        assert_eq!(m.hostname, "gateway.internal");
+        assert_eq!(
+            (
+                m.sleep.as_str(),
+                m.egress.clone(),
+                m.restart.policy.as_str()
+            ),
+            ("never", api::Egress::default(), "always")
+        );
+        // Not one of the tenant's machines: not listed, not counted, its console readable.
+        assert!(h.m.list(None).is_empty() && h.m.list(Some("t1")).is_empty());
+        assert_eq!(h.m.usage().2, 0);
+        assert!(h.m.logs(&gw.machine_id, "", 10).is_ok());
+        // The name is taken in the tenant, like any machine's.
+        assert!(matches!(
+            h.m.create(h.request("gateway")).await,
+            Err(MError::Conflict(_))
+        ));
+        assert!(matches!(h.m.tenant("t9"), Err(MError::NotFound)));
+        // A spec the gateway cannot run is refused before anything is made.
+        for bad in [
+            gateway_spec(0),
+            api::GatewaySpec {
+                image: String::new(),
+                ..gateway_spec(3128)
+            },
+            api::GatewaySpec {
+                size: Some(api::Size {
+                    vcpus: 0,
+                    memory_mb: 256,
+                }),
+                ..gateway_spec(3128)
+            },
+        ] {
+            assert!(matches!(
+                h.m.set_gateway("t1", bad).await,
+                Err(MError::Invalid(_))
+            ));
+        }
+        assert_eq!(h.gateway_view().machine_id, gw.machine_id);
+    }
+
+    #[tokio::test]
+    async fn a_start_through_the_gateway_boots_it_first() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        let m = h.m.create(h.consumer("sbx")).await.unwrap();
+        assert_eq!(m.state, state::RUNNING);
+        // The gateway's boot and its port, then the machine's pin, its policy naming the
+        // gateway's address, and its boot.
+        let (gtap, tap) = (netw::tap_name(&gw), netw::tap_name(&m.id));
+        assert_eq!(
+            h.host.calls(),
+            vec![
+                format!("ensure_tap {gtap} by1 10.64.1.2"),
+                format!("boot {gw} tap={gtap} resume=false"),
+                "wait_ready 1000".to_string(),
+                "wait_port 10.64.1.2:3128".to_string(),
+                format!("ensure_tap {tap} by1 10.64.1.3"),
+                format!("set_policy {VIA_GATEWAY}"),
+                format!("boot {} tap={tap} resume=false", m.id),
+                "wait_ready 1001".to_string(),
+            ]
+        );
+        assert_eq!(h.gateway_view().state, state::RUNNING);
+        // The tenant has one machine; the host runs two and commits both.
+        assert_eq!(h.m.tenant("t1").unwrap().machines, 1);
+        let (used, running, total) = h.m.usage();
+        assert_eq!((used.memory_mb, running, total), (512, 2, 1));
+        // The tables a daemon start renders name the gateway too.
+        let rules = h.m.rules().unwrap();
+        assert!(rules.policies.iter().any(|p| matches!(p,
+            nft::Policy::Via { to, .. } if to == "10.64.1.2")));
+        // Running already: the next start probes its port and boots nothing for it.
+        h.m.stop(&m.id, Duration::from_secs(1), false)
+            .await
+            .unwrap();
+        h.host.calls();
+        h.m.start(&m.id).await.unwrap();
+        let calls = h.host.calls();
+        assert_eq!(Harness::boots_of(&calls, &gw), 0, "{calls:?}");
+        assert_eq!(calls[0], "wait_port 10.64.1.2:3128");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_starts_through_the_gateway_boot_it_once() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        let mut ids = Vec::new();
+        for name in ["a", "b"] {
+            let mut req = h.consumer(name);
+            req.start = Some(false);
+            ids.push(h.m.create(req).await.unwrap().id);
+        }
+        h.host.boots(Boots::Ready(Duration::from_millis(50)));
+        let (ma, mb) = (h.m.clone(), h.m.clone());
+        let (a, b) = (ids[0].clone(), ids[1].clone());
+        let (ra, rb) = tokio::join!(
+            tokio::spawn(async move { ma.start(&a).await }),
+            tokio::spawn(async move { mb.start(&b).await })
+        );
+        assert_eq!(ra.unwrap().unwrap().state, state::RUNNING);
+        assert_eq!(rb.unwrap().unwrap().state, state::RUNNING);
+        let calls = h.host.calls();
+        assert_eq!(Harness::boots_of(&calls, &gw), 1, "{calls:?}");
+        assert_eq!(h.gateway_view().state, state::RUNNING);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_gateway_that_does_not_come_up_fails_the_start_and_says_so() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        let mut req = h.consumer("sbx");
+        req.start = Some(false);
+        let m = h.m.create(req).await.unwrap();
+        h.host.calls();
+        // Its program never listens: the gateway is ended, in error, with the port named.
+        h.host.silent_ports.store(true, Relaxed);
+        let failed = |r: Result<api::Machine, MError>| match r {
+            Err(MError::BootFailed(b)) => *b,
+            other => panic!("{other:?}"),
+        };
+        let b = failed(h.m.start(&m.id).await);
+        // The answer is the machine asked for, not moved, the gateway's reason in it.
+        assert_eq!(
+            (b.id.as_str(), b.state.as_str()),
+            (m.id.as_str(), state::CREATED)
+        );
+        assert!(
+            b.error
+                .starts_with("the tenant's gateway did not come up: port 3128 did not answer"),
+            "{}",
+            b.error
+        );
+        let g = h.gateway_view();
+        assert_eq!(g.state, state::ERROR);
+        assert!(
+            g.error.starts_with("port 3128 did not answer"),
+            "{}",
+            g.error
+        );
+        let calls = h.host.calls();
+        assert_eq!(Harness::boots_of(&calls, &m.id), 0, "{calls:?}");
+        assert!(!calls.iter().any(|c| c.contains("10.64.1.3")), "{calls:?}");
+        assert!(h.host.alive().is_empty());
+        assert_eq!(h.stored(&m.id).unwrap().state, state::CREATED);
+        // Its guest never comes up: the same answer, with the boot's reason.
+        h.host.silent_ports.store(false, Relaxed);
+        h.host.boots(Boots::Silent);
+        let b = failed(h.m.start(&m.id).await);
+        assert!(
+            b.error
+                .starts_with("the tenant's gateway did not come up: the guest did not come up: "),
+            "{}",
+            b.error
+        );
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::CREATED);
+        // Fixed: the next start brings the gateway back from `error`, then the machine.
+        h.host.boots(Boots::Ready(Duration::ZERO));
+        assert_eq!(h.m.start(&m.id).await.unwrap().state, state::RUNNING);
+        assert_eq!(h.gateway_view().state, state::RUNNING);
+        assert_eq!(h.m.get(&gw).unwrap().error, "");
+    }
+
+    #[tokio::test]
+    async fn the_sleeper_stops_the_gateway_once_nothing_needs_it() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        let a = h.m.create(h.consumer("a")).await.unwrap();
+        let b = h.m.create(h.consumer("b")).await.unwrap();
+        let mut open = h.request("open");
+        open.sleep = "never".into();
+        h.m.create(open).await.unwrap();
+        let long_ago = Some(Utc::now() - chrono::Duration::hours(1));
+        let idle = |id: &str| h.m.entry(id).unwrap().rec.lock().unwrap().last_used_at = long_ago;
+        // Nothing idle: the gateway stays.
+        h.m.tick().await;
+        assert_eq!(h.gateway_view().state, state::RUNNING);
+        // One consumer asleep, the other running: it stays.
+        idle(&a.id);
+        h.m.tick().await;
+        assert_eq!(h.m.get(&a.id).unwrap().stopped_reason, stop::IDLE);
+        assert_eq!(h.gateway_view().state, state::RUNNING);
+        // The last one asleep: the gateway goes in the same tick; a machine that does not
+        // send through it does not keep it.
+        idle(&b.id);
+        h.m.tick().await;
+        assert_eq!(h.m.get(&b.id).unwrap().stopped_reason, stop::IDLE);
+        let g = h.m.get(&gw).unwrap();
+        assert_eq!(
+            (g.state.as_str(), g.stopped_reason.as_str()),
+            (state::STOPPED, stop::IDLE)
+        );
+        // A wake of a consumer (an exec here, a connection alike) goes through the start.
+        h.host.calls();
+        let woken =
+            h.m.exec(
+                &a.id,
+                api::ExecRequest {
+                    cmd: vec!["true".into()],
+                    wake: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(woken.exit_code, 0);
+        assert_eq!(Harness::boots_of(&h.host.calls(), &gw), 1);
+        assert_eq!(h.gateway_view().state, state::RUNNING);
+    }
+
+    #[tokio::test]
+    async fn the_sleeper_leaves_a_gateway_whose_tenant_is_busy() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        let m = h.m.create(h.consumer("sbx")).await.unwrap();
+        h.m.stop(&m.id, Duration::from_secs(1), false)
+            .await
+            .unwrap();
+        // A start that needs the gateway holds the tenant's lock until it is `starting`:
+        // nothing runs through the gateway yet, and still it is not stopped under that start.
+        let t = h.m.tenant_of("t1").unwrap();
+        let held = t.lock.lock().await;
+        h.m.tick().await;
+        assert_eq!(h.m.get(&gw).unwrap().state, state::RUNNING);
+        drop(held);
+        h.m.tick().await;
+        assert_eq!(h.m.get(&gw).unwrap().state, state::STOPPED);
+    }
+
+    #[tokio::test]
+    async fn a_gateway_in_use_is_kept_and_one_unused_removed() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        let m = h.m.create(h.consumer("sbx")).await.unwrap();
+        assert!(matches!(
+            h.m.delete_gateway("t1").await,
+            Err(MError::GatewayInUse)
+        ));
+        assert_eq!(h.gateway_view().state, state::RUNNING);
+        h.m.stop(&m.id, Duration::from_secs(1), false)
+            .await
+            .unwrap();
+        h.m.delete_gateway("t1").await.unwrap();
+        // Stopped and destroyed: no record, no process, no disks.
+        assert!(h.m.tenant("t1").unwrap().gateway.is_none());
+        assert!(matches!(h.m.get(&gw), Err(MError::NotFound)));
+        assert!(h.stored(&gw).is_none());
+        assert!(h.host.alive().is_empty());
+        assert!(!h.pool.dev().join(format!("byard/m/{gw}")).exists());
+        // Its consumer's next start is refused, with what to do; none is success.
+        assert_eq!(
+            refused(h.m.start(&m.id).await),
+            "tenant has no gateway: PUT /v1/tenants/t1/gateway first"
+        );
+        assert_eq!(h.stored(&m.id).unwrap().state, state::STOPPED);
+        h.m.delete_gateway("t1").await.unwrap();
+        h.m.delete_gateway("t-none").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_tenants_removal_destroys_its_gateway() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        // The tenant's own machine keeps the tenant, and the gateway with it.
+        assert!(matches!(
+            h.m.delete_tenant("t1").await,
+            Err(MError::TenantInUse)
+        ));
+        assert!(h.m.get(&gw).is_ok());
+        h.m.destroy(&m.id).await.unwrap();
+        h.m.delete_tenant("t1").await.unwrap();
+        assert!(matches!(h.m.get(&gw), Err(MError::NotFound)));
+        assert!(!h.pool.dev().join(format!("byard/m/{gw}")).exists());
+        assert!(h.m.tenants().is_empty());
+    }
+
+    #[tokio::test]
+    async fn via_gateway_needs_the_tenant_to_have_one() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let want = "tenant has no gateway: PUT /v1/tenants/t1/gateway first";
+        assert_eq!(refused(h.m.create(h.consumer("sbx")).await), want);
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let patch = h.m.update(&m.id, set_egress("via", Some("gateway"))).await;
+        assert_eq!(refused(patch), want);
+        assert_eq!(h.stored(&m.id).unwrap().egress, api::Egress::default());
+        // The gateway itself cannot send through itself: a start of it refuses.
+        let t = h.m.set_gateway("t1", gateway_spec(3128)).await.unwrap();
+        let gw = h.m.entry(&t.gateway.unwrap().machine_id).unwrap();
+        gw.rec.lock().unwrap().egress = egress("via", Some("gateway"));
+        assert_eq!(
+            refused(h.m.start_entry(&gw).await),
+            "egress.via names the machine itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_patch_to_via_gateway_runs_the_gateway_before_the_policy() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        let mut req = h.request("sbx");
+        req.sleep = "never".into();
+        let m = h.m.create(req).await.unwrap();
+        h.host.calls();
+        let patched =
+            h.m.update(&m.id, set_egress("via", Some("gateway")))
+                .await
+                .unwrap();
+        assert!(patched.egress.via_gateway());
+        let calls = h.host.calls();
+        let at = |line: &str| calls.iter().position(|c| c == line).unwrap_or(usize::MAX);
+        assert!(
+            at("wait_port 10.64.1.2:3128") < at(&format!("set_policy {VIA_GATEWAY}")),
+            "{calls:?}"
+        );
+        assert_eq!(Harness::boots_of(&calls, &gw), 1);
+        // From now on it needs the gateway: the sleeper keeps it.
+        h.m.tick().await;
+        assert_eq!(h.gateway_view().state, state::RUNNING);
+    }
+
+    #[tokio::test]
+    async fn a_put_on_a_running_gateway_restarts_it_with_the_new_spec() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        h.m.inner
+            .images
+            .seed(IMAGE2, ImageConfig::default())
+            .await
+            .unwrap();
+        h.m.create(h.consumer("sbx")).await.unwrap();
+        h.host.calls();
+        h.pool.calls();
+        let spec = api::GatewaySpec {
+            image: IMAGE2.into(),
+            ..gateway_spec(8080)
+        };
+        let t = h.m.set_gateway("t1", spec).await.unwrap();
+        // Same machine, same address; the new port and image, running again.
+        let g = t.gateway.unwrap();
+        assert_eq!(
+            (
+                g.machine_id.as_str(),
+                g.ip.as_str(),
+                g.port,
+                g.state.as_str()
+            ),
+            (gw.as_str(), "10.64.1.2", 8080, state::RUNNING)
+        );
+        let calls = h.host.calls();
+        assert!(calls[0].starts_with("shutdown "), "{calls:?}");
+        assert_eq!(Harness::boots_of(&calls, &gw), 1);
+        assert_eq!(calls.last().unwrap(), "wait_port 10.64.1.2:8080");
+        let key2 = h.stored(&gw).unwrap().image_key;
+        let zfs = h.pool.calls();
+        assert!(
+            zfs.contains(&format!("destroy -r byard/m/{gw}/root")),
+            "{zfs:?}"
+        );
+        assert!(
+            zfs.contains(&format!("clone byard/images/{key2}@base byard/m/{gw}/root")),
+            "{zfs:?}"
+        );
+        assert_eq!(h.m.get(&gw).unwrap().image, IMAGE2);
+        // Asleep with a memory snapshot, then replaced: the next start boots it cold.
+        let sbx = h.m.list(None)[0].id.clone();
+        h.m.stop(&sbx, Duration::from_secs(1), false).await.unwrap();
+        let e = h.m.entry(&gw).unwrap();
+        h.m.stop_entry(&e, stop::USER, Duration::from_secs(1), true)
+            .await
+            .unwrap();
+        assert!(h.m.get(&gw).unwrap().suspended);
+        h.m.set_gateway("t1", gateway_spec(8080)).await.unwrap();
+        assert!(!h.m.get(&gw).unwrap().suspended);
+        h.host.calls();
+        h.m.start(&sbx).await.unwrap();
+        let calls = h.host.calls();
+        assert!(
+            calls.contains(&format!(
+                "boot {gw} tap={} resume=false",
+                netw::tap_name(&gw)
+            )),
+            "{calls:?}"
+        );
+        // The volume is the gateway's for its life.
+        let spec = api::GatewaySpec {
+            volume_gb: Some(1),
+            ..gateway_spec(8080)
+        };
+        assert!(refused(h.m.set_gateway("t1", spec).await).starts_with("volume_gb is fixed"));
+    }
+
+    #[tokio::test]
+    async fn the_gateways_address_stays_reserved_while_a_policy_names_it() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        h.m.create(h.consumer("sbx")).await.unwrap();
+        // Destroyed under a running consumer (by its machine id): a new gateway gets another
+        // address, so the consumer's policy reaches nothing rather than a stranger.
+        h.m.destroy_machine(&gw).await.unwrap();
+        let t = h.m.set_gateway("t1", gateway_spec(3128)).await.unwrap();
+        assert_eq!(t.gateway.unwrap().ip, "10.64.1.4");
+    }
+
+    #[tokio::test]
+    async fn the_gateway_is_read_only_through_the_machine_routes() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        // Read: the machine, its console, its use.
+        assert_eq!(h.m.get(&gw).unwrap().name, "gateway");
+        assert!(h.m.logs(&gw, "", 10).is_ok());
+        assert!(h.m.stats(&gw).await.is_ok());
+        h.pool.calls();
+        // Everything that changes or runs something in it is the tenant route's.
+        let gateway = |r: Result<(), MError>| match r {
+            Err(MError::Gateway(t)) => t,
+            other => panic!("{other:?}"),
+        };
+        let exec = api::ExecRequest {
+            cmd: vec!["true".into()],
+            wake: true,
+            ..Default::default()
+        };
+        let put = api::PutFileRequest {
+            path: "/x".into(),
+            base64: String::new(),
+            mode: None,
+        };
+        let mut fork = h.request("fork");
+        fork.image = String::new();
+        fork.fork = Some(api::ForkSpec {
+            machine_id: gw.clone(),
+            copy: String::new(),
+        });
+        let refused = [
+            gateway(h.m.destroy(&gw).await),
+            gateway(
+                h.m.stop(&gw, Duration::from_secs(1), false)
+                    .await
+                    .map(|_| ()),
+            ),
+            gateway(h.m.start(&gw).await.map(|_| ())),
+            gateway(h.m.wake(&gw).await.map(|_| ())),
+            gateway(h.m.touch(&gw)),
+            gateway(h.m.update(&gw, set_egress("none", None)).await.map(|_| ())),
+            gateway(h.m.create(fork).await.map(|_| ())),
+            gateway(h.m.exec(&gw, exec).await.map(|_| ())),
+            gateway(h.m.put_file(&gw, put).await),
+            gateway(h.m.get_file(&gw, "/etc/hostname").await.map(|_| ())),
+            gateway(h.m.snapshot(&gw).await.map(|_| ())),
+            gateway(h.m.snapshots(&gw).await.map(|_| ())),
+            gateway(h.m.delete_snapshot(&gw, "s_1").await),
+            gateway(h.m.backup(&gw).await.map(|_| ())),
+            gateway(
+                h.m.create_endpoint(
+                    &gw,
+                    api::CreateEndpointRequest {
+                        port: 3128,
+                        ..Default::default()
+                    },
+                )
+                .map(|_| ()),
+            ),
+        ];
+        assert!(refused.iter().all(|t| t == "t1"), "{refused:?}");
+        assert_eq!(
+            MError::Gateway("t1".into()).to_string(),
+            "the tenant's gateway: use /v1/tenants/t1/gateway"
+        );
+        // Untouched: not started, not destroyed, no other machine made, no snapshot taken.
+        assert_eq!(h.gateway_view().state, state::CREATED);
+        assert!(h.host.calls().is_empty());
+        assert!(h.m.list(None).is_empty());
+        assert!(h.pool.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recovery_starts_the_gateway_an_adopted_machine_needs() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.tenant("t1");
+        h.tenant("t2");
+        let gateway = |id: &str, tenant: &str| {
+            // Found running, its process gone with the daemon: nothing to adopt.
+            let e = h.add(id, state::RUNNING, 256);
+            e.set_state(state::RUNNING, |r| {
+                (r.role, r.tenant, r.name) = (Some(Role::Gateway), tenant.into(), "gateway".into());
+                (r.ports, r.pid) = (vec![3128], 4242);
+            });
+            e
+        };
+        let adopted = |id: &str, tenant: &str, n: u8, eg: api::Egress| {
+            let e = h.add(id, state::RUNNING, 256);
+            let pid = h.host.left_running(id, &h.m.inner.cfg.run_dir().join(id));
+            e.set_state(state::RUNNING, |r| {
+                (r.tenant, r.name, r.egress, r.pid) = (tenant.into(), id.into(), eg, pid);
+                (r.host_num, r.ip) = (n, format!("10.64.1.{n}"));
+            });
+            e
+        };
+        let needed = gateway("m_gw", "t1");
+        h.disks(&needed).await;
+        let sbx = adopted("m_sbx", "t1", 3, egress("via", Some("gateway")));
+        // A tenant whose adopted machine does not send through its gateway.
+        let unneeded = gateway("m_gw2", "t2");
+        adopted("m_open", "t2", 4, api::Egress::default());
+        h.m.recover().await;
+        // Started detached, as a start that needs it would: boot, then its port.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while needed.snapshot().state != state::RUNNING {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the gateway runs");
+        let calls = h.host.calls();
+        assert!(
+            calls.contains(&"wait_port 10.64.1.2:3128".to_string()),
+            "{calls:?}"
+        );
+        assert!(
+            sbx.live.lock().unwrap().is_some(),
+            "the machine was adopted"
+        );
+        assert_eq!(sbx.snapshot().state, state::RUNNING);
+        let r = unneeded.snapshot();
+        assert_eq!(
+            (r.state.as_str(), r.stopped_reason.as_str()),
+            (state::STOPPED, stop::HOST)
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("boot m_gw2 ")),
+            "{calls:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_put_with_start_runs_the_gateway_before_any_machine_needs_it() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let start = api::GatewaySpec {
+            start: true,
+            ..gateway_spec(3128)
+        };
+        let t = h.m.set_gateway("t1", start.clone()).await.unwrap();
+        let gw = t.gateway.unwrap();
+        assert_eq!(gw.state, state::RUNNING);
+        let tap = netw::tap_name(&gw.machine_id);
+        assert_eq!(
+            h.host.calls(),
+            [
+                format!("ensure_tap {tap} by1 10.64.1.2"),
+                format!("boot {} tap={tap} resume=false", gw.machine_id),
+                "wait_ready 1000".to_string(),
+                "wait_port 10.64.1.2:3128".to_string(),
+            ]
+        );
+        // Running with the spec it has: left as is, its port asked again.
+        h.m.set_gateway("t1", start.clone()).await.unwrap();
+        assert_eq!(h.host.calls(), ["wait_port 10.64.1.2:3128"]);
+        // Nothing needs it: the sleeper may stop it, and a machine's start brings it back.
+        h.m.tick().await;
+        assert_eq!(h.gateway_view().state, state::STOPPED);
+        // A program that never listens: boot_failed names the gateway, with its console.
+        h.m.inner.store.delete("machines", &gw.machine_id).unwrap();
+        h.host.silent_ports.store(true, Relaxed);
+        let b = match h.m.set_gateway("t1", start).await {
+            Err(MError::BootFailed(b)) => b,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            (b.id.as_str(), b.state.as_str()),
+            (gw.machine_id.as_str(), state::ERROR)
+        );
+        assert!(
+            b.error.starts_with("port 3128 did not answer"),
+            "{}",
+            b.error
+        );
+        assert_eq!(h.gateway_view().state, state::ERROR);
     }
 }

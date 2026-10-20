@@ -1,6 +1,6 @@
 # ADR 0016: A tenant's gateway is the daemon's, not a machine of the tenant
 
-Date: 2026-10-20 · Status: accepted (Sylvain, 2026-10-20)
+Date: 2026-10-20 · Status: accepted (Sylvain, 2026-10-20); amended with the implementation the same day (marked *Built*)
 
 ## Context
 
@@ -10,13 +10,19 @@ Competitors run a shared injector on the host (E2B, SPACE). We keep one per tena
 
 ## Decisions
 
-**A tenant may declare one gateway**: `PUT /v1/tenants/{id}/gateway { image, env, size, port, volume_gb }`, `DELETE` to remove it, `GET /v1/tenants/{id}` shows it (`state`, `ip`, `port`). The spec is the subset of a machine's create that a proxy needs; env values are secrets like any machine's (config drive, 0600).
+**A tenant may declare one gateway**: `PUT /v1/tenants/{id}/gateway { image, cmd, env, size, port, volume_gb }`, `DELETE` to remove it, `GET /v1/tenants/{id}` shows it (`state`, `ip`, `port`, `machine_id`, `error`). The spec is the subset of a machine's create that a proxy needs; env values are secrets like any machine's (config drive, 0600).
+
+*Built:* `cmd` was missing: a stock proxy image needs its command (the e2e runs one). The tenant's existing `gateway` field (the bridge's `.1`, read by nobody) is now `router`, so `gateway` is this one. A PUT on a tenant with nothing yet makes the tenant; a PUT on an existing gateway keeps its machine, address and volume (`volume_gb` cannot change) and restarts it if it runs. `DELETE` answers 409 `gateway_in_use` while a `via: gateway` machine runs or starts. The spec it has already changes nothing, so a control plane may put it again. `start: true` runs it at once (tenant lock, port wait; `boot_failed` with its console otherwise): briq's program makes its CA on first boot, and the first consumer's create needs that CA as a boot file. The sleeper may stop it again: the CA is on its volume.
 
 **It is a machine of the daemon, not of the tenant.** One record per tenant with `role: gateway`, on the tenant's bridge, with an address of the tenant's /24 and the name `gateway.internal` in the tenant's DNS. Absent from `GET /v1/machines`: the tenant's listing stays the tenant's machines, which is what a control plane reconciles against. Destroyed with the tenant.
+
+*Built:* the machine is named `gateway`, so its DNS name is a machine's like any other and the name is taken in the tenant. Absent from the tenant's `machines` count and the status' `machines`; its memory counts. `GET /v1/machines/{id}`, `/logs`, `/stats` and `/wait` answer for it; every other machine route on its id answers 409 `gateway`, so the tenant's route is the only way to change it.
 
 **`via: "gateway"` names it.** A machine created or patched with it sends through the gateway only (ADR 0015); the policy resolves the gateway's address at apply time.
 
 **It runs while something needs it.** Starting a `via: gateway` machine starts the gateway first and waits for its port, under the tenant's lock; the sleeper stops it when no running machine of the tenant points at it. A gateway that cannot boot fails the start of its consumer with `boot_failed`, the gateway's console in the message. A machine-to-machine connection does not wake a sleeping sibling (only the ingress does), so this rule is what keeps the consumer's first request working.
+
+*Built:* the tenant's lock is held until the consumer is `starting`, and the sleeper counts `starting` as well as `running`: otherwise a tick between the gateway's port answering and the consumer's reservation stops the gateway under it. The sleeper skips a tenant whose lock is held. The `boot_failed` body's `machine` is the consumer, unmoved (`stopped` or `created`), the gateway's reason in its `error`: the provider destroys the machine a failed create names, which must not be the gateway. A gateway whose port does not answer within `boot_timeout_sec` after its boot is ended and left in `error`, like a boot that fails; the next consumer start tries again. A PATCH to `via: gateway` on a running machine runs the gateway before the policy changes. The gateway runs with `restart: always`, so a program that dies while consumers run comes back. A daemon start that adopts a running consumer starts its gateway again if the gateway's process did not survive.
 
 **The program is the tenant's choice.** The daemon knows nothing of credentials: briq passes its credential-gateway image and token; another operator may run any forward proxy.
 
@@ -26,3 +32,4 @@ Competitors run a shared injector on the host (E2B, SPACE). We keep one per tena
 - The gateway's cost is ours, not the tenant's: nothing meters it (it is not a briq).
 - One gateway per tenant; a second kind of system machine would generalize `role`, not before it is needed.
 - e2e: a tenant gateway (a forward proxy image), a `via: gateway` machine whose start boots it, a request through it, the gateway stopped by the sleeper once its consumer stops, absent from the machine list, gone with the tenant.
+- *Built:* the fleet forwards `GET /v1/tenants/{id}` and `/gateway` to the tenant's host; a PUT for a tenant with no host places it as a first machine would, the gateway's size as the need.

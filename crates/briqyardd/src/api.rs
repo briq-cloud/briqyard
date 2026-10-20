@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use briqyard_api as api;
 use serde::Deserialize;
@@ -110,7 +110,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/images", get(list_images))
         .route("/v1/images/:key", axum::routing::delete(delete_image))
         .route("/v1/tenants", get(list_tenants))
-        .route("/v1/tenants/:id", axum::routing::delete(delete_tenant))
+        .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
+        .route(
+            "/v1/tenants/:id/gateway",
+            put(set_gateway).delete(delete_gateway),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), auth_and_log))
         .with_state(state)
 }
@@ -136,6 +140,8 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::BootFailed(_) => (StatusCode::CONFLICT, "boot_failed"),
         MError::Capacity(_) => (StatusCode::SERVICE_UNAVAILABLE, "capacity"),
         MError::TenantInUse => (StatusCode::CONFLICT, "tenant_in_use"),
+        MError::GatewayInUse => (StatusCode::CONFLICT, "gateway_in_use"),
+        MError::Gateway(_) => (StatusCode::CONFLICT, "gateway"),
         MError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
     }
 }
@@ -511,9 +517,30 @@ async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {
     Json(st.mgr.tenants())
 }
 
+async fn get_tenant(State(st): S, Path(id): Path<String>) -> Result<Json<api::Tenant>, AppError> {
+    Ok(Json(st.mgr.tenant(&id)?))
+}
+
 async fn delete_tenant(State(st): S, Path(id): Path<String>) -> Result<StatusCode, AppError> {
     let m = st.mgr.clone();
     detached(async move { m.delete_tenant(&id).await }).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn set_gateway(
+    State(st): S,
+    Path(id): Path<String>,
+    Json(spec): Json<api::GatewaySpec>,
+) -> Result<Json<api::Tenant>, AppError> {
+    let m = st.mgr.clone();
+    Ok(Json(
+        detached(async move { m.set_gateway(&id, spec).await }).await?,
+    ))
+}
+
+async fn delete_gateway(State(st): S, Path(id): Path<String>) -> Result<StatusCode, AppError> {
+    let m = st.mgr.clone();
+    detached(async move { m.delete_gateway(&id).await }).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -570,6 +597,11 @@ mod tests {
         assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "boot_failed"));
         assert_eq!(e.error, "boot failed: the guest did not come up: tail");
         assert_eq!(e.machine.as_ref().map(|m| m.id.as_str()), Some("m_1"));
+        let e = AppError::from(MError::GatewayInUse);
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway_in_use"));
+        let e = AppError::from(MError::Gateway("t1".into()));
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway"));
+        assert_eq!(e.error, "the tenant's gateway: use /v1/tenants/t1/gateway");
         let e = AppError::from(MError::Capacity("1 MB used of 1".into()));
         assert_eq!(
             (e.status, e.code),
