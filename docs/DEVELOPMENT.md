@@ -108,7 +108,12 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   format, no probe per scrape, conditions turning true and clearing with their events, a pool
   that cannot be read, image removal under disk pressure oldest unused first, `top` from two
   ticks, the console rotated while two tasks write with no line lost, logs across the rotated
-  file, placement and creates refused on a host under pressure). What still needs the host: a tenant's first create (its bridge and
+  file, placement and creates refused on a host under pressure), probes (readiness and
+  its events, `/wait` for ready and its `not_ready`, a startup failure that fails the boot and
+  one that is a crash, liveness under `on-failure` and `no`, the backoff, its reset and
+  `crash_loop`, the ingress waiting for a woken machine, the host's turns, a PATCH on a running
+  machine, the gateway waited for ready, an adopted machine; the HTTP client and the TCP
+  connect against loopback servers). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
@@ -122,10 +127,11 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   ingress bytes, a stopped machine's disk hours), events (a watch from before a stop gets it,
   a stale `If-Match` refused, `describe`, the reasons in order, a cursor past the log
   refused), metrics (a running machine's CPU and state series, `top` lists it with rates after
-  two ticks, no condition true on a healthy host), backups on a schedule (every second backup whole and a
-  kept one's base kept, a base not deleted alone, the oldest kept restored from its chain,
-  retention down to 2, its event, a destroyed machine's backups listed then deleted with their
-  chain). 109 checks.
+  two ticks, no condition true on a healthy host), probes (an HTTP readiness probe: not ready, then
+  ready and its event, `wait`; an exec liveness probe that fails: `liveness_failed`, restarted,
+  running again), backups on a schedule (every second backup whole and a kept one's base kept,
+  a base not deleted alone, the oldest kept restored from its chain, retention down to 2, its
+  event, a destroyed machine's backups listed then deleted with their chain). 116 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,

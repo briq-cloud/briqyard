@@ -32,7 +32,7 @@ docs/                   architecture, operations, development, mesh design, adr/
 - `cargo test --workspace` runs anywhere, but CI is Linux: run it in the VM too before pushing (`CARGO_TARGET_DIR=$HOME/target-ci`). macOS hides Linux behaviours tests trip on (a just-written script refused as "Text file busy", coarse file times). The init's tests are Linux-only.
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` are CI.
 - `hack/vm.sh install` builds in the VM, installs both units, restarts them. **Always after a config field change**: an old binary refuses a new field and systemd's start limit then needs `systemctl reset-failed`.
-- `hack/e2e.sh` (109 checks, one daemon), `hack/fleet-smoke.sh` (19, through the fleet), `hack/fleet-two-hosts.sh` (16, needs `fc2`). Run the first two on every daemon change; the third on every fleet change.
+- `hack/e2e.sh` (116 checks, one daemon), `hack/fleet-smoke.sh` (19, through the fleet), `hack/fleet-two-hosts.sh` (16, needs `fc2`). Run the first two on every daemon change; the third on every fleet change.
 - `hack/stress.py` with `hack/stress-invariants.sh`: many tenants through every feature, host invariants between phases. Run it after any change to the manager, the network or the store.
 - Coverage: `cargo llvm-cov` in the VM. Last measure in `docs/research/2026-10-19-stress-spike.md`.
 - `limactl stop fc fc2` when done.

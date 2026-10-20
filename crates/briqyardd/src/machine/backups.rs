@@ -1160,7 +1160,7 @@ mod tests {
             store.list(&format!("backups/{id}/")).await.unwrap()
         }
 
-        fn last_event(&self, id: &str, reason: &str) -> api::Event {
+        fn last_of(&self, id: &str, reason: &str) -> api::Event {
             self.events_of(id)
                 .into_iter()
                 .rev()
@@ -1221,7 +1221,7 @@ mod tests {
             next >= before + chrono::Duration::days(1)
                 && next <= Utc::now() + chrono::Duration::days(1)
         );
-        let ev = h.last_event(&m.id, reason::UPDATED);
+        let ev = h.last_of(&m.id, reason::UPDATED);
         assert_eq!(ev.data.unwrap()["fields"], json!(["backup"]));
         // The same policy again is no change: no event, the same next time.
         let again =
@@ -1274,7 +1274,7 @@ mod tests {
         let v = h.m.get(&m.id).unwrap();
         assert_eq!(v.last_backup_at, Some(all[0].created_at));
         assert_eq!(v.next_backup_at, Some(t + chrono::Duration::hours(1)));
-        let ev = h.last_event(&m.id, reason::BACKED_UP);
+        let ev = h.last_of(&m.id, reason::BACKED_UP);
         assert_eq!(ev.data.unwrap()["bytes"], json!(all[0].bytes));
         // Done for this hour: the same tick, or one a minute short of the next, starts none.
         assert_eq!(run(h.m.backup_step(t)).await, 0);
@@ -1406,7 +1406,7 @@ mod tests {
             .collect();
         want.sort();
         assert_eq!(h.objects(&m.id).await, want);
-        let ev = h.last_event(&m.id, reason::BACKUP_DELETED).data.unwrap();
+        let ev = h.last_of(&m.id, reason::BACKUP_DELETED).data.unwrap();
         assert_eq!(ev["reason"], "retention");
         assert_eq!(ev["backups"], json!([made[1], made[0]]), "newest first");
         assert_eq!(
@@ -1449,7 +1449,7 @@ mod tests {
             h.stored(&m.id).unwrap().backup.last.as_ref(),
             Some(&made[1])
         );
-        let ev = h.last_event(&m.id, reason::BACKUP_DELETED).data.unwrap();
+        let ev = h.last_of(&m.id, reason::BACKUP_DELETED).data.unwrap();
         assert_eq!(
             (ev["reason"].clone(), ev["backups"].clone()),
             (json!("request"), json!([made[2]]))
@@ -1459,7 +1459,7 @@ mod tests {
         assert!(!next.incremental);
         h.m.delete_backup(&m.id, &made[0], true).await.unwrap();
         assert_eq!(h.ids(&h.listed(&m.id).await), vec![next.id.clone()]);
-        let ev = h.last_event(&m.id, reason::BACKUP_DELETED).data.unwrap();
+        let ev = h.last_of(&m.id, reason::BACKUP_DELETED).data.unwrap();
         assert_eq!(ev["backups"], json!([made[1], made[0]]));
         assert_eq!(h.stored(&m.id).unwrap().backup_bytes, next.bytes);
     }
@@ -1476,7 +1476,7 @@ mod tests {
             r.backup.next_at = Some(t);
         }
         assert_eq!(run(h.m.backup_step(t)).await, 1);
-        let ev = h.last_event("m_boom", reason::BACKUP_FAILED);
+        let ev = h.last_of("m_boom", reason::BACKUP_FAILED);
         assert_eq!(ev.kind, api::event::WARNING);
         assert!(ev.message.contains("permission denied"), "{}", ev.message);
         assert!(ev.data.unwrap()["error"]
@@ -1511,7 +1511,7 @@ mod tests {
         std::fs::write(store.join(format!("backups/{}/root", m.id)), "").unwrap();
         assert!(h.m.backup(&m.id).await.is_err());
         assert_eq!(
-            h.last_event(&m.id, reason::BACKUP_FAILED).kind,
+            h.last_of(&m.id, reason::BACKUP_FAILED).kind,
             api::event::WARNING
         );
         let root = h.m.get(&m.id).map(|_| format!("m/{}/root", m.id)).unwrap();
@@ -1574,7 +1574,7 @@ mod tests {
         // Deleted by request too, and held across a restart of the daemon.
         h.m.delete_backup(&m.id, &second.id, false).await.unwrap();
         assert_eq!(
-            h.last_event(&m.id, reason::BACKUP_DELETED).data.unwrap()["reason"],
+            h.last_of(&m.id, reason::BACKUP_DELETED).data.unwrap()["reason"],
             "request"
         );
         let again = Backups::open(&h.m.inner.cfg.backup, &h.m.inner.store).unwrap();
@@ -1599,7 +1599,7 @@ mod tests {
             .get::<HolderRec>(HOLDERS, &m.id)
             .unwrap()
             .is_none());
-        let ev = h.last_event(&m.id, reason::BACKUP_DELETED).data.unwrap();
+        let ev = h.last_of(&m.id, reason::BACKUP_DELETED).data.unwrap();
         assert_eq!(
             (ev["reason"].clone(), ev["backups"].clone()),
             (json!("expired"), json!([first.id]))

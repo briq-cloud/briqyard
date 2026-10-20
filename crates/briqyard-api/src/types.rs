@@ -94,6 +94,185 @@ where
     T::deserialize(d).map(Some)
 }
 
+/// A check the daemon runs on a running machine (ADR 0022): exactly one of `exec`, `tcp` and
+/// `http`, every `period_sec`, from `initial_delay_sec` after it may start.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Probe {
+    /// A command run in the machine through its init: exit 0 passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<Vec<String>>,
+    /// A TCP connect from the host to this port of the machine's address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp: Option<u16>,
+    /// A GET from the host: 200 to 399 passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<HttpProbe>,
+    #[serde(default = "default_period")]
+    pub period_sec: u32,
+    /// For one execution, counted once it holds its turn.
+    #[serde(default = "default_probe_timeout")]
+    pub timeout_sec: u32,
+    /// Failures in a row that fail it.
+    #[serde(default = "default_failures")]
+    pub failure_threshold: u32,
+    /// Passes in a row that pass it; 1 for startup and liveness.
+    #[serde(default = "default_successes")]
+    pub success_threshold: u32,
+    #[serde(default)]
+    pub initial_delay_sec: u32,
+}
+
+/// An HTTP probe's target on the machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpProbe {
+    pub port: u16,
+    #[serde(default = "default_probe_path")]
+    pub path: String,
+}
+
+fn default_period() -> u32 {
+    10
+}
+fn default_probe_timeout() -> u32 {
+    5
+}
+fn default_failures() -> u32 {
+    3
+}
+fn default_successes() -> u32 {
+    1
+}
+fn default_probe_path() -> String {
+    "/".into()
+}
+
+impl Default for Probe {
+    /// No action yet, Kubernetes's timings.
+    fn default() -> Self {
+        Self {
+            exec: None,
+            tcp: None,
+            http: None,
+            period_sec: default_period(),
+            timeout_sec: default_probe_timeout(),
+            failure_threshold: default_failures(),
+            success_threshold: default_successes(),
+            initial_delay_sec: 0,
+        }
+    }
+}
+
+impl Probe {
+    /// One action, well formed, and timings the daemon can run; the message names the field
+    /// under `name` (`probes.readiness`).
+    pub fn check(&self, name: &str, one_success: bool) -> Result<(), String> {
+        let actions = [self.exec.is_some(), self.tcp.is_some(), self.http.is_some()];
+        if actions.iter().filter(|a| **a).count() != 1 {
+            return Err(format!("{name}: exactly one of exec, tcp and http"));
+        }
+        if self.exec.as_ref().is_some_and(|c| c.is_empty()) {
+            return Err(format!("{name}.exec: an empty command"));
+        }
+        if self.tcp == Some(0) {
+            return Err(format!("{name}.tcp: 0 is not a port"));
+        }
+        if let Some(h) = &self.http {
+            if h.port == 0 {
+                return Err(format!("{name}.http.port: 0 is not a port"));
+            }
+            if !h.path.starts_with('/') || !h.path.bytes().all(|c| c.is_ascii_graphic()) {
+                return Err(format!(
+                    "{name}.http.path: a path, \"/\" then printable ASCII without spaces"
+                ));
+            }
+        }
+        for (field, v) in [
+            ("period_sec", self.period_sec),
+            ("timeout_sec", self.timeout_sec),
+            ("failure_threshold", self.failure_threshold),
+            ("success_threshold", self.success_threshold),
+        ] {
+            if v == 0 {
+                return Err(format!("{name}.{field}: at least 1"));
+            }
+        }
+        if one_success && self.success_threshold != 1 {
+            return Err(format!("{name}.success_threshold: must be 1"));
+        }
+        Ok(())
+    }
+
+    /// What it checks, for a person: `exec test -f /tmp/alive`, `tcp :5432`, `http :8080/`.
+    pub fn target(&self) -> String {
+        match (&self.exec, self.tcp, &self.http) {
+            (Some(cmd), _, _) => format!("exec {}", cmd.join(" ")),
+            (_, Some(port), _) => format!("tcp :{port}"),
+            (_, _, Some(h)) => format!("http :{}{}", h.port, h.path),
+            _ => "nothing".into(),
+        }
+    }
+}
+
+/// A machine's probes (ADR 0022): startup gates the other two, readiness sets `ready`, liveness
+/// restarts the machine under its restart policy.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Probes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<Probe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<Probe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<Probe>,
+}
+
+impl Probes {
+    pub fn is_empty(&self) -> bool {
+        self.startup.is_none() && self.readiness.is_none() && self.liveness.is_none()
+    }
+
+    /// Each probe checked, its field named under `probes`.
+    pub fn check(&self) -> Result<(), String> {
+        for (name, p, one_success) in [
+            ("startup", &self.startup, true),
+            ("readiness", &self.readiness, false),
+            ("liveness", &self.liveness, true),
+        ] {
+            if let Some(p) = p {
+                p.check(&format!("probes.{name}"), one_success)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The last execution of a probe in the current run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeStatus {
+    pub passed: bool,
+    /// What it answered: `exit 1: …`, `HTTP 503`, `connection refused`.
+    pub message: String,
+    /// Failures in a row; 0 after a pass.
+    pub failures: u32,
+    pub at: DateTime<Utc>,
+}
+
+/// Each probe's last result in the current run; absent before its first execution.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbesStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<ProbeStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ProbeStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<ProbeStatus>,
+}
+
+impl ProbesStatus {
+    pub fn is_empty(&self) -> bool {
+        self.startup.is_none() && self.readiness.is_none() && self.liveness.is_none()
+    }
+}
+
 /// Egress modes.
 pub mod egress {
     /// The tenant, and the internet through NAT (the default).
@@ -258,6 +437,9 @@ pub struct CreateMachineRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub backup: Option<Option<BackupPolicy>>,
+    /// Startup, readiness and liveness checks (ADR 0022); a restore takes the backup's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probes: Option<Probes>,
     /// Start right after creating (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<bool>,
@@ -340,6 +522,20 @@ pub struct Machine {
     pub ports: Vec<u16>,
     pub sleep: String,
     pub restart: RestartPolicy,
+    /// Restarts in a row by the restart policy.
+    #[serde(default)]
+    pub restarts: u32,
+    /// When the restart policy starts it again, while it waits to (ADR 0022's backoff).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarting_at: Option<DateTime<Utc>>,
+    /// Running, and its probes say it serves: true without a startup or readiness probe.
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default, skip_serializing_if = "Probes::is_empty")]
+    pub probes: Probes,
+    /// The last result of each probe in the current run.
+    #[serde(default, skip_serializing_if = "ProbesStatus::is_empty")]
+    pub probes_status: ProbesStatus,
     #[serde(default)]
     pub egress: Egress,
     /// The limits in force: the machine's own values over the host's.
@@ -543,6 +739,9 @@ pub struct UpdateMachineRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub backup: Option<Option<BackupPolicy>>,
+    /// Replaces the probes; a running machine's start over at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probes: Option<Probes>,
 }
 
 /// Stops a machine.
@@ -603,6 +802,10 @@ pub struct GatewaySpec {
     /// A data volume at `/data`, fixed for the gateway's life.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume_gb: Option<u32>,
+    /// As a machine's; with a startup or readiness probe, a start that needs the gateway waits
+    /// for its `ready` instead of its port.
+    #[serde(default, skip_serializing_if = "Probes::is_empty")]
+    pub probes: Probes,
     /// Start it now and answer once its port accepts (a running one is left as is), for a
     /// program that must run once before any machine uses it.
     #[serde(default)]
@@ -736,13 +939,16 @@ pub mod reason {
     pub const STARTING: &str = "starting";
     pub const STARTED: &str = "started";
     pub const RESUMED: &str = "resumed";
-    /// For probes: defined, not emitted yet.
     pub const READY: &str = "ready";
+    pub const NOT_READY: &str = "not_ready";
     pub const STOPPING: &str = "stopping";
     pub const STOPPED: &str = "stopped";
     pub const SUSPENDED: &str = "suspended";
     pub const EXITED: &str = "exited";
     pub const RESTARTING: &str = "restarting";
+    pub const CRASH_LOOP: &str = "crash_loop";
+    pub const LIVENESS_FAILED: &str = "liveness_failed";
+    pub const STARTUP_FAILED: &str = "startup_failed";
     pub const BOOT_FAILED: &str = "boot_failed";
     pub const START_FAILED: &str = "start_failed";
     pub const UPDATED: &str = "updated";
@@ -767,11 +973,15 @@ pub mod reason {
         STARTED,
         RESUMED,
         READY,
+        NOT_READY,
         STOPPING,
         STOPPED,
         SUSPENDED,
         EXITED,
         RESTARTING,
+        CRASH_LOOP,
+        LIVENESS_FAILED,
+        STARTUP_FAILED,
         BOOT_FAILED,
         START_FAILED,
         UPDATED,
@@ -997,7 +1207,8 @@ pub struct ApiError {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub request_id: String,
     /// With `boot_failed`: the machine, in state `error`, kept so the caller can read its
-    /// console and destroy it. With `conflict` on a stale `If-Match`: the machine as it is.
+    /// console and destroy it. With `conflict` on a stale `If-Match`, and with `not_ready` from
+    /// a `/wait`: the machine as it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<Box<Machine>>,
     /// With `gone`: the oldest event seq the host still keeps.
@@ -1260,7 +1471,11 @@ mod tests {
         expected["version"] = json!(0);
         expected["limits"] = json!({});
         expected["egress_drops"] = json!({"blocked_port": 0, "rate": 0, "bandwidth": 0});
+        expected["restarts"] = json!(0);
+        expected["ready"] = json!(false);
         let m: Machine = round_trip(input, expected);
+        assert!(m.probes.is_empty() && m.probes_status.is_empty());
+        assert_eq!(m.restarting_at, None);
         assert_eq!(m.state, state::RUNNING);
         assert_eq!(m.egress, Egress::default());
         assert_eq!(m.image_digest, "");
@@ -1296,8 +1511,15 @@ mod tests {
             "last_used_at": "2026-01-02T03:04:05Z", "sleeps_at": "2026-01-02T03:34:05Z",
             "suspended": true, "backup": {"every": "6h", "keep": 4},
             "last_backup_at": "2026-01-02T03:04:05Z", "next_backup_at": "2026-01-02T09:04:05Z",
-            "version": 812, "host": "h1"
+            "version": 812, "host": "h1",
+            "restarts": 2, "restarting_at": "2026-01-02T03:04:25Z", "ready": false
         });
+        let mut input = input;
+        input["probes"] = json!({"readiness": {"http": {"port": 8080, "path": "/"},
+            "period_sec": 10, "timeout_sec": 5, "failure_threshold": 3, "success_threshold": 1,
+            "initial_delay_sec": 0}});
+        input["probes_status"] = json!({"readiness": {"passed": false, "message": "HTTP 503",
+            "failures": 2, "at": "2026-01-02T03:04:05Z"}});
         let m: Machine = same(input);
         assert_eq!(m.backup.as_ref().map(|b| b.keep), Some(4));
         assert_eq!(
@@ -1305,6 +1527,11 @@ mod tests {
                 .zip(m.last_backup_at)
                 .map(|(n, l)| (n - l).num_hours()),
             Some(6)
+        );
+        assert_eq!(m.restarts, 2);
+        assert_eq!(
+            m.probes_status.readiness.as_ref().map(|s| s.failures),
+            Some(2)
         );
         assert_eq!(m.version, 812);
         assert_eq!(m.stopped_reason, stop::EXIT);
@@ -1503,6 +1730,113 @@ mod tests {
         assert!(serde_json::from_value::<EgressLimits>(json!({"blocked_ports": [70000]})).is_err());
         let d: EgressDrops = same(json!({"blocked_port": 1, "rate": 2, "bandwidth": 3}));
         assert_eq!(d.total(), 6);
+    }
+
+    #[test]
+    fn probes_round_trip_with_their_defaults() {
+        // An action alone takes Kubernetes's timings; `path` defaults to `/`.
+        let p: Probes = round_trip(
+            json!({"readiness": {"http": {"port": 8080}}, "liveness": {"exec": ["true"]}}),
+            json!({
+                "readiness": {"http": {"port": 8080, "path": "/"}, "period_sec": 10,
+                    "timeout_sec": 5, "failure_threshold": 3, "success_threshold": 1,
+                    "initial_delay_sec": 0},
+                "liveness": {"exec": ["true"], "period_sec": 10, "timeout_sec": 5,
+                    "failure_threshold": 3, "success_threshold": 1, "initial_delay_sec": 0}
+            }),
+        );
+        assert!(p.startup.is_none());
+        assert_eq!(p.check(), Ok(()));
+        let full = json!({"startup": {"tcp": 5432, "period_sec": 2, "timeout_sec": 1,
+            "failure_threshold": 30, "success_threshold": 1, "initial_delay_sec": 4}});
+        let p: Probes = same(full);
+        assert_eq!(p.startup.as_ref().unwrap().target(), "tcp :5432");
+        assert!(same::<Probes>(json!({})).is_empty());
+        // In a request and a gateway's spec: absent stays absent.
+        let u: UpdateMachineRequest = same(json!({"probes": {}}));
+        assert_eq!(u.probes, Some(Probes::default()));
+        let r: CreateMachineRequest = serde_json::from_value(json!({
+            "tenant": "t1", "name": "web", "size": {"vcpus": 1, "memory_mb": 256},
+            "probes": {"readiness": {"tcp": 80}}
+        }))
+        .unwrap();
+        assert_eq!(
+            r.probes.and_then(|p| p.readiness).and_then(|p| p.tcp),
+            Some(80)
+        );
+        let s: GatewaySpec = serde_json::from_value(json!({
+            "image": "proxy", "port": 3128, "probes": {"readiness": {"tcp": 3128}}
+        }))
+        .unwrap();
+        assert!(s.probes.readiness.is_some());
+        let st: ProbeStatus = same(json!({
+            "passed": true, "message": "HTTP 200", "failures": 0, "at": "2026-01-02T03:04:05Z"
+        }));
+        assert!(st.passed);
+    }
+
+    #[test]
+    fn probes_are_checked_with_the_field_named() {
+        let bad = |v: Value| {
+            serde_json::from_value::<Probes>(v)
+                .unwrap()
+                .check()
+                .unwrap_err()
+        };
+        assert_eq!(
+            bad(json!({"readiness": {}})),
+            "probes.readiness: exactly one of exec, tcp and http"
+        );
+        assert_eq!(
+            bad(json!({"liveness": {"exec": ["true"], "tcp": 80}})),
+            "probes.liveness: exactly one of exec, tcp and http"
+        );
+        assert_eq!(
+            bad(json!({"startup": {"exec": []}})),
+            "probes.startup.exec: an empty command"
+        );
+        assert_eq!(
+            bad(json!({"readiness": {"tcp": 0}})),
+            "probes.readiness.tcp: 0 is not a port"
+        );
+        assert_eq!(
+            bad(json!({"readiness": {"http": {"port": 0}}})),
+            "probes.readiness.http.port: 0 is not a port"
+        );
+        for path in ["healthz", "/a b", "/a\r\nX: y", ""] {
+            assert!(
+                bad(json!({"readiness": {"http": {"port": 80, "path": path}}}))
+                    .starts_with("probes.readiness.http.path: "),
+                "{path:?}"
+            );
+        }
+        for field in [
+            "period_sec",
+            "timeout_sec",
+            "failure_threshold",
+            "success_threshold",
+        ] {
+            let mut p = json!({"readiness": {"tcp": 80}});
+            p["readiness"][field] = json!(0);
+            assert_eq!(bad(p), format!("probes.readiness.{field}: at least 1"));
+        }
+        // Readiness may want several passes; startup and liveness pass on one, as Kubernetes.
+        let three = |kind: &str| json!({ kind: {"tcp": 80, "success_threshold": 3} });
+        assert!(serde_json::from_value::<Probes>(three("readiness"))
+            .unwrap()
+            .check()
+            .is_ok());
+        assert_eq!(
+            bad(three("liveness")),
+            "probes.liveness.success_threshold: must be 1"
+        );
+        assert_eq!(
+            bad(three("startup")),
+            "probes.startup.success_threshold: must be 1"
+        );
+        // A negative or fractional timing is refused by the parse itself.
+        assert!(serde_json::from_value::<Probe>(json!({"tcp": 80, "period_sec": -1})).is_err());
+        assert!(serde_json::from_value::<Probe>(json!({"tcp": 70000})).is_err());
     }
 
     #[test]
@@ -1790,7 +2124,8 @@ mod tests {
                 "limits": {}, "egress_drops": {"blocked_port": 0, "rate": 0, "bandwidth": 0},
                 "metadata": {}, "endpoints": [],
                 "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:05Z",
-                "state_changed_at": "2026-01-02T03:04:05Z", "suspended": false, "version": 3
+                "state_changed_at": "2026-01-02T03:04:05Z", "suspended": false, "version": 3,
+                "restarts": 0, "ready": false
             }
         }));
         assert_eq!(e.machine.as_ref().map(|m| m.state.as_str()), Some("error"));
@@ -1833,7 +2168,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), reason::ALL.len());
-        assert_eq!(all.len(), 27);
+        assert_eq!(all.len(), 31);
         assert!(all
             .iter()
             .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));

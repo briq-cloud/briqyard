@@ -58,6 +58,20 @@ a start takes the host's memory and moves to `starting` in one step under the ma
 lock, so starts that race never oversubscribe it; a destroy holds the machine's lock from the
 state check to the record's removal and, when it fails, is tried again every 15 s.
 
+### Probes and restarts
+
+A machine may have a startup, a readiness and a liveness probe (ADR 0022, `machine/probes.rs`),
+Kubernetes's: `exec` through the guest's init, `tcp` and `http` from the host to the machine's
+address. One task per running machine with probes, ended with its process; 32 executions at
+once per host. Startup runs first and gates the others; `ready` is true at `running` without a
+startup or readiness probe, else when they pass; liveness failures end the process as a failure
+for the restart policy. A startup failure on a run a caller asked for is a failed boot (`error`,
+ADR 0011); on a run the policy started, a crash. `/wait` waits for `ready` (`?for=running`
+otherwise), and so do the ingress before it proxies and a start that needs the tenant's gateway
+when the gateway has probes. Create and start answer at `running`. A restart waits 10 s,
+doubling to 5 minutes, reset by a run of 10 minutes; `restarting_at` says when, and the third
+in a row is a `crash_loop` event. Probes are not use: they never keep a machine awake.
+
 ### Disks
 
 Every disk is a ZFS zvol in one pool (`byard` by default):

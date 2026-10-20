@@ -29,6 +29,7 @@ use tokio::sync::{broadcast, Notify};
 
 mod backups;
 use backups::{Backups, Schedule, Turn};
+mod probes;
 
 /// What the API maps to statuses.
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +60,10 @@ pub enum MError {
     /// The machine stays, in state `error`, with the console tail in its `error`.
     #[error("boot failed: {}", .0.error)]
     BootFailed(Box<api::Machine>),
+    /// A `/wait` for `ready` ran out while the machine runs and its probes say it does not
+    /// serve yet (ADR 0022): the machine, its probes' last results in it.
+    #[error("machine {} is running, not ready: {}", .0.id, not_ready_why(.0))]
+    NotReady(Box<api::Machine>),
     /// `If-Match` named a version the machine has moved past (ADR 0019): the machine as it is.
     #[error("machine {} is at version {}: read it again", .0.id, .0.version)]
     Moved(Box<api::Machine>),
@@ -127,6 +132,9 @@ pub struct Record {
     #[serde(default)]
     pub sleep: String,
     pub restart: api::RestartPolicy,
+    /// Its startup, readiness and liveness probes (ADR 0022).
+    #[serde(default)]
+    pub probes: api::Probes,
     /// Where its traffic may go (ADR 0015); a record from before has none: open.
     #[serde(default)]
     pub egress: api::Egress,
@@ -149,6 +157,12 @@ pub struct Record {
     pub pid: u32,
     #[serde(default)]
     pub restarts: u32,
+    /// Restarts since the last run that lasted `RESET_AFTER`: the backoff's step (ADR 0022).
+    #[serde(default)]
+    pub recent_restarts: u32,
+    /// When the restart policy starts it again, while it waits to.
+    #[serde(default)]
+    pub restarting_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub boots: u32,
     pub created_at: DateTime<Utc>,
@@ -353,7 +367,7 @@ struct Entry {
     live: Mutex<Option<fc::Vm>>,
     /// The reason set before asking the guest to stop; `None` when it ends on its own.
     stop_req: Mutex<Option<String>>,
-    /// Signalled on every state change: what `wait_running` and a stop wait on.
+    /// Signalled on every state change: what `wait` and a stop wait on.
     changed: Notify,
     /// A use since the record was last written; read and written under `rec`'s lock.
     unsaved_use: AtomicBool,
@@ -365,6 +379,10 @@ struct Entry {
     events: Events,
     /// Held by each backup and deletion of its backups.
     backup_turn: Turn,
+    /// What its probes found in the current run (ADR 0022); locked before `rec`, never after.
+    probe: Mutex<probes::Run>,
+    /// The task running its probes, while one runs.
+    prober: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl Entry {
@@ -380,6 +398,8 @@ impl Entry {
             traffic: Arc::default(),
             events,
             backup_turn: Turn::default(),
+            probe: Mutex::default(),
+            prober: Mutex::new(None),
         })
     }
 
@@ -473,6 +493,8 @@ struct Inner {
     backups: Backups,
     /// Boots run at once; see `boots_at_once`.
     boot_gate: tokio::sync::Semaphore,
+    /// Probe executions run at once (ADR 0022).
+    probe_gate: tokio::sync::Semaphore,
     /// The hours of usage not closed yet.
     usage: Mutex<Ledger>,
     /// What happened on the host (ADR 0019).
@@ -559,6 +581,7 @@ impl Manager {
             tenant_create: tokio::sync::Mutex::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),
+            probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),
             usage: Mutex::new(ledger),
             events,
             pool: Mutex::new(None),
@@ -825,6 +848,10 @@ impl Manager {
         *e.live.lock().unwrap() = Some(vm.clone());
         *e.stop_req.lock().unwrap() = None;
         self.watch(e, &vm);
+        // Its probes run again from the top; nobody waits on this run, so a startup that
+        // fails is a crash for the restart policy, not a failed boot.
+        let (_, _, generation) = self.reset_probes(e);
+        self.spawn_probes(e, &vm, generation, false);
         e.note(
             Ev::normal(
                 reason::ADOPTED,
@@ -1322,6 +1349,7 @@ impl Manager {
         if spec.image.is_empty() || spec.port == 0 {
             return Err(invalid("a gateway needs an image and a port (1..65535)"));
         }
+        spec.probes.check().map_err(invalid)?;
         // A machine of the daemon: no window of its own, it runs while something needs it,
         // and comes back whenever its program ends on its own.
         let req = api::CreateMachineRequest {
@@ -1336,6 +1364,7 @@ impl Manager {
                 mount: "/data".into(),
             }),
             ports: vec![spec.port],
+            probes: Some(spec.probes),
             sleep: "never".into(),
             restart: Some(api::RestartPolicy {
                 policy: "always".into(),
@@ -1378,11 +1407,13 @@ impl Manager {
                 "volume_gb is fixed for the gateway's life: DELETE the gateway to change it",
             ));
         }
+        let probes = req.probes.clone().unwrap_or_default();
         if im.key == was.image_key
             && req.cmd == was.cmd
             && req.env == was.env
             && req.size == was.size
             && req.ports == was.ports
+            && probes == was.probes
         {
             return Ok(());
         }
@@ -1421,6 +1452,7 @@ impl Manager {
                     ("env", req.env != r.env),
                     ("size", req.size != r.size),
                     ("ports", req.ports != r.ports),
+                    ("probes", probes != r.probes),
                 ]
                 .into_iter()
                 .filter_map(|(f, changed)| changed.then_some(f))
@@ -1433,6 +1465,7 @@ impl Manager {
                 r.env = req.env;
                 r.size = req.size;
                 r.ports = req.ports;
+                r.probes = probes;
                 // A memory snapshot is of the old program on the old disk: boot cold.
                 r.suspended = false;
                 let ev = Ev::normal(
@@ -1495,30 +1528,43 @@ impl Manager {
         Ok(turn)
     }
 
-    /// Starts the gateway unless it runs, then waits for its port, within the boot timeout.
-    /// A gateway whose port does not answer is ended and left in `error` with its console's
-    /// last lines, as a boot that fails is. Under the tenant's lock.
+    /// Starts the gateway unless it runs, then waits for it to serve within the boot timeout:
+    /// its `ready` when it has a startup or readiness probe (ADR 0022), else its port. A
+    /// gateway that does not serve in time is ended and left in `error` with its console's
+    /// last lines, as a boot that fails is. Under the tenant's lock; the gateway's own lock is
+    /// let go while it is waited for, since its probes take it to end a failed boot.
     async fn run_gateway(&self, gw: &Arc<Entry>) -> Result<(), MError> {
-        let _turn = gw.lock.lock().await;
-        let started = gw.snapshot().state != state::RUNNING;
-        if started {
-            self.start_boxed(gw).await?;
-        }
-        let r = gw.snapshot();
-        let live = gw.live.lock().unwrap().clone();
+        let (started, live) = {
+            let _turn = gw.lock.lock().await;
+            let started = gw.snapshot().state != state::RUNNING;
+            if started {
+                self.start_boxed(gw, true).await?;
+            }
+            (started, gw.live.lock().unwrap().clone())
+        };
         let Some(live) = live else {
             return Err(MError::NotRunning("the gateway has no process".into()));
         };
+        let r = gw.snapshot();
         let port = r.ports.first().copied().unwrap_or(0);
         let ip: Ipv4Addr = r.ip.parse().map_err(anyhow::Error::from)?;
         let timeout = Duration::from_secs(self.inner.cfg.boot_timeout_sec.max(10));
         let mut exited = live.exited.clone();
-        let answered = tokio::select! {
-            r = self.inner.net.wait_port(ip, port, timeout) => {
-                r.map_err(|err| format!("port {port} did not answer: {err:#}"))
-            }
-            _ = exited.wait_for(|gone| *gone) => Err("the gateway exited".to_string()),
+        let answered = match probes::ready_at_boot(&r.probes) {
+            true => tokio::select! {
+                r = self.inner.net.wait_port(ip, port, timeout) => {
+                    r.map_err(|err| format!("port {port} did not answer: {err:#}"))
+                }
+                _ = exited.wait_for(|gone| *gone) => Err("the gateway exited".to_string()),
+            },
+            false => match self.wait(&r.id, Until::Ready, timeout).await {
+                Ok(_) => Ok(()),
+                // Its startup probe failed it already: the machine says why.
+                Err(MError::BootFailed(m)) => return Err(MError::BootFailed(m)),
+                Err(err) => Err(format!("not ready: {err}")),
+            },
         };
+        let _turn = gw.lock.lock().await;
         let Err(why) = answered else {
             if started {
                 gw.note(
@@ -1532,7 +1578,9 @@ impl Manager {
             }
             return Ok(());
         };
-        self.end_process(gw, &live, Duration::ZERO).await;
+        if gw.live.lock().unwrap().as_ref().map(|l| l.pid) == Some(live.pid) {
+            self.end_process(gw, &live, Duration::ZERO).await;
+        }
         let tail = self.last_console_lines(&r, 5);
         gw.set_state(state::ERROR, |r| {
             r.error = format!("{why}: {tail}");
@@ -1640,11 +1688,17 @@ impl Manager {
 
     fn view(&self, e: &Entry) -> api::Machine {
         let r = e.snapshot();
-        let sleeps_at = if r.state == state::RUNNING {
+        let running = r.state == state::RUNNING;
+        let sleeps_at = if running {
             sleeps_at(r.last_used_at, r.sleep_window())
         } else {
             None
         };
+        let (ready, probes_status) = {
+            let run = e.probe.lock().unwrap();
+            (running && run.ready, run.status.clone())
+        };
+        let waiting_restart = r.state == state::STOPPED && r.stopped_reason == stop::EXIT;
         api::Machine {
             id: r.id.clone(),
             tenant: r.tenant.clone(),
@@ -1663,6 +1717,11 @@ impl Manager {
             ports: r.ports.clone(),
             sleep: r.sleep.clone(),
             restart: r.restart.clone(),
+            restarts: r.restarts,
+            restarting_at: r.restarting_at.filter(|_| waiting_restart),
+            ready,
+            probes: r.probes.clone(),
+            probes_status,
             egress: r.egress.clone(),
             limits: self.inner.cfg.egress_limits.with(&r.limits).view(),
             egress_drops: e.meter.lock().unwrap().drops(),
@@ -1735,6 +1794,7 @@ impl Manager {
             e.set_state(state::STARTING, |r| {
                 r.error.clear();
                 r.pid = 0;
+                r.restarting_at = None;
                 None
             });
         }
@@ -1997,6 +2057,9 @@ impl Manager {
         }
         api::parse_sleep(&req.sleep).map_err(invalid)?;
         check_limits(req.limits.as_ref())?;
+        if let Some(p) = &req.probes {
+            p.check().map_err(invalid)?;
+        }
         for f in &req.files {
             if !f.path.starts_with('/') {
                 return Err(invalid(format!("file {:?}: path must be absolute", f.path)));
@@ -2031,6 +2094,7 @@ impl Manager {
             ports: req.ports.clone(),
             sleep: sleep_setting(&req.sleep),
             restart,
+            probes: req.probes.clone().unwrap_or_default(),
             egress: req.egress.clone().unwrap_or_default(),
             limits: req.limits.clone().unwrap_or_default(),
             metadata: req.metadata.clone(),
@@ -2043,6 +2107,8 @@ impl Manager {
             ip: String::new(),
             pid: 0,
             restarts: 0,
+            recent_restarts: 0,
+            restarting_at: None,
             boots: 0,
             created_at: now,
             updated_at: now,
@@ -2089,6 +2155,9 @@ impl Manager {
             }
             if req.limits.is_none() {
                 rec.limits = was.limits;
+            }
+            if req.probes.is_none() {
+                rec.probes = was.probes;
             }
             if rec.size == api::Size::default() {
                 rec.size = was.size;
@@ -2173,7 +2242,7 @@ impl Manager {
         if req.start.unwrap_or(true) {
             // Created but did not start: the same answer a start would give; the machine
             // stays, for the caller to read and destroy.
-            self.start_entry(&e).await?;
+            self.start_entry(&e, true).await?;
         }
         Ok(self.view(&e))
     }
@@ -2310,7 +2379,7 @@ impl Manager {
         let _guard = e.lock.lock().await;
         self.check_version(&e, at)?;
         if e.snapshot().state != state::RUNNING {
-            self.start_entry(&e).await?;
+            self.start_entry(&e, true).await?;
         }
         Ok(self.view(&e))
     }
@@ -2333,7 +2402,7 @@ impl Manager {
             state::ERROR => return Err(MError::BadState(r.state)),
             _ => {}
         }
-        self.start_entry(&e).await?;
+        self.start_entry(&e, true).await?;
         Ok(self.view(&e))
     }
 
@@ -2342,13 +2411,16 @@ impl Manager {
     fn start_boxed<'a>(
         &'a self,
         e: &'a Arc<Entry>,
+        asked: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), MError>> + Send + 'a>> {
-        Box::pin(self.start_entry(e))
+        Box::pin(self.start_entry(e, asked))
     }
 
     /// Boots the machine. Called with the entry's lock held, on a machine that is not up:
     /// one being destroyed is refused here, whoever asks (a start, a wake, a restart).
-    async fn start_entry(&self, e: &Arc<Entry>) -> Result<(), MError> {
+    /// `asked`: a caller asked for this run (a create, a start, a wake), not the restart
+    /// policy; its startup probe failing is a failed boot (ADR 0022).
+    async fn start_entry(&self, e: &Arc<Entry>, asked: bool) -> Result<(), MError> {
         let cfg = &self.inner.cfg;
         let rec = e.snapshot();
         match rec.state.as_str() {
@@ -2500,6 +2572,7 @@ impl Manager {
             let _ = self.save(e);
             return Err(MError::BootFailed(Box::new(self.view(e))));
         }
+        let (_, _, generation) = self.reset_probes(e);
         e.set_state(state::RUNNING, |r| {
             let now = Utc::now();
             r.started_at = Some(now);
@@ -2515,6 +2588,7 @@ impl Manager {
             };
             Some(ev.data(json!({ "pid": pid })))
         });
+        self.spawn_probes(e, &live, generation, asked);
         let _ = self.save(e);
         tracing::info!(
             machine = rec.id,
@@ -2580,31 +2654,49 @@ impl Manager {
         });
         let (code, oom, requested) = (report.code, report.oom, report.requested);
         let stop_req = e.stop_req.lock().unwrap().take();
+        if stop_req.is_none() && !requested {
+            self.exited(e, code, oom, code != 0);
+            return;
+        }
         let now = Utc::now();
-        let mut restart_again = false;
         e.set_state(state::STOPPED, |r| {
             r.pid = 0;
             r.stopped_at = Some(now);
-            if let Some(why) = stop_req {
-                r.stopped_reason = why.clone();
-                tracing::info!(machine = r.id, reason = why, "machine stopped");
-                let ev = match r.suspended {
-                    true => Ev::normal(
-                        reason::SUSPENDED,
-                        format!("suspended ({why}): its memory snapshot kept"),
-                    ),
-                    false => Ev::normal(reason::STOPPED, format!("stopped ({why})")),
-                };
-                return Some(ev.data(json!({ "reason": why })));
-            }
-            if requested {
+            let Some(why) = stop_req else {
                 r.stopped_reason = stop::USER.into();
                 return Some(
                     Ev::normal(reason::STOPPED, "stopped on request")
                         .data(json!({ "reason": stop::USER })),
                 );
+            };
+            r.stopped_reason = why.clone();
+            tracing::info!(machine = r.id, reason = why, "machine stopped");
+            let ev = match r.suspended {
+                true => Ev::normal(
+                    reason::SUSPENDED,
+                    format!("suspended ({why}): its memory snapshot kept"),
+                ),
+                false => Ev::normal(reason::STOPPED, format!("stopped ({why})")),
+            };
+            Some(ev.data(json!({ "reason": why })))
+        });
+        let _ = self.save(e);
+    }
+
+    /// A process that ended on its own, or that a probe ended (`failed` whatever its code):
+    /// the exit recorded and the restart policy's decision. A restart waits the backoff (ADR
+    /// 0022): 10 s doubling to 5 minutes by `recent_restarts`, which a run of `RESET_AFTER`
+    /// clears; from the third in a row it is a crash loop. Under the machine's lock.
+    fn exited(&self, e: &Arc<Entry>, code: i32, oom: bool, failed: bool) {
+        let now = Utc::now();
+        let mut restart = None;
+        e.set_state(state::STOPPED, |r| {
+            r.pid = 0;
+            r.stopped_at = Some(now);
+            if r.started_at.is_some_and(|t| now - t >= RESET_AFTER) {
+                r.recent_restarts = 0;
             }
-            let again = restarts_after_exit(&r.restart, code, r.restarts);
+            let again = restarts_after_exit(&r.restart, failed, r.restarts);
             r.exit = Some(api::Exit {
                 code,
                 oom_killed: oom,
@@ -2614,32 +2706,34 @@ impl Manager {
             r.stopped_reason = stop::EXIT.into();
             if again {
                 r.restarts += 1;
+                r.recent_restarts += 1;
                 e.meter.lock().unwrap().restarts += 1;
-                restart_again = true;
+                let delay = restart_delay(r.recent_restarts);
+                r.restarting_at = Some(now + delay);
+                restart = Some((r.restarts, r.recent_restarts, delay, r.restart.clone()));
                 tracing::warn!(
                     machine = r.id,
                     code,
                     oom,
                     restart = r.restarts,
+                    delay_sec = delay.as_secs(),
                     "machine exited, restarting"
                 );
             } else {
                 r.restarts = 0;
+                r.recent_restarts = 0;
+                r.restarting_at = None;
                 tracing::info!(machine = r.id, code, oom, "machine exited");
             }
             let ev = match (oom, code) {
                 (true, _) => Ev::warning(reason::EXITED, "killed: out of memory"),
-                (false, 0) => Ev::normal(reason::EXITED, "exited with code 0"),
+                (false, 0) if !failed => Ev::normal(reason::EXITED, "exited with code 0"),
                 (false, _) => Ev::warning(reason::EXITED, format!("exited with code {code}")),
             };
             Some(ev.data(json!({ "code": code, "oom": oom, "restarting": again })))
         });
-        if restart_again {
-            // The delay is the attempt's number in seconds, as the task below waits.
-            let (attempt, policy) = {
-                let r = e.snapshot();
-                (r.restarts, r.restart)
-            };
+        if let Some((attempt, recent, delay, policy)) = &restart {
+            let secs = delay.as_secs();
             let bound = match policy.policy.as_str() {
                 "always" => "always".to_string(),
                 _ => format!("at most {}", policy.max_retries),
@@ -2647,32 +2741,42 @@ impl Manager {
             e.note(
                 Ev::warning(
                     reason::RESTARTING,
-                    format!("restart {attempt} in {attempt} s ({bound})"),
+                    format!("restart {attempt} in {secs} s ({bound})"),
                 )
-                .data(json!({ "attempt": attempt, "policy": policy.policy, "delay_sec": attempt })),
+                .data(json!({ "attempt": attempt, "policy": policy.policy, "delay_sec": secs })),
             );
+            if *recent >= CRASH_LOOP_AT {
+                e.note(
+                    Ev::warning(
+                        reason::CRASH_LOOP,
+                        format!(
+                            "restarted {recent} times in a row, no run of 10 minutes between: next in {secs} s"
+                        ),
+                    )
+                    .data(json!({ "restarts": recent, "delay_sec": secs })),
+                );
+            }
         }
         let _ = self.save(e);
-        if restart_again {
-            let m = self.clone();
-            let e = e.clone();
-            let delay = Duration::from_secs(e.snapshot().restarts as u64);
-            tokio::spawn(async move {
-                tokio::time::sleep(delay).await;
-                let _guard = e.lock.lock().await;
-                let r = e.snapshot();
-                if r.state != state::STOPPED || r.stopped_reason != stop::EXIT {
-                    return;
+        let Some((_, _, delay, _)) = restart else {
+            return;
+        };
+        let (m, e) = (self.clone(), e.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _guard = e.lock.lock().await;
+            let r = e.snapshot();
+            if r.state != state::STOPPED || r.stopped_reason != stop::EXIT {
+                return;
+            }
+            match m.start_boxed(&e, false).await {
+                Ok(()) => {}
+                Err(err @ MError::BootFailed(_)) => {
+                    tracing::warn!(machine = r.id, err = %err, "restart")
                 }
-                match m.start_boxed(&e).await {
-                    Ok(()) => {}
-                    Err(err @ MError::BootFailed(_)) => {
-                        tracing::warn!(machine = r.id, err = %err, "restart")
-                    }
-                    Err(err) => tracing::error!(machine = r.id, err = %err, "restart"),
-                }
-            });
-        }
+                Err(err) => tracing::error!(machine = r.id, err = %err, "restart"),
+            }
+        });
     }
 
     /// The last `max` bytes of the console since the current boot began.
@@ -2961,10 +3065,10 @@ impl Manager {
 
     // --- use and sleep ---
 
-    /// Changes the sleep window, the metadata, the egress policy or the limits of a machine,
-    /// in any state; a running machine's policy changes in the tables at once. A change is an
-    /// event (`egress_changed` for the policy or the limits, else `updated`); a request that
-    /// changes nothing is none.
+    /// Changes the sleep window, the metadata, the egress policy, the limits or the probes of a
+    /// machine, in any state; a running machine's policy changes in the tables at once, and its
+    /// probes start over. A change is an event (`egress_changed` for the policy or the limits,
+    /// else `updated`); a request that changes nothing is none.
     pub async fn update(
         &self,
         id: &str,
@@ -2977,6 +3081,9 @@ impl Manager {
         }
         check_limits(req.limits.as_ref())?;
         backups::check_update(&req.backup)?;
+        if let Some(p) = &req.probes {
+            p.check().map_err(invalid)?;
+        }
         // Under the entry's lock, like every transition: no start or stop runs in between,
         // and a destroy that ran first has removed the machine, whose record is not written
         // back.
@@ -2987,6 +3094,7 @@ impl Manager {
         self.check_version(&e, at)?;
         // Held until the record says `via: gateway`, as a start holds it.
         let mut gateway_turn = None;
+        let reprobe;
         if req.egress.is_some() || req.limits.is_some() {
             let mut r = e.snapshot();
             if let Some(eg) = &req.egress {
@@ -3025,12 +3133,19 @@ impl Manager {
                 r.limits = l.over(&r.limits);
             }
             backups::update(&mut r, req.backup)?;
+            if let Some(p) = req.probes {
+                r.probes = p;
+            }
             if let Some(ev) = change_event(&was, &r) {
                 e.note_locked(&mut r, ev);
             }
+            reprobe = r.probes != was.probes && r.state == state::RUNNING;
         }
         self.save(&e)?;
         drop(gateway_turn);
+        if reprobe {
+            self.restart_probes(&e);
+        }
         Ok(self.view(&e))
     }
 
@@ -3345,8 +3460,14 @@ impl Manager {
         })
     }
 
-    /// Blocks until the machine runs, or until it is clear it will not (within `timeout`).
-    pub async fn wait_running(&self, id: &str, timeout: Duration) -> Result<api::Machine, MError> {
+    /// Blocks until the machine runs (`Until::Running`) or is ready (`Until::Ready`, ADR 0022),
+    /// or until it is clear it will not, within `timeout`.
+    pub async fn wait(
+        &self,
+        id: &str,
+        until: Until,
+        timeout: Duration,
+    ) -> Result<api::Machine, MError> {
         let e = self.entry(id)?;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -3355,18 +3476,25 @@ impl Manager {
             tokio::pin!(changed);
             changed.as_mut().enable();
             let m = self.view(&e);
-            match will_run(&m) {
-                Some(Ok(())) => return Ok(m),
-                Some(Err(why)) => return Err(MError::NotRunning(why)),
-                None => {}
+            if let Some(answer) = wait_verdict(&m, until) {
+                return answer.map(|()| m);
             }
             if tokio::time::timeout_at(deadline, changed).await.is_err() {
-                return Err(MError::NotRunning(format!(
-                    "still {} after {timeout:?}",
-                    m.state
-                )));
+                let m = self.view(&e);
+                return Err(match until == Until::Ready && m.state == state::RUNNING {
+                    true => MError::NotReady(Box::new(m)),
+                    false => MError::NotRunning(format!("still {} after {timeout:?}", m.state)),
+                });
             }
         }
+    }
+
+    /// The address a proxy connects to once the machine is ready, woken when it sleeps:
+    /// readiness gates traffic (ADR 0022).
+    pub async fn ready_addr(&self, id: &str, timeout: Duration) -> Result<Ipv4Addr, MError> {
+        let ip = self.machine_addr(id, true).await?;
+        self.wait(id, Until::Ready, timeout).await?;
+        Ok(ip)
     }
 
     // --- config drive ---
@@ -3805,12 +3933,47 @@ fn change_event(was: &Record, now: &Record) -> Option<Ev> {
         ("sleep", was.sleep != now.sleep),
         ("metadata", was.metadata != now.metadata),
         ("backup", was.backup.policy != now.backup.policy),
+        ("probes", was.probes != now.probes),
     ]);
     if fields.is_empty() {
         return None;
     }
     let ev = Ev::normal(reason::UPDATED, format!("{} changed", fields.join(", ")));
     Some(ev.data(json!({ "fields": fields })))
+}
+
+/// What `/wait` waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Until {
+    Running,
+    Ready,
+}
+
+/// What a `/wait` answers now, or None to keep waiting. For `Ready`, a machine in `error`
+/// failed its boot (the guest or its startup probe): `boot_failed`, as its start would answer.
+fn wait_verdict(m: &api::Machine, until: Until) -> Option<Result<(), MError>> {
+    match (will_run(m), until) {
+        (Some(Ok(())), Until::Ready) if !m.ready => None,
+        (Some(Err(_)), Until::Ready) if m.state == state::ERROR => {
+            Some(Err(MError::BootFailed(Box::new(m.clone()))))
+        }
+        (verdict, _) => verdict.map(|v| v.map_err(MError::NotRunning)),
+    }
+}
+
+/// Why a running machine is not ready: its probes' last results.
+fn not_ready_why(m: &api::Machine) -> String {
+    let s = &m.probes_status;
+    let said: Vec<String> = [("startup", &s.startup), ("readiness", &s.readiness)]
+        .into_iter()
+        .filter_map(|(name, st)| st.as_ref().map(|st| (name, st)))
+        .filter(|(_, st)| !st.passed)
+        .map(|(name, st)| format!("{name}: {}", st.message))
+        .collect();
+    match said.is_empty() {
+        true => "its probes have not passed yet".into(),
+        false => said.join("; "),
+    }
 }
 
 /// What `/wait` answers: running, will not run (why), or still moving.
@@ -3924,14 +4087,27 @@ fn inet_of(text: &str) -> Option<Ipv4Addr> {
     f.get(i + 1)?.split('/').next()?.parse().ok()
 }
 
-/// Whether a machine whose process ended on its own (exit `code`, after `restarts` restarts
-/// in a row) is started again.
-fn restarts_after_exit(policy: &api::RestartPolicy, code: i32, restarts: u32) -> bool {
+/// Whether a machine whose process ended on its own (a failure: an exit code other than 0, or
+/// a probe that ended it; after `restarts` restarts in a row) is started again.
+fn restarts_after_exit(policy: &api::RestartPolicy, failed: bool, restarts: u32) -> bool {
     match policy.policy.as_str() {
         "always" => true,
-        "on-failure" => code != 0 && restarts < policy.max_retries,
+        "on-failure" => failed && restarts < policy.max_retries,
         _ => false,
     }
+}
+
+/// A run this long ends a crash loop: the backoff starts over at its exit (ADR 0022).
+const RESET_AFTER: chrono::Duration = chrono::Duration::minutes(10);
+
+/// The restart in a crash loop from which each one is a `crash_loop` event.
+const CRASH_LOOP_AT: u32 = 3;
+
+/// How long the `n`th restart since a run of `RESET_AFTER` waits: 10 s, doubling, at most
+/// 5 minutes, as Kubernetes's CrashLoopBackOff.
+fn restart_delay(n: u32) -> Duration {
+    let doubled = 10u64 << n.saturating_sub(1).min(5);
+    Duration::from_secs(doubled.min(300))
 }
 
 /// When a running machine goes to sleep: its last use plus its window. None while it was
@@ -4129,23 +4305,32 @@ mod tests {
 
     #[test]
     fn restart_decisions() {
-        // on-failure: a non-zero exit restarts until the retries run out; a clean exit never.
+        // on-failure: a failure restarts until the retries run out; a clean exit never.
         let p = policy("on-failure", 3);
-        assert!(restarts_after_exit(&p, 1, 0));
-        assert!(restarts_after_exit(&p, 137, 2));
-        assert!(!restarts_after_exit(&p, 1, 3));
-        assert!(!restarts_after_exit(&p, 0, 0));
-        assert!(!restarts_after_exit(&policy("on-failure", 0), 1, 0));
+        assert!(restarts_after_exit(&p, true, 0));
+        assert!(restarts_after_exit(&p, true, 2));
+        assert!(!restarts_after_exit(&p, true, 3));
+        assert!(!restarts_after_exit(&p, false, 0));
+        assert!(!restarts_after_exit(&policy("on-failure", 0), true, 0));
         // always: every time, whatever the code and however many times before.
         let p = policy("always", 0);
-        assert!(restarts_after_exit(&p, 0, 0));
-        assert!(restarts_after_exit(&p, 1, 1000));
+        assert!(restarts_after_exit(&p, false, 0));
+        assert!(restarts_after_exit(&p, true, 1000));
         // no: never.
-        assert!(!restarts_after_exit(&policy("no", 3), 1, 0));
+        assert!(!restarts_after_exit(&policy("no", 3), true, 0));
         // The default policy is on-failure with three retries.
         let d = api::RestartPolicy::default();
-        assert!(restarts_after_exit(&d, 1, 2));
-        assert!(!restarts_after_exit(&d, 1, 3));
+        assert!(restarts_after_exit(&d, true, 2));
+        assert!(!restarts_after_exit(&d, true, 3));
+    }
+
+    #[test]
+    fn the_backoff_doubles_to_five_minutes() {
+        let secs: Vec<u64> = (1..=9).map(|n| restart_delay(n).as_secs()).collect();
+        assert_eq!(secs, [10, 20, 40, 80, 160, 300, 300, 300, 300]);
+        // Past any count: the cap, never an overflow.
+        assert_eq!(restart_delay(u32::MAX), Duration::from_secs(300));
+        assert_eq!(restart_delay(0), Duration::from_secs(10));
     }
 
     #[test]
@@ -4258,6 +4443,7 @@ mod tests {
             ports: vec![5432],
             sleep: "30m".into(),
             restart: api::RestartPolicy::default(),
+            probes: api::Probes::default(),
             egress: api::Egress::default(),
             limits: api::EgressLimits::default(),
             metadata: BTreeMap::new(),
@@ -4270,6 +4456,8 @@ mod tests {
             ip: "10.64.1.2".into(),
             pid: 0,
             restarts: 0,
+            recent_restarts: 0,
+            restarting_at: None,
             boots: 0,
             created_at: now,
             updated_at: now,
@@ -4334,6 +4522,16 @@ mod tests {
         counted: Mutex<BTreeMap<String, nft::Counters>>,
         /// `uncount` fails, as an `nft` that refuses its input.
         refuse_uncount: AtomicBool,
+        /// What an exec of a command (its argv joined by spaces) exits with; 0 when absent.
+        exec_codes: Mutex<HashMap<String, i32>>,
+        /// How long an exec takes, and how many run at once now and at most.
+        exec_takes: Mutex<Duration>,
+        execs_now: std::sync::atomic::AtomicUsize,
+        execs_most: std::sync::atomic::AtomicUsize,
+        /// The ports of an address a TCP probe finds closed; every other one accepts.
+        closed: Mutex<std::collections::HashSet<(Ipv4Addr, u16)>>,
+        /// What an HTTP probe of an address and port answers; 200 when absent.
+        http_codes: Mutex<HashMap<(Ipv4Addr, u16), u16>>,
     }
 
     impl Mock {
@@ -4350,7 +4548,24 @@ mod tests {
                 cgroups: Mutex::new(HashMap::new()),
                 counted: Mutex::new(BTreeMap::new()),
                 refuse_uncount: AtomicBool::new(false),
+                exec_codes: Mutex::new(HashMap::new()),
+                exec_takes: Mutex::new(Duration::ZERO),
+                execs_now: Default::default(),
+                execs_most: Default::default(),
+                closed: Mutex::new(Default::default()),
+                http_codes: Mutex::new(HashMap::new()),
             })
+        }
+
+        /// An exec of `cmd` exits with `code` from now on.
+        fn answers(&self, cmd: &str, code: i32) {
+            self.exec_codes.lock().unwrap().insert(cmd.into(), code);
+        }
+
+        /// An HTTP probe of `ip:port` answers `code` from now on.
+        fn http(&self, ip: &str, port: u16, code: u16) {
+            let ip = ip.parse().unwrap();
+            self.http_codes.lock().unwrap().insert((ip, port), code);
         }
 
         fn cpu(&self, id: &str, usec: u64) {
@@ -4633,11 +4848,29 @@ mod tests {
 
         async fn exec(&self, vsock: &Path, req: guest::Request) -> Result<guestc::ExecOutput> {
             let (pid, _, _) = self.proc_at(vsock)?;
-            self.record(format!("exec {pid} {}", req.cmd.join(" ")));
+            let cmd = req.cmd.join(" ");
+            self.record(format!("exec {pid} {cmd}"));
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.execs_now.fetch_add(1, SeqCst) + 1;
+            self.execs_most.fetch_max(now, SeqCst);
+            let takes = *self.exec_takes.lock().unwrap();
+            tokio::time::sleep(takes).await;
+            self.execs_now.fetch_sub(1, SeqCst);
+            let code = self
+                .exec_codes
+                .lock()
+                .unwrap()
+                .get(&cmd)
+                .copied()
+                .unwrap_or(0);
             Ok(guestc::ExecOutput {
                 stdout: b"ok\n".to_vec(),
-                stderr: Vec::new(),
-                code: 0,
+                stderr: if code == 0 {
+                    Vec::new()
+                } else {
+                    b"no\n".to_vec()
+                },
+                code,
                 timed_out: false,
             })
         }
@@ -4730,6 +4963,30 @@ mod tests {
                 return Err(anyhow!("{ip}:{port} did not accept within {timeout:?}"));
             }
             Ok(())
+        }
+
+        async fn probe_tcp(&self, ip: Ipv4Addr, port: u16, _timeout: Duration) -> Result<()> {
+            self.record(format!("probe_tcp {ip}:{port}"));
+            match self.closed.lock().unwrap().contains(&(ip, port)) {
+                true => Err(anyhow!("{ip}:{port}: Connection refused")),
+                false => Ok(()),
+            }
+        }
+
+        async fn probe_http(
+            &self,
+            ip: Ipv4Addr,
+            port: u16,
+            path: &str,
+            _timeout: Duration,
+        ) -> Result<u16> {
+            self.record(format!("probe_http {ip}:{port}{path}"));
+            Ok(*self
+                .http_codes
+                .lock()
+                .unwrap()
+                .get(&(ip, port))
+                .unwrap_or(&200))
         }
     }
 
@@ -4838,6 +5095,7 @@ mod tests {
                 tenant_create: tokio::sync::Mutex::new(()),
                 backups,
                 boot_gate: tokio::sync::Semaphore::new(2),
+                probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),
                 usage: Mutex::new(Ledger::default()),
                 events,
                 pool: Mutex::new(None),
@@ -4983,7 +5241,9 @@ mod tests {
         for r in [
             h.m.start("m_d", None).await,
             h.m.wake("m_d", None).await,
-            h.m.start_entry(&e).await.map(|_| h.m.get("m_d").unwrap()),
+            h.m.start_entry(&e, true)
+                .await
+                .map(|_| h.m.get("m_d").unwrap()),
         ] {
             match r {
                 Err(MError::BadState(s)) => assert_eq!(s, state::DESTROYING),
@@ -4999,19 +5259,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_running_follows_the_state() {
+    async fn wait_for_running_follows_the_state() {
         let h = harness("10.64.0.0/22", 4096).await;
         let e = h.add("m_w", state::STARTING, 512);
         let m = h.m.clone();
         let waiting =
-            tokio::spawn(async move { m.wait_running("m_w", Duration::from_secs(30)).await });
+            tokio::spawn(
+                async move { m.wait("m_w", Until::Running, Duration::from_secs(30)).await },
+            );
         e.set_state(state::RUNNING, |_| None);
         assert_eq!(waiting.await.unwrap().unwrap().state, state::RUNNING);
 
         let e = h.add("m_e", state::STARTING, 512);
         let m = h.m.clone();
         let waiting =
-            tokio::spawn(async move { m.wait_running("m_e", Duration::from_secs(30)).await });
+            tokio::spawn(
+                async move { m.wait("m_e", Until::Running, Duration::from_secs(30)).await },
+            );
         e.set_state(state::ERROR, |r| {
             r.error = "no init".into();
             None
@@ -5022,14 +5286,15 @@ mod tests {
         }
         // Already settled: answered at once, without a change to wait for.
         assert_eq!(
-            h.m.wait_running("m_w", Duration::from_secs(30))
+            h.m.wait("m_w", Until::Running, Duration::from_secs(30))
                 .await
                 .unwrap()
                 .state,
             state::RUNNING
         );
         assert!(matches!(
-            h.m.wait_running("m_x", Duration::from_secs(1)).await,
+            h.m.wait("m_x", Until::Running, Duration::from_secs(1))
+                .await,
             Err(MError::NotFound)
         ));
     }
@@ -5069,6 +5334,54 @@ mod tests {
         assert_eq!(will_run(&m(state::STOPPED, stop::EXIT, true)), None);
         assert_eq!(will_run(&m(state::STARTING, "", false)), None);
         assert_eq!(will_run(&m(state::STOPPING, "", false)), None);
+    }
+
+    #[test]
+    fn wait_for_ready_decisions() {
+        let m = |state: &str, ready: bool| api::Machine {
+            id: "m_1".into(),
+            state: state.into(),
+            ready,
+            error: "why".into(),
+            ..Default::default()
+        };
+        let verdict = |m: &api::Machine, until| match wait_verdict(m, until) {
+            None => "wait".to_string(),
+            Some(Ok(())) => "ok".to_string(),
+            Some(Err(MError::BootFailed(_))) => "boot_failed".to_string(),
+            Some(Err(MError::NotRunning(why))) => format!("not_running: {why}"),
+            Some(Err(other)) => format!("{other:?}"),
+        };
+        // Running is enough for `running`; `ready` waits for the probes.
+        assert_eq!(verdict(&m(state::RUNNING, false), Until::Running), "ok");
+        assert_eq!(verdict(&m(state::RUNNING, false), Until::Ready), "wait");
+        assert_eq!(verdict(&m(state::RUNNING, true), Until::Ready), "ok");
+        // In `error`, a wait for ready answers as the boot did; for running, as before.
+        assert_eq!(
+            verdict(&m(state::ERROR, false), Until::Ready),
+            "boot_failed"
+        );
+        assert_eq!(
+            verdict(&m(state::ERROR, false), Until::Running),
+            "not_running: why"
+        );
+        assert_eq!(verdict(&m(state::STARTING, false), Until::Ready), "wait");
+        assert_eq!(
+            verdict(&m(state::DESTROYING, false), Until::Ready),
+            "not_running: destroying"
+        );
+        // Why it is not ready: the probes that have not passed, else that none has run.
+        let mut r = m(state::RUNNING, false);
+        assert_eq!(not_ready_why(&r), "its probes have not passed yet");
+        let st = |passed, message: &str| api::ProbeStatus {
+            passed,
+            message: message.into(),
+            failures: 1,
+            at: Utc::now(),
+        };
+        r.probes_status.startup = Some(st(true, "exit 0"));
+        r.probes_status.readiness = Some(st(false, "HTTP 503"));
+        assert_eq!(not_ready_why(&r), "readiness: HTTP 503");
     }
 
     #[tokio::test]
@@ -5520,7 +5833,11 @@ mod tests {
         assert!(!h.host.calls().iter().any(|c| c.starts_with("boot ")));
         // An errored machine holds no memory, and `/wait` answers at once with the reason.
         assert_eq!(h.m.usage().0.memory_mb, 0);
-        match h.m.wait_running(&m.id, Duration::from_secs(1)).await {
+        match h
+            .m
+            .wait(&m.id, Until::Running, Duration::from_secs(1))
+            .await
+        {
             Err(MError::NotRunning(why)) => assert_eq!(why, m.error),
             other => panic!("{other:?}"),
         }
@@ -5719,7 +6036,10 @@ mod tests {
         };
         caller.abort();
         assert!(caller.await.unwrap_err().is_cancelled());
-        let running = h.m.wait_running(&id, Duration::from_secs(5)).await.unwrap();
+        let running =
+            h.m.wait(&id, Until::Running, Duration::from_secs(5))
+                .await
+                .unwrap();
         assert_eq!(running.state, state::RUNNING);
         assert_eq!(h.stored(&id).unwrap().state, state::RUNNING);
         assert_eq!(h.host.alive().len(), 1);
@@ -7231,7 +7551,7 @@ mod tests {
         let gw = h.m.entry(&t.gateway.unwrap().machine_id).unwrap();
         gw.rec.lock().unwrap().egress = egress("via", Some("gateway"));
         assert_eq!(
-            refused(h.m.start_entry(&gw).await),
+            refused(h.m.start_entry(&gw, true).await),
             "egress.via names the machine itself"
         );
     }
@@ -7964,10 +8284,11 @@ mod tests {
             self.events_of(id).into_iter().map(|e| e.reason).collect()
         }
 
-        /// Waits until the machine's events hold `n` of `reason`.
+        /// Waits until the machine's events hold `n` of `reason`, within ten minutes: on a
+        /// paused clock, which a restart's backoff needs.
         async fn events_reach(&self, id: &str, reason: &str, n: usize) {
             let count = || self.reasons(id).iter().filter(|r| *r == reason).count();
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(Duration::from_secs(600), async {
                 while count() < n {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
@@ -8064,13 +8385,13 @@ mod tests {
         assert!(e.message.contains("nft: refused"), "{}", e.message);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_exit_and_its_restart_are_events() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         let m = h.m.create(h.request("job")).await.unwrap();
         h.host.exit(1000, 7, false);
-        // The default policy, on-failure with 3 retries: the first comes after a second.
+        // The default policy, on-failure with 3 retries: the first comes after 10 s.
         h.events_reach(&m.id, reason::STARTED, 2).await;
         assert_eq!(
             h.reasons(&m.id),
@@ -8094,7 +8415,8 @@ mod tests {
             exited.data,
             Some(json!({"code": 7, "oom": false, "restarting": true}))
         );
-        assert_eq!(restarting.message, "restart 1 in 1 s (at most 3)");
+        assert_eq!(restarting.message, "restart 1 in 10 s (at most 3)");
+        assert_eq!(restarting.data.as_ref().unwrap()["delay_sec"], 10);
         assert_eq!(restarting.data.as_ref().unwrap()["attempt"], 1);
         // Counted for `/metrics`, and a start's time measured.
         let e = h.m.entry(&m.id).unwrap();
@@ -8460,6 +8782,578 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 409);
+    }
+
+    // --- probes (ADR 0022) ---
+
+    fn http_probe(port: u16) -> api::Probe {
+        api::Probe {
+            http: Some(api::HttpProbe {
+                port,
+                path: "/".into(),
+            }),
+            period_sec: 1,
+            ..Default::default()
+        }
+    }
+
+    fn exec_probe(cmd: &str) -> api::Probe {
+        api::Probe {
+            exec: Some(cmd.split(' ').map(String::from).collect()),
+            period_sec: 1,
+            ..Default::default()
+        }
+    }
+
+    fn readiness(p: api::Probe) -> api::Probes {
+        api::Probes {
+            readiness: Some(p),
+            ..Default::default()
+        }
+    }
+
+    impl Harness {
+        fn probed(&self, name: &str, probes: api::Probes) -> api::CreateMachineRequest {
+            let mut r = self.request(name);
+            r.probes = Some(probes);
+            r
+        }
+
+        fn last_event(&self, id: &str) -> api::Event {
+            self.events_of(id).pop().expect("an event")
+        }
+    }
+
+    /// Waits until `f` holds, a tenth of a second at a time, within ten minutes: on a paused
+    /// clock, a probe's periods pass at once.
+    async fn eventually(what: &str, f: impl Fn() -> bool) {
+        for _ in 0..6000 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("never: {what}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_sets_ready_and_says_when_it_changes() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        // Without probes: ready once running, as Kubernetes; never while stopped.
+        let plain = h.m.create(h.request("plain")).await.unwrap();
+        assert!(plain.ready);
+        assert!(plain.probes.is_empty() && plain.probes_status.is_empty());
+        let stopped =
+            h.m.stop(&plain.id, Duration::from_secs(1), false, None)
+                .await
+                .unwrap();
+        assert!(!stopped.ready);
+        // A readiness probe: not ready while it fails, and never was, so no `not_ready`.
+        let m =
+            h.m.create(h.probed("web", readiness(http_probe(8080))))
+                .await
+                .unwrap();
+        h.host.http(&m.ip, 8080, 503);
+        assert_eq!((m.state.as_str(), m.ready), (state::RUNNING, false));
+        let status = || h.m.get(&m.id).unwrap().probes_status.readiness;
+        eventually("two failures", || status().is_some_and(|s| s.failures >= 2)).await;
+        let st = status().unwrap();
+        assert_eq!((st.passed, st.message.as_str()), (false, "HTTP 503"));
+        assert!(!h.reasons(&m.id).contains(&"not_ready".to_string()));
+        // It passes: ready, an event that moves the version.
+        h.host.http(&m.ip, 8080, 200);
+        eventually("ready", || h.m.get(&m.id).unwrap().ready).await;
+        let ev = h.last_event(&m.id);
+        assert_eq!(
+            (ev.reason.as_str(), ev.kind.as_str(), ev.message.as_str()),
+            ("ready", "normal", "ready: readiness passed")
+        );
+        assert_eq!(ev.data, Some(json!({"probe": "readiness"})));
+        assert_eq!(h.m.get(&m.id).unwrap().version, ev.seq);
+        assert_eq!(h.stored(&m.id).unwrap().version, ev.seq);
+        // Three failures in a row: not ready, a warning that says why.
+        h.host.http(&m.ip, 8080, 500);
+        eventually("not ready", || !h.m.get(&m.id).unwrap().ready).await;
+        let ev = h.last_event(&m.id);
+        assert_eq!(
+            (ev.reason.as_str(), ev.kind.as_str(), ev.message.as_str()),
+            (
+                "not_ready",
+                "warning",
+                "not ready: readiness failed 3 times in a row: HTTP 500"
+            )
+        );
+        assert_eq!(ev.data, Some(json!({"probe": "readiness", "failures": 3})));
+        // A probe is not a use: the sleep window never moved.
+        let now = h.m.get(&m.id).unwrap();
+        assert_eq!(now.last_used_at, m.last_used_at);
+        assert!(h
+            .host
+            .calls()
+            .contains(&format!("probe_http {}:8080/", m.ip)));
+        // Stopped: not ready, and the probes stop with the process.
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        h.host.calls();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!h.host.calls().iter().any(|c| c.starts_with("probe_")));
+        assert!(!h.m.get(&m.id).unwrap().ready);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_follows_ready_and_says_why_it_is_not() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m =
+            h.m.create(h.probed("web", readiness(http_probe(8080))))
+                .await
+                .unwrap();
+        h.host.http(&m.ip, 8080, 503);
+        // For running: at once, as before.
+        let up = h.m.wait(&m.id, Until::Running, Duration::from_secs(30));
+        assert_eq!(up.await.unwrap().state, state::RUNNING);
+        // For ready: not by the timeout, answered with the machine and its probe's word.
+        match h.m.wait(&m.id, Until::Ready, Duration::from_secs(5)).await {
+            Err(MError::NotReady(now)) => {
+                assert!(!now.ready);
+                assert_eq!(now.probes_status.readiness.unwrap().message, "HTTP 503");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A wait under way answers once the probe passes.
+        let (mgr, id) = (h.m.clone(), m.id.clone());
+        let waiting =
+            tokio::spawn(async move { mgr.wait(&id, Until::Ready, Duration::from_secs(60)).await });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!waiting.is_finished());
+        h.host.http(&m.ip, 8080, 200);
+        assert!(waiting.await.unwrap().unwrap().ready);
+        // A machine without probes is ready with `running`.
+        let plain = h.m.create(h.request("plain")).await.unwrap();
+        let ready = h.m.wait(&plain.id, Until::Ready, Duration::from_secs(1));
+        assert!(ready.await.unwrap().ready);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_startup_probe_that_fails_fails_the_boot_a_caller_waits_on() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        h.host.answers("pg_isready", 1);
+        let probes = api::Probes {
+            startup: Some(exec_probe("pg_isready")),
+            liveness: Some(exec_probe("true")),
+            ..Default::default()
+        };
+        let m = h.m.create(h.probed("pg", probes)).await.unwrap();
+        // The create answers at `running`; the caller waits for `ready`.
+        assert_eq!((m.state.as_str(), m.ready), (state::RUNNING, false));
+        let failed = match h.m.wait(&m.id, Until::Ready, Duration::from_secs(60)).await {
+            Err(MError::BootFailed(failed)) => failed,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(failed.state, state::ERROR);
+        assert!(
+            failed
+                .error
+                .starts_with("the startup probe failed 3 times in a row: exit 1: no: "),
+            "{}",
+            failed.error
+        );
+        assert_eq!(
+            h.reasons(&m.id),
+            ["created", "starting", "started", "startup_failed"]
+        );
+        let ev = h.last_event(&m.id);
+        assert_eq!(ev.kind, "warning");
+        assert_eq!(ev.data, Some(json!({"failures": 3, "boot": true})));
+        assert_eq!(
+            ev.message,
+            "startup failed 3 times in a row: exit 1: no: the boot failed"
+        );
+        // The guest was asked to stop; nothing restarts a boot that failed (ADR 0011), and
+        // liveness never ran before startup passed.
+        let calls = h.host.calls();
+        assert!(
+            calls.contains(&"shutdown 1000 10s".to_string()),
+            "{calls:?}"
+        );
+        assert!(!calls.iter().any(|c| c.ends_with(" true")), "{calls:?}");
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::ERROR);
+        assert_eq!(h.stored(&m.id).unwrap().boots, 1);
+        assert!(h.host.alive().is_empty());
+        use std::sync::atomic::Ordering::Relaxed;
+        assert_eq!(h.m.inner.stats.starts_failed.load(Relaxed), 1);
+        // For running, it will not run: the reason, as before.
+        match h
+            .m
+            .wait(&m.id, Until::Running, Duration::from_secs(1))
+            .await
+        {
+            Err(MError::NotRunning(why)) => assert_eq!(why, failed.error),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_startup_probe_failing_a_restart_is_a_crash_for_the_policy() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let probes = api::Probes {
+            startup: Some(exec_probe("check")),
+            ..Default::default()
+        };
+        let m = h.m.create(h.probed("app", probes)).await.unwrap();
+        // Startup passed and there is no readiness probe: ready, through the startup probe.
+        eventually("ready", || h.m.get(&m.id).unwrap().ready).await;
+        assert_eq!(h.last_event(&m.id).message, "ready: startup passed");
+        // It crashes; the restart's startup fails: a crash too, restarted by the policy.
+        h.host.answers("check", 1);
+        h.host.exit(h.stored(&m.id).unwrap().pid, 1, false);
+        h.events_reach(&m.id, reason::STARTUP_FAILED, 1).await;
+        h.events_reach(&m.id, reason::RESTARTING, 2).await;
+        let evs = h.events_of(&m.id);
+        let failed = evs.iter().find(|e| e.reason == "startup_failed").unwrap();
+        assert_eq!(failed.data, Some(json!({"failures": 3, "boot": false})));
+        assert!(
+            failed.message.ends_with(": ending it"),
+            "{}",
+            failed.message
+        );
+        let exited: Vec<_> = evs.iter().filter(|e| e.reason == "exited").collect();
+        assert_eq!(exited[1].data.as_ref().unwrap()["restarting"], true);
+        let now = h.m.get(&m.id).unwrap();
+        assert_eq!((now.state.as_str(), now.restarts), (state::STOPPED, 2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn liveness_restarts_under_the_policy_and_not_under_no() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let alive = "test -f /tmp/alive";
+        let probes = api::Probes {
+            liveness: Some(exec_probe(alive)),
+            ..Default::default()
+        };
+        let m = h.m.create(h.probed("live", probes.clone())).await.unwrap();
+        // Liveness does not gate `ready`.
+        assert!(m.ready);
+        h.host.answers(alive, 1);
+        h.events_reach(&m.id, reason::LIVENESS_FAILED, 1).await;
+        let after: Vec<String> = h.reasons(&m.id)[3..].to_vec();
+        assert_eq!(after, ["liveness_failed", "exited", "restarting"]);
+        let ev = h.events_of(&m.id)[3].clone();
+        assert_eq!(
+            (ev.kind.as_str(), ev.message.as_str()),
+            (
+                "warning",
+                "liveness failed 3 times in a row: exit 1: no: ending it"
+            )
+        );
+        assert_eq!(ev.data, Some(json!({"failures": 3})));
+        // Ended as a stop is (asked, then killed after 10 s), and a failure for the policy
+        // whatever the code the process gave.
+        assert!(h.host.calls().contains(&"shutdown 1000 10s".to_string()));
+        let now = h.m.get(&m.id).unwrap();
+        assert_eq!(
+            (
+                now.state.as_str(),
+                now.stopped_reason.as_str(),
+                now.restarts
+            ),
+            (state::STOPPED, stop::EXIT, 1)
+        );
+        let exit = now.exit.unwrap();
+        assert!(exit.restarting);
+        let at = now.restarting_at.expect("when it starts again");
+        assert_eq!((at - exit.at).num_seconds(), 10);
+        // It comes back, and its probes run again.
+        h.host.answers(alive, 0);
+        h.events_reach(&m.id, reason::STARTED, 2).await;
+        let again = h.m.get(&m.id).unwrap();
+        assert_eq!(again.state, state::RUNNING);
+        assert_eq!(again.restarting_at, None);
+        eventually("probed again", || {
+            h.m.get(&m.id)
+                .unwrap()
+                .probes_status
+                .liveness
+                .is_some_and(|s| s.passed)
+        })
+        .await;
+        // Under `restart: no` it is ended and stays stopped.
+        let mut req = h.probed("once", probes);
+        req.restart = Some(api::RestartPolicy {
+            policy: "no".into(),
+            max_retries: 0,
+        });
+        let once = h.m.create(req).await.unwrap();
+        h.host.answers(alive, 1);
+        h.events_reach(&once.id, reason::LIVENESS_FAILED, 1).await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let now = h.m.get(&once.id).unwrap();
+        assert_eq!(
+            (now.state.as_str(), now.stopped_reason.as_str()),
+            (state::STOPPED, stop::EXIT)
+        );
+        assert!(!now.exit.unwrap().restarting);
+        assert_eq!(now.restarting_at, None);
+        assert!(!h.reasons(&once.id).contains(&"restarting".to_string()));
+        assert_eq!(h.stored(&once.id).unwrap().boots, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restarts_back_off_and_a_third_in_a_row_is_a_crash_loop() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let mut req = h.request("crash");
+        req.restart = Some(api::RestartPolicy {
+            policy: "always".into(),
+            max_retries: 0,
+        });
+        let m = h.m.create(req).await.unwrap();
+        for n in 1..=4 {
+            h.host.exit(h.stored(&m.id).unwrap().pid, 1, false);
+            h.events_reach(&m.id, reason::STARTED, n + 1).await;
+        }
+        let evs = h.events_of(&m.id);
+        let delays: Vec<u64> = evs
+            .iter()
+            .filter(|e| e.reason == "restarting")
+            .map(|e| e.data.as_ref().unwrap()["delay_sec"].as_u64().unwrap())
+            .collect();
+        assert_eq!(delays, [10, 20, 40, 80]);
+        // From the third restart in a row, each is a crash loop, right after its `restarting`.
+        let loops: Vec<&api::Event> = evs.iter().filter(|e| e.reason == "crash_loop").collect();
+        assert_eq!(loops.len(), 2);
+        assert_eq!(loops[0].data, Some(json!({"restarts": 3, "delay_sec": 40})));
+        assert_eq!(
+            loops[0].message,
+            "restarted 3 times in a row, no run of 10 minutes between: next in 40 s"
+        );
+        let i = evs.iter().position(|e| e.reason == "crash_loop").unwrap();
+        assert_eq!(evs[i - 1].data.as_ref().unwrap()["attempt"], 3);
+        // A run of 10 minutes ends the loop: the next restart waits 10 s again. The count
+        // `max_retries` reads is not reset by it.
+        e_started_minutes_ago(&h, &m.id, 11);
+        h.host.exit(h.stored(&m.id).unwrap().pid, 1, false);
+        h.events_reach(&m.id, reason::RESTARTING, 5).await;
+        let last = h.events_of(&m.id);
+        let last = last
+            .iter()
+            .rev()
+            .find(|e| e.reason == "restarting")
+            .unwrap();
+        assert_eq!(last.data.as_ref().unwrap()["delay_sec"], 10);
+        assert_eq!(last.data.as_ref().unwrap()["attempt"], 5);
+        assert_eq!(
+            h.reasons(&m.id)
+                .iter()
+                .filter(|r| *r == "crash_loop")
+                .count(),
+            2
+        );
+        let r = h.stored(&m.id).unwrap();
+        assert_eq!((r.restarts, r.recent_restarts), (5, 1));
+    }
+
+    /// Moves the current run's start back, as if it had run that long.
+    fn e_started_minutes_ago(h: &Harness, id: &str, minutes: i64) {
+        let e = h.m.entry(id).unwrap();
+        e.rec.lock().unwrap().started_at = Some(Utc::now() - chrono::Duration::minutes(minutes));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ingress_waits_for_a_woken_machine_to_be_ready() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m =
+            h.m.create(h.probed("web", readiness(http_probe(8080))))
+                .await
+                .unwrap();
+        eventually("ready", || h.m.get(&m.id).unwrap().ready).await;
+        let e = h.m.entry(&m.id).unwrap();
+        h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        // A connection wakes it; its program is not serving yet: the proxy waits.
+        h.host.http(&m.ip, 8080, 503);
+        let mgr = h.m.clone();
+        let id = m.id.clone();
+        let dial = tokio::spawn(async move { mgr.ready_addr(&id, Duration::from_secs(120)).await });
+        eventually("woken", || h.m.get(&m.id).unwrap().state == state::RUNNING).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!dial.is_finished());
+        h.host.http(&m.ip, 8080, 200);
+        let ip = dial.await.unwrap().unwrap();
+        assert_eq!(ip.to_string(), m.ip);
+        assert!(h.m.get(&m.id).unwrap().ready);
+        // Running and not ready: readiness gates every connection, not only a wake's.
+        h.host.http(&m.ip, 8080, 500);
+        eventually("not ready", || !h.m.get(&m.id).unwrap().ready).await;
+        match h.m.ready_addr(&m.id, Duration::from_secs(5)).await {
+            Err(MError::NotReady(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn probe_executions_take_turns_across_the_host() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        h.m.inner
+            .probe_gate
+            .forget_permits(probes::PROBES_AT_ONCE - 2);
+        *h.host.exec_takes.lock().unwrap() = Duration::from_secs(2);
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let req = h.probed(&format!("m{i}"), readiness(exec_probe("ready-check")));
+            ids.push(h.m.create(req).await.unwrap().id);
+        }
+        // Each one gets its turn: all ready in the end, never more than two at once.
+        eventually("all ready", || {
+            ids.iter().all(|id| h.m.get(id).unwrap().ready)
+        })
+        .await;
+        use std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(h.host.execs_most.load(SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_patch_of_the_probes_applies_at_once_to_a_running_machine() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        assert!(m.ready);
+        h.host.http(&m.ip, 8080, 503);
+        let set = |p: api::Probes| api::UpdateMachineRequest {
+            probes: Some(p),
+            ..Default::default()
+        };
+        let patched =
+            h.m.update(&m.id, set(readiness(http_probe(8080))), None)
+                .await
+                .unwrap();
+        assert_eq!(patched.probes, readiness(http_probe(8080)));
+        assert!(!patched.ready);
+        let evs = h.events_of(&m.id);
+        let got: Vec<(&str, &str)> = evs[3..]
+            .iter()
+            .map(|e| (e.reason.as_str(), e.message.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("updated", "probes changed"),
+                ("not_ready", "not ready: its probes changed")
+            ]
+        );
+        assert_eq!(h.stored(&m.id).unwrap().probes, readiness(http_probe(8080)));
+        eventually("probed", || {
+            h.m.get(&m.id)
+                .unwrap()
+                .probes_status
+                .readiness
+                .is_some_and(|s| s.failures >= 1)
+        })
+        .await;
+        // The probes taken off: ready at once, the results gone, no probe runs any more.
+        let cleared =
+            h.m.update(&m.id, set(api::Probes::default()), None)
+                .await
+                .unwrap();
+        assert!(cleared.ready && cleared.probes_status.is_empty());
+        assert_eq!(h.last_event(&m.id).message, "ready: its probes changed");
+        h.host.calls();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!h.host.calls().iter().any(|c| c.starts_with("probe_")));
+        // The same probes again change nothing.
+        let v = h.m.get(&m.id).unwrap().version;
+        let same =
+            h.m.update(&m.id, set(api::Probes::default()), None)
+                .await
+                .unwrap();
+        assert_eq!(same.version, v);
+        // Refused with the field named, on a PATCH as on a create.
+        let bad = readiness(api::Probe::default());
+        let want = "probes.readiness: exactly one of exec, tcp and http";
+        assert_eq!(
+            refused(h.m.update(&m.id, set(bad.clone()), None).await),
+            want
+        );
+        assert_eq!(refused(h.m.create(h.probed("bad", bad)).await), want);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_gateway_with_a_readiness_probe_is_waited_for_ready_not_its_port() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let mut spec = gateway_spec(3128);
+        spec.probes = readiness(api::Probe {
+            tcp: Some(3128),
+            period_sec: 1,
+            ..Default::default()
+        });
+        let gw = h.m.set_gateway("t1", spec).await.unwrap().gateway.unwrap();
+        let ip: Ipv4Addr = gw.ip.parse().unwrap();
+        h.host.closed.lock().unwrap().insert((ip, 3128));
+        h.host.calls();
+        // Not ready within the boot timeout: the consumer's start fails, the gateway errs.
+        let err = h.m.create(h.consumer("c")).await.unwrap_err();
+        let m = match err {
+            MError::BootFailed(m) => m,
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            m.error
+                .starts_with("the tenant's gateway did not come up: not ready: "),
+            "{}",
+            m.error
+        );
+        assert_eq!(h.gateway_view().state, state::ERROR);
+        let calls = h.host.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("wait_port")),
+            "{calls:?}"
+        );
+        assert!(calls.contains(&format!("probe_tcp {ip}:3128")), "{calls:?}");
+        // Its port answers: the next start runs it, ready, then the consumer.
+        h.host.closed.lock().unwrap().clear();
+        let c = h.m.start(&m.id, None).await.unwrap();
+        assert_eq!(c.state, state::RUNNING);
+        let gw = h.m.get(&gw.machine_id).unwrap();
+        assert!(gw.ready);
+        assert_eq!(h.last_event(&gw.id).reason, "gateway_started");
+    }
+
+    #[tokio::test]
+    async fn an_adopted_machine_runs_its_probes_again() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.tenant("t1");
+        let e = h.add("m_ours", state::RUNNING, 256);
+        let pid = h
+            .host
+            .left_running("m_ours", &h.m.inner.cfg.run_dir().join("m_ours"));
+        e.set_state(state::RUNNING, |r| {
+            r.pid = pid;
+            r.probes = readiness(http_probe(8080));
+            None
+        });
+        h.host.http("10.64.1.2", 8080, 503);
+        assert_eq!(h.m.recover().await, (1, 0));
+        // Not ready until its readiness probe passes again: results are not kept.
+        let m = h.m.get("m_ours").unwrap();
+        assert_eq!((m.state.as_str(), m.ready), (state::RUNNING, false));
+        h.host.http("10.64.1.2", 8080, 200);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !h.m.get("m_ours").unwrap().ready {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     // --- metrics, conditions, top (ADR 0021) ---

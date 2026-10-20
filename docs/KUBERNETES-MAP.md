@@ -53,9 +53,10 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Change image, env, command, size (`kubectl apply`, `set image`, in-place resize) | ✗ PATCH takes sleep, metadata, egress | a PATCH applied at the next cold boot | yard |
 | `kubectl exec -it`, attach | ◐ exec with stdin and streamed output, no TTY | a TTY | yard, later |
 | `kubectl cp` | ✓ `/files` | | |
-| Pod phases and conditions | ◐ states, `stopped_reason`, exit code | a `ready` condition | yard (probes) |
-| Liveness, readiness, startup probes | ◐ the init answers; briq runs its healthcheck by exec from the control plane | probes in the daemon: exec, TCP, HTTP; readiness and restart on liveness | yard |
-| `restartPolicy`, CrashLoopBackOff | ◐ `no`, `on-failure`, `always`, a retry count, a linear backoff | a cap, a reset after a stable run, a `crash_loop` reason | yard |
+| Pod phases and conditions | ✓ states, `stopped_reason`, exit code, `ready` (ADR 0022) | | |
+| Liveness, readiness, startup probes | ✓ in the daemon: exec, TCP, HTTP, Kubernetes's timings, 32 at once per host (ADR 0022) | gRPC probes | yard, later |
+| `restartPolicy`, CrashLoopBackOff | ✓ `no`, `on-failure`, `always`, a retry count; 10 s doubling to 5 minutes, reset after 10 minutes, a `crash_loop` event | | |
+| Readiness gates traffic (endpoints follow Ready) | ✓ the ingress, `/wait` and the gateway's start wait for `ready` | another replica to send to (groups) | yard, later |
 | `terminationGracePeriod` | ✓ stop timeout, SIGTERM then reset | | |
 | preStop hook | ✗ | | — |
 | Requests, limits | ✓ size (vCPUs, memory) as cgroup limits | | |
@@ -171,7 +172,7 @@ Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit 
 1. **Egress controls**: blocked ports, connection rate, bandwidth per machine. Built: ADR 0018.
 2. **Events, watch, versions**, and `describe` from them.
 3. **Metrics**: per machine series and machine states on `/metrics`, host conditions, image GC and log rotation under them, `top`.
-4. **Probes**: exec, TCP, HTTP; `ready`, which the ingress and `/wait` follow; restart on liveness; a capped backoff with a `crash_loop` reason.
+4. **Probes**: exec, TCP, HTTP; `ready`, which the ingress and `/wait` follow; restart on liveness; a capped backoff with a `crash_loop` reason. Built: ADR 0022.
 5. **Backups on a schedule**, retention, delete (closes ADR 0017's storage hole). Built: ADR 0023.
 6. **TLS between the fleet and the hosts**, the certificate pinned at bootstrap. Built: ADR 0020.
 7. **Changes at the next cold boot**: image, env, command, size by PATCH.
