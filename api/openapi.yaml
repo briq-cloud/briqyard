@@ -619,6 +619,8 @@ components:
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer, description: the tenants' machines, gateways not counted }
         running: { type: integer, description: machines up on the host, gateways included }
+        disk_free_mb: { type: integer }
+        tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate, 64 hex digits; empty on plain HTTP (ADR 0020)" }
     Host:
       type: object
       properties:
@@ -634,6 +636,7 @@ components:
         last_seen: { type: string, format: date-time }
         version: { type: string }
         note: { type: string, description: What the provisioner or the bootstrap last said }
+        tls_fingerprint: { type: string, description: "SHA-256 of the host's API certificate, pinned by the fleet; empty on plain HTTP" }
     OrderHostRequest:
       type: object
       properties:
@@ -651,11 +654,12 @@ components:
         tenants: { type: array, items: { type: string } }
         version: { type: string }
         disk_free_mb: { type: integer }
+        tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate; a fingerprint other than the pinned one is refused (403 tls_mismatch)" }
     ApiError:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, gateway, unauthorized, unknown_host, host_unreachable, host_down, registry, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, gateway, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]

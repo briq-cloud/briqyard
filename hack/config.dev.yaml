@@ -1,5 +1,8 @@
 # briqyardd configuration for the development VM.
 listen: 0.0.0.0:7420
+# Plain HTTP off loopback, said explicitly (ADR 0020): Lima's forwards bring the API to the Mac
+# and the suites curl http://127.0.0.1:7420. Development only; TLS is covered by unit tests.
+api_tls: false
 data_dir: /var/lib/briqyard
 firecracker: /usr/local/bin/firecracker
 jailer: /usr/local/bin/jailer

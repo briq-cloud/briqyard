@@ -21,6 +21,11 @@ struct Cli {
     /// Bearer token.
     #[arg(long, env = "BRIQYARD_TOKEN", global = true, hide_env_values = true)]
     token: Option<String>,
+    /// A daemon's API certificate (`tls_fingerprint` in its status, `briqyardd
+    /// tls-fingerprint` on the host): trusted alone, no CA. Without it, an https URL is
+    /// checked against the web PKI, as a fleet's is.
+    #[arg(long, env = "BRIQYARD_TLS_FINGERPRINT", global = true, value_parser = fingerprint_arg)]
+    tls_fingerprint: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -381,6 +386,22 @@ impl Client {
     }
 }
 
+fn fingerprint_arg(s: &str) -> Result<String, String> {
+    api::tls::parse_fingerprint(s)
+}
+
+/// The HTTP client: pinned to a daemon's certificate (https only), or the web PKI's.
+fn http_client(tls_fingerprint: Option<&str>) -> Result<reqwest::Client> {
+    let b = reqwest::Client::builder().timeout(Duration::from_secs(900));
+    let b = match tls_fingerprint {
+        Some(fp) => b
+            .use_preconfigured_tls(api::tls::pinned_client(fp))
+            .https_only(true),
+        None => b,
+    };
+    Ok(b.build()?)
+}
+
 fn print_json<T: serde::Serialize>(v: &T) {
     println!("{}", serde_json::to_string_pretty(v).unwrap());
 }
@@ -388,13 +409,17 @@ fn print_json<T: serde::Serialize>(v: &T) {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    let http = match http_client(cli.tls_fingerprint.as_deref()) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+    };
     let c = Client {
         base: cli.url.trim_end_matches('/').to_string(),
         token: cli.token.clone(),
-        http: reqwest::Client::builder()
-            .timeout(Duration::from_secs(900))
-            .build()
-            .unwrap(),
+        http,
     };
     if let Err(e) = run(&c, cli.cmd).await {
         eprintln!("error: {e:#}");
@@ -989,6 +1014,9 @@ fn host_table(hs: &[api::Host]) -> String {
             h.tenants.len(),
             h.last_seen.to_rfc3339()
         ));
+        if !h.tls_fingerprint.is_empty() {
+            out.push_str(&format!("{:<16} tls: {}\n", "", h.tls_fingerprint));
+        }
         if !h.note.is_empty() {
             out.push_str(&format!("{:<16} note: {}\n", "", h.note));
         }

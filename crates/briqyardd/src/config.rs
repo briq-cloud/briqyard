@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// The HTTP API address. Put it behind TLS or a private network before listening on
-    /// anything but loopback.
+    /// The API's address. Served over TLS unless it is loopback or `api_tls` is false.
     pub listen: String,
+    /// TLS on the API with the daemon's own certificate (`<data_dir>/api-cert.pem`, ADR
+    /// 0020). A loopback `listen` is plain HTTP whatever this says: nothing leaves the host.
+    pub api_tls: bool,
     /// When set, required as `Authorization: Bearer <token>` on every request.
     pub token: String,
     /// A token of its own for `/metrics`, so a scraper never holds the API's. Unset, the
@@ -163,6 +165,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:7420".into(),
+            api_tls: true,
             token: String::new(),
             metrics_token: String::new(),
             data_dir: "/var/lib/briqyard".into(),
@@ -269,7 +272,74 @@ impl Config {
         for c in &self.ingress.allowed_clients {
             netw::cidr(c).with_context(|| format!("ingress.allowed_clients {c:?}"))?;
         }
-        self.check_exposure()
+        self.check_exposure()?;
+        self.check_advertise()
+    }
+
+    /// The fleet dials `fleet.advertise` as written: its scheme must be the API's.
+    fn check_advertise(&self) -> Result<()> {
+        let Some(f) = &self.fleet else { return Ok(()) };
+        if f.advertise.is_empty() {
+            return Ok(());
+        }
+        let want = if self.serves_tls() { "https" } else { "http" };
+        if !f.advertise.starts_with(&format!("{want}://")) {
+            bail!(
+                "fleet.advertise: {} but the API serves {} on {}: write {want}://…",
+                f.advertise,
+                if self.serves_tls() {
+                    "TLS"
+                } else {
+                    "plain HTTP"
+                },
+                self.listen
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether the API is served over TLS: `api_tls`, unless `listen` is loopback.
+    pub fn serves_tls(&self) -> bool {
+        let loopback = self
+            .listen
+            .parse::<SocketAddr>()
+            .map(|a| a.ip().is_loopback())
+            .unwrap_or(false);
+        self.api_tls && !loopback
+    }
+
+    /// The API certificate and its key (ADR 0020).
+    pub fn tls_cert(&self) -> PathBuf {
+        self.data_dir.join("api-cert.pem")
+    }
+    pub fn tls_key(&self) -> PathBuf {
+        self.data_dir.join("api-key.pem")
+    }
+
+    /// The names the API certificate carries: the addresses the configuration gives the
+    /// host. Nothing checks them (the fleet pins the fingerprint); they say whose it is.
+    pub fn tls_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Ok(a) = self.listen.parse::<SocketAddr>() {
+            if !a.ip().is_unspecified() {
+                names.push(a.ip().to_string());
+            }
+        }
+        if let Some(f) = &self.fleet {
+            let host = f.advertise.split("://").nth(1).unwrap_or("");
+            let host = host.split('/').next().unwrap_or("");
+            let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            if !host.is_empty() {
+                names.push(host.to_string());
+            }
+        }
+        if !self.ingress.advertise.is_empty() {
+            names.push(self.ingress.advertise.clone());
+        }
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Refuses an address the internet could reach when nothing says who may connect
@@ -340,6 +410,8 @@ mod tests {
     fn defaults() {
         let c = Config::load(None).unwrap();
         assert_eq!(c.listen, "127.0.0.1:7420");
+        assert!(c.api_tls);
+        assert!(!c.serves_tls(), "a loopback API is plain HTTP");
         assert!(c.token.is_empty());
         assert_eq!(c.data_dir, PathBuf::from("/var/lib/briqyard"));
         assert_eq!(c.firecracker, PathBuf::from("/usr/local/bin/firecracker"));
@@ -394,6 +466,7 @@ mod tests {
         let c = load(
             r#"
 listen: 0.0.0.0:7420
+api_tls: false
 token: secret
 data_dir: /data
 firecracker: /opt/fc/firecracker
@@ -438,6 +511,7 @@ capacity:
         )
         .unwrap();
         assert_eq!(c.listen, "0.0.0.0:7420");
+        assert!(!c.api_tls);
         assert_eq!(c.token, "secret");
         assert_eq!(c.data_dir, PathBuf::from("/data"));
         assert_eq!(c.firecracker, PathBuf::from("/opt/fc/firecracker"));
@@ -610,6 +684,78 @@ capacity:
             let err = format!("{:#}", load(yaml).unwrap_err());
             assert!(err.contains(msg), "{yaml:?}: {err}");
         }
+    }
+
+    #[test]
+    fn the_api_is_tls_unless_loopback_or_turned_off() {
+        let c = load("listen: 0.0.0.0:7420\ningress:\n  allow_public: true\n").unwrap();
+        assert!(c.serves_tls(), "a wider listen is TLS by default");
+        let c = load("listen: 10.0.0.5:7420\n").unwrap();
+        assert!(c.serves_tls());
+        // The only way to plain HTTP off loopback: saying so.
+        let c = load("listen: 10.0.0.5:7420\napi_tls: false\n").unwrap();
+        assert!(!c.serves_tls());
+        for listen in ["127.0.0.1:7420", "[::1]:7420"] {
+            let c = load(&format!("listen: \"{listen}\"\n")).unwrap();
+            assert!(!c.serves_tls(), "{listen}");
+        }
+    }
+
+    #[test]
+    fn fleet_advertise_has_the_apis_scheme() {
+        let base = "listen: 10.0.0.5:7420\n";
+        load(&format!(
+            "{base}fleet:\n  url: https://fleet\n  advertise: https://10.0.0.5:7420\n"
+        ))
+        .unwrap();
+        let err = load(&format!(
+            "{base}fleet:\n  url: https://fleet\n  advertise: http://10.0.0.5:7420\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "fleet.advertise: http://10.0.0.5:7420 but the API serves TLS on 10.0.0.5:7420: write https://…"
+        );
+        // A plain API (loopback, a host forwarded by its operator) advertises http.
+        let err = load("fleet:\n  advertise: https://192.168.64.1:27420\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("serves plain HTTP on 127.0.0.1:7420: write http://"),
+            "{err}"
+        );
+        load("fleet:\n  advertise: http://192.168.64.1:27420\n").unwrap();
+        load("listen: 10.0.0.5:7420\napi_tls: false\nfleet:\n  advertise: http://10.0.0.5:7420\n")
+            .unwrap();
+    }
+
+    #[test]
+    fn the_certificate_names_the_configured_addresses() {
+        let c = load(
+            "listen: 10.0.0.5:7420\ningress:\n  advertise: 10.0.0.5\nfleet:\n  advertise: https://203.0.113.5:7420\n",
+        )
+        .unwrap();
+        assert_eq!(c.tls_names(), ["10.0.0.5", "203.0.113.5"]);
+        let c =
+            load("listen: 0.0.0.0:7420\napi_tls: false\ningress:\n  allow_public: true\n").unwrap();
+        assert!(
+            c.tls_names().is_empty(),
+            "an unspecified address names nothing"
+        );
+        let c = load("listen: \"[::]:7420\"\napi_tls: false\ningress:\n  allow_public: true\nfleet:\n  advertise: \"http://[fd00::5]:7420\"\n").unwrap();
+        assert_eq!(c.tls_names(), ["fd00::5"]);
+        let c = load("data_dir: /data\n").unwrap();
+        assert_eq!(c.tls_cert(), PathBuf::from("/data/api-cert.pem"));
+        assert_eq!(c.tls_key(), PathBuf::from("/data/api-key.pem"));
+    }
+
+    #[test]
+    fn the_dev_config_is_plain_http_on_purpose() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hack/config.dev.yaml");
+        let c = Config::load(Some(&path)).unwrap();
+        assert_eq!(c.listen, "0.0.0.0:7420");
+        assert!(!c.serves_tls(), "the suites curl http://127.0.0.1:7420");
     }
 
     #[test]

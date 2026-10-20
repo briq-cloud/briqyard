@@ -1,13 +1,17 @@
 //! The fleet's configuration file.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub listen: String,
+    /// The fleet's own listener: `{ cert, key }` serves TLS; without it, plain HTTP, refused
+    /// off loopback unless `off` says something in front terminates TLS (ADR 0020).
+    pub tls: Tls,
     /// Required from API clients when set. A host's heartbeat presents the host's own token
     /// instead (`hosts[].token`, or the one the bootstrap gave it).
     pub token: String,
@@ -27,6 +31,45 @@ pub struct StaticHost {
     /// Without one the host is polled only.
     pub token: String,
     pub region: String,
+    /// The SHA-256 of the host's API certificate (`briqyardd tls-fingerprint` on the host),
+    /// with an `https://` URL; empty for a host on plain HTTP (ADR 0020).
+    pub tls_fingerprint: String,
+}
+
+/// The fleet's listener.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Tls {
+    /// Plain HTTP, on loopback only.
+    #[default]
+    Unset,
+    /// Plain HTTP on any address: something else terminates TLS.
+    Off,
+    /// TLS with the operator's certificate chain and key, PEM.
+    Files { cert: PathBuf, key: PathBuf },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TlsFiles {
+    cert: PathBuf,
+    key: PathBuf,
+}
+
+/// `tls: off` or `tls: { cert, key }`.
+impl<'de> Deserialize<'de> for Tls {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+        match serde_yaml::Value::deserialize(d)? {
+            serde_yaml::Value::String(s) if s == "off" => Ok(Tls::Off),
+            v @ serde_yaml::Value::Mapping(_) => serde_yaml::from_value::<TlsFiles>(v)
+                .map(|f| Tls::Files {
+                    cert: f.cert,
+                    key: f.key,
+                })
+                .map_err(|e| D::Error::custom(format!("tls: {e}"))),
+            _ => Err(D::Error::custom("tls: want `off` or `{ cert, key }`")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -184,6 +227,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:7430".into(),
+            tls: Tls::Unset,
             token: String::new(),
             state_dir: "/var/lib/briqyard-fleet".into(),
             hosts: vec![],
@@ -222,7 +266,52 @@ impl Config {
         if let Ok(v) = std::env::var("OVH_CONSUMER_KEY") {
             cfg.provisioner.ovh.consumer_key = v;
         }
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    fn validate(&mut self) -> Result<()> {
+        let listen: SocketAddr = self
+            .listen
+            .parse()
+            .with_context(|| format!("listen {:?}: want address:port", self.listen))?;
+        if self.tls == Tls::Unset && !listen.ip().is_loopback() {
+            bail!(
+                "listen: {} is not loopback and tls is not set: give tls: {{ cert, key }} (a \
+                 certificate for the fleet's name), or tls: off if something in front \
+                 terminates TLS",
+                listen.ip()
+            );
+        }
+        for h in &mut self.hosts {
+            let name = if h.id.is_empty() { &h.url } else { &h.id };
+            if !h.tls_fingerprint.is_empty() {
+                h.tls_fingerprint = briqyard_api::tls::parse_fingerprint(&h.tls_fingerprint)
+                    .map_err(|e| anyhow::anyhow!("hosts {name}: tls_fingerprint {e}"))?;
+            }
+            let https = h.url.starts_with("https://");
+            if https != !h.tls_fingerprint.is_empty() {
+                bail!(
+                    "hosts {name}: {} wants {}",
+                    h.url,
+                    if https {
+                        "its tls_fingerprint: the fleet trusts a host's certificate by it alone"
+                    } else {
+                        "an https:// URL with a tls_fingerprint"
+                    }
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The fleet's own URL on its listen address, for a host that is given none.
+    pub fn own_url(&self) -> String {
+        let scheme = match self.tls {
+            Tls::Files { .. } => "https",
+            _ => "http",
+        };
+        format!("{scheme}://{}", self.listen)
     }
 }
 
@@ -276,6 +365,8 @@ mod tests {
     fn defaults() {
         let cfg = with_env(&[], || Config::load(None).unwrap());
         assert_eq!(cfg.listen, "127.0.0.1:7430");
+        assert_eq!(cfg.tls, Tls::Unset);
+        assert_eq!(cfg.own_url(), "http://127.0.0.1:7430");
         assert_eq!(cfg.token, "");
         assert_eq!(cfg.state_dir, PathBuf::from("/var/lib/briqyard-fleet"));
         assert!(cfg.hosts.is_empty());
@@ -309,13 +400,17 @@ mod tests {
             &dir,
             r#"
 listen: 0.0.0.0:7430
+tls:
+  cert: /etc/briqyard/fleet.crt
+  key: /etc/briqyard/fleet.key
 token: api-t0k
 state_dir: /tmp/fleet
 hosts:
   - id: h1
-    url: http://10.0.0.1:7420
+    url: https://10.0.0.1:7420
     token: t1
     region: fsn
+    tls_fingerprint: "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
   - url: http://10.0.0.2:7420
 placement:
   fill_ceiling: 0.9
@@ -362,13 +457,27 @@ provisioner:
         );
         let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
         assert_eq!(cfg.listen, "0.0.0.0:7430");
+        assert_eq!(
+            cfg.tls,
+            Tls::Files {
+                cert: "/etc/briqyard/fleet.crt".into(),
+                key: "/etc/briqyard/fleet.key".into()
+            }
+        );
+        assert_eq!(cfg.own_url(), "https://0.0.0.0:7430");
         assert_eq!(cfg.token, "api-t0k");
         assert_eq!(cfg.state_dir, PathBuf::from("/tmp/fleet"));
         assert_eq!(cfg.hosts.len(), 2);
         assert_eq!(cfg.hosts[0].id, "h1");
-        assert_eq!(cfg.hosts[0].url, "http://10.0.0.1:7420");
+        assert_eq!(cfg.hosts[0].url, "https://10.0.0.1:7420");
         assert_eq!(cfg.hosts[0].token, "t1");
         assert_eq!(cfg.hosts[0].region, "fsn");
+        assert_eq!(
+            cfg.hosts[0].tls_fingerprint,
+            "abcdef0123456789".repeat(4),
+            "as openssl prints it, kept as the daemon reports it"
+        );
+        assert_eq!(cfg.hosts[1].tls_fingerprint, "");
         assert_eq!(cfg.hosts[1].id, "", "a host needs only its URL");
         assert_eq!(cfg.hosts[1].url, "http://10.0.0.2:7420");
         assert_eq!(cfg.placement.fill_ceiling, 0.9);
@@ -438,6 +547,7 @@ provisioner:
             ("provisioner:\n  scaleway:\n    secret: s\n", "secret"),
             ("provisioner:\n  ovh:\n    plan: x\n", "plan"),
             ("hosts:\n  - url: http://h\n    tokn: t\n", "tokn"),
+            ("tls:\n  cert: a\n  keys: b\n", "keys"),
         ] {
             let path = write(&dir, text);
             let err = with_env(&[], || Config::load(Some(&path)).unwrap_err());
@@ -445,6 +555,79 @@ provisioner:
             assert!(msg.contains("parse config"), "{msg}");
             assert!(msg.contains(field), "{field} named in: {msg}");
         }
+    }
+
+    #[test]
+    fn a_plain_listener_off_loopback_needs_tls_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |text: &str| {
+            let path = write(&dir, text);
+            with_env(&[], || Config::load(Some(&path)))
+        };
+        let err = load("listen: 0.0.0.0:7430\n").unwrap_err().to_string();
+        assert!(
+            err.starts_with("listen: 0.0.0.0 is not loopback and tls is not set"),
+            "{err}"
+        );
+        assert!(err.contains("tls: off"), "{err}");
+        let cfg = load("listen: 0.0.0.0:7430\ntls: off\n").unwrap();
+        assert_eq!(cfg.tls, Tls::Off);
+        assert_eq!(cfg.own_url(), "http://0.0.0.0:7430");
+        load("listen: \"[::1]:7430\"\n").unwrap();
+        for (text, msg) in [
+            ("tls: on\n", "tls: want `off` or `{ cert, key }`"),
+            ("tls: true\n", "tls: want `off` or `{ cert, key }`"),
+            ("tls:\n  cert: a\n", "missing field `key`"),
+            ("listen: localhost:7430\n", "want address:port"),
+        ] {
+            let err = format!("{:#}", load(text).unwrap_err());
+            assert!(err.contains(msg), "{text:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_host_on_tls_is_listed_with_its_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |text: &str| {
+            let path = write(&dir, text);
+            with_env(&[], || Config::load(Some(&path)))
+        };
+        let fp = "ab".repeat(32);
+        load(&format!(
+            "hosts:\n  - url: https://10.0.0.1:7420\n    tls_fingerprint: {fp}\n"
+        ))
+        .unwrap();
+        // No trust on first use: an https host without a pin, or a pin on plain HTTP.
+        let err = load("hosts:\n  - id: h1\n    url: https://10.0.0.1:7420\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("hosts h1: https://10.0.0.1:7420 wants its tls_fingerprint"),
+            "{err}"
+        );
+        let err = load(&format!(
+            "hosts:\n  - url: http://10.0.0.1:7420\n    tls_fingerprint: {fp}\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.starts_with(
+                "hosts http://10.0.0.1:7420: http://10.0.0.1:7420 wants an https:// URL"
+            ),
+            "{err}"
+        );
+        let err = load("hosts:\n  - url: https://h\n    tls_fingerprint: abc\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("64 hex digits"), "{err}");
+    }
+
+    #[test]
+    fn the_dev_config_loads() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hack/fleet.dev.yaml");
+        let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
+        assert_eq!(cfg.tls, Tls::Off);
+        assert!(cfg.hosts.iter().all(|h| h.tls_fingerprint.is_empty()));
     }
 
     #[test]

@@ -22,6 +22,8 @@ struct Daemon {
     next: AtomicUsize,
     /// A tenant the daemon refuses to delete (answers 409), to test a failed forward.
     keep_tenant: String,
+    /// Its certificate's, when it serves TLS.
+    tls_fingerprint: String,
 }
 
 impl Daemon {
@@ -92,6 +94,11 @@ struct Running {
 }
 
 async fn start_daemon(id: &str, token: &str) -> Running {
+    start_daemon_on(id, token, None).await
+}
+
+/// A stub daemon serving TLS with `cert` when given, as a daemon off loopback does.
+async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKey>) -> Running {
     let stub = Arc::new(Daemon {
         id: id.into(),
         token: token.into(),
@@ -101,6 +108,9 @@ async fn start_daemon(id: &str, token: &str) -> Running {
         gateways: Mutex::new(vec![]),
         next: AtomicUsize::new(0),
         keep_tenant: "kept".into(),
+        tls_fingerprint: cert
+            .map(|c| api::tls::fingerprint(c.cert.der()))
+            .unwrap_or_default(),
     });
     type D = State<Arc<Daemon>>;
     async fn status(State(d): D) -> Json<api::Status> {
@@ -119,6 +129,7 @@ async fn start_daemon(id: &str, token: &str) -> Running {
             machines: ms.len(),
             running: ms.len(),
             disk_free_mb: 100_000,
+            tls_fingerprint: d.tls_fingerprint.clone(),
         })
     }
     async fn tenants(State(d): D) -> Json<Vec<api::Tenant>> {
@@ -345,9 +356,26 @@ async fn start_daemon(id: &str, token: &str) -> Running {
         )
         .layer(axum::middleware::from_fn_with_state(stub.clone(), record))
         .with_state(stub.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = app.into_make_service();
+    let url = match cert {
+        None => {
+            tokio::spawn(axum_server::from_tcp(listener).serve(app));
+            format!("http://{addr}")
+        }
+        Some(c) => {
+            let cfg = api::tls::server_config(
+                c.cert.pem().as_bytes(),
+                c.key_pair.serialize_pem().as_bytes(),
+            )
+            .unwrap();
+            let cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(cfg));
+            tokio::spawn(axum_server::from_tcp_rustls(listener, cfg).serve(app));
+            format!("https://{addr}")
+        }
+    };
     Running { url, stub }
 }
 
@@ -386,6 +414,7 @@ fn fleet_at(
         cfg,
         reg: Mutex::new(reg),
         http: reqwest::Client::new(),
+        pinned: Mutex::new(HashMap::new()),
         prov,
     });
     Fleet { st, _dir: dir }
@@ -441,6 +470,7 @@ async fn fleet_with_daemons(n: usize) -> (Fleet, Vec<Running>) {
             url: d.url.clone(),
             token: format!("tok-{i}"),
             region: "fsn".into(),
+            ..Default::default()
         });
         daemons.push(d);
     }
@@ -611,6 +641,7 @@ async fn a_registration_is_taken_only_for_the_host_that_expects_it() {
                     url: "http://10.0.0.1:7420".into(),
                     token: "s1-token".into(),
                     region: "fsn".into(),
+                    ..Default::default()
                 },
                 config::StaticHost {
                     id: "open".into(),
@@ -820,7 +851,7 @@ async fn a_registry_that_cannot_be_written_fails_the_request() {
                 id: "d1".into(),
                 url: d.url.clone(),
                 token: "tok".into(),
-                region: String::new(),
+                ..Default::default()
             }],
             ..Default::default()
         },
@@ -1091,6 +1122,7 @@ async fn the_poll_fills_a_static_host_in_and_marks_a_silent_one_down() {
                 url: d.url.clone(),
                 token: "tok-1".into(),
                 region: "fsn".into(),
+                ..Default::default()
             },
             config::StaticHost {
                 id: "gone".into(),
@@ -1884,4 +1916,120 @@ async fn a_gateway_refused_is_answered_as_the_host_said() {
     }
     assert_eq!(ds[0].stub.calls().len(), before);
     assert_eq!(pinned(&f.st, "t2"), None);
+}
+
+// --- TLS to the hosts (ADR 0020) ---
+
+fn certificate() -> (rcgen::CertifiedKey, String) {
+    let c = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let fp = api::tls::fingerprint(c.cert.der());
+    (c, fp)
+}
+
+#[tokio::test]
+async fn an_ordered_host_is_pinned_at_bootstrap_then_forwarded_to_over_tls() {
+    let (cert, fp) = certificate();
+    let d = start_daemon_on("d1", "tok", Some(&cert)).await;
+    assert!(d.url.starts_with("https://127.0.0.1:"));
+    let f = fleet(config::Config::default(), dry_scaleway());
+    {
+        let mut ordered = static_host(&config::StaticHost::default(), Utc::now());
+        ordered.id = "h_srv-9".into();
+        ordered.url = d.url.clone();
+        ordered.state = "provisioning".into();
+        ordered.provider = "scaleway".into();
+        ordered.provider_id = "srv-9".into();
+        ordered.token = "tok".into();
+        f.st.reg
+            .lock()
+            .unwrap()
+            .hosts
+            .insert(ordered.id.clone(), ordered);
+    }
+    let mut hb = heartbeat(&d.url, 64_000, &[]);
+    hb["tls_fingerprint"] = fp.clone().into();
+    // The daemon is up before the bootstrap has read its certificate: not taken on its word.
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/register", "tok", Some(hb.clone())).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(json(&body)["code"], "tls_mismatch");
+    assert!(json(&body)["error"]
+        .as_str()
+        .unwrap()
+        .contains("no fingerprint is pinned"));
+    assert_eq!(hosts(&f.st)[0].state, "provisioning");
+    // The bootstrap pins it; the next heartbeat makes the host ready.
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        let r = reg.hosts.get_mut("h_srv-9").unwrap();
+        bootstrap::bootstrapped(r, "bootstrapped".into(), fp.clone());
+    }
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/register", "tok", Some(hb.clone())).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    let h = &hosts(&f.st)[0];
+    assert_eq!(
+        (h.state.as_str(), h.tls_fingerprint.as_str()),
+        ("ready", fp.as_str())
+    );
+    assert_eq!(saved(&f.st).hosts["h_srv-9"].tls_fingerprint, fp, "written");
+    // A create is forwarded over TLS, to the pinned certificate.
+    let (s, headers, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "",
+        Some(create_body("t1", "web", 512)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "h_srv-9");
+    assert_eq!(d.stub.calls(), ["POST /v1/machines"]);
+    // Another machine at that address: refused, the pin kept.
+    let (_, other) = certificate();
+    hb["tls_fingerprint"] = other.clone().into();
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/register", "tok", Some(hb)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    let why = json(&body)["error"].as_str().unwrap().to_string();
+    assert!(
+        why.starts_with(&format!("certificate {other} is not the one pinned ({fp})")),
+        "{why}"
+    );
+    assert_eq!(hosts(&f.st)[0].tls_fingerprint, fp);
+}
+
+#[tokio::test]
+async fn a_host_presenting_another_certificate_is_not_forwarded_to() {
+    let (served, _) = certificate();
+    let (_, pinned) = certificate();
+    let d = start_daemon_on("d1", "tok", Some(&served)).await;
+    d.stub.add("t1", "web", 512);
+    let f = fleet(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "d1".into(),
+                url: d.url.clone(),
+                token: "tok".into(),
+                tls_fingerprint: pinned.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let (s, _, body) = call(&f.st, "GET", "/v1/machines", "", None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
+    let v = json(&body);
+    assert_eq!(v["code"], "host_unreachable");
+    let why = v["error"].as_str().unwrap();
+    assert!(
+        why.contains(&format!("is not the pinned {pinned}")),
+        "{why}"
+    );
+    assert!(
+        d.stub.calls().is_empty(),
+        "no request reached it, token included"
+    );
+    // The poll asks it nothing either: its capacity stays unknown.
+    poll_static_hosts_once(&f.st).await;
+    assert_eq!(hosts(&f.st)[0].capacity.memory_mb, 0);
+    assert!(d.stub.calls().is_empty());
 }

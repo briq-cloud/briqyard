@@ -622,6 +622,10 @@ pub struct Host {
     /// The last thing the provisioner or the bootstrap said about this host.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// The SHA-256 of the host's API certificate, pinned by the fleet; empty for a host on
+    /// plain HTTP (ADR 0020).
+    #[serde(default)]
+    pub tls_fingerprint: String,
 }
 
 /// POST /v1/hosts/order (fleet only).
@@ -650,6 +654,10 @@ pub struct RegisterHostRequest {
     pub version: String,
     #[serde(default)]
     pub disk_free_mb: u64,
+    /// The SHA-256 of the API's certificate; empty when the API is plain HTTP. The fleet
+    /// refuses a heartbeat whose fingerprint is not the one it pinned (ADR 0020).
+    #[serde(default)]
+    pub tls_fingerprint: String,
 }
 
 /// GET /v1/status.
@@ -664,6 +672,9 @@ pub struct Status {
     /// Free space for disks, in MB.
     #[serde(default)]
     pub disk_free_mb: u64,
+    /// The SHA-256 of the API's certificate; empty when the API is plain HTTP (ADR 0020).
+    #[serde(default)]
+    pub tls_fingerprint: String,
 }
 
 /// Every error response's body.
@@ -1205,13 +1216,15 @@ mod tests {
         expected["provider"] = json!("");
         expected["tenants"] = json!([]);
         expected["version"] = json!("");
+        expected["tls_fingerprint"] = json!("");
         let h: Host = round_trip(input, expected);
         assert_eq!(h.note, "");
         let h: Host = same(json!({
             "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1", "provider": "hetzner-robot",
             "state": "draining", "capacity": {"memory_mb": 65536, "vcpus": 16},
             "used": {"memory_mb": 1024, "vcpus": 2}, "machines": 2, "tenants": ["t1", "t2"],
-            "last_seen": "2026-01-02T03:04:05Z", "version": "0.1.0", "note": "ordered"
+            "last_seen": "2026-01-02T03:04:05Z", "version": "0.1.0", "note": "ordered",
+            "tls_fingerprint": "ab01"
         }));
         assert_eq!(h.tenants, vec!["t1", "t2"]);
     }
@@ -1229,16 +1242,19 @@ mod tests {
             json!({
                 "id": "h1", "url": "http://10.0.0.5:7420", "region": "",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
-                "machines": 0, "tenants": [], "version": "", "disk_free_mb": 0
+                "machines": 0, "tenants": [], "version": "", "disk_free_mb": 0,
+                "tls_fingerprint": ""
             }),
         );
         assert_eq!(r.region, "");
         let r: RegisterHostRequest = same(json!({
             "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1",
             "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 512, "vcpus": 1},
-            "machines": 1, "tenants": ["t1"], "version": "0.1.0", "disk_free_mb": 100000
+            "machines": 1, "tenants": ["t1"], "version": "0.1.0", "disk_free_mb": 100000,
+            "tls_fingerprint": "ab01"
         }));
         assert_eq!(r.disk_free_mb, 100000);
+        assert_eq!(r.tls_fingerprint, "ab01");
         assert!(serde_json::from_value::<RegisterHostRequest>(json!({"id": "h1"})).is_err());
     }
 
@@ -1253,7 +1269,7 @@ mod tests {
             json!({
                 "version": "0.1.0", "host_id": "h1",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
-                "machines": 3, "running": 1, "disk_free_mb": 0
+                "machines": 3, "running": 1, "disk_free_mb": 0, "tls_fingerprint": ""
             }),
         );
         assert_eq!(s.running, 1);
