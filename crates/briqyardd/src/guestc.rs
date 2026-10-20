@@ -66,7 +66,8 @@ async fn write_request(s: &mut UnixStream, req: &Request) -> Result<()> {
     Ok(())
 }
 
-async fn read_response(s: &mut UnixStream) -> Result<Response> {
+/// Reads one frame of the guest protocol.
+pub async fn read_frame<T: serde::de::DeserializeOwned>(s: &mut UnixStream) -> Result<T> {
     let mut hdr = [0u8; 4];
     s.read_exact(&mut hdr).await?;
     let n = u32::from_be_bytes(hdr) as usize;
@@ -76,6 +77,10 @@ async fn read_response(s: &mut UnixStream) -> Result<Response> {
     let mut body = vec![0u8; n];
     s.read_exact(&mut body).await?;
     Ok(guest::decode_frame(&body)?)
+}
+
+async fn read_response(s: &mut UnixStream) -> Result<Response> {
+    read_frame(s).await
 }
 
 #[derive(Debug)]

@@ -4,6 +4,10 @@
 //! Every message is one frame: a 4-byte big-endian length, then JSON. One request per
 //! connection; a request gets one response, except `exec`, which streams `stdout`/`stderr`
 //! frames and ends with `exit`.
+//!
+//! One connection goes the other way: when the main process ends, the init connects to the
+//! host on [`EXIT_PORT`] and sends one [`ExitReport`] frame, then waits for the host to close
+//! before it resets the machine.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -11,6 +15,9 @@ use std::io::{self, Read, Write};
 
 /// The vsock port briqyard-init listens on.
 pub const PORT: u32 = 7421;
+
+/// The host port the init connects to with its [`ExitReport`].
+pub const EXIT_PORT: u32 = 7422;
 
 /// The largest frame.
 pub const MAX_FRAME: usize = 4 << 20;
@@ -101,6 +108,16 @@ pub struct Response {
     pub uptime: f64,
     #[serde(default)]
     pub main_pid: i32,
+}
+
+/// How the main process ended, sent by the init on [`EXIT_PORT`] before the machine resets.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitReport {
+    pub code: i32,
+    /// The kernel's OOM killer ended it.
+    pub oom: bool,
+    /// The host asked for the stop (`shutdown`).
+    pub requested: bool,
 }
 
 impl Response {
@@ -277,6 +294,7 @@ mod tests {
     fn constants() {
         // The init listens on this port and the daemon writes the drive under these names.
         assert_eq!(PORT, 7421);
+        assert_eq!(EXIT_PORT, 7422);
         assert_eq!(MAX_FRAME, 4 * 1024 * 1024);
         assert_eq!(CONFIG_NAME, "config.json");
         assert_eq!(FILES_PREFIX, "files/");
@@ -366,6 +384,27 @@ mod tests {
         }));
         assert_eq!(r.data, b"hello");
         assert!(serde_json::from_value::<Response>(json!({"kind": "ok"})).is_err());
+    }
+
+    #[test]
+    fn exit_report_on_the_wire() {
+        // Every field is written, and a report from an init that knows fewer still reads.
+        let r: ExitReport = same(json!({"code": 137, "oom": true, "requested": false}));
+        assert_eq!(
+            r,
+            ExitReport {
+                code: 137,
+                oom: true,
+                requested: false
+            }
+        );
+        assert!(serde_json::from_value::<ExitReport>(json!({"code": 1})).is_err());
+        // One frame, read back by the sync reader the way the host reads it.
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &r).unwrap();
+        let back: ExitReport = read_frame(&mut &buf[..]).unwrap();
+        assert_eq!(back, r);
+        assert_eq!(ExitReport::default().code, 0);
     }
 
     #[test]

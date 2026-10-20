@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use briqyard_api::guest;
 use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -498,6 +499,11 @@ impl Process {
         self.pid
     }
 
+    /// `true` once the process is gone and its console fully written.
+    pub fn done(&self) -> watch::Receiver<bool> {
+        self.done.clone()
+    }
+
     pub fn kill(&self) {
         unsafe {
             libc::kill(self.pid as i32, libc::SIGKILL);
@@ -552,6 +558,9 @@ pub struct Vm {
     pub resumed: bool,
     /// `true` once the process is gone and its console fully written.
     pub exited: watch::Receiver<bool>,
+    /// What the init reported when the main process ended; `None` until then, and the
+    /// channel closes with the process, so a wait on it ends either way.
+    pub exit: watch::Receiver<Option<guest::ExitReport>>,
 }
 
 impl Vm {
@@ -601,9 +610,17 @@ pub struct Firecracker {
 impl Vmm for Firecracker {
     async fn boot(&self, b: &Boot) -> Result<Vm> {
         let mut resume = b.resume;
-        let proc = loop {
+        let (proc, exit) = loop {
             let mut proc =
                 Process::start(&self.binary, &b.id, &b.dir, self.pci, b.jail.as_ref()).await?;
+            let exit = match listen_exit(&proc.vsock, proc.uid, proc.gid, proc.done()) {
+                Ok(rx) => rx,
+                Err(err) => {
+                    proc.kill();
+                    proc.wait().await;
+                    return Err(err);
+                }
+            };
             let c = proc.client.clone();
             let (snap_state, snap_mem) = (proc.outside("snap.state"), proc.outside("snap.mem"));
             resume = resume && snap_state.exists() && snap_mem.exists();
@@ -626,7 +643,7 @@ impl Vmm for Firecracker {
                     .await
                 };
                 match load.await {
-                    Ok(()) => break proc,
+                    Ok(()) => break (proc, exit),
                     Err(err) => {
                         tracing::warn!(machine = b.id, err = %err, "resume from snapshot failed, booting cold");
                         proc.kill();
@@ -658,7 +675,7 @@ impl Vmm for Firecracker {
                 proc.wait().await;
                 return Err(anyhow!("configure firecracker: {err}"));
             }
-            break proc;
+            break (proc, exit);
         };
         // A snapshot is for one resume: stale files would be loaded into a different boot.
         let _ = tokio::fs::remove_file(proc.outside("snap.state")).await;
@@ -672,6 +689,7 @@ impl Vmm for Firecracker {
             chroot: proc.chroot.clone(),
             resumed: resume,
             exited,
+            exit,
         };
         tokio::spawn(async move {
             let mut proc = proc;
@@ -697,6 +715,10 @@ impl Vmm for Firecracker {
             return None;
         }
         let (exited_tx, exited) = watch::channel(false);
+        // The previous daemon's listener died with it; the guest connects at its exit, so
+        // a new one on the same path takes the report.
+        let (uid, gid) = jail.map(|j| (j.uid, j.gid)).unwrap_or((0, 0));
+        let exit = listen_exit(&vsock, uid, gid, exited.clone()).ok()?;
         let machine = id.to_string();
         tokio::spawn(async move {
             while machine_of(pid).as_deref() == Some(machine.as_str()) {
@@ -712,6 +734,7 @@ impl Vmm for Firecracker {
             chroot: jail.map(|j| jail_root(&j.base, id)),
             resumed: false,
             exited,
+            exit,
         })
     }
 
@@ -787,6 +810,48 @@ fn machine_of(pid: u32) -> Option<String> {
 /// Whether Firecracker's `GET /` says the microVM runs.
 fn api_running(info: &serde_json::Value) -> bool {
     info["state"].as_str() == Some("Running")
+}
+
+/// Where Firecracker brings a guest connection to host port [`guest::EXIT_PORT`]: the vsock
+/// socket's path with `_<port>` appended (Firecracker's convention for guest-initiated
+/// connections), next to the socket, inside the chroot when jailed.
+pub fn exit_socket(vsock: &Path) -> PathBuf {
+    let mut name = vsock.as_os_str().to_owned();
+    name.push(format!("_{}", guest::EXIT_PORT));
+    PathBuf::from(name)
+}
+
+/// Listens for the init's exit report at [`exit_socket`]: the first connection's one frame
+/// is the report. The socket belongs to the jail's user, since Firecracker connects to it
+/// as that user. The listener ends with the process (`done`), and the channel closes with
+/// it, so whoever waits for the report stops waiting when none can come. The socket file
+/// stays until the next bind replaces it: the next boot may have bound it already.
+fn listen_exit(
+    vsock: &Path,
+    uid: u32,
+    gid: u32,
+    mut done: watch::Receiver<bool>,
+) -> Result<watch::Receiver<Option<guest::ExitReport>>> {
+    let path = exit_socket(vsock);
+    let _ = std::fs::remove_file(&path);
+    let ln = tokio::net::UnixListener::bind(&path)
+        .with_context(|| format!("listen {}", path.display()))?;
+    let _ = std::os::unix::fs::chown(&path, Some(uid), Some(gid));
+    let (tx, rx) = watch::channel(None);
+    tokio::spawn(async move {
+        // A connection made before the process ended is ready before `done` is: taken first.
+        let accepted = tokio::select! {
+            biased;
+            r = ln.accept() => r.ok(),
+            _ = done.wait_for(|d| *d) => None,
+        };
+        if let Some((mut s, _)) = accepted {
+            if let Ok(report) = crate::guestc::read_frame::<guest::ExitReport>(&mut s).await {
+                let _ = tx.send(Some(report));
+            }
+        }
+    });
+    Ok(rx)
 }
 
 /// A file name next to Firecracker's sockets, as Firecracker sees it: at the root of the
@@ -1160,6 +1225,68 @@ mod tests {
                 dir.join("firecracker.log")
             )
         );
+    }
+
+    #[test]
+    fn the_exit_socket_is_next_to_the_vsock_socket() {
+        // Firecracker's convention for a guest connection to host port P: `<uds_path>_P`.
+        assert_eq!(
+            exit_socket(Path::new("/run/m_1/vsock.sock")),
+            PathBuf::from("/run/m_1/vsock.sock_7422")
+        );
+        assert_eq!(
+            exit_socket(Path::new("/jail/firecracker/m-1/root/vsock.sock")),
+            PathBuf::from("/jail/firecracker/m-1/root/vsock.sock_7422")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_exit_listener_takes_one_frame_then_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let vsock = dir.path().join("vsock.sock");
+        let (done_tx, done) = watch::channel(false);
+        let mut rx = listen_exit(&vsock, 0, 0, done).unwrap();
+        assert!(rx.borrow().is_none());
+        // The guest's connection, as Firecracker brings it to the host.
+        let mut s = UnixStream::connect(exit_socket(&vsock)).await.unwrap();
+        let report = guest::ExitReport {
+            code: 7,
+            oom: false,
+            requested: true,
+        };
+        s.write_all(&guest::encode_frame(&report).unwrap())
+            .await
+            .unwrap();
+        s.shutdown().await.unwrap();
+        rx.wait_for(|r| r.is_some()).await.unwrap();
+        assert_eq!(rx.borrow().as_ref(), Some(&report));
+        // The host closed after the frame, and the listener is done: the channel closes.
+        assert_eq!(s.read(&mut [0u8; 8]).await.unwrap(), 0);
+        assert!(rx.changed().await.is_err());
+        drop(done_tx);
+    }
+
+    #[tokio::test]
+    async fn the_exit_listener_ends_with_the_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let vsock = dir.path().join("vsock.sock");
+        let (done_tx, done) = watch::channel(false);
+        let mut rx = listen_exit(&vsock, 0, 0, done).unwrap();
+        // No connection ever: the process is gone, the channel closes with nothing in it.
+        done_tx.send(true).unwrap();
+        assert!(rx.wait_for(|r| r.is_some()).await.is_err());
+        assert!(rx.borrow().is_none());
+        // Bound again on the same path, as an adoption does.
+        let (done_tx, done) = watch::channel(false);
+        listen_exit(&vsock, 0, 0, done).unwrap();
+        // A path that cannot be bound is an error, not a panic.
+        assert!(listen_exit(
+            Path::new("/nonexistent/dir/v.sock"),
+            0,
+            0,
+            done_tx.subscribe()
+        )
+        .is_err());
     }
 
     #[test]

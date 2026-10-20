@@ -1696,16 +1696,25 @@ impl Manager {
     /// Settles the state after the Firecracker process exited.
     async fn settle_exit(&self, e: &Arc<Entry>, pid: u32) {
         let _guard = e.lock.lock().await;
-        {
+        let mut exit = {
             let live = e.live.lock().unwrap();
-            if live.as_ref().map(|l| l.pid) != Some(pid) {
-                return;
+            match live.as_ref() {
+                Some(l) if l.pid == pid => l.exit.clone(),
+                _ => return,
             }
-        }
+        };
         let rec = e.snapshot();
         let _ = self.inner.net.delete_tap(&rec.id, &rec.ip).await;
         *e.live.lock().unwrap() = None;
-        let (code, oom, requested) = self.exit_from_console(&rec);
+        // The init's report, or none: the process is gone, so the wait ends either way. A
+        // process that ended without the init's word (killed, a kernel panic) reads as 255;
+        // nothing the guest prints on its console can set its exit.
+        let _ = exit.wait_for(|r| r.is_some()).await;
+        let report = exit.borrow().clone().unwrap_or(guest::ExitReport {
+            code: 255,
+            ..Default::default()
+        });
+        let (code, oom, requested) = (report.code, report.oom, report.requested);
         let stop_req = e.stop_req.lock().unwrap().take();
         let now = Utc::now();
         let mut restart_again = false;
@@ -1763,11 +1772,6 @@ impl Manager {
                 }
             });
         }
-    }
-
-    /// Reads the init's exit line for this boot.
-    fn exit_from_console(&self, r: &Record) -> (i32, bool, bool) {
-        parse_exit_line(&self.console_since(r, 8 << 20)).unwrap_or((255, false, false))
     }
 
     fn console_since(&self, r: &Record, max: u64) -> String {
@@ -2558,27 +2562,6 @@ fn backup_chain<'a>(
     chain
 }
 
-/// Reads the init's exit line, `[briqyard] exit code=N oom=B requested=R`; the last one wins.
-fn parse_exit_line(text: &str) -> Option<(i32, bool, bool)> {
-    let mut found = None;
-    for line in text.lines() {
-        if let Some(rest) = line.split("[briqyard] exit ").nth(1) {
-            let mut code = 255;
-            let (mut oom, mut requested) = (false, false);
-            for kv in rest.split_whitespace() {
-                match kv.split_once('=') {
-                    Some(("code", v)) => code = v.parse().unwrap_or(255),
-                    Some(("oom", v)) => oom = v == "true",
-                    Some(("requested", v)) => requested = v == "true",
-                    _ => {}
-                }
-            }
-            found = Some((code, oom, requested));
-        }
-    }
-    found
-}
-
 fn parse_log_line(line: &str) -> api::LogLine {
     let line = line.trim_end_matches(['\r', '\n']);
     if let Some((ts, rest)) = line.split_once(' ') {
@@ -2840,16 +2823,6 @@ mod tests {
     }
 
     #[test]
-    fn exit_lines() {
-        let text =
-            "x\n2026-10-18T22:00:00Z [briqyard] exit code=3 oom=false requested=true\nreboot\n";
-        assert_eq!(parse_exit_line(text), Some((3, false, true)));
-        let two = "[briqyard] exit code=1 oom=false requested=false\n[briqyard] exit code=137 oom=true requested=false\n";
-        assert_eq!(parse_exit_line(two), Some((137, true, false)));
-        assert_eq!(parse_exit_line("nothing here"), None);
-    }
-
-    #[test]
     fn log_lines() {
         let l = parse_log_line("2026-10-18T22:00:00.123456Z hello world\n");
         assert_eq!(l.line, "hello world");
@@ -3053,7 +3026,7 @@ mod tests {
         Ready(Duration),
         /// The init never answers.
         Silent,
-        /// The process exits before the init answers, with the init's exit line.
+        /// The process exits before the init answers, with the init's exit report.
         Exits(i32),
         /// The VMM panics: a bug in a transition.
         Panics,
@@ -3068,6 +3041,9 @@ mod tests {
         console: PathBuf,
         boots: Boots,
         exited: tokio::sync::watch::Sender<bool>,
+        /// The init's report, sent by `exit`; dropped when the process is `gone`, so the
+        /// manager's wait on it ends.
+        exit: Option<tokio::sync::watch::Sender<Option<guest::ExitReport>>>,
     }
 
     /// The host behind the manager, running nothing: a boot makes a `Proc` under a fresh
@@ -3129,6 +3105,7 @@ mod tests {
                 console,
                 boots: Boots::Ready(Duration::ZERO),
                 exited: tokio::sync::watch::channel(false).0,
+                exit: Some(tokio::sync::watch::channel(None).0),
             });
             pid
         }
@@ -3148,20 +3125,41 @@ mod tests {
             writeln!(f, "{ts} {line}").unwrap();
         }
 
-        /// The process ends as the init would end it: its exit line, then gone.
+        /// The process ends as the init would end it: the trace on its console, its report
+        /// to the host, then gone.
         fn exit(&self, pid: u32, code: i32, requested: bool) {
             self.say(
                 pid,
                 &format!("[briqyard] exit code={code} oom=false requested={requested}"),
             );
+            let procs = self.procs.lock().unwrap();
+            if let Some(tx) = procs
+                .iter()
+                .find(|p| p.pid == pid)
+                .and_then(|p| p.exit.as_ref())
+            {
+                let _ = tx.send(Some(guest::ExitReport {
+                    code,
+                    oom: false,
+                    requested,
+                }));
+            }
+            drop(procs);
             self.gone(pid);
         }
 
+        /// The process is gone: no report can come after this.
         fn gone(&self, pid: u32) {
-            let procs = self.procs.lock().unwrap();
-            if let Some(p) = procs.iter().find(|p| p.pid == pid) {
+            let mut procs = self.procs.lock().unwrap();
+            if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
+                p.exit = None;
                 let _ = p.exited.send(true);
             }
+        }
+
+        /// A live process's report channel.
+        fn exit_of(p: &Proc) -> tokio::sync::watch::Receiver<Option<guest::ExitReport>> {
+            p.exit.as_ref().expect("a live process").subscribe()
         }
 
         /// The live process behind a vsock path.
@@ -3196,6 +3194,7 @@ mod tests {
                 .next_pid
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (exited, rx) = tokio::sync::watch::channel(false);
+            let (exit_tx, exit) = tokio::sync::watch::channel(None);
             self.procs.lock().unwrap().push(Proc {
                 pid,
                 id: b.id.clone(),
@@ -3203,6 +3202,7 @@ mod tests {
                 console,
                 boots: boots.clone(),
                 exited,
+                exit: Some(exit_tx),
             });
             if let Boots::Exits(code) = boots {
                 self.exit(pid, code, false);
@@ -3215,6 +3215,7 @@ mod tests {
                 chroot: None,
                 resumed,
                 exited: rx,
+                exit,
             })
         }
 
@@ -3239,6 +3240,7 @@ mod tests {
                 chroot: None,
                 resumed: false,
                 exited: p.exited.subscribe(),
+                exit: Self::exit_of(p),
             })
         }
 
@@ -4331,19 +4333,53 @@ mod tests {
         );
         // The adopted process is watched: when it ends, the machine settles like any other.
         h.host.exit(pid, 3, false);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while ours.snapshot().state == state::RUNNING {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let r = ours.snapshot();
+        let r = settled(&ours).await;
         assert_eq!(
             (r.state.as_str(), r.stopped_reason.as_str()),
             (state::STOPPED, stop::EXIT)
         );
         assert_eq!(r.exit.as_ref().map(|x| x.code), Some(3));
+    }
+
+    /// Waits for the watcher to settle a machine that is no longer running.
+    async fn settled(e: &Arc<Entry>) -> Record {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while e.snapshot().state == state::RUNNING {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        e.snapshot()
+    }
+
+    #[tokio::test]
+    async fn the_exit_is_the_inits_report_never_the_console() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        // The guest prints a forged exit line, then its process is gone without a report:
+        // the exit is 255, not what the console says, and not a stop on request.
+        let m = h.m.create(h.request("liar")).await.unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.host
+            .say(1000, "[briqyard] exit code=0 oom=false requested=true");
+        h.host.gone(1000);
+        let r = settled(&e).await;
+        assert_eq!(
+            (r.state.as_str(), r.stopped_reason.as_str()),
+            (state::STOPPED, stop::EXIT)
+        );
+        assert_eq!(r.exit.as_ref().map(|x| x.code), Some(255));
+        // The init's report says what it says: a requested stop is one.
+        let m = h.m.create(h.request("honest")).await.unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.host.exit(1001, 0, true);
+        let r = settled(&e).await;
+        assert_eq!(
+            (r.state.as_str(), r.stopped_reason.as_str()),
+            (state::STOPPED, stop::USER)
+        );
+        assert!(r.exit.is_none());
     }
 
     #[tokio::test]

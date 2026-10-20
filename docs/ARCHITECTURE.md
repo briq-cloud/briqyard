@@ -18,7 +18,7 @@ Status: v0, in development. The API is not stable yet.
  │                                                                                         │
  │  machine manager ── storage (ZFS) ── network (bridge per tenant, TAP per VM, nft, DNS)  │
  │        │                                                                                │
- │  firecracker process per machine ─ serial log ─ vsock to briqyard-init                  │
+ │  firecracker process per machine ─ serial log ─ vsock to and from briqyard-init         │
  └─────────────────────────────────────────────────────────────────────────────────────────┘
           │ bt<id> (TAP)          │ zvol root (clone of image)   │ zvol data (the volume)
     ┌─────┴──────────────────────┴──────────────────────────────┴───────┐
@@ -110,9 +110,12 @@ entrypoint and command with its environment and user. It listens on vsock port 7
 host: `exec` (a command with stdin, streamed stdout and stderr, exit code, timeout), `put` and
 `get` (files), `ping`, `shutdown`. PID 1 inherits every orphan on the system; the init reaps
 them with `waitid(WNOWAIT)` and leaves alone the children it waits for itself, so a command's
-exit status is never stolen. When the main process exits, the init prints
-`[briqyard] exit code=N oom=B requested=R` on the serial console and resets the machine, which
-ends Firecracker; the daemon reads the line and applies the restart policy.
+exit status is never stolen. When the main process exits, the init connects out to the host
+(vsock port 7422, which Firecracker brings to the daemon as `<vsock socket>_7422`), sends one
+`ExitReport` frame (code, oom, requested), waits for the daemon's close, and resets the machine,
+which ends Firecracker; the daemon settles the machine from the report and applies the restart
+policy (ADR 0004). The `[briqyard] exit …` line on the serial console is a trace for a person;
+nothing reads it, so nothing a guest prints can set its exit.
 
 ### Backups
 
