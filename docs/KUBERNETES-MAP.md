@@ -91,7 +91,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Ingress controller | ✓ L4 ingress per host, private to the edge | | |
 | Ingress auth, TLS, hostnames | the router, Cloudflare in front | | briq |
 | NetworkPolicy, egress | ✓ `open`, `via`, `none` | | |
-| NetworkPolicy, by port and CIDR | ✗ | blocked ports, rate and bandwidth limits per machine | yard |
+| NetworkPolicy, by port and CIDR | ◐ blocked ports, a connection rate, a bandwidth cap per machine (ADR 0018) | allow-lists by CIDR | yard, later |
 | NetworkPolicy, ingress between pods | ✗ | | yard, later |
 | Egress gateway | ✓ tenant gateway | | |
 | A pod network across nodes | ✗ a tenant on one host | `MESH.md` | yard, later |
@@ -155,7 +155,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 
 Tonight, in this order, each with unit tests, Linux CI and the VM suites:
 
-1. **Egress controls**: blocked ports, connection rate, bandwidth per machine (NetworkPolicy by port, plus abuse).
+1. **Egress controls**: blocked ports, connection rate, bandwidth per machine (NetworkPolicy by port, plus abuse). Built: ADR 0018.
 2. **Events, watch, versions**: the API machinery an imperative API needs to be driven safely.
 3. **Metrics**: per machine series and machine states on `/metrics`, host conditions, `top`.
 4. **Probes**: exec, TCP, HTTP; `ready`; restart on liveness; a restart backoff.
