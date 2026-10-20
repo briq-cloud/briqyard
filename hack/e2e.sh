@@ -32,7 +32,7 @@ state=$(briqyard machine get "$A" | jq -r .state)
 check "alpine running (${boot}s)" '[ "$state" = running ]'
 check "uname"        'briqyard machine exec "$A" -- uname -r | grep -q "^6\."'
 check "hostname"     '[ "$(briqyard machine exec "$A" -- hostname)" = alp ]'
-check "exit code"    '! briqyard machine exec "$A" -- sh -c "exit 3"; [ $? = 3 ] || true'
+check "exit code"    'briqyard machine exec "$A" -- sh -c "exit 3"; [ $? = 3 ]'
 check "stdin"        '[ "$(echo hello | briqyard machine exec --stdin "$A" -- cat)" = hello ]'
 check "stderr"       '[ "$(briqyard machine exec "$A" -- sh -c "echo e >&2" 2>&1 >/dev/null)" = e ]'
 check "timeout"      'out=$(briqyard machine exec --timeout 2s "$A" -- sleep 30 2>&1 || true); echo "$out" | grep -q "timed out"'
@@ -60,7 +60,7 @@ briqyard machine start "$A" >/dev/null
 check "started again"  '[ "$(briqyard machine get "$A" | jq -r .state)" = running ]'
 check "file survived"  '[ "$(briqyard machine get-file "$A" /root/f.txt)" = hello-file ]'
 X=$(briqyard machine run --image alpine:3.20 --name exiter --tenant "$T" --memory 256 -- sh -c "exit 7" 2>/dev/null | jq -r .id || true)
-sleep 3
+for i in $(seq 1 30); do [ "$(briqyard machine get "$X" | jq -r .exit.code)" != null ] && break; sleep 1; done
 check "exit recorded"  '[ "$(briqyard machine get "$X" | jq -r .exit.code)" = 7 ]'
 
 echo "== postgres with a volume, endpoint, wake on connect"
@@ -131,8 +131,8 @@ for i in 1 2 3; do briqyard machine destroy "$(jq -r .id /tmp/by-par$i.json)" >/
 
 echo "== suspend and resume"
 C=$(briqyard machine run --image alpine:3.20 --name counter --tenant "$T" --memory 256 -- sh -c 'i=0; while :; do i=$((i+1)); echo $i > /tmp/c; sleep 1; done' | jq -r .id)
-sleep 3
-before=$(briqyard machine exec "$C" -- cat /tmp/c)
+for i in $(seq 1 30); do before=$(briqyard machine exec "$C" -- cat /tmp/c 2>/dev/null) && [ -n "$before" ] && break; sleep 1; done
+up_before=$(briqyard machine exec "$C" -- cut -d. -f1 /proc/uptime)
 t_susp=$(date +%s.%N)
 briqyard machine stop --suspend "$C" >/dev/null
 susp_s=$(echo "$(date +%s.%N) - $t_susp" | bc)
@@ -142,9 +142,8 @@ t0=$(date +%s.%N)
 briqyard machine start "$C" >/dev/null
 resume=$(echo "$(date +%s.%N) - $t0" | bc)
 check "resumed ($resume s)" '[ "$(briqyard machine get "$C" | jq -r .state)" = running ]'
-check "uptime kept"      '[ "$(briqyard machine exec "$C" -- cut -d. -f1 /proc/uptime)" -ge 3 ]'
-sleep 2
-after=$(briqyard machine exec "$C" -- cat /tmp/c)
+check "uptime kept"      '[ "$(briqyard machine exec "$C" -- cut -d. -f1 /proc/uptime)" -ge "$up_before" ]'
+for i in $(seq 1 30); do after=$(briqyard machine exec "$C" -- cat /tmp/c) && [ "$after" -gt "$before" ] && break; sleep 1; done
 check "process went on ($before -> $after)" '[ "$after" -gt "$before" ]'
 check "one boot in the log" '[ "$(briqyard machine logs "$C" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
 
@@ -163,8 +162,10 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   echo "== daemon crash: running machines are adopted"
   K=$(briqyard machine run --image alpine:3.20 --name survivor --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
   # The daemon alone (systemctl kill would signal every process of the unit, machines included).
-  sudo kill -9 "$(systemctl show -p MainPID --value briqyardd)"
-  sleep 1
+  pid=$(systemctl show -p MainPID --value briqyardd)
+  sudo kill -9 "$pid"
+  # Once systemd has reaped it, a start brings it back now rather than after RestartSec.
+  for i in $(seq 1 50); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
   sudo systemctl start briqyardd
   for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
   check "still running"    '[ "$(briqyard machine get "$K" | jq -r .state)" = running ]'
