@@ -88,7 +88,9 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
-  a daemon SIGKILL, host invariants between phases (ADR 0010). `--tenants 6 --per-tenant 4 --rounds 2 --crash`.
+  a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
+  destroy, more starts at once than the host has memory for), host invariants between phases
+  (ADR 0010). `--tenants 6 --per-tenant 4 --rounds 2 --crash`.
 - `hack/fleet-two-hosts.sh`: a fleet with two hosts: tenants placed on different hosts, calls
   forwarded to each, a host that stops answering marked down with its tenant's calls refused
   (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back. 16 checks.
