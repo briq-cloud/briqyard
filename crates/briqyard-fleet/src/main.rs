@@ -866,10 +866,11 @@ async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {
         .map(|(t, h)| api::Tenant {
             id: t.clone(),
             subnet: String::new(),
-            gateway: String::new(),
+            router: String::new(),
             machines: 0,
             created_at: Utc::now(),
             host: h.clone(),
+            gateway: None,
         })
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));

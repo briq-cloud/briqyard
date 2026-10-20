@@ -64,6 +64,8 @@ pub mod egress {
     pub const VIA: &str = "via";
     /// The tenant, no internet.
     pub const NONE: &str = "none";
+    /// What `via` takes to name the tenant's gateway (ADR 0016) rather than a machine.
+    pub const GATEWAY: &str = "gateway";
 }
 
 /// Where a machine's traffic may go: enforced on the host, never by the guest.
@@ -72,7 +74,8 @@ pub struct Egress {
     /// "open" (default), "via" or "none".
     #[serde(default = "default_egress_mode")]
     pub mode: String,
-    /// For `via`: the machine of the same tenant that is the only one this machine reaches.
+    /// For `via`: the machine of the same tenant that is the only one this machine reaches,
+    /// or `"gateway"` for the tenant's gateway, which then runs while this machine does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
 }
@@ -91,7 +94,13 @@ impl Default for Egress {
 }
 
 impl Egress {
-    /// The mode is one of the three, and `via` names a machine exactly when the mode is `via`.
+    /// Sends through the tenant's gateway.
+    pub fn via_gateway(&self) -> bool {
+        self.mode == egress::VIA && self.via.as_deref() == Some(egress::GATEWAY)
+    }
+
+    /// The mode is one of the three, and `via` names a machine (or `"gateway"`) exactly when
+    /// the mode is `via`.
     pub fn check(&self) -> Result<(), String> {
         match (self.mode.as_str(), &self.via) {
             (egress::OPEN | egress::NONE, None) => Ok(()),
@@ -423,14 +432,51 @@ pub struct Tenant {
     pub id: String,
     #[serde(default)]
     pub subnet: String,
+    /// The host's address on the tenant's network (`.1`): the machines' route and DNS.
     #[serde(default)]
-    pub gateway: String,
+    pub router: String,
+    /// The tenant's machines, its gateway not counted.
     #[serde(default)]
     pub machines: usize,
     pub created_at: DateTime<Utc>,
     /// The host the tenant lives on (fleet).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayView>,
+}
+
+/// `PUT /v1/tenants/{id}/gateway`: the tenant's gateway, a machine the daemon runs while a
+/// machine of the tenant sends `via: "gateway"` (ADR 0016).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GatewaySpec {
+    pub image: String,
+    /// Replaces the image's command, as a machine's `cmd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmd: Option<Vec<String>>,
+    /// Write-only, like a machine's.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Default 1 vCPU, 256 MB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<Size>,
+    /// The port the program listens on: a start waits for it.
+    pub port: u16,
+    /// A data volume at `/data`, fixed for the gateway's life.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_gb: Option<u32>,
+}
+
+/// The tenant's gateway as `GET /v1/tenants/{id}` shows it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GatewayView {
+    pub state: String,
+    pub ip: String,
+    pub port: u16,
+    /// Its machine: `GET /v1/machines/{id}` and its logs answer for it.
+    pub machine_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
 }
 
 /// What a running machine uses, from its cgroup (jailed hosts only).
@@ -942,6 +988,12 @@ mod tests {
         assert_eq!(e.check(), Ok(()));
         let e: Egress = same(json!({"mode": "via", "via": "m_gw"}));
         assert_eq!(e.check(), Ok(()));
+        assert!(!e.via_gateway());
+        // The tenant's gateway, by the word that names it.
+        let e: Egress = same(json!({"mode": "via", "via": "gateway"}));
+        assert_eq!(e.check(), Ok(()));
+        assert!(e.via_gateway());
+        assert!(!Egress::default().via_gateway());
         // The checks name the field and what it wants.
         let bad = |v: serde_json::Value| serde_json::from_value::<Egress>(v).unwrap().check();
         assert_eq!(
@@ -980,16 +1032,45 @@ mod tests {
         let t: Tenant = round_trip(
             json!({"id": "t1", "created_at": "2026-01-02T03:04:05Z"}),
             json!({
-                "id": "t1", "subnet": "", "gateway": "", "machines": 0,
+                "id": "t1", "subnet": "", "router": "", "machines": 0,
                 "created_at": "2026-01-02T03:04:05Z"
             }),
         );
         assert_eq!(t.host, "");
+        assert!(t.gateway.is_none(), "no gateway: none on the wire");
         let t: Tenant = same(json!({
-            "id": "t1", "subnet": "10.64.1.0/24", "gateway": "10.64.1.1", "machines": 2,
-            "created_at": "2026-01-02T03:04:05Z", "host": "h1"
+            "id": "t1", "subnet": "10.64.1.0/24", "router": "10.64.1.1", "machines": 2,
+            "created_at": "2026-01-02T03:04:05Z", "host": "h1",
+            "gateway": {"state": "running", "ip": "10.64.1.2", "port": 3128, "machine_id": "m_1"}
         }));
         assert_eq!(t.machines, 2);
+        assert_eq!(t.gateway.as_ref().map(|g| g.port), Some(3128));
+        let g: GatewayView = same(json!({
+            "state": "error", "ip": "10.64.1.2", "port": 3128, "machine_id": "m_1",
+            "error": "port 3128 did not answer"
+        }));
+        assert_eq!(g.error, "port 3128 did not answer");
+    }
+
+    #[test]
+    fn gateway_spec() {
+        // An image and a port are enough; env comes back empty, the rest stays out.
+        let s: GatewaySpec = round_trip(
+            json!({"image": "ghcr.io/x/proxy:1", "port": 3128}),
+            json!({"image": "ghcr.io/x/proxy:1", "env": {}, "port": 3128}),
+        );
+        assert!(s.size.is_none() && s.volume_gb.is_none() && s.cmd.is_none());
+        let s: GatewaySpec = same(json!({
+            "image": "ghcr.io/x/proxy:1", "cmd": ["proxy", "-v"], "env": {"TOKEN": "t"},
+            "size": {"vcpus": 1, "memory_mb": 512}, "port": 3128, "volume_gb": 1
+        }));
+        assert_eq!(s.env["TOKEN"], "t");
+        for missing in [json!({"image": "x"}), json!({"port": 3128})] {
+            assert!(
+                serde_json::from_value::<GatewaySpec>(missing.clone()).is_err(),
+                "{missing}"
+            );
+        }
     }
 
     #[test]

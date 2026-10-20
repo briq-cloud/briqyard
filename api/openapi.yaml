@@ -83,7 +83,8 @@ paths:
       summary: Boot a created or stopped machine
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
-        "409": { description: "`bad_state`: busy (starting, stopping or destroying); `boot_failed`: the guest did not come up, the body's `machine` is it, in state `error`" }
+        "400": { description: "`invalid`: its `egress.via` names a machine that is gone, or `gateway` in a tenant that has none" }
+        "409": { description: "`bad_state`: busy (starting, stopping or destroying); `boot_failed`: the guest did not come up, the body's `machine` is it, in state `error`; or the tenant's gateway did not come up, the body's `machine` is this one, not moved, the gateway's reason in its `error`" }
         "503": { description: "`capacity`: the host has no room" }
   /v1/machines/{id}/wake:
     parameters: [{ $ref: "#/components/parameters/id" }]
@@ -234,11 +235,34 @@ paths:
         "200": { description: tenants, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Tenant" } } } } }
   /v1/tenants/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: A tenant, its gateway included
+      responses:
+        "200": { description: tenant, content: { application/json: { schema: { $ref: "#/components/schemas/Tenant" } } } }
+        "404": { $ref: "#/components/responses/Error" }
     delete:
-      summary: Remove an empty tenant's network
+      summary: Remove the network of a tenant with no machine left, and its gateway
       responses:
         "204": { description: removed }
-        "409": { description: the tenant still has machines }
+        "409": { description: "`tenant_in_use`: the tenant still has machines" }
+  /v1/tenants/{id}/gateway:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    put:
+      summary: "Make the tenant's gateway (the tenant too, when it has nothing yet), not started, or replace its spec: a running one is restarted with it, on the same address (ADR 0016). It is a machine of the daemon named `gateway.internal` in the tenant, absent from `GET /v1/machines`; a machine with `egress: {mode: via, via: gateway}` starts it and waits for its port before its own boot, and the daemon stops it when no such machine runs or starts"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GatewaySpec" }
+      responses:
+        "200": { description: the tenant, content: { application/json: { schema: { $ref: "#/components/schemas/Tenant" } } } }
+        "400": { description: "`invalid`: no image, no port, a bad size, or a change of `volume_gb`" }
+        "409": { description: "`conflict`: a machine named `gateway` exists in the tenant; `boot_failed`: a replaced gateway did not come up again" }
+    delete:
+      summary: Stop and destroy the tenant's gateway; none is success
+      responses:
+        "204": { description: removed }
+        "409": { description: "`gateway_in_use`: a machine of the tenant with `via: gateway` is running or starting" }
   /v1/tenants/{id}/unpin:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
@@ -365,7 +389,7 @@ components:
       description: "where the machine's traffic may go, enforced on the host (ADR 0015); a refusal names the field"
       properties:
         mode: { type: string, enum: [open, via, none], default: open, description: "open: its tenant and the internet; via: only the `via` machine (any port) and its gateway's DNS; none: its tenant, no internet. Under via and none, DNS answers internal names only (NXDOMAIN for the rest)" }
-        via: { type: string, description: "for `via` only: a machine of the same tenant, not this one" }
+        via: { type: string, description: "for `via` only: a machine of the same tenant, not this one, or `gateway`: the tenant's gateway, started before this machine and kept running while it runs" }
     CreateMachineRequest:
       type: object
       required: [tenant, name, size]
@@ -521,10 +545,29 @@ components:
       properties:
         id: { type: string }
         subnet: { type: string }
-        gateway: { type: string }
-        machines: { type: integer }
+        router: { type: string, description: "the host's address on the tenant's network (`.1`): the machines' route and DNS" }
+        machines: { type: integer, description: the tenant's machines, its gateway not counted }
         created_at: { type: string, format: date-time }
         host: { type: string, description: The host the tenant lives on (fleet) }
+        gateway: { $ref: "#/components/schemas/GatewayView" }
+    GatewaySpec:
+      type: object
+      required: [image, port]
+      properties:
+        image: { type: string }
+        cmd: { type: array, items: { type: string }, description: replaces the image's command }
+        env: { type: object, additionalProperties: { type: string }, description: write-only, as a machine's }
+        size: { allOf: [{ $ref: "#/components/schemas/Size" }], description: "default 1 vCPU, 256 MB" }
+        port: { type: integer, minimum: 1, maximum: 65535, description: "the port its program listens on: a start waits for it, within `boot_timeout_sec`" }
+        volume_gb: { type: integer, minimum: 1, description: "a data volume at `/data`, fixed for the gateway's life" }
+    GatewayView:
+      type: object
+      properties:
+        state: { type: string, enum: [created, starting, running, stopping, stopped, destroying, error] }
+        ip: { type: string }
+        port: { type: integer }
+        machine_id: { type: string, description: "`GET /v1/machines/{id}` and its `/logs` answer for it" }
+        error: { type: string, description: why it last failed to come up }
     Capacity:
       type: object
       properties:
@@ -537,8 +580,8 @@ components:
         host_id: { type: string }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
-        machines: { type: integer }
-        running: { type: integer }
+        machines: { type: integer, description: the tenants' machines, gateways not counted }
+        running: { type: integer, description: machines up on the host, gateways included }
     Host:
       type: object
       properties:
@@ -575,7 +618,7 @@ components:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, unauthorized, unknown_host, host_unreachable, host_down, registry, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, unauthorized, unknown_host, host_unreachable, host_down, registry, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]

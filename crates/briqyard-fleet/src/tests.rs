@@ -128,10 +128,11 @@ async fn start_daemon(id: &str, token: &str) -> Running {
                 .map(|id| api::Tenant {
                     id,
                     subnet: "10.1.0.0/24".into(),
-                    gateway: "10.1.0.1".into(),
+                    router: "10.1.0.1".into(),
                     machines: 1,
                     created_at: Utc::now(),
                     host: String::new(),
+                    gateway: None,
                 })
                 .collect(),
         )

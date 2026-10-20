@@ -4,6 +4,8 @@
 use super::{bridge_name, nft, tap_name, Subnet, TAP_PREFIX};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
 use tokio::process::Command;
 
 /// The host network as the manager drives it: the bridges, TAPs, pins and egress policies
@@ -19,6 +21,9 @@ pub trait Net: Send + Sync {
     async fn set_policy(&self, p: &nft::Policy) -> Result<()>;
     async fn unset_policy(&self, p: &nft::Policy) -> Result<()>;
     async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()>;
+    /// Returns once a TCP connection to `ip:port` from the host is accepted, or fails at
+    /// `timeout`.
+    async fn wait_port(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()>;
 }
 
 /// iproute2 and nftables on this host.
@@ -52,6 +57,26 @@ impl Net for HostNet {
     }
     async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()> {
         nft::swap_policy(old, new).await
+    }
+    async fn wait_port(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()> {
+        wait_port(SocketAddr::from((ip, port)), timeout).await
+    }
+}
+
+/// Connects until the port accepts: nothing on the host says when a guest's program listens.
+pub async fn wait_port(addr: SocketAddr, timeout: Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let last =
+            match tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(addr)).await {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(e)) => e.to_string(),
+                Err(_) => "no answer".to_string(),
+            };
+        if tokio::time::Instant::now() + Duration::from_millis(200) > deadline {
+            return Err(anyhow!("{addr} did not accept within {timeout:?}: {last}"));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -218,6 +243,33 @@ mod tests {
                    10: bt0123456789ab@if3: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc fq state UP\n";
         assert_eq!(tap_names(out), ["btabcdef123456", "bt0123456789ab"]);
         assert!(tap_names("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_port_is_waited_for_until_it_listens() {
+        // Free a port, then listen on it a moment later: the wait ends once it accepts.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let late = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let ln = tokio::net::TcpListener::bind(addr).await.unwrap();
+            let _ = ln.accept().await;
+        });
+        wait_port(addr, Duration::from_secs(5)).await.unwrap();
+        late.await.unwrap();
+        // Nothing listens: an error at the deadline, naming the address.
+        let t0 = std::time::Instant::now();
+        let err = wait_port(addr, Duration::from_millis(500))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with(&format!("{addr} did not accept")),
+            "{err}"
+        );
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
     }
 
     #[test]
