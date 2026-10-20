@@ -207,21 +207,11 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", hex::encode(b))
 }
 
-/// The running process, as the entry keeps it.
-#[derive(Clone)]
-struct Live {
-    pid: u32,
-    vsock: PathBuf,
-    /// Firecracker's API socket, for pause and snapshot.
-    api: PathBuf,
-    exited: tokio::sync::watch::Receiver<bool>,
-}
-
 struct Entry {
     /// Serializes lifecycle operations on one machine.
     lock: tokio::sync::Mutex<()>,
     rec: Mutex<Record>,
-    live: Mutex<Option<Live>>,
+    live: Mutex<Option<fc::Vm>>,
     /// The reason set before asking the guest to stop; `None` when it ends on its own.
     stop_req: Mutex<Option<String>>,
     /// Signalled on every state change: what `wait_running` and a stop wait on.
@@ -276,6 +266,10 @@ struct Inner {
     zfs: Zfs,
     images: Builder,
     dns: Resolver,
+    /// The host behind the manager: its VMM, the guests, its network. Mocks in tests.
+    vmm: Arc<dyn fc::Vmm>,
+    guest: Arc<dyn guestc::Guest>,
+    net: Arc<dyn host::Net>,
     range: Range,
     egress: String,
     host_id: String,
@@ -356,6 +350,12 @@ impl Manager {
         );
         let inner = Arc::new(Inner {
             stats: Stats::default(),
+            vmm: Arc::new(fc::Firecracker {
+                binary: cfg.firecracker.clone(),
+                pci: cfg.pci,
+            }),
+            guest: Arc::new(guestc::Vsock),
+            net: Arc::new(host::HostNet),
             cfg,
             store,
             zfs,
@@ -453,13 +453,10 @@ impl Manager {
             if rec.state == state::RUNNING && rec.pid > 0 && self.adopt(&e, rec.pid).await {
                 continue;
             }
-            if rec.pid > 0 && is_our_firecracker(rec.pid, &rec.id) {
-                unsafe {
-                    libc::kill(-(rec.pid as i32), libc::SIGKILL);
-                    libc::kill(rec.pid as i32, libc::SIGKILL);
-                }
+            if rec.pid > 0 && self.inner.vmm.machine_of(rec.pid).as_deref() == Some(&rec.id) {
+                self.inner.vmm.kill(rec.pid);
             }
-            let _ = host::delete_tap(&rec.id, &rec.ip).await;
+            let _ = self.inner.net.delete_tap(&rec.id, &rec.ip).await;
             e.set_state(state::STOPPED, |r| {
                 r.stopped_reason = stop::HOST.into();
                 r.pid = 0;
@@ -486,12 +483,9 @@ impl Manager {
             .cloned()
             .collect();
         let mut swept = 0;
-        for (pid, id) in firecracker_processes() {
+        for (pid, id) in self.inner.vmm.processes() {
             if !known.contains(&id) {
-                unsafe {
-                    libc::kill(-(pid as i32), libc::SIGKILL);
-                    libc::kill(pid as i32, libc::SIGKILL);
-                }
+                self.inner.vmm.kill(pid);
                 tracing::warn!(machine = id, pid, "firecracker with no record, ended");
                 swept += 1;
             }
@@ -518,12 +512,12 @@ impl Manager {
                 }
             }
         }
-        if let Ok(taps) = host::list_taps().await {
+        if let Ok(taps) = self.inner.net.list_taps().await {
             let owned: std::collections::HashSet<String> =
                 known.iter().map(|id| netw::tap_name(id)).collect();
             for t in taps {
                 if !owned.contains(&t) {
-                    let _ = host::delete_link(&t).await;
+                    let _ = self.inner.net.delete_link(&t).await;
                     tracing::warn!(tap = t, "tap with no record, removed");
                     swept += 1;
                 }
@@ -557,52 +551,38 @@ impl Manager {
         }
     }
 
-    /// Takes over a Firecracker a previous daemon left running (it crashed; a shutdown suspends
-    /// them instead): the process must be alive, be Firecracker, and answer on the machine's
-    /// API socket as running. The watcher polls the pid, since the process is nobody's child.
+    /// Takes over a VMM a previous daemon left running (it crashed; a shutdown suspends
+    /// them instead), when the VMM still answers for the machine.
     async fn adopt(&self, e: &Arc<Entry>, pid: u32) -> bool {
         let rec = e.snapshot();
-        if !is_our_firecracker(pid, &rec.id) {
-            return false;
-        }
         let dir = self.inner.cfg.run_dir().join(&rec.id);
         let jail = self.jail_for(&rec);
-        let (api, vsock, _, _) = fc::paths_for(&dir, jail.as_ref(), &rec.id);
-        let client = fc::Client::new(&api);
-        let running = match tokio::time::timeout(Duration::from_secs(3), client.info()).await {
-            Ok(Ok(info)) => api_running(&info),
-            _ => false,
-        };
-        if !running {
+        let Some(vm) = self
+            .inner
+            .vmm
+            .adopt(&rec.id, &dir, jail.as_ref(), pid)
+            .await
+        else {
             return false;
-        }
-        let (exit_tx, exit_rx) = tokio::sync::watch::channel(false);
-        let live = Live {
-            pid,
-            vsock,
-            api,
-            exited: exit_rx,
         };
-        *e.live.lock().unwrap() = Some(live);
+        *e.live.lock().unwrap() = Some(vm.clone());
         *e.stop_req.lock().unwrap() = None;
-        let watcher = self.clone();
-        let we = e.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                if !is_our_firecracker(pid, &rec.id) {
-                    break;
-                }
-            }
-            let _ = exit_tx.send(true);
-            watcher.settle_exit(&we, pid).await;
-        });
+        self.watch(e, &vm);
         tracing::info!(
-            machine = e.snapshot().id,
+            machine = rec.id,
             pid,
             "adopted a machine left running by a previous daemon"
         );
         true
+    }
+
+    /// Settles the machine's state once its process is gone.
+    fn watch(&self, e: &Arc<Entry>, vm: &fc::Vm) {
+        let (m, e, pid, mut exited) = (self.clone(), e.clone(), vm.pid, vm.exited.clone());
+        tokio::spawn(async move {
+            let _ = exited.wait_for(|gone| *gone).await;
+            m.settle_exit(&e, pid).await;
+        });
     }
 
     fn save(&self, e: &Entry) -> Result<()> {
@@ -649,7 +629,7 @@ impl Manager {
     // --- tenants ---
 
     async fn plumb_tenant(&self, t: &Tenant) -> Result<()> {
-        host::ensure_bridge(&t.subnet).await?;
+        self.inner.net.ensure_bridge(&t.subnet).await?;
         self.inner.dns.listen(t.subnet.gateway()).await?;
         Ok(())
     }
@@ -785,7 +765,7 @@ impl Manager {
             return Err(MError::TenantInUse);
         }
         self.inner.dns.unset(t.subnet.gateway());
-        host::delete_bridge(t.rec.subnet_index).await?;
+        self.inner.net.delete_bridge(t.rec.subnet_index).await?;
         self.inner.tenants.lock().unwrap().remove(id);
         self.inner.store.delete("tenants", id)?;
         Ok(())
@@ -1552,7 +1532,10 @@ impl Manager {
             Some(t) => t,
             None => return Err(fail(anyhow!("tenant network is gone"))),
         };
-        let tap = host::ensure_tap(&rec.id, &netw::bridge_name(t.rec.subnet_index), &rec.ip)
+        let tap = self
+            .inner
+            .net
+            .ensure_tap(&rec.id, &netw::bridge_name(t.rec.subnet_index), &rec.ip)
             .await
             .map_err(fail)?;
         let dir = cfg.run_dir().join(&rec.id);
@@ -1596,9 +1579,22 @@ impl Manager {
             .map(|m| m.len())
             .unwrap_or(0);
         e.rec.lock().unwrap().console_offset = console_offset;
-        let jail = self.jail_for(&rec);
         let ip: Ipv4Addr = rec.ip.parse().unwrap();
-        let mut resume = rec.suspended;
+        let boot = fc::Boot {
+            id: rec.id.clone(),
+            dir,
+            jail: self.jail_for(&rec),
+            vcpus: rec.size.vcpus,
+            memory_mb: rec.size.memory_mb,
+            kernel: cfg.kernel.clone(),
+            boot_args: self.boot_args(),
+            config_drive,
+            root: root_dev,
+            data: data_dev,
+            tap,
+            mac: netw::mac_for(ip),
+            resume: rec.suspended,
+        };
         // Boots take their turn: a host asked for many at once boots a few at a time, each
         // with the whole timeout, instead of all of them crawling past it together.
         let _boot_turn = self
@@ -1607,98 +1603,21 @@ impl Manager {
             .acquire()
             .await
             .map_err(|e| fail(anyhow!(e)))?;
-        let mut proc = loop {
-            let mut proc =
-                fc::Process::start(&cfg.firecracker, &rec.id, &dir, cfg.pci, jail.as_ref())
-                    .await
-                    .map_err(fail)?;
-            let c = proc.client.clone();
-            let (snap_state, snap_mem) = (proc.outside("snap.state"), proc.outside("snap.mem"));
-            resume = resume && snap_state.exists() && snap_mem.exists();
-            if resume {
-                // Memory and state come back; the disks are where they were; the TAP has the
-                // same name. Nothing boots: the guest carries on where it was paused.
-                let load = async {
-                    // What the snapshot's devices open again: the drives, by the names given at boot.
-                    proc.expose_file(&config_drive, "config.tar")?;
-                    proc.expose_block(&root_dev, "root")?;
-                    if let Some(d) = &data_dev {
-                        proc.expose_block(d, "data")?;
-                    }
-                    c.snapshot_load(
-                        &proc.inside("snap.state"),
-                        &proc.inside("snap.mem"),
-                        "eth0",
-                        &tap,
-                    )
-                    .await
-                };
-                match load.await {
-                    Ok(()) => break proc,
-                    Err(err) => {
-                        tracing::warn!(machine = rec.id, err = %err, "resume from snapshot failed, booting cold");
-                        proc.kill();
-                        proc.wait().await;
-                        resume = false;
-                        continue;
-                    }
-                }
-            }
-            let configure = async {
-                let kernel = proc.expose_file(&cfg.kernel, "vmlinux")?;
-                let config = proc.expose_file(&config_drive, "config.tar")?;
-                let root = proc.expose_block(&root_dev, "root")?;
-                c.machine_config(rec.size.vcpus, rec.size.memory_mb).await?;
-                c.boot_source(&kernel, &self.boot_args()).await?;
-                c.drive("rootfs", &root, true, false, "Writeback").await?;
-                c.drive("config", &config, false, true, "Unsafe").await?;
-                if let Some(d) = &data_dev {
-                    let data = proc.expose_block(d, "data")?;
-                    c.drive("data", &data, false, false, "Writeback").await?;
-                }
-                c.network_interface("eth0", &tap, &netw::mac_for(ip))
-                    .await?;
-                c.vsock(3, &proc.inside("vsock.sock")).await?;
-                c.start().await?;
-                Ok::<(), anyhow::Error>(())
-            };
-            if let Err(err) = configure.await {
-                proc.kill();
-                proc.wait().await;
-                return Err(fail(anyhow!("configure firecracker: {err}")));
-            }
-            break proc;
-        };
-        // A snapshot is for one resume: stale files would be loaded into a different boot.
-        let _ = tokio::fs::remove_file(proc.outside("snap.state")).await;
-        let _ = tokio::fs::remove_file(proc.outside("snap.mem")).await;
-        let (exit_tx, exit_rx) = tokio::sync::watch::channel(false);
-        let live = Live {
-            pid: proc.pid(),
-            vsock: proc.vsock.clone(),
-            api: proc.api.clone(),
-            exited: exit_rx,
-        };
+        let live = self.inner.vmm.boot(&boot).await.map_err(fail)?;
         {
             *e.live.lock().unwrap() = Some(live.clone());
             *e.stop_req.lock().unwrap() = None;
             let mut r = e.rec.lock().unwrap();
-            r.pid = proc.pid();
+            r.pid = live.pid;
             r.suspended = false;
-            if !resume {
+            if !live.resumed {
                 r.boots += 1;
             }
         }
         let _ = self.save(e);
-        let watcher = self.clone();
-        let we = e.clone();
-        tokio::spawn(async move {
-            proc.wait().await;
-            let _ = exit_tx.send(true);
-            watcher.settle_exit(&we, live.pid).await;
-        });
+        self.watch(e, &live);
 
-        let ready = guestc::wait_ready(
+        let ready = self.inner.guest.wait_ready(
             &live.vsock,
             Duration::from_secs(cfg.boot_timeout_sec.max(10)),
         );
@@ -1739,11 +1658,11 @@ impl Manager {
             name = rec.name,
             ip = rec.ip,
             pid = live.pid,
-            resumed = resume,
+            resumed = live.resumed,
             "machine running"
         );
         use std::sync::atomic::Ordering::Relaxed;
-        if resume {
+        if live.resumed {
             self.inner.stats.resumes.fetch_add(1, Relaxed);
         } else {
             self.inner.stats.boots.fetch_add(1, Relaxed);
@@ -1784,7 +1703,7 @@ impl Manager {
             }
         }
         let rec = e.snapshot();
-        let _ = host::delete_tap(&rec.id, &rec.ip).await;
+        let _ = self.inner.net.delete_tap(&rec.id, &rec.ip).await;
         *e.live.lock().unwrap() = None;
         let (code, oom, requested) = self.exit_from_console(&rec);
         let stop_req = e.stop_req.lock().unwrap().take();
@@ -1882,13 +1801,13 @@ impl Manager {
     /// kills after `grace` (at once when zero), waits for Firecracker to be gone, then clears
     /// the entry itself, since the watcher cannot take the lock to settle it, and wakes whoever
     /// waited for that.
-    async fn end_process(&self, e: &Arc<Entry>, live: &Live, grace: Duration) {
+    async fn end_process(&self, e: &Arc<Entry>, live: &fc::Vm, grace: Duration) {
         let mut exited = live.exited.clone();
         if !*exited.borrow() {
             let asked = !grace.is_zero()
                 && tokio::time::timeout(
                     Duration::from_secs(5),
-                    guestc::shutdown(&live.vsock, grace),
+                    self.inner.guest.shutdown(&live.vsock, grace),
                 )
                 .await
                 .map(|r| r.is_ok())
@@ -1898,16 +1817,14 @@ impl Manager {
                     .await
                     .is_ok();
             if !gone {
-                unsafe {
-                    libc::kill(live.pid as i32, libc::SIGKILL);
-                }
+                self.inner.vmm.kill(live.pid);
                 let _ = exited.wait_for(|x| *x).await;
             }
         }
         *e.live.lock().unwrap() = None;
         *e.stop_req.lock().unwrap() = None;
         let r = e.snapshot();
-        let _ = host::delete_tap(&r.id, &r.ip).await;
+        let _ = self.inner.net.delete_tap(&r.id, &r.ip).await;
         e.changed.notify_waiters();
     }
 
@@ -1920,50 +1837,6 @@ impl Manager {
         let e = self.entry(id)?;
         self.stop_entry(&e, stop::USER, timeout, suspend).await?;
         Ok(self.view(&e))
-    }
-
-    /// Pauses the machine and writes its memory and state next to its run files, so the next
-    /// start resumes it in well under a second. Called with the entry's lock held, on a running
-    /// machine. `Ok(false)`: Firecracker refused, the guest runs on; stop it the plain way.
-    async fn snapshot_live(&self, e: &Arc<Entry>, live: &Live) -> Result<bool> {
-        let rec = e.snapshot();
-        // Firecracker writes next to its sockets: the run dir, or the chroot root when jailed.
-        let base = live
-            .api
-            .parent()
-            .map(|p| {
-                if p.ends_with("run") {
-                    p.parent().unwrap_or(p).to_path_buf()
-                } else {
-                    p.to_path_buf()
-                }
-            })
-            .unwrap_or_default();
-        let inside = |name: &str| -> PathBuf {
-            if self.jail_for(&rec).is_some() {
-                PathBuf::from("/").join(name)
-            } else {
-                base.join(name)
-            }
-        };
-        let c = fc::Client::new(&live.api);
-        if let Err(err) = c.pause().await {
-            tracing::warn!(machine = rec.id, err = %err, "pause refused");
-            return Ok(false);
-        }
-        match c
-            .snapshot_create(&inside("snap.state"), &inside("snap.mem"))
-            .await
-        {
-            Ok(()) => Ok(true),
-            Err(err) => {
-                tracing::warn!(machine = rec.id, err = %err, "snapshot refused, resuming");
-                let _ = c.resume().await;
-                let _ = tokio::fs::remove_file(base.join("snap.state")).await;
-                let _ = tokio::fs::remove_file(base.join("snap.mem")).await;
-                Ok(false)
-            }
-        }
     }
 
     /// Asks the guest to end its process, then waits for Firecracker to exit; after the grace,
@@ -2015,7 +1888,17 @@ impl Manager {
             *e.stop_req.lock().unwrap() = Some(reason.to_string());
             e.set_state(state::STOPPING, |_| {});
             let _ = self.save(e);
-            if suspend && self.snapshot_live(e, &live).await.unwrap_or(false) {
+            // A suspend keeps a memory snapshot: the next start resumes in well under a
+            // second. Refused, the machine is stopped the plain way.
+            let suspended = suspend
+                && match self.inner.vmm.snapshot(&live).await {
+                    Ok(()) => true,
+                    Err(err) => {
+                        tracing::warn!(machine = r.id, err = %err, "suspend refused, stopping");
+                        false
+                    }
+                };
+            if suspended {
                 self.inner
                     .stats
                     .suspends
@@ -2029,9 +1912,7 @@ impl Manager {
                 let settled = e.changed.notified();
                 tokio::pin!(settled);
                 settled.as_mut().enable();
-                unsafe {
-                    libc::kill(live.pid as i32, libc::SIGKILL);
-                }
+                self.inner.vmm.kill(live.pid);
                 drop(_guard);
                 let _ = tokio::time::timeout(Duration::from_secs(15), settled).await;
                 return Ok(());
@@ -2043,16 +1924,14 @@ impl Manager {
         settled.as_mut().enable();
         if let Err(err) = tokio::time::timeout(
             Duration::from_secs(5),
-            guestc::shutdown(&live.vsock, timeout),
+            self.inner.guest.shutdown(&live.vsock, timeout),
         )
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r)
         {
             tracing::warn!(machine = e.snapshot().id, err = %err, "guest shutdown request failed, killing");
-            unsafe {
-                libc::kill(live.pid as i32, libc::SIGKILL);
-            }
+            self.inner.vmm.kill(live.pid);
         }
         let mut exited = live.exited.clone();
         if !*exited.borrow()
@@ -2064,9 +1943,7 @@ impl Manager {
                 machine = e.snapshot().id,
                 "guest did not stop in time, killing"
             );
-            unsafe {
-                libc::kill(live.pid as i32, libc::SIGKILL);
-            }
+            self.inner.vmm.kill(live.pid);
         }
         let _ = tokio::time::timeout(Duration::from_secs(10), settled).await;
         Ok(())
@@ -2097,7 +1974,7 @@ impl Manager {
             let _ = self.delete_endpoint(&ep.id);
         }
         let rec = e.snapshot();
-        let _ = host::delete_tap(id, &rec.ip).await;
+        let _ = self.inner.net.delete_tap(id, &rec.ip).await;
         // A fork is a clone of this machine's disks: it takes the snapshots over and lives on.
         for ds in [rec.root_dataset(), rec.data_dataset()] {
             if self.inner.zfs.exists(&ds).await.context("disks")? {
@@ -2163,43 +2040,45 @@ impl Manager {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
         loop {
             tick.tick().await;
-            let now = Utc::now();
-            let (due, destroying): (Vec<Arc<Entry>>, Vec<String>) = {
-                let machines = self.inner.machines.lock().unwrap();
-                let due = machines
-                    .values()
-                    .filter(|e| {
-                        let r = e.rec.lock().unwrap();
-                        r.state == state::RUNNING
-                            && idle_past(r.last_used_at, r.sleep_window(), now)
-                    })
-                    .cloned()
-                    .collect();
-                // One whose lock is held has a destroy under way already.
-                let destroying = machines
-                    .values()
-                    .filter(|e| {
-                        e.rec.lock().unwrap().state == state::DESTROYING
-                            && e.lock.try_lock().is_ok()
-                    })
-                    .map(|e| e.snapshot().id)
-                    .collect();
-                (due, destroying)
-            };
-            for e in due {
-                tracing::info!(machine = e.snapshot().id, "machine idle, going to sleep");
-                let suspend = self.inner.cfg.suspend_on_sleep;
-                if let Err(err) = self
-                    .stop_entry(&e, stop::IDLE, Duration::from_secs(10), suspend)
-                    .await
-                {
-                    tracing::warn!(machine = e.snapshot().id, err = %err, "sleep");
-                }
+            self.tick().await;
+        }
+    }
+
+    async fn tick(&self) {
+        let now = Utc::now();
+        let (due, destroying): (Vec<Arc<Entry>>, Vec<String>) = {
+            let machines = self.inner.machines.lock().unwrap();
+            let due = machines
+                .values()
+                .filter(|e| {
+                    let r = e.rec.lock().unwrap();
+                    r.state == state::RUNNING && idle_past(r.last_used_at, r.sleep_window(), now)
+                })
+                .cloned()
+                .collect();
+            // One whose lock is held has a destroy under way already.
+            let destroying = machines
+                .values()
+                .filter(|e| {
+                    e.rec.lock().unwrap().state == state::DESTROYING && e.lock.try_lock().is_ok()
+                })
+                .map(|e| e.snapshot().id)
+                .collect();
+            (due, destroying)
+        };
+        for e in due {
+            tracing::info!(machine = e.snapshot().id, "machine idle, going to sleep");
+            let suspend = self.inner.cfg.suspend_on_sleep;
+            if let Err(err) = self
+                .stop_entry(&e, stop::IDLE, Duration::from_secs(10), suspend)
+                .await
+            {
+                tracing::warn!(machine = e.snapshot().id, err = %err, "sleep");
             }
-            for id in destroying {
-                if let Err(err) = self.destroy(&id).await {
-                    tracing::warn!(machine = id, err = %err, "resume destroy");
-                }
+        }
+        for id in destroying {
+            if let Err(err) = self.destroy(&id).await {
+                tracing::warn!(machine = id, err = %err, "resume destroy");
             }
         }
     }
@@ -2295,7 +2174,7 @@ impl Manager {
         };
         let out = tokio::time::timeout(
             Duration::from_millis(timeout_ms + 10_000),
-            guestc::exec(&sock, greq),
+            self.inner.guest.exec(&sock, greq),
         )
         .await
         .map_err(|_| MError::NotRunning("the command did not finish".into()))?
@@ -2327,7 +2206,7 @@ impl Manager {
         };
         tokio::time::timeout(
             Duration::from_secs(60),
-            guestc::put(&sock, &req.path, mode, data),
+            self.inner.guest.put(&sock, &req.path, mode, data),
         )
         .await
         .map_err(|_| MError::NotRunning("timeout".into()))??;
@@ -2337,7 +2216,7 @@ impl Manager {
 
     pub async fn get_file(&self, id: &str, path: &str) -> Result<Vec<u8>, MError> {
         let sock = self.running_vsock(id, false).await?;
-        let data = tokio::time::timeout(Duration::from_secs(60), guestc::get(&sock, path))
+        let data = tokio::time::timeout(Duration::from_secs(60), self.inner.guest.get(&sock, path))
             .await
             .map_err(|_| MError::NotRunning("timeout".into()))??;
         let _ = self.touch(id);
@@ -2638,52 +2517,6 @@ async fn host_ip(interface: &str) -> Option<Ipv4Addr> {
     inet_of(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// The machine id a Firecracker command line carries (`firecracker --id m-… …`), as the
-/// daemon spells it; `None` for any other process.
-fn firecracker_id(cmdline: &[u8]) -> Option<String> {
-    let args: Vec<&str> = cmdline
-        .split(|b| *b == 0)
-        .filter_map(|a| std::str::from_utf8(a).ok())
-        .collect();
-    if !args.first()?.ends_with("firecracker") {
-        return None;
-    }
-    let i = args.iter().position(|a| *a == "--id")?;
-    Some(args.get(i + 1)?.replacen("m-", "m_", 1))
-}
-
-/// Whether `pid` is the Firecracker running machine `id`, by its command line: the only
-/// check before the daemon signals a pid it did not spawn (a record's pid after a reboot
-/// is someone else's).
-fn is_our_firecracker(pid: u32, id: &str) -> bool {
-    std::fs::read(format!("/proc/{pid}/cmdline"))
-        .ok()
-        .and_then(|c| firecracker_id(&c))
-        .as_deref()
-        == Some(id)
-}
-
-/// Every Firecracker process on the host with the machine id it carries, read from
-/// `/proc`: what a sweep compares to the records.
-fn firecracker_processes() -> Vec<(u32, String)> {
-    let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir("/proc") else {
-        return out;
-    };
-    for e in rd.flatten() {
-        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        let Ok(cmd) = std::fs::read(e.path().join("cmdline")) else {
-            continue;
-        };
-        if let Some(id) = firecracker_id(&cmd) {
-            out.push((pid, id));
-        }
-    }
-    out
-}
-
 fn check_size(size: &api::Size) -> Result<(), MError> {
     if !(1..=32).contains(&size.vcpus) {
         return Err(invalid("size.vcpus must be 1..32"));
@@ -2797,11 +2630,6 @@ fn inet_of(text: &str) -> Option<Ipv4Addr> {
     let f: Vec<&str> = text.split_whitespace().collect();
     let i = f.iter().position(|w| *w == "inet")?;
     f.get(i + 1)?.split('/').next()?.parse().ok()
-}
-
-/// Whether Firecracker's `GET /` says the microVM runs.
-fn api_running(info: &serde_json::Value) -> bool {
-    info["state"].as_str() == Some("Running")
 }
 
 /// Whether a machine whose process ended on its own (exit `code`, after `restarts` restarts
@@ -3125,33 +2953,6 @@ mod tests {
     }
 
     #[test]
-    fn adoption_checks() {
-        // Only a Firecracker carrying the machine's id is ours: the binary by any path, the
-        // id as the jailer spells it.
-        let fc = b"/usr/local/bin/firecracker\0--id\0m-abc123\0--api-sock\0/run/api.sock\0";
-        assert_eq!(firecracker_id(fc).as_deref(), Some("m_abc123"));
-        assert_eq!(
-            firecracker_id(b"firecracker\0--id\0m-x\0").as_deref(),
-            Some("m_x")
-        );
-        assert_eq!(firecracker_id(b"firecracker\0--api-sock\0/x\0"), None);
-        assert_eq!(firecracker_id(b"/usr/bin/jailer\0--id\0m-abc123\0"), None);
-        assert_eq!(
-            firecracker_id(b"/bin/sh\0-c\0firecracker --id m-abc123\0"),
-            None
-        );
-        assert_eq!(firecracker_id(b""), None);
-        // This process is not a Firecracker (and there is no /proc on a Mac): never killed.
-        assert!(!is_our_firecracker(std::process::id(), "m_abc123"));
-        assert!(api_running(
-            &serde_json::json!({"id": "m-1", "state": "Running", "vmm_version": "1.10"})
-        ));
-        assert!(!api_running(&serde_json::json!({"state": "Paused"})));
-        assert!(!api_running(&serde_json::json!({"state": "Not started"})));
-        assert!(!api_running(&serde_json::json!({})));
-    }
-
-    #[test]
     fn jail_uids() {
         assert_eq!(jail_uid(100_000, 0, 2), 100_002);
         assert_eq!(jail_uid(100_000, 3, 254), 100_000 + 3 * 256 + 254);
@@ -3293,6 +3094,12 @@ mod tests {
                 zfs,
                 images,
                 dns: Resolver::new(&["127.0.0.1".into()]),
+                vmm: Arc::new(fc::Firecracker {
+                    binary: PathBuf::new(),
+                    pci: false,
+                }),
+                guest: Arc::new(guestc::Vsock),
+                net: Arc::new(host::HostNet),
                 egress: "lo".into(),
                 host_id: "h_test".into(),
                 advertise: "127.0.0.1".into(),

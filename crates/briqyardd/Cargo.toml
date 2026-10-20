@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 briqyard-api = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
