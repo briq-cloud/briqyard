@@ -89,7 +89,10 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   harness over a temp directory, the same fake `zfs` and a mock host (`Vmm`, `Guest`,
   `Net`; ADR 0010): create to running, boot failures, start against destroy, starts past
   capacity, stop and suspend, a caller that hangs up, crash recovery, the orphan sweep,
-  the sleeper's tick, the init's exit report, fork snapshots freed, the tenant's gateway
+  the sleeper's tick, the init's exit report, fork snapshots freed, backups (the schedule due
+  and not before, at most `at_once`, one per machine, a machine with no process skipped while
+  unchanged, retention and its restores, delete and `chain`, a failure and its backoff, a
+  refused store leaving nothing, a destroyed machine's held, counted and expired), the tenant's gateway
   (booted once by what needs it, its failure named, slept by the tick, kept while in use),
   usage (hours split, counter resets, suspended and stopped machines, traffic on its machine,
   closed hours, a restart, retention, a destroyed machine, the route's range), egress limits
@@ -101,8 +104,8 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   restart, suspend and resume, the gateway, PATCH, a stale `If-Match`, the seq past the
   records at load, the route's pages, watch and 410; the log itself: seqs across a restart, a
   torn line, retention, a watch's backlog, lag, heartbeat and shutdown). What still needs the host: a tenant's first create (its bridge and
-  the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, backups and their
-  event, an image pull and its event, the API handlers; those stay with the e2e suite).
+  the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
+  `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
@@ -113,7 +116,9 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   live, drops shown, a download capped at 2 Mbit/s), usage (running seconds, internet and
   ingress bytes, a stopped machine's disk hours), events (a watch from before a stop gets it,
   a stale `If-Match` refused, `describe`, the reasons in order, a cursor past the log
-  refused). 96 checks.
+  refused), backups on a schedule (every second backup whole and a kept one's base kept, a
+  base not deleted alone, the oldest kept restored from its chain, retention down to 2, its
+  event, a destroyed machine's backups listed then deleted with their chain). 104 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,

@@ -77,6 +77,9 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `backup.store` | none | `s3://bucket/prefix` or `file:///path`; set, `POST /v1/machines/{id}/backups` works. Credentials in `BRIQYARD_S3_ACCESS_KEY` / `BRIQYARD_S3_SECRET_KEY` |
 | `backup.endpoint`, `backup.region` | none | The S3 endpoint (`https://s3.fr-par.scw.cloud`) and region |
 | `backup.keep_snapshots` | `1` | Backup snapshots kept on the host per machine (the newest is the base of the next incremental send) |
+| `backup.default_every`, `backup.default_keep` | none | The schedule of a machine created without `backup` (ADR 0023): both or neither, `every` at least `1h`, `keep` at least 1 |
+| `backup.at_once` | `2` | Scheduled backups (and expired holders' deletions) the tick runs at once |
+| `backup.keep_destroyed_days` | `30` | A destroyed machine's backups stay this long, then go with its holder |
 | `suspend_on_sleep` | `false` | Sleep with a memory snapshot: wakes in a quarter second, costs the machine's memory in disk |
 | `storage.pool` | `byard` | The ZFS pool or dataset for every disk |
 | `registries[]` | none | `{host, username, password}` for private registries |
@@ -144,6 +147,35 @@ N` makes a new machine from one (`POST /v1/machines` with `restore`): the whole 
 streams is received into fresh datasets, and the image, command, env, files, size and volume
 come from the record unless the request sets them. Any host that reaches the store can
 restore, which is how a machine moves off a dead host.
+
+### On a schedule (ADR 0023)
+
+A machine with `backup: {every, keep}` (`machine run --backup-every 6h --backup-keep 4`,
+`machine set-backup <id> --every 1d --keep 5`, or `--off`) is backed up by the daemon's tick,
+with or without the control plane: `every` after its last backup, 15 minutes after a failed one
+(`backup_failed`, a warning event), `backup.at_once` at a time. A machine with no process
+(stopped, created) whose disks wrote nothing since its last backup is not backed up again.
+
+| Retention, `keep` 2 | sent | in the store |
+|---|---|---|
+| 1st | whole | 1 |
+| 2nd | from 1 | 1 2 |
+| 3rd | whole | 1 2 3 (2 is kept, 1 is its base) |
+| 4th | from 3 | 3 4 |
+
+Every `keep`-th backup is whole; after each backup, what is neither among the newest `keep`
+nor a base of one goes (`backup_deleted`, `retention`). The store holds `keep` to
+`2·keep − 1` backups, each restorable. `briqyard backup rm <machine> <backup>` deletes one;
+refused while another continues from it, `--chain` deletes those too.
+
+A destroy keeps the machine's backups for `backup.keep_destroyed_days`: a holder
+(`state/holders/<id>.json`) keeps them listed (`briqyard backups --tenant T`, each with
+`deletes_at`) and counted in the machine's usage buckets (`backup_gb_hours`). Through a fleet,
+`backup rm` of a destroyed machine's backup names its tenant (`--tenant`).
+
+In the store, per machine: `backups/<machine>/<id>.json` (the record) and
+`backups/<machine>/<disk>/<id>.zfs` (a stream, `root` or `data`). Ids are times to the
+millisecond, `20261021T101500.123Z`. A deletion removes the streams first, then the record.
 
 The state itself (`state/`) is small and lives only on the host; a lost host loses the records
 of machines that were never backed up, and their disks. A machine's own `POST

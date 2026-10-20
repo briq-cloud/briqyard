@@ -13,7 +13,7 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 | # | Gap | briqyard | briq | Before |
 |---|---|---|---|---|
 | 1 | Public edge: hosting, IPs, certificates, DDoS | the hosts' ingress, private to the edge (done) | the router (done), edge hosts and certificates in infra | staging |
-| 2 | Volume durability: Fly's daily snapshots | scheduled backups, retention, delete | the schedule and retention per plan | staging |
+| 2 | Volume durability: Fly's daily snapshots | scheduled backups, retention, delete (done); a run against a real bucket | the schedule and retention per plan | staging |
 | 3 | Egress abuse: our servers' IPs and the provider's abuse desk | blocked ports, rate and bandwidth limits per machine (done) | the limits per plan, abuse response | public traffic |
 | 4 | Observability and alerts | `/metrics`, JSON logs (done), host health | scraping, log shipping, alerts in the monitor | staging |
 | 5 | Host operations: real orders, upgrades, patching | rolling upgrade, real provisioner runs | runbooks, capacity decisions | production |
@@ -43,10 +43,9 @@ On briqyard: the router's logic (host lookup, `private`/`token`, wake, activity,
 
 Fly today: a daily block snapshot of every volume, kept 5 days, restorable.
 
-On briqyard: backups exist (`zfs send` to S3, incremental, restore anywhere, ADR 0008), on demand only; no schedule, no retention, no delete.
+On briqyard (built, ADR 0023): a machine carries `backup: { every, keep }`; the daemon takes and prunes them, so a backup happens even when the control plane is down; `DELETE` of a backup; a destroyed machine's backups kept `keep_destroyed_days`, listed by `GET /v1/backups`. Missing: a run against a real bucket.
 
-- **briqyard runs the schedule** (recommended): a machine carries `backup: { every, keep }`, set by briq at create; the daemon takes and prunes them, so a backup happens even when the control plane is down. Plus `DELETE` of a backup and a run against a real bucket.
-- briq decides the values per plan and shows backups in the dashboard.
+- briq sets the values per plan at create (Fly's: `{ every: "1d", keep: 5 }`) and shows `GET /v1/backups?tenant=` in the dashboard.
 
 ## 3. Egress abuse
 
@@ -108,7 +107,7 @@ On briqyard: datasets are plain. ZFS native encryption per tenant dataset is the
 
 ## 10. Usage and costs
 
-ADR 0017, built 2026-10-20: briqyard measures compute, disk, object storage and network per machine in hourly buckets, with no price; `GET /v1/usage`, whole or failed through the fleet. briq collects closed hours and owns the cost model and billing (not built). Two holes before billing storage: a destroyed machine's backups stay in the store with no bucket after its last hour (fixed by item 2's backup delete and retention, or by reporting backups per store object), and `host retire` takes the host's stored hours with it (retire should wait until briq has collected the host's last closed hour).
+ADR 0017, built 2026-10-20: briqyard measures compute, disk, object storage and network per machine in hourly buckets, with no price; `GET /v1/usage`, whole or failed through the fleet. briq collects closed hours and owns the cost model and billing (not built). One hole before billing storage: `host retire` takes the host's stored hours with it, and the holders of its destroyed machines' backups (retire should wait until briq has collected the host's last closed hour). A destroyed machine's backups are reported in its buckets until they are deleted (ADR 0023).
 
 ## 11. Image pulls at scale
 

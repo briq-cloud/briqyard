@@ -156,6 +156,15 @@ directory), incremental after the first; the record beside it holds the machine'
 restore is a create that receives the chain of streams into fresh datasets on any host that
 reaches the store. Local snapshots stay only as the base of the next incremental send.
 
+A machine's `backup: {every, keep}` is run by the daemon (ADR 0023, `machine/backups.rs`):
+the tick starts each due backup detached, through a semaphore (`backup.at_once`), and every
+backup or deletion of a machine's backups takes the machine's turn, so one runs at a time. A
+backup is whole every `keep`-th, else from the last one's snapshot when that backup is in the
+store; after it, retention deletes whole chains: whatever is neither among the newest `keep`
+nor a base of one. A destroy hands the backups and the turn to a holder (`state/holders/`),
+which lists them, meters them into the machine's usage buckets, and deletes them
+`keep_destroyed_days` later.
+
 ### Usage
 
 The daemon measures what each machine uses, per UTC hour, and never prices it (ADR 0017,
@@ -164,7 +173,8 @@ every tick, split at the hour (running is `starting` to `stopping`; suspended is
 memory snapshot); the tick (15 s) adds what its counters grew by, a smaller value counting as
 a counter begun again. The sources: the cgroup's `cpu.stat`; one `zfs list` of the pool for
 allocated sizes, used bytes and snapshots, plus the memory snapshot files; the record's
-`backup_bytes`, added at each backup; two counter sets in the inet table (`internet_out`,
+`backup_bytes`, what its backups in the store take, set at each backup and deletion (a
+destroyed machine's holder carries it on); two counter sets in the inet table (`internet_out`,
 `internet_in`, an element per machine address for the machine's life, matched in the forward
 chain on the egress interface); and the ingress proxy, which adds the bytes it passes as they
 pass. The open hours live in memory, written to `state/usage/<hour>.json` once a minute and at
