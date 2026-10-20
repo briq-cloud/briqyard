@@ -54,3 +54,5 @@ Same shape (6 tenants × 4, one round, 6 workers, a daemon SIGKILL), on the merg
 Consequence: `hack/config.dev.yaml` sets `boot_timeout_sec: 300` so a stress run on the Mac fails on bugs, not on the host. Real servers boot a guest in about a second; the production default stays 120 s.
 
 After the egress policy and the tenant gateway (ADR 0015, 0016), same driver, 4 tenants × 4, a daemon SIGKILL, the dev boot timeout at 300 s: 0 invariant breaks, 0 boot failures; the only API failures are the three status polls that land while the daemon is down on purpose.
+
+API TLS (ADR 0020), checked end to end on the Mac 2026-10-21: fc2 bootstrapped on `0.0.0.0` with `ALLOWED_CLIENTS` served TLS and printed its fingerprint; with it pinned in the fleet's host entry, fc2 turned ready over `https`, `hack/fleet-two-hosts.sh` passed 16/16 through it, and the CLI with a wrong pin was refused naming both fingerprints. The dev loop keeps fc2 plain (loopback bind), since a fingerprint is per machine and cannot live in `hack/fleet.dev.yaml`.
