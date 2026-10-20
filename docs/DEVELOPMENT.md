@@ -64,8 +64,9 @@ networks:
 then `limactl stop fc && limactl start fc`. The second VM, with the daemon's port forwarded as
 27420 the same way, is installed from the binaries `hack/vm.sh` built (copied out with
 `limactl copy` into `bin/`) by the bootstrap script, and registers with the fleet, which takes
-a registration only for a host it expects: uncomment the `fc2` entry in `hack/fleet.dev.yaml`
-(its address and token) and `hack/vm.sh install` so the fleet in `fc` runs with it, then
+a registration only for a host it expects: the `fc2` entry in `hack/fleet.dev.yaml` (its
+address and token). `hack/vm.sh install` copies the dev configs into `/etc/briqyard` only when
+none is there: after a change, copy them by hand and restart the units. Then
 
 ```bash
 limactl start --name=fc2 --vm-type=vz --nested-virt --cpus=2 --memory=6 --disk=30 --network=vzNAT template://ubuntu
