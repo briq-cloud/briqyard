@@ -5,6 +5,9 @@ firecracker: /usr/local/bin/firecracker
 jailer: /usr/local/bin/jailer
 kernel: /var/lib/briqyard/vmlinux
 init: /usr/local/bin/briqyard-init
+# The dev VM boots guests slowly when many boot at once (nested virtualization on a shared
+# Mac): three times the production default, so a stress run fails on bugs, not on the host.
+boot_timeout_sec: 300
 root_disk_gb: 8
 storage:
   backend: zfs

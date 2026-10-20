@@ -39,3 +39,16 @@ After, per file: config 100 %, api types / guest / fleet config / provision / re
 ## Suites after
 
 `hack/e2e.sh` 54 / 54 · `hack/fleet-smoke.sh` 19 / 19 · `hack/fleet-two-hosts.sh` 16 / 16.
+
+## Day 3 (2026-10-20): the review fixes under the same stress
+
+Same shape (6 tenants × 4, one round, 6 workers, a daemon SIGKILL), on the merged main after the review fixes (ADR 0011–0014). The Mac was shared with other work all day (OrbStack and other sessions at load 6–38), so timings are worse than night 2's, not comparable.
+
+| | Result |
+|---|---|
+| Races added by the review (a client hanging up mid-create, start against destroy, starts past capacity) | Pass. The hang-up's machine still boots and the next create of the image works; the start/destroy race ends in one state, never `destroying` with a live process (p50 0.3 s, was 36 s before the destroy ran under one lock); refused starts answer 503 `capacity` and stay stopped |
+| Invariants after each phase | Only "no machine in error" breaks, from boot timeouts; no leaked zvol, process, TAP, bridge, port, run dir or jail after any phase or the crash |
+| Boot timeouts | 9 of 24 creates past the daemon's 120 s under 24 guests. Not a regression: an A/B on the same host, back to back, booting 12 machines at once in one tenant (gate of 3): night 2's daemon 41 / 113 / 234 / 350 s per batch of three; today's 8 / 29 / 58 / 96 s |
+| Why concurrent boots are slow here | One guest alone boots in 4 s with 2.7 s of kernel time; three at once take 8 s, then each later batch longer. The guests' own command (`python3 -m http.server`) spends 10–25 s at 100 % starting up when siblings boot beside it: page-fault-heavy user code under nested virtualization on six shared vCPUs. Not memory (384 MB limit, 232 MB used, zero reclaim), not the init (idle), not the kernel copy into the jail (65 ms for three) |
+
+Consequence: `hack/config.dev.yaml` sets `boot_timeout_sec: 300` so a stress run on the Mac fails on bugs, not on the host. Real servers boot a guest in about a second; the production default stays 120 s.
