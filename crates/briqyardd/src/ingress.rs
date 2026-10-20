@@ -27,11 +27,7 @@ impl Ingress {
     pub fn new(mgr: Manager, bind: &str, http: &str, boot_timeout: Duration) -> Self {
         Self {
             mgr,
-            bind: if bind.is_empty() {
-                "0.0.0.0".into()
-            } else {
-                bind.to_string()
-            },
+            bind: bind.to_string(),
             http: http.to_string(),
             // A connection waits for the machine as long as a boot may take, plus the
             // service's own start.

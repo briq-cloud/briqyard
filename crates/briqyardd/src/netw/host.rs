@@ -1,7 +1,7 @@
 //! Bridges, TAPs, forwarding and the egress interface, through iproute2: this is the host,
 //! where `ip` always exists, and its output is what an operator reads when something is off.
 
-use super::{bridge_name, tap_name, Subnet};
+use super::{bridge_name, nft, tap_name, Subnet, TAP_PREFIX};
 use anyhow::{anyhow, Context, Result};
 use tokio::process::Command;
 
@@ -47,6 +47,17 @@ pub async fn ensure_bridge(s: &Subnet) -> Result<String> {
         ip(&["addr", "add", &gw, "dev", &name]).await?;
     }
     ip(&["link", "set", &name, "up"]).await?;
+    // Frames switched inside the bridge stay out of the IP hooks (what br_netfilter would
+    // feed them to), so the forward chain sees routed traffic only. A kernel without
+    // bridge netfilter has no knob and nothing to switch off.
+    for knob in ["nf_call_iptables", "nf_call_ip6tables", "nf_call_arptables"] {
+        let path = format!("/sys/class/net/{name}/bridge/{knob}");
+        match tokio::fs::write(&path, "0\n").await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(anyhow!("{path}: {e}")),
+        }
+    }
     Ok(name)
 }
 
@@ -59,20 +70,24 @@ pub async fn delete_bridge(index: u32) -> Result<()> {
     Ok(())
 }
 
-/// Makes the machine's TAP, attached to the bridge and up. Firecracker opens it by name.
-pub async fn ensure_tap(machine_id: &str, bridge: &str) -> Result<String> {
+/// Makes the machine's TAP, attached to the bridge, up and pinned to the machine's address.
+/// Firecracker opens it by name. A TAP lives for one boot: one of that name already there
+/// is a leftover (a start that failed after making it) and is replaced, never shared.
+pub async fn ensure_tap(machine_id: &str, bridge: &str, ip_addr: &str) -> Result<String> {
     let name = tap_name(machine_id);
-    if !link_exists(&name).await {
-        ip(&["tuntap", "add", "dev", &name, "mode", "tap", "vnet_hdr"]).await?;
-    }
+    delete_link(&name).await?;
+    ip(&["tuntap", "add", "dev", &name, "mode", "tap", "vnet_hdr"]).await?;
     ip(&["link", "set", &name, "master", bridge]).await?;
     ip(&["link", "set", &name, "up"]).await?;
+    nft::pin_source(&name, ip_addr).await?;
     Ok(name)
 }
 
-/// Removes the machine's TAP. Missing is success.
-pub async fn delete_tap(machine_id: &str) -> Result<()> {
-    delete_link(&tap_name(machine_id)).await
+/// Removes the machine's TAP and its pin. Missing is success.
+pub async fn delete_tap(machine_id: &str, ip_addr: &str) -> Result<()> {
+    let name = tap_name(machine_id);
+    delete_link(&name).await?;
+    nft::unpin_source(&name, ip_addr).await
 }
 
 /// Removes a link by name. Missing is success.
@@ -83,15 +98,19 @@ pub async fn delete_link(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// The TAP interfaces on the host (every `tun` link whose name starts with "t").
+/// The daemon's TAPs on the host: every `tun` link named with its prefix.
 pub async fn list_taps() -> Result<Vec<String>> {
     let out = ip(&["-o", "link", "show", "type", "tun"]).await?;
-    Ok(out
+    Ok(tap_names(&out))
+}
+
+fn tap_names(ip_link_out: &str) -> Vec<String> {
+    ip_link_out
         .lines()
         .filter_map(|l| l.split(": ").nth(1))
         .map(|n| n.split('@').next().unwrap_or(n).to_string())
-        .filter(|n| n.starts_with('t'))
-        .collect())
+        .filter(|n| n.starts_with(TAP_PREFIX))
+        .collect()
 }
 
 pub fn enable_forwarding() -> Result<()> {
@@ -136,6 +155,19 @@ mod tests {
         // A line without a device (a blackhole) does not count; the next one does.
         let hole = "blackhole default\ndefault via 10.0.0.1 dev br0\n";
         assert_eq!(default_route_device(hole).unwrap(), "br0");
+    }
+
+    #[test]
+    fn only_our_taps_are_listed() {
+        // `ip -o link show type tun`: two of ours, a VPN's tun, another tool's tap. Only the
+        // prefix decides.
+        let out =
+            "7: btabcdef123456: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc fq master by0 state UP\n\
+                   8: tun0: <POINTOPOINT,MULTICAST,NOARP,UP> mtu 1420 qdisc fq state UNKNOWN\n\
+                   9: tap-docker@NONE: <BROADCAST> mtu 1500 qdisc noop state DOWN\n\
+                   10: bt0123456789ab@if3: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc fq state UP\n";
+        assert_eq!(tap_names(out), ["btabcdef123456", "bt0123456789ab"]);
+        assert!(tap_names("").is_empty());
     }
 
     #[test]

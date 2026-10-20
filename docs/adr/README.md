@@ -16,4 +16,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0008](0008-backups-zfs-send.md) | Backups: ZFS streams to an object store, incremental, restore is a create |
 | [0009](0009-load-controls.md) | Load: boots take turns, a tag's digest is remembered |
 | [0010](0010-testing.md) | Testing: unit tests with fakes, shell suites in `hack/`, a stress driver with invariants |
+| [0012](0012-host-exposure-and-forwarding-policy.md) | The host exposes its ports to `allowed_clients` only and refuses a public bind without them; forward drops by default; every TAP pinned to its address |
 | [0014](0014-jail-and-snapshots-on-the-pool.md) | Machine files: jails and memory snapshots on the pool, everything the daemon writes for itself alone |

@@ -20,7 +20,7 @@ Status: v0, in development. The API is not stable yet.
  │        │                                                                                │
  │  firecracker process per machine ─ serial log ─ vsock to briqyard-init                  │
  └─────────────────────────────────────────────────────────────────────────────────────────┘
-          │ tap-<id>              │ zvol root (clone of image)   │ zvol data (the volume)
+          │ bt<id> (TAP)          │ zvol root (clone of image)   │ zvol data (the volume)
     ┌─────┴──────────────────────┴──────────────────────────────┴───────┐
     │ microVM: guest kernel + briqyard-init (PID 1) → the image's command │
     └─────────────────────────────────────────────────────────────────────┘
@@ -68,9 +68,16 @@ rather than its target), devices skipped; then `mkfs.ext4 -d` builds the disk.
 
 ### Network
 
-One Linux bridge per tenant, one /24 from `10.64.0.0/10` per tenant, the host as gateway (`.1`),
-one TAP per machine. nftables masquerades egress and drops traffic between tenants. The daemon
-answers DNS on every gateway: `<alias>.internal` follows the machine's alias (what a sibling's
+One Linux bridge per tenant (`by<n>`), one /24 from `10.64.0.0/10` per tenant, the host as
+gateway (`.1`), one TAP per machine (`bt` + the machine id's 12 hex digits). nftables, two tables
+rendered at start (`nft list table inet briqyard`, `nft list table bridge briqyard`, ADR 0012):
+the forward chain drops by default and accepts only a tenant's way to the internet through the
+egress interface, never to a private network, another tenant or in IPv6; the input chain lets a
+tenant reach its gateway's DNS and ping and nothing else of the host, and lets only
+`ingress.allowed_clients` reach the API, the HTTP ingress and the TCP endpoints; a `bridge`
+family chain pins every TAP to its machine's address (IP and ARP), so a guest that changes its
+address sends nothing. A machine start adds its pin, a stop removes it; a tenant changes no rule.
+The daemon answers DNS on every gateway: `<alias>.internal` follows the machine's alias (what a sibling's
 env holds), `<id>.vm.internal` is that exact machine; everything else is forwarded upstream.
 The guest configures its interface from the config drive (`briqyard-init`), so the guest kernel
 needs no `ip=` support.
@@ -160,10 +167,11 @@ filters. The daemon never mounts a guest filesystem. Guests reach only their ten
 the gateway's DNS, and the internet through NAT; nothing reaches a guest but the ingress.
 Secrets reach the guest on its config drive and never through the API's responses.
 
-The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API listens on
-loopback unless told otherwise; put it behind TLS or a private network before that. What it
-writes is its own: umask `077`, `data_dir` and everything under it `0700`, records and config
-drives `0600`, the drive's copy in the jail `0400` for the jail's user, so no other local uid
-(another machine's Firecracker included) reads a tenant's secrets (ADR 0014). A state key is a
-file name: `Store::path` refuses a key that would leave its directory, behind the API's own
-validation of ids.
+The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API and its
+endpoints listen on loopback unless told otherwise; on an address the internet could reach it
+refuses to start until `ingress.allowed_clients` says who may connect (ADR 0012). The API is
+plain HTTP: TLS or a private network in front. What it writes is its own: umask `077`,
+`data_dir` and everything under it `0700`, records and config drives `0600`, the drive's copy
+in the jail `0400` for the jail's user, so no other local uid (another machine's Firecracker
+included) reads a tenant's secrets (ADR 0014). A state key is a file name: `Store::path`
+refuses a key that would leave its directory, behind the API's own validation of ids.

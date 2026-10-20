@@ -50,7 +50,7 @@ else
 fi
 stray=$(comm -23 <(echo "$fcs") <(echo "$ids"))
 [ -z "$stray" ] && ok "no firecracker for an unknown machine" || fail "firecracker for unknown ids: $(echo "$stray" | tr '\n' ' ')"
-taps=$(ip -o link show type tun 2>/dev/null | awk -F': ' '{print $2}' | grep '^t' | sort)
+taps=$(ip -o link show type tun 2>/dev/null | awk -F': ' '{print $2}' | grep '^bt' | sort)
 [ "$pending" = 0 ] && check_eq "taps == live machines" "$(echo "$taps" | grep -c . || true)" "$n_running"
 
 # --- tenants: a bridge per tenant the daemon knows, none else ---

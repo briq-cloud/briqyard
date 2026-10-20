@@ -6,7 +6,7 @@ pub mod host;
 pub mod nft;
 
 use anyhow::{anyhow, Result};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 /// A tenant's /24 inside the range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,14 +119,42 @@ pub fn bridge_name(index: u32) -> String {
     format!("by{index}")
 }
 
-/// The TAP of a machine: "t" + the first 12 characters of its id, without separators.
+/// The prefix of every TAP the daemon makes: no other link on the host starts with it.
+pub const TAP_PREFIX: &str = "bt";
+
+/// The TAP of a machine: "bt" + the 12 hex digits of its id (14 characters, under IFNAMSIZ).
 pub fn tap_name(machine_id: &str) -> String {
-    let id: String = machine_id
-        .chars()
-        .filter(|c| *c != '-' && *c != '_')
-        .take(12)
-        .collect();
-    format!("t{id}")
+    let hex = machine_id.strip_prefix("m_").unwrap_or(machine_id);
+    format!("{TAP_PREFIX}{hex}")
+}
+
+/// Loopback, RFC 1918, carrier-grade NAT (100.64/10) and link-local: an address the
+/// internet cannot reach. Unspecified (`0.0.0.0`, `::`) listens on everything, so it is not.
+pub fn is_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            v6.is_loopback() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// An IPv4 network as nftables writes it: `a.b.c.d/n`, or a bare address (`/32`).
+pub fn cidr(s: &str) -> Result<String> {
+    let (ip, bits) = s.split_once('/').unwrap_or((s, "32"));
+    let ip: Ipv4Addr = ip.parse().map_err(|_| anyhow!("{s:?}: want a.b.c.d/n"))?;
+    let bits: u8 = bits.parse().map_err(|_| anyhow!("{s:?}: want a.b.c.d/n"))?;
+    if bits > 32 {
+        return Err(anyhow!("{s:?}: the prefix is at most /32"));
+    }
+    Ok(format!("{ip}/{bits}"))
 }
 
 /// A stable, locally administered MAC from a machine's address.
@@ -163,8 +191,53 @@ mod tests {
 
     #[test]
     fn names() {
-        assert_eq!(tap_name("m_abcdef123456"), "tmabcdef12345");
+        // Every hex digit of the id is kept: two ids that share eleven never share a TAP.
+        assert_eq!(tap_name("m_abcdef123456"), "btabcdef123456");
+        assert_eq!(tap_name("m_abcdef123457"), "btabcdef123457");
+        assert_eq!(tap_name("m_abcdef123456").len(), 14);
         assert_eq!(bridge_name(3), "by3");
         assert_eq!(mac_for(Ipv4Addr::new(10, 64, 0, 2)), "06:b1:0a:40:00:02");
+    }
+
+    #[test]
+    fn private_addresses() {
+        for a in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "10.0.0.5",
+            "10.255.255.255",
+            "172.16.0.1",
+            "172.31.9.9",
+            "192.168.64.3",
+            "100.64.0.1",
+            "100.127.255.254",
+            "169.254.1.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+        ] {
+            assert!(is_private(a.parse().unwrap()), "{a}");
+        }
+        for a in [
+            "0.0.0.0",
+            "::",
+            "203.0.113.5",
+            "8.8.8.8",
+            "172.32.0.1",
+            "100.128.0.1",
+            "11.0.0.1",
+            "2001:db8::1",
+        ] {
+            assert!(!is_private(a.parse().unwrap()), "{a}");
+        }
+    }
+
+    #[test]
+    fn cidrs() {
+        assert_eq!(cidr("10.0.0.0/8").unwrap(), "10.0.0.0/8");
+        assert_eq!(cidr("192.168.64.1").unwrap(), "192.168.64.1/32");
+        for bad in ["10.0.0.0/33", "10.0.0/8", "fd00::/8", "x", ""] {
+            assert!(cidr(bad).is_err(), "{bad}");
+        }
     }
 }

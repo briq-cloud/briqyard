@@ -1,7 +1,9 @@
 //! The daemon's configuration file.
 
+use crate::netw;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -93,11 +95,19 @@ pub struct Ingress {
     pub http: String,
     /// The suffix of HTTP endpoint host names.
     pub domain: String,
-    /// The address TCP endpoints listen on.
+    /// The address TCP endpoints listen on. Loopback by default, like `listen`: a wider
+    /// address needs `allowed_clients`.
     pub bind: String,
     /// The address endpoints are reported at (`Endpoint.address`): what a router on another
     /// machine dials. Default: `bind` when it is one address, else the host's primary address.
     pub advertise: String,
+    /// The IPv4 networks (`a.b.c.d/n`) that may reach the API, the HTTP ingress and the TCP
+    /// endpoints; the host's own loopback always may. Empty: anyone who can route to the
+    /// address, so `listen`, `bind` and `http` must then be loopback or private addresses.
+    pub allowed_clients: Vec<String>,
+    /// Starts on a public address with `allowed_clients` empty: something else (your own
+    /// firewall) keeps the daemon's ports from the internet.
+    pub allow_public: bool,
 }
 
 /// Where backups go. Off until `store` is set.
@@ -199,8 +209,10 @@ impl Default for Ingress {
             tcp_ports: "20000-29999".into(),
             http: String::new(),
             domain: "byard.localhost".into(),
-            bind: "0.0.0.0".into(),
+            bind: "127.0.0.1".into(),
             advertise: String::new(),
+            allowed_clients: vec![],
+            allow_public: false,
         }
     }
 }
@@ -241,6 +253,43 @@ impl Config {
         ] {
             if !p.is_absolute() {
                 bail!("{name} must be an absolute path");
+            }
+        }
+        for c in &self.ingress.allowed_clients {
+            netw::cidr(c).with_context(|| format!("ingress.allowed_clients {c:?}"))?;
+        }
+        self.check_exposure()
+    }
+
+    /// Refuses an address the internet could reach when nothing says who may connect
+    /// (ADR 0012): `ingress.allowed_clients` becomes the firewall, or `ingress.allow_public`
+    /// says the operator has one.
+    fn check_exposure(&self) -> Result<()> {
+        let listen: SocketAddr = self
+            .listen
+            .parse()
+            .with_context(|| format!("listen {:?}: want address:port", self.listen))?;
+        let bind: IpAddr =
+            self.ingress.bind.parse().with_context(|| {
+                format!("ingress.bind {:?}: want an address", self.ingress.bind)
+            })?;
+        let mut binds = vec![("listen", listen.ip()), ("ingress.bind", bind)];
+        if !self.ingress.http.is_empty() {
+            let http: SocketAddr = self.ingress.http.parse().with_context(|| {
+                format!("ingress.http {:?}: want address:port", self.ingress.http)
+            })?;
+            binds.push(("ingress.http", http.ip()));
+        }
+        if !self.ingress.allowed_clients.is_empty() || self.ingress.allow_public {
+            return Ok(());
+        }
+        for (field, ip) in binds {
+            if !netw::is_private(ip) {
+                bail!(
+                    "{field}: {ip} is reachable from outside the host: set ingress.allowed_clients \
+                     to the networks that may connect, or ingress.allow_public: true if a \
+                     firewall of your own keeps the daemon's ports from the internet"
+                );
             }
         }
         Ok(())
@@ -299,8 +348,10 @@ mod tests {
         assert_eq!(c.ingress.tcp_ports, "20000-29999");
         assert!(c.ingress.http.is_empty());
         assert_eq!(c.ingress.domain, "byard.localhost");
-        assert_eq!(c.ingress.bind, "0.0.0.0");
+        assert_eq!(c.ingress.bind, "127.0.0.1");
         assert!(c.ingress.advertise.is_empty());
+        assert!(c.ingress.allowed_clients.is_empty());
+        assert!(!c.ingress.allow_public);
         assert_eq!(c.root_disk_gb, 8);
         assert_eq!(c.image_keep_days, 14);
         assert!(!c.suspend_on_sleep);
@@ -358,6 +409,8 @@ ingress:
   domain: byard.example
   bind: 10.0.0.5
   advertise: 203.0.113.5
+  allowed_clients: ["10.0.0.0/8", "203.0.113.9"]
+  allow_public: true
 root_disk_gb: 16
 image_keep_days: 3
 suspend_on_sleep: true
@@ -396,6 +449,8 @@ capacity:
         assert_eq!(c.ingress.domain, "byard.example");
         assert_eq!(c.ingress.bind, "10.0.0.5");
         assert_eq!(c.ingress.advertise, "203.0.113.5");
+        assert_eq!(c.ingress.allowed_clients, vec!["10.0.0.0/8", "203.0.113.9"]);
+        assert!(c.ingress.allow_public);
         assert_eq!(c.root_disk_gb, 16);
         assert_eq!(c.image_keep_days, 3);
         assert!(c.suspend_on_sleep);
@@ -459,6 +514,87 @@ capacity:
         }
         // The jailer may stay empty (no jail) and is not checked for an absolute path here.
         load("jailer: \"\"\n").unwrap();
+    }
+
+    #[test]
+    fn a_public_bind_is_refused_unless_someone_says_who_may_connect() {
+        // Endpoints are the entry to every tenant: `bind: 0.0.0.0` alone is refused.
+        let err = load("ingress:\n  bind: 0.0.0.0\n").unwrap_err().to_string();
+        assert!(
+            err.starts_with("ingress.bind: 0.0.0.0 is reachable"),
+            "{err}"
+        );
+        assert!(err.contains("ingress.allowed_clients"), "{err}");
+        assert!(err.contains("ingress.allow_public"), "{err}");
+
+        for (yaml, field) in [
+            (
+                "listen: 0.0.0.0:7420\ningress:\n  bind: 127.0.0.1\n",
+                "listen: 0.0.0.0",
+            ),
+            (
+                "listen: \"[::]:7420\"\ningress:\n  bind: 127.0.0.1\n",
+                "listen: ::",
+            ),
+            (
+                "listen: 203.0.113.5:7420\ningress:\n  bind: 10.0.0.5\n",
+                "listen: 203.0.113.5",
+            ),
+            (
+                "ingress:\n  bind: 203.0.113.5\n",
+                "ingress.bind: 203.0.113.5",
+            ),
+            (
+                "ingress:\n  bind: 10.0.0.5\n  http: 0.0.0.0:8080\n",
+                "ingress.http: 0.0.0.0",
+            ),
+        ] {
+            let err = load(yaml).unwrap_err().to_string();
+            assert!(err.starts_with(field), "{yaml:?}: {err}");
+        }
+        // Private addresses need nothing: loopback, RFC 1918, carrier-grade NAT.
+        for bind in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "172.16.0.5",
+            "192.168.64.3",
+            "100.64.0.1",
+        ] {
+            load(&format!("ingress:\n  bind: {bind}\n  http: {bind}:8080\n")).unwrap();
+        }
+        // Either field lifts the refusal.
+        load("ingress:\n  allowed_clients: [10.0.0.0/8]\n").unwrap();
+        load("listen: 0.0.0.0:7420\ningress:\n  http: 0.0.0.0:8080\n  allow_public: true\n")
+            .unwrap();
+    }
+
+    #[test]
+    fn addresses_and_client_networks_are_checked_by_name() {
+        for (yaml, msg) in [
+            (
+                "listen: localhost:7420\n",
+                "listen \"localhost:7420\": want address:port",
+            ),
+            (
+                "ingress:\n  bind: \"\"\n",
+                "ingress.bind \"\": want an address",
+            ),
+            (
+                "ingress:\n  bind: 127.0.0.1\n  http: 8080\n",
+                "ingress.http \"8080\": want address:port",
+            ),
+            (
+                "ingress:\n  allowed_clients: [10.0.0.0/33]\n",
+                "ingress.allowed_clients \"10.0.0.0/33\"",
+            ),
+            (
+                "ingress:\n  allowed_clients: [fd00::/8]\n",
+                "ingress.allowed_clients \"fd00::/8\"",
+            ),
+        ] {
+            let err = format!("{:#}", load(yaml).unwrap_err());
+            assert!(err.contains(msg), "{yaml:?}: {err}");
+        }
     }
 
     #[test]
