@@ -21,3 +21,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0013](0013-fleet-trust-and-capacity.md) | Fleet: one token per host, capacity reserved at placement, a tenant released by hand |
 | [0014](0014-jail-and-snapshots-on-the-pool.md) | Machine files: jails and memory snapshots on the pool, everything the daemon writes for itself alone |
 | [0015](0015-egress-policy.md) | Egress per machine: open, via a gateway machine, or none; enforced on the host, never by the guest |
+| [0016](0016-tenant-gateway.md) | A tenant's gateway is a machine of the daemon: declared on the tenant, named by `via: gateway`, running while something needs it |

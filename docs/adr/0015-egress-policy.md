@@ -1,6 +1,6 @@
 # ADR 0015: Egress policy per machine: open, via a gateway, or none
 
-Date: 2026-10-20 · Status: accepted (enforcement); who runs the gateway machine: open, see below
+Date: 2026-10-20 · Status: accepted
 
 ## Context
 
@@ -24,9 +24,9 @@ briq's credential gateway (monorepo ADR 0015, merged 2026-10-20) puts a placehol
 
 **The injector is never the daemon.** Credentials are terminated and swapped in a process that holds one team's secrets, not in the root process every tenant shares. That rules out a proxy inside `briqyardd`; it does not decide who starts the gateway machine.
 
-## Open: who runs the gateway machine
+## Who runs the gateway machine
 
-Today briq's control plane makes a hidden gateway briq per team (`briqs.kind = 'credential-gateway'`), skipped by every list, limit and bill: machinery shaped by Fly, where nothing else could run it. briqyard replaces Fly (`CLAUDE.md`), so the native shape is a tenant-level gateway the daemon runs: `PATCH /v1/tenants/{id} { gateway: { image, env, size } }`, booted by the daemon the first time a machine of the tenant asks for `via: gateway`, pinned, slept and woken with the tenant, outside the tenant's machine list. The control plane then stops special-casing a briq. The credential program itself stays briq's (the Node proxy and its config endpoint). Decision pending with Sylvain; the enforcement above is the same in both shapes.
+The daemon, as the tenant's gateway: ADR 0016 (decided 2026-10-20). The credential program stays briq's.
 
 ## Consequences
 
