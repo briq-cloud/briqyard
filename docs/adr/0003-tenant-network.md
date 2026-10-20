@@ -21,5 +21,5 @@ Machines of one tenant must reach each other by name and nothing of any other te
 ## Consequences
 
 - The /24 per tenant caps a tenant at 253 machines per host; the mesh design hands a /26 slice per host per tenant.
-- The TCP ingress carries no authentication: the host must not expose it publicly. Review finding B1 (`../review-2026-10-20.md`): the bind defaults to `0.0.0.0` and must become private or firewalled before a public host.
+- The TCP ingress carries no authentication: the host must not expose it publicly. Review finding B1 (`../review-2026-10-20.md`): the bind defaulted to `0.0.0.0`. ADR 0012: the bind defaults to loopback, `ingress.allowed_clients` is the firewall, and a public bind without it is refused.
 - Credential-gateway enforcement for briq (force tenant egress on 443 through the team's gateway machine, DNS answering only allowed names) is nftables and DNS rules on this layer: the next addition here.

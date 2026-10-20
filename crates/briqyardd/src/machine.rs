@@ -362,7 +362,7 @@ impl Manager {
                             libc::kill(rec.pid as i32, libc::SIGKILL);
                         }
                     }
-                    let _ = host::delete_tap(&rec.id).await;
+                    let _ = host::delete_tap(&rec.id, &rec.ip).await;
                     {
                         let mut r = e.rec.lock().unwrap();
                         r.state = state::STOPPED.into();
@@ -439,7 +439,7 @@ impl Manager {
             let owned: std::collections::HashSet<String> =
                 known.iter().map(|id| netw::tap_name(id)).collect();
             for t in taps {
-                if t.len() == 13 && !owned.contains(&t) {
+                if !owned.contains(&t) {
                     let _ = host::delete_link(&t).await;
                     tracing::warn!(tap = t, "tap with no record, removed");
                     swept += 1;
@@ -611,24 +611,35 @@ impl Manager {
             .lock()
             .unwrap()
             .insert(id.to_string(), t.clone());
-        self.apply_rules().await?;
         Ok(t)
     }
 
+    /// Installs the host's nftables tables, once at start. A running record may be adopted
+    /// with its TAP, so it is pinned here; everything else pins and unpins as it goes.
     async fn apply_rules(&self) -> Result<()> {
-        let mut bridges: Vec<String> = self
+        let cfg = &self.inner.cfg;
+        let mut pins: Vec<(String, String)> = self
             .inner
-            .tenants
+            .machines
             .lock()
             .unwrap()
             .values()
-            .map(|t| netw::bridge_name(t.subnet_index))
+            .map(|e| e.snapshot())
+            .filter(|r| r.state == state::RUNNING)
+            .map(|r| (netw::tap_name(&r.id), r.ip))
             .collect();
-        bridges.sort();
+        pins.sort();
         Ruleset {
             egress: self.inner.egress.clone(),
             range: self.inner.range.to_string(),
-            bridges,
+            allowed_clients: cfg
+                .ingress
+                .allowed_clients
+                .iter()
+                .map(|c| netw::cidr(c))
+                .collect::<Result<_>>()?,
+            ports: netw::nft::daemon_ports(&cfg.listen, &cfg.ingress.http, &cfg.ingress.tcp_ports)?,
+            pins,
         }
         .apply()
         .await
@@ -701,7 +712,6 @@ impl Manager {
         host::delete_bridge(t.subnet_index).await?;
         self.inner.tenants.lock().unwrap().remove(id);
         self.inner.store.delete("tenants", id)?;
-        self.apply_rules().await?;
         Ok(())
     }
 
@@ -1476,7 +1486,7 @@ impl Manager {
             Some(t) => t,
             None => return Err(fail(anyhow!("tenant network is gone"))),
         };
-        let tap = host::ensure_tap(&rec.id, &netw::bridge_name(t.subnet_index))
+        let tap = host::ensure_tap(&rec.id, &netw::bridge_name(t.subnet_index), &rec.ip)
             .await
             .map_err(fail)?;
         let dir = cfg.run_dir().join(&rec.id);
@@ -1701,7 +1711,7 @@ impl Manager {
             }
         }
         let rec = e.snapshot();
-        let _ = host::delete_tap(&rec.id).await;
+        let _ = host::delete_tap(&rec.id, &rec.ip).await;
         *e.live.lock().unwrap() = None;
         let (code, oom, requested) = self.exit_from_console(&rec);
         let stop_req = e.stop_req.lock().unwrap().take();
@@ -1976,8 +1986,8 @@ impl Manager {
         for ep in self.endpoints_of(id) {
             let _ = self.delete_endpoint(&ep.id);
         }
-        let _ = host::delete_tap(id).await;
         let rec = e.snapshot();
+        let _ = host::delete_tap(id, &rec.ip).await;
         // A fork is a clone of this machine's disks: it takes the snapshots over and lives on.
         for ds in [rec.root_dataset(), rec.data_dataset()] {
             if self.inner.zfs.exists(&ds).await.context("disks")? {

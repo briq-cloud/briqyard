@@ -33,7 +33,7 @@ briqyard status
 
 | Field | Default | Meaning |
 |---|---|---|
-| `listen` | `127.0.0.1:7420` | The API. Listen wider only behind TLS or on a private network |
+| `listen` | `127.0.0.1:7420` | The API. A public address is refused without `ingress.allowed_clients` or `ingress.allow_public` (ADR 0012); plain HTTP, so TLS or a private network in front |
 | `token` | none | Required as `Authorization: Bearer` on every request when set |
 | `data_dir` | `/var/lib/briqyard` | State (`state/`), run files (`run/`), image metadata (`images/`), jails (`jail/`) |
 | `firecracker`, `jailer`, `kernel`, `init` | `/usr/local/bin/...`, `/var/lib/briqyard/vmlinux` | The binaries and the guest kernel. No `jailer`: Firecracker runs as root (development only) |
@@ -55,7 +55,9 @@ briqyard status
 | `network.upstream_dns` | the host's, then `1.1.1.1` | Where the gateway forwards DNS |
 | `network.egress` | the default route's interface | Where machines reach the internet |
 | `ingress.tcp_ports` | `20000-29999` | Host ports handed to TCP endpoints |
-| `ingress.bind` | `0.0.0.0` | Where TCP endpoints listen. A public address makes every endpoint public: bind a private one, or firewall the range |
+| `ingress.bind` | `127.0.0.1` | Where TCP endpoints listen. A public address is refused without `ingress.allowed_clients` or `ingress.allow_public` |
+| `ingress.allowed_clients` | none | The IPv4 networks (`a.b.c.d/n`) that may reach the API, the HTTP ingress and the TCP endpoints; rendered into the daemon's nftables table (`nft list table inet briqyard`). Loopback always may. Empty: anyone who can route to the address |
+| `ingress.allow_public` | `false` | Start on a public address with `allowed_clients` empty: a firewall of your own keeps the daemon's ports from the internet |
 | `ingress.advertise` | the host's primary address | The address endpoints are reported at (`address` on an endpoint): what a router on another machine dials, a private address when the host has one |
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
 | `capacity.memory_mb`, `capacity.vcpus` | host memory − 2 GB, threads × 4 | What the host hands out; shared vCPUs oversubscribe |

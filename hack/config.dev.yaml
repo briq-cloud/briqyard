@@ -15,6 +15,10 @@ ingress:
   tcp_ports: 20000-29999
   http: 0.0.0.0:8080
   domain: byard.localhost
+  bind: 0.0.0.0
+  # The Mac's side of Lima's NAT. Lima's port forwards arrive on the VM's loopback, which
+  # always may connect.
+  allowed_clients: [192.168.64.0/24]
   # Lima forwards the VM's ports to the Mac's loopback; the VM's own address is not routable
   # from there. So a router on the Mac dials endpoints at 127.0.0.1.
   advertise: 127.0.0.1
