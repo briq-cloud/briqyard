@@ -2,17 +2,52 @@
 //! ("images/abc", "m/<id>/root"). Every method is idempotent where it can be.
 
 use anyhow::{anyhow, Context, Result};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
+
+/// A command the backend runs: a program and the arguments that come before the backend's own.
+/// On a host it is the program alone; a test's stand-in is `sh <script>`, so the script is read,
+/// never executed: Linux refuses to execute a file another thread's fork still holds open for
+/// writing ("Text file busy"), and a test writes its scripts while other tests fork.
+#[derive(Clone, Debug)]
+pub struct Tool {
+    program: PathBuf,
+    leading: Vec<OsString>,
+}
+
+impl Tool {
+    pub fn program(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            leading: Vec::new(),
+        }
+    }
+
+    /// A shell script, run by `sh`.
+    #[cfg(test)]
+    pub fn script(path: &Path) -> Self {
+        Self {
+            program: "sh".into(),
+            leading: vec![path.into()],
+        }
+    }
+
+    fn command(&self) -> Command {
+        let mut c = Command::new(&self.program);
+        c.args(&self.leading);
+        c
+    }
+}
 
 #[derive(Clone)]
 pub struct Zfs {
     pool: String,
     /// The `zfs` command; a fake one in tests.
-    binary: PathBuf,
+    binary: Tool,
     /// The `udevadm` command; a fake one in tests.
-    udevadm: PathBuf,
+    udevadm: Tool,
     /// Where the kernel exposes zvols (`/dev/zvol/<dataset>`).
     dev_root: PathBuf,
 }
@@ -26,8 +61,8 @@ impl Zfs {
     pub async fn new(pool: &str, jail_dir: &Path) -> Result<Self> {
         Self::with_paths(
             pool,
-            Path::new("zfs"),
-            Path::new("udevadm"),
+            &Tool::program("zfs"),
+            &Tool::program("udevadm"),
             Path::new("/dev/zvol"),
             jail_dir,
         )
@@ -38,15 +73,15 @@ impl Zfs {
     /// can stand in for all three without ZFS on the machine.
     pub async fn with_paths(
         pool: &str,
-        binary: &Path,
-        udevadm: &Path,
+        binary: &Tool,
+        udevadm: &Tool,
         dev_root: &Path,
         jail_dir: &Path,
     ) -> Result<Self> {
         let z = Self {
             pool: pool.to_string(),
-            binary: binary.to_path_buf(),
-            udevadm: udevadm.to_path_buf(),
+            binary: binary.clone(),
+            udevadm: udevadm.clone(),
             dev_root: dev_root.to_path_buf(),
         };
         z.run(&["list", "-H", "-o", "name", pool])
@@ -93,7 +128,9 @@ impl Zfs {
     }
 
     async fn run(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new(&self.binary)
+        let out = self
+            .binary
+            .command()
             .args(args)
             .output()
             .await
@@ -181,7 +218,9 @@ impl Zfs {
     /// polls for this); where it does, the loop runs once.
     async fn wait_device(&self, name: &str) -> Result<PathBuf> {
         let dev = self.dev(name);
-        let out = Command::new(&self.udevadm)
+        let out = self
+            .udevadm
+            .command()
             .args(["settle", "--timeout=15"])
             .output()
             .await
@@ -388,7 +427,7 @@ impl Zfs {
         from: Option<&str>,
     ) -> Result<tokio::process::Child> {
         let target = format!("{}@{snap}", self.ds(name));
-        let mut cmd = Command::new(&self.binary);
+        let mut cmd = self.binary.command();
         cmd.arg("send").arg("-c");
         if let Some(f) = from {
             cmd.arg("-i").arg(format!("@{f}"));
@@ -402,7 +441,7 @@ impl Zfs {
     /// Starts `zfs receive` into a dataset (made or overwritten); the caller writes the stream
     /// to the child's stdin and waits for it.
     pub fn receive(&self, name: &str) -> Result<tokio::process::Child> {
-        let mut cmd = Command::new(&self.binary);
+        let mut cmd = self.binary.command();
         cmd.args(["receive", "-F", "-u", &self.ds(name)])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -530,7 +569,6 @@ exit 0
 
     impl Scripts {
         pub(crate) fn new() -> Scripts {
-            use std::os::unix::fs::PermissionsExt;
             let dir = tempfile::tempdir().unwrap();
             let dev = dir.path().join("dev");
             std::fs::create_dir_all(&dev).unwrap();
@@ -543,7 +581,6 @@ exit 0
                     .replace("__LOG__", log.to_str().unwrap())
                     .replace("__POOL__", "byard");
                 std::fs::write(bin, script).unwrap();
-                std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
             let jail = dir.path().join("jail");
             Scripts {
@@ -556,8 +593,14 @@ exit 0
         }
 
         pub(crate) async fn open(self, pool: &str) -> Result<Fake> {
-            let zfs =
-                Zfs::with_paths(pool, &self.zfs, &self.udevadm, &self.dev, &self.jail).await?;
+            let zfs = Zfs::with_paths(
+                pool,
+                &Tool::script(&self.zfs),
+                &Tool::script(&self.udevadm),
+                &self.dev,
+                &self.jail,
+            )
+            .await?;
             Ok(Fake { dir: self.dir, zfs })
         }
 
@@ -975,8 +1018,8 @@ mod tests {
     async fn a_missing_binary_is_an_error() {
         let err = Zfs::with_paths(
             "byard",
-            Path::new("/nonexistent/zfs"),
-            Path::new("/nonexistent/udevadm"),
+            &Tool::program("/nonexistent/zfs"),
+            &Tool::program("/nonexistent/udevadm"),
             Path::new("/dev/zvol"),
             Path::new("/var/lib/briqyard/jail"),
         )
@@ -990,6 +1033,6 @@ mod tests {
         let f = s.open("byard").await.unwrap();
         std::fs::remove_file(&udevadm).unwrap();
         let err = f.zfs.create("m/x/root", 1 << 20).await.unwrap_err();
-        assert!(format!("{err:#}").contains("run udevadm"), "{err:#}");
+        assert!(format!("{err:#}").contains("udevadm"), "{err:#}");
     }
 }
