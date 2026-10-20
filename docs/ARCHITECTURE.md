@@ -116,7 +116,10 @@ start of such a machine (a wake too) first starts the gateway and waits for its 
 tenant's lock, held until the machine is `starting`; the sleeper stops the gateway once no such
 machine runs or starts. A gateway that does not come up fails that start with `boot_failed`,
 the machine unmoved, the gateway's reason and console in its `error`. Its program is restarted
-whenever it ends on its own (`restart: always`).
+whenever it ends on its own (`restart: always`), and a daemon start that adopts a machine
+needing it starts it again. The PUT's `start` runs it before anything needs it (a program that
+makes its CA on first boot). The machine routes read it (GET, logs, stats) and refuse the rest
+with 409 `gateway`: one resolver, `own_entry`, for every call that changes or runs something.
 
 No machine has a public address. Something outside reaches a port through the ingress, which is
 how sleep works: a connection to a sleeping machine's endpoint starts it, waits for the port and

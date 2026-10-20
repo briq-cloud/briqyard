@@ -141,6 +141,7 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::Capacity(_) => (StatusCode::SERVICE_UNAVAILABLE, "capacity"),
         MError::TenantInUse => (StatusCode::CONFLICT, "tenant_in_use"),
         MError::GatewayInUse => (StatusCode::CONFLICT, "gateway_in_use"),
+        MError::Gateway(_) => (StatusCode::CONFLICT, "gateway"),
         MError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
     }
 }
@@ -598,6 +599,9 @@ mod tests {
         assert_eq!(e.machine.as_ref().map(|m| m.id.as_str()), Some("m_1"));
         let e = AppError::from(MError::GatewayInUse);
         assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway_in_use"));
+        let e = AppError::from(MError::Gateway("t1".into()));
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway"));
+        assert_eq!(e.error, "the tenant's gateway: use /v1/tenants/t1/gateway");
         let e = AppError::from(MError::Capacity("1 MB used of 1".into()));
         assert_eq!(
             (e.status, e.code),

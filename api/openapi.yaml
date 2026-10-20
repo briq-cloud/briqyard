@@ -57,6 +57,7 @@ paths:
         "503": { description: "`capacity`: the host has no room" }
   /v1/machines/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
+    description: "A tenant's gateway answers GET, `/logs`, `/stats` and `/wait` here like any machine; every other route on its id answers 409 `gateway` (`/v1/tenants/{id}/gateway` owns it)."
     get:
       summary: A machine
       responses:
@@ -248,7 +249,7 @@ paths:
   /v1/tenants/{id}/gateway:
     parameters: [{ $ref: "#/components/parameters/id" }]
     put:
-      summary: "Make the tenant's gateway (the tenant too, when it has nothing yet), not started, or replace its spec: a running one is restarted with it, on the same address (ADR 0016). It is a machine of the daemon named `gateway.internal` in the tenant, absent from `GET /v1/machines`; a machine with `egress: {mode: via, via: gateway}` starts it and waits for its port before its own boot, and the daemon stops it when no such machine runs or starts"
+      summary: "Make the tenant's gateway (the tenant too, when it has nothing yet), not started unless `start`, or replace its spec: a running one is restarted with it, on the same address, and the spec it has changes nothing (ADR 0016). It is a machine of the daemon named `gateway.internal` in the tenant, absent from `GET /v1/machines`; a machine with `egress: {mode: via, via: gateway}` starts it and waits for its port before its own boot, and the daemon stops it when no such machine runs or starts"
       requestBody:
         required: true
         content:
@@ -257,7 +258,7 @@ paths:
       responses:
         "200": { description: the tenant, content: { application/json: { schema: { $ref: "#/components/schemas/Tenant" } } } }
         "400": { description: "`invalid`: no image, no port, a bad size, or a change of `volume_gb`" }
-        "409": { description: "`conflict`: a machine named `gateway` exists in the tenant; `boot_failed`: a replaced gateway did not come up again" }
+        "409": { description: "`conflict`: a machine named `gateway` exists in the tenant; `boot_failed`: the gateway did not come up (asked with `start`, or replaced while running), the body's `machine` is it, in `error` with its console's last lines" }
     delete:
       summary: Stop and destroy the tenant's gateway; none is success
       responses:
@@ -560,6 +561,7 @@ components:
         size: { allOf: [{ $ref: "#/components/schemas/Size" }], description: "default 1 vCPU, 256 MB" }
         port: { type: integer, minimum: 1, maximum: 65535, description: "the port its program listens on: a start waits for it, within `boot_timeout_sec`" }
         volume_gb: { type: integer, minimum: 1, description: "a data volume at `/data`, fixed for the gateway's life" }
+        start: { type: boolean, default: false, description: "start it now and answer once its port accepts; a running one is left as is. Nothing then keeps it running: the daemon stops it until a `via: gateway` machine starts" }
     GatewayView:
       type: object
       properties:
@@ -618,7 +620,7 @@ components:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, unauthorized, unknown_host, host_unreachable, host_down, registry, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, gateway, unauthorized, unknown_host, host_unreachable, host_down, registry, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]

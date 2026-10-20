@@ -465,6 +465,20 @@ pub struct GatewaySpec {
     /// A data volume at `/data`, fixed for the gateway's life.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume_gb: Option<u32>,
+    /// Start it now and answer once its port accepts (a running one is left as is), for a
+    /// program that must run once before any machine uses it.
+    #[serde(default)]
+    pub start: bool,
+}
+
+impl GatewaySpec {
+    /// The size it runs at: the spec's, or 1 vCPU and 256 MB.
+    pub fn size(&self) -> Size {
+        self.size.unwrap_or(Size {
+            vcpus: 1,
+            memory_mb: 256,
+        })
+    }
 }
 
 /// The tenant's gateway as `GET /v1/tenants/{id}` shows it.
@@ -1054,17 +1068,26 @@ mod tests {
 
     #[test]
     fn gateway_spec() {
-        // An image and a port are enough; env comes back empty, the rest stays out.
+        // An image and a port are enough; env comes back empty, not started, the rest out.
         let s: GatewaySpec = round_trip(
             json!({"image": "ghcr.io/x/proxy:1", "port": 3128}),
-            json!({"image": "ghcr.io/x/proxy:1", "env": {}, "port": 3128}),
+            json!({"image": "ghcr.io/x/proxy:1", "env": {}, "port": 3128, "start": false}),
         );
         assert!(s.size.is_none() && s.volume_gb.is_none() && s.cmd.is_none());
+        assert_eq!(
+            s.size(),
+            Size {
+                vcpus: 1,
+                memory_mb: 256
+            }
+        );
         let s: GatewaySpec = same(json!({
             "image": "ghcr.io/x/proxy:1", "cmd": ["proxy", "-v"], "env": {"TOKEN": "t"},
-            "size": {"vcpus": 1, "memory_mb": 512}, "port": 3128, "volume_gb": 1
+            "size": {"vcpus": 1, "memory_mb": 512}, "port": 3128, "volume_gb": 1, "start": true
         }));
         assert_eq!(s.env["TOKEN"], "t");
+        assert_eq!(s.size().memory_mb, 512);
+        assert!(s.start);
         for missing in [json!({"image": "x"}), json!({"port": 3128})] {
             assert!(
                 serde_json::from_value::<GatewaySpec>(missing.clone()).is_err(),

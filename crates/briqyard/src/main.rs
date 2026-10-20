@@ -262,9 +262,12 @@ enum TenantCmd {
 
 #[derive(Subcommand)]
 enum GatewayCmd {
-    /// Make or replace it: briqyard tenant gateway set TENANT --image I --port P [-e K=V] [-- cmd...]
+    /// Make or replace it: briqyard tenant gateway set TENANT --image I --port P [-e K=V] [--start] [-- cmd...]
     Set {
         tenant: String,
+        /// Start it now and wait for its port (a running one is left as is)
+        #[arg(long)]
+        start: bool,
         #[arg(long)]
         image: String,
         /// The port its program listens on
@@ -740,6 +743,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             }
             TenantCmd::Gateway(GatewayCmd::Set {
                 tenant,
+                start,
                 image,
                 port,
                 envs,
@@ -750,6 +754,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     cmd: if cmd.is_empty() { None } else { Some(cmd) },
                     env: env_args(&envs)?,
                     port,
+                    start,
                     ..Default::default()
                 };
                 print_json(

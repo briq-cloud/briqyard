@@ -472,6 +472,7 @@ fn endpoint_tenant_and_image_commands() {
     {
         Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set {
             tenant,
+            start,
             image,
             port,
             envs,
@@ -481,8 +482,19 @@ fn endpoint_tenant_and_image_commands() {
                 (tenant.as_str(), image.as_str(), port),
                 ("t1", "proxy:1", 3128)
             );
+            assert!(!start, "made, not started, unless asked");
             assert_eq!(env_args(&envs).unwrap()["TOKEN"], "a=b");
             assert_eq!(cmd, ["proxy", "-v"]);
+        }
+        _ => panic!("not a gateway set"),
+    }
+    match parse(&[
+        "tenant", "gateway", "set", "t1", "--image", "proxy:1", "--port", "3128", "--start",
+    ])
+    .cmd
+    {
+        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set { start, cmd, .. })) => {
+            assert!(start && cmd.is_empty())
         }
         _ => panic!("not a gateway set"),
     }
