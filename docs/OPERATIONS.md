@@ -35,9 +35,9 @@ briqyard status
 |---|---|---|
 | `listen` | `127.0.0.1:7420` | The API. Listen wider only behind TLS or on a private network |
 | `token` | none | Required as `Authorization: Bearer` on every request when set |
-| `data_dir` | `/var/lib/briqyard` | State (`state/`), run files (`run/`), image metadata (`images/`), jails (`jail/`) |
+| `data_dir` | `/var/lib/briqyard` | State (`state/`), run files (`run/`), image metadata (`images/`), jails (`jail/`). All of it `0700`, root's: records and config drives hold tenant secrets |
 | `firecracker`, `jailer`, `kernel`, `init` | `/usr/local/bin/...`, `/var/lib/briqyard/vmlinux` | The binaries and the guest kernel. No `jailer`: Firecracker runs as root (development only) |
-| `jail_dir`, `jail_uid_base` | `<data_dir>/jail`, `100000` | Where chroots go; each machine gets a uid of its own from this base |
+| `jail_dir`, `jail_uid_base` | `<data_dir>/jail`, `100000` | Where chroots and memory snapshots go: the daemon mounts `<pool>/jail` there, so they land on the pool, not on `/` (ADR 0014). Each machine gets a uid of its own from this base |
 | `kernel_args` | none | Appended to the boot arguments |
 | `pci` | `false` | Firecracker's PCI transport (needs a guest kernel with PCI) |
 | `root_disk_gb` | `8` | Size of every root disk (thin) |
@@ -66,9 +66,10 @@ briqyard status
 | Path | What |
 |---|---|
 | `<data_dir>/state/{machines,tenants,endpoints}/*.json` | The records, one file each, written atomically |
-| `<data_dir>/run/<machine>/` | `console.log` (the guest's serial console, timestamped), `config.tar` (the config drive), sockets when not jailed |
-| `<data_dir>/jail/firecracker/<machine>/root/` | The chroot: kernel, config drive, device nodes, sockets, `snap.state` and `snap.mem` while suspended |
+| `<data_dir>/run/<machine>/` | `console.log` (the guest's serial console, timestamped), `config.tar` (the config drive, `0600`), sockets when not jailed |
+| `<jail_dir>/firecracker/<machine>/root/` | The chroot, on `byard/jail`: kernel, config drive (`0400`, the jail's user), device nodes, sockets, `snap.state` and `snap.mem` while suspended |
 | `<data_dir>/images/meta/*.json` | What each image is |
+| `byard/jail` | A filesystem mounted at `jail_dir`: `zfs list byard/jail` is what the jails and the suspended machines hold |
 | `byard/images/<key>` | A root disk per image, with its `@base` snapshot |
 | `byard/m/<machine>/root`, `.../data` | A machine's disks |
 
@@ -80,7 +81,9 @@ they take. A machine's `fork-*` and `s_*` snapshots on its disks are its forks' 
 Install the new binaries and `systemctl restart briqyardd`. The daemon suspends every running
 machine on the way down (a memory snapshot each) and marks it so; each one resumes on its next
 use, in about a quarter of a second. Nothing reboots. A daemon that crashes instead leaves its
-machines running (`KillMode=process`), and the next daemon adopts them.
+machines running (`KillMode=process`), and the next daemon adopts them. A host from before ADR
+0014 (jails on `/`): stop the daemon and empty `jail_dir` before the first start that mounts
+`byard/jail` there, or the old files stay hidden on `/` and the machines suspended then boot cold.
 
 The guest kernel and `briqyard-init` are baked into root disks: an image built with an older
 init keeps it until the image is rebuilt (a new init hash makes a new image key; the old disk is

@@ -229,11 +229,66 @@ pub struct Process {
     done: tokio::sync::watch::Receiver<bool>,
 }
 
+/// The cgroup the jailer puts every machine's cgroup under (`/sys/fs/cgroup/<parent>/<id>`).
+pub const CGROUP_PARENT: &str = "firecracker";
+
+/// A machine's id as Firecracker and its jailer take it: letters, digits and dashes only.
+pub fn fc_id(id: &str) -> String {
+    id.replace('_', "-")
+}
+
 /// The jail's root directory for a machine.
 pub fn jail_root(base: &Path, id: &str) -> PathBuf {
-    base.join("firecracker")
-        .join(id.replace('_', "-"))
-        .join("root")
+    base.join("firecracker").join(fc_id(id)).join("root")
+}
+
+/// The cgroup (v2) of a jailed machine, where its CPU and memory use are read.
+pub fn cgroup_dir(id: &str) -> PathBuf {
+    Path::new("/sys/fs/cgroup")
+        .join(CGROUP_PARENT)
+        .join(fc_id(id))
+}
+
+/// The jailer's command line for a machine: what to run, as whom, where, with what limits.
+fn jailer_args(j: &Jail, id: &str, binary: &Path) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "--id".into(),
+        fc_id(id).into(),
+        "--exec-file".into(),
+        binary.into(),
+        "--uid".into(),
+        j.uid.to_string().into(),
+        "--gid".into(),
+        j.gid.to_string().into(),
+        "--chroot-base-dir".into(),
+        j.base.clone().into(),
+        "--cgroup-version".into(),
+        "2".into(),
+        "--parent-cgroup".into(),
+        CGROUP_PARENT.into(),
+        "--new-pid-ns".into(),
+    ];
+    if j.cpus > 0 {
+        args.push("--cgroup".into());
+        args.push(format!("cpu.max={} 100000", j.cpus as u64 * 100_000).into());
+    }
+    if j.memory_mb > 0 {
+        args.push("--cgroup".into());
+        args.push(format!("memory.max={}", (j.memory_mb as u64) << 20).into());
+    }
+    args
+}
+
+/// The pid the jailer wrote for Firecracker: with a new pid namespace the jailer forks, the
+/// process we spawned writes its child's pid to this file and exits, and the child is the one
+/// to kill or adopt.
+fn jailed_pid(root: &Path) -> Result<u32> {
+    let path = root.join("firecracker.pid");
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    text.trim()
+        .parse()
+        .with_context(|| format!("{}: {text:?}", path.display()))
 }
 
 /// The runtime files of a machine: the API and vsock sockets depend on whether it is jailed.
@@ -281,14 +336,14 @@ impl Process {
         let (api, vsock, console, fclog) = paths_for(dir, jail, id);
         let _ = tokio::fs::remove_file(&api).await;
         let _ = tokio::fs::remove_file(&vsock).await;
+        // The console holds what the guest prints, the jailer's errors included: ours alone.
         let out = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .open(&console)
             .await?;
-        // Firecracker accepts only letters, digits and dashes in an instance id; its log levels
-        // are Error, Warning, Info, Debug, Trace.
-        let fc_id = id.replace('_', "-");
+        // Firecracker's log levels are Error, Warning, Info, Debug, Trace.
         let (mut cmd, chroot, uid, gid) = match jail {
             Some(j) => {
                 // The jailer makes the chroot and drops to uid:gid; the files Firecracker opens
@@ -317,27 +372,7 @@ impl Process {
                     std::os::unix::fs::chown(d, Some(j.uid), Some(j.gid))?;
                 }
                 let mut cmd = Command::new(&j.jailer);
-                cmd.arg("--id")
-                    .arg(&fc_id)
-                    .arg("--exec-file")
-                    .arg(binary)
-                    .arg("--uid")
-                    .arg(j.uid.to_string())
-                    .arg("--gid")
-                    .arg(j.gid.to_string())
-                    .arg("--chroot-base-dir")
-                    .arg(&j.base)
-                    .arg("--cgroup-version")
-                    .arg("2")
-                    .arg("--new-pid-ns");
-                if j.cpus > 0 {
-                    cmd.arg("--cgroup")
-                        .arg(format!("cpu.max={} 100000", j.cpus as u64 * 100_000));
-                }
-                if j.memory_mb > 0 {
-                    cmd.arg("--cgroup")
-                        .arg(format!("memory.max={}", (j.memory_mb as u64) << 20));
-                }
+                cmd.args(jailer_args(j, id, binary));
                 cmd.arg("--").arg("--").arg("--level").arg("Warning");
                 if pci {
                     cmd.arg("--enable-pci");
@@ -348,13 +383,14 @@ impl Process {
                 let _ = tokio::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
+                    .mode(0o600)
                     .open(&fclog)
                     .await?;
                 let mut cmd = Command::new(binary);
                 cmd.arg("--api-sock")
                     .arg(&api)
                     .arg("--id")
-                    .arg(&fc_id)
+                    .arg(fc_id(id))
                     .arg("--log-path")
                     .arg(&fclog)
                     .arg("--level")
@@ -402,17 +438,17 @@ impl Process {
             return Err(e);
         }
         let mut p = p;
-        if let Some(root) = &p.chroot {
-            // With a new pid namespace the jailer forks: the pid we spawned is its parent, and
-            // the one that matters (to kill, to adopt) is in the file the jailer writes.
-            for _ in 0..50 {
-                if let Ok(text) = tokio::fs::read_to_string(root.join("firecracker.pid")).await {
-                    if let Ok(pid) = text.trim().parse::<u32>() {
-                        p.pid = pid;
-                        break;
-                    }
+        if let Some(root) = p.chroot.clone() {
+            // The process we spawned is the jailer's parent: it exits once it has written the
+            // pid file, so its exit is the wait, and the file is then there or never will be.
+            let _ = p.child.wait().await;
+            match jailed_pid(&root) {
+                Ok(pid) => p.pid = pid,
+                Err(e) => {
+                    // A Firecracker that cannot be named is killed through its cgroup.
+                    let _ = std::fs::write(cgroup_dir(id).join("cgroup.kill"), "1");
+                    return Err(e.context("jailer pid"));
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }
         Ok(p)
@@ -500,9 +536,11 @@ fn outside_path(chroot: Option<&Path>, dir: &Path, name: &str) -> PathBuf {
 }
 
 /// Puts `host` at the jail root as `name` (a hard link, or a copy across filesystems), owned
-/// by the jail's user, and returns the path inside the chroot. An earlier file of that name
-/// is replaced.
+/// by the jail's user and read-only for it (Firecracker only reads what it is given: a config
+/// drive written 0600 is 0400 in the jail), and returns the path inside the chroot. An
+/// earlier file of that name is replaced.
 fn place_file(root: &Path, host: &Path, name: &str, uid: u32, gid: u32) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
     let inside = root.join(name);
     let _ = std::fs::remove_file(&inside);
     if std::fs::hard_link(host, &inside).is_err() {
@@ -510,6 +548,8 @@ fn place_file(root: &Path, host: &Path, name: &str, uid: u32, gid: u32) -> Resul
             .with_context(|| format!("copy {} into the jail", host.display()))?;
     }
     let _ = std::os::unix::fs::chown(&inside, Some(uid), Some(gid));
+    let mode = std::fs::metadata(&inside)?.permissions().mode() & 0o444;
+    std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(mode))?;
     Ok(PathBuf::from("/").join(name))
 }
 
@@ -783,9 +823,15 @@ mod tests {
     fn jail_paths() {
         let base = Path::new("/var/lib/briqyard/jail");
         // Firecracker takes only letters, digits and dashes in an id.
+        assert_eq!(fc_id("m_abc123"), "m-abc123");
         assert_eq!(
             jail_root(base, "m_abc123"),
             PathBuf::from("/var/lib/briqyard/jail/firecracker/m-abc123/root")
+        );
+        // The stats are read where the jailer, told the same parent, puts the cgroup.
+        assert_eq!(
+            cgroup_dir("m_abc123"),
+            PathBuf::from("/sys/fs/cgroup/firecracker/m-abc123")
         );
         let dir = Path::new("/var/lib/briqyard/run/m_abc123");
         assert_eq!(
@@ -841,21 +887,91 @@ mod tests {
     }
 
     #[test]
+    fn the_jailer_is_told_the_cgroup_parent_and_the_limits() {
+        let jail = Jail {
+            jailer: "/usr/local/bin/jailer".into(),
+            base: "/var/lib/briqyard/jail".into(),
+            uid: 100_002,
+            gid: 100_002,
+            cpus: 2,
+            memory_mb: 768,
+        };
+        let args: Vec<String> =
+            jailer_args(&jail, "m_abc123", Path::new("/usr/local/bin/firecracker"))
+                .into_iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+        assert_eq!(
+            args,
+            [
+                "--id",
+                "m-abc123",
+                "--exec-file",
+                "/usr/local/bin/firecracker",
+                "--uid",
+                "100002",
+                "--gid",
+                "100002",
+                "--chroot-base-dir",
+                "/var/lib/briqyard/jail",
+                "--cgroup-version",
+                "2",
+                "--parent-cgroup",
+                CGROUP_PARENT,
+                "--new-pid-ns",
+                "--cgroup",
+                "cpu.max=200000 100000",
+                "--cgroup",
+                "memory.max=805306368",
+            ]
+        );
+        // No limit, no cgroup argument.
+        let free = Jail {
+            cpus: 0,
+            memory_mb: 0,
+            ..jail
+        };
+        let args = jailer_args(&free, "m_abc123", Path::new("/fc"));
+        assert!(!args.iter().any(|a| a == "--cgroup"), "{args:?}");
+    }
+
+    #[test]
+    fn the_pid_file_is_read_once_and_must_be_there() {
+        let root = tempfile::tempdir().unwrap();
+        let err = jailed_pid(root.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("firecracker.pid"), "{err:#}");
+        std::fs::write(root.path().join("firecracker.pid"), "nope\n").unwrap();
+        let err = jailed_pid(root.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("\"nope\\n\""), "{err:#}");
+        std::fs::write(root.path().join("firecracker.pid"), "4242\n").unwrap();
+        assert_eq!(jailed_pid(root.path()).unwrap(), 4242);
+    }
+
+    #[test]
     fn placing_a_file_in_the_jail() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("root");
         std::fs::create_dir_all(&root).unwrap();
         let host = dir.path().join("vmlinux");
         std::fs::write(&host, b"kernel").unwrap();
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o644)).unwrap();
         // Not root: the chown fails and is ignored; the link is what matters.
         let inside = place_file(&root, &host, "vmlinux", 100_000, 100_000).unwrap();
         assert_eq!(inside, PathBuf::from("/vmlinux"));
         assert_eq!(std::fs::read(root.join("vmlinux")).unwrap(), b"kernel");
+        // Read-only for Firecracker; a shared kernel stays readable by all.
+        assert_eq!(mode(&root.join("vmlinux")), 0o444);
         // A new file of the same name replaces the earlier one.
         let host2 = dir.path().join("config.tar");
         std::fs::write(&host2, b"v2").unwrap();
         place_file(&root, &host2, "vmlinux", 100_000, 100_000).unwrap();
         assert_eq!(std::fs::read(root.join("vmlinux")).unwrap(), b"v2");
+        // A config drive, written for the daemon alone, is the jail's user's alone.
+        std::fs::set_permissions(&host2, std::fs::Permissions::from_mode(0o600)).unwrap();
+        place_file(&root, &host2, "config.tar", 100_000, 100_000).unwrap();
+        assert_eq!(mode(&root.join("config.tar")), 0o400);
         // A host file that does not exist cannot be placed.
         let err = place_file(&root, &dir.path().join("missing"), "x", 0, 0).unwrap_err();
         assert!(err.to_string().contains("into the jail"), "{err}");

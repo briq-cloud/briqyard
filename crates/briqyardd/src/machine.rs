@@ -853,7 +853,7 @@ impl Manager {
                 st.uptime_sec = (Utc::now() - t).num_seconds().max(0) as u64;
             }
             if self.jail_for(&r).is_some() {
-                let cg = PathBuf::from("/sys/fs/cgroup/firecracker").join(r.id.replace('_', "-"));
+                let cg = fc::cgroup_dir(&r.id);
                 if let Ok(text) = tokio::fs::read_to_string(cg.join("cpu.stat")).await {
                     for line in text.lines() {
                         if let Some(v) = line.strip_prefix("usage_usec ") {
@@ -2754,17 +2754,10 @@ fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Writes a drive whole, through a temp file next to it, so a crash leaves the previous
-/// drive or none, never half of one.
+/// Writes a drive whole and for the daemon alone (it holds the machine's secrets): through a
+/// temp file next to it, so a crash leaves the previous drive or none, never half of one.
 fn write_drive(path: &Path, data: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let tmp = path.with_extension("tar.tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(data)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    crate::store::write_private(path, data)
 }
 
 #[cfg(test)]

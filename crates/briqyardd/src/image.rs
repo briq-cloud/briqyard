@@ -1,15 +1,17 @@
 //! Turns an OCI image into a root disk, once per image, and remembers its config.
 //!
-//! The layers are applied in order to a scratch directory the host controls, every path
-//! resolved inside it (a symlink in a layer never leads outside), whiteouts honoured, devices
-//! skipped; `briqyard-init` is added; then `mkfs.ext4 -d` builds the disk without mounting
-//! anything. The host never mounts a guest filesystem.
+//! The layers are streamed one at a time to a file and applied in manifest order to a scratch
+//! directory the host controls, every path resolved inside it (a symlink in a layer never
+//! leads outside), whiteouts honoured, devices skipped; `briqyard-init` is added; then
+//! `mkfs.ext4 -d` builds the disk without mounting anything. The host never mounts a guest
+//! filesystem, and never holds a layer in memory.
 
+use crate::store::{private_dir, write_private};
 use crate::zfs::Zfs;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
-use oci_client::client::{ClientConfig, ImageData};
-use oci_client::manifest::{ImageIndexEntry, Platform};
+use oci_client::client::ClientConfig;
+use oci_client::manifest::{ImageIndexEntry, OciImageManifest, Platform};
 use oci_client::secrets::RegistryAuth;
 use oci_client::{Client, Reference};
 use serde::{Deserialize, Serialize};
@@ -18,14 +20,24 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use tokio::sync::Notify;
+use std::sync::Mutex;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::watch;
 
 /// Where briqyard-init lives inside every root disk.
 pub const INIT_PATH: &str = "/.briqyard/init";
 
 /// The snapshot machines clone.
 pub const SNAP: &str = "base";
+
+/// The layer kinds the extractor reads: tar, plain or compressed with gzip or zstd.
+const LAYER_MEDIA_TYPES: &[&str] = &[
+    oci_client::manifest::IMAGE_LAYER_MEDIA_TYPE,
+    oci_client::manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE,
+    oci_client::manifest::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
+    oci_client::manifest::IMAGE_DOCKER_LAYER_TAR_MEDIA_TYPE,
+    "application/vnd.oci.image.layer.v1.tar+zstd",
+];
 
 /// What the image says about how to run it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -65,11 +77,55 @@ pub struct Builder {
     /// Credentials by registry host; anything else is pulled anonymously.
     pub registries: Vec<(String, String, String)>,
     init_hash: String,
-    building: Mutex<HashMap<String, Arc<Notify>>>,
+    /// One registry client: its connection pool and TLS sessions serve every pull.
+    client: Client,
+    /// The builds under way, by key (see `take`).
+    building: Builds,
     /// What a reference resolved to, and when: a tag is asked of the registry once per
     /// `resolve_ttl`, a digest never.
     resolved: Mutex<HashMap<String, (String, std::time::Instant)>>,
     pub resolve_ttl: std::time::Duration,
+}
+
+/// The builds under way, by key: a waiter clones the receiver and is woken when the
+/// builder's sender drops, which happens whether the build finished or its future was
+/// dropped. The receiver is taken under the lock, so a wake-up is never missed.
+type Builds = Mutex<HashMap<String, watch::Receiver<()>>>;
+
+/// A build's hold on its key, freed on drop: a build whose future is dropped half way (the
+/// request that asked for it went away) never leaves later creates waiting for it.
+struct BuildSlot<'a> {
+    building: &'a Builds,
+    key: String,
+    _done: watch::Sender<()>,
+}
+
+impl Drop for BuildSlot<'_> {
+    // The key is freed before `_done` drops and wakes the waiters, so a woken waiter that
+    // takes a turn finds it free.
+    fn drop(&mut self) {
+        self.building.lock().unwrap().remove(&self.key);
+    }
+}
+
+enum Turn<'a> {
+    Build(BuildSlot<'a>),
+    Wait(watch::Receiver<()>),
+}
+
+/// Takes the build of `key`, or a ticket to wait for the one under way.
+fn take<'a>(building: &'a Builds, key: &str) -> Turn<'a> {
+    let mut b = building.lock().unwrap();
+    if let Some(rx) = b.get(key) {
+        return Turn::Wait(rx.clone());
+    }
+    let (tx, rx) = watch::channel(());
+    b.insert(key.to_string(), rx);
+    Turn::Build(BuildSlot {
+        building,
+        key: key.to_string(),
+        _done: tx,
+    })
 }
 
 /// What a reference last resolved to, kept on disk: when the registry refuses (a rate limit,
@@ -86,7 +142,8 @@ impl Builder {
         let data =
             std::fs::read(&init).with_context(|| format!("init binary {}", init.display()))?;
         let init_hash = hex::encode(Sha256::digest(&data));
-        std::fs::create_dir_all(dir.join("meta"))?;
+        private_dir(&dir)?;
+        private_dir(&dir.join("meta"))?;
         Ok(Self {
             zfs,
             dir,
@@ -94,6 +151,10 @@ impl Builder {
             root_gb,
             registries: vec![],
             init_hash,
+            client: Client::new(ClientConfig {
+                platform_resolver: Some(Box::new(host_platform)),
+                ..Default::default()
+            }),
             building: Mutex::new(HashMap::new()),
             resolved: Mutex::new(HashMap::new()),
             resolve_ttl: std::time::Duration::from_secs(600),
@@ -129,39 +190,25 @@ impl Builder {
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow!("image {reference:?}: {e}"))?;
-        let client = Client::new(ClientConfig {
-            platform_resolver: Some(Box::new(host_platform)),
-            ..Default::default()
-        });
         let auth = self.auth_for(&r);
-        let digest = self.resolve(&client, &r, reference, &auth).await?;
+        let digest = self.resolve(&r, reference, &auth).await?;
         let key = self.key(&digest);
-
         // One build at a time per key.
-        let waiter = {
-            let mut b = self.building.lock().unwrap();
-            match b.get(&key) {
-                Some(n) => Some(n.clone()),
-                None => {
-                    b.insert(key.clone(), Arc::new(Notify::new()));
-                    None
+        loop {
+            match take(&self.building, &key) {
+                Turn::Build(_slot) => {
+                    return self.ensure_locked(&r, reference, &digest, &key).await;
+                }
+                Turn::Wait(mut rx) => {
+                    // Returns when the builder is done, however it ended.
+                    let _ = rx.changed().await;
+                    if let Some(image) = self.load(&key) {
+                        return Ok(image);
+                    }
+                    // No image: the build failed or its future was dropped. Take a turn.
                 }
             }
-        };
-        if let Some(n) = waiter {
-            n.notified().await;
-            return self
-                .load(&key)
-                .ok_or_else(|| anyhow!("image build of {reference} failed"));
         }
-        let result = self
-            .ensure_locked(&client, &r, reference, &digest, &key)
-            .await;
-        let n = self.building.lock().unwrap().remove(&key);
-        if let Some(n) = n {
-            n.notify_waiters();
-        }
-        result
     }
 
     fn resolution_path(&self, reference: &str) -> PathBuf {
@@ -171,13 +218,7 @@ impl Builder {
 
     /// The digest a reference names: pinned in the reference, remembered from a recent answer,
     /// asked of the registry, or, when the registry refuses, the one the host already built.
-    async fn resolve(
-        &self,
-        client: &Client,
-        r: &Reference,
-        reference: &str,
-        auth: &RegistryAuth,
-    ) -> Result<String> {
+    async fn resolve(&self, r: &Reference, reference: &str, auth: &RegistryAuth) -> Result<String> {
         if let Some(d) = r.digest() {
             return Ok(d.to_string());
         }
@@ -186,7 +227,7 @@ impl Builder {
                 return Ok(d.clone());
             }
         }
-        match client.pull_image_manifest(r, auth).await {
+        match self.client.pull_image_manifest(r, auth).await {
             Ok((_, digest)) => {
                 self.resolved.lock().unwrap().insert(
                     reference.to_string(),
@@ -197,9 +238,9 @@ impl Builder {
                     digest: digest.clone(),
                     at: Utc::now(),
                 };
-                let _ = std::fs::write(
-                    self.resolution_path(reference),
-                    serde_json::to_vec(&rec).unwrap_or_default(),
+                let _ = write_private(
+                    &self.resolution_path(reference),
+                    &serde_json::to_vec(&rec).unwrap_or_default(),
                 );
                 Ok(digest)
             }
@@ -226,7 +267,6 @@ impl Builder {
 
     async fn ensure_locked(
         &self,
-        client: &Client,
         r: &Reference,
         reference: &str,
         digest: &str,
@@ -238,18 +278,15 @@ impl Builder {
             }
         }
         tracing::info!(image = reference, digest, key, "building image");
-        let accepted = vec![
-            oci_client::manifest::IMAGE_LAYER_MEDIA_TYPE,
-            oci_client::manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE,
-            oci_client::manifest::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
-            oci_client::manifest::IMAGE_DOCKER_LAYER_TAR_MEDIA_TYPE,
-            "application/vnd.oci.image.layer.v1.tar+zstd",
-        ];
-        let data = client
-            .pull(r, &self.auth_for(r), accepted)
+        // Pulled by the digest resolved above, so a tag moved since names the same build.
+        let pinned = r.clone_with_digest(digest.to_string());
+        let (manifest, _, config) = self
+            .client
+            .pull_manifest_and_config(&pinned, &self.auth_for(r))
             .await
             .with_context(|| format!("pull {reference}"))?;
-        let config = parse_config(&data.config.data)?;
+        check_layers(&manifest)?;
+        let config = parse_config(config.as_bytes())?;
         let image = Image {
             r#ref: reference.to_string(),
             digest: digest.to_string(),
@@ -258,34 +295,42 @@ impl Builder {
             size_gb: self.root_gb,
             built_at: Utc::now(),
         };
-        if let Err(e) = self.build(&data, &image).await {
+        if let Err(e) = self.build(&pinned, &manifest, &image).await {
             let _ = self.zfs.destroy(&image.dataset()).await;
             let _ = std::fs::remove_dir_all(self.dir.join(format!("extract-{}", image.key)));
             return Err(e);
         }
-        std::fs::write(self.meta_path(key), serde_json::to_vec_pretty(&image)?)?;
+        write_private(&self.meta_path(key), &serde_json::to_vec_pretty(&image)?)?;
         Ok(image)
     }
 
-    async fn build(&self, data: &ImageData, image: &Image) -> Result<()> {
+    async fn build(&self, r: &Reference, manifest: &OciImageManifest, image: &Image) -> Result<()> {
         let scratch = self.dir.join(format!("extract-{}", image.key));
         let _ = std::fs::remove_dir_all(&scratch);
         let root = scratch.join("root");
         std::fs::create_dir_all(&root)?;
-        // The client fetches layers concurrently and hands them back in completion order; an
-        // image is its layers applied in manifest order, so put them back in it.
-        let layers = ordered_layers(data);
-        let root2 = root.clone();
-        let init = self.init.clone();
-        let files = tokio::task::spawn_blocking(move || -> Result<usize> {
-            let mut n = 0;
-            for (media_type, bytes) in &layers {
-                n += apply_layer(&root2, media_type, bytes)?;
-            }
-            prepare_root(&root2, &init)?;
-            Ok(n)
-        })
-        .await??;
+        // One layer at a time, in manifest order: streamed to a file, applied from it. The
+        // daemon's memory during a build is the decompressor's buffer, whatever the image.
+        let layer_file = scratch.join("layer");
+        let mut files = 0;
+        for layer in &manifest.layers {
+            let mut out = tokio::fs::File::create(&layer_file).await?;
+            self.client
+                .pull_blob(r, layer, &mut out)
+                .await
+                .with_context(|| format!("pull layer {}", layer.digest))?;
+            out.flush().await?;
+            drop(out);
+            let (root, path, media_type) =
+                (root.clone(), layer_file.clone(), layer.media_type.clone());
+            files += tokio::task::spawn_blocking(move || {
+                apply_layer(&root, &media_type, std::fs::File::open(&path)?)
+            })
+            .await??;
+        }
+        let _ = std::fs::remove_file(&layer_file);
+        let (root2, init) = (root.clone(), self.init.clone());
+        tokio::task::spawn_blocking(move || prepare_root(&root2, &init)).await??;
         let dev = self
             .zfs
             .create(&image.dataset(), (self.root_gb as u64) << 30)
@@ -324,26 +369,22 @@ impl Builder {
     }
 }
 
-/// The layers in manifest order, as (media type, bytes).
-fn ordered_layers(data: &ImageData) -> Vec<(String, Vec<u8>)> {
-    let mut layers: Vec<(String, Vec<u8>)> = data
-        .layers
-        .iter()
-        .map(|l| (l.media_type.clone(), l.data.clone()))
-        .collect();
-    if let Some(manifest) = &data.manifest {
-        let digests: Vec<String> = data.layers.iter().map(|l| l.sha256_digest()).collect();
-        let mut ordered = Vec::with_capacity(layers.len());
-        for want in &manifest.layers {
-            if let Some(i) = digests.iter().position(|d| *d == want.digest) {
-                ordered.push(layers[i].clone());
-            }
-        }
-        if ordered.len() == layers.len() {
-            layers = ordered;
+/// Refuses an image with no layers or a layer kind the extractor cannot read, before any
+/// layer is pulled.
+fn check_layers(manifest: &OciImageManifest) -> Result<()> {
+    if manifest.layers.is_empty() {
+        return Err(anyhow!("image has no layers"));
+    }
+    for layer in &manifest.layers {
+        if !LAYER_MEDIA_TYPES.contains(&layer.media_type.as_str()) {
+            return Err(anyhow!(
+                "layer {}: media type {:?} is not supported",
+                layer.digest,
+                layer.media_type
+            ));
         }
     }
-    layers
+    Ok(())
 }
 
 impl Builder {
@@ -450,14 +491,15 @@ fn parse_config(data: &[u8]) -> Result<ImageConfig> {
     })
 }
 
-/// Applies one layer: whiteouts remove, everything else is extracted inside `root`.
-pub fn apply_layer(root: &Path, media_type: &str, bytes: &[u8]) -> Result<usize> {
-    let reader: Box<dyn Read> = if media_type.ends_with("gzip") {
-        Box::new(flate2::read::GzDecoder::new(bytes))
+/// Applies one layer, read as it is decompressed: whiteouts remove, everything else is
+/// extracted inside `root`.
+pub fn apply_layer<R: Read>(root: &Path, media_type: &str, layer: R) -> Result<usize> {
+    let reader: Box<dyn Read + '_> = if media_type.ends_with("gzip") {
+        Box::new(flate2::read::GzDecoder::new(layer))
     } else if media_type.ends_with("zstd") {
-        Box::new(zstd::Decoder::new(bytes)?)
+        Box::new(zstd::Decoder::new(layer)?)
     } else {
-        Box::new(bytes)
+        Box::new(layer)
     };
     extract(root, reader)
 }
@@ -809,5 +851,85 @@ mod tests {
         assert_eq!(c.env["PGDATA"], "/var/lib/postgresql/data");
         assert_eq!(c.volumes, vec!["/var/lib/postgresql/data"]);
         assert_eq!(c.exposed_ports, vec![5432]);
+    }
+
+    /// A layer is applied from a file, whatever its compression: the build never holds one
+    /// in memory.
+    #[test]
+    fn a_layer_is_applied_from_a_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let tar = archive(&[("etc/hello", tar::EntryType::Regular, "", "hi\n")]);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&tar).unwrap();
+        let gz = gz.finish().unwrap();
+        let zst = zstd::encode_all(&tar[..], 1).unwrap();
+        for (name, media_type, bytes) in [
+            ("plain", oci_client::manifest::IMAGE_LAYER_MEDIA_TYPE, &tar),
+            ("gz", oci_client::manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE, &gz),
+            ("zst", "application/vnd.oci.image.layer.v1.tar+zstd", &zst),
+        ] {
+            let layer = dir.path().join(name);
+            std::fs::write(&layer, bytes).unwrap();
+            let root = dir.path().join(format!("root-{name}"));
+            std::fs::create_dir(&root).unwrap();
+            let file: std::fs::File = std::fs::File::open(&layer).unwrap();
+            assert_eq!(apply_layer(&root, media_type, file).unwrap(), 1, "{name}");
+            assert_eq!(
+                std::fs::read_to_string(root.join("etc/hello")).unwrap(),
+                "hi\n",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn layers_are_checked_before_any_pull() {
+        let manifest = |layers: serde_json::Value| -> OciImageManifest {
+            serde_json::from_value(serde_json::json!({
+                "schemaVersion": 2,
+                "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:c0", "size": 1},
+                "layers": layers
+            }))
+            .unwrap()
+        };
+        let err = check_layers(&manifest(serde_json::json!([]))).unwrap_err();
+        assert_eq!(err.to_string(), "image has no layers");
+        let ok = serde_json::json!({"mediaType": oci_client::manifest::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE, "digest": "sha256:a1", "size": 1});
+        check_layers(&manifest(serde_json::json!([ok]))).unwrap();
+        let odd = serde_json::json!({"mediaType": "application/vnd.oci.image.layer.v1.tar+xz", "digest": "sha256:b2", "size": 1});
+        let err = check_layers(&manifest(serde_json::json!([ok, odd]))).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "layer sha256:b2: media type \"application/vnd.oci.image.layer.v1.tar+xz\" is not supported"
+        );
+    }
+
+    /// A build whose future is dropped half way frees its key: a waiter wakes and the next
+    /// `ensure` of the key builds instead of waiting forever.
+    #[tokio::test]
+    async fn a_dropped_build_frees_its_key_and_wakes_its_waiters() {
+        use futures::FutureExt;
+        let building: Builds = Mutex::new(HashMap::new());
+        let Turn::Build(slot) = take(&building, "k") else {
+            panic!("the first taker builds");
+        };
+        let Turn::Wait(mut rx) = take(&building, "k") else {
+            panic!("the second waits");
+        };
+        assert!(
+            rx.changed().now_or_never().is_none(),
+            "nothing to wake on yet"
+        );
+        drop(slot);
+        assert!(rx.changed().now_or_never().is_some(), "woken by the drop");
+        assert!(building.lock().unwrap().is_empty());
+        assert!(matches!(take(&building, "k"), Turn::Build(_)));
+        // A build that ended normally frees the key the same way.
+        let Turn::Build(slot) = take(&building, "k2") else {
+            panic!();
+        };
+        drop(slot);
+        assert!(matches!(take(&building, "k2"), Turn::Build(_)));
     }
 }

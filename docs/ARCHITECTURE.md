@@ -52,6 +52,7 @@ Every disk is a ZFS zvol in one pool (`byard` by default):
 | `byard/images/<digest>` | A root disk built from an image, with a `@base` snapshot |
 | `byard/m/<id>/root` | The machine's root disk, a clone of `@base` |
 | `byard/m/<id>/data` | The machine's data volume, when it has one |
+| `byard/jail` | A filesystem mounted at `jail_dir`: the chroots and the memory snapshots, on the pool, not on `/` |
 
 The root disk outlives restarts and stops, as on Fly. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
@@ -110,7 +111,7 @@ ingress connection or an exec on an idle machine wakes it. `sleep: "never"` keep
 
 A stop can keep a memory snapshot instead (`POST /machines/{id}/stop {"suspend": true}`, or
 `suspend_on_sleep: true` for the sleeper): the machine is paused, Firecracker writes its memory
-and state next to its run files, and the next start loads them into a fresh Firecracker and
+and state into its jail (on the pool), and the next start loads them into a fresh Firecracker and
 resumes, in about a quarter of a second under nested virtualization, without a boot: processes,
 connections and uptime carry on. The snapshot is used once; if it cannot be loaded, the start is
 a cold boot. The daemon suspends every running machine when it shuts down, so an upgrade costs
@@ -160,4 +161,9 @@ the gateway's DNS, and the internet through NAT; nothing reaches a guest but the
 Secrets reach the guest on its config drive and never through the API's responses.
 
 The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API listens on
-loopback unless told otherwise; put it behind TLS or a private network before that.
+loopback unless told otherwise; put it behind TLS or a private network before that. What it
+writes is its own: umask `077`, `data_dir` and everything under it `0700`, records and config
+drives `0600`, the drive's copy in the jail `0400` for the jail's user, so no other local uid
+(another machine's Firecracker included) reads a tenant's secrets (ADR 0014). A state key is a
+file name: `Store::path` refuses a key that would leave its directory, behind the API's own
+validation of ids.
