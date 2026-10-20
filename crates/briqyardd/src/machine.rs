@@ -2,6 +2,7 @@
 //! transition. One `Manager` per daemon.
 
 use crate::config::Config;
+use crate::events::{self, Ev, Events};
 use crate::fc;
 use crate::guestc;
 use crate::image::{self, Builder, ImageConfig};
@@ -12,9 +13,10 @@ use crate::usage::{self, Ledger, Meter, Traffic};
 use crate::zfs::Zfs;
 use anyhow::{anyhow, Context, Result};
 use briqyard_api::guest;
-use briqyard_api::{self as api, state, stop};
+use briqyard_api::{self as api, reason, state, stop};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -50,6 +52,12 @@ pub enum MError {
     /// The machine stays, in state `error`, with the console tail in its `error`.
     #[error("boot failed: {}", .0.error)]
     BootFailed(Box<api::Machine>),
+    /// `If-Match` named a version the machine has moved past (ADR 0019): the machine as it is.
+    #[error("machine {} is at version {}: read it again", .0.id, .0.version)]
+    Moved(Box<api::Machine>),
+    /// An event cursor the log cannot answer from, with the oldest seq it keeps.
+    #[error("{message}")]
+    Gone { oldest: u64, message: String },
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -156,6 +164,9 @@ pub struct Record {
     /// What this machine's backups sent to the store, all of them: what they take there.
     #[serde(default)]
     pub backup_bytes: u64,
+    /// The seq of the last event about it (ADR 0019); written only by `Entry::note_locked`.
+    #[serde(default)]
+    pub version: u64,
 }
 
 impl Record {
@@ -338,10 +349,12 @@ struct Entry {
     meter: Mutex<Meter>,
     /// Bytes through its endpoints, added by the ingress as they pass.
     traffic: Arc<Traffic>,
+    /// The host's event log: what an event about it goes to.
+    events: Events,
 }
 
 impl Entry {
-    fn new(rec: Record) -> Arc<Self> {
+    fn new(rec: Record, events: Events) -> Arc<Self> {
         Arc::new(Self {
             lock: tokio::sync::Mutex::new(()),
             rec: Mutex::new(rec),
@@ -351,6 +364,7 @@ impl Entry {
             unsaved_use: AtomicBool::new(false),
             meter: Mutex::new(Meter::new(Utc::now())),
             traffic: Arc::default(),
+            events,
         })
     }
 
@@ -369,8 +383,9 @@ impl Entry {
 
     /// The one place `state` is written: the time in the old state is accrued to the meter,
     /// `state_changed_at` follows it and whoever waits on the machine is woken. `f` edits the
-    /// rest of the record under the same lock.
-    fn set_state(&self, state: &str, f: impl FnOnce(&mut Record)) {
+    /// rest of the record under the same lock and says what happened: that event is logged
+    /// and becomes the machine's version (ADR 0019).
+    fn set_state(&self, state: &str, f: impl FnOnce(&mut Record) -> Option<Ev>) {
         {
             let mut r = self.rec.lock().unwrap();
             if r.state != state {
@@ -378,9 +393,21 @@ impl Entry {
                 r.state = state.into();
                 r.state_changed_at = Utc::now();
             }
-            f(&mut r);
+            if let Some(ev) = f(&mut r) {
+                self.note_locked(&mut r, ev);
+            }
         }
         self.changed.notify_waiters();
+    }
+
+    /// Logs an event about the machine, which becomes its version. The caller writes the record.
+    fn note(&self, ev: Ev) {
+        let mut r = self.rec.lock().unwrap();
+        self.note_locked(&mut r, ev);
+    }
+
+    fn note_locked(&self, r: &mut Record, ev: Ev) {
+        r.version = self.events.emit(ev.of(&r.id, &r.tenant));
     }
 }
 
@@ -426,6 +453,8 @@ struct Inner {
     boot_gate: tokio::sync::Semaphore,
     /// The hours of usage not closed yet.
     usage: Mutex<Ledger>,
+    /// What happened on the host (ADR 0019).
+    events: Events,
 }
 
 #[derive(Clone)]
@@ -440,7 +469,7 @@ impl Manager {
         cfg: Config,
         store: Store,
         zfs: Zfs,
-        images: Builder,
+        mut images: Builder,
         dns: Resolver,
     ) -> Result<Self> {
         let range = Range::parse(&cfg.network.range).context("network.range")?;
@@ -485,6 +514,8 @@ impl Manager {
         };
         let (endpoint_events, _) = broadcast::channel(64);
         let ledger = Ledger::load(&store, Utc::now()).context("usage")?;
+        let events = Events::open(&store.dir("events")).context("events")?;
+        images.events = Some(events.clone());
         let advertise = advertise_address(
             &cfg.ingress.advertise,
             &cfg.ingress.bind,
@@ -516,6 +547,7 @@ impl Manager {
             backups,
             boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),
             usage: Mutex::new(ledger),
+            events,
         });
         let m = Self { inner };
         m.load()?;
@@ -526,8 +558,19 @@ impl Manager {
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
-        m.recover().await;
-        m.sweep_orphans().await;
+        let (adopted, stopped) = m.recover().await;
+        let swept = m.sweep_orphans().await;
+        let machines = m.inner.machines.lock().unwrap().len();
+        m.inner.events.emit(
+            Ev::normal(
+                reason::HOST_STARTED,
+                format!("daemon started: {adopted} machines adopted, {stopped} marked stopped, {swept} leftovers swept"),
+            )
+            .data(json!({
+                "version": env!("CARGO_PKG_VERSION"), "machines": machines,
+                "adopted": adopted, "stopped": stopped, "swept": swept,
+            })),
+        );
         let sleeper = m.clone();
         tokio::spawn(async move { sleeper.sleeper().await });
         Ok(m)
@@ -538,7 +581,8 @@ impl Manager {
     }
 
     /// Reads the records. A tenant whose subnet index is outside `network.range` is refused
-    /// here, with the fix, rather than found by the first request that needs its subnet.
+    /// here, with the fix, rather than found by the first request that needs its subnet. The
+    /// event log goes on past every machine's version.
     fn load(&self) -> Result<()> {
         let st = &self.inner.store;
         for rec in st.list::<TenantRec>("tenants")? {
@@ -556,12 +600,13 @@ impl Manager {
         }
         for mut r in st.list::<Record>("machines")? {
             r.migrate();
+            self.inner.events.floor(r.version);
             let id = r.id.clone();
             self.inner
                 .machines
                 .lock()
                 .unwrap()
-                .insert(id, Entry::new(r));
+                .insert(id, Entry::new(r, self.inner.events.clone()));
         }
         for ep in st.list::<EndpointRec>("endpoints")? {
             self.inner
@@ -576,8 +621,9 @@ impl Manager {
     /// Machines a previous daemon left running: adopted when their Firecracker is still up
     /// and answering, else ended (only a process that still carries the machine's id is
     /// killed: after a reboot the pid is someone else's) and marked stopped by the host, so
-    /// the next use wakes them. Destroys cut short are resumed by the sleeper's tick.
-    async fn recover(&self) {
+    /// the next use wakes them. Destroys cut short are resumed by the sleeper's tick. How many
+    /// were adopted, and how many marked stopped.
+    async fn recover(&self) -> (usize, usize) {
         let entries: Vec<Arc<Entry>> = self
             .inner
             .machines
@@ -586,6 +632,7 @@ impl Manager {
             .values()
             .cloned()
             .collect();
+        let (mut adopted, mut stopped) = (0, 0);
         for e in entries {
             let rec = e.snapshot();
             if !matches!(
@@ -595,8 +642,10 @@ impl Manager {
                 continue;
             }
             if rec.state == state::RUNNING && rec.pid > 0 && self.adopt(&e, rec.pid).await {
+                adopted += 1;
                 continue;
             }
+            stopped += 1;
             if rec.pid > 0 && self.inner.vmm.machine_of(rec.pid).as_deref() == Some(&rec.id) {
                 self.inner.vmm.kill(rec.pid);
             }
@@ -605,6 +654,13 @@ impl Manager {
                 r.stopped_reason = stop::HOST.into();
                 r.pid = 0;
                 r.stopped_at = Some(Utc::now());
+                Some(
+                    Ev::warning(
+                        reason::STOPPED,
+                        "left running by a previous daemon that could not hand it over: stopped",
+                    )
+                    .data(json!({"reason": stop::HOST})),
+                )
             });
             tracing::warn!(
                 machine = rec.id,
@@ -622,12 +678,14 @@ impl Manager {
                 }
             });
         }
+        (adopted, stopped)
     }
 
     /// Resources a previous daemon left with no record to own them: a crash between a resource
     /// and its record, or a destroy cut short. A Firecracker nobody knows is ended; its run
-    /// directory, jail, TAP and disks go. Done once at start, so nothing leaks for good.
-    async fn sweep_orphans(&self) {
+    /// directory, jail, TAP and disks go. Done once at start, so nothing leaks for good. How
+    /// many it found.
+    async fn sweep_orphans(&self) -> usize {
         let known: std::collections::HashSet<String> = self
             .inner
             .machines
@@ -714,6 +772,7 @@ impl Manager {
         if swept > 0 {
             tracing::info!(swept, "orphans swept at start");
         }
+        swept
     }
 
     /// Removes a `fork-*` snapshot nothing clones any more: `true` when it did. Kept, with a
@@ -751,6 +810,14 @@ impl Manager {
         *e.live.lock().unwrap() = Some(vm.clone());
         *e.stop_req.lock().unwrap() = None;
         self.watch(e, &vm);
+        e.note(
+            Ev::normal(
+                reason::ADOPTED,
+                format!("pid {pid}, left running by a previous daemon, taken over"),
+            )
+            .data(json!({"pid": pid})),
+        );
+        let _ = self.save(e);
         tracing::info!(
             machine = rec.id,
             pid,
@@ -832,7 +899,7 @@ impl Manager {
                 let m = self.clone();
                 tasks.push(tokio::spawn(async move {
                     if let Err(err) = m
-                        .stop_entry(&e, stop::HOST, Duration::from_secs(10), true)
+                        .stop_entry(&e, stop::HOST, Duration::from_secs(10), true, None)
                         .await
                     {
                         tracing::warn!(machine = e.snapshot().id, err = %err, "stop on shutdown");
@@ -1216,7 +1283,7 @@ impl Manager {
         {
             let _turn = t.lock.lock().await;
             if let Some(gw) = self.gateway_of(id) {
-                self.destroy_machine(&gw.snapshot().id).await?;
+                self.destroy_machine(&gw.snapshot().id, None).await?;
             }
         }
         self.inner.dns.unset(t.subnet.gateway());
@@ -1306,7 +1373,7 @@ impl Manager {
         }
         let running = was.state == state::RUNNING;
         if running {
-            self.stop_entry(gw, stop::HOST, Duration::from_secs(10), false)
+            self.stop_entry(gw, stop::HOST, Duration::from_secs(10), false, None)
                 .await?;
         }
         {
@@ -1333,6 +1400,16 @@ impl Manager {
             }
             {
                 let mut r = gw.rec.lock().unwrap();
+                let fields: Vec<&str> = [
+                    ("image", im.key != r.image_key),
+                    ("cmd", req.cmd != r.cmd),
+                    ("env", req.env != r.env),
+                    ("size", req.size != r.size),
+                    ("ports", req.ports != r.ports),
+                ]
+                .into_iter()
+                .filter_map(|(f, changed)| changed.then_some(f))
+                .collect();
                 r.image = req.image;
                 r.image_key = im.key;
                 r.image_digest = im.digest;
@@ -1343,6 +1420,11 @@ impl Manager {
                 r.ports = req.ports;
                 // A memory snapshot is of the old program on the old disk: boot cold.
                 r.suspended = false;
+                let ev = Ev::normal(
+                    reason::UPDATED,
+                    format!("the gateway's {} replaced", fields.join(", ")),
+                );
+                gw.note_locked(&mut r, ev.data(json!({ "fields": fields })));
             }
             self.save(gw)?;
         }
@@ -1366,7 +1448,7 @@ impl Manager {
         if gateway_needed(&self.inner.machines.lock().unwrap(), tenant) {
             return Err(MError::GatewayInUse);
         }
-        self.destroy_machine(&gw.snapshot().id).await
+        self.destroy_machine(&gw.snapshot().id, None).await
     }
 
     /// The tenant's gateway machine, unless it is being destroyed.
@@ -1403,7 +1485,8 @@ impl Manager {
     /// last lines, as a boot that fails is. Under the tenant's lock.
     async fn run_gateway(&self, gw: &Arc<Entry>) -> Result<(), MError> {
         let _turn = gw.lock.lock().await;
-        if gw.snapshot().state != state::RUNNING {
+        let started = gw.snapshot().state != state::RUNNING;
+        if started {
             self.start_boxed(gw).await?;
         }
         let r = gw.snapshot();
@@ -1422,6 +1505,16 @@ impl Manager {
             _ = exited.wait_for(|gone| *gone) => Err("the gateway exited".to_string()),
         };
         let Err(why) = answered else {
+            if started {
+                gw.note(
+                    Ev::normal(
+                        reason::GATEWAY_STARTED,
+                        format!("the tenant's gateway answers on {ip}:{port}"),
+                    )
+                    .data(json!({ "port": port })),
+                );
+                let _ = self.save(gw);
+            }
             return Ok(());
         };
         self.end_process(gw, &live, Duration::ZERO).await;
@@ -1430,6 +1523,7 @@ impl Manager {
             r.error = format!("{why}: {tail}");
             r.stopped_at = Some(Utc::now());
             r.pid = 0;
+            Some(Ev::warning(reason::BOOT_FAILED, r.error.clone()))
         });
         let _ = self.save(gw);
         Err(MError::BootFailed(Box::new(self.view(gw))))
@@ -1488,10 +1582,19 @@ impl Manager {
         );
         let suspend = self.inner.cfg.suspend_on_sleep;
         if let Err(err) = self
-            .stop_entry(gw, stop::IDLE, Duration::from_secs(10), suspend)
+            .stop_entry(gw, stop::IDLE, Duration::from_secs(10), suspend, None)
             .await
         {
             tracing::warn!(machine = r.id, err = %err, "gateway sleep");
+            return;
+        }
+        let _turn = gw.lock.lock().await;
+        if self.holds(gw) && gw.snapshot().state == state::STOPPED {
+            gw.note(Ev::normal(
+                reason::GATEWAY_STOPPED,
+                "nothing sends through the tenant's gateway: stopped",
+            ));
+            let _ = self.save(gw);
         }
     }
 
@@ -1558,6 +1661,7 @@ impl Manager {
             last_used_at: r.last_used_at,
             sleeps_at,
             suspended: r.suspended,
+            version: r.version,
             host: String::new(),
         }
     }
@@ -1602,15 +1706,26 @@ impl Manager {
 
     /// Takes the machine's memory from the host and moves it to `starting`, as one step
     /// under the map's lock: two starts that read the same free memory cannot both take it.
+    /// Its event is logged once that lock is let go: the log syncs to disk, and the map is
+    /// every request's. Nothing else moves the machine meanwhile: its own lock is held.
     fn reserve(&self, e: &Entry) -> Result<(), MError> {
-        let machines = self.inner.machines.lock().unwrap();
-        let (used, _) = committed(&machines);
-        let need = e.rec.lock().unwrap().size.memory_mb;
-        admit(used.memory_mb, self.capacity().memory_mb, need)?;
-        e.set_state(state::STARTING, |r| {
-            r.error.clear();
-            r.pid = 0;
-        });
+        {
+            let machines = self.inner.machines.lock().unwrap();
+            let (used, _) = committed(&machines);
+            let need = e.rec.lock().unwrap().size.memory_mb;
+            admit(used.memory_mb, self.capacity().memory_mb, need)?;
+            e.set_state(state::STARTING, |r| {
+                r.error.clear();
+                r.pid = 0;
+                None
+            });
+        }
+        let resume = e.snapshot().suspended;
+        let ev = match resume {
+            true => Ev::normal(reason::STARTING, "resuming from its memory snapshot"),
+            false => Ev::normal(reason::STARTING, "booting"),
+        };
+        e.note(ev.data(json!({ "resume": resume })));
         Ok(())
     }
 
@@ -1841,6 +1956,7 @@ impl Manager {
             console_offset: 0,
             suspended: false,
             backup_bytes: 0,
+            version: 0,
         };
         self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
         let mut src: Option<Arc<Entry>> = None;
@@ -1941,6 +2057,20 @@ impl Manager {
             let _ = self.inner.zfs.destroy(&rec.dataset()).await;
             return Err(err.into());
         }
+        e.note(match (&restore_from, &req.fork) {
+            (Some(b), _) => Ev::normal(
+                reason::RESTORED,
+                format!("restored from backup {} of {}", b.id, b.machine_id),
+            )
+            .data(json!({ "from": b.machine_id, "backup": b.id })),
+            (None, Some(f)) => Ev::normal(reason::FORKED, format!("forked from {}", f.machine_id))
+                .data(json!({ "from": f.machine_id })),
+            (None, None) => {
+                let r = e.snapshot();
+                Ev::normal(reason::CREATED, format!("created from {}", r.image))
+                    .data(json!({ "image": r.image, "digest": r.image_digest }))
+            }
+        });
         self.save(&e)?;
         if req.start.unwrap_or(true) {
             // Created but did not start: the same answer a start would give; the machine
@@ -1989,7 +2119,7 @@ impl Manager {
         rec.host_num = n as u8;
         rec.ip = t.subnet.host(n as u8)?.to_string();
         let id = rec.id.clone();
-        let e = Entry::new(rec);
+        let e = Entry::new(rec, self.inner.events.clone());
         machines.insert(id, e.clone());
         drop(machines);
         self.refresh_dns(t);
@@ -2137,6 +2267,14 @@ impl Manager {
             let _turn = e.lock.lock().await;
             if self.holds(&e) {
                 e.rec.lock().unwrap().backup_bytes += total;
+                let kind = if incremental { "incremental" } else { "whole" };
+                e.note(
+                    Ev::normal(
+                        reason::BACKED_UP,
+                        format!("backup {bid}: {total} bytes, {kind}"),
+                    )
+                    .data(json!({ "backup": bid, "bytes": total, "incremental": incremental })),
+                );
                 self.save(&e)?;
             }
         }
@@ -2244,9 +2382,19 @@ impl Manager {
 
     // --- start ---
 
-    pub async fn start(&self, id: &str) -> Result<api::Machine, MError> {
+    /// `If-Match` (ADR 0019): the version the caller read, compared under the machine's lock,
+    /// so nothing moves it between the check and the change. None: no condition.
+    fn check_version(&self, e: &Entry, at: Option<u64>) -> Result<(), MError> {
+        match at {
+            Some(v) if v != e.snapshot().version => Err(MError::Moved(Box::new(self.view(e)))),
+            _ => Ok(()),
+        }
+    }
+
+    pub async fn start(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
         let _guard = e.lock.lock().await;
+        self.check_version(&e, at)?;
         if e.snapshot().state != state::RUNNING {
             self.start_entry(&e).await?;
         }
@@ -2255,9 +2403,10 @@ impl Manager {
 
     /// Starts a machine that went to sleep, that the host stopped or whose process ended;
     /// one stopped on purpose stays stopped.
-    pub async fn wake(&self, id: &str) -> Result<api::Machine, MError> {
+    pub async fn wake(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
         let _guard = e.lock.lock().await;
+        self.check_version(&e, at)?;
         let r = e.snapshot();
         match r.state.as_str() {
             state::RUNNING => {
@@ -2318,6 +2467,7 @@ impl Manager {
                 r.error = format!("{err:#}");
                 r.stopped_at = Some(Utc::now());
                 r.pid = 0;
+                Some(Ev::warning(reason::START_FAILED, r.error.clone()))
             });
             let _ = self.save(e);
             MError::Other(err)
@@ -2444,6 +2594,7 @@ impl Manager {
                 r.error = format!("{why}: {tail}");
                 r.stopped_at = Some(Utc::now());
                 r.pid = 0;
+                Some(Ev::warning(reason::BOOT_FAILED, r.error.clone()))
             });
             let _ = self.save(e);
             return Err(MError::BootFailed(Box::new(self.view(e))));
@@ -2453,6 +2604,15 @@ impl Manager {
             r.started_at = Some(now);
             r.last_used_at = Some(now);
             r.stopped_reason.clear();
+            let pid = live.pid;
+            let ev = match live.resumed {
+                true => Ev::normal(
+                    reason::RESUMED,
+                    format!("resumed from its memory snapshot, pid {pid}"),
+                ),
+                false => Ev::normal(reason::STARTED, format!("running, pid {pid}")),
+            };
+            Some(ev.data(json!({ "pid": pid })))
         });
         let _ = self.save(e);
         tracing::info!(
@@ -2524,36 +2684,72 @@ impl Manager {
         e.set_state(state::STOPPED, |r| {
             r.pid = 0;
             r.stopped_at = Some(now);
-            if let Some(reason) = stop_req {
-                r.stopped_reason = reason.clone();
-                tracing::info!(machine = r.id, reason, "machine stopped");
-            } else if requested {
-                r.stopped_reason = stop::USER.into();
-            } else {
-                let again = restarts_after_exit(&r.restart, code, r.restarts);
-                r.exit = Some(api::Exit {
-                    code,
-                    oom_killed: oom,
-                    at: now,
-                    restarting: again,
-                });
-                r.stopped_reason = stop::EXIT.into();
-                if again {
-                    r.restarts += 1;
-                    restart_again = true;
-                    tracing::warn!(
-                        machine = r.id,
-                        code,
-                        oom,
-                        restart = r.restarts,
-                        "machine exited, restarting"
-                    );
-                } else {
-                    r.restarts = 0;
-                    tracing::info!(machine = r.id, code, oom, "machine exited");
-                }
+            if let Some(why) = stop_req {
+                r.stopped_reason = why.clone();
+                tracing::info!(machine = r.id, reason = why, "machine stopped");
+                let ev = match r.suspended {
+                    true => Ev::normal(
+                        reason::SUSPENDED,
+                        format!("suspended ({why}): its memory snapshot kept"),
+                    ),
+                    false => Ev::normal(reason::STOPPED, format!("stopped ({why})")),
+                };
+                return Some(ev.data(json!({ "reason": why })));
             }
+            if requested {
+                r.stopped_reason = stop::USER.into();
+                return Some(
+                    Ev::normal(reason::STOPPED, "stopped on request")
+                        .data(json!({ "reason": stop::USER })),
+                );
+            }
+            let again = restarts_after_exit(&r.restart, code, r.restarts);
+            r.exit = Some(api::Exit {
+                code,
+                oom_killed: oom,
+                at: now,
+                restarting: again,
+            });
+            r.stopped_reason = stop::EXIT.into();
+            if again {
+                r.restarts += 1;
+                restart_again = true;
+                tracing::warn!(
+                    machine = r.id,
+                    code,
+                    oom,
+                    restart = r.restarts,
+                    "machine exited, restarting"
+                );
+            } else {
+                r.restarts = 0;
+                tracing::info!(machine = r.id, code, oom, "machine exited");
+            }
+            let ev = match (oom, code) {
+                (true, _) => Ev::warning(reason::EXITED, "killed: out of memory"),
+                (false, 0) => Ev::normal(reason::EXITED, "exited with code 0"),
+                (false, _) => Ev::warning(reason::EXITED, format!("exited with code {code}")),
+            };
+            Some(ev.data(json!({ "code": code, "oom": oom, "restarting": again })))
         });
+        if restart_again {
+            // The delay is the attempt's number in seconds, as the task below waits.
+            let (attempt, policy) = {
+                let r = e.snapshot();
+                (r.restarts, r.restart)
+            };
+            let bound = match policy.policy.as_str() {
+                "always" => "always".to_string(),
+                _ => format!("at most {}", policy.max_retries),
+            };
+            e.note(
+                Ev::warning(
+                    reason::RESTARTING,
+                    format!("restart {attempt} in {attempt} s ({bound})"),
+                )
+                .data(json!({ "attempt": attempt, "policy": policy.policy, "delay_sec": attempt })),
+            );
+        }
         let _ = self.save(e);
         if restart_again {
             let m = self.clone();
@@ -2640,20 +2836,24 @@ impl Manager {
         id: &str,
         timeout: Duration,
         suspend: bool,
+        at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        self.stop_entry(&e, stop::USER, timeout, suspend).await?;
+        self.stop_entry(&e, stop::USER, timeout, suspend, at)
+            .await?;
         Ok(self.view(&e))
     }
 
     /// Asks the guest to end its process, then waits for Firecracker to exit; after the grace,
-    /// kills. Takes the entry's lock only briefly so the watcher can settle the state.
+    /// kills. Takes the entry's lock only briefly so the watcher can settle the state. `at` is
+    /// the caller's `If-Match`, checked under that lock.
     async fn stop_entry(
         &self,
         e: &Arc<Entry>,
-        reason: &str,
+        why: &str,
         timeout: Duration,
         suspend: bool,
+        at: Option<u64>,
     ) -> Result<(), MError> {
         let timeout = if timeout.is_zero() {
             Duration::from_secs(10)
@@ -2662,14 +2862,22 @@ impl Manager {
         };
         let live = {
             let _guard = e.lock.lock().await;
+            self.check_version(e, at)?;
             let r = e.snapshot();
             match r.state.as_str() {
                 state::STOPPED | state::CREATED | state::ERROR => {
                     if r.state == state::STOPPED
-                        && reason == stop::USER
+                        && why == stop::USER
                         && r.stopped_reason != stop::USER
                     {
-                        e.rec.lock().unwrap().stopped_reason = stop::USER.into();
+                        let mut rec = e.rec.lock().unwrap();
+                        rec.stopped_reason = stop::USER.into();
+                        let ev = Ev::normal(
+                            reason::STOPPED,
+                            format!("stopped on request (it was {})", r.stopped_reason),
+                        );
+                        e.note_locked(&mut rec, ev.data(json!({ "reason": stop::USER })));
+                        drop(rec);
                         let _ = self.save(e);
                     }
                     return Ok(());
@@ -2692,8 +2900,13 @@ impl Manager {
                 Some(l) => l,
                 None => return Err(MError::NotRunning("no process".into())),
             };
-            *e.stop_req.lock().unwrap() = Some(reason.to_string());
-            e.set_state(state::STOPPING, |_| {});
+            *e.stop_req.lock().unwrap() = Some(why.to_string());
+            e.set_state(state::STOPPING, |_| {
+                Some(
+                    Ev::normal(reason::STOPPING, format!("stopping ({why})"))
+                        .data(json!({ "reason": why, "suspend": suspend })),
+                )
+            });
             let _ = self.save(e);
             // A suspend keeps a memory snapshot: the next start resumes in well under a
             // second. Refused, the machine is stopped the plain way.
@@ -2759,18 +2972,18 @@ impl Manager {
     // --- destroy ---
 
     /// A destroy through the API: missing is success.
-    pub async fn destroy(&self, id: &str) -> Result<(), MError> {
+    pub async fn destroy(&self, id: &str, at: Option<u64>) -> Result<(), MError> {
         match self.own_entry(id) {
             Err(MError::NotFound) => Ok(()),
             Err(err) => Err(err),
-            Ok(_) => self.destroy_machine(id).await,
+            Ok(_) => self.destroy_machine(id, at).await,
         }
     }
 
     /// One critical section under the entry's lock, from the state to the record's removal:
     /// nothing starts the machine in between, and a destroy that fails leaves it
-    /// `destroying` for the sleeper's tick to try again.
-    async fn destroy_machine(&self, id: &str) -> Result<(), MError> {
+    /// `destroying` for the sleeper's tick to try again. `at` is the caller's `If-Match`.
+    async fn destroy_machine(&self, id: &str, at: Option<u64>) -> Result<(), MError> {
         let e = match self.entry(id) {
             Ok(e) => e,
             Err(_) => return Ok(()),
@@ -2780,7 +2993,9 @@ impl Manager {
             // A destroy that held the lock before this one finished the job.
             return Ok(());
         }
-        e.set_state(state::DESTROYING, |_| {});
+        self.check_version(&e, at)?;
+        // No event: the destroy is one step, and `destroyed` ends it.
+        e.set_state(state::DESTROYING, |_| None);
         let _ = self.save(&e);
         let live = e.live.lock().unwrap().clone();
         if let Some(live) = live {
@@ -2835,6 +3050,9 @@ impl Manager {
         }
         self.inner.store.delete("machines", id)?;
         self.remove_machine(&e);
+        self.inner
+            .events
+            .emit(Ev::normal(reason::DESTROYED, "destroyed").of(id, &rec.tenant));
         tracing::info!(machine = id, "machine destroyed");
         Ok(())
     }
@@ -2842,11 +3060,14 @@ impl Manager {
     // --- use and sleep ---
 
     /// Changes the sleep window, the metadata, the egress policy or the limits of a machine,
-    /// in any state; a running machine's policy changes in the tables at once.
+    /// in any state; a running machine's policy changes in the tables at once. A change is an
+    /// event (`egress_changed` for the policy or the limits, else `updated`); a request that
+    /// changes nothing is none.
     pub async fn update(
         &self,
         id: &str,
         req: api::UpdateMachineRequest,
+        at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
         if let Some(sl) = &req.sleep {
@@ -2860,6 +3081,7 @@ impl Manager {
         if !self.inner.machines.lock().unwrap().contains_key(id) {
             return Err(MError::NotFound);
         }
+        self.check_version(&e, at)?;
         // Held until the record says `via: gateway`, as a start holds it.
         let mut gateway_turn = None;
         if req.egress.is_some() || req.limits.is_some() {
@@ -2886,6 +3108,7 @@ impl Manager {
         }
         {
             let mut r = e.rec.lock().unwrap();
+            let was = r.clone();
             if let Some(sl) = req.sleep {
                 r.sleep = sleep_setting(&sl);
             }
@@ -2897,6 +3120,9 @@ impl Manager {
             }
             if let Some(l) = req.limits {
                 r.limits = l.over(&r.limits);
+            }
+            if let Some(ev) = change_event(&was, &r) {
+                e.note_locked(&mut r, ev);
             }
         }
         self.save(&e)?;
@@ -2924,6 +3150,13 @@ impl Manager {
     async fn tick(&self) {
         let now = Utc::now();
         self.measure(now).await;
+        if let Err(err) =
+            self.inner
+                .events
+                .prune(now, self.inner.cfg.events_keep_days, events::MAX_EVENTS)
+        {
+            tracing::warn!(err = %err, "old events not removed");
+        }
         let (due, used, destroying): (Vec<Arc<Entry>>, Vec<Arc<Entry>>, Vec<String>) = {
             let machines = self.inner.machines.lock().unwrap();
             let due = machines
@@ -2960,7 +3193,7 @@ impl Manager {
                 tracing::info!(machine = e.snapshot().id, "machine idle, going to sleep");
                 let suspend = m.inner.cfg.suspend_on_sleep;
                 if let Err(err) = m
-                    .stop_entry(&e, stop::IDLE, Duration::from_secs(10), suspend)
+                    .stop_entry(&e, stop::IDLE, Duration::from_secs(10), suspend, None)
                     .await
                 {
                     tracing::warn!(machine = e.snapshot().id, err = %err, "sleep");
@@ -2983,7 +3216,7 @@ impl Manager {
             }
         }
         for id in destroying {
-            if let Err(err) = self.destroy_machine(&id).await {
+            if let Err(err) = self.destroy_machine(&id, None).await {
                 tracing::warn!(machine = id, err = %err, "resume destroy");
             }
         }
@@ -3096,6 +3329,30 @@ impl Manager {
         Ok(out)
     }
 
+    // --- events (ADR 0019) ---
+
+    pub fn events(&self) -> &Events {
+        &self.inner.events
+    }
+
+    /// A page of events after `since`, oldest first.
+    pub async fn events_page(
+        &self,
+        since: u64,
+        f: events::Filter,
+        limit: usize,
+    ) -> Result<api::EventsPage, MError> {
+        let log = self.inner.events.clone();
+        let page = tokio::task::spawn_blocking(move || log.read(since, &f, limit))
+            .await
+            .map_err(|e| anyhow!(e))?
+            .map_err(gone)?;
+        Ok(api::EventsPage {
+            events: page.events,
+            next: page.next.to_string(),
+        })
+    }
+
     /// Blocks until the machine runs, or until it is clear it will not (within `timeout`).
     pub async fn wait_running(&self, id: &str, timeout: Duration) -> Result<api::Machine, MError> {
         let e = self.entry(id)?;
@@ -3162,7 +3419,7 @@ impl Manager {
     async fn wake_detached(&self, id: &str) -> Result<api::Machine, MError> {
         let m = self.clone();
         let id = id.to_string();
-        detached(async move { m.wake(&id).await }).await
+        detached(async move { m.wake(&id, None).await }).await
     }
 
     pub async fn exec(&self, id: &str, req: api::ExecRequest) -> Result<api::ExecResult, MError> {
@@ -3483,6 +3740,17 @@ impl Manager {
     }
 }
 
+/// A read the log refused as `gone` (ADR 0019), or what else went wrong.
+pub fn gone(err: anyhow::Error) -> MError {
+    match err.downcast::<events::Gone>() {
+        Ok(g) => MError::Gone {
+            oldest: g.oldest,
+            message: g.message,
+        },
+        Err(err) => MError::Other(err),
+    }
+}
+
 /// Runs a transition in a task of its own and waits for it: a client that hangs up drops
 /// the wait, never the transition, so no machine is left half-moved.
 pub async fn detached<T, F>(fut: F) -> Result<T, MError>
@@ -3520,6 +3788,42 @@ fn gateway_needed(machines: &HashMap<String, Arc<Entry>>, tenant: &str) -> bool 
             && r.egress.via_gateway()
             && matches!(r.state.as_str(), state::STARTING | state::RUNNING)
     })
+}
+
+/// The event of a PATCH: `egress_changed` when the policy or the limits moved (both are what
+/// the tables hold for its internet traffic), else `updated`; each with the fields that did.
+/// None when nothing changed.
+fn change_event(was: &Record, now: &Record) -> Option<Ev> {
+    let changed = |pairs: &[(&'static str, bool)]| -> Vec<&'static str> {
+        pairs.iter().filter(|(_, c)| *c).map(|(f, _)| *f).collect()
+    };
+    let egress = changed(&[
+        ("egress", was.egress != now.egress),
+        ("limits", was.limits != now.limits),
+    ]);
+    if !egress.is_empty() {
+        let label = |e: &api::Egress| match &e.via {
+            Some(via) => format!("{}:{via}", e.mode),
+            None => e.mode.clone(),
+        };
+        let (from, to) = (label(&was.egress), label(&now.egress));
+        let message = match was.egress != now.egress {
+            true => format!("egress {from} -> {to}"),
+            false => "egress limits changed".to_string(),
+        };
+        return Some(Ev::normal(reason::EGRESS_CHANGED, message).data(json!({
+            "fields": egress, "from": from, "to": to, "limits": now.limits,
+        })));
+    }
+    let fields = changed(&[
+        ("sleep", was.sleep != now.sleep),
+        ("metadata", was.metadata != now.metadata),
+    ]);
+    if fields.is_empty() {
+        return None;
+    }
+    let ev = Ev::normal(reason::UPDATED, format!("{} changed", fields.join(", ")));
+    Some(ev.data(json!({ "fields": fields })))
 }
 
 /// What `/wait` answers: running, will not run (why), or still moving.
@@ -4069,6 +4373,7 @@ mod tests {
             console_offset: 0,
             suspended: false,
             backup_bytes: 0,
+            version: 0,
         }
     }
 
@@ -4582,6 +4887,7 @@ mod tests {
         let zfs = fake.zfs.clone();
         let images = Builder::new(zfs.clone(), cfg.image_dir(), init, 8).unwrap();
         let store = Store::open(&cfg.state_dir()).unwrap();
+        let events = Events::open(&store.dir("events")).unwrap();
         let (endpoint_events, _) = broadcast::channel(64);
         let host = Mock::new();
         let m = Manager {
@@ -4608,6 +4914,7 @@ mod tests {
                 backups: None,
                 boot_gate: tokio::sync::Semaphore::new(2),
                 usage: Mutex::new(Ledger::default()),
+                events,
             }),
         };
         fake.calls();
@@ -4630,7 +4937,7 @@ mod tests {
             r.id = id.into();
             r.state = state.into();
             r.size.memory_mb = memory_mb;
-            let e = Entry::new(r);
+            let e = Entry::new(r, self.m.inner.events.clone());
             self.m
                 .inner
                 .machines
@@ -4735,7 +5042,7 @@ mod tests {
         assert_eq!(a.snapshot().state, state::STARTING);
         assert_eq!(b.snapshot().state, state::STOPPED);
         // A machine on its way down still holds its memory.
-        a.set_state(state::STOPPING, |_| {});
+        a.set_state(state::STOPPING, |_| None);
         assert!(matches!(h.m.reserve(&b), Err(MError::Capacity(_))));
         assert!(admit(0, 100, 100).is_ok());
         assert!(admit(1, 100, 100).is_err());
@@ -4747,8 +5054,8 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         let e = h.add("m_d", state::DESTROYING, 512);
         for r in [
-            h.m.start("m_d").await,
-            h.m.wake("m_d").await,
+            h.m.start("m_d", None).await,
+            h.m.wake("m_d", None).await,
             h.m.start_entry(&e).await.map(|_| h.m.get("m_d").unwrap()),
         ] {
             match r {
@@ -4771,14 +5078,17 @@ mod tests {
         let m = h.m.clone();
         let waiting =
             tokio::spawn(async move { m.wait_running("m_w", Duration::from_secs(30)).await });
-        e.set_state(state::RUNNING, |_| {});
+        e.set_state(state::RUNNING, |_| None);
         assert_eq!(waiting.await.unwrap().unwrap().state, state::RUNNING);
 
         let e = h.add("m_e", state::STARTING, 512);
         let m = h.m.clone();
         let waiting =
             tokio::spawn(async move { m.wait_running("m_e", Duration::from_secs(30)).await });
-        e.set_state(state::ERROR, |r| r.error = "no init".into());
+        e.set_state(state::ERROR, |r| {
+            r.error = "no init".into();
+            None
+        });
         match waiting.await.unwrap() {
             Err(MError::NotRunning(why)) => assert_eq!(why, "no init"),
             other => panic!("{other:?}"),
@@ -4839,7 +5149,10 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         let e = h.add("m_s", state::STOPPED, 512);
         let t0 = e.snapshot().state_changed_at;
-        e.set_state(state::STOPPED, |r| r.stopped_reason = stop::USER.into());
+        e.set_state(state::STOPPED, |r| {
+            r.stopped_reason = stop::USER.into();
+            None
+        });
         e.touch();
         let r = e.snapshot();
         assert_eq!(r.state_changed_at, t0);
@@ -4847,7 +5160,7 @@ mod tests {
         assert_eq!(r.updated_at, t0);
         h.m.save(&e).unwrap();
         assert!(e.snapshot().updated_at > t0);
-        e.set_state(state::STARTING, |_| {});
+        e.set_state(state::STARTING, |_| None);
         let r = e.snapshot();
         assert!(r.state_changed_at > t0);
         assert_eq!(h.m.get("m_s").unwrap().state_changed_at, r.state_changed_at);
@@ -4884,13 +5197,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            h.m.update("m_n", set("never")).await.unwrap().sleep,
+            h.m.update("m_n", set("never"), None).await.unwrap().sleep,
             "never"
         );
-        assert_eq!(h.m.update("m_n", set("")).await.unwrap().sleep, "never");
-        assert_eq!(h.m.update("m_n", set("3h")).await.unwrap().sleep, "3h");
+        assert_eq!(
+            h.m.update("m_n", set(""), None).await.unwrap().sleep,
+            "never"
+        );
+        assert_eq!(
+            h.m.update("m_n", set("3h"), None).await.unwrap().sleep,
+            "3h"
+        );
         assert!(matches!(
-            h.m.update("m_n", set("soon")).await,
+            h.m.update("m_n", set("soon"), None).await,
             Err(MError::Invalid(_))
         ));
     }
@@ -5318,7 +5637,7 @@ mod tests {
         let created = h.m.create(req).await.unwrap();
         assert_eq!(created.state, state::CREATED);
         assert!(matches!(
-            h.m.start(&created.id).await,
+            h.m.start(&created.id, None).await,
             Err(MError::BootFailed(_))
         ));
     }
@@ -5331,8 +5650,8 @@ mod tests {
             let e = h.add("m_race", state::STOPPED, 512);
             h.disks(&e).await;
             let (a, b) = (h.m.clone(), h.m.clone());
-            let start = async move { a.start("m_race").await.map(|m| m.state) };
-            let destroy = async move { b.destroy("m_race").await };
+            let start = async move { a.start("m_race", None).await.map(|m| m.state) };
+            let destroy = async move { b.destroy("m_race", None).await };
             let (started, destroyed) = if round % 2 == 0 {
                 let s = tokio::spawn(start);
                 let d = tokio::spawn(destroy);
@@ -5368,7 +5687,7 @@ mod tests {
             h.disks(&e).await;
         }
         let (a, b) = (h.m.clone(), h.m.clone());
-        let (ra, rb) = tokio::join!(a.start("m_a"), b.start("m_b"));
+        let (ra, rb) = tokio::join!(a.start("m_a", None), b.start("m_b", None));
         let mut outcomes = [ra, rb];
         outcomes.sort_by_key(|r| r.is_err());
         assert_eq!(outcomes[0].as_ref().unwrap().state, state::RUNNING);
@@ -5398,7 +5717,7 @@ mod tests {
         let m = h.m.create(h.request("web")).await.unwrap();
         h.host.calls();
         let stopped =
-            h.m.stop(&m.id, Duration::from_secs(3), false)
+            h.m.stop(&m.id, Duration::from_secs(3), false, None)
                 .await
                 .unwrap();
         assert_eq!(
@@ -5414,8 +5733,11 @@ mod tests {
         assert!(calls.contains(&format!("delete_tap {} 10.64.1.2", netw::tap_name(&m.id))));
         assert_eq!(h.m.usage().0.memory_mb, 0);
         // Stopped on request: a wake refuses, a start boots it again.
-        assert!(matches!(h.m.wake(&m.id).await, Err(MError::NotRunning(_))));
-        let again = h.m.start(&m.id).await.unwrap();
+        assert!(matches!(
+            h.m.wake(&m.id, None).await,
+            Err(MError::NotRunning(_))
+        ));
+        let again = h.m.start(&m.id, None).await.unwrap();
         assert_eq!(
             (again.state.as_str(), again.stopped_reason.as_str()),
             (state::RUNNING, "")
@@ -5431,17 +5753,22 @@ mod tests {
         let e = h.m.entry(&m.id).unwrap();
         // A stop is in flight: the state says so, and whoever asked still holds the lock.
         let held = e.lock.lock().await;
-        e.set_state(state::STOPPING, |_| {});
+        e.set_state(state::STOPPING, |_| None);
         let (m2, id) = (h.m.clone(), m.id.clone());
         let second = tokio::spawn(async move {
             let t0 = std::time::Instant::now();
-            m2.stop(&id, Duration::from_secs(1), false).await.unwrap();
+            m2.stop(&id, Duration::from_secs(1), false, None)
+                .await
+                .unwrap();
             t0.elapsed()
         });
         drop(held);
         // The watcher settles the machine as soon as it can take the lock.
         let _settling = e.lock.lock().await;
-        e.set_state(state::STOPPED, |r| r.stopped_reason = stop::USER.into());
+        e.set_state(state::STOPPED, |r| {
+            r.stopped_reason = stop::USER.into();
+            None
+        });
         drop(_settling);
         let waited = second.await.unwrap();
         assert!(waited < Duration::from_secs(1), "{waited:?}");
@@ -5479,7 +5806,7 @@ mod tests {
         h.disks(&e).await;
         h.host.boots(Boots::Panics);
         let m = h.m.clone();
-        let err = detached(async move { m.start("m_p").await })
+        let err = detached(async move { m.start("m_p", None).await })
             .await
             .unwrap_err();
         match err {
@@ -5490,7 +5817,7 @@ mod tests {
         }
         // The lock went with the task: the next call on the machine is served.
         h.host.boots(Boots::Ready(Duration::ZERO));
-        tokio::time::timeout(Duration::from_secs(5), h.m.destroy("m_p"))
+        tokio::time::timeout(Duration::from_secs(5), h.m.destroy("m_p", None))
             .await
             .unwrap()
             .unwrap();
@@ -5506,10 +5833,16 @@ mod tests {
         let pid = h
             .host
             .left_running("m_ours", &h.m.inner.cfg.run_dir().join("m_ours"));
-        ours.set_state(state::RUNNING, |r| r.pid = pid);
+        ours.set_state(state::RUNNING, |r| {
+            r.pid = pid;
+            None
+        });
         // Not ours: a pid from before a reboot, now someone else's.
         let other = h.add("m_other", state::RUNNING, 256);
-        other.set_state(state::RUNNING, |r| r.pid = 4242);
+        other.set_state(state::RUNNING, |r| {
+            r.pid = 4242;
+            None
+        });
         // Caught moving: nothing to adopt, stopped by the host.
         let moving = h.add("m_moving", state::STARTING, 256);
         h.m.recover().await;
@@ -5674,12 +6007,15 @@ mod tests {
         h.ready().await;
         let m = h.m.create(h.request("web")).await.unwrap();
         h.host.calls();
-        let slept = h.m.stop(&m.id, Duration::from_secs(1), true).await.unwrap();
+        let slept =
+            h.m.stop(&m.id, Duration::from_secs(1), true, None)
+                .await
+                .unwrap();
         assert!(slept.suspended);
         assert_eq!(slept.state, state::STOPPED);
         let calls = h.host.calls();
         assert_eq!(&calls[..2], ["snapshot 1000", "kill 1000"]);
-        let back = h.m.start(&m.id).await.unwrap();
+        let back = h.m.start(&m.id, None).await.unwrap();
         assert!(!back.suspended);
         assert_eq!(back.state, state::RUNNING);
         let calls = h.host.calls();
@@ -5728,7 +6064,7 @@ mod tests {
         assert!(unwritten());
         // A change to the machine carries the use with it, and the tick has nothing left.
         h.m.touch("m_t").unwrap();
-        e.set_state(state::STARTING, |_| {});
+        e.set_state(state::STARTING, |_| None);
         h.m.save(&e).unwrap();
         assert_eq!(
             h.stored("m_t").unwrap().last_used_at,
@@ -5814,7 +6150,7 @@ mod tests {
         let (root, snap) = (format!("m/{}/root", src.id), format!("fork-{}", fork.id));
         assert!(h.snapshot_exists(&root, &snap));
         h.pool.calls();
-        h.m.destroy(&fork.id).await.unwrap();
+        h.m.destroy(&fork.id, None).await.unwrap();
         // Nothing clones the snapshot once the fork is gone: it goes with the fork.
         let calls = h.pool.calls();
         assert!(
@@ -5831,11 +6167,11 @@ mod tests {
             .clone_snapshot(&root, &snap_a, "m/other/root")
             .await
             .unwrap();
-        h.m.destroy(&a.id).await.unwrap();
+        h.m.destroy(&a.id, None).await.unwrap();
         assert!(h.snapshot_exists(&root, &snap_a));
         // A snapshot that is not a fork's (the image's base) is never touched.
         h.pool.calls();
-        h.m.destroy(&src.id).await.unwrap();
+        h.m.destroy(&src.id, None).await.unwrap();
         assert!(!h
             .pool
             .calls()
@@ -5851,7 +6187,7 @@ mod tests {
         let fork = h.fork(&src.id, "fork").await;
         let fork_root = format!("m/{}/root", fork.id);
         let snap = format!("fork-{}", fork.id);
-        h.m.destroy(&src.id).await.unwrap();
+        h.m.destroy(&src.id, None).await.unwrap();
         // The fork was promoted and owns the snapshot it was made from; with the source gone
         // nothing clones that snapshot, so it goes too.
         assert!(h.pool.dev().join(format!("byard/{fork_root}")).exists());
@@ -5859,7 +6195,7 @@ mod tests {
         assert!(!h.snapshot_exists(&fork_root, &snap));
         assert_eq!(h.pool.zfs.origin(&fork_root).await.unwrap(), None);
         assert_eq!(h.m.get(&fork.id).unwrap().state, state::RUNNING);
-        h.m.destroy(&fork.id).await.unwrap();
+        h.m.destroy(&fork.id, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -5992,7 +6328,7 @@ mod tests {
         assert!(h.dns_kept("10.64.1.3"));
         assert!(!h.dns_kept("10.64.1.2"), "the gateway machine is open");
         // A stop takes it out right after the pin.
-        h.m.stop(&m.id, Duration::from_secs(3), false)
+        h.m.stop(&m.id, Duration::from_secs(3), false, None)
             .await
             .unwrap();
         let calls = h.host.calls();
@@ -6006,7 +6342,7 @@ mod tests {
         assert!(!h.dns_kept("10.64.1.3"));
         assert!(h.m.inner.policies.lock().unwrap().is_empty());
         // Every start sets it again.
-        h.m.start(&m.id).await.unwrap();
+        h.m.start(&m.id, None).await.unwrap();
         assert!(h.host.calls().contains(&format!("set_policy {VIA}")));
     }
 
@@ -6020,7 +6356,10 @@ mod tests {
                 .await
                 .unwrap();
         h.host.calls();
-        let changed = h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        let changed =
+            h.m.update(&m.id, set_egress("none", None), None)
+                .await
+                .unwrap();
         assert_eq!(changed.egress, egress("none", None));
         assert_eq!(
             h.host.calls(),
@@ -6029,21 +6368,27 @@ mod tests {
         );
         assert!(h.dns_kept("10.64.1.3"));
         // The same policy again: nothing to change.
-        h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        h.m.update(&m.id, set_egress("none", None), None)
+            .await
+            .unwrap();
         assert!(h.host.calls().is_empty());
         // Open: nothing in the tables, outside names forwarded again.
-        h.m.update(&m.id, set_egress("open", None)).await.unwrap();
+        h.m.update(&m.id, set_egress("open", None), None)
+            .await
+            .unwrap();
         assert_eq!(h.host.calls(), ["unset_policy none 10.64.1.3"]);
         assert!(!h.dns_kept("10.64.1.3"));
         // Stopped: the record changes, the next start applies it.
-        h.m.stop(&m.id, Duration::from_secs(3), false)
+        h.m.stop(&m.id, Duration::from_secs(3), false, None)
             .await
             .unwrap();
         h.host.calls();
-        h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        h.m.update(&m.id, set_egress("none", None), None)
+            .await
+            .unwrap();
         assert!(h.host.calls().is_empty());
         assert_eq!(h.stored(&m.id).unwrap().egress, egress("none", None));
-        h.m.start(&m.id).await.unwrap();
+        h.m.start(&m.id, None).await.unwrap();
         assert!(h
             .host
             .calls()
@@ -6076,11 +6421,14 @@ mod tests {
         ] {
             let create = h.m.create(h.request_egress("sbx2", "via", Some(via))).await;
             assert_eq!(refused(create), want);
-            let update = h.m.update(&m.id, set_egress("via", Some(via))).await;
+            let update = h.m.update(&m.id, set_egress("via", Some(via)), None).await;
             assert_eq!(refused(update), want);
         }
         assert_eq!(
-            refused(h.m.update(&m.id, set_egress("via", Some(&m.id))).await),
+            refused(
+                h.m.update(&m.id, set_egress("via", Some(&m.id)), None)
+                    .await
+            ),
             "egress.via names the machine itself"
         );
         assert_eq!(
@@ -6094,7 +6442,7 @@ mod tests {
         assert!(h.m.list(None).iter().all(|x| x.name != "sbx2"));
         assert_eq!(h.stored(&m.id).unwrap().egress, api::Egress::default());
         // Its own tenant's machine is a gateway.
-        h.m.update(&m.id, set_egress("via", Some(&gw.id)))
+        h.m.update(&m.id, set_egress("via", Some(&gw.id)), None)
             .await
             .unwrap();
     }
@@ -6108,18 +6456,18 @@ mod tests {
             h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
                 .await
                 .unwrap();
-        h.m.destroy(&gw.id).await.unwrap();
+        h.m.destroy(&gw.id, None).await.unwrap();
         // The policy stays, and so does the address it names: a new machine gets another.
         assert_eq!(h.m.create(h.request("next")).await.unwrap().ip, "10.64.1.4");
         h.host.calls();
         // A stop takes out what was set, gateway or not.
-        h.m.stop(&m.id, Duration::from_secs(3), false)
+        h.m.stop(&m.id, Duration::from_secs(3), false, None)
             .await
             .unwrap();
         assert!(h.host.calls().contains(&format!("unset_policy {VIA}")));
         // A start is refused until the policy names a machine that is there; nothing moves.
         assert_eq!(
-            refused(h.m.start(&m.id).await),
+            refused(h.m.start(&m.id, None).await),
             format!("egress.via {}: no such machine", gw.id)
         );
         assert!(h.host.calls().is_empty());
@@ -6208,7 +6556,7 @@ mod tests {
         h.host.calls();
         h.host.refuse_policies.store(true, Relaxed);
         let err =
-            h.m.update(&m.id, set_egress("none", None))
+            h.m.update(&m.id, set_egress("none", None), None)
                 .await
                 .unwrap_err();
         assert!(matches!(err, MError::Other(_)), "{err:?}");
@@ -6228,7 +6576,10 @@ mod tests {
         assert!(h.dns_kept("10.64.1.3"));
         // Accepted, it lands.
         h.host.refuse_policies.store(false, Relaxed);
-        let changed = h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        let changed =
+            h.m.update(&m.id, set_egress("none", None), None)
+                .await
+                .unwrap();
         assert_eq!(changed.egress, egress("none", None));
     }
 
@@ -6293,7 +6644,7 @@ mod tests {
         );
         assert!(!h.dns_kept("10.64.1.2"));
         // A stop withdraws them right after the pin, a start sets them again.
-        h.m.stop(&m.id, Duration::from_secs(3), false)
+        h.m.stop(&m.id, Duration::from_secs(3), false, None)
             .await
             .unwrap();
         let calls = h.host.calls();
@@ -6305,10 +6656,10 @@ mod tests {
             "{calls:?}"
         );
         assert!(h.m.inner.policies.lock().unwrap().is_empty());
-        h.m.start(&m.id).await.unwrap();
+        h.m.start(&m.id, None).await.unwrap();
         assert!(h.host.calls().contains(&format!("set_policy {open}")));
         // A destroy withdraws them too, and the drop counters with the others.
-        h.m.destroy(&m.id).await.unwrap();
+        h.m.destroy(&m.id, None).await.unwrap();
         assert!(h.host.calls().contains(&format!("unset_policy {open}")));
         assert!(h.m.inner.policies.lock().unwrap().is_empty());
         assert!(!h.host.counted.lock().unwrap().contains_key("10.64.1.2"));
@@ -6326,7 +6677,7 @@ mod tests {
             new_connections_per_minute: Some(0),
             ..Default::default()
         };
-        let changed = h.m.update(&m.id, set_limits(lift)).await.unwrap();
+        let changed = h.m.update(&m.id, set_limits(lift), None).await.unwrap();
         assert_eq!(changed.limits, view_limits(&[25], 0, 0));
         assert_eq!(
             h.host.calls(),
@@ -6337,7 +6688,7 @@ mod tests {
             bandwidth_mbit: Some(2),
             ..Default::default()
         };
-        let changed = h.m.update(&m.id, set_limits(ports)).await.unwrap();
+        let changed = h.m.update(&m.id, set_limits(ports), None).await.unwrap();
         assert_eq!(changed.limits, view_limits(&[25, 465], 0, 2));
         assert_eq!(
             h.stored(&m.id).unwrap().limits,
@@ -6353,11 +6704,11 @@ mod tests {
             bandwidth_mbit: Some(2),
             ..Default::default()
         };
-        h.m.update(&m.id, set_limits(same)).await.unwrap();
+        h.m.update(&m.id, set_limits(same), None).await.unwrap();
         assert!(h.host.calls().is_empty());
         // Nothing left to limit: nothing in the tables.
         let none = view_limits(&[], 0, 0);
-        h.m.update(&m.id, set_limits(none)).await.unwrap();
+        h.m.update(&m.id, set_limits(none), None).await.unwrap();
         assert_eq!(
             h.host.calls(),
             ["unset_policy open 10.64.1.2 ports [25, 465] conn 0 mbit 2"]
@@ -6369,7 +6720,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            refused(h.m.update(&m.id, set_limits(bad.clone())).await),
+            refused(h.m.update(&m.id, set_limits(bad.clone()), None).await),
             "limits.blocked_ports: 0 is not a port"
         );
         assert_eq!(
@@ -6385,7 +6736,7 @@ mod tests {
         assert!(h.host.calls().is_empty());
         assert_eq!(h.stored(&m.id).unwrap().limits.blocked_ports, Some(vec![]));
         // Stopped: the record changes, the next start applies it.
-        h.m.stop(&m.id, Duration::from_secs(3), false)
+        h.m.stop(&m.id, Duration::from_secs(3), false, None)
             .await
             .unwrap();
         h.host.calls();
@@ -6394,11 +6745,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            h.m.update(&m.id, set_limits(conn)).await.unwrap().limits,
+            h.m.update(&m.id, set_limits(conn), None)
+                .await
+                .unwrap()
+                .limits,
             view_limits(&[], 6, 0)
         );
         assert!(h.host.calls().is_empty());
-        h.m.start(&m.id).await.unwrap();
+        h.m.start(&m.id, None).await.unwrap();
         assert!(h
             .host
             .calls()
@@ -6431,12 +6785,14 @@ mod tests {
             bandwidth_mbit: Some(10),
             ..Default::default()
         };
-        h.m.update(&m.id, set_limits(own)).await.unwrap();
+        h.m.update(&m.id, set_limits(own), None).await.unwrap();
         assert!(h.host.calls().is_empty(), "nothing to change in the tables");
         // Open: the policy becomes its limits, in one transaction, and the resolver lets
         // it go once the tables have changed.
         assert!(h.dns_kept("10.64.1.3"));
-        h.m.update(&m.id, set_egress("open", None)).await.unwrap();
+        h.m.update(&m.id, set_egress("open", None), None)
+            .await
+            .unwrap();
         assert_eq!(
             h.host.calls(),
             [format!(
@@ -6445,7 +6801,9 @@ mod tests {
         );
         assert!(!h.dns_kept("10.64.1.3"));
         // And back: the resolver takes it in before.
-        h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        h.m.update(&m.id, set_egress("none", None), None)
+            .await
+            .unwrap();
         assert_eq!(
             h.host.calls(),
             ["swap_policy open 10.64.1.3 ports [25] conn 600 mbit 10 -> none 10.64.1.3"]
@@ -6453,15 +6811,23 @@ mod tests {
         assert!(h.dns_kept("10.64.1.3"));
         // Refused, a swap to open keeps the machine in the resolver with its old policy.
         h.host.refuse_policies.store(true, Relaxed);
-        assert!(h.m.update(&m.id, set_egress("open", None)).await.is_err());
+        assert!(h
+            .m
+            .update(&m.id, set_egress("open", None), None)
+            .await
+            .is_err());
         assert!(h.dns_kept("10.64.1.3"));
         // Refused, a swap from open takes nothing into the resolver.
         h.host.refuse_policies.store(false, Relaxed);
-        h.m.update(&gw.id, set_limits(view_limits(&[25], 600, 1)))
+        h.m.update(&gw.id, set_limits(view_limits(&[25], 600, 1)), None)
             .await
             .unwrap();
         h.host.refuse_policies.store(true, Relaxed);
-        assert!(h.m.update(&gw.id, set_egress("none", None)).await.is_err());
+        assert!(h
+            .m
+            .update(&gw.id, set_egress("none", None), None)
+            .await
+            .is_err());
         assert!(!h.dns_kept("10.64.1.2"));
     }
 
@@ -6564,7 +6930,7 @@ mod tests {
         h.host.stops_take(Duration::from_secs(3));
         let d = h.m.clone();
         let id = m.id.clone();
-        let destroy = tokio::spawn(async move { d.destroy(&id).await });
+        let destroy = tokio::spawn(async move { d.destroy(&id, None).await });
         while h.m.get(&m.id).unwrap().state != state::DESTROYING {
             tokio::task::yield_now().await;
         }
@@ -6572,7 +6938,7 @@ mod tests {
             sleep: Some("3h".into()),
             ..Default::default()
         };
-        let patched = h.m.update(&m.id, set).await;
+        let patched = h.m.update(&m.id, set, None).await;
         destroy.await.unwrap().unwrap();
         assert!(matches!(patched, Err(MError::NotFound)), "{patched:?}");
         assert!(h.stored(&m.id).is_none(), "the record is not written back");
@@ -6717,11 +7083,11 @@ mod tests {
         assert!(rules.policies.iter().any(|p| matches!(p,
             nft::Policy::Via { to, .. } if to == "10.64.1.2")));
         // Running already: the next start probes its port and boots nothing for it.
-        h.m.stop(&m.id, Duration::from_secs(1), false)
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
             .await
             .unwrap();
         h.host.calls();
-        h.m.start(&m.id).await.unwrap();
+        h.m.start(&m.id, None).await.unwrap();
         let calls = h.host.calls();
         assert_eq!(Harness::boots_of(&calls, &gw), 0, "{calls:?}");
         assert_eq!(calls[0], "wait_port 10.64.1.2:3128");
@@ -6741,8 +7107,8 @@ mod tests {
         let (ma, mb) = (h.m.clone(), h.m.clone());
         let (a, b) = (ids[0].clone(), ids[1].clone());
         let (ra, rb) = tokio::join!(
-            tokio::spawn(async move { ma.start(&a).await }),
-            tokio::spawn(async move { mb.start(&b).await })
+            tokio::spawn(async move { ma.start(&a, None).await }),
+            tokio::spawn(async move { mb.start(&b, None).await })
         );
         assert_eq!(ra.unwrap().unwrap().state, state::RUNNING);
         assert_eq!(rb.unwrap().unwrap().state, state::RUNNING);
@@ -6765,7 +7131,7 @@ mod tests {
             Err(MError::BootFailed(b)) => *b,
             other => panic!("{other:?}"),
         };
-        let b = failed(h.m.start(&m.id).await);
+        let b = failed(h.m.start(&m.id, None).await);
         // The answer is the machine asked for, not moved, the gateway's reason in it.
         assert_eq!(
             (b.id.as_str(), b.state.as_str()),
@@ -6792,7 +7158,7 @@ mod tests {
         // Its guest never comes up: the same answer, with the boot's reason.
         h.host.silent_ports.store(false, Relaxed);
         h.host.boots(Boots::Silent);
-        let b = failed(h.m.start(&m.id).await);
+        let b = failed(h.m.start(&m.id, None).await);
         assert!(
             b.error
                 .starts_with("the tenant's gateway did not come up: the guest did not come up: "),
@@ -6802,7 +7168,7 @@ mod tests {
         assert_eq!(h.m.get(&m.id).unwrap().state, state::CREATED);
         // Fixed: the next start brings the gateway back from `error`, then the machine.
         h.host.boots(Boots::Ready(Duration::ZERO));
-        assert_eq!(h.m.start(&m.id).await.unwrap().state, state::RUNNING);
+        assert_eq!(h.m.start(&m.id, None).await.unwrap().state, state::RUNNING);
         assert_eq!(h.gateway_view().state, state::RUNNING);
         assert_eq!(h.m.get(&gw).unwrap().error, "");
     }
@@ -6859,7 +7225,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         let gw = h.with_gateway().await;
         let m = h.m.create(h.consumer("sbx")).await.unwrap();
-        h.m.stop(&m.id, Duration::from_secs(1), false)
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
             .await
             .unwrap();
         // A start that needs the gateway holds the tenant's lock until it is `starting`:
@@ -6883,7 +7249,7 @@ mod tests {
             Err(MError::GatewayInUse)
         ));
         assert_eq!(h.gateway_view().state, state::RUNNING);
-        h.m.stop(&m.id, Duration::from_secs(1), false)
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
             .await
             .unwrap();
         h.m.delete_gateway("t1").await.unwrap();
@@ -6895,7 +7261,7 @@ mod tests {
         assert!(!h.pool.dev().join(format!("byard/m/{gw}")).exists());
         // Its consumer's next start is refused, with what to do; none is success.
         assert_eq!(
-            refused(h.m.start(&m.id).await),
+            refused(h.m.start(&m.id, None).await),
             "tenant has no gateway: PUT /v1/tenants/t1/gateway first"
         );
         assert_eq!(h.stored(&m.id).unwrap().state, state::STOPPED);
@@ -6914,7 +7280,7 @@ mod tests {
             Err(MError::TenantInUse)
         ));
         assert!(h.m.get(&gw).is_ok());
-        h.m.destroy(&m.id).await.unwrap();
+        h.m.destroy(&m.id, None).await.unwrap();
         h.m.delete_tenant("t1").await.unwrap();
         assert!(matches!(h.m.get(&gw), Err(MError::NotFound)));
         assert!(!h.pool.dev().join(format!("byard/m/{gw}")).exists());
@@ -6928,7 +7294,9 @@ mod tests {
         let want = "tenant has no gateway: PUT /v1/tenants/t1/gateway first";
         assert_eq!(refused(h.m.create(h.consumer("sbx")).await), want);
         let m = h.m.create(h.request("web")).await.unwrap();
-        let patch = h.m.update(&m.id, set_egress("via", Some("gateway"))).await;
+        let patch =
+            h.m.update(&m.id, set_egress("via", Some("gateway")), None)
+                .await;
         assert_eq!(refused(patch), want);
         assert_eq!(h.stored(&m.id).unwrap().egress, api::Egress::default());
         // The gateway itself cannot send through itself: a start of it refuses.
@@ -6950,7 +7318,7 @@ mod tests {
         let m = h.m.create(req).await.unwrap();
         h.host.calls();
         let patched =
-            h.m.update(&m.id, set_egress("via", Some("gateway")))
+            h.m.update(&m.id, set_egress("via", Some("gateway")), None)
                 .await
                 .unwrap();
         assert!(patched.egress.via_gateway());
@@ -7011,16 +7379,18 @@ mod tests {
         assert_eq!(h.m.get(&gw).unwrap().image, IMAGE2);
         // Asleep with a memory snapshot, then replaced: the next start boots it cold.
         let sbx = h.m.list(None)[0].id.clone();
-        h.m.stop(&sbx, Duration::from_secs(1), false).await.unwrap();
+        h.m.stop(&sbx, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
         let e = h.m.entry(&gw).unwrap();
-        h.m.stop_entry(&e, stop::USER, Duration::from_secs(1), true)
+        h.m.stop_entry(&e, stop::USER, Duration::from_secs(1), true, None)
             .await
             .unwrap();
         assert!(h.m.get(&gw).unwrap().suspended);
         h.m.set_gateway("t1", gateway_spec(8080)).await.unwrap();
         assert!(!h.m.get(&gw).unwrap().suspended);
         h.host.calls();
-        h.m.start(&sbx).await.unwrap();
+        h.m.start(&sbx, None).await.unwrap();
         let calls = h.host.calls();
         assert!(
             calls.contains(&format!(
@@ -7044,7 +7414,7 @@ mod tests {
         h.m.create(h.consumer("sbx")).await.unwrap();
         // Destroyed under a running consumer (by its machine id): a new gateway gets another
         // address, so the consumer's policy reaches nothing rather than a stranger.
-        h.m.destroy_machine(&gw).await.unwrap();
+        h.m.destroy_machine(&gw, None).await.unwrap();
         let t = h.m.set_gateway("t1", gateway_spec(3128)).await.unwrap();
         assert_eq!(t.gateway.unwrap().ip, "10.64.1.4");
     }
@@ -7080,16 +7450,20 @@ mod tests {
             copy: String::new(),
         });
         let refused = [
-            gateway(h.m.destroy(&gw).await),
+            gateway(h.m.destroy(&gw, None).await),
             gateway(
-                h.m.stop(&gw, Duration::from_secs(1), false)
+                h.m.stop(&gw, Duration::from_secs(1), false, None)
                     .await
                     .map(|_| ()),
             ),
-            gateway(h.m.start(&gw).await.map(|_| ())),
-            gateway(h.m.wake(&gw).await.map(|_| ())),
+            gateway(h.m.start(&gw, None).await.map(|_| ())),
+            gateway(h.m.wake(&gw, None).await.map(|_| ())),
             gateway(h.m.touch(&gw)),
-            gateway(h.m.update(&gw, set_egress("none", None)).await.map(|_| ())),
+            gateway(
+                h.m.update(&gw, set_egress("none", None), None)
+                    .await
+                    .map(|_| ()),
+            ),
             gateway(h.m.create(fork).await.map(|_| ())),
             gateway(h.m.exec(&gw, exec).await.map(|_| ())),
             gateway(h.m.put_file(&gw, put).await),
@@ -7132,6 +7506,7 @@ mod tests {
             e.set_state(state::RUNNING, |r| {
                 (r.role, r.tenant, r.name) = (Some(Role::Gateway), tenant.into(), "gateway".into());
                 (r.ports, r.pid) = (vec![3128], 4242);
+                None
             });
             e
         };
@@ -7141,6 +7516,7 @@ mod tests {
             e.set_state(state::RUNNING, |r| {
                 (r.tenant, r.name, r.egress, r.pid) = (tenant.into(), id.into(), eg, pid);
                 (r.host_num, r.ip) = (n, format!("10.64.1.{n}"));
+                None
             });
             e
         };
@@ -7310,7 +7686,7 @@ mod tests {
         let e = h.add("m_a", state::RUNNING, 512);
         let t0 = Utc::now() - chrono::Duration::seconds(30);
         e.meter.lock().unwrap().at = t0;
-        e.set_state(state::STOPPED, |_| {});
+        e.set_state(state::STOPPED, |_| None);
         // A minute later, the tick finds it stopped: the 30 s before the stop ran, the
         // minute after did not.
         h.m.measure(Utc::now() + chrono::Duration::seconds(60))
@@ -7550,7 +7926,7 @@ mod tests {
         // Booted by this daemon: its CPU counts from the boot, so the first reading counts.
         h.host.cpu(&m.id, 3_000_000);
         h.host.internet(&m.ip, 500, 50);
-        h.m.destroy(&m.id).await.unwrap();
+        h.m.destroy(&m.id, None).await.unwrap();
         assert!(!h.host.counted.lock().unwrap().contains_key(&m.ip));
         // Measured by the destroy itself: no tick ran.
         let mine: Vec<api::UsageBucket> =
@@ -7572,7 +7948,7 @@ mod tests {
         // be handed out again with the old count. The tick tries again.
         let m = h.m.create(h.request("web2")).await.unwrap();
         h.host.refuse_uncount.store(true, Relaxed);
-        let err = h.m.destroy(&m.id).await.unwrap_err();
+        let err = h.m.destroy(&m.id, None).await.unwrap_err();
         assert!(format!("{err:#}").contains("usage counters"), "{err:#}");
         assert_eq!(h.m.get(&m.id).unwrap().state, state::DESTROYING);
         h.host.refuse_uncount.store(false, Relaxed);
@@ -7643,5 +8019,515 @@ mod tests {
             assert_eq!(e.code, "invalid", "{q}");
             assert!(e.error.contains(why), "{q}: {}", e.error);
         }
+    }
+
+    // --- events and versions (ADR 0019) ---
+
+    impl Harness {
+        /// The events about a machine, oldest first.
+        fn events_of(&self, id: &str) -> Vec<api::Event> {
+            let f = events::Filter {
+                machine: Some(id.into()),
+                ..Default::default()
+            };
+            self.m.inner.events.read(0, &f, 5000).unwrap().events
+        }
+
+        fn reasons(&self, id: &str) -> Vec<String> {
+            self.events_of(id).into_iter().map(|e| e.reason).collect()
+        }
+
+        /// Waits until the machine's events hold `n` of `reason`.
+        async fn events_reach(&self, id: &str, reason: &str, n: usize) {
+            let count = || self.reasons(id).iter().filter(|r| *r == reason).count();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while count() < n {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{id}: {:?}", self.reasons(id)));
+        }
+    }
+
+    #[tokio::test]
+    async fn each_transition_is_an_event_and_moves_the_version() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        let running = h.m.start(&m.id, None).await.unwrap();
+        // The version is the seq of the last event, in memory and on disk.
+        let evs = h.events_of(&m.id);
+        assert_eq!(running.version, evs.last().unwrap().seq);
+        assert_eq!(h.stored(&m.id).unwrap().version, running.version);
+        h.m.destroy(&m.id, None).await.unwrap();
+        assert_eq!(
+            h.reasons(&m.id),
+            [
+                "created",
+                "starting",
+                "started",
+                "stopping",
+                "stopped",
+                "starting",
+                "started",
+                "destroyed"
+            ]
+        );
+        let evs = h.events_of(&m.id);
+        assert!(evs.windows(2).all(|w| w[0].seq < w[1].seq));
+        assert!(evs
+            .iter()
+            .all(|e| e.tenant == "t1" && e.kind == api::event::NORMAL));
+        let data = |i: usize| evs[i].data.clone().unwrap_or_default();
+        assert_eq!(data(0)["image"], IMAGE);
+        assert_eq!(data(1)["resume"], false);
+        assert_eq!(data(2)["pid"], 1000);
+        assert_eq!(
+            (data(3)["reason"].clone(), data(4)["reason"].clone()),
+            ("user".into(), "user".into())
+        );
+        assert_eq!(evs[4].message, "stopped (user)");
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_is_a_warning_that_says_whose_fault() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        // The image's: the guest exited booting; its console's tail is in the message.
+        h.host.boots(Boots::Exits(1));
+        let m = match h.m.create(h.request("bad")).await {
+            Err(MError::BootFailed(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(h.reasons(&m.id), ["created", "starting", "boot_failed"]);
+        let e = h.events_of(&m.id).pop().unwrap();
+        assert_eq!(e.kind, api::event::WARNING);
+        assert!(
+            e.message.starts_with("the machine exited during boot"),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message.contains("[briqyard] exit code=1"),
+            "{}",
+            e.message
+        );
+        assert_eq!(m.version, e.seq);
+        // The host's: a policy the tables refuse.
+        h.host.boots(Boots::Ready(Duration::ZERO));
+        h.host.refuse_policies.store(true, Relaxed);
+        let err =
+            h.m.create(h.request_egress("walled", "none", None))
+                .await
+                .unwrap_err();
+        assert!(matches!(err, MError::Other(_)), "{err:?}");
+        let id =
+            h.m.list(Some("t1"))
+                .into_iter()
+                .find(|x| x.name == "walled")
+                .unwrap()
+                .id;
+        assert_eq!(h.reasons(&id), ["created", "starting", "start_failed"]);
+        let e = h.events_of(&id).pop().unwrap();
+        assert_eq!(e.kind, api::event::WARNING);
+        assert!(e.message.contains("nft: refused"), "{}", e.message);
+    }
+
+    #[tokio::test]
+    async fn an_exit_and_its_restart_are_events() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("job")).await.unwrap();
+        h.host.exit(1000, 7, false);
+        // The default policy, on-failure with 3 retries: the first comes after a second.
+        h.events_reach(&m.id, reason::STARTED, 2).await;
+        assert_eq!(
+            h.reasons(&m.id),
+            [
+                "created",
+                "starting",
+                "started",
+                "exited",
+                "restarting",
+                "starting",
+                "started"
+            ]
+        );
+        let evs = h.events_of(&m.id);
+        let (exited, restarting) = (&evs[3], &evs[4]);
+        assert_eq!(
+            (exited.kind.as_str(), exited.message.as_str()),
+            ("warning", "exited with code 7")
+        );
+        assert_eq!(
+            exited.data,
+            Some(json!({"code": 7, "oom": false, "restarting": true}))
+        );
+        assert_eq!(restarting.message, "restart 1 in 1 s (at most 3)");
+        assert_eq!(restarting.data.as_ref().unwrap()["attempt"], 1);
+        // An exit with nothing to restart says so, and a clean exit is no warning.
+        let mut req = h.request("once");
+        req.restart = Some(api::RestartPolicy {
+            policy: "no".into(),
+            max_retries: 0,
+        });
+        let m = h.m.create(req).await.unwrap();
+        h.host.exit(1002, 0, false);
+        h.events_reach(&m.id, reason::EXITED, 1).await;
+        let e = h.events_of(&m.id).pop().unwrap();
+        assert_eq!(
+            (e.kind.as_str(), e.message.as_str()),
+            ("normal", "exited with code 0")
+        );
+        assert_eq!(e.data.unwrap()["restarting"], false);
+    }
+
+    #[tokio::test]
+    async fn a_suspend_and_its_resume_are_events() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        h.m.stop(&m.id, Duration::from_secs(1), true, None)
+            .await
+            .unwrap();
+        h.m.start(&m.id, None).await.unwrap();
+        let evs = h.events_of(&m.id);
+        let got: Vec<(&str, &str)> = evs[3..]
+            .iter()
+            .map(|e| (e.reason.as_str(), e.message.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("stopping", "stopping (user)"),
+                ("suspended", "suspended (user): its memory snapshot kept"),
+                ("starting", "resuming from its memory snapshot"),
+                ("resumed", "resumed from its memory snapshot, pid 1001"),
+            ]
+        );
+        assert_eq!(evs[3].data.as_ref().unwrap()["suspend"], true);
+        // A sleeping machine stopped on request: that changes it, so it is an event.
+        let m = h.m.create(h.request("nap")).await.unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        let last = h.events_of(&m.id).pop().unwrap();
+        assert_eq!(
+            (last.reason.as_str(), last.message.as_str()),
+            ("stopped", "stopped on request (it was idle)")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gateway_says_when_it_serves_and_when_it_sleeps() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let gw = h.with_gateway().await;
+        assert_eq!(h.reasons(&gw), ["created"]);
+        let c = h.m.create(h.consumer("c")).await.unwrap();
+        assert_eq!(
+            h.reasons(&gw),
+            ["created", "starting", "started", "gateway_started"]
+        );
+        let started = h.events_of(&gw).pop().unwrap();
+        assert_eq!(
+            started.message,
+            "the tenant's gateway answers on 10.64.1.2:3128"
+        );
+        // Its consumer's start came after the gateway answered.
+        let consumer = h.events_of(&c.id);
+        assert!(consumer[1].seq > started.seq);
+        // A start that finds it running says nothing more.
+        h.m.create(h.consumer("d")).await.unwrap();
+        assert_eq!(h.reasons(&gw).len(), 4);
+        for id in [
+            c.id.clone(),
+            h.m.list(Some("t1"))
+                .into_iter()
+                .find(|m| m.name == "d")
+                .unwrap()
+                .id,
+        ] {
+            h.m.stop(&id, Duration::from_secs(1), false, None)
+                .await
+                .unwrap();
+        }
+        h.m.tick().await;
+        assert_eq!(
+            h.reasons(&gw)[4..],
+            ["stopping", "stopped", "gateway_stopped"]
+        );
+        assert_eq!(
+            h.m.get(&gw).unwrap().version,
+            h.events_of(&gw).pop().unwrap().seq
+        );
+        // A new spec is an update of the gateway.
+        let mut spec = gateway_spec(3128);
+        spec.env.insert("MORE".into(), "1".into());
+        h.m.set_gateway("t1", spec).await.unwrap();
+        let e = h.events_of(&gw).pop().unwrap();
+        assert_eq!(
+            (e.reason.as_str(), e.message.as_str()),
+            ("updated", "the gateway's env replaced")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_patch_is_an_event_only_when_it_changes_something() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let changed =
+            h.m.update(&m.id, set_egress("none", None), None)
+                .await
+                .unwrap();
+        let e = h.events_of(&m.id).pop().unwrap();
+        assert_eq!(
+            (e.reason.as_str(), e.message.as_str()),
+            ("egress_changed", "egress open -> none")
+        );
+        let data = e.data.unwrap();
+        assert_eq!(
+            (&data["fields"], &data["from"], &data["to"]),
+            (&json!(["egress"]), &json!("open"), &json!("none"))
+        );
+        assert_eq!(changed.version, e.seq);
+        // The limits are what the tables hold for its internet traffic too: an egress change.
+        let limits = api::UpdateMachineRequest {
+            limits: Some(api::EgressLimits {
+                bandwidth_mbit: Some(5),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let limited = h.m.update(&m.id, limits.clone(), None).await.unwrap();
+        let e = h.events_of(&m.id).pop().unwrap();
+        assert_eq!(
+            (e.reason.as_str(), e.message.as_str()),
+            ("egress_changed", "egress limits changed")
+        );
+        let data = e.data.unwrap();
+        assert_eq!(data["fields"], json!(["limits"]));
+        assert_eq!(data["limits"]["bandwidth_mbit"], 5);
+        assert_eq!(limited.version, e.seq);
+        // The same limits again change nothing.
+        let same = h.m.update(&m.id, limits, None).await.unwrap();
+        assert_eq!(same.version, limited.version);
+        let sleep = |s: &str| api::UpdateMachineRequest {
+            sleep: Some(s.into()),
+            ..Default::default()
+        };
+        let three = h.m.update(&m.id, sleep("3h"), None).await.unwrap();
+        let e = h.events_of(&m.id).pop().unwrap();
+        assert_eq!(
+            (e.reason.as_str(), e.message.as_str()),
+            ("updated", "sleep changed")
+        );
+        assert_eq!(three.version, e.seq);
+        // The same value again: no event, the version stays.
+        let same = h.m.update(&m.id, sleep("3h"), None).await.unwrap();
+        assert_eq!(same.version, three.version);
+        let both = api::UpdateMachineRequest {
+            sleep: Some("never".into()),
+            metadata: Some(BTreeMap::from([(
+                "briq_id".to_string(),
+                "bq_1".to_string(),
+            )])),
+            ..Default::default()
+        };
+        h.m.update(&m.id, both, None).await.unwrap();
+        let e = h.events_of(&m.id).pop().unwrap();
+        assert_eq!(e.data, Some(json!({"fields": ["sleep", "metadata"]})));
+    }
+
+    #[tokio::test]
+    async fn a_stale_if_match_is_refused_with_the_machine_as_it_is() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let stale = m.version - 1;
+        let moved = |r: Result<api::Machine, MError>| match r {
+            Err(MError::Moved(now)) => now.version,
+            other => panic!("{other:?}"),
+        };
+        let sleep = api::UpdateMachineRequest {
+            sleep: Some("3h".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            moved(h.m.update(&m.id, sleep.clone(), Some(stale)).await),
+            m.version
+        );
+        assert_eq!(h.m.get(&m.id).unwrap().sleep, "30m", "nothing changed");
+        assert_eq!(
+            moved(
+                h.m.stop(&m.id, Duration::from_secs(1), false, Some(stale))
+                    .await
+            ),
+            m.version
+        );
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
+        assert_eq!(moved(h.m.start(&m.id, Some(stale)).await), m.version);
+        assert_eq!(moved(h.m.wake(&m.id, Some(stale)).await), m.version);
+        assert!(matches!(
+            h.m.destroy(&m.id, Some(stale)).await,
+            Err(MError::Moved(_))
+        ));
+        assert!(h.m.get(&m.id).is_ok());
+        // The version read passes, once: the change moves it.
+        let patched =
+            h.m.update(&m.id, sleep.clone(), Some(m.version))
+                .await
+                .unwrap();
+        assert_eq!(patched.sleep, "3h");
+        assert_eq!(
+            moved(h.m.update(&m.id, sleep, Some(m.version)).await),
+            patched.version
+        );
+        let stopped =
+            h.m.stop(&m.id, Duration::from_secs(1), false, Some(patched.version))
+                .await
+                .unwrap();
+        h.m.destroy(&m.id, Some(stopped.version)).await.unwrap();
+        assert!(h.m.get(&m.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_seq_goes_on_past_every_records_version_at_load() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        // A record written at version 500 by a daemon whose log was lost after it.
+        let mut r = record();
+        r.version = 500;
+        h.m.inner.store.put("machines", &r.id, &r).unwrap();
+        h.m.load().unwrap();
+        assert_eq!(h.m.get(&r.id).unwrap().version, 500);
+        assert_eq!(
+            h.m.inner.events.emit(Ev::normal(reason::HOST_STARTED, "")),
+            501
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_says_what_it_adopted_and_what_it_stopped() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.tenant("t1");
+        let ours = h.add("m_ours", state::RUNNING, 256);
+        let pid = h
+            .host
+            .left_running("m_ours", &h.m.inner.cfg.run_dir().join("m_ours"));
+        ours.set_state(state::RUNNING, |r| {
+            r.pid = pid;
+            None
+        });
+        h.add("m_lost", state::STARTING, 256);
+        assert_eq!(h.m.recover().await, (1, 1));
+        let adopted = h.events_of("m_ours").pop().unwrap();
+        assert_eq!(adopted.reason, "adopted");
+        assert_eq!(adopted.data, Some(json!({"pid": pid})));
+        assert_eq!(h.stored("m_ours").unwrap().version, adopted.seq);
+        let lost = h.events_of("m_lost").pop().unwrap();
+        assert_eq!(
+            (lost.reason.as_str(), lost.kind.as_str()),
+            ("stopped", "warning")
+        );
+        assert_eq!(lost.data, Some(json!({"reason": "host"})));
+    }
+
+    /// The next line of a streamed answer, as JSON, within five seconds.
+    async fn next_line(w: &mut reqwest::Response, buf: &mut String) -> serde_json::Value {
+        loop {
+            if let Some(i) = buf.find('\n') {
+                let l = serde_json::from_str(&buf[..i]).unwrap();
+                buf.drain(..=i);
+                return l;
+            }
+            let chunk = tokio::time::timeout(Duration::from_secs(5), w.chunk())
+                .await
+                .expect("a line in time")
+                .unwrap()
+                .expect("the stream is open");
+            buf.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_events_route_pages_watches_and_checks_if_match() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let st = Arc::new(crate::api::AppState {
+            mgr: h.m.clone(),
+            token: String::new(),
+            metrics_token: String::new(),
+            loopback: true,
+            openapi: "",
+            tls_fingerprint: String::new(),
+        });
+        let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", ln.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(ln, crate::api::router(st)).await.unwrap() });
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let http = reqwest::Client::new();
+        let get = |q: String| http.get(format!("{base}/v1/events{q}")).send();
+        let r = get(format!("?machine={}", m.id)).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let page: api::EventsPage = r.json().await.unwrap();
+        let reasons: Vec<&str> = page.events.iter().map(|e| e.reason.as_str()).collect();
+        assert_eq!(reasons, ["created", "starting", "started"]);
+        assert_eq!(page.next, m.version.to_string());
+        // A cursor the log cannot answer, and queries that make no sense.
+        let r = get("?since=99".into()).await.unwrap();
+        assert_eq!(r.status(), 410);
+        let e: api::ApiError = r.json().await.unwrap();
+        assert_eq!((e.code.as_str(), e.oldest), ("gone", Some(1)));
+        for q in ["?since=x", "?type=fatal", "?machine=../x", "?watch=yes"] {
+            let r = get(q.into()).await.unwrap();
+            assert_eq!(r.status(), 400, "{q}");
+        }
+        // A watch from the first event: the rest of the log, then what happens next.
+        let mut w = get(format!("?watch=true&since=1&machine={}", m.id))
+            .await
+            .unwrap();
+        assert_eq!(w.headers()["content-type"], "application/x-ndjson");
+        let mut buf = String::new();
+        assert_eq!(next_line(&mut w, &mut buf).await["reason"], "starting");
+        assert_eq!(next_line(&mut w, &mut buf).await["reason"], "started");
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        assert_eq!(next_line(&mut w, &mut buf).await["reason"], "stopping");
+        assert_eq!(next_line(&mut w, &mut buf).await["reason"], "stopped");
+        // If-Match on a PATCH: stale is 409 with the machine, current passes, garbage is 400.
+        let now = h.m.get(&m.id).unwrap().version;
+        let patch = |v: String| {
+            http.patch(format!("{base}/v1/machines/{}", m.id))
+                .header("if-match", v)
+                .json(&json!({"sleep": "3h"}))
+                .send()
+        };
+        let r = patch((now - 1).to_string()).await.unwrap();
+        assert_eq!(r.status(), 409);
+        let e: api::ApiError = r.json().await.unwrap();
+        assert_eq!(e.code, "conflict");
+        assert_eq!(e.machine.map(|m| m.version), Some(now));
+        let r = patch(format!("\"{now}\"")).await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(r.json::<api::Machine>().await.unwrap().version > now);
+        let r = patch("soon".into()).await.unwrap();
+        assert_eq!(r.status(), 400);
+        // A lifecycle POST takes it too.
+        let r = http
+            .post(format!("{base}/v1/machines/{}/start", m.id))
+            .header("if-match", "1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
     }
 }

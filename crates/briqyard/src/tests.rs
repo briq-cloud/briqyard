@@ -1224,3 +1224,272 @@ async fn errors_name_the_code_and_the_request() {
     );
     assert!(err.starts_with("request http://127.0.0.1:1: "), "{err}");
 }
+
+// --- events and describe (ADR 0019) ---
+
+fn ev(seq: u64, reason: &str, machine: &str, message: &str) -> api::Event {
+    api::Event {
+        seq,
+        at: ts() + chrono::Duration::seconds(seq as i64),
+        kind: if reason == "exited" {
+            "warning"
+        } else {
+            "normal"
+        }
+        .into(),
+        reason: reason.into(),
+        message: message.into(),
+        machine_id: machine.into(),
+        tenant: "t1".into(),
+        host: String::new(),
+        data: None,
+    }
+}
+
+#[test]
+fn events_and_describe_parse() {
+    match parse(&[
+        "events",
+        "--tenant",
+        "t1",
+        "--machine",
+        "m1",
+        "--since",
+        "d1:3,d2:9",
+        "--watch",
+    ])
+    .cmd
+    {
+        Cmd::Events {
+            tenant,
+            machine,
+            since,
+            watch,
+        } => {
+            assert_eq!(
+                (tenant.as_deref(), machine.as_deref(), since.as_deref()),
+                (Some("t1"), Some("m1"), Some("d1:3,d2:9"))
+            );
+            assert!(watch);
+        }
+        _ => panic!("not events"),
+    }
+    match parse(&["events"]).cmd {
+        Cmd::Events {
+            tenant: None,
+            machine: None,
+            since: None,
+            watch: false,
+        } => {}
+        _ => panic!("not plain events"),
+    }
+    match machine(parse(&["machine", "describe", "m1"])) {
+        MachineCmd::Describe { id } => assert_eq!(id, "m1"),
+        _ => panic!("not a describe"),
+    }
+    assert_eq!(
+        fails(&["machine", "describe"]),
+        ErrorKind::MissingRequiredArgument
+    );
+    // The paths, and a cursor added to either.
+    assert_eq!(events_path(None, None, false), "/v1/events");
+    assert_eq!(
+        events_path(Some("t1"), Some("m1"), true),
+        "/v1/events?tenant=t1&machine=m1&watch=true"
+    );
+    assert_eq!(with_since("/v1/events", "4"), "/v1/events?since=4");
+    assert_eq!(
+        with_since("/v1/events?tenant=t1", "d1:3"),
+        "/v1/events?tenant=t1&since=d1:3"
+    );
+    assert_eq!(with_since("/v1/events", ""), "/v1/events");
+}
+
+#[test]
+fn the_events_table() {
+    let out = events_table(&[
+        ev(1, "host_started", "", "daemon started"),
+        ev(2, "exited", "m_0123456789ab", "exited with code 7"),
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "TIME                 TYPE     REASON           MACHINE         MESSAGE",
+            "2026-10-19 08:30:01  normal   host_started     -               daemon started",
+            "2026-10-19 08:30:02  warning  exited           m_0123456789ab  exited with code 7",
+        ]
+    );
+}
+
+#[test]
+fn describe_shows_the_machine_then_its_events() {
+    let m = api::Machine {
+        id: "m_0123456789ab".into(),
+        tenant: "t1".into(),
+        name: "web".into(),
+        image: "nginx:1.27".into(),
+        state: "stopped".into(),
+        stopped_reason: "exit".into(),
+        exit: Some(api::Exit {
+            code: 137,
+            oom_killed: true,
+            at: ts(),
+            restarting: true,
+        }),
+        ip: "10.64.1.2".into(),
+        size: api::Size {
+            vcpus: 1,
+            memory_mb: 256,
+        },
+        volume: Some(api::VolumeSpec {
+            size_gb: 2,
+            mount: "/data".into(),
+        }),
+        sleep: "30m".into(),
+        egress: api::Egress {
+            mode: "via".into(),
+            via: Some("gateway".into()),
+        },
+        endpoints: vec![
+            api::Endpoint {
+                id: "ep_1".into(),
+                machine_id: "m_0123456789ab".into(),
+                port: 80,
+                protocol: "http".into(),
+                host_port: None,
+                host: "web-ab12.byard.localhost".into(),
+                address: "http://web-ab12.byard.localhost".into(),
+                created_at: ts(),
+            },
+            api::Endpoint {
+                id: "ep_2".into(),
+                machine_id: "m_0123456789ab".into(),
+                port: 5432,
+                protocol: "tcp".into(),
+                host_port: Some(20001),
+                host: String::new(),
+                address: "10.0.0.5:20001".into(),
+                created_at: ts(),
+            },
+        ],
+        created_at: ts(),
+        version: 12,
+        host: "d1".into(),
+        ..Default::default()
+    };
+    let out = describe(
+        &m,
+        &[ev(11, "exited", "m_0123456789ab", "killed: out of memory")],
+    );
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        [
+            "Name:          web",
+            "ID:            m_0123456789ab",
+            "Tenant:        t1",
+            "Host:          d1",
+            "Image:         nginx:1.27",
+            "State:         stopped",
+            "Reason:        exit",
+            "Exit:          code 137 at 2026-10-19 08:30:00, out of memory, restarting",
+            "IP:            10.64.1.2",
+            "Size:          1 vCPU, 256 MB",
+            "Volume:        2 GB at /data",
+            "Egress:        via:gateway",
+            "Endpoints:     ep_1 http 80 -> http://web-ab12.byard.localhost",
+            "               ep_2 tcp 5432 -> 10.0.0.5:20001",
+            "Sleep:         30m",
+            "Version:       12",
+            "Created:       2026-10-19 08:30:00",
+            "Events:",
+            "  2026-10-19 08:30:11  warning  exited           killed: out of memory",
+        ]
+    );
+    // A machine with nothing to say says so.
+    let plain = api::Machine {
+        state: "created".into(),
+        ..m.clone()
+    };
+    let out = describe(
+        &api::Machine {
+            exit: None,
+            stopped_reason: String::new(),
+            endpoints: vec![],
+            volume: None,
+            host: String::new(),
+            ..plain
+        },
+        &[],
+    );
+    assert!(out.contains("Endpoints:     none\n"), "{out}");
+    assert!(out.ends_with("Events:\n  none\n"), "{out}");
+    assert!(!out.contains("Host:") && !out.contains("Exit:"), "{out}");
+}
+
+#[test]
+fn a_watch_line_is_an_event_a_heartbeat_or_the_end() {
+    let line = serde_json::to_string(&ev(3, "started", "m1", "running, pid 9")).unwrap();
+    assert_eq!(watch_line(&line).unwrap().map(|e| e.seq), Some(3));
+    assert!(watch_line("{}\n").unwrap().is_none());
+    let err =
+        watch_line(r#"{"error":"the watch fell 9 events behind","code":"lagged"}"#).unwrap_err();
+    assert_eq!(err.to_string(), "the watch fell 9 events behind (lagged)");
+    assert!(watch_line("not json").is_err());
+}
+
+#[tokio::test]
+async fn events_are_read_page_after_page_and_a_watch_line_by_line() {
+    // A full page, then the rest: the second read starts from the first one's cursor.
+    let full = api::EventsPage {
+        events: (1..=500).map(|n| ev(n, "created", "m1", "")).collect(),
+        next: "500".into(),
+    };
+    let rest = api::EventsPage {
+        events: vec![ev(501, "started", "m1", "")],
+        next: "501".into(),
+    };
+    let ndjson = format!(
+        "{}\n{{}}\n{}\n{}\n",
+        serde_json::to_string(&ev(7, "stopping", "m1", "")).unwrap(),
+        serde_json::to_string(&ev(8, "stopped", "m1", "")).unwrap(),
+        r#"{"error":"the daemon is going down: watch again from since=8","code":"shutdown"}"#
+    );
+    let (url, stub) = stub(vec![
+        (
+            StatusCode::OK,
+            JSON.to_vec(),
+            &serde_json::to_string(&full).unwrap(),
+        ),
+        (
+            StatusCode::OK,
+            JSON.to_vec(),
+            &serde_json::to_string(&rest).unwrap(),
+        ),
+        (
+            StatusCode::OK,
+            vec![("content-type", "application/x-ndjson")],
+            &ndjson,
+        ),
+    ])
+    .await;
+    let c = client(&url, None);
+    let (evs, next) = c
+        .events("/v1/events?machine=m1", Some("0".into()))
+        .await
+        .unwrap();
+    assert_eq!((evs.len(), next.as_str()), (501, "501"));
+    let seen = stub.seen.lock().unwrap().clone();
+    assert_eq!(seen[0].path, "/v1/events?machine=m1&since=0");
+    assert_eq!(seen[1].path, "/v1/events?machine=m1&since=500");
+    // A watch hands over each event and ends with the server's reason.
+    let mut got = Vec::new();
+    let err = c
+        .watch("/v1/events?machine=m1&watch=true", |e| {
+            got.push(e.reason.clone())
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(got, ["stopping", "stopped"]);
+    assert!(err.to_string().ends_with("(shutdown)"), "{err}");
+}

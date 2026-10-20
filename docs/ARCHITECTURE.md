@@ -172,6 +172,22 @@ the hour's close; a closed hour is never written again (what a late meter brings
 in the open hour), and a destroyed machine's buckets stay. `GET /v1/usage` answers a range of
 at most 31 days; the fleet asks every host and fails whole.
 
+### Events and versions
+
+Each host keeps one event log (ADR 0019, `events.rs`): a JSON line per event in
+`state/events/<hour>.ndjson`, appended and synced under the log's lock, then sent to watchers.
+`seq` counts one more per event and never goes back: at start it goes on from the larger of the
+log's last line and every record's version. A state change says what happened through
+`Entry::set_state`, whose closure returns the event; the other facts (a create, a restart, a
+PATCH, a backup, a destroy, the gateway serving or put to sleep, an image pull, the daemon's
+start, an adoption) are logged where they happen. The seq of the last event about a machine is
+its `version`; `PATCH`, `DELETE`, `start`, `stop` and `wake` take `If-Match` and answer 409
+`conflict` with the machine when it moved. `GET /v1/events` reads from a cursor (`since`, 410
+`gone` when it is pruned or past the log); `watch=true` subscribes, sends the backlog, then each
+new event as NDJSON with `{}` every 30 s, and closes a watcher that falls 1,024 events behind.
+Retention is `events_keep_days` and 100,000 events. The fleet sends a tenant's or a machine's
+read to its host and merges a read of every host, never partial, with a cursor per host.
+
 ### Sleep
 
 Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the

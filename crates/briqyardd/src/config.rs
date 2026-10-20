@@ -53,6 +53,8 @@ pub struct Config {
     pub image_keep_days: u32,
     /// Closed hours of usage are kept this many days (ADR 0017).
     pub usage_keep_days: u32,
+    /// Events are kept this many days (ADR 0019), and at most `events::MAX_EVENTS` of them.
+    pub events_keep_days: u32,
     /// How long a tag's resolution (which digest `alpine:3.20` is) is reused before asking the
     /// registry again: a burst of creates makes one registry call, not one each.
     pub image_resolve_minutes: u32,
@@ -244,6 +246,7 @@ impl Default for Config {
             root_disk_gb: 8,
             image_keep_days: 14,
             usage_keep_days: 90,
+            events_keep_days: 7,
             image_resolve_minutes: 10,
             boot_timeout_sec: 120,
             boots_at_once: 0,
@@ -319,6 +322,9 @@ impl Config {
         }
         if self.usage_keep_days < 1 {
             bail!("usage_keep_days must be at least 1");
+        }
+        if self.events_keep_days < 1 {
+            bail!("events_keep_days must be at least 1");
         }
         for (name, p) in [
             ("firecracker", &self.firecracker),
@@ -504,6 +510,7 @@ mod tests {
         assert_eq!(c.root_disk_gb, 8);
         assert_eq!(c.image_keep_days, 14);
         assert_eq!(c.usage_keep_days, 90);
+        assert_eq!(c.events_keep_days, 7);
         assert!(!c.suspend_on_sleep);
         assert!(c.fleet.is_none());
         assert_eq!(c.capacity.memory_mb, 0);
@@ -569,6 +576,7 @@ ingress:
 root_disk_gb: 16
 image_keep_days: 3
 usage_keep_days: 30
+events_keep_days: 2
 suspend_on_sleep: true
 fleet:
   url: http://fleet:7430
@@ -618,6 +626,7 @@ capacity:
         assert_eq!(c.root_disk_gb, 16);
         assert_eq!(c.image_keep_days, 3);
         assert_eq!(c.usage_keep_days, 30);
+        assert_eq!(c.events_keep_days, 2);
         assert!(c.suspend_on_sleep);
         let f = c.fleet.unwrap();
         assert_eq!(f.url, "http://fleet:7430");
@@ -724,6 +733,8 @@ capacity:
         assert!(err.to_string().contains("root_disk_gb"), "{err}");
         let err = load("usage_keep_days: 0\n").unwrap_err();
         assert_eq!(err.to_string(), "usage_keep_days must be at least 1");
+        let err = load("events_keep_days: 0\n").unwrap_err();
+        assert_eq!(err.to_string(), "events_keep_days must be at least 1");
         let err = load("egress_limits:\n  blocked_ports: [0]\n").unwrap_err();
         assert_eq!(
             err.to_string(),

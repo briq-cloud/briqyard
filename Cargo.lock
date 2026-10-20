@@ -266,6 +266,7 @@ dependencies = [
  "briqyard-api",
  "chrono",
  "clap",
+ "futures",
  "rand 0.8.8",
  "rcgen",
  "reqwest",

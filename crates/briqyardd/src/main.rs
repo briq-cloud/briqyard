@@ -2,6 +2,7 @@
 
 mod api;
 mod config;
+mod events;
 mod fc;
 mod guestc;
 mod heartbeat;
@@ -180,6 +181,7 @@ async fn run(args: Args) -> Result<()> {
     let handle = axum_server::Handle::new();
     {
         let handle = handle.clone();
+        let watches = mgr.events().clone();
         tokio::spawn(async move {
             let mut term =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -189,6 +191,8 @@ async fn run(args: Args) -> Result<()> {
                 _ = term.recv() => {}
             }
             tracing::info!("shutting down");
+            // A watch never ends on its own: the server would wait for it.
+            watches.close();
             handle.graceful_shutdown(None);
         });
     }

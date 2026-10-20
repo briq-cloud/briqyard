@@ -32,9 +32,9 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | REST resources, OpenAPI | ✓ `api/openapi.yaml`, served | | |
-| `resourceVersion`, optimistic concurrency (409 on a stale write) | ✗ | a version on every record, `If-Match` on writes | yard |
-| watch (list + watch, informers) | ✗ | a watch stream from a version | yard |
-| Events (`kubectl get events`, `describe`) | ✗ | an event log per host: what happened to a machine, a tenant, a host | yard |
+| `resourceVersion`, optimistic concurrency (409 on a stale write) | ✓ a machine's `version`, `If-Match` on PATCH, DELETE, start, stop, wake (ADR 0019) | | |
+| watch (list + watch, informers) | ✓ `GET /v1/events?watch=true` from a cursor; per host, or a tenant or a machine through the fleet | | |
+| Events (`kubectl get events`, `describe`) | ✓ an event log per host, a closed list of reasons, `briqyard events` | events of endpoints and tenants | yard, later |
 | Labels and selectors (`-l app=web`) | ◐ metadata, no selection | `?label=k=v` on listings | yard |
 | Annotations | ✓ metadata | | |
 | Namespaces | ✓ tenants | | |
@@ -133,8 +133,8 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | `kubectl logs`, timestamps | ✓ (`since` is a page cursor, not a time) | | |
 | `kubectl logs -f` | ✗ | follow | yard |
-| `kubectl describe` | ✗ | a machine with its last events | yard |
-| Events | ✗ | (API machinery) | yard |
+| `kubectl describe` | ✓ `briqyard machine describe` | | |
+| Events | ✓ (API machinery) | | |
 | kubelet `/metrics`, cAdvisor (per pod CPU, memory, disk, network) | ◐ `/v1/machines/{id}/stats`, `/metrics` for the host | per machine series on `/metrics` | yard |
 | kube-state-metrics (machines by state, restarts) | ✗ | the same series | yard |
 | metrics-server, `kubectl top pod` | ◐ stats | `briqyard top` | yard |

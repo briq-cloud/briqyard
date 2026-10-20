@@ -64,7 +64,8 @@ paths:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "404": { $ref: "#/components/responses/Error" }
     patch:
-      summary: Change the sleep window, the metadata, the egress policy or the limits, in any state; a running machine's policy and limits change at once
+      summary: Change the sleep window, the metadata, the egress policy or the limits, in any state; a running machine's policy and limits change at once. A change is an event (`egress_changed` for the policy or the limits, else `updated`) and moves `version`; a request that changes nothing does neither
+      parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       requestBody:
         required: true
         content:
@@ -72,38 +73,45 @@ paths:
             schema: { $ref: "#/components/schemas/UpdateMachineRequest" }
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
-        "400": { description: "`invalid`: a bad sleep window, an `egress` the machine cannot take, or bad `limits`" }
+        "400": { description: "`invalid`: a bad sleep window, an `egress` the machine cannot take, bad `limits`, or an `If-Match` that is not a number" }
         "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Moved" }
     delete:
       summary: Destroy a machine, its endpoints and its disks
+      parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       responses:
         "204": { description: destroyed (or already gone) }
+        "409": { $ref: "#/components/responses/Moved" }
   /v1/machines/{id}/start:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
       summary: Boot a created or stopped machine
+      parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "400": { description: "`invalid`: its `egress.via` names a machine that is gone, or `gateway` in a tenant that has none" }
-        "409": { description: "`bad_state`: busy (starting, stopping or destroying); `boot_failed`: the guest did not come up, the body's `machine` is it, in state `error`; or the tenant's gateway did not come up, the body's `machine` is this one, not moved, the gateway's reason in its `error`" }
+        "409": { description: "`bad_state`: busy (starting, stopping or destroying); `boot_failed`: the guest did not come up, the body's `machine` is it, in state `error`; or the tenant's gateway did not come up, the body's `machine` is this one, not moved, the gateway's reason in its `error`; `conflict`: `If-Match` names a version it moved past, the body's `machine` is it as it is" }
         "503": { description: "`capacity`: the host has no room" }
   /v1/machines/{id}/wake:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
       summary: Start a machine that went to sleep (idle), that the host stopped, or whose process ended; one stopped on request stays stopped
+      parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
-        "409": { description: "`not_running`: stopped on request; `bad_state`: busy or in error; `boot_failed`: the guest did not come up" }
+        "409": { description: "`not_running`: stopped on request; `bad_state`: busy or in error; `boot_failed`: the guest did not come up; `conflict`: a stale `If-Match`" }
   /v1/machines/{id}/stop:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
       summary: Stop a machine (SIGTERM to its process, SIGKILL after the timeout); disks are kept. A client that hangs up does not cancel this, nor any transition.
+      parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       requestBody:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/StopRequest" }
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "409": { $ref: "#/components/responses/Moved" }
   /v1/machines/{id}/touch:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
@@ -239,6 +247,25 @@ paths:
       responses:
         "200": { description: "buckets, by hour then machine", content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/UsageBucket" } } } } }
         "400": { description: "`invalid`: `from` or `to` missing, not RFC 3339, not on the hour, `to` not after `from`, or more than 31 days" }
+  /v1/events:
+    get:
+      summary: "What happened on the host, oldest first (ADR 0019): the events after `since`. With `watch=true`, those and then each new event as it is logged, kept open as NDJSON, one event per line, `{}` every 30 s, and a last line `{code, error}` when the watch ends (`lagged`: it fell more than 1,024 events behind; `shutdown`: the daemon goes down); watch again from the last seq received. Through the fleet: with `tenant`, from the tenant's host, else with `machine`, from the machine's host (`x-briqyard-host` names it, the cursor is its seq, a watch is streamed through); with neither, every host, never partial, merged by time with `host` on each event and a cursor `<host>:<seq>,…`; a watch of every host is refused (400)"
+      parameters:
+        - { name: since, in: query, description: "a previous read's `next`; absent or 0, the oldest kept", schema: { type: string } }
+        - { name: tenant, in: query, schema: { type: string } }
+        - { name: machine, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string, enum: [normal, warning] } }
+        - { name: limit, in: query, schema: { type: integer, default: 500, maximum: 5000 } }
+        - { name: watch, in: query, schema: { type: boolean, default: false } }
+      responses:
+        "200":
+          description: a page, or with `watch` a stream
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/EventsPage" } }
+            application/x-ndjson: { schema: { $ref: "#/components/schemas/Event" } }
+        "400": { description: "`invalid`: a `since` that is not a cursor, a bad id or type; a fleet-wide watch" }
+        "404": { description: "`not_found` (fleet): the tenant or the machine is on no host; a destroyed machine's events are read with its tenant" }
+        "410": { description: "`gone`: the events after `since` were removed, or `since` is past the host's last seq (its log began again); `oldest` is the oldest seq kept" }
   /v1/tenants:
     get:
       summary: Tenants on the host (daemon), or tenant to host (fleet)
@@ -333,9 +360,19 @@ components:
       in: path
       required: true
       schema: { type: string }
+    ifMatch:
+      name: If-Match
+      in: header
+      description: "the machine's `version` as last read (ADR 0019): the call is refused with 409 `conflict` when it moved since. Absent: no condition"
+      schema: { type: integer }
   responses:
     Error:
       description: error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+    Moved:
+      description: "`conflict`: `If-Match` names a version the machine moved past; the body's `machine` is it as it is"
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ApiError" }
@@ -476,6 +513,7 @@ components:
         stopped_at: { type: string, format: date-time }
         last_used_at: { type: string, format: date-time }
         sleeps_at: { type: string, format: date-time, description: when it stops if nothing uses it }
+        version: { type: integer, description: "the seq of the last event about it: every event moves it, its last use does not; what `If-Match` compares" }
         host: { type: string, description: the host that runs it (fleet) }
     Endpoint:
       type: object
@@ -629,6 +667,24 @@ components:
         egress_dropped_packets: { type: integer, description: "packets the machine's egress limits dropped (ADR 0018)" }
         closed: { type: boolean, description: "the hour is over: the bucket will not change again" }
         host: { type: string, description: the host that measured it (fleet) }
+    Event:
+      type: object
+      required: [seq, at, type, reason, message]
+      properties:
+        seq: { type: integer, description: one more per event on its host, never reused }
+        at: { type: string, format: date-time }
+        type: { type: string, enum: [normal, warning] }
+        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, stopping, stopped, suspended, exited, restarting, boot_failed, start_failed, updated, egress_changed, backed_up, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted], description: "ADR 0019's table says when each happens; `ready` is not emitted yet" }
+        message: { type: string, description: for a person; at most 1 KB }
+        machine_id: { type: string }
+        tenant: { type: string }
+        host: { type: string, description: "the host it happened on (fleet-wide reads)" }
+        data: { type: object, description: "the reason's facts: `code`, `oom` for `exited`, `reason` for `stopped`…" }
+    EventsPage:
+      type: object
+      properties:
+        events: { type: array, items: { $ref: "#/components/schemas/Event" } }
+        next: { type: string, description: "the `since` to read on from: the last event returned when the page is full, else the host's last seq; through the fleet without a tenant or machine, `<host>:<seq>,…`" }
     Status:
       type: object
       properties:
@@ -678,8 +734,9 @@ components:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, gateway, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]
-          description: with `boot_failed`, the machine left in state `error`
+          description: "with `boot_failed`, the machine left in state `error`; with `conflict` on a stale `If-Match`, the machine as it is"
+        oldest: { type: integer, description: "with `gone`: the oldest event seq kept" }
