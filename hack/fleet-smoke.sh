@@ -18,7 +18,9 @@ trap cleanup EXIT
 
 echo "== fleet"
 check "status"          'curl -fsS "$BRIQYARD_URL/v1/status" | jq -e ".hosts >= 1" >/dev/null'
-for i in $(seq 1 30); do curl -fsS "$BRIQYARD_URL/v1/hosts" | jq -e '.[] | select(.state == "ready" and .capacity.memory_mb > 0)' >/dev/null 2>&1 && break; sleep 1; done
+# Every listed host ready first: a fleet just restarted is still hearing from its hosts, and a
+# listing fails whole while one does not answer (ADR 0006).
+for i in $(seq 1 60); do curl -fsS "$BRIQYARD_URL/v1/hosts" | jq -e 'length > 0 and all(.state == "ready" and .capacity.memory_mb > 0)' >/dev/null 2>&1 && break; sleep 1; done
 check "a ready host"    'curl -fsS "$BRIQYARD_URL/v1/hosts" | jq -e ".[] | select(.state == \"ready\" and .capacity.memory_mb > 0)" >/dev/null'
 M=$(briqyard machine run --image alpine:3.20 --name viafleet --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
 check "created, placed" '[ -n "$(briqyard machine get "$M" | jq -r .host)" ]'
