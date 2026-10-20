@@ -22,6 +22,8 @@ pub struct AppState {
     /// The listener is on loopback: `/metrics` and the OpenAPI document need no token.
     pub loopback: bool,
     pub openapi: &'static str,
+    /// The SHA-256 of the API's certificate; empty on plain HTTP (ADR 0020).
+    pub tls_fingerprint: String,
 }
 
 /// The most a request may ask for. Past these a value is a mistake, not a wish, and the
@@ -286,6 +288,7 @@ async fn status(State(st): S) -> Json<api::Status> {
         machines,
         running,
         disk_free_mb: st.mgr.disk_free_mb().await,
+        tls_fingerprint: st.tls_fingerprint.clone(),
     })
 }
 

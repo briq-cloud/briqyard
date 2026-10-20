@@ -37,7 +37,7 @@ briqyard is imperative; briq's reconciler is the declarative layer above it (`..
 | `boot_failed` | warning | the guest never came up or exited booting (ADR 0011); the console tail in `message` | |
 | `start_failed` | warning | the host failed the start (network, disk, Firecracker): ADR 0011's 500 | |
 | `updated` | normal | a PATCH changed its sleep or metadata, a PUT the gateway's spec | `fields` |
-| `egress_changed` | normal | a PATCH changed its egress | `from`, `to` |
+| `egress_changed` | normal | a PATCH changed its egress policy or its limits (ADR 0018) | `fields`, `from`, `to`, `limits` |
 | `backed_up` | normal | a backup reached the store | `backup`, `bytes`, `incremental` |
 | `destroyed` | normal | its record is gone | |
 | `gateway_started` | normal | the tenant's gateway was started and its port answers | `port` |

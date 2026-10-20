@@ -1,6 +1,6 @@
 # ADR 0017: briqyard reports usage, never costs
 
-Date: 2026-10-20 · Status: accepted (Sylvain, 2026-10-20); amended with the implementation the same day (marked *Built*)
+Date: 2026-10-20 · Status: accepted (Sylvain, 2026-10-20); amended with the implementation the same day (marked *Built*), and by ADR 0018 (`egress_dropped_packets`)
 
 ## Context
 
@@ -16,7 +16,7 @@ On Fly, briq prices its own infrastructure from Fly's list prices and inventory.
 | Compute | `running_seconds`, `suspended_seconds`, `cpu_seconds` (CPU time used), `memory_mb_seconds` (`size.memory_mb` × running seconds: what is reserved) | the state, the cgroup's `cpu.stat` |
 | Disk | `root_gb_hours`, `volume_gb_hours` (allocated size × hours), `disk_used_gb_hours` (bytes the datasets take), `snapshot_gb_hours` (local snapshots, memory snapshots included) | ZFS |
 | Object storage | `backup_gb_hours` (bytes of the machine's backups in the store) | the backup records |
-| Network | `internet_out_bytes`, `internet_in_bytes` (through the host's NAT), `ingress_out_bytes`, `ingress_in_bytes` (through the host's endpoints) | per-machine counters in nftables, the ingress proxy's byte counts |
+| Network | `internet_out_bytes`, `internet_in_bytes` (through the host's NAT), `ingress_out_bytes`, `ingress_in_bytes` (through the host's endpoints); `egress_dropped_packets` (what its egress limits dropped, ADR 0018) | per-machine counters in nftables, the ingress proxy's byte counts |
 
 Intra-tenant traffic is not counted: it is bridged, never routed, and costs nothing on one host.
 

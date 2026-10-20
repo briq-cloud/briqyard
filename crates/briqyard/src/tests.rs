@@ -46,6 +46,34 @@ fn global_flags_go_before_or_after_the_command() {
 }
 
 #[test]
+fn a_daemon_is_pinned_by_its_certificate() {
+    let fp = "ab".repeat(32);
+    let cli = parse(&[
+        "--url",
+        "https://10.0.0.5:7420",
+        "--tls-fingerprint",
+        &fp,
+        "status",
+    ]);
+    assert_eq!(cli.tls_fingerprint.as_deref(), Some(fp.as_str()));
+    // As openssl prints it.
+    let colons = vec!["AB"; 32].join(":");
+    let cli = parse(&["status", "--tls-fingerprint", &colons]);
+    assert_eq!(cli.tls_fingerprint.as_deref(), Some(fp.as_str()));
+    assert_eq!(
+        parse(&["status"]).tls_fingerprint,
+        None,
+        "a fleet: the web PKI"
+    );
+    assert_eq!(
+        fails(&["--tls-fingerprint", "abc", "status"]),
+        ErrorKind::ValueValidation
+    );
+    http_client(Some(&fp)).unwrap();
+    http_client(None).unwrap();
+}
+
+#[test]
 fn machine_run_takes_every_setting() {
     let cli = parse(&[
         "machine",
@@ -205,6 +233,72 @@ fn an_egress_policy_is_read_as_the_daemon_checks_it() {
     }
     assert_eq!(
         fails(&["machine", "set-egress", "m1"]),
+        ErrorKind::MissingRequiredArgument
+    );
+}
+
+#[test]
+fn limits_are_read_as_the_daemon_checks_them() {
+    let run = |extra: &[&str]| {
+        let args = [&["machine", "run", "--image", "x"][..], extra].concat();
+        let MachineCmd::Run(a) = machine(parse(&args)) else {
+            panic!("not a run");
+        };
+        a.limits.request()
+    };
+    // Nothing named: none sent, the host's apply.
+    assert_eq!(run(&[]).unwrap(), None);
+    assert_eq!(
+        run(&[
+            "--block-port",
+            "25",
+            "--block-port",
+            "465",
+            "--conn-per-min",
+            "600",
+            "--bandwidth",
+            "100"
+        ])
+        .unwrap(),
+        Some(api::EgressLimits {
+            blocked_ports: Some(vec![25, 465]),
+            new_connections_per_minute: Some(600),
+            bandwidth_mbit: Some(100),
+        })
+    );
+    // set-limits sends the ones it names; 0 lifts one.
+    let MachineCmd::SetLimits { id, limits } = machine(parse(&[
+        "machine",
+        "set-limits",
+        "m1",
+        "--conn-per-min",
+        "0",
+    ])) else {
+        panic!("not set-limits");
+    };
+    assert_eq!(id, "m1");
+    assert_eq!(
+        limits.request().unwrap(),
+        Some(api::EgressLimits {
+            new_connections_per_minute: Some(0),
+            ..Default::default()
+        })
+    );
+    // Refused before the request, as the daemon would.
+    assert_eq!(
+        run(&["--block-port", "0"]).unwrap_err().to_string(),
+        "limits.blocked_ports: 0 is not a port"
+    );
+    assert_eq!(
+        run(&["--bandwidth", "200000"]).unwrap_err().to_string(),
+        "limits.bandwidth_mbit: at most 100000"
+    );
+    assert_eq!(
+        fails(&["machine", "run", "--image", "x", "--block-port", "smtp"]),
+        ErrorKind::ValueValidation
+    );
+    assert_eq!(
+        fails(&["machine", "set-limits"]),
         ErrorKind::MissingRequiredArgument
     );
 }
@@ -660,6 +754,11 @@ fn the_machine_table() {
         mode: "via".into(),
         via: Some("m_0123456789ab".into()),
     };
+    b.limits = api::EgressLimits {
+        blocked_ports: Some(vec![25, 465]),
+        new_connections_per_minute: Some(600),
+        bandwidth_mbit: Some(100),
+    };
     let mut long = a.clone();
     long.id = "m_03".into();
     long.name = "a-rather-long-name-indeed".into();
@@ -670,7 +769,7 @@ fn the_machine_table() {
     assert!(out.ends_with('\n'));
     assert_eq!(
         lines[0],
-        "ID               TENANT     NAME           IMAGE                    STATE              IP           SIZE      SLEEP  EGRESS             HOST"
+        "ID               TENANT     NAME           IMAGE                    STATE              IP           SIZE      SLEEP  EGRESS             LIMITS                   HOST"
     );
     // Every column starts where its header does.
     let cols = [
@@ -683,11 +782,12 @@ fn the_machine_table() {
         (100, 9),
         (110, 6),
         (117, 18),
+        (136, 24),
     ];
     let heads: Vec<String> = cols.iter().map(|(at, w)| col(lines[0], *at, *w)).collect();
     assert_eq!(
         heads,
-        ["ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP", "EGRESS"]
+        ["ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP", "EGRESS", "LIMITS"]
     );
     let row: Vec<String> = cols.iter().map(|(at, w)| col(lines[2], *at, *w)).collect();
     assert_eq!(
@@ -701,16 +801,19 @@ fn the_machine_table() {
             "",
             "2c/1024M",
             "never",
-            "via:m_0123456789ab"
+            "via:m_0123456789ab",
+            "25,465 600/min 100Mbit"
         ],
         "the stop reason is shown with the state; an empty ip is an empty column; \
-         a via policy in the form set-egress takes"
+         a via policy in the form set-egress takes; the limits short"
     );
-    assert!(
-        lines[2].ends_with("via:m_0123456789ab "),
-        "no host: nothing after the egress"
+    assert_eq!(
+        lines[2].len(),
+        136 + 24 + 1,
+        "no host: nothing after the limits"
     );
     assert_eq!(col(lines[1], 117, 18), "open");
+    assert_eq!(col(lines[1], 136, 24), "-", "nothing limited");
     // A value wider than its column is not cut: the rest of that row moves right.
     assert!(
         lines[3].contains("a-rather-long-name-indeed ghcr.io/org/some-image:v1.2.3 "),
@@ -729,7 +832,7 @@ fn the_machine_table() {
 fn the_host_table() {
     let ready = api::Host {
         id: "h_byard-1".into(),
-        url: "http://10.0.0.9:7420".into(),
+        url: "https://10.0.0.9:7420".into(),
         region: "par".into(),
         provider: "scaleway".into(),
         state: "ready".into(),
@@ -746,6 +849,7 @@ fn the_host_table() {
         last_seen: ts(),
         version: "0.1.0".into(),
         note: String::new(),
+        tls_fingerprint: "ab".repeat(32),
     };
     let ordered = api::Host {
         id: "h_srv-9".into(),
@@ -757,26 +861,31 @@ fn the_host_table() {
         tenants: vec![],
         note: "bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
             .into(),
+        tls_fingerprint: String::new(),
         ..ready.clone()
     };
     let out = host_table(&[ready, ordered]);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 4, "a note takes a line of its own");
+    assert_eq!(lines.len(), 5, "a pin and a note take a line each");
     assert_eq!(
         lines[0],
         "ID               URL                          STATE        MEMORY MB      VCPUS      MACHINES  TENANTS  LAST SEEN"
     );
     assert_eq!(
         lines[1],
-        "h_byard-1        http://10.0.0.9:7420         ready        8192/64000     6/32       3         2        2026-10-19T08:30:00+00:00"
+        "h_byard-1        https://10.0.0.9:7420        ready        8192/64000     6/32       3         2        2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[2],
+        format!("                 tls: {}", "ab".repeat(32))
+    );
+    assert_eq!(
+        lines[3],
         "h_srv-9          -                            provisioning 0/0            0/0        0         0        2026-10-19T08:30:00+00:00",
         "no address yet shows as -"
     );
     assert_eq!(
-        lines[3],
+        lines[4],
         "                 note: bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
     );
     assert!(out.ends_with('\n'));

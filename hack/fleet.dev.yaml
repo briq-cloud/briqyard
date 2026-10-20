@@ -1,12 +1,16 @@
 # briqyard-fleet configuration for the development VM: one static host, the local daemon.
 listen: 0.0.0.0:7430
+# Plain HTTP off loopback, said explicitly (ADR 0020): fc2 reaches the fleet through the Mac's
+# forward. Development only.
+tls: off
 state_dir: /var/lib/briqyard-fleet
 hosts:
   - id: local
     url: http://127.0.0.1:7420
     region: dev
   # The second VM of docs/DEVELOPMENT.md ("Two hosts on the Mac"): the fleet forwards to it
-  # with this token and takes its heartbeats with it (a host nobody expects is refused).
+  # with this token and takes its heartbeats with it (a host nobody expects is refused). Its
+  # daemon binds loopback, so it is plain HTTP and has no tls_fingerprint.
   - id: fc2
     url: http://192.168.64.1:27420
     token: fc2-token

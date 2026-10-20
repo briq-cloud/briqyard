@@ -123,6 +123,9 @@ pub struct Record {
     /// Where its traffic may go (ADR 0015); a record from before has none: open.
     #[serde(default)]
     pub egress: api::Egress,
+    /// Its own limits on its internet traffic, over the host's (ADR 0018).
+    #[serde(default)]
+    pub limits: api::EgressLimits,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
     pub state: String,
@@ -1064,39 +1067,52 @@ impl Manager {
     }
 
     /// The policy a record asks for, resolved against its tenant, with the tenant's gateway:
-    /// `None` for open.
+    /// `None` for open with nothing to limit. An open machine's limits are its own over the
+    /// host's (ADR 0018); `via` and `none` never reach the NAT, so they carry none.
     fn policy_for(&self, r: &Record) -> Result<Option<(Ipv4Addr, nft::Policy)>, MError> {
-        if r.egress.mode == api::egress::OPEN {
+        let limits = self.inner.cfg.egress_limits.with(&r.limits);
+        if r.egress.mode == api::egress::OPEN && limits.is_none() {
             return Ok(None);
         }
         let t = self
             .tenant_of(&r.tenant)
             .ok_or_else(|| anyhow!("tenant network is gone"))?;
         let gateway = t.subnet.gateway();
-        let p = if r.egress.mode == api::egress::VIA {
-            nft::Policy::Via {
-                ip: r.ip.clone(),
+        let ip = r.ip.clone();
+        let p = match r.egress.mode.as_str() {
+            api::egress::OPEN => nft::Policy::Open { ip, limits },
+            api::egress::VIA => nft::Policy::Via {
+                ip,
                 to: self.via_target(&r.egress, &r.tenant, &r.id)?,
                 host: gateway.to_string(),
-            }
-        } else {
-            nft::Policy::None { ip: r.ip.clone() }
+            },
+            _ => nft::Policy::None { ip },
         };
         Ok(Some((gateway, p)))
     }
 
+    /// Tells the resolver to answer a machine internal names only, or no longer, when its
+    /// policy says so.
+    fn internal_dns(&self, gateway: Ipv4Addr, p: &nft::Policy, on: bool) {
+        if !p.internal_only() {
+            return;
+        }
+        if let Ok(ip) = p.ip().parse() {
+            self.inner.dns.internal_only(gateway, ip, on);
+        }
+    }
+
     /// Puts a machine's policy in the tables and the resolver, in place of what they held
-    /// for it; open leaves nothing. The resolver keeps the machine in from before the
-    /// tables do until after they stop.
+    /// for it; open with no limits leaves nothing. The resolver keeps the machine in from
+    /// before the tables do until after they stop.
     async fn set_policy(&self, id: &str, policy: Option<(Ipv4Addr, nft::Policy)>) -> Result<()> {
         self.unset_policy(id).await?;
         let Some((gateway, p)) = policy else {
             return Ok(());
         };
-        let ip: Ipv4Addr = p.ip().parse()?;
-        self.inner.dns.internal_only(gateway, ip, true);
+        self.internal_dns(gateway, &p, true);
         if let Err(err) = self.inner.net.set_policy(&p).await {
-            self.inner.dns.internal_only(gateway, ip, false);
+            self.internal_dns(gateway, &p, false);
             return Err(err);
         }
         self.inner
@@ -1109,9 +1125,7 @@ impl Manager {
 
     /// Records a policy the tables hold already (rendered at start).
     fn hold_policy(&self, id: &str, gateway: Ipv4Addr, p: nft::Policy) {
-        if let Ok(ip) = p.ip().parse() {
-            self.inner.dns.internal_only(gateway, ip, true);
-        }
+        self.internal_dns(gateway, &p, true);
         self.inner
             .policies
             .lock()
@@ -1127,22 +1141,35 @@ impl Manager {
             return Ok(());
         };
         self.inner.net.unset_policy(&p).await?;
-        if let Ok(ip) = p.ip().parse() {
-            self.inner.dns.internal_only(gateway, ip, false);
-        }
+        self.internal_dns(gateway, &p, false);
         self.inner.policies.lock().unwrap().remove(id);
         Ok(())
     }
 
     /// Changes a running machine's policy. From one policy to another is one transaction,
     /// so there is no moment with neither, and a refusal leaves the old one; the resolver
-    /// keeps the machine in throughout (same address, same gateway).
+    /// takes the machine in before the tables change and lets it go after.
     async fn replace_policy(&self, id: &str, new: Option<(Ipv4Addr, nft::Policy)>) -> Result<()> {
         let held = self.inner.policies.lock().unwrap().get(id).cloned();
         match (held, new) {
             (Some((_, old)), Some((gateway, p))) => {
                 if old != p {
-                    self.inner.net.swap_policy(&old, &p).await?;
+                    let (taken, let_go) = (
+                        p.internal_only() && !old.internal_only(),
+                        old.internal_only() && !p.internal_only(),
+                    );
+                    if taken {
+                        self.internal_dns(gateway, &p, true);
+                    }
+                    if let Err(err) = self.inner.net.swap_policy(&old, &p).await {
+                        if taken {
+                            self.internal_dns(gateway, &p, false);
+                        }
+                        return Err(err);
+                    }
+                    if let_go {
+                        self.internal_dns(gateway, &old, false);
+                    }
                 }
                 self.inner
                     .policies
@@ -1622,6 +1649,8 @@ impl Manager {
             sleep: r.sleep.clone(),
             restart: r.restart.clone(),
             egress: r.egress.clone(),
+            limits: self.inner.cfg.egress_limits.with(&r.limits).view(),
+            egress_drops: e.meter.lock().unwrap().drops(),
             metadata: r.metadata.clone(),
             endpoints: self.endpoints_of(&r.id),
             created_at: r.created_at,
@@ -1870,6 +1899,7 @@ impl Manager {
             }
         }
         api::parse_sleep(&req.sleep).map_err(invalid)?;
+        check_limits(req.limits.as_ref())?;
         for f in &req.files {
             if !f.path.starts_with('/') {
                 return Err(invalid(format!("file {:?}: path must be absolute", f.path)));
@@ -1905,6 +1935,7 @@ impl Manager {
             sleep: sleep_setting(&req.sleep),
             restart,
             egress: req.egress.clone().unwrap_or_default(),
+            limits: req.limits.clone().unwrap_or_default(),
             metadata: req.metadata.clone(),
             state: state::CREATED.into(),
             stopped_reason: String::new(),
@@ -1957,6 +1988,9 @@ impl Manager {
             if req.egress.is_none() {
                 rec.egress = was.egress;
                 self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
+            }
+            if req.limits.is_none() {
+                rec.limits = was.limits;
             }
             if rec.size == api::Size::default() {
                 rec.size = was.size;
@@ -3025,9 +3059,10 @@ impl Manager {
 
     // --- use and sleep ---
 
-    /// Changes the sleep window, the metadata or the egress policy of a machine, in any
-    /// state; a running machine's policy changes in the tables at once. A change is an event
-    /// (`egress_changed`, else `updated`); a request that changes nothing is none.
+    /// Changes the sleep window, the metadata, the egress policy or the limits of a machine,
+    /// in any state; a running machine's policy changes in the tables at once. A change is an
+    /// event (`egress_changed` for the policy or the limits, else `updated`); a request that
+    /// changes nothing is none.
     pub async fn update(
         &self,
         id: &str,
@@ -3038,6 +3073,7 @@ impl Manager {
         if let Some(sl) = &req.sleep {
             api::parse_sleep(sl).map_err(invalid)?;
         }
+        check_limits(req.limits.as_ref())?;
         // Under the entry's lock, like every transition: no start or stop runs in between,
         // and a destroy that ran first has removed the machine, whose record is not written
         // back.
@@ -3048,14 +3084,19 @@ impl Manager {
         self.check_version(&e, at)?;
         // Held until the record says `via: gateway`, as a start holds it.
         let mut gateway_turn = None;
-        if let Some(eg) = &req.egress {
+        if req.egress.is_some() || req.limits.is_some() {
             let mut r = e.snapshot();
-            self.check_egress(eg, &r.tenant, &r.id)?;
+            if let Some(eg) = &req.egress {
+                self.check_egress(eg, &r.tenant, &r.id)?;
+                r.egress = eg.clone();
+            }
+            if let Some(l) = &req.limits {
+                r.limits = l.over(&r.limits);
+            }
             // The tables first: refused, the old policy stays and so does the record.
             if r.state == state::RUNNING {
-                r.egress = eg.clone();
                 let policy = self.policy_for(&r)?;
-                if eg.via_gateway() {
+                if req.egress.as_ref().is_some_and(|eg| eg.via_gateway()) {
                     gateway_turn = Some(
                         self.ensure_gateway(&r.tenant)
                             .await
@@ -3076,6 +3117,9 @@ impl Manager {
             }
             if let Some(eg) = req.egress {
                 r.egress = eg;
+            }
+            if let Some(l) = req.limits {
+                r.limits = l.over(&r.limits);
             }
             if let Some(ev) = change_event(&was, &r) {
                 e.note_locked(&mut r, ev);
@@ -3746,27 +3790,35 @@ fn gateway_needed(machines: &HashMap<String, Arc<Entry>>, tenant: &str) -> bool 
     })
 }
 
-/// The event of a PATCH: `egress_changed` when the egress moved, else `updated` with the
-/// fields that did; none when nothing changed.
+/// The event of a PATCH: `egress_changed` when the policy or the limits moved (both are what
+/// the tables hold for its internet traffic), else `updated`; each with the fields that did.
+/// None when nothing changed.
 fn change_event(was: &Record, now: &Record) -> Option<Ev> {
-    if was.egress != now.egress {
+    let changed = |pairs: &[(&'static str, bool)]| -> Vec<&'static str> {
+        pairs.iter().filter(|(_, c)| *c).map(|(f, _)| *f).collect()
+    };
+    let egress = changed(&[
+        ("egress", was.egress != now.egress),
+        ("limits", was.limits != now.limits),
+    ]);
+    if !egress.is_empty() {
         let label = |e: &api::Egress| match &e.via {
             Some(via) => format!("{}:{via}", e.mode),
             None => e.mode.clone(),
         };
         let (from, to) = (label(&was.egress), label(&now.egress));
-        return Some(
-            Ev::normal(reason::EGRESS_CHANGED, format!("egress {from} -> {to}"))
-                .data(json!({ "from": from, "to": to })),
-        );
+        let message = match was.egress != now.egress {
+            true => format!("egress {from} -> {to}"),
+            false => "egress limits changed".to_string(),
+        };
+        return Some(Ev::normal(reason::EGRESS_CHANGED, message).data(json!({
+            "fields": egress, "from": from, "to": to, "limits": now.limits,
+        })));
     }
-    let fields: Vec<&str> = [
+    let fields = changed(&[
         ("sleep", was.sleep != now.sleep),
         ("metadata", was.metadata != now.metadata),
-    ]
-    .into_iter()
-    .filter_map(|(f, changed)| changed.then_some(f))
-    .collect();
+    ]);
     if fields.is_empty() {
         return None;
     }
@@ -3822,6 +3874,14 @@ fn check_size(size: &api::Size) -> Result<(), MError> {
         return Err(invalid("size.memory_mb must be 128..262144"));
     }
     Ok(())
+}
+
+/// Limits a request may set (ADR 0018); none is fine.
+fn check_limits(l: Option<&api::EgressLimits>) -> Result<(), MError> {
+    match l.map(|l| l.check()) {
+        Some(Err(e)) => Err(invalid(format!("limits.{e}"))),
+        _ => Ok(()),
+    }
 }
 
 /// The newest backup snapshot (`bk-<id>`) among a dataset's snapshots: the base of the next
@@ -4292,6 +4352,7 @@ mod tests {
             sleep: "30m".into(),
             restart: api::RestartPolicy::default(),
             egress: api::Egress::default(),
+            limits: api::EgressLimits::default(),
             metadata: BTreeMap::new(),
             state: state::CREATED.into(),
             stopped_reason: String::new(),
@@ -4361,8 +4422,8 @@ mod tests {
         silent_ports: AtomicBool,
         /// CPU time of each machine's cgroup, in µs; none without an entry.
         cgroups: Mutex<HashMap<String, u64>>,
-        /// The counted addresses and their bytes, `(in, out)`.
-        counted: Mutex<BTreeMap<String, (u64, u64)>>,
+        /// The counted addresses and their counters.
+        counted: Mutex<BTreeMap<String, nft::Counters>>,
         /// `uncount` fails, as an `nft` that refuses its input.
         refuse_uncount: AtomicBool,
     }
@@ -4392,7 +4453,18 @@ mod tests {
         fn internet(&self, ip: &str, inb: u64, out: u64) {
             let mut c = self.counted.lock().unwrap();
             let n = c.get_mut(ip).expect("a counted address");
-            *n = (n.0 + inb, n.1 + out);
+            n.internet_in += inb;
+            n.internet_out += out;
+        }
+
+        /// Packets the limits dropped for a counted address, as the forward chain would count
+        /// them.
+        fn dropped(&self, ip: &str, port: u64, rate: u64, bandwidth: u64) {
+            let mut c = self.counted.lock().unwrap();
+            let d = &mut c.get_mut(ip).expect("a counted address").dropped;
+            d.blocked_port += port;
+            d.rate += rate;
+            d.bandwidth += bandwidth;
         }
 
         fn boots(&self, b: Boots) {
@@ -4729,7 +4801,7 @@ mod tests {
             Ok(())
         }
 
-        async fn counters(&self) -> Result<HashMap<String, (u64, u64)>> {
+        async fn counters(&self) -> Result<HashMap<String, nft::Counters>> {
             Ok(self.counted.lock().unwrap().clone().into_iter().collect())
         }
 
@@ -4758,6 +4830,10 @@ mod tests {
         match p {
             nft::Policy::Via { ip, to, host } => format!("via {ip} to {to} host {host}"),
             nft::Policy::None { ip } => format!("none {ip}"),
+            nft::Policy::Open { ip, limits: l } => format!(
+                "open {ip} ports {:?} conn {} mbit {}",
+                l.blocked_ports, l.new_connections_per_minute, l.bandwidth_mbit
+            ),
         }
     }
 
@@ -4771,6 +4847,26 @@ mod tests {
     }
 
     async fn harness(range: &str, memory_mb: u32) -> Harness {
+        // No host limits: an open machine puts nothing in the tables, and the calls the tests
+        // read are the pin's and the policy's alone. The limits' tests set theirs.
+        harness_with(range, memory_mb, no_limits()).await
+    }
+
+    /// No limit at all.
+    fn no_limits() -> crate::config::EgressLimits {
+        crate::config::EgressLimits {
+            blocked_ports: vec![],
+            new_connections_per_minute: 0,
+            bandwidth_mbit: 0,
+        }
+    }
+
+    /// A harness whose host limits every open machine's internet traffic with these.
+    async fn harness_with(
+        range: &str,
+        memory_mb: u32,
+        egress_limits: crate::config::EgressLimits,
+    ) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let fake = crate::zfs::fake::Fake::open("byard").await.unwrap();
         let init = dir.path().join("init");
@@ -4785,6 +4881,7 @@ mod tests {
                 memory_mb,
                 vcpus: 1000,
             },
+            egress_limits,
             ..Default::default()
         };
         let zfs = fake.zfs.clone();
@@ -6486,6 +6583,344 @@ mod tests {
         assert_eq!(changed.egress, egress("none", None));
     }
 
+    // --- egress limits (ADR 0018) ---
+
+    /// The host's limits in these tests: port 25, 600 connections a minute, no cap.
+    fn host_limits() -> crate::config::EgressLimits {
+        crate::config::EgressLimits {
+            blocked_ports: vec![25],
+            new_connections_per_minute: 600,
+            bandwidth_mbit: 0,
+        }
+    }
+
+    fn set_limits(l: api::EgressLimits) -> api::UpdateMachineRequest {
+        api::UpdateMachineRequest {
+            limits: Some(l),
+            ..Default::default()
+        }
+    }
+
+    fn view_limits(ports: &[u16], conn: u32, mbit: u32) -> api::EgressLimits {
+        api::EgressLimits {
+            blocked_ports: Some(ports.to_vec()),
+            new_connections_per_minute: Some(conn),
+            bandwidth_mbit: Some(mbit),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_open_machine_runs_with_the_host_s_limits_under_its_own() {
+        let h = harness_with("10.64.0.0/22", 4096, host_limits()).await;
+        h.ready().await;
+        let m =
+            h.m.create(api::CreateMachineRequest {
+                limits: Some(api::EgressLimits {
+                    bandwidth_mbit: Some(100),
+                    ..Default::default()
+                }),
+                ..h.request("web")
+            })
+            .await
+            .unwrap();
+        // Its own field over the host's two; shown whole, stored as it was asked.
+        assert_eq!(m.limits, view_limits(&[25], 600, 100));
+        assert_eq!(h.stored(&m.id).unwrap().limits.bandwidth_mbit, Some(100));
+        assert_eq!(h.stored(&m.id).unwrap().limits.blocked_ports, None);
+        // Set where the policy is: after the pin, before the boot. The resolver forwards
+        // outside names as for any open machine.
+        let (tap, open) = (
+            netw::tap_name(&m.id),
+            "open 10.64.1.2 ports [25] conn 600 mbit 100",
+        );
+        assert_eq!(
+            h.host.calls(),
+            vec![
+                format!("ensure_tap {tap} by1 10.64.1.2"),
+                format!("set_policy {open}"),
+                format!("boot {} tap={tap} resume=false", m.id),
+                "wait_ready 1000".to_string(),
+            ]
+        );
+        assert!(!h.dns_kept("10.64.1.2"));
+        // A stop withdraws them right after the pin, a start sets them again.
+        h.m.stop(&m.id, Duration::from_secs(3), false, None)
+            .await
+            .unwrap();
+        let calls = h.host.calls();
+        let at = |line: String| calls.iter().position(|c| *c == line);
+        let unpinned = at(format!("delete_tap {tap} 10.64.1.2")).expect("unpinned");
+        assert_eq!(
+            at(format!("unset_policy {open}")),
+            Some(unpinned + 1),
+            "{calls:?}"
+        );
+        assert!(h.m.inner.policies.lock().unwrap().is_empty());
+        h.m.start(&m.id, None).await.unwrap();
+        assert!(h.host.calls().contains(&format!("set_policy {open}")));
+        // A destroy withdraws them too, and the drop counters with the others.
+        h.m.destroy(&m.id, None).await.unwrap();
+        assert!(h.host.calls().contains(&format!("unset_policy {open}")));
+        assert!(h.m.inner.policies.lock().unwrap().is_empty());
+        assert!(!h.host.counted.lock().unwrap().contains_key("10.64.1.2"));
+    }
+
+    #[tokio::test]
+    async fn limits_change_at_once_on_a_running_machine() {
+        let h = harness_with("10.64.0.0/22", 4096, host_limits()).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        assert_eq!(m.limits, view_limits(&[25], 600, 0));
+        h.host.calls();
+        // The fields it names, in one transaction; the others stay.
+        let lift = api::EgressLimits {
+            new_connections_per_minute: Some(0),
+            ..Default::default()
+        };
+        let changed = h.m.update(&m.id, set_limits(lift), None).await.unwrap();
+        assert_eq!(changed.limits, view_limits(&[25], 0, 0));
+        assert_eq!(
+            h.host.calls(),
+            ["swap_policy open 10.64.1.2 ports [25] conn 600 mbit 0 -> open 10.64.1.2 ports [25] conn 0 mbit 0"]
+        );
+        let ports = api::EgressLimits {
+            blocked_ports: Some(vec![465, 25]),
+            bandwidth_mbit: Some(2),
+            ..Default::default()
+        };
+        let changed = h.m.update(&m.id, set_limits(ports), None).await.unwrap();
+        assert_eq!(changed.limits, view_limits(&[25, 465], 0, 2));
+        assert_eq!(
+            h.stored(&m.id).unwrap().limits,
+            api::EgressLimits {
+                blocked_ports: Some(vec![465, 25]),
+                new_connections_per_minute: Some(0),
+                bandwidth_mbit: Some(2),
+            }
+        );
+        h.host.calls();
+        // The same again: nothing to change.
+        let same = api::EgressLimits {
+            bandwidth_mbit: Some(2),
+            ..Default::default()
+        };
+        h.m.update(&m.id, set_limits(same), None).await.unwrap();
+        assert!(h.host.calls().is_empty());
+        // Nothing left to limit: nothing in the tables.
+        let none = view_limits(&[], 0, 0);
+        h.m.update(&m.id, set_limits(none), None).await.unwrap();
+        assert_eq!(
+            h.host.calls(),
+            ["unset_policy open 10.64.1.2 ports [25, 465] conn 0 mbit 2"]
+        );
+        assert!(h.m.inner.policies.lock().unwrap().is_empty());
+        // Refused: named, nothing applied or stored.
+        let bad = api::EgressLimits {
+            blocked_ports: Some(vec![0]),
+            ..Default::default()
+        };
+        assert_eq!(
+            refused(h.m.update(&m.id, set_limits(bad.clone()), None).await),
+            "limits.blocked_ports: 0 is not a port"
+        );
+        assert_eq!(
+            refused(
+                h.m.create(api::CreateMachineRequest {
+                    limits: Some(bad),
+                    ..h.request("web2")
+                })
+                .await
+            ),
+            "limits.blocked_ports: 0 is not a port"
+        );
+        assert!(h.host.calls().is_empty());
+        assert_eq!(h.stored(&m.id).unwrap().limits.blocked_ports, Some(vec![]));
+        // Stopped: the record changes, the next start applies it.
+        h.m.stop(&m.id, Duration::from_secs(3), false, None)
+            .await
+            .unwrap();
+        h.host.calls();
+        let conn = api::EgressLimits {
+            new_connections_per_minute: Some(6),
+            ..Default::default()
+        };
+        assert_eq!(
+            h.m.update(&m.id, set_limits(conn), None)
+                .await
+                .unwrap()
+                .limits,
+            view_limits(&[], 6, 0)
+        );
+        assert!(h.host.calls().is_empty());
+        h.m.start(&m.id, None).await.unwrap();
+        assert!(h
+            .host
+            .calls()
+            .contains(&"set_policy open 10.64.1.2 ports [] conn 6 mbit 0".to_string()));
+    }
+
+    #[tokio::test]
+    async fn via_and_none_machines_get_no_limits() {
+        let h = harness_with("10.64.0.0/22", 4096, host_limits()).await;
+        h.ready().await;
+        let gw = h.m.create(h.request("gw")).await.unwrap();
+        h.host.calls();
+        // They never reach the NAT: their policy is the one they would have without limits.
+        let m =
+            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+                .await
+                .unwrap();
+        assert!(h.host.calls().contains(&format!("set_policy {VIA}")));
+        let n =
+            h.m.create(h.request_egress("off", "none", None))
+                .await
+                .unwrap();
+        assert!(h
+            .host
+            .calls()
+            .contains(&"set_policy none 10.64.1.4".to_string()));
+        // The limits are shown and stored all the same, ready for an open policy.
+        assert_eq!(n.limits, view_limits(&[25], 600, 0));
+        let own = api::EgressLimits {
+            bandwidth_mbit: Some(10),
+            ..Default::default()
+        };
+        h.m.update(&m.id, set_limits(own), None).await.unwrap();
+        assert!(h.host.calls().is_empty(), "nothing to change in the tables");
+        // Open: the policy becomes its limits, in one transaction, and the resolver lets
+        // it go once the tables have changed.
+        assert!(h.dns_kept("10.64.1.3"));
+        h.m.update(&m.id, set_egress("open", None), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            h.host.calls(),
+            [format!(
+                "swap_policy {VIA} -> open 10.64.1.3 ports [25] conn 600 mbit 10"
+            )]
+        );
+        assert!(!h.dns_kept("10.64.1.3"));
+        // And back: the resolver takes it in before.
+        h.m.update(&m.id, set_egress("none", None), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            h.host.calls(),
+            ["swap_policy open 10.64.1.3 ports [25] conn 600 mbit 10 -> none 10.64.1.3"]
+        );
+        assert!(h.dns_kept("10.64.1.3"));
+        // Refused, a swap to open keeps the machine in the resolver with its old policy.
+        h.host.refuse_policies.store(true, Relaxed);
+        assert!(h
+            .m
+            .update(&m.id, set_egress("open", None), None)
+            .await
+            .is_err());
+        assert!(h.dns_kept("10.64.1.3"));
+        // Refused, a swap from open takes nothing into the resolver.
+        h.host.refuse_policies.store(false, Relaxed);
+        h.m.update(&gw.id, set_limits(view_limits(&[25], 600, 1)), None)
+            .await
+            .unwrap();
+        h.host.refuse_policies.store(true, Relaxed);
+        assert!(h
+            .m
+            .update(&gw.id, set_egress("none", None), None)
+            .await
+            .is_err());
+        assert!(!h.dns_kept("10.64.1.2"));
+    }
+
+    #[tokio::test]
+    async fn the_tables_at_start_hold_the_running_machines_limits() {
+        let h = harness_with("10.64.0.0/22", 4096, host_limits()).await;
+        h.tenant("t1");
+        let add = |id: &str, st: &str, n: u8, eg: api::Egress, own: api::EgressLimits| {
+            let e = h.add(id, st, 256);
+            let mut r = e.rec.lock().unwrap();
+            r.name = id.trim_start_matches("m_").into();
+            (r.host_num, r.ip, r.egress, r.limits) = (n, format!("10.64.1.{n}"), eg, own);
+        };
+        let own = api::EgressLimits {
+            new_connections_per_minute: Some(6),
+            ..Default::default()
+        };
+        add(
+            "m_web",
+            state::RUNNING,
+            2,
+            api::Egress::default(),
+            own.clone(),
+        );
+        add(
+            "m_free",
+            state::RUNNING,
+            3,
+            api::Egress::default(),
+            view_limits(&[], 0, 0),
+        );
+        add(
+            "m_none",
+            state::RUNNING,
+            4,
+            egress("none", None),
+            own.clone(),
+        );
+        add("m_off", state::STOPPED, 5, api::Egress::default(), own);
+        let r = h.m.rules().unwrap();
+        // The running open machine with something to limit, merged; the one with nothing
+        // has no policy; `none` has its own; a stopped machine has nothing.
+        assert_eq!(
+            r.policies,
+            [
+                nft::Policy::Open {
+                    ip: "10.64.1.2".into(),
+                    limits: crate::config::EgressLimits {
+                        new_connections_per_minute: 6,
+                        ..host_limits()
+                    }
+                },
+                nft::Policy::None {
+                    ip: "10.64.1.4".into()
+                }
+            ]
+        );
+        assert!(r
+            .render()
+            .contains("\tlimit conn_10_64_1_2 {\n\t\trate over 6/minute burst 6 packets\n\t}\n"));
+        // Held as if set, and only `none` in the resolver.
+        assert_eq!(h.m.inner.policies.lock().unwrap().len(), 2);
+        assert!(!h.dns_kept("10.64.1.2") && h.dns_kept("10.64.1.4"));
+    }
+
+    #[tokio::test]
+    async fn drops_land_in_the_view_and_the_usage() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let e = h.metered("m_a", state::RUNNING, "2026-10-20T14:00:00Z");
+        h.m.inner.net.count("10.64.1.2").await.unwrap();
+        h.host.dropped("10.64.1.2", 2, 5, 0);
+        h.m.measure(at("2026-10-20T14:00:15Z")).await;
+        h.host.dropped("10.64.1.2", 1, 0, 10);
+        h.m.measure(at("2026-10-20T14:00:30Z")).await;
+        let u = h.bucket("m_a", "2026-10-20T14:00:00Z").await;
+        assert_eq!(u.usage.egress_dropped_packets, 18);
+        assert_eq!(
+            h.m.get("m_a").unwrap().egress_drops,
+            api::EgressDrops {
+                blocked_port: 3,
+                rate: 5,
+                bandwidth: 10
+            }
+        );
+        // Since the machine started: a boot counts the view from none, not the usage.
+        e.meter.lock().unwrap().boot(0);
+        h.host.dropped("10.64.1.2", 1, 0, 0);
+        h.m.measure(at("2026-10-20T14:00:45Z")).await;
+        assert_eq!(h.m.get("m_a").unwrap().egress_drops.total(), 1);
+        let u = h.bucket("m_a", "2026-10-20T14:00:00Z").await;
+        assert_eq!(u.usage.egress_dropped_packets, 19);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_patch_waiting_on_a_destroy_finds_nothing() {
         let h = harness("10.64.0.0/22", 4096).await;
@@ -7545,6 +7980,7 @@ mod tests {
             metrics_token: String::new(),
             loopback: true,
             openapi: "",
+            tls_fingerprint: String::new(),
         });
         let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v1/usage", ln.local_addr().unwrap());
@@ -7857,8 +8293,33 @@ mod tests {
             (e.reason.as_str(), e.message.as_str()),
             ("egress_changed", "egress open -> none")
         );
-        assert_eq!(e.data, Some(json!({"from": "open", "to": "none"})));
+        let data = e.data.unwrap();
+        assert_eq!(
+            (&data["fields"], &data["from"], &data["to"]),
+            (&json!(["egress"]), &json!("open"), &json!("none"))
+        );
         assert_eq!(changed.version, e.seq);
+        // The limits are what the tables hold for its internet traffic too: an egress change.
+        let limits = api::UpdateMachineRequest {
+            limits: Some(api::EgressLimits {
+                bandwidth_mbit: Some(5),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let limited = h.m.update(&m.id, limits.clone(), None).await.unwrap();
+        let e = h.events_of(&m.id).pop().unwrap();
+        assert_eq!(
+            (e.reason.as_str(), e.message.as_str()),
+            ("egress_changed", "egress limits changed")
+        );
+        let data = e.data.unwrap();
+        assert_eq!(data["fields"], json!(["limits"]));
+        assert_eq!(data["limits"]["bandwidth_mbit"], 5);
+        assert_eq!(limited.version, e.seq);
+        // The same limits again change nothing.
+        let same = h.m.update(&m.id, limits, None).await.unwrap();
+        assert_eq!(same.version, limited.version);
         let sleep = |s: &str| api::UpdateMachineRequest {
             sleep: Some(s.into()),
             ..Default::default()
@@ -8006,6 +8467,7 @@ mod tests {
             metrics_token: String::new(),
             loopback: true,
             openapi: "",
+            tls_fingerprint: String::new(),
         });
         let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", ln.local_addr().unwrap());

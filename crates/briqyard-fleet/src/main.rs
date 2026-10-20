@@ -18,6 +18,7 @@ use briqyard_api as api;
 use chrono::{Duration, Utc};
 use clap::Parser;
 use registry::{url_host, HostRec, Policy, Registry, ScalePolicy};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -32,12 +33,40 @@ struct AppState {
     cfg: config::Config,
     reg: Mutex<Registry>,
     policy: Policy,
+    /// The client to hosts on plain HTTP.
     http: reqwest::Client,
+    /// A client per pinned certificate (fingerprint → client), each accepting that one
+    /// certificate and nothing else (ADR 0020).
+    pinned: Mutex<HashMap<String, reqwest::Client>>,
     state_path: PathBuf,
     prov: Box<dyn provision::Provisioner>,
 }
 
+/// A host that does not even accept the connection is given five seconds. No deadline for
+/// the whole call here: each call sets its own (`FORWARD_TIMEOUT`), a watch none.
+fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(5))
+}
+
 impl AppState {
+    /// The client for a host: the one of its pinned certificate, or the plain one when it has
+    /// none. A pinned client speaks https only, so a pin never goes out in clear.
+    fn client(&self, h: &HostRec) -> reqwest::Result<reqwest::Client> {
+        if h.tls_fingerprint.is_empty() {
+            return Ok(self.http.clone());
+        }
+        let mut pinned = self.pinned.lock().unwrap();
+        if let Some(c) = pinned.get(&h.tls_fingerprint) {
+            return Ok(c.clone());
+        }
+        let c = client_builder()
+            .use_preconfigured_tls(api::tls::pinned_client(&h.tls_fingerprint))
+            .https_only(true)
+            .build()?;
+        pinned.insert(h.tls_fingerprint.clone(), c.clone());
+        Ok(c)
+    }
+
     /// Writes the registry. A failure is logged at `error` and returned: a request answers
     /// 500 with it, a background task has nothing more to do with it.
     fn save(&self) -> Result<()> {
@@ -88,6 +117,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         },
         url: h.url.clone(),
         token: h.token.clone(),
+        tls_fingerprint: h.tls_fingerprint.clone(),
         region: h.region.clone(),
         provider: "static".into(),
         provider_id: String::new(),
@@ -134,27 +164,40 @@ async fn run(args: Args) -> Result<()> {
         policy,
         // A host that does not even accept the connection is given five seconds; each call
         // has its own deadline (`FORWARD_TIMEOUT`, none for a watch).
-        http: reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .build()?,
+        http: client_builder().build()?,
+        pinned: Mutex::new(HashMap::new()),
         state_path,
         prov: provision::build(&cfg.provisioner),
     });
     tokio::spawn(poll_static_hosts(state.clone()));
     tokio::spawn(scaler(state.clone()));
     tokio::spawn(bootstrap::run(state.clone()));
-    let app = app(state);
-    let listener = tokio::net::TcpListener::bind(&cfg.listen)
-        .await
+    let app = app(state).into_make_service();
+    let listener = std::net::TcpListener::bind(&cfg.listen)
         .with_context(|| format!("listen {}", cfg.listen))?;
+    listener.set_nonblocking(true)?;
     tracing::info!(
         addr = cfg.listen,
+        tls = matches!(cfg.tls, config::Tls::Files { .. }),
         version = env!("CARGO_PKG_VERSION"),
         provisioner = cfg.provisioner.kind,
         dry_run = cfg.provisioner.dry_run,
         "briqyard-fleet listening"
     );
-    axum::serve(listener, app).await?;
+    match &cfg.tls {
+        config::Tls::Files { cert, key } => {
+            let read = |p: &PathBuf| {
+                std::fs::read(p).with_context(|| format!("tls: read {}", p.display()))
+            };
+            let server = api::tls::server_config(&read(cert)?, &read(key)?)
+                .with_context(|| format!("tls: {} and {}", cert.display(), key.display()))?;
+            let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
+            axum_server::from_tcp_rustls(listener, config)
+                .serve(app)
+                .await?
+        }
+        config::Tls::Unset | config::Tls::Off => axum_server::from_tcp(listener).serve(app).await?,
+    }
     Ok(())
 }
 
@@ -341,14 +384,28 @@ async fn register_host(
                 "the host's own token is required",
             ));
         }
+        if let Err(why) =
+            registry::tls_matches(&rec.tls_fingerprint, &req.tls_fingerprint, &req.url)
+        {
+            tracing::warn!(
+                host = rec.id,
+                daemon = req.id,
+                url = req.url,
+                reported = req.tls_fingerprint,
+                pinned = rec.tls_fingerprint,
+                "registration refused: not the pinned certificate"
+            );
+            return Err(err(StatusCode::FORBIDDEN, "tls_mismatch", why));
+        }
         let id = rec.id.clone();
-        // What the host reports, applied to its record: the id, token, provider fields and
-        // state are the record's own (`heartbeat` leaves them).
+        // What the host reports, applied to its record: the id, token, pin, provider fields
+        // and state are the record's own (`heartbeat` leaves them).
         reg.heartbeat(
             HostRec {
                 id,
                 url: req.url,
                 token: String::new(),
+                tls_fingerprint: String::new(),
                 region: req.region,
                 provider: String::new(),
                 provider_id: String::new(),
@@ -433,9 +490,11 @@ fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
         id: id.clone(),
         url: server
             .ip
-            .map(|ip| format!("http://{ip}:7420"))
+            .map(|ip| bootstrap::host_url(&ip))
             .unwrap_or_default(),
         token: bootstrap::new_token(),
+        // Pinned by the bootstrap, once the host has made its certificate.
+        tls_fingerprint: String::new(),
         region: String::new(),
         provider: st.prov.name().into(),
         provider_id: server.provider_id,
@@ -520,7 +579,8 @@ async fn get_json<T: serde::de::DeserializeOwned>(
     path: &str,
 ) -> Option<T> {
     let mut r = st
-        .http
+        .client(h)
+        .ok()?
         .get(format!("{}{}", h.url.trim_end_matches('/'), path))
         .timeout(FORWARD_TIMEOUT);
     if !h.token.is_empty() {
@@ -653,16 +713,24 @@ fn down(host: &HostRec) -> Option<Response> {
     })
 }
 
-/// A request to a host, with the caller's content type and `If-Match` and the host's token.
+/// A request to a host, with the caller's content type and `If-Match` and the host's token,
+/// through the client of its pinned certificate (ADR 0020).
 fn to_host(
     st: &AppState,
     host: &HostRec,
     method: Method,
     path: &str,
     headers: &HeaderMap,
-) -> reqwest::RequestBuilder {
+) -> Result<reqwest::RequestBuilder, Refusal> {
     let url = format!("{}{}", host.url.trim_end_matches('/'), path);
-    let mut req = st.http.request(method, &url);
+    let client = st.client(host).map_err(|e| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            "host_unreachable",
+            format!("host {}: a client for its certificate: {e}", host.id),
+        )
+    })?;
+    let mut req = client.request(method, &url);
     for h in [header::CONTENT_TYPE, header::IF_MATCH] {
         if let Some(v) = headers.get(&h) {
             req = req.header(h, v);
@@ -671,7 +739,7 @@ fn to_host(
     if !host.token.is_empty() {
         req = req.bearer_auth(&host.token);
     }
-    req
+    Ok(req)
 }
 
 async fn forward(
@@ -685,9 +753,10 @@ async fn forward(
     if let Some(refused) = down(host) {
         return refused;
     }
-    let req = to_host(st, host, method, path, headers)
-        .body(body)
-        .timeout(FORWARD_TIMEOUT);
+    let req = match to_host(st, host, method, path, headers) {
+        Ok(r) => r.body(body).timeout(FORWARD_TIMEOUT),
+        Err(refused) => return refused.into_response(),
+    };
     match req.send().await {
         Ok(resp) => {
             let status = resp.status();
@@ -711,7 +780,7 @@ async fn forward(
         Err(e) => err(
             StatusCode::BAD_GATEWAY,
             "host_unreachable",
-            format!("host {}: {e}", host.id),
+            format!("host {}: {}", host.id, causes(&e)),
         )
         .into_response(),
     }
@@ -723,7 +792,11 @@ async fn forward_watch(st: &AppState, host: &HostRec, path: &str, headers: &Head
     if let Some(refused) = down(host) {
         return refused;
     }
-    match to_host(st, host, Method::GET, path, headers).send().await {
+    let req = match to_host(st, host, Method::GET, path, headers) {
+        Ok(r) => r,
+        Err(refused) => return refused.into_response(),
+    };
+    match req.send().await {
         Ok(resp) => {
             let status = resp.status();
             let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
@@ -741,10 +814,23 @@ async fn forward_watch(st: &AppState, host: &HostRec, path: &str, headers: &Head
         Err(e) => err(
             StatusCode::BAD_GATEWAY,
             "host_unreachable",
-            format!("host {}: {e}", host.id),
+            format!("host {}: {}", host.id, causes(&e)),
         )
         .into_response(),
     }
+}
+
+/// An error and its sources, as one line: a refused certificate is two levels under reqwest's
+/// "error sending request".
+fn causes(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut next = e.source();
+    while let Some(s) = next {
+        out.push_str(": ");
+        out.push_str(&s.to_string());
+        next = s.source();
+    }
+    out
 }
 
 /// A forwarded response, its body read so it can be looked at and sent on.

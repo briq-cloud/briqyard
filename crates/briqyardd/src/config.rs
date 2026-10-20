@@ -2,6 +2,7 @@
 
 use crate::netw;
 use anyhow::{bail, Context, Result};
+use briqyard_api as api;
 use serde::Deserialize;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -9,9 +10,11 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// The HTTP API address. Put it behind TLS or a private network before listening on
-    /// anything but loopback.
+    /// The API's address. Served over TLS unless it is loopback or `api_tls` is false.
     pub listen: String,
+    /// TLS on the API with the daemon's own certificate (`<data_dir>/api-cert.pem`, ADR
+    /// 0020). A loopback `listen` is plain HTTP whatever this says: nothing leaves the host.
+    pub api_tls: bool,
     /// When set, required as `Authorization: Bearer <token>` on every request.
     pub token: String,
     /// A token of its own for `/metrics`, so a scraper never holds the API's. Unset, the
@@ -40,6 +43,9 @@ pub struct Config {
     /// Credentials for private registries, by host ("ghcr.io", "registry-1.docker.io").
     pub registries: Vec<Registry>,
     pub network: Network,
+    /// The limits on every machine's internet traffic, unless the machine sets its own
+    /// (ADR 0018).
+    pub egress_limits: EgressLimits,
     pub ingress: Ingress,
     /// The size of every root disk (thin: only written blocks take space).
     pub root_disk_gb: u32,
@@ -92,6 +98,61 @@ pub struct Network {
     pub upstream_dns: Vec<String>,
     /// The host interface machines reach the internet through. Empty: the default route's.
     pub egress: String,
+}
+
+/// Limits on a machine's internet traffic, every field set: the host's defaults, and what a
+/// machine runs with once its own values are put over them (ADR 0018).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EgressLimits {
+    /// Destination ports refused, TCP and UDP.
+    pub blocked_ports: Vec<u16>,
+    /// New connections a minute; 0 is no limit.
+    pub new_connections_per_minute: u32,
+    /// Mbit/s, in and out together; 0 is no limit.
+    pub bandwidth_mbit: u32,
+}
+
+impl Default for EgressLimits {
+    /// Mail is what gets a server's address blocklisted first.
+    fn default() -> Self {
+        Self {
+            blocked_ports: vec![25],
+            new_connections_per_minute: 0,
+            bandwidth_mbit: 0,
+        }
+    }
+}
+
+impl EgressLimits {
+    /// These, with a machine's own values over them; the ports sorted, once each.
+    pub fn with(&self, own: &api::EgressLimits) -> EgressLimits {
+        let l = own.over(&self.view());
+        let mut blocked_ports = l.blocked_ports.unwrap_or_default();
+        blocked_ports.sort_unstable();
+        blocked_ports.dedup();
+        EgressLimits {
+            blocked_ports,
+            new_connections_per_minute: l.new_connections_per_minute.unwrap_or(0),
+            bandwidth_mbit: l.bandwidth_mbit.unwrap_or(0),
+        }
+    }
+
+    /// Nothing is limited: the machine needs nothing in the tables.
+    pub fn is_none(&self) -> bool {
+        self.blocked_ports.is_empty()
+            && self.new_connections_per_minute == 0
+            && self.bandwidth_mbit == 0
+    }
+
+    /// As the API shows them: every field there.
+    pub fn view(&self) -> api::EgressLimits {
+        api::EgressLimits {
+            blocked_ports: Some(self.blocked_ports.clone()),
+            new_connections_per_minute: Some(self.new_connections_per_minute),
+            bandwidth_mbit: Some(self.bandwidth_mbit),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -165,6 +226,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:7420".into(),
+            api_tls: true,
             token: String::new(),
             metrics_token: String::new(),
             data_dir: "/var/lib/briqyard".into(),
@@ -179,6 +241,7 @@ impl Default for Config {
             storage: Storage::default(),
             registries: vec![],
             network: Network::default(),
+            egress_limits: EgressLimits::default(),
             ingress: Ingress::default(),
             root_disk_gb: 8,
             image_keep_days: 14,
@@ -275,7 +338,77 @@ impl Config {
         for c in &self.ingress.allowed_clients {
             netw::cidr(c).with_context(|| format!("ingress.allowed_clients {c:?}"))?;
         }
-        self.check_exposure()
+        if let Err(e) = self.egress_limits.view().check() {
+            bail!("egress_limits.{e}");
+        }
+        self.check_exposure()?;
+        self.check_advertise()
+    }
+
+    /// The fleet dials `fleet.advertise` as written: its scheme must be the API's.
+    fn check_advertise(&self) -> Result<()> {
+        let Some(f) = &self.fleet else { return Ok(()) };
+        if f.advertise.is_empty() {
+            return Ok(());
+        }
+        let want = if self.serves_tls() { "https" } else { "http" };
+        if !f.advertise.starts_with(&format!("{want}://")) {
+            bail!(
+                "fleet.advertise: {} but the API serves {} on {}: write {want}://…",
+                f.advertise,
+                if self.serves_tls() {
+                    "TLS"
+                } else {
+                    "plain HTTP"
+                },
+                self.listen
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether the API is served over TLS: `api_tls`, unless `listen` is loopback.
+    pub fn serves_tls(&self) -> bool {
+        let loopback = self
+            .listen
+            .parse::<SocketAddr>()
+            .map(|a| a.ip().is_loopback())
+            .unwrap_or(false);
+        self.api_tls && !loopback
+    }
+
+    /// The API certificate and its key (ADR 0020).
+    pub fn tls_cert(&self) -> PathBuf {
+        self.data_dir.join("api-cert.pem")
+    }
+    pub fn tls_key(&self) -> PathBuf {
+        self.data_dir.join("api-key.pem")
+    }
+
+    /// The names the API certificate carries: the addresses the configuration gives the
+    /// host. Nothing checks them (the fleet pins the fingerprint); they say whose it is.
+    pub fn tls_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Ok(a) = self.listen.parse::<SocketAddr>() {
+            if !a.ip().is_unspecified() {
+                names.push(a.ip().to_string());
+            }
+        }
+        if let Some(f) = &self.fleet {
+            let host = f.advertise.split("://").nth(1).unwrap_or("");
+            let host = host.split('/').next().unwrap_or("");
+            let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            if !host.is_empty() {
+                names.push(host.to_string());
+            }
+        }
+        if !self.ingress.advertise.is_empty() {
+            names.push(self.ingress.advertise.clone());
+        }
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Refuses an address the internet could reach when nothing says who may connect
@@ -346,6 +479,8 @@ mod tests {
     fn defaults() {
         let c = Config::load(None).unwrap();
         assert_eq!(c.listen, "127.0.0.1:7420");
+        assert!(c.api_tls);
+        assert!(!c.serves_tls(), "a loopback API is plain HTTP");
         assert!(c.token.is_empty());
         assert_eq!(c.data_dir, PathBuf::from("/var/lib/briqyard"));
         assert_eq!(c.firecracker, PathBuf::from("/usr/local/bin/firecracker"));
@@ -362,6 +497,9 @@ mod tests {
         assert_eq!(c.network.range, "10.64.0.0/10");
         assert!(c.network.upstream_dns.is_empty());
         assert!(c.network.egress.is_empty());
+        assert_eq!(c.egress_limits.blocked_ports, vec![25]);
+        assert_eq!(c.egress_limits.new_connections_per_minute, 0);
+        assert_eq!(c.egress_limits.bandwidth_mbit, 0);
         assert_eq!(c.ingress.tcp_ports, "20000-29999");
         assert!(c.ingress.http.is_empty());
         assert_eq!(c.ingress.domain, "byard.localhost");
@@ -401,6 +539,7 @@ mod tests {
         let c = load(
             r#"
 listen: 0.0.0.0:7420
+api_tls: false
 token: secret
 data_dir: /data
 firecracker: /opt/fc/firecracker
@@ -422,6 +561,10 @@ network:
   range: 10.128.0.0/10
   upstream_dns: ["1.1.1.1", "9.9.9.9"]
   egress: eth0
+egress_limits:
+  blocked_ports: [25, 465, 587]
+  new_connections_per_minute: 600
+  bandwidth_mbit: 200
 ingress:
   tcp_ports: 30000-31000
   http: 0.0.0.0:8080
@@ -446,6 +589,7 @@ capacity:
         )
         .unwrap();
         assert_eq!(c.listen, "0.0.0.0:7420");
+        assert!(!c.api_tls);
         assert_eq!(c.token, "secret");
         assert_eq!(c.data_dir, PathBuf::from("/data"));
         assert_eq!(c.firecracker, PathBuf::from("/opt/fc/firecracker"));
@@ -464,6 +608,14 @@ capacity:
         assert_eq!(c.network.range, "10.128.0.0/10");
         assert_eq!(c.network.upstream_dns, vec!["1.1.1.1", "9.9.9.9"]);
         assert_eq!(c.network.egress, "eth0");
+        assert_eq!(
+            c.egress_limits,
+            EgressLimits {
+                blocked_ports: vec![25, 465, 587],
+                new_connections_per_minute: 600,
+                bandwidth_mbit: 200,
+            }
+        );
         assert_eq!(c.ingress.tcp_ports, "30000-31000");
         assert_eq!(c.ingress.http, "0.0.0.0:8080");
         assert_eq!(c.ingress.domain, "byard.example");
@@ -490,6 +642,59 @@ capacity:
         assert_eq!(c.ingress.http, "127.0.0.1:8080");
         assert_eq!(c.ingress.tcp_ports, "20000-29999");
         assert_eq!(c.ingress.domain, "byard.localhost");
+        // A rate set for every machine keeps port 25 blocked.
+        let c = load("egress_limits:\n  new_connections_per_minute: 600\n").unwrap();
+        assert_eq!(c.egress_limits.blocked_ports, vec![25]);
+        assert_eq!(c.egress_limits.new_connections_per_minute, 600);
+    }
+
+    #[test]
+    fn a_machine_s_limits_are_its_own_over_the_host_s() {
+        let host = EgressLimits {
+            blocked_ports: vec![465, 25],
+            new_connections_per_minute: 600,
+            bandwidth_mbit: 0,
+        };
+        // Nothing of its own: the host's, the ports in order.
+        let l = host.with(&api::EgressLimits::default());
+        assert_eq!(l.blocked_ports, vec![25, 465]);
+        assert_eq!((l.new_connections_per_minute, l.bandwidth_mbit), (600, 0));
+        // Its own, field by field; `[]` and 0 lift a host default.
+        let own = api::EgressLimits {
+            blocked_ports: Some(vec![]),
+            new_connections_per_minute: Some(0),
+            bandwidth_mbit: Some(100),
+        };
+        let l = host.with(&own);
+        assert_eq!(
+            l,
+            EgressLimits {
+                blocked_ports: vec![],
+                new_connections_per_minute: 0,
+                bandwidth_mbit: 100,
+            }
+        );
+        assert!(!l.is_none());
+        assert!(host
+            .with(&api::EgressLimits {
+                bandwidth_mbit: Some(0),
+                ..own
+            })
+            .is_none());
+        let own = api::EgressLimits {
+            blocked_ports: Some(vec![587, 25, 587]),
+            ..Default::default()
+        };
+        assert_eq!(host.with(&own).blocked_ports, vec![25, 587]);
+        // Shown with every field.
+        assert_eq!(
+            host.view(),
+            api::EgressLimits {
+                blocked_ports: Some(vec![465, 25]),
+                new_connections_per_minute: Some(600),
+                bandwidth_mbit: Some(0),
+            }
+        );
     }
 
     #[test]
@@ -502,6 +707,7 @@ capacity:
             ("fleet:\n  urll: x\n", "urll"),
             ("fleet:\n  token: x\n", "token"),
             ("capacity:\n  memory: 1\n", "memory"),
+            ("egress_limits:\n  bandwidth: 1\n", "bandwidth"),
         ] {
             let err = load(yaml).unwrap_err();
             let msg = format!("{err:#}");
@@ -529,6 +735,16 @@ capacity:
         assert_eq!(err.to_string(), "usage_keep_days must be at least 1");
         let err = load("events_keep_days: 0\n").unwrap_err();
         assert_eq!(err.to_string(), "events_keep_days must be at least 1");
+        let err = load("egress_limits:\n  blocked_ports: [0]\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "egress_limits.blocked_ports: 0 is not a port"
+        );
+        let err = load("egress_limits:\n  bandwidth_mbit: 200000\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "egress_limits.bandwidth_mbit: at most 100000"
+        );
 
         for (field, yaml) in [
             ("firecracker", "firecracker: bin/firecracker\n"),
@@ -621,6 +837,78 @@ capacity:
             let err = format!("{:#}", load(yaml).unwrap_err());
             assert!(err.contains(msg), "{yaml:?}: {err}");
         }
+    }
+
+    #[test]
+    fn the_api_is_tls_unless_loopback_or_turned_off() {
+        let c = load("listen: 0.0.0.0:7420\ningress:\n  allow_public: true\n").unwrap();
+        assert!(c.serves_tls(), "a wider listen is TLS by default");
+        let c = load("listen: 10.0.0.5:7420\n").unwrap();
+        assert!(c.serves_tls());
+        // The only way to plain HTTP off loopback: saying so.
+        let c = load("listen: 10.0.0.5:7420\napi_tls: false\n").unwrap();
+        assert!(!c.serves_tls());
+        for listen in ["127.0.0.1:7420", "[::1]:7420"] {
+            let c = load(&format!("listen: \"{listen}\"\n")).unwrap();
+            assert!(!c.serves_tls(), "{listen}");
+        }
+    }
+
+    #[test]
+    fn fleet_advertise_has_the_apis_scheme() {
+        let base = "listen: 10.0.0.5:7420\n";
+        load(&format!(
+            "{base}fleet:\n  url: https://fleet\n  advertise: https://10.0.0.5:7420\n"
+        ))
+        .unwrap();
+        let err = load(&format!(
+            "{base}fleet:\n  url: https://fleet\n  advertise: http://10.0.0.5:7420\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "fleet.advertise: http://10.0.0.5:7420 but the API serves TLS on 10.0.0.5:7420: write https://…"
+        );
+        // A plain API (loopback, a host forwarded by its operator) advertises http.
+        let err = load("fleet:\n  advertise: https://192.168.64.1:27420\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("serves plain HTTP on 127.0.0.1:7420: write http://"),
+            "{err}"
+        );
+        load("fleet:\n  advertise: http://192.168.64.1:27420\n").unwrap();
+        load("listen: 10.0.0.5:7420\napi_tls: false\nfleet:\n  advertise: http://10.0.0.5:7420\n")
+            .unwrap();
+    }
+
+    #[test]
+    fn the_certificate_names_the_configured_addresses() {
+        let c = load(
+            "listen: 10.0.0.5:7420\ningress:\n  advertise: 10.0.0.5\nfleet:\n  advertise: https://203.0.113.5:7420\n",
+        )
+        .unwrap();
+        assert_eq!(c.tls_names(), ["10.0.0.5", "203.0.113.5"]);
+        let c =
+            load("listen: 0.0.0.0:7420\napi_tls: false\ningress:\n  allow_public: true\n").unwrap();
+        assert!(
+            c.tls_names().is_empty(),
+            "an unspecified address names nothing"
+        );
+        let c = load("listen: \"[::]:7420\"\napi_tls: false\ningress:\n  allow_public: true\nfleet:\n  advertise: \"http://[fd00::5]:7420\"\n").unwrap();
+        assert_eq!(c.tls_names(), ["fd00::5"]);
+        let c = load("data_dir: /data\n").unwrap();
+        assert_eq!(c.tls_cert(), PathBuf::from("/data/api-cert.pem"));
+        assert_eq!(c.tls_key(), PathBuf::from("/data/api-key.pem"));
+    }
+
+    #[test]
+    fn the_dev_config_is_plain_http_on_purpose() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hack/config.dev.yaml");
+        let c = Config::load(Some(&path)).unwrap();
+        assert_eq!(c.listen, "0.0.0.0:7420");
+        assert!(!c.serves_tls(), "the suites curl http://127.0.0.1:7420");
     }
 
     #[test]

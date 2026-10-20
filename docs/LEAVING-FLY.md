@@ -14,7 +14,7 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 |---|---|---|---|---|
 | 1 | Public edge: hosting, IPs, certificates, DDoS | the hosts' ingress, private to the edge (done) | the router (done), edge hosts and certificates in infra | staging |
 | 2 | Volume durability: Fly's daily snapshots | scheduled backups, retention, delete | the schedule and retention per plan | staging |
-| 3 | Egress abuse: our servers' IPs and the provider's abuse desk | blocked ports, rate and bandwidth limits per machine | the limits per plan, abuse response | public traffic |
+| 3 | Egress abuse: our servers' IPs and the provider's abuse desk | blocked ports, rate and bandwidth limits per machine (done) | the limits per plan, abuse response | public traffic |
 | 4 | Observability and alerts | `/metrics`, JSON logs (done), host health | scraping, log shipping, alerts in the monitor | staging |
 | 5 | Host operations: real orders, upgrades, patching | rolling upgrade, real provisioner runs | runbooks, capacity decisions | production |
 | 6 | Host loss | evacuate a host from its backups | the briqs' state while it happens | production |
@@ -37,6 +37,7 @@ On briqyard: the router's logic (host lookup, `private`/`token`, wake, activity,
 - **Edge hosts of our own** (recommended): two small servers per region running the edge image as a service, `*.briq.run` and `*.tcp.briq.run` in DNS to both. Certificates by Let's Encrypt DNS-01 in CI, as the `*.tcp` one already is. The hosts' `ingress.allowed_clients` lists the edge until the mesh makes it the mesh range.
 - **Cloudflare in front of HTTP**: `*.briq.run` proxied gives anycast, TLS at the edge and flood absorption, with our edge hosts as origin. TCP endpoints cannot go through it without Spectrum (paid): they stay direct.
 - The edge never runs inside briqyard: tokens, teams and `briq.run` are briq's.
+- **The path from the edge to the hosts carries customers' traffic** (HTTP in clear, a database's protocol after the edge's TLS). It must ride a private network: OVH's vRack or a Scaleway private network between the edge and the hosts of a region, the mesh (`MESH.md`) across providers. TLS on the daemon's API (ADR 0020) covers the control path only.
 
 ## 2. Volume durability
 
@@ -53,7 +54,7 @@ Fly today: its IPs and its abuse desk; one abusive app is Fly's problem first.
 
 On briqyard: every machine of a host leaves through the host's IP. A sandbox that sends spam or scans the internet gets the server's IP blocklisted, and OVH or Scaleway can suspend the server, taking every tenant on it down.
 
-- **briqyard enforces** (recommended): blocked destination ports (25 by default), a connection rate and a bandwidth cap per machine (nftables `limit`, `tc`), as an extension of the egress policy (ADR 0015); counters exposed in usage.
+- **briqyard enforces** (built, ADR 0018): blocked destination ports (25 by default), a connection rate and a bandwidth cap per machine, host defaults in `egress_limits`, in nftables beside the egress policy (ADR 0015); drops counted per machine, in its view and in usage.
 - briq sets the limits per plan, and owns abuse response (suspend a team, answer the provider's abuse desk).
 - Later: a separate egress IP for untrusted sandboxes (an OVH additional IP per host), so their reputation is not the databases'.
 

@@ -105,7 +105,12 @@ Each machine has an egress policy (`egress` on create and PATCH, ADR 0015): `ope
 default), `none` (its tenant, no internet: `egress_none` in the inet forward chain) or
 `via: <machine>` (only that sibling, any port, and the gateway's DNS: `via_sources` and
 `via_allowed` in the bridge chain, IP and ARP, before the pins). Under `via` and `none` the
-resolver answers internal names only, NXDOMAIN for the rest. The policy is set at every start
+resolver answers internal names only, NXDOMAIN for the rest. An `open` machine's policy is its
+limits on internet traffic (`limits`, ADR 0018: blocked ports, new connections a minute, Mbit/s;
+the host's `egress_limits` under the machine's own): `blocked_ports` (address . port, TCP reset,
+UDP unreachable), and a named `limit` per rate found through `conn_limits` and
+`bandwidth_limits`, in the inet forward chain before the reply accept and the internet counters;
+three counter sets count what they drop. The policy is set at every start
 right after the pin, taken out with it, swapped live on a running machine in one transaction, and rendered from
 the running records at daemon start.
 
@@ -238,6 +243,14 @@ taken for the record made at the order. No provider's API returns the server's S
 the key seen at the first successful bootstrap is pinned in `<state_dir>/known_hosts`, its
 fingerprint in the host's note, and later connects are strict against it.
 
+The control path is TLS (ADR 0020). Each daemon makes a self-signed certificate once and
+serves its API with it on any non-loopback address; the fleet trusts that certificate by its
+SHA-256 alone, pinned in the host record: read by the bootstrap over the pinned SSH connection,
+or written in `hosts:` by the operator. Every forwarded call verifies the pin; a heartbeat
+reporting another fingerprint, or reporting one for a host with none pinned, is refused. The
+CLI pins a daemon the same way (`--tls-fingerprint`, the same verifier in `briqyard-api`). The
+ingress and TCP endpoints are not covered: they need a private network (`LEAVING-FLY.md` item 1).
+
 A WireGuard mesh between hosts, so a tenant can span several, is the next step after that: `MESH.md` is its design.
 
 ## Security
@@ -254,8 +267,8 @@ Secrets reach the guest on its config drive and never through the API's response
 
 The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API and its
 endpoints listen on loopback unless told otherwise; on an address the internet could reach it
-refuses to start until `ingress.allowed_clients` says who may connect (ADR 0012). The API is
-plain HTTP: TLS or a private network in front. Every id a caller sends (a tenant, a machine id
+refuses to start until `ingress.allowed_clients` says who may connect (ADR 0012). Off
+loopback the API is TLS with the host's own certificate (ADR 0020). Every id a caller sends (a tenant, a machine id
 in a path) is checked (`a-z`, `0-9`, `_`, `-`, 64 at most) before it names a file or an object.
 A pid in a record is signalled only when `/proc` shows it is the Firecracker of that machine:
 after a reboot, the number is someone else's. What it writes is its own: umask `077`,

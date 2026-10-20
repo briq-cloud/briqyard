@@ -40,6 +40,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Namespaces | ✓ tenants | | |
 | Finalizers, owner references, garbage collection | ◐ a tenant takes its gateway; forks are independent | | — |
 | CRDs, admission webhooks, aggregated APIs | ✗ | briq is the extension layer | briq |
+| TLS to the nodes (kubelet serving certificates) | ✓ a self-signed certificate per host, its SHA-256 pinned in the host record at bootstrap (ADR 0020) | | |
 | AuthN, RBAC, service accounts | ◐ one API token, a metrics token, one token per host (fleet) | scoped tokens (read-only, per tenant) | yard, later |
 | API priority and fairness | ✗ | per-client request limits | yard, later |
 | Audit log | ◐ one line per request | the principal and the change on mutating calls | yard, later |
@@ -49,16 +50,21 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | Pod | ✓ machine | | |
+| Change image, env, command, size (`kubectl apply`, `set image`, in-place resize) | ✗ PATCH takes sleep, metadata, egress | a PATCH applied at the next cold boot | yard |
+| `kubectl exec -it`, attach | ◐ exec with stdin and streamed output, no TTY | a TTY | yard, later |
+| `kubectl cp` | ✓ `/files` | | |
 | Pod phases and conditions | ◐ states, `stopped_reason`, exit code | a `ready` condition | yard (probes) |
 | Liveness, readiness, startup probes | ◐ the init answers; briq runs its healthcheck by exec from the control plane | probes in the daemon: exec, TCP, HTTP; readiness and restart on liveness | yard |
-| `restartPolicy`, CrashLoopBackOff | ◐ `no`, `on-failure`, `always` with a retry count | a backoff between restarts | yard |
-| `terminationGracePeriod`, preStop | ✓ stop timeout, SIGTERM then reset | | |
+| `restartPolicy`, CrashLoopBackOff | ◐ `no`, `on-failure`, `always`, a retry count, a linear backoff | a cap, a reset after a stable run, a `crash_loop` reason | yard |
+| `terminationGracePeriod` | ✓ stop timeout, SIGTERM then reset | | |
+| preStop hook | ✗ | | — |
 | Requests, limits | ✓ size (vCPUs, memory) as cgroup limits | | |
-| Init containers, sidecars | ◐ boot steps (briq recipes) | | briq |
+| Init containers | ◐ boot steps (briq recipes) | commands the init runs before the main process | yard, later (briq composes them) |
+| Sidecars | ✗ one main process; exec for the rest | | — |
 | Deployment, ReplicaSet (replicas, rolling update) | ✗ | a group of machines behind one name | yard, later |
-| StatefulSet | ✓ a machine with a volume | | |
+| StatefulSet | ◐ identity and a volume, no replicas | with groups | yard, later |
 | Job | ✓ `restart: no` + exit code; briq's async exec | | |
-| CronJob | ✗ | | briq |
+| CronJob | ✗ | | briq: a schedule on a workload is briq's; a schedule on what the host owns (its disks: backups) is the host's |
 | Ephemeral containers (debug) | ✓ exec | | |
 | — | ★ sleep on idle, wake on connect | | |
 | — | ★ suspend and resume in 0.2 s | Kubernetes checkpointing is alpha | |
@@ -70,13 +76,14 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | Fit by resources | ✓ memory and disk, reserved at placement | | |
 | Node selectors, node affinity, topology | ◐ hosts carry a region, placement ignores it | placement within the asked region | yard |
-| Pod affinity | ✓ a tenant's machines share a host | | |
-| Taints, cordon | ✓ drain | | |
+| Pod affinity | ◐ a tenant's machines share a host, forced | | — |
+| Cordon | ✓ drain | | |
+| Taints, tolerations | ✗ | | — |
 | Drain with eviction | ◐ drain stops placement; machines stay | evacuate a host from backups | yard |
 | Node object, heartbeats | ✓ heartbeat every 15 s, `down` after a minute | | |
 | Node conditions (MemoryPressure, DiskPressure) | ✗ | host conditions; placement refuses a host under pressure | yard |
 | Node-pressure eviction | ✗ a full pool stops every machine | headroom thresholds, events | yard |
-| Cluster autoscaler | ✓ provisioner autoscaler (dry run by default) | real orders | yard |
+| Cluster autoscaler | ◐ provisioner autoscaler, stub-tested, dry run by default | a first real order | yard |
 | Node upgrades | ✗ by hand | `host upgrade`: drain, upgrade, back | yard |
 | `kubectl top node` | ◐ `/v1/status` | | yard (metrics) |
 
@@ -91,9 +98,10 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Ingress controller | ✓ L4 ingress per host, private to the edge | | |
 | Ingress auth, TLS, hostnames | the router, Cloudflare in front | | briq |
 | NetworkPolicy, egress | ✓ `open`, `via`, `none` | | |
-| NetworkPolicy, by port and CIDR | ✗ | blocked ports, rate and bandwidth limits per machine | yard |
+| NetworkPolicy, by port and CIDR | ◐ blocked ports, a connection rate, a bandwidth cap per machine (ADR 0018) | allow-lists by CIDR | yard, later |
 | NetworkPolicy, ingress between pods | ✗ | | yard, later |
 | Egress gateway | ✓ tenant gateway | | |
+| Static egress IP (cloud NAT) | ✗ every machine leaves through its host's address | an additional IP per host for a class of machines | yard (mechanism), briq (who gets it) |
 | A pod network across nodes | ✗ a tenant on one host | `MESH.md` | yard, later |
 | Dual stack | ✗ tenant IPv6 dropped | | yard, later |
 
@@ -103,9 +111,9 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | PV, PVC, StorageClass | ✓ a volume per machine | | |
 | Volume expansion | ✗ | grow the zvol and the filesystem at boot | yard, later |
-| VolumeSnapshot, restore | ✓ snapshots, fork, backups, restore anywhere | | |
+| VolumeSnapshot, restore | ◐ local snapshots (list, delete), fork, backups and restore anywhere | rollback to a named local snapshot | yard, later |
 | Scheduled backups and retention (Velero) | ✗ on demand only | `backup: { every, keep }`, delete | yard (values from briq) |
-| Encryption at rest (CSI) | ✗ | ZFS native encryption | yard |
+| Encryption at rest (CSI, etcd secrets) | ✗ records, config drives and disks in clear (0600) | the pool encrypted at bootstrap, one key per host held by the fleet, handed over TLS at start, never on the host's disk | yard, before the first real host |
 | emptyDir, tmpfs | ✓ `/tmp` | | |
 
 ## Configuration and images
@@ -116,12 +124,14 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Live update of mounted config | ✗ applied at the next cold boot | | — |
 | imagePullSecrets per pod | ◐ registry credentials per host | per machine | yard, later |
 | Image pull, cache | ✓ a root disk per digest, the tag's digest cached | a registry mirror | yard |
+| Image garbage collection under disk pressure | ◐ unused images removed after `image_keep_days` | removal when the pool runs low | yard |
+| Container log rotation | ◐ the console rotates at a cold boot only | rotation by size while running | yard |
 
 ## Observability
 
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
-| `kubectl logs --since`, timestamps | ✓ | | |
+| `kubectl logs`, timestamps | ✓ (`since` is a page cursor, not a time) | | |
 | `kubectl logs -f` | ✗ | follow | yard |
 | `kubectl describe` | ✓ `briqyard machine describe` | | |
 | Events | ✓ (API machinery) | | |
@@ -141,27 +151,33 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Plans, what a plan allows | | | briq |
 | Egress abuse (outside core) | ✗ | (Networking) | yard; the response to abuse is briq's |
 | Private endpoints, tokens | | | briq |
+| Workload identity (a token to a cloud API) | | the credential gateway | briq |
+| PodDisruptionBudget, PriorityClass, HPA, VPA, RWX volumes | weighed, not needed: one machine per briq, no replicas | | — |
 
 ## Operations
 
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | Control plane HA (etcd quorum) | ✗ one fleet process, one file | state the fleet can rebuild from the hosts | yard, later |
+| etcd backup | ✗ | the registry file copied to the object store on each write | yard |
 | Cluster provisioning | ✓ bootstrap script, provisioners | | |
 | Version skew, upgrades | ✗ | `host upgrade` | yard |
 | Multi-cluster | ◐ regions on hosts | placement by region | yard |
 
 ## Order of work
 
-Tonight, in this order, each with unit tests, Linux CI and the VM suites:
+Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit tests, Linux CI and the VM suites, the stress driver after the items that touch the manager, the network or the store:
 
-1. **Egress controls**: blocked ports, connection rate, bandwidth per machine (NetworkPolicy by port, plus abuse).
-2. **Events, watch, versions**: the API machinery an imperative API needs to be driven safely.
-3. **Metrics**: per machine series and machine states on `/metrics`, host conditions, `top`.
-4. **Probes**: exec, TCP, HTTP; `ready`; restart on liveness; a restart backoff.
-5. **Scheduling**: placement by region, refusing hosts under pressure, labels on listings.
-6. **Backups on a schedule**, retention, delete.
-7. **Quotas per tenant**, logs follow, `describe`.
-8. **The edge** (briq): its hosts, Cloudflare in front, client IPs.
+1. **Egress controls**: blocked ports, connection rate, bandwidth per machine. Built: ADR 0018.
+2. **Events, watch, versions**, and `describe` from them.
+3. **Metrics**: per machine series and machine states on `/metrics`, host conditions, image GC and log rotation under them, `top`.
+4. **Probes**: exec, TCP, HTTP; `ready`, which the ingress and `/wait` follow; restart on liveness; a capped backoff with a `crash_loop` reason.
+5. **Backups on a schedule**, retention, delete (closes ADR 0017's storage hole).
+6. **TLS between the fleet and the hosts**, the certificate pinned at bootstrap. Built: ADR 0020.
+7. **Changes at the next cold boot**: image, env, command, size by PATCH.
+8. **Scheduling**: placement by region, hosts under pressure refused, labels on listings; quotas per tenant; logs follow.
+9. **The edge** (briq, in parallel): its servers, Cloudflare in front, client IPs, WebSockets. Built: up-lab/briq#277 (draft).
 
-Later, in the tables above: groups and load balancing, the mesh, volume expansion, encryption at rest (its keys first), scoped tokens, fleet HA, `host upgrade`, evacuation.
+Decided for the founder (advisor, 2026-10-20): the daemon runs scheduled backups from a policy briq sets; the pool is encrypted with one key per host held by the fleet, built before the first real host (after TLS); events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and briq's healthcheck moves onto them.
+
+Later, in the tables above: groups and load balancing, the mesh, volume expansion, encryption at rest, scoped tokens, fleet HA, `host upgrade`, evacuation, a TTY for exec.

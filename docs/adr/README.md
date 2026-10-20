@@ -23,4 +23,6 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0015](0015-egress-policy.md) | Egress per machine: open, via a gateway machine, or none; enforced on the host, never by the guest |
 | [0016](0016-tenant-gateway.md) | A tenant's gateway is a machine of the daemon: declared on the tenant, named by `via: gateway`, running while something needs it |
 | [0017](0017-usage-not-costs.md) | briqyard reports usage per machine in hourly buckets (compute, disk, object storage, network); costs live in briq |
+| [0018](0018-egress-limits.md) | Egress limits per machine (blocked ports, a connection rate, a bandwidth cap) on its internet traffic, in nftables, host defaults with per-field overrides; drops counted |
 | [0019](0019-events-watch-versions.md) | An event log per host (closed reasons, `seq` per host), a watch from a cursor, and a version on every machine checked by `If-Match` |
+| [0020](0020-api-tls.md) | The daemon's API serves TLS with a self-signed certificate made once; the fleet pins its SHA-256, read at bootstrap over the pinned SSH connection |

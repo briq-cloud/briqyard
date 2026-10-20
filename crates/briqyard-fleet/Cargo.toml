@@ -7,7 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-briqyard-api = { workspace = true }
+briqyard-api = { workspace = true, features = ["tls"] }
+axum-server = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,4 +29,5 @@ rand = { workspace = true }
 [dev-dependencies]
 futures = { workspace = true }
 tempfile = "3"
+rcgen = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

@@ -21,6 +21,11 @@ struct Cli {
     /// Bearer token.
     #[arg(long, env = "BRIQYARD_TOKEN", global = true, hide_env_values = true)]
     token: Option<String>,
+    /// A daemon's API certificate (`tls_fingerprint` in its status, `briqyardd
+    /// tls-fingerprint` on the host): trusted alone, no CA. Without it, an https URL is
+    /// checked against the web PKI, as a fleet's is.
+    #[arg(long, env = "BRIQYARD_TLS_FINGERPRINT", global = true, value_parser = fingerprint_arg)]
+    tls_fingerprint: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -85,7 +90,7 @@ enum MachineCmd {
         tenant: Option<String>,
     },
     /// Create and start a machine
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Show a machine
     Get {
         id: String,
@@ -199,6 +204,42 @@ enum MachineCmd {
         #[arg(value_parser = egress_arg)]
         egress: api::Egress,
     },
+    /// Change the limits it names on its internet traffic, at once: briqyard machine set-limits ID --conn-per-min 0
+    SetLimits {
+        id: String,
+        #[command(flatten)]
+        limits: LimitArgs,
+    },
+}
+
+/// Limits on a machine's internet traffic; each one left out is the machine's (on a run, the
+/// host's).
+#[derive(Args)]
+struct LimitArgs {
+    /// A destination port refused, TCP and UDP, repeatable (the host's default: 25)
+    #[arg(long = "block-port")]
+    block_ports: Vec<u16>,
+    /// New connections a minute; 0: no limit
+    #[arg(long)]
+    conn_per_min: Option<u32>,
+    /// Mbit/s, in and out together; 0: no limit
+    #[arg(long)]
+    bandwidth: Option<u32>,
+}
+
+impl LimitArgs {
+    /// The request's `limits`, checked as the daemon checks them; none when nothing is named.
+    fn request(&self) -> Result<Option<api::EgressLimits>> {
+        let l = api::EgressLimits {
+            blocked_ports: (!self.block_ports.is_empty()).then(|| self.block_ports.clone()),
+            new_connections_per_minute: self.conn_per_min,
+            bandwidth_mbit: self.bandwidth,
+        };
+        if let Err(e) = l.check() {
+            bail!("limits.{e}");
+        }
+        Ok((l != api::EgressLimits::default()).then_some(l))
+    }
 }
 
 #[derive(Args)]
@@ -221,6 +262,8 @@ struct RunArgs {
     /// Where its traffic may go: open (default), none (its tenant only), via:MACHINE_ID, via:gateway (the tenant's)
     #[arg(long, value_parser = egress_arg)]
     egress: Option<api::Egress>,
+    #[command(flatten)]
+    limits: LimitArgs,
     /// Data volume, SIZE:MOUNT (10G:/data)
     #[arg(long)]
     volume: Option<String>,
@@ -468,6 +511,23 @@ fn watch_line(line: &str) -> Result<Option<api::Event>> {
     Ok(None)
 }
 
+fn fingerprint_arg(s: &str) -> Result<String, String> {
+    api::tls::parse_fingerprint(s)
+}
+
+/// The HTTP client: pinned to a daemon's certificate (https only), or the web PKI's.
+fn http_client(tls_fingerprint: Option<&str>) -> Result<reqwest::Client> {
+    // Each call has its own deadline (`CALL_TIMEOUT`); a watch has none.
+    let b = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
+    let b = match tls_fingerprint {
+        Some(fp) => b
+            .use_preconfigured_tls(api::tls::pinned_client(fp))
+            .https_only(true),
+        None => b,
+    };
+    Ok(b.build()?)
+}
+
 fn print_json<T: serde::Serialize>(v: &T) {
     println!("{}", serde_json::to_string_pretty(v).unwrap());
 }
@@ -475,14 +535,17 @@ fn print_json<T: serde::Serialize>(v: &T) {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    let http = match http_client(cli.tls_fingerprint.as_deref()) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+    };
     let c = Client {
         base: cli.url.trim_end_matches('/').to_string(),
         token: cli.token.clone(),
-        // Each call has its own deadline (`CALL_TIMEOUT`); a watch has none.
-        http: reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .unwrap(),
+        http,
     };
     if let Err(e) = run(&c, cli.cmd).await {
         eprintln!("error: {e:#}");
@@ -572,6 +635,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     restart: None,
                     metadata: BTreeMap::new(),
                     egress: a.egress.clone(),
+                    limits: a.limits.request()?,
                     start: if a.no_start { Some(false) } else { None },
                     fork: None,
                     restore: None,
@@ -694,6 +758,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     sleep: src.sleep.clone(),
                     metadata: src.metadata.clone(),
                     egress: Some(src.egress.clone()),
+                    limits: Some(src.limits.clone()),
                     fork: Some(api::ForkSpec {
                         machine_id: id,
                         copy: String::new(),
@@ -747,6 +812,23 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::SetEgress { id, egress } => {
                 let req = api::UpdateMachineRequest {
                     egress: Some(egress),
+                    ..Default::default()
+                };
+                print_json(
+                    &c.call::<api::Machine>(
+                        reqwest::Method::PATCH,
+                        &format!("/v1/machines/{id}"),
+                        Some(&req),
+                    )
+                    .await?,
+                )
+            }
+            MachineCmd::SetLimits { id, limits } => {
+                let Some(limits) = limits.request()? else {
+                    bail!("name a limit: --block-port, --conn-per-min or --bandwidth");
+                };
+                let req = api::UpdateMachineRequest {
+                    limits: Some(limits),
                     ..Default::default()
                 };
                 print_json(
@@ -1047,13 +1129,35 @@ fn egress_label(e: &api::Egress) -> String {
     }
 }
 
+/// The limits in force, short: the blocked ports, the rate, the cap (`25,465 600/min
+/// 100Mbit`); `-` when nothing is limited.
+fn limits_label(l: &api::EgressLimits) -> String {
+    let mut parts = Vec::new();
+    let ports = l.blocked_ports.as_deref().unwrap_or_default();
+    if !ports.is_empty() {
+        let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+        parts.push(ports.join(","));
+    }
+    if let Some(n) = l.new_connections_per_minute.filter(|n| *n > 0) {
+        parts.push(format!("{n}/min"));
+    }
+    if let Some(n) = l.bandwidth_mbit.filter(|n| *n > 0) {
+        parts.push(format!("{n}Mbit"));
+    }
+    if parts.is_empty() {
+        "-".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
 // --- tables ---
 
 /// `machine ls`.
 fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {:<18} HOST\n",
-        "ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP", "EGRESS"
+        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {:<18} {:<24} HOST\n",
+        "ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP", "EGRESS", "LIMITS"
     );
     for m in ms {
         let state = if m.stopped_reason.is_empty() {
@@ -1062,7 +1166,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             format!("{} ({})", m.state, m.stopped_reason)
         };
         out.push_str(&format!(
-            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {:<18} {}\n",
+            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {:<18} {:<24} {}\n",
             m.id,
             m.tenant,
             m.name,
@@ -1072,6 +1176,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             format!("{}c/{}M", m.size.vcpus, m.size.memory_mb),
             m.sleep,
             egress_label(&m.egress),
+            limits_label(&m.limits),
             m.host
         ));
     }
@@ -1131,6 +1236,9 @@ fn host_table(hs: &[api::Host]) -> String {
             h.tenants.len(),
             h.last_seen.to_rfc3339()
         ));
+        if !h.tls_fingerprint.is_empty() {
+            out.push_str(&format!("{:<16} tls: {}\n", "", h.tls_fingerprint));
+        }
         if !h.note.is_empty() {
             out.push_str(&format!("{:<16} note: {}\n", "", h.note));
         }

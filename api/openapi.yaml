@@ -64,7 +64,7 @@ paths:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "404": { $ref: "#/components/responses/Error" }
     patch:
-      summary: Change the sleep window, the metadata or the egress policy, in any state; a running machine's policy changes at once. A change is an event (`egress_changed`, else `updated`) and moves `version`; a request that changes nothing does neither
+      summary: Change the sleep window, the metadata, the egress policy or the limits, in any state; a running machine's policy and limits change at once. A change is an event (`egress_changed` for the policy or the limits, else `updated`) and moves `version`; a request that changes nothing does neither
       parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       requestBody:
         required: true
@@ -73,7 +73,7 @@ paths:
             schema: { $ref: "#/components/schemas/UpdateMachineRequest" }
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
-        "400": { description: "`invalid`: a bad sleep window, an `egress` the machine cannot take, or an `If-Match` that is not a number" }
+        "400": { description: "`invalid`: a bad sleep window, an `egress` the machine cannot take, bad `limits`, or an `If-Match` that is not a number" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Moved" }
     delete:
@@ -438,6 +438,20 @@ components:
       properties:
         mode: { type: string, enum: [open, via, none], default: open, description: "open: its tenant and the internet; via: only the `via` machine (any port) and its gateway's DNS; none: its tenant, no internet. Under via and none, DNS answers internal names only (NXDOMAIN for the rest)" }
         via: { type: string, description: "for `via` only: a machine of the same tenant, not this one, or `gateway`: the tenant's gateway, started before this machine and kept running while it runs" }
+    EgressLimits:
+      type: object
+      description: "limits on the machine's internet traffic, through the host's NAT, enforced on the host (ADR 0018); `via` and `none` machines never reach it. In a request an absent field keeps the machine's value (on create, the host's `egress_limits`); in a machine, every field is there: the values in force"
+      properties:
+        blocked_ports: { type: array, items: { type: integer, minimum: 1, maximum: 65535 }, description: "destination ports refused, TCP (reset) and UDP (ICMP port unreachable); `[]` refuses none. Host default: [25]" }
+        new_connections_per_minute: { type: integer, minimum: 0, description: "new connections a minute, as many at once; over it, dropped. 0: no limit" }
+        bandwidth_mbit: { type: integer, minimum: 0, maximum: 100000, description: "Mbit/s, in and out together; over it, dropped. 0: no limit" }
+    EgressDrops:
+      type: object
+      description: packets the machine's limits dropped since it started (or the daemon did), read every 15 s
+      properties:
+        blocked_port: { type: integer }
+        rate: { type: integer }
+        bandwidth: { type: integer }
     CreateMachineRequest:
       type: object
       required: [tenant, name, size]
@@ -456,6 +470,7 @@ components:
         restart: { $ref: "#/components/schemas/RestartPolicy" }
         metadata: { type: object, additionalProperties: { type: string } }
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent: open, or for a restore the backup's" }
+        limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "over the host's, field by field; absent: the host's, or for a restore the backup's" }
         start: { type: boolean, default: true }
         fork: { $ref: "#/components/schemas/ForkSpec" }
         restore: { $ref: "#/components/schemas/RestoreSpec" }
@@ -487,6 +502,8 @@ components:
         sleep: { type: string }
         restart: { $ref: "#/components/schemas/RestartPolicy" }
         egress: { $ref: "#/components/schemas/Egress" }
+        limits: { $ref: "#/components/schemas/EgressLimits" }
+        egress_drops: { $ref: "#/components/schemas/EgressDrops" }
         metadata: { type: object, additionalProperties: { type: string } }
         endpoints: { type: array, items: { $ref: "#/components/schemas/Endpoint" } }
         created_at: { type: string, format: date-time }
@@ -561,6 +578,7 @@ components:
         sleep: { type: string }
         metadata: { type: object, additionalProperties: { type: string } }
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent keeps the current one" }
+        limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "the fields it names change, the others stay" }
     StopRequest:
       type: object
       properties:
@@ -646,6 +664,7 @@ components:
         internet_in_bytes: { type: integer }
         ingress_out_bytes: { type: integer, description: "to clients of the machine's endpoints" }
         ingress_in_bytes: { type: integer }
+        egress_dropped_packets: { type: integer, description: "packets the machine's egress limits dropped (ADR 0018)" }
         closed: { type: boolean, description: "the hour is over: the bucket will not change again" }
         host: { type: string, description: the host that measured it (fleet) }
     Event:
@@ -675,6 +694,8 @@ components:
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer, description: the tenants' machines, gateways not counted }
         running: { type: integer, description: machines up on the host, gateways included }
+        disk_free_mb: { type: integer }
+        tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate, 64 hex digits; empty on plain HTTP (ADR 0020)" }
     Host:
       type: object
       properties:
@@ -690,6 +711,7 @@ components:
         last_seen: { type: string, format: date-time }
         version: { type: string }
         note: { type: string, description: What the provisioner or the bootstrap last said }
+        tls_fingerprint: { type: string, description: "SHA-256 of the host's API certificate, pinned by the fleet; empty on plain HTTP" }
     OrderHostRequest:
       type: object
       properties:
@@ -707,11 +729,12 @@ components:
         tenants: { type: array, items: { type: string } }
         version: { type: string }
         disk_free_mb: { type: integer }
+        tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate; a fingerprint other than the pinned one is refused (403 tls_mismatch)" }
     ApiError:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, host_unreachable, host_down, registry, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]

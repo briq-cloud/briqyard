@@ -85,6 +85,39 @@ check "open again: internet"      'connects "$N" "$NET"'
 for m in "$V" "$N" "$SIB" "$G"; do briqyard machine rm "$m" >/dev/null; done
 briqyard tenant rm "$E" >/dev/null 2>&1 || true
 
+echo "== egress limits: port 25 blocked by default, a connection rate, a bandwidth cap"
+L=$(briqyard machine run --image alpine:3.20 --name lim --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
+lim() { briqyard machine get "$L" | jq -c "$1"; }
+# A connect to $NET's port $1 from the machine: refused (not 0) within a second, where a
+# dropped SYN would wait out the 5 s.
+refused_at_once() {
+  set -- $(briqyard machine exec "$L" -- sh -c 's=$(date +%s); nc -z -w 5 "$1" "$2"; echo $? $(($(date +%s) - s))' _ "$NET" "$1")
+  [ "${1:-0}" != 0 ] && [ "${2:-9}" -le 1 ]
+}
+# Seven connections in a row: y for each that connects.
+seven() { briqyard machine exec "$L" -- sh -c 'for i in 1 2 3 4 5 6 7; do nc -z -w 2 "$1" 443 && printf y || printf n; done' _ "$NET"; }
+# 2 MiB from the internet, cut at 2 MiB so the server's range support does not matter:
+# at 2 Mbit/s it takes over 7 s (a second of burst), unlimited a moment.
+capped() {
+  set -- $(briqyard machine exec "$L" -- sh -c 's=$(date +%s); n=$(wget -qO- -T 30 https://proof.ovh.net/files/10Mb.dat | head -c 2097152 | wc -c); echo $n $(($(date +%s) - s))')
+  [ "${1:-}" = 2097152 ] && [ "${2:-0}" -ge 6 ]
+}
+check "limits: the host's shown"   '[ "$(lim .limits)" = "{\"blocked_ports\":[25],\"new_connections_per_minute\":0,\"bandwidth_mbit\":0}" ]'
+check "port 25 refused at once"    'refused_at_once 25'
+check "port 443 connects"          'connects "$L" "$NET"'
+briqyard machine set-limits "$L" --conn-per-min 6 >/dev/null
+check "set-limits shown"           '[ "$(lim .limits.new_connections_per_minute)" = 6 ]'
+check "6 a minute: the 7th dropped" '[ "$(seven)" = yyyyyyn ]'
+briqyard machine set-limits "$L" --conn-per-min 0 >/dev/null
+check "rate lifted at once"        'connects "$L" "$NET"'
+# The tick reads the counters every 15 s.
+both='.egress_drops.blocked_port > 0 and .egress_drops.rate > 0'
+for i in $(seq 1 20); do [ "$(lim "$both")" = true ] && break; sleep 2; done
+check "drops shown"                '[ "$(lim "$both")" = true ]'
+briqyard machine set-limits "$L" --bandwidth 2 >/dev/null
+check "2 Mbit/s: a download capped" 'capped'
+briqyard machine rm "$L" >/dev/null
+
 echo "== tenant gateway: started by what needs it, stopped once nothing does"
 GT="$T-gw"
 # A forward proxy: CONNECT host:port, then bytes both ways. On the image the egress section
