@@ -16,3 +16,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0008](0008-backups-zfs-send.md) | Backups: ZFS streams to an object store, incremental, restore is a create |
 | [0009](0009-load-controls.md) | Load: boots take turns, a tag's digest is remembered |
 | [0010](0010-testing.md) | Testing: unit tests with fakes, shell suites in `hack/`, a stress driver with invariants |
+| [0011](0011-transitions-as-tasks-and-error-codes.md) | Transitions run detached from the request; a boot the image fails is 409 `boot_failed`, not 500 |

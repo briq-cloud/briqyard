@@ -185,6 +185,7 @@ fn err(status: StatusCode, code: &str, msg: impl Into<String>) -> Response {
             error: msg.into(),
             code: code.into(),
             request_id: String::new(),
+            machine: None,
         }),
     )
         .into_response()

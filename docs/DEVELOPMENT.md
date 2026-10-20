@@ -80,7 +80,10 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
 - `cargo test --workspace`: unit tests, which run anywhere (extraction and whiteouts, DNS
   packets, the guest protocol, address allocation, the store, the configuration, the ZFS
   backend against a fake `zfs`, the Firecracker and guest clients against in-test sockets,
-  the config drive, restart and sleep decisions).
+  the config drive, restart and sleep decisions, and the manager's own decisions through a
+  harness over a temp directory and a `zfs` that answers nothing: reservation under load,
+  the destroying guard, `/wait`, record migration, id checks; what needs a process, a disk
+  or a bridge stays with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,

@@ -41,7 +41,19 @@ mount path, the ports the image listens on, and the sleep window. The daemon:
 
 States: `created` → `starting` → `running` → `stopping` → `stopped` → (`starting` again) …
 → `destroying` → gone. A `stopped` machine keeps both disks. `stopped_reason` says why it
-stopped: `user`, `idle` (went to sleep), `exit` (its process ended; `exit_code` says how).
+stopped: `user`, `idle` (went to sleep), `exit` (its process ended; `exit` says how), `host`
+(the daemon stopped it: a shutdown, or a leftover of a crashed daemon; wakeable like `idle`).
+`state_changed_at` moves only with `state`; `updated_at` moves on every write, a touch included.
+
+A boot the guest does not survive (the image's fault: no init to run, a command that exits
+at once) leaves the machine in `error` with the console's last lines, and the request answers
+409 `boot_failed` with the machine in the body; nothing restarts it, the caller reads and
+destroys it. The host's own faults answer 500. Every transition (create, start, stop, destroy,
+backup) runs in a task of its own that the request only waits on: a client that hangs up
+never leaves a machine half-moved (ADR 0011). One lock per machine orders its transitions;
+a start takes the host's memory and moves to `starting` in one step under the machines map's
+lock, so starts that race never oversubscribe it; a destroy holds the machine's lock from the
+state check to the record's removal and, when it fails, is tried again every 15 s.
 
 ### Disks
 
@@ -160,4 +172,7 @@ the gateway's DNS, and the internet through NAT; nothing reaches a guest but the
 Secrets reach the guest on its config drive and never through the API's responses.
 
 The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API listens on
-loopback unless told otherwise; put it behind TLS or a private network before that.
+loopback unless told otherwise; put it behind TLS or a private network before that. Every id a
+caller sends (a tenant, a machine id in a path) is checked (`a-z`, `0-9`, `_`, `-`, 64 at most)
+before it names a file or an object. A pid in a record is signalled only when `/proc` shows
+it is the Firecracker of that machine: after a reboot, the number is someone else's.

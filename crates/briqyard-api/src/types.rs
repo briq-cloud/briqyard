@@ -136,6 +136,9 @@ pub mod stop {
     pub const IDLE: &str = "idle";
     /// Its process ended and the restart policy let it.
     pub const EXIT: &str = "exit";
+    /// The daemon stopped it on its own: a shutdown, or a previous daemon's leftover found
+    /// at start. Wakeable, like `idle`.
+    pub const HOST: &str = "host";
 }
 
 /// A machine as the API returns it.
@@ -171,6 +174,9 @@ pub struct Machine {
     pub endpoints: Vec<Endpoint>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// When `state` last changed. `updated_at` moves on every write (a touch, a metadata
+    /// change); this moves only with the state.
+    pub state_changed_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,6 +482,10 @@ pub struct ApiError {
     pub code: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub request_id: String,
+    /// With `boot_failed`: the machine, in state `error`, kept so the caller can read its
+    /// console and destroy it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<Box<Machine>>,
 }
 
 /// Parses a sleep window: "30m", "2h", "7d", "never" or "". `None` is never.
@@ -506,6 +516,16 @@ pub fn parse_sleep(s: &str) -> Result<Option<std::time::Duration>, String> {
         .checked_mul(per_unit)
         .ok_or_else(|| format!("sleep {s:?}: too long"))?;
     Ok(Some(std::time::Duration::from_secs(secs)))
+}
+
+/// An id the API takes from a caller (a tenant, a machine id in a path or a restore): a-z,
+/// 0-9, `_` and `-`, 1 to 64 characters. Ids become file and object names on the host, so
+/// nothing else gets in.
+pub fn valid_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
 }
 
 /// A DNS label: a-z, 0-9, hyphens inside, at most 63 characters.
@@ -692,7 +712,8 @@ mod tests {
             "state": "running", "hostname": "db.internal", "machine_host": "m1.vm.internal",
             "size": {"vcpus": 1, "memory_mb": 512}, "sleep": "never",
             "restart": {"policy": "no", "max_retries": 0},
-            "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:05Z"
+            "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:05Z",
+            "state_changed_at": "2026-01-02T03:04:05Z"
         });
         let mut expected = input.clone();
         // What a reader always gets, even when nothing was set.
@@ -727,6 +748,7 @@ mod tests {
                 "host_port": 20001, "address": "1.2.3.4:20001", "created_at": "2026-01-02T03:04:05Z"
             }],
             "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:05Z",
+            "state_changed_at": "2026-01-02T03:04:05Z",
             "started_at": "2026-01-02T03:04:05Z", "stopped_at": "2026-01-02T03:04:05Z",
             "last_used_at": "2026-01-02T03:04:05Z", "sleeps_at": "2026-01-02T03:34:05Z",
             "suspended": true, "host": "h1"
@@ -965,6 +987,20 @@ mod tests {
         assert_eq!(e.request_id, "");
         let e: ApiError = same(json!({"error": "boom", "code": "internal", "request_id": "r1"}));
         assert_eq!(e.request_id, "r1");
+        // A boot failure carries the machine it left in `error`.
+        let e: ApiError = same(json!({
+            "error": "the guest did not come up", "code": "boot_failed",
+            "machine": {
+                "id": "m1", "tenant": "t1", "name": "db", "image": "postgres:17",
+                "state": "error", "error": "the guest did not come up",
+                "hostname": "db.internal", "machine_host": "m1.vm.internal",
+                "size": {"vcpus": 1, "memory_mb": 512}, "ports": [], "sleep": "never",
+                "restart": {"policy": "no", "max_retries": 0}, "metadata": {}, "endpoints": [],
+                "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:05Z",
+                "state_changed_at": "2026-01-02T03:04:05Z", "suspended": false
+            }
+        }));
+        assert_eq!(e.machine.as_ref().map(|m| m.state.as_str()), Some("error"));
     }
 
     #[test]
@@ -991,8 +1027,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            [stop::USER, stop::IDLE, stop::EXIT],
-            ["user", "idle", "exit"]
+            [stop::USER, stop::IDLE, stop::EXIT, stop::HOST],
+            ["user", "idle", "exit", "host"]
         );
     }
 
@@ -1076,6 +1112,37 @@ mod tests {
             &"a".repeat(64),
         ] {
             assert!(!valid_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn ids() {
+        for ok in [
+            "t1",
+            "m_abcdef123456",
+            "team-x",
+            "_",
+            "-",
+            "0",
+            &"a".repeat(64),
+        ] {
+            assert!(valid_id(ok), "{ok}");
+        }
+        // What would leave the state directory, or name a file nothing expects.
+        for bad in [
+            "",
+            "../../etc/cron.d/x",
+            "a/b",
+            "..",
+            ".hidden",
+            "a.b",
+            "A",
+            "a b",
+            "é",
+            "a\0b",
+            &"a".repeat(65),
+        ] {
+            assert!(!valid_id(bad), "{bad}");
         }
     }
 }
