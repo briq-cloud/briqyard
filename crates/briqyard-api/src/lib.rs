@@ -3,6 +3,8 @@
 
 pub mod auth;
 pub mod guest;
+#[cfg(feature = "tls")]
+pub mod tls;
 pub mod types;
 
 pub use auth::constant_eq;

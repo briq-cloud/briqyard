@@ -50,6 +50,10 @@ rusty-s3 = "0.7"
 url = "2"
 tokio-vsock = "0.6"
 humantime = "2"
+# TLS on the API (ADR 0020): ring, the provider reqwest already uses; no aws-lc.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 
 [profile.release]
 opt-level = "s"
