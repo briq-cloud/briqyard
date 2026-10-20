@@ -109,6 +109,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/images", get(list_images))
         .route("/v1/images/:key", axum::routing::delete(delete_image))
+        .route("/v1/usage", get(usage))
         .route("/v1/tenants", get(list_tenants))
         .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
         .route(
@@ -511,6 +512,23 @@ async fn delete_image(State(st): S, Path(key): Path<String>) -> Result<StatusCod
     let m = st.mgr.clone();
     detached(async move { m.delete_image(&key).await }).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct UsageQuery {
+    from: Option<String>,
+    to: Option<String>,
+    tenant: Option<String>,
+}
+
+/// The usage buckets of a range of hours (ADR 0017).
+async fn usage(
+    State(st): S,
+    Query(q): Query<UsageQuery>,
+) -> Result<Json<Vec<api::UsageBucket>>, AppError> {
+    let (from, to) =
+        crate::usage::range(q.from.as_deref(), q.to.as_deref()).map_err(MError::Invalid)?;
+    Ok(Json(st.mgr.usage_buckets(from, to, q.tenant).await?))
 }
 
 async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {

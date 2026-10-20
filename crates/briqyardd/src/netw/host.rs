@@ -4,6 +4,7 @@
 use super::{bridge_name, nft, tap_name, Subnet, TAP_PREFIX};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::process::Command;
@@ -21,6 +22,13 @@ pub trait Net: Send + Sync {
     async fn set_policy(&self, p: &nft::Policy) -> Result<()>;
     async fn unset_policy(&self, p: &nft::Policy) -> Result<()>;
     async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()>;
+    /// Counts the internet traffic of a machine's address, from zero (ADR 0017).
+    async fn count(&self, ip: &str) -> Result<()>;
+    /// Ends the count. Missing is success.
+    async fn uncount(&self, ip: &str) -> Result<()>;
+    /// Bytes from and to the internet, `(in, out)`, of every counted address since it was
+    /// counted.
+    async fn counters(&self) -> Result<HashMap<String, (u64, u64)>>;
     /// Returns once a TCP connection to `ip:port` from the host is accepted, or fails at
     /// `timeout`.
     async fn wait_port(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()>;
@@ -57,6 +65,15 @@ impl Net for HostNet {
     }
     async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()> {
         nft::swap_policy(old, new).await
+    }
+    async fn count(&self, ip: &str) -> Result<()> {
+        nft::count(ip).await
+    }
+    async fn uncount(&self, ip: &str) -> Result<()> {
+        nft::uncount(ip).await
+    }
+    async fn counters(&self) -> Result<HashMap<String, (u64, u64)>> {
+        nft::counters().await
     }
     async fn wait_port(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()> {
         wait_port(SocketAddr::from((ip, port)), timeout).await

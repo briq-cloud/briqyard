@@ -11,6 +11,7 @@ mod machine;
 mod netw;
 mod objstore;
 mod store;
+mod usage;
 mod zfs;
 
 use anyhow::{anyhow, Context, Result};

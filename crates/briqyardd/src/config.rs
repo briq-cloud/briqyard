@@ -45,6 +45,8 @@ pub struct Config {
     pub root_disk_gb: u32,
     /// An image no machine uses is removed this many days after it was built.
     pub image_keep_days: u32,
+    /// Closed hours of usage are kept this many days (ADR 0017).
+    pub usage_keep_days: u32,
     /// How long a tag's resolution (which digest `alpine:3.20` is) is reused before asking the
     /// registry again: a burst of creates makes one registry call, not one each.
     pub image_resolve_minutes: u32,
@@ -178,6 +180,7 @@ impl Default for Config {
             ingress: Ingress::default(),
             root_disk_gb: 8,
             image_keep_days: 14,
+            usage_keep_days: 90,
             image_resolve_minutes: 10,
             boot_timeout_sec: 120,
             boots_at_once: 0,
@@ -250,6 +253,9 @@ impl Config {
         }
         if self.root_disk_gb < 1 {
             bail!("root_disk_gb must be at least 1");
+        }
+        if self.usage_keep_days < 1 {
+            bail!("usage_keep_days must be at least 1");
         }
         for (name, p) in [
             ("firecracker", &self.firecracker),
@@ -359,6 +365,7 @@ mod tests {
         assert!(!c.ingress.allow_public);
         assert_eq!(c.root_disk_gb, 8);
         assert_eq!(c.image_keep_days, 14);
+        assert_eq!(c.usage_keep_days, 90);
         assert!(!c.suspend_on_sleep);
         assert!(c.fleet.is_none());
         assert_eq!(c.capacity.memory_mb, 0);
@@ -418,6 +425,7 @@ ingress:
   allow_public: true
 root_disk_gb: 16
 image_keep_days: 3
+usage_keep_days: 30
 suspend_on_sleep: true
 fleet:
   url: http://fleet:7430
@@ -457,6 +465,7 @@ capacity:
         assert!(c.ingress.allow_public);
         assert_eq!(c.root_disk_gb, 16);
         assert_eq!(c.image_keep_days, 3);
+        assert_eq!(c.usage_keep_days, 30);
         assert!(c.suspend_on_sleep);
         let f = c.fleet.unwrap();
         assert_eq!(f.url, "http://fleet:7430");
@@ -507,6 +516,8 @@ capacity:
 
         let err = load("root_disk_gb: 0\n").unwrap_err();
         assert!(err.to_string().contains("root_disk_gb"), "{err}");
+        let err = load("usage_keep_days: 0\n").unwrap_err();
+        assert_eq!(err.to_string(), "usage_keep_days must be at least 1");
 
         for (field, yaml) in [
             ("firecracker", "firecracker: bin/firecracker\n"),

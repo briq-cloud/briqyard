@@ -151,6 +151,22 @@ directory), incremental after the first; the record beside it holds the machine'
 restore is a create that receives the chain of streams into fresh datasets on any host that
 reaches the store. Local snapshots stay only as the base of the next incremental send.
 
+### Usage
+
+The daemon measures what each machine uses, per UTC hour, and never prices it (ADR 0017,
+`usage.rs`). Each machine has a meter: time in its state is accrued at every state change and
+every tick, split at the hour (running is `starting` to `stopping`; suspended is stopped with a
+memory snapshot); the tick (15 s) adds what its counters grew by, a smaller value counting as
+a counter begun again. The sources: the cgroup's `cpu.stat`; one `zfs list` of the pool for
+allocated sizes, used bytes and snapshots, plus the memory snapshot files; the record's
+`backup_bytes`, added at each backup; two counter sets in the inet table (`internet_out`,
+`internet_in`, an element per machine address for the machine's life, matched in the forward
+chain on the egress interface); and the ingress proxy, which adds the bytes it passes as they
+pass. The open hours live in memory, written to `state/usage/<hour>.json` once a minute and at
+the hour's close; a closed hour is never written again (what a late meter brings for it lands
+in the open hour), and a destroyed machine's buckets stay. `GET /v1/usage` answers a range of
+at most 31 days; the fleet asks every host and fails whole.
+
 ### Sleep
 
 Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the

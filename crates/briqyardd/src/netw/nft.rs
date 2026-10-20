@@ -4,11 +4,13 @@
 //! address so a guest cannot send as anyone else.
 //!
 //! The tables are rendered once at start. A machine's pin is one element added to or removed
-//! from the `pins` set, its egress policy (ADR 0015) a few more in the sets beside it;
+//! from the `pins` set, its egress policy (ADR 0015) a few more in the sets beside it, its
+//! internet counters (ADR 0017) one element in each of two counter sets for its life;
 //! tenants need no change at all: the rules name their bridges by prefix (`by*`), which only
 //! the daemon makes.
 
 use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -67,7 +69,12 @@ pub struct Ruleset {
     pub pins: Vec<(String, String)>,
     /// The egress policies of those machines.
     pub policies: Vec<Policy>,
+    /// The address of every machine on the host: its internet traffic is counted.
+    pub counted: Vec<String>,
 }
+
+/// The counter sets: bytes a machine's address sent to the internet and got back from it.
+const COUNTERS: [&str; 2] = ["internet_out", "internet_in"];
 
 impl Ruleset {
     pub fn render(&self) -> String {
@@ -93,10 +100,25 @@ impl Ruleset {
         }
         s.push_str("\t}\n");
         s.push_str(&set("egress_none", "ipv4_addr", &egress_none));
+        for name in COUNTERS {
+            s.push_str(&counter_set(name, &self.counted));
+        }
         s.push_str("\tchain forward {\n\t\ttype filter hook forward priority 0; policy drop;\n");
         s.push_str("\t\tmeta nfproto ipv6 iifname \"by*\" drop\n");
         // Before the reply accept: a policy set while a connection is open ends it.
         s.push_str("\t\tip saddr @egress_none drop\n");
+        // Counted before the accepts, so replies count too: a lookup in a set with `counter`
+        // adds the packet to its element and goes on to the next rule. Only the route to the
+        // internet crosses this chain: a tenant's own traffic is bridged, endpoints and DNS
+        // end on the host. A first packet to a private network, dropped below, is counted.
+        s.push_str(&format!(
+            "\t\tiifname \"by*\" oifname \"{}\" ip saddr @internet_out\n",
+            self.egress
+        ));
+        s.push_str(&format!(
+            "\t\tiifname \"{}\" oifname \"by*\" ip daddr @internet_in\n",
+            self.egress
+        ));
         s.push_str("\t\tct state established,related accept\n");
         s.push_str(&format!(
             "\t\tiifname \"by*\" oifname \"{}\" ip daddr {PRIVATE_NETS} drop\n",
@@ -203,6 +225,96 @@ fn set(name: &str, ty: &str, elements: &[String]) -> String {
     s
 }
 
+/// A set of addresses with a counter on each element: every element, added at start or later,
+/// counts from zero.
+fn counter_set(name: &str, elements: &[String]) -> String {
+    let mut s = format!("\tset {name} {{\n\t\ttype ipv4_addr\n\t\tcounter\n");
+    if !elements.is_empty() {
+        s.push_str(&format!("\t\telements = {{ {} }}\n", elements.join(", ")));
+    }
+    s.push_str("\t}\n");
+    s
+}
+
+/// What `count` sends: the address in both counter sets; with `delete`, what ends it.
+pub fn counter_elements(verb: &str, ip: &str) -> String {
+    COUNTERS
+        .iter()
+        .map(|set| format!("{verb} element inet briqyard {set} {{ {ip} }}\n"))
+        .collect()
+}
+
+/// Counts a machine's internet traffic, from zero. Again keeps the counts.
+pub async fn count(ip: &str) -> Result<()> {
+    nft(&counter_elements("add", ip)).await
+}
+
+/// Ends the count. Missing is success.
+pub async fn uncount(ip: &str) -> Result<()> {
+    missing_is_fine(nft(&counter_elements("delete", ip)).await)
+}
+
+/// Bytes each counted address got from the internet and sent to it, `(in, out)`, since it
+/// was counted: what `nft -j list set` says of both sets.
+pub async fn counters() -> Result<HashMap<String, (u64, u64)>> {
+    let mut bytes = [HashMap::new(), HashMap::new()];
+    for (set, into) in COUNTERS.iter().zip(bytes.iter_mut()) {
+        let out = Command::new("nft")
+            .args(["-j", "list", "set", "inet", "briqyard", set])
+            .output()
+            .await
+            .context("run nft")?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "nft list set {set}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        *into = set_bytes(&out.stdout).with_context(|| format!("nft list set {set}"))?;
+    }
+    let [out, inb] = bytes;
+    Ok(both(&inb, &out))
+}
+
+/// `(in, out)` per address, from the bytes of each direction.
+fn both(inb: &HashMap<String, u64>, out: &HashMap<String, u64>) -> HashMap<String, (u64, u64)> {
+    let mut all: HashMap<String, (u64, u64)> = HashMap::new();
+    for (ip, b) in inb {
+        all.entry(ip.clone()).or_default().0 = *b;
+    }
+    for (ip, b) in out {
+        all.entry(ip.clone()).or_default().1 = *b;
+    }
+    all
+}
+
+/// The bytes of each element of a counter set, from `nft -j list set`: `nftables[].set.elem[]`
+/// is `{"elem": {"val": "10.64.1.2", "counter": {"packets": 6, "bytes": 504}}}`; an empty set
+/// has no `elem`.
+fn set_bytes(json: &[u8]) -> Result<HashMap<String, u64>> {
+    let v: serde_json::Value = serde_json::from_slice(json)?;
+    let mut out = HashMap::new();
+    let items = v["nftables"]
+        .as_array()
+        .ok_or_else(|| anyhow!("no nftables array"))?;
+    for item in items {
+        let Some(elems) = item["set"]["elem"].as_array() else {
+            continue;
+        };
+        for e in elems {
+            let e = &e["elem"];
+            let ip = e["val"]
+                .as_str()
+                .ok_or_else(|| anyhow!("an element without an address: {e}"))?;
+            let bytes = e["counter"]["bytes"]
+                .as_u64()
+                .ok_or_else(|| anyhow!("{ip}: no counter"))?;
+            out.insert(ip.to_string(), bytes);
+        }
+    }
+    Ok(out)
+}
+
 /// What `pin_source` sends: one element into the `pins` set.
 pub fn pin_element(tap: &str, ip: &str) -> String {
     format!("add element bridge briqyard pins {{ {} }}\n", pin(tap, ip))
@@ -301,6 +413,7 @@ mod tests {
                     ip: "10.64.0.4".into(),
                 },
             ],
+            counted: vec!["10.64.0.2".into(), "10.64.0.3".into()],
         }
     }
 
@@ -329,10 +442,22 @@ table inet briqyard {
 		type ipv4_addr
 		elements = { 10.64.0.4 }
 	}
+	set internet_out {
+		type ipv4_addr
+		counter
+		elements = { 10.64.0.2, 10.64.0.3 }
+	}
+	set internet_in {
+		type ipv4_addr
+		counter
+		elements = { 10.64.0.2, 10.64.0.3 }
+	}
 	chain forward {
 		type filter hook forward priority 0; policy drop;
 		meta nfproto ipv6 iifname "by*" drop
 		ip saddr @egress_none drop
+		iifname "by*" oifname "eth0" ip saddr @internet_out
+		iifname "eth0" oifname "by*" ip daddr @internet_in
 		ct state established,related accept
 		iifname "by*" oifname "eth0" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } drop
 		iifname "by*" oifname "eth0" accept
@@ -386,6 +511,7 @@ table bridge briqyard {
             allowed_clients: vec![],
             pins: vec![],
             policies: vec![],
+            counted: vec![],
             ..ruleset()
         };
         let s = r.render();
@@ -398,6 +524,7 @@ table bridge briqyard {
         assert!(s.contains("\tset pins {\n\t\ttype ifname . ipv4_addr\n\t}\n"));
         assert!(s.contains("\tset egress_none {\n\t\ttype ipv4_addr\n\t}\n"));
         assert!(s.contains("\tset via_allowed {\n\t\ttype ipv4_addr . ipv4_addr\n\t}\n"));
+        assert!(s.contains("\tset internet_in {\n\t\ttype ipv4_addr\n\t\tcounter\n\t}\n"));
     }
 
     #[test]
@@ -457,6 +584,50 @@ table bridge briqyard {
             "delete element bridge briqyard via_sources { 10.64.0.3 }\n\
              delete element bridge briqyard via_allowed { 10.64.0.3 . 10.64.0.2, 10.64.0.3 . 10.64.0.1 }\n\
              add element inet briqyard egress_none { 10.64.0.3 }\n"
+        );
+    }
+
+    #[test]
+    fn counter_elements_name_both_sets() {
+        assert_eq!(
+            counter_elements("add", "10.64.1.2"),
+            "add element inet briqyard internet_out { 10.64.1.2 }\n\
+             add element inet briqyard internet_in { 10.64.1.2 }\n"
+        );
+        assert_eq!(
+            counter_elements("delete", "10.64.1.2"),
+            "delete element inet briqyard internet_out { 10.64.1.2 }\n\
+             delete element inet briqyard internet_in { 10.64.1.2 }\n"
+        );
+    }
+
+    #[test]
+    fn counters_are_read_from_nft_json() {
+        // What nft 1.1.6 prints for a counter set, read on the dev VM.
+        let listed = br#"{"nftables": [{"metainfo": {"version": "1.1.6", "release_name": "Commodore Bullmoose #7", "json_schema_version": 1}}, {"set": {"family": "inet", "name": "internet_out", "table": "briqyard", "type": "ipv4_addr", "handle": 2, "elem": [{"elem": {"val": "10.64.1.2", "counter": {"packets": 6, "bytes": 504}}}, {"elem": {"val": "10.64.1.3", "counter": {"packets": 0, "bytes": 0}}}], "stmt": [{"counter": null}]}}]}"#;
+        let out = set_bytes(listed).unwrap();
+        assert_eq!(
+            out,
+            HashMap::from([("10.64.1.2".to_string(), 504), ("10.64.1.3".to_string(), 0)])
+        );
+        // An empty set has no `elem`.
+        let empty = br#"{"nftables": [{"metainfo": {}}, {"set": {"family": "inet", "name": "internet_in", "table": "briqyard", "type": "ipv4_addr", "handle": 3, "stmt": [{"counter": null}]}}]}"#;
+        assert!(set_bytes(empty).unwrap().is_empty());
+        // A set without counters is an error, not zero.
+        let bare = br#"{"nftables": [{"set": {"elem": [{"elem": {"val": "10.64.1.2"}}]}}]}"#;
+        assert_eq!(
+            set_bytes(bare).unwrap_err().to_string(),
+            "10.64.1.2: no counter"
+        );
+        assert!(set_bytes(b"not json").is_err());
+        // In and out side by side, an address seen in one direction only has zero in the other.
+        let inb = HashMap::from([("10.64.1.2".to_string(), 9000)]);
+        assert_eq!(
+            both(&inb, &out),
+            HashMap::from([
+                ("10.64.1.2".to_string(), (9000, 504)),
+                ("10.64.1.3".to_string(), (0, 0))
+            ])
         );
     }
 

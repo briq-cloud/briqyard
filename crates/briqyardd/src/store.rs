@@ -42,7 +42,7 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 impl Store {
     pub fn open(root: &Path) -> Result<Self> {
         private_dir(root)?;
-        for d in ["machines", "tenants", "endpoints", "meta"] {
+        for d in ["machines", "tenants", "endpoints", "meta", "usage"] {
             private_dir(&root.join(d))?;
         }
         Ok(Self {
@@ -97,6 +97,19 @@ impl Store {
         Ok(out)
     }
 
+    /// The keys of a kind, sorted.
+    pub fn keys(&self, kind: &str) -> Result<Vec<String>> {
+        let mut keys = Vec::new();
+        for entry in std::fs::read_dir(self.root.join(kind))? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if let Some(k) = name.strip_suffix(".json") {
+                keys.push(k.to_string());
+            }
+        }
+        keys.sort();
+        Ok(keys)
+    }
+
     pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
         match std::fs::read_to_string(self.path("meta", key)?) {
             Ok(s) => Ok(Some(s)),
@@ -138,7 +151,7 @@ mod tests {
     #[test]
     fn open_makes_the_kinds() {
         let (dir, _) = open();
-        for d in ["machines", "tenants", "endpoints", "meta"] {
+        for d in ["machines", "tenants", "endpoints", "meta", "usage"] {
             assert!(dir.path().join("state").join(d).is_dir(), "{d}");
         }
         // Opening again over an existing state dir is fine.
@@ -239,7 +252,7 @@ mod tests {
         store.put_meta("host_id", "h_1").unwrap();
         let state = dir.path().join("state");
         assert_eq!(mode(&state), 0o700);
-        for d in ["machines", "tenants", "endpoints", "meta"] {
+        for d in ["machines", "tenants", "endpoints", "meta", "usage"] {
             assert_eq!(mode(&state.join(d)), 0o700, "{d}");
         }
         assert_eq!(mode(&state.join("machines/m_a.json")), 0o600);
@@ -261,7 +274,10 @@ mod tests {
         std::fs::write(dir.path().join("state/machines/m_b.json.tmp"), b"{").unwrap();
         std::fs::write(dir.path().join("state/machines/README"), b"x").unwrap();
         let all: Vec<Rec> = store.list("machines").unwrap();
-        assert_eq!(all, vec![r]);
+        assert_eq!(all, vec![r.clone()]);
+        // Keys too, sorted.
+        store.put("machines", "m_0", &r).unwrap();
+        assert_eq!(store.keys("machines").unwrap(), ["m_0", "m_a"]);
     }
 
     #[test]
