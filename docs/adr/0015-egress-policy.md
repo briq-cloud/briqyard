@@ -18,7 +18,7 @@ briq's credential gateway (monorepo ADR 0015, merged 2026-10-20) puts a placehol
 
 **Enforced where the host sees the port, never by the guest.** `via` and `none` are rendered into the bridge-family table beside the source pins (ADR 0012): a drop rule keyed on the pinned source address and the allowed destinations, before the accept. The guest's `HTTPS_PROXY` is a courtesy for compliant clients; a client that ignores it reaches nothing. `none` keeps the tenant network and drops the route out in the inet forward chain.
 
-**DNS follows the policy.** The tenant resolver keeps a set of addresses that get internal answers only; an outside name from them is refused, not forwarded.
+**DNS follows the policy.** The tenant resolver keeps a set of addresses that get internal answers only; an outside name from them is answered NXDOMAIN, not forwarded. Not REFUSED: glibc and Go fail at once on it, musl ignores it and waits out its 5 s timeout (`res_msend.c`); NXDOMAIN is final for all three.
 
 **A machine's policy is applied at every start and withdrawn at every stop**, like its pin, and re-applied from the records at daemon start. Changing `via` to a gateway that does not exist in the tenant is refused.
 
@@ -32,4 +32,5 @@ Today briq's control plane makes a hidden gateway briq per team (`briqs.kind = '
 
 - A `via` machine cannot reach its siblings: a stack whose sandbox needs its database goes through `none` plus an allow-list, which is the next mode (ADR 0005 on the briq side).
 - The policy is IPv4; IPv6 from tenants is dropped already (ADR 0012).
+- A gateway machine destroyed under `via` machines leaves their policy as it is: they reach nothing (its address is not handed out while a policy names it), and their next start is refused until `egress` names a machine that exists.
 - e2e: a `via` machine reaches the gateway and nothing else, a `none` machine reaches a sibling and not the internet, an outside name is refused for both, `open` is unchanged.

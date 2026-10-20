@@ -56,6 +56,57 @@ impl Default for RestartPolicy {
     }
 }
 
+/// Egress modes.
+pub mod egress {
+    /// The tenant, and the internet through NAT (the default).
+    pub const OPEN: &str = "open";
+    /// One machine of the tenant and the gateway's DNS, nothing else.
+    pub const VIA: &str = "via";
+    /// The tenant, no internet.
+    pub const NONE: &str = "none";
+}
+
+/// Where a machine's traffic may go: enforced on the host, never by the guest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Egress {
+    /// "open" (default), "via" or "none".
+    #[serde(default = "default_egress_mode")]
+    pub mode: String,
+    /// For `via`: the machine of the same tenant that is the only one this machine reaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+}
+
+fn default_egress_mode() -> String {
+    egress::OPEN.into()
+}
+
+impl Default for Egress {
+    fn default() -> Self {
+        Self {
+            mode: default_egress_mode(),
+            via: None,
+        }
+    }
+}
+
+impl Egress {
+    /// The mode is one of the three, and `via` names a machine exactly when the mode is `via`.
+    pub fn check(&self) -> Result<(), String> {
+        match (self.mode.as_str(), &self.via) {
+            (egress::OPEN | egress::NONE, None) => Ok(()),
+            (egress::OPEN | egress::NONE, Some(_)) => {
+                Err("egress.via goes with mode \"via\" only".into())
+            }
+            (egress::VIA, Some(id)) if valid_id(id) => Ok(()),
+            (egress::VIA, _) => Err("egress.via must name a machine of the tenant".into()),
+            (other, _) => Err(format!(
+                "egress.mode {other:?}: want \"open\", \"via\" or \"none\""
+            )),
+        }
+    }
+}
+
 /// Makes a machine. The image is pulled if the host has not seen it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateMachineRequest {
@@ -86,6 +137,9 @@ pub struct CreateMachineRequest {
     /// Kept and returned as is (a briq id, a stack name).
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// Where its traffic may go; absent is `open` (a restore takes the backup's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<Egress>,
     /// Start right after creating (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<bool>,
@@ -168,6 +222,8 @@ pub struct Machine {
     pub ports: Vec<u16>,
     pub sleep: String,
     pub restart: RestartPolicy,
+    #[serde(default)]
+    pub egress: Egress,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
     #[serde(default)]
@@ -337,6 +393,9 @@ pub struct UpdateMachineRequest {
     /// Replaces the metadata; absent keeps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<BTreeMap<String, String>>,
+    /// A new egress policy, applied at once to a running machine; absent keeps the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<Egress>,
 }
 
 /// Stops a machine.
@@ -689,10 +748,15 @@ mod tests {
             "volume": {"size_gb": 5, "mount": "/data"},
             "ports": [80, 443], "sleep": "30m",
             "restart": {"policy": "always", "max_retries": 0},
-            "metadata": {"briq": "bq_1"}, "start": false,
+            "metadata": {"briq": "bq_1"}, "egress": {"mode": "via", "via": "m_gw"},
+            "start": false,
             "fork": {"machine_id": "m0", "copy": "disk"}
         });
         let r: CreateMachineRequest = same(input);
+        assert_eq!(
+            r.egress.as_ref().and_then(|e| e.via.as_deref()),
+            Some("m_gw")
+        );
         assert_eq!(
             r.cmd.as_deref(),
             Some(&["nginx", "-g", "daemon off;"].map(String::from)[..])
@@ -720,8 +784,10 @@ mod tests {
         expected["metadata"] = json!({});
         expected["endpoints"] = json!([]);
         expected["suspended"] = json!(false);
+        expected["egress"] = json!({"mode": "open"});
         let m: Machine = round_trip(input, expected);
         assert_eq!(m.state, state::RUNNING);
+        assert_eq!(m.egress, Egress::default());
         assert_eq!(m.image_digest, "");
         assert!(m.exit.is_none());
         assert_eq!(m.started_at, None);
@@ -741,6 +807,7 @@ mod tests {
             "volume": {"size_gb": 5, "mount": "/var/lib/postgresql/data"},
             "ports": [5432], "sleep": "30m",
             "restart": {"policy": "on-failure", "max_retries": 3},
+            "egress": {"mode": "none"},
             "metadata": {"stack": "s1"},
             "endpoints": [{
                 "id": "e1", "machine_id": "m1", "port": 5432, "protocol": "tcp",
@@ -754,6 +821,7 @@ mod tests {
         });
         let m: Machine = same(input);
         assert_eq!(m.stopped_reason, stop::EXIT);
+        assert_eq!(m.egress.mode, egress::NONE);
         assert_eq!(m.exit.as_ref().map(|e| e.code), Some(1));
         assert_eq!(m.endpoints[0].host_port, Some(20001));
         assert_eq!(m.sleeps_at.map(|t| (t - ts()).num_minutes()), Some(30));
@@ -857,6 +925,42 @@ mod tests {
         assert_eq!(u.metadata, None);
         let u: UpdateMachineRequest = same(json!({"metadata": {}}));
         assert_eq!(u.metadata, Some(BTreeMap::new()));
+        let u: UpdateMachineRequest = same(json!({"egress": {"mode": "via", "via": "m_gw"}}));
+        assert_eq!(
+            u.egress.as_ref().and_then(|e| e.via.as_deref()),
+            Some("m_gw")
+        );
+    }
+
+    #[test]
+    fn egress_policy() {
+        // Absent fields are the default: open, no gateway; `via` stays off the wire then.
+        let e: Egress = round_trip(json!({}), json!({"mode": "open"}));
+        assert_eq!(e, Egress::default());
+        assert_eq!(e.check(), Ok(()));
+        let e: Egress = same(json!({"mode": "none"}));
+        assert_eq!(e.check(), Ok(()));
+        let e: Egress = same(json!({"mode": "via", "via": "m_gw"}));
+        assert_eq!(e.check(), Ok(()));
+        // The checks name the field and what it wants.
+        let bad = |v: serde_json::Value| serde_json::from_value::<Egress>(v).unwrap().check();
+        assert_eq!(
+            bad(json!({"mode": "all"})).unwrap_err(),
+            "egress.mode \"all\": want \"open\", \"via\" or \"none\""
+        );
+        assert_eq!(
+            bad(json!({"mode": "open", "via": "m_gw"})).unwrap_err(),
+            "egress.via goes with mode \"via\" only"
+        );
+        for v in [
+            json!({"mode": "via"}),
+            json!({"mode": "via", "via": "../x"}),
+        ] {
+            assert_eq!(
+                bad(v).unwrap_err(),
+                "egress.via must name a machine of the tenant"
+            );
+        }
     }
 
     #[test]
@@ -993,7 +1097,8 @@ mod tests {
                 "state": "error", "error": "the guest did not come up",
                 "hostname": "db.internal", "machine_host": "m1.vm.internal",
                 "size": {"vcpus": 1, "memory_mb": 512}, "ports": [], "sleep": "never",
-                "restart": {"policy": "no", "max_retries": 0}, "metadata": {}, "endpoints": [],
+                "restart": {"policy": "no", "max_retries": 0}, "egress": {"mode": "open"},
+                "metadata": {}, "endpoints": [],
                 "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:05Z",
                 "state_changed_at": "2026-01-02T03:04:05Z", "suspended": false
             }

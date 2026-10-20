@@ -435,6 +435,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     sleep: a.sleep.clone(),
                     restart: None,
                     metadata: BTreeMap::new(),
+                    egress: None,
                     start: if a.no_start { Some(false) } else { None },
                     fork: None,
                     restore: None,
@@ -587,7 +588,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::SetSleep { id, sleep } => {
                 let req = api::UpdateMachineRequest {
                     sleep: Some(sleep),
-                    metadata: None,
+                    ..Default::default()
                 };
                 print_json(
                     &c.call::<api::Machine>(

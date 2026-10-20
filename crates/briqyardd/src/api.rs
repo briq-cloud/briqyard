@@ -298,7 +298,11 @@ async fn update_machine(
     Path(id): Path<String>,
     Json(req): Json<api::UpdateMachineRequest>,
 ) -> Result<Json<api::Machine>, AppError> {
-    Ok(Json(st.mgr.update(&id, req)?))
+    // Detached too: a policy swap cut short between its two steps would leave none.
+    let m = st.mgr.clone();
+    Ok(Json(
+        detached(async move { m.update(&id, req).await }).await?,
+    ))
 }
 
 async fn destroy_machine(State(st): S, Path(id): Path<String>) -> Result<StatusCode, AppError> {
