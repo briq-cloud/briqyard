@@ -27,7 +27,7 @@ docs/                   architecture, operations, development, mesh design, adr/
 
 ## Commands
 
-- `cargo test --workspace` runs anywhere. The init's tests are Linux-only: run them in the VM.
+- `cargo test --workspace` runs anywhere, but CI is Linux: run it in the VM too before pushing (`CARGO_TARGET_DIR=$HOME/target-ci`). macOS hides Linux behaviours tests trip on (a just-written script refused as "Text file busy", coarse file times). The init's tests are Linux-only.
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` are CI.
 - `hack/vm.sh install` builds in the VM, installs both units, restarts them. **Always after a config field change**: an old binary refuses a new field and systemd's start limit then needs `systemctl reset-failed`.
 - `hack/e2e.sh` (76 checks, one daemon), `hack/fleet-smoke.sh` (19, through the fleet), `hack/fleet-two-hosts.sh` (16, needs `fc2`). Run the first two on every daemon change; the third on every fleet change.
