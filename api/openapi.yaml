@@ -230,6 +230,12 @@ paths:
       responses:
         "204": { description: removed }
         "409": { description: the tenant still has machines }
+  /v1/tenants/{id}/unpin:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Release a tenant from its host without touching the host (fleet only); its next machine is placed afresh, and the host's next heartbeat pins it again if the tenant still has machines there
+      responses:
+        "204": { description: released }
   /v1/hosts:
     get:
       summary: Hosts (fleet only)
@@ -237,7 +243,7 @@ paths:
         "200": { description: hosts, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Host" } } } } }
   /v1/hosts/register:
     post:
-      summary: A daemon's heartbeat (fleet only; `host_token`)
+      summary: A daemon's heartbeat (fleet only), with the host's own API token as the bearer, taken for the one host record that expects that token at the daemon's address
       requestBody:
         required: true
         content:
@@ -245,6 +251,8 @@ paths:
             schema: { $ref: "#/components/schemas/RegisterHostRequest" }
       responses:
         "204": { description: recorded }
+        "401": { description: not the token the fleet holds for the host at this address }
+        "403": { description: no host is expected at this address (`unknown_host`) }
   /v1/hosts/order:
     post:
       summary: Order a host from the provisioner now (fleet only; dry-run unless configured otherwise)
@@ -497,6 +505,7 @@ components:
         gateway: { type: string }
         machines: { type: integer }
         created_at: { type: string, format: date-time }
+        host: { type: string, description: The host the tenant lives on (fleet) }
     Capacity:
       type: object
       properties:
@@ -534,7 +543,7 @@ components:
       type: object
       required: [id, url, capacity, used, machines]
       properties:
-        id: { type: string }
+        id: { type: string, description: The daemon's own id, for the fleet's log; the fleet keeps the host under its own }
         url: { type: string }
         region: { type: string }
         capacity: { $ref: "#/components/schemas/Capacity" }
@@ -543,10 +552,9 @@ components:
         tenants: { type: array, items: { type: string } }
         version: { type: string }
         disk_free_mb: { type: integer }
-        api_token: { type: string, description: The daemon's own token, so the fleet can forward to it }
     ApiError:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, capacity, tenant_in_use, unauthorized, host_unreachable, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, capacity, tenant_in_use, unauthorized, unknown_host, host_unreachable, host_down, registry, internal, timeout] }
         request_id: { type: string }

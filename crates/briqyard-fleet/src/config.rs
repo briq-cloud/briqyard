@@ -8,12 +8,11 @@ use std::path::{Path, PathBuf};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub listen: String,
-    /// Required from API clients when set.
+    /// Required from API clients when set. A host's heartbeat presents the host's own token
+    /// instead (`hosts[].token`, or the one the bootstrap gave it).
     pub token: String,
-    /// Required from daemons on /v1/hosts/register when set.
-    pub host_token: String,
     pub state_dir: PathBuf,
-    /// Hosts you manage yourself; a host may also just register.
+    /// Hosts you manage yourself: polled, and expected to register with their token.
     pub hosts: Vec<StaticHost>,
     pub placement: Placement,
     pub provisioner: Provisioner,
@@ -24,6 +23,8 @@ pub struct Config {
 pub struct StaticHost {
     pub id: String,
     pub url: String,
+    /// The host's API token: what the fleet forwards with, and what its heartbeats present.
+    /// Without one the host is polled only.
     pub token: String,
     pub region: String,
 }
@@ -184,7 +185,6 @@ impl Default for Config {
         Self {
             listen: "127.0.0.1:7430".into(),
             token: String::new(),
-            host_token: String::new(),
             state_dir: "/var/lib/briqyard-fleet".into(),
             hosts: vec![],
             placement: Placement::default(),
@@ -277,7 +277,6 @@ mod tests {
         let cfg = with_env(&[], || Config::load(None).unwrap());
         assert_eq!(cfg.listen, "127.0.0.1:7430");
         assert_eq!(cfg.token, "");
-        assert_eq!(cfg.host_token, "");
         assert_eq!(cfg.state_dir, PathBuf::from("/var/lib/briqyard-fleet"));
         assert!(cfg.hosts.is_empty());
         assert_eq!(cfg.placement.fill_ceiling, 0.85);
@@ -311,7 +310,6 @@ mod tests {
             r#"
 listen: 0.0.0.0:7430
 token: api-t0k
-host_token: host-t0k
 state_dir: /tmp/fleet
 hosts:
   - id: h1
@@ -365,7 +363,6 @@ provisioner:
         let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
         assert_eq!(cfg.listen, "0.0.0.0:7430");
         assert_eq!(cfg.token, "api-t0k");
-        assert_eq!(cfg.host_token, "host-t0k");
         assert_eq!(cfg.state_dir, PathBuf::from("/tmp/fleet"));
         assert_eq!(cfg.hosts.len(), 2);
         assert_eq!(cfg.hosts[0].id, "h1");
@@ -434,6 +431,7 @@ provisioner:
         let dir = tempfile::tempdir().unwrap();
         for (text, field) in [
             ("tokne: t\n", "tokne"),
+            ("host_token: t\n", "host_token"),
             ("placement:\n  fill_ceilling: 0.5\n", "fill_ceilling"),
             ("provisioner:\n  dry: false\n", "dry"),
             ("provisioner:\n  bootstrap:\n    enable: true\n", "enable"),

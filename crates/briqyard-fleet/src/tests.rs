@@ -8,11 +8,15 @@ use tower::ServiceExt;
 
 // --- a stub daemon ---
 
+/// What a stub daemon hands out, like the fleet's capacity figure for it.
+const DAEMON_MEMORY_MB: u32 = 64_000;
+
 struct Daemon {
     id: String,
     token: String,
     calls: Mutex<Vec<String>>,
     machines: Mutex<Vec<api::Machine>>,
+    endpoints: Mutex<Vec<api::Endpoint>>,
     next: AtomicUsize,
     /// A tenant the daemon refuses to delete (answers 409), to test a failed forward.
     keep_tenant: String,
@@ -51,6 +55,32 @@ impl Daemon {
         self.machines.lock().unwrap().push(m.clone());
         m
     }
+
+    /// Adds an endpoint as if it had been opened on this daemon.
+    fn add_endpoint(&self, machine_id: &str) -> api::Endpoint {
+        let n = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        let e = api::Endpoint {
+            id: format!("ep_{}_{n}", self.id),
+            machine_id: machine_id.into(),
+            port: 80,
+            protocol: "tcp".into(),
+            host_port: Some(30000 + n as u16),
+            host: String::new(),
+            address: format!("127.0.0.1:{}", 30000 + n),
+            created_at: Utc::now(),
+        };
+        self.endpoints.lock().unwrap().push(e.clone());
+        e
+    }
+
+    fn used_mb(&self) -> u32 {
+        self.machines
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| m.size.memory_mb)
+            .sum()
+    }
 }
 
 /// A daemon on loopback: its URL and the stub behind it.
@@ -65,6 +95,7 @@ async fn start_daemon(id: &str, token: &str) -> Running {
         token: token.into(),
         calls: Mutex::new(vec![]),
         machines: Mutex::new(vec![]),
+        endpoints: Mutex::new(vec![]),
         next: AtomicUsize::new(0),
         keep_tenant: "kept".into(),
     });
@@ -75,7 +106,7 @@ async fn start_daemon(id: &str, token: &str) -> Running {
             version: "0.1-stub".into(),
             host_id: d.id.clone(),
             capacity: api::Capacity {
-                memory_mb: 64_000,
+                memory_mb: DAEMON_MEMORY_MB,
                 vcpus: 32,
             },
             used: api::Capacity {
@@ -107,7 +138,7 @@ async fn start_daemon(id: &str, token: &str) -> Running {
     }
     async fn delete_tenant(State(d): D, Path(id): Path<String>) -> Response {
         if id == d.keep_tenant {
-            return err(StatusCode::CONFLICT, "busy", "tenant has machines");
+            return err(StatusCode::CONFLICT, "busy", "tenant has machines").into_response();
         }
         d.machines.lock().unwrap().retain(|m| m.tenant != id);
         StatusCode::NO_CONTENT.into_response()
@@ -125,7 +156,20 @@ async fn start_daemon(id: &str, token: &str) -> Running {
                 .collect(),
         )
     }
+    /// Like the daemon: a bad name is refused, and a machine that does not fit in what the
+    /// host has left.
     async fn create(State(d): D, Json(req): Json<api::CreateMachineRequest>) -> Response {
+        if !api::valid_name(&req.name) {
+            return err(StatusCode::BAD_REQUEST, "invalid", "name").into_response();
+        }
+        if d.used_mb() + req.size.memory_mb > DAEMON_MEMORY_MB {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "capacity",
+                "the host has no room",
+            )
+            .into_response();
+        }
         let m = d.add(&req.tenant, &req.name, req.size.memory_mb);
         (StatusCode::CREATED, Json(m)).into_response()
     }
@@ -170,24 +214,30 @@ async fn start_daemon(id: &str, token: &str) -> Running {
     async fn backups(State(_d): D) -> Json<Vec<serde_json::Value>> {
         Json(vec![])
     }
-
+    async fn add_endpoint(State(d): D, Path(id): Path<String>) -> Response {
+        if !d.machines.lock().unwrap().iter().any(|m| m.id == id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        (StatusCode::CREATED, Json(d.add_endpoint(&id))).into_response()
+    }
     async fn endpoints(State(d): D) -> Json<Vec<api::Endpoint>> {
-        Json(vec![api::Endpoint {
-            id: format!("ep_{}", d.id),
-            machine_id: format!("m_{}_1", d.id),
-            port: 80,
-            protocol: "tcp".into(),
-            host_port: Some(30080),
-            host: String::new(),
-            address: "127.0.0.1:30080".into(),
-            created_at: Utc::now(),
-        }])
+        Json(d.endpoints.lock().unwrap().clone())
+    }
+    async fn get_endpoint(State(d): D, Path(id): Path<String>) -> Response {
+        let eps = d.endpoints.lock().unwrap();
+        match eps.iter().find(|e| e.id == id) {
+            Some(e) => Json(e.clone()).into_response(),
+            None => err(StatusCode::NOT_FOUND, "not_found", "endpoint not found").into_response(),
+        }
     }
     async fn delete_endpoint(State(d): D, Path(id): Path<String>) -> StatusCode {
-        if id == format!("ep_{}", d.id) {
-            StatusCode::NO_CONTENT
-        } else {
+        let mut eps = d.endpoints.lock().unwrap();
+        let before = eps.len();
+        eps.retain(|e| e.id != id);
+        if eps.len() == before {
             StatusCode::NOT_FOUND
+        } else {
+            StatusCode::NO_CONTENT
         }
     }
     // Every request is recorded, with its query, and checked for the daemon's token.
@@ -198,14 +248,8 @@ async fn start_daemon(id: &str, token: &str) -> Running {
             req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
         );
         d.calls.lock().unwrap().push(line);
-        let bearer = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or("");
-        if !d.token.is_empty() && bearer != d.token {
-            return err(StatusCode::UNAUTHORIZED, "unauthorized", "bad token");
+        if !d.token.is_empty() && bearer(req.headers()) != d.token {
+            return err(StatusCode::UNAUTHORIZED, "unauthorized", "bad token").into_response();
         }
         next.run(req).await
     }
@@ -217,8 +261,12 @@ async fn start_daemon(id: &str, token: &str) -> Running {
         .route("/v1/machines/:id", get(get_machine).delete(delete_machine))
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/backups", get(backups))
+        .route("/v1/machines/:id/endpoints", post(add_endpoint))
         .route("/v1/endpoints", get(endpoints))
-        .route("/v1/endpoints/:id", axum::routing::delete(delete_endpoint))
+        .route(
+            "/v1/endpoints/:id",
+            get(get_endpoint).delete(delete_endpoint),
+        )
         .layer(axum::middleware::from_fn_with_state(stub.clone(), record))
         .with_state(stub.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -235,8 +283,18 @@ struct Fleet {
 }
 
 /// A fleet on a fresh state directory, with the hosts of the configuration seeded as `run` does.
-fn fleet(mut cfg: config::Config, prov: Box<dyn provision::Provisioner>) -> Fleet {
+fn fleet(cfg: config::Config, prov: Box<dyn provision::Provisioner>) -> Fleet {
     let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("registry.json");
+    fleet_at(cfg, prov, dir, state_path)
+}
+
+fn fleet_at(
+    mut cfg: config::Config,
+    prov: Box<dyn provision::Provisioner>,
+    dir: tempfile::TempDir,
+    state_path: PathBuf,
+) -> Fleet {
     cfg.state_dir = dir.path().to_path_buf();
     let mut reg = Registry::default();
     let now = Utc::now();
@@ -244,7 +302,7 @@ fn fleet(mut cfg: config::Config, prov: Box<dyn provision::Provisioner>) -> Flee
         reg.heartbeat(static_host(h, now), now);
     }
     let st = Arc::new(AppState {
-        state_path: cfg.state_dir.join("registry.json"),
+        state_path,
         policy: Policy {
             fill_ceiling: cfg.placement.fill_ceiling,
             down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
@@ -298,7 +356,6 @@ async fn fleet_with_daemons(n: usize) -> (Fleet, Vec<Running>) {
     let mut daemons = Vec::new();
     let mut cfg = config::Config {
         token: "api".into(),
-        host_token: "hosty".into(),
         ..Default::default()
     };
     for i in 1..=n {
@@ -356,6 +413,14 @@ fn hosts(st: &Arc<AppState>) -> Vec<api::Host> {
     v
 }
 
+fn saved(st: &AppState) -> Registry {
+    serde_json::from_slice(&std::fs::read(&st.state_path).unwrap()).unwrap()
+}
+
+fn pinned(st: &AppState, tenant: &str) -> Option<String> {
+    st.reg.lock().unwrap().tenants.get(tenant).cloned()
+}
+
 fn create_body(tenant: &str, name: &str, memory_mb: u32) -> serde_json::Value {
     serde_json::to_value(api::CreateMachineRequest {
         tenant: tenant.into(),
@@ -368,6 +433,15 @@ fn create_body(tenant: &str, name: &str, memory_mb: u32) -> serde_json::Value {
         ..Default::default()
     })
     .unwrap()
+}
+
+/// A daemon's heartbeat body for `url`.
+fn heartbeat(url: &str, memory_mb: u32, tenants: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "id": "h_daemon", "url": url, "region": "par",
+        "capacity": {"memory_mb": memory_mb, "vcpus": 32}, "used": {"memory_mb": 512, "vcpus": 1},
+        "machines": tenants.len(), "tenants": tenants, "version": "0.1", "disk_free_mb": 5000
+    })
 }
 
 // --- pure helpers ---
@@ -410,16 +484,20 @@ fn with_host_marks_a_machine_body_and_leaves_the_rest() {
     );
     let text = Bytes::from("not json");
     assert_eq!(with_host(text.clone(), "d1"), text);
+    assert_eq!(
+        error_code(br#"{"error":"full","code":"capacity"}"#),
+        "capacity"
+    );
+    assert_eq!(error_code(b"[]"), "");
 }
 
 // --- auth, status, hosts ---
 
 #[tokio::test]
-async fn a_bearer_token_guards_every_route_but_healthz() {
+async fn a_bearer_token_guards_every_route_but_healthz_and_register() {
     let f = fleet(
         config::Config {
             token: "api".into(),
-            host_token: "hosty".into(),
             ..Default::default()
         },
         Box::new(provision::Static),
@@ -433,27 +511,158 @@ async fn a_bearer_token_guards_every_route_but_healthz() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     let (s, _, _) = call(&f.st, "GET", "/v1/status", "api", None).await;
     assert_eq!(s, StatusCode::OK);
-    // The host token opens the register route alone.
-    let hb = serde_json::json!({
-        "id": "h1", "url": "http://10.0.0.1:7420",
-        "capacity": {"memory_mb": 1000, "vcpus": 4}, "used": {"memory_mb": 0, "vcpus": 0},
-        "machines": 0
-    });
-    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/register", "api", Some(hb.clone())).await;
-    assert_eq!(
-        s,
-        StatusCode::UNAUTHORIZED,
-        "the API token is not a host token"
-    );
-    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/register", "hosty", Some(hb)).await;
-    assert_eq!(s, StatusCode::NO_CONTENT);
-    let (s, _, _) = call(&f.st, "GET", "/v1/hosts", "hosty", None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "a host token reads nothing");
+    // The register route is checked against the host's own token, not the API's: with the
+    // API token it gets as far as the handler, which knows no host at that address.
+    let hb = heartbeat("http://10.0.0.1:7420", 1000, &[]);
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/register", "api", Some(hb)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(json(&body)["code"], "unknown_host");
 
-    // No token configured: nothing is asked.
+    // No token configured: nothing is asked of API clients.
     let open = fleet(config::Config::default(), Box::new(provision::Static));
     let (s, _, _) = call(&open.st, "GET", "/v1/hosts", "", None).await;
     assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_registration_is_taken_only_for_the_host_that_expects_it() {
+    let f = fleet(
+        config::Config {
+            token: "api".into(),
+            hosts: vec![
+                config::StaticHost {
+                    id: "s1".into(),
+                    url: "http://10.0.0.1:7420".into(),
+                    token: "s1-token".into(),
+                    region: "fsn".into(),
+                },
+                config::StaticHost {
+                    id: "open".into(),
+                    url: "http://10.0.0.2:7420".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    // An address no record expects: refused whatever it presents.
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/hosts/register",
+        "s1-token",
+        Some(heartbeat("http://10.0.0.9:7420", 1000, &[])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    let v = json(&body);
+    assert_eq!(v["code"], "unknown_host");
+    assert!(v["error"].as_str().unwrap().contains("10.0.0.9"), "{v}");
+    assert_eq!(hosts(&f.st).len(), 2, "nothing was added");
+    // The expected address with another host's token, the API token, or none: refused.
+    for token in ["", "api", "wrong", "s1-toke"] {
+        let (s, _, body) = call(
+            &f.st,
+            "POST",
+            "/v1/hosts/register",
+            token,
+            Some(heartbeat("http://10.0.0.1:7420", 1000, &[])),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "token {token:?}: {body}");
+        assert_eq!(json(&body)["code"], "unauthorized");
+    }
+    assert_eq!(hosts(&f.st)[1].capacity.memory_mb, 0, "nothing was taken");
+    // A host listed without a token is polled only: no token opens its registration.
+    let (s, _, _) = call(
+        &f.st,
+        "POST",
+        "/v1/hosts/register",
+        "",
+        Some(heartbeat("http://10.0.0.2:7420", 1000, &[])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    // Its own token: taken, under the id the fleet knows it by, whatever the daemon calls itself.
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/hosts/register",
+        "s1-token",
+        Some(heartbeat("http://10.0.0.1:7420", 64_000, &["t1"])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    let hs = hosts(&f.st);
+    assert_eq!(hs.len(), 2);
+    assert_eq!(hs[1].id, "s1");
+    assert_eq!(hs[1].capacity.memory_mb, 64_000);
+    assert_eq!(hs[1].region, "par");
+    assert_eq!(hs[1].tenants, ["t1"]);
+    assert_eq!(pinned(&f.st, "t1").as_deref(), Some("s1"));
+    assert_eq!(
+        f.st.reg.lock().unwrap().hosts["s1"].token,
+        "s1-token",
+        "a heartbeat never changes a token"
+    );
+    assert!(
+        saved(&f.st).hosts["s1"].capacity.memory_mb == 64_000,
+        "written"
+    );
+}
+
+#[tokio::test]
+async fn a_heartbeat_lands_on_the_record_ordered_for_its_address() {
+    let f = fleet(config::Config::default(), dry_scaleway());
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        let mut ordered = static_host(&config::StaticHost::default(), Utc::now());
+        ordered.id = "h_srv-9".into();
+        ordered.url = "http://10.0.0.9:7420".into();
+        ordered.state = "provisioning".into();
+        ordered.provider = "scaleway".into();
+        ordered.provider_id = "srv-9".into();
+        ordered.token = "t0k".into();
+        ordered.note = "bootstrapped at 2026-10-20".into();
+        reg.hosts.insert(ordered.id.clone(), ordered);
+    }
+    // The token the bootstrap gave it is its credential; the fleet's API needs none here.
+    let hb = heartbeat("http://10.0.0.9:7420", 64_000, &["t1"]);
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/hosts/register",
+        "other",
+        Some(hb.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{body}");
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/register", "t0k", Some(hb)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    let hs = hosts(&f.st);
+    assert_eq!(hs.len(), 1);
+    let h = &hs[0];
+    assert_eq!(h.id, "h_srv-9", "the fleet's id for it, not the daemon's");
+    assert_eq!(h.state, "ready");
+    assert_eq!(h.provider, "scaleway");
+    assert_eq!(h.region, "par");
+    assert_eq!(h.capacity.memory_mb, 64_000);
+    assert_eq!(h.machines, 1);
+    assert_eq!(h.note, "bootstrapped at 2026-10-20");
+    {
+        let reg = f.st.reg.lock().unwrap();
+        let rec = &reg.hosts["h_srv-9"];
+        assert_eq!(rec.provider_id, "srv-9");
+        assert_eq!(rec.token, "t0k");
+        assert_eq!(reg.tenants.get("t1").map(String::as_str), Some("h_srv-9"));
+    }
+    assert!(saved(&f.st).hosts.contains_key("h_srv-9"));
+    let (s, _, body) = call(&f.st, "GET", "/v1/tenants", "", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let ts: Vec<api::Tenant> = serde_json::from_str(&body).unwrap();
+    assert_eq!(ts.len(), 1);
+    assert_eq!((ts[0].id.as_str(), ts[0].host.as_str()), ("t1", "h_srv-9"));
 }
 
 #[tokio::test]
@@ -490,69 +699,72 @@ async fn status_sums_the_ready_hosts_and_hosts_are_sorted() {
 }
 
 #[tokio::test]
-async fn a_heartbeat_takes_over_the_record_ordered_for_its_address() {
-    let f = fleet(
+async fn a_registry_that_cannot_be_written_fails_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let nowhere = dir.path().join("missing").join("registry.json");
+    let f = fleet_at(
+        config::Config::default(),
+        dry_scaleway(),
+        dir,
+        nowhere.clone(),
+    );
+    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+    for (method, path) in [
+        ("POST", "/v1/hosts/h_a/drain"),
+        ("POST", "/v1/hosts/order"),
+        ("POST", "/v1/tenants/t1/unpin"),
+        ("DELETE", "/v1/hosts/h_a"),
+    ] {
+        let body = (path == "/v1/hosts/order").then(|| serde_json::json!({}));
+        let (s, _, text) = call(&f.st, method, path, "", body).await;
+        assert_eq!(
+            s,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{method} {path}: {text}"
+        );
+        let v = json(&text);
+        assert_eq!(v["code"], "registry", "{method} {path}");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("write registry {}", nowhere.display())),
+            "{v}"
+        );
+    }
+    assert!(!nowhere.exists());
+    // A create is refused before any host is asked: a pin the fleet would forget on restart
+    // could put the tenant's next machine on another host.
+    let d = start_daemon("d1", "tok").await;
+    let dir = tempfile::tempdir().unwrap();
+    let nowhere = dir.path().join("missing").join("registry.json");
+    let g = fleet_at(
         config::Config {
-            host_token: "hosty".into(),
+            hosts: vec![config::StaticHost {
+                id: "d1".into(),
+                url: d.url.clone(),
+                token: "tok".into(),
+                region: String::new(),
+            }],
             ..Default::default()
         },
-        dry_scaleway(),
+        Box::new(provision::Static),
+        dir,
+        nowhere,
     );
-    {
-        let mut reg = f.st.reg.lock().unwrap();
-        let mut ordered = static_host(&config::StaticHost::default(), Utc::now());
-        ordered.id = "h_srv-9".into();
-        ordered.url = "http://10.0.0.9:7420".into();
-        ordered.state = "provisioning".into();
-        ordered.provider = "scaleway".into();
-        ordered.provider_id = "srv-9".into();
-        ordered.token = "t0k".into();
-        ordered.note = "delivered at 10.0.0.9".into();
-        reg.hosts.insert(ordered.id.clone(), ordered);
-    }
-    let hb = serde_json::json!({
-        "id": "h_byard-1", "url": "http://10.0.0.9:7420", "region": "par",
-        "capacity": {"memory_mb": 64000, "vcpus": 32}, "used": {"memory_mb": 512, "vcpus": 1},
-        "machines": 1, "tenants": ["t1"], "version": "0.1", "disk_free_mb": 5000
-    });
-    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/register", "hosty", Some(hb)).await;
-    assert_eq!(s, StatusCode::NO_CONTENT);
-    let hs = hosts(&f.st);
-    assert_eq!(
-        hs.len(),
-        1,
-        "the ordered record is replaced, not kept beside"
-    );
-    let h = &hs[0];
-    assert_eq!(h.id, "h_byard-1");
-    assert_eq!(h.state, "ready");
-    assert_eq!(h.provider, "scaleway");
-    assert_eq!(h.region, "par");
-    assert_eq!(h.capacity.memory_mb, 64_000);
-    assert_eq!(h.machines, 1);
-    assert_eq!(h.note, "delivered at 10.0.0.9");
-    {
-        let reg = f.st.reg.lock().unwrap();
-        let rec = &reg.hosts["h_byard-1"];
-        assert_eq!(rec.provider_id, "srv-9");
-        assert_eq!(
-            rec.token, "t0k",
-            "the token the bootstrap gave it carries over"
-        );
-        assert_eq!(reg.tenants.get("t1").map(String::as_str), Some("h_byard-1"));
-    }
-    // The registry is written after each register.
-    let saved: Registry =
-        serde_json::from_slice(&std::fs::read(&f.st.state_path).unwrap()).unwrap();
-    assert!(saved.hosts.contains_key("h_byard-1"));
-    let (s, _, body) = call(&f.st, "GET", "/v1/tenants", "", None).await;
-    assert_eq!(s, StatusCode::OK);
-    let ts: Vec<api::Tenant> = serde_json::from_str(&body).unwrap();
-    assert_eq!(ts.len(), 1);
-    assert_eq!(
-        (ts[0].id.as_str(), ts[0].host.as_str()),
-        ("t1", "h_byard-1")
-    );
+    poll_static_hosts_once(&g.st).await;
+    let before = d.stub.calls().len();
+    let (s, _, body) = call(
+        &g.st,
+        "POST",
+        "/v1/machines",
+        "",
+        Some(create_body("t1", "web", 512)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(json(&body)["code"], "registry");
+    assert_eq!(d.stub.calls().len(), before, "the host was not asked");
 }
 
 // --- ordering, retiring, draining, forgetting ---
@@ -607,6 +819,7 @@ async fn an_order_in_dry_run_records_a_dry_run_host() {
         assert_eq!(rec.token.len(), 32, "a token of its own for its API");
         assert!(rec.empty_since.is_some());
     }
+    assert!(saved(&f.st).hosts.contains_key(&h.id), "written");
     // No reason: a default one in the note.
     let (s, _, body) = call(
         &f.st,
@@ -684,6 +897,7 @@ async fn retire_releases_an_empty_host_at_once() {
         h.provider_id = "dry-run-x".into();
         // Stale index entries from a machine long gone and a tenant never confirmed.
         reg.machines.insert("m9".into(), "h_a".into());
+        reg.endpoints.insert("e9".into(), "h_a".into());
         reg.tenants.insert("t9".into(), "h_a".into());
     }
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/retire", "", None).await;
@@ -694,7 +908,8 @@ async fn retire_releases_an_empty_host_at_once() {
     assert!(hosts(&f.st).is_empty(), "released and forgotten");
     {
         let reg = f.st.reg.lock().unwrap();
-        assert!(reg.machines.is_empty(), "its machine index goes with it");
+        assert!(reg.machines.is_empty(), "its index goes with it");
+        assert!(reg.endpoints.is_empty());
         assert!(reg.tenants.is_empty());
     }
     let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_a/retire", "", None).await;
@@ -784,9 +999,7 @@ async fn drain_and_forget() {
     }
     let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/h_a", "", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "forgetting twice is fine");
-    let saved: Registry =
-        serde_json::from_slice(&std::fs::read(&f.st.state_path).unwrap()).unwrap();
-    assert!(!saved.hosts.contains_key("h_a"));
+    assert!(!saved(&f.st).hosts.contains_key("h_a"));
 }
 
 // --- the poll of static hosts ---
@@ -885,6 +1098,10 @@ async fn a_create_is_placed_and_forwarded_with_its_host() {
             reg.tenants.get("t1").map(String::as_str),
             Some(host.as_str())
         );
+        assert_eq!(
+            reg.hosts[&host].used.memory_mb, 512,
+            "reserved until the host reports"
+        );
     }
     // The tenant's next machine lands on the same host, whatever the other has free.
     let other = if host == "d1" { "d2" } else { "d1" };
@@ -917,10 +1134,96 @@ async fn a_create_is_placed_and_forwarded_with_its_host() {
     .await;
     assert_eq!(s, StatusCode::CREATED);
     assert_eq!(headers["x-briqyard-host"], other);
-    // The registry was written.
-    let saved: Registry =
-        serde_json::from_slice(&std::fs::read(&f.st.state_path).unwrap()).unwrap();
-    assert_eq!(saved.machines.len(), 3);
+    assert_eq!(saved(&f.st).machines.len(), 3, "the registry was written");
+}
+
+#[tokio::test]
+async fn a_burst_of_creates_is_spread_by_what_each_one_reserved() {
+    let (f, _ds) = fleet_with_daemons(2).await;
+    // Three tenants, created before any poll could show the first's memory as used: each
+    // sees what the ones before it reserved, so the two larger ones land apart.
+    let mut on = Vec::new();
+    for (t, mb) in [("t1", 30_000), ("t2", 20_000), ("t3", 20_000)] {
+        let (s, headers, body) = call(
+            &f.st,
+            "POST",
+            "/v1/machines",
+            "api",
+            Some(create_body(t, "web", mb)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{body}");
+        on.push(headers["x-briqyard-host"].to_str().unwrap().to_string());
+    }
+    assert_ne!(on[0], on[1], "t2 saw t1's 30 GB taken: {on:?}");
+    assert_eq!(
+        on[1], on[2],
+        "t3 saw 30 GB on one host and 20 GB on the other: {on:?}"
+    );
+    let used: Vec<u32> = {
+        let reg = f.st.reg.lock().unwrap();
+        on.iter().map(|h| reg.hosts[h].used.memory_mb).collect()
+    };
+    assert_eq!(used, [30_000, 40_000, 40_000]);
+    // The hosts report: what they run is what is used, no more.
+    poll_static_hosts_once(&f.st).await;
+    let used: Vec<u32> = {
+        let reg = f.st.reg.lock().unwrap();
+        on.iter().map(|h| reg.hosts[h].used.memory_mb).collect()
+    };
+    assert_eq!(used, [30_000, 40_000, 40_000]);
+}
+
+#[tokio::test]
+async fn a_capacity_answer_unpins_a_tenants_first_machine_only() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    // The host filled up since the fleet last looked: the fleet pins t1 to it and asks; the
+    // host refuses; the pin goes, so a retry can be placed where there is room.
+    ds[0].stub.add("t0", "big", 50_000);
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t1", "web", 20_000)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        json(&body)["code"],
+        "capacity",
+        "the host's answer passes through"
+    );
+    assert_eq!(ds[0].stub.calls().last().unwrap(), "POST /v1/machines");
+    assert_eq!(pinned(&f.st, "t1"), None, "unpinned");
+    assert_eq!(saved(&f.st).tenants.get("t1"), None, "written");
+    // A tenant already on the host keeps its pin through a refusal: its network is there.
+    poll_static_hosts_once(&f.st).await;
+    assert_eq!(pinned(&f.st, "t0").as_deref(), Some("d1"));
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t0", "more", 20_000)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(pinned(&f.st, "t0").as_deref(), Some("d1"), "still pinned");
+    // A refusal that is not `capacity` leaves a first machine's pin: the host had room, the
+    // request was wrong. (The host's report first: the refused machine was reserved.)
+    poll_static_hosts_once(&f.st).await;
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t2", "Bad Name", 10)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(json(&body)["code"], "invalid");
+    assert_eq!(pinned(&f.st, "t2").as_deref(), Some("d1"));
 }
 
 #[tokio::test]
@@ -970,6 +1273,11 @@ async fn a_fork_lands_where_its_source_is() {
     assert!(
         !ds[0].stub.calls().iter().any(|c| c.starts_with("POST")),
         "d1 was not asked"
+    );
+    assert_eq!(
+        f.st.reg.lock().unwrap().hosts["d2"].used.memory_mb,
+        1024,
+        "the fork is reserved on the source's host"
     );
 }
 
@@ -1083,12 +1391,7 @@ async fn a_tenant_listing_asks_its_host_alone() {
     ds[1].stub.add("t2", "db", 512);
     poll_static_hosts_once(&f.st).await;
     assert_eq!(
-        f.st.reg
-            .lock()
-            .unwrap()
-            .tenants
-            .get("t1")
-            .map(String::as_str),
+        pinned(&f.st, "t1").as_deref(),
         Some("d1"),
         "the poll pins the tenants the hosts list"
     );
@@ -1210,7 +1513,7 @@ async fn deleting_a_tenant_unpins_it() {
     let (s, _, body) = call(&f.st, "DELETE", "/v1/tenants/t1", "api", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
     assert_eq!(ds[0].stub.calls().last().unwrap(), "DELETE /v1/tenants/t1");
-    assert_eq!(f.st.reg.lock().unwrap().tenants.get("t1"), None);
+    assert_eq!(pinned(&f.st, "t1"), None);
     // The host refused: the pin stays.
     let (s, _, body) = call(&f.st, "DELETE", "/v1/tenants/kept", "api", None).await;
     assert_eq!(s, StatusCode::CONFLICT, "{body}");
@@ -1219,15 +1522,7 @@ async fn deleting_a_tenant_unpins_it() {
         "busy",
         "the host's answer passes through"
     );
-    assert_eq!(
-        f.st.reg
-            .lock()
-            .unwrap()
-            .tenants
-            .get("kept")
-            .map(String::as_str),
-        Some("d1")
-    );
+    assert_eq!(pinned(&f.st, "kept").as_deref(), Some("d1"));
     // A tenant the fleet never placed: nothing to do, no host asked.
     let before: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
     let (s, _, _) = call(&f.st, "DELETE", "/v1/tenants/nobody", "api", None).await;
@@ -1237,22 +1532,130 @@ async fn deleting_a_tenant_unpins_it() {
 }
 
 #[tokio::test]
-async fn endpoints_are_gathered_and_found_across_hosts() {
+async fn unpin_releases_a_tenant_without_asking_its_host() {
     let (f, ds) = fleet_with_daemons(2).await;
+    ds[0].stub.add("kept", "db", 512);
+    poll_static_hosts_once(&f.st).await;
+    assert_eq!(pinned(&f.st, "kept").as_deref(), Some("d1"));
+    set_state(&f.st, "d1", "down");
+    let before: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
+    let (s, _, body) = call(&f.st, "POST", "/v1/tenants/kept/unpin", "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    let after: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
+    assert_eq!(before, after, "no host asked, down or not");
+    assert_eq!(pinned(&f.st, "kept"), None);
+    assert_eq!(saved(&f.st).tenants.get("kept"), None, "written");
+    // Its next machine is placed afresh: d1 is down, so on d2.
+    let (s, headers, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("kept", "db-restored", 512)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d2");
+    let (s, _, _) = call(&f.st, "POST", "/v1/tenants/nobody/unpin", "api", None).await;
+    assert_eq!(
+        s,
+        StatusCode::NO_CONTENT,
+        "unpinning what is not pinned is fine"
+    );
+}
+
+#[tokio::test]
+async fn endpoints_are_indexed_to_their_host_and_listed_whole() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    let m1 = ds[0].stub.add("t1", "web", 512);
+    let m2 = ds[1].stub.add("t2", "db", 512);
+    // Opened through the fleet: indexed at once.
+    let (s, headers, body) = call(
+        &f.st,
+        "POST",
+        &format!("/v1/machines/{}/endpoints", m1.id),
+        "api",
+        Some(serde_json::json!({"port": 80})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d1");
+    let e1: api::Endpoint = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        f.st.reg
+            .lock()
+            .unwrap()
+            .endpoints
+            .get(&e1.id)
+            .map(String::as_str),
+        Some("d1")
+    );
+    assert_eq!(
+        saved(&f.st).endpoints.get(&e1.id).map(String::as_str),
+        Some("d1")
+    );
+    // Opened elsewhere: the listing asks every host and learns.
+    let e2 = ds[1].stub.add_endpoint(&m2.id);
     let (s, _, body) = call(&f.st, "GET", "/v1/endpoints", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     let eps: Vec<api::Endpoint> = serde_json::from_str(&body).unwrap();
     let ids: Vec<&str> = eps.iter().map(|e| e.id.as_str()).collect();
-    assert_eq!(ids, ["ep_d1", "ep_d2"]);
-    // An endpoint call goes to the first host that does not answer 404.
-    let (s, headers, _) = call(&f.st, "DELETE", "/v1/endpoints/ep_d2", "api", None).await;
+    assert_eq!(ids, [e1.id.as_str(), e2.id.as_str()]);
+    assert_eq!(
+        f.st.reg
+            .lock()
+            .unwrap()
+            .endpoints
+            .get(&e2.id)
+            .map(String::as_str),
+        Some("d2")
+    );
+    // Indexed: a call goes to its host alone.
+    let d1_before = ds[0].stub.calls().len();
+    let (s, headers, body) = call(
+        &f.st,
+        "GET",
+        &format!("/v1/endpoints/{}", e2.id),
+        "api",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d2");
+    assert_eq!(ds[0].stub.calls().len(), d1_before, "d1 was not asked");
+    // Not indexed (a fleet restarted with an empty registry): found by asking each host.
+    f.st.reg.lock().unwrap().endpoints.clear();
+    let (s, headers, _) = call(
+        &f.st,
+        "DELETE",
+        &format!("/v1/endpoints/{}", e2.id),
+        "api",
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert_eq!(headers["x-briqyard-host"], "d2");
     assert_eq!(
         ds[0].stub.calls().last().unwrap(),
-        "DELETE /v1/endpoints/ep_d2"
+        &format!("GET /v1/endpoints/{}", e2.id),
+        "the search asked d1 first"
+    );
+    assert_eq!(
+        f.st.reg.lock().unwrap().endpoints.get(&e2.id),
+        None,
+        "a delete drops the entry"
     );
     let (s, _, body) = call(&f.st, "DELETE", "/v1/endpoints/ep_x", "api", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert_eq!(json(&body)["error"], "endpoint ep_x not found");
+    // The listing is never partial: a host down fails it, like machines.
+    set_state(&f.st, "d2", "down");
+    let (s, _, body) = call(&f.st, "GET", "/v1/endpoints", "api", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "host_down");
+    set_state(&f.st, "d2", "ready");
+    f.st.reg.lock().unwrap().hosts.get_mut("d2").unwrap().url = "http://127.0.0.1:1".into();
+    let (s, _, body) = call(&f.st, "GET", "/v1/endpoints", "api", None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(json(&body)["code"], "host_unreachable");
 }

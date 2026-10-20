@@ -19,7 +19,9 @@ bash bootstrap-host.sh
 It installs the packages (ZFS, nftables, e2fsprogs), makes the pool (on the device given, or on
 a file for a trial), downloads Firecracker, its jailer and a guest kernel, installs the
 binaries, writes `/etc/briqyard/config.yaml` and the systemd unit, and starts `briqyardd`.
-With `FLEET_URL`, `FLEET_TOKEN` and `ADVERTISE` set, the host registers with a fleet.
+With `FLEET_URL` and `ADVERTISE` set, the host registers with a fleet, presenting
+`BRIQYARD_TOKEN`: the fleet takes the registration only when it expects that token at that
+address (the host's `hosts:` entry, below).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -78,7 +80,7 @@ briqyard status
 | `ingress.advertise` | the host's primary address | The address endpoints are reported at (`address` on an endpoint): what a router on another machine dials, a private address when the host has one |
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
 | `capacity.memory_mb`, `capacity.vcpus` | host memory − 2 GB, threads × 4 | What the host hands out; shared vCPUs oversubscribe |
-| `fleet.url`, `fleet.token`, `fleet.advertise`, `fleet.region` | none | Register with a fleet, every 15 s |
+| `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` |
 
 ## Where things live
 
@@ -149,8 +151,11 @@ backup until sent elsewhere.
 | A create ends in `state: error` | `error` on the machine; the last console lines are in it. Then `briqyard machine logs` |
 | The process exits at once (`stopped`, `exit.code`) | `briqyard machine logs`: the image's own output. `restart.policy: on-failure` tries three times |
 | `the guest did not come up` | The kernel booted but the init did not answer on vsock within 60 s: console log, then the kernel (`kernel`) and init (`init`) paths |
-| `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk |
+| `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk. `used` counts what placement reserved until the next heartbeat |
 | `host h_… is down` (fleet, 503) | The host missed its heartbeats for `placement.down_after_sec`: its machines answer again once it is back. `briqyard host ls`, then the host's `journalctl -u briqyardd` |
+| `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it |
+| `write registry …` (fleet, 500 `registry`) | The fleet's `state_dir` is full or not writable; nothing is recorded until it is |
+| `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
 | `dataset is busy` | A zvol a Firecracker just released; the daemon retries for ten seconds |
 | A jail refuses to start | `<run>/<machine>/console.log` holds the jailer's own messages |
@@ -158,9 +163,26 @@ backup until sent elsewhere.
 ## A fleet
 
 `briqyard-fleet` runs anywhere that reaches every host (`/etc/briqyard/fleet.yaml`, unit in
-`hack/briqyard-fleet.service`). Hosts either register themselves (`fleet:` in their config,
-with the fleet's `host_token`) or are listed under `hosts:` and polled. Clients use the fleet's
-URL and `token` as they would a daemon's; `briqyard host ls` shows the hosts.
+`hack/briqyard-fleet.service`). Clients use the fleet's URL and `token` as they would a
+daemon's; `briqyard host ls` shows the hosts.
+
+A host has one credential, its own API token, and the fleet must hold it before the host can
+be anything to it: it forwards with it and takes the host's heartbeats (`fleet:` in the host's
+config) only with it. A host the fleet orders gets its token from the bootstrap. A host you
+install yourself is listed under `hosts:` with it:
+
+```yaml
+hosts:
+  - id: h1
+    url: http://10.0.0.5:7420
+    token: <the host's token>
+    region: fsn
+```
+
+The fleet polls it every 15 s and accepts its heartbeats; without a `token` it is polled only.
+A heartbeat from an address no entry or order expects is refused (`unknown_host`), so no host
+can speak for another. The registry is `<state_dir>/registry.json`; a write that fails is an
+`error` in the fleet's log and a 500 `registry` on the request that needed it.
 
 ### Adding and removing hosts
 
@@ -210,13 +232,38 @@ set: every two minutes the fleet asks the provider for the server's address, the
 own for the host's API.
 The host is `bootstrapped` once the script succeeds and `ready` at its first heartbeat; a server
 that cannot be installed after `max_attempts` is `failed`, with the last error in its note.
-Without the bootstrap, run the script yourself with `FLEET_URL` and `FLEET_TOKEN` set.
+Without the bootstrap, run the script yourself with `FLEET_URL`, `ADVERTISE` and the
+`BRIQYARD_TOKEN` the fleet holds for the host (an entry under `hosts:`).
+
+No provider's API returns the server's SSH host key, so the bootstrap pins the key it sees:
+the first attempt that succeeds appends it to `<state_dir>/known_hosts` and writes its
+fingerprint into the host's note (`ssh host key SHA256:… ed25519 pinned at first connect`);
+compare it with the provider's console. Every later connect is strict against that file. A
+server reinstalled by the provider has a new key: remove its line from the file.
 
 A retire drains the host first (no new tenant lands on it) and releases it at the provider
 once it runs nothing: at once when it is already empty, else from the hourly pass as soon as
-its last machine is destroyed. Machines do not move between hosts: a draining host keeps its
-tenants until they are removed. A host from the `hosts:` list is retired by removing it from
+its last machine is destroyed. A host from the `hosts:` list is retired by removing it from
 the configuration; forgotten through the API, it is back on the next poll.
+
+### Moving a tenant
+
+Machines do not move between hosts on their own: a draining host keeps its tenants until they
+are removed. To take a tenant off a host (draining, full, or gone):
+
+```bash
+briqyard host drain h_old                          # nothing new lands there
+briqyard machine backup <id>                       # each machine of the tenant (ADR 0008)
+briqyard machine destroy <id>                      # each one, once its backup is listed
+briqyard tenant rm <tenant>                        # its network on the old host; unpins it
+briqyard machine restore --from <id> --tenant <tenant> --name <name>   # placed afresh
+```
+
+`briqyard tenant unpin <tenant>` (`POST /v1/tenants/{id}/unpin`) drops the pin without asking
+the host, for a host that is down for good or a pin left on a full host. A tenant unpinned
+while it still has machines on a host is pinned back there by the host's next heartbeat, and a
+machine created in between lands on another host, where it cannot reach the others: unpin
+once the tenant has nothing left on the host, or mean to abandon what is there.
 
 The autoscaler (`provisioner.enabled: true`) orders a host when no ready host has a slot of
 `slot_mb` left and releases a provisioned host empty for `idle_grace`, between `min_hosts` and

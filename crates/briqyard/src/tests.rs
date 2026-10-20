@@ -384,6 +384,10 @@ fn endpoint_tenant_and_image_commands() {
         _ => panic!("not a tenant rm"),
     }
     assert_eq!(fails(&["tenant", "rm"]), ErrorKind::MissingRequiredArgument);
+    match parse(&["tenant", "unpin", "t1"]).cmd {
+        Cmd::Tenant(TenantCmd::Unpin { id }) => assert_eq!(id, "t1"),
+        _ => panic!("not a tenant unpin"),
+    }
     assert!(matches!(
         parse(&["image", "ls"]).cmd,
         Cmd::Image(ImageCmd::Ls)

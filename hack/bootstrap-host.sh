@@ -4,9 +4,11 @@
 # the systemd unit. Idempotent: run it again to upgrade.
 #
 #   BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.0 \
-#   BRIQYARD_POOL_DEVICE=/dev/nvme1n1 FLEET_URL=https://fleet.example FLEET_TOKEN=... \
+#   BRIQYARD_POOL_DEVICE=/dev/nvme1n1 BRIQYARD_TOKEN=... FLEET_URL=https://fleet.example \
 #   ADVERTISE=http://10.0.0.5:7420 ALLOWED_CLIENTS=10.0.0.0/8 bash bootstrap-host.sh
 #
+# With FLEET_URL the host registers with the fleet, presenting BRIQYARD_TOKEN: the fleet must
+# expect that token at ADVERTISE's address (the host's order, or its `hosts:` entry).
 # Without BRIQYARD_RELEASE, the binaries are expected in ./bin (built with `make`).
 #
 # The API and the endpoints listen on LISTEN's address (0.0.0.0:7420 by default). A public
@@ -18,7 +20,6 @@ POOL_DEVICE=${BRIQYARD_POOL_DEVICE:-}
 POOL_FILE_GB=${BRIQYARD_POOL_FILE_GB:-50}
 RELEASE=${BRIQYARD_RELEASE:-}
 FLEET_URL=${FLEET_URL:-}
-FLEET_TOKEN=${FLEET_TOKEN:-}
 ADVERTISE=${ADVERTISE:-}
 API_TOKEN=${BRIQYARD_TOKEN:-}
 LISTEN=${LISTEN:-0.0.0.0:7420}
@@ -145,7 +146,6 @@ EOF
     cat >> /etc/briqyard/config.yaml <<EOF
 fleet:
   url: $FLEET_URL
-  token: "$FLEET_TOKEN"
   advertise: ${ADVERTISE:-http://$(hostname -I | awk '{print $1}'):7420}
 EOF
   fi
