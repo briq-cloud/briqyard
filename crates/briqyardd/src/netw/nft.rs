@@ -4,12 +4,14 @@
 //! address so a guest cannot send as anyone else.
 //!
 //! The tables are rendered once at start. A machine's pin is one element added to or removed
-//! from the `pins` set, its egress policy (ADR 0015) a few more in the sets beside it, its
-//! internet counters (ADR 0017) one element in each of two counter sets for its life;
-//! tenants need no change at all: the rules name their bridges by prefix (`by*`), which only
-//! the daemon makes.
+//! from the `pins` set, its egress policy (ADR 0015) and limits (ADR 0018) a few more in the
+//! sets and maps beside it, with a named `limit` per rate, its counters (ADR 0017, 0018) one
+//! element in each counter set for its life; tenants need no change at all: the rules name
+//! their bridges by prefix (`by*`), which only the daemon makes.
 
+use crate::config::EgressLimits;
 use anyhow::{anyhow, Context, Result};
+use briqyard_api::EgressDrops;
 use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
@@ -33,17 +35,27 @@ pub enum Policy {
     /// `ip` reaches its tenant and not the internet: an element of `egress_none` in the inet
     /// table, where the route out is.
     None { ip: String },
+    /// `ip` reaches its tenant and the internet within `limits` (ADR 0018), which limit
+    /// something: elements of `blocked_ports`, `conn_limits` and `bandwidth_limits` in the
+    /// inet table, and a named `limit` for each rate. Open with no limits is no policy.
+    Open { ip: String, limits: EgressLimits },
 }
 
 impl Policy {
     /// The machine's address, which the policy is keyed on.
     pub fn ip(&self) -> &str {
         match self {
-            Policy::Via { ip, .. } | Policy::None { ip } => ip,
+            Policy::Via { ip, .. } | Policy::None { ip } | Policy::Open { ip, .. } => ip,
         }
     }
 
-    /// The `add element` lines of this policy; with `delete`, the lines that end it.
+    /// The resolver answers the machine internal names only (ADR 0015).
+    pub fn internal_only(&self) -> bool {
+        !matches!(self, Policy::Open { .. })
+    }
+
+    /// The lines that put this policy in the tables; with `delete`, the lines that take it
+    /// out: an element before the object it names.
     fn elements(&self, verb: &str) -> String {
         match self {
             Policy::Via { ip, to, host } => format!(
@@ -53,8 +65,64 @@ impl Policy {
             Policy::None { ip } => {
                 format!("{verb} element inet briqyard egress_none {{ {ip} }}\n")
             }
+            Policy::Open { ip, limits } => {
+                let mut s = String::new();
+                let ports = blocked(ip, limits);
+                if !ports.is_empty() {
+                    s += &format!(
+                        "{verb} element inet briqyard blocked_ports {{ {} }}\n",
+                        ports.join(", ")
+                    );
+                }
+                for (map, name, spec) in rates(ip, limits) {
+                    if verb == "add" {
+                        s += &format!("add limit inet briqyard {name} {{ {spec} }}\n");
+                        s += &format!("add element inet briqyard {map} {{ {ip} : \"{name}\" }}\n");
+                    } else {
+                        s += &format!("delete element inet briqyard {map} {{ {ip} }}\n");
+                        s += &format!("delete limit inet briqyard {name}\n");
+                    }
+                }
+                s
+            }
         }
     }
+}
+
+/// The elements of `blocked_ports` for a machine: its address with each port.
+fn blocked(ip: &str, l: &EgressLimits) -> Vec<String> {
+    l.blocked_ports
+        .iter()
+        .map(|p| format!("{ip} . {p}"))
+        .collect()
+}
+
+/// A machine's rates as `(map, limit name, limit spec)`, the ones it has. A `limit` holds one
+/// token bucket, so each machine has its own, named after its address. `burst` lets the
+/// whole minute's connections through at once (nft's default is 5); bytes have a second's
+/// burst, nft's default.
+fn rates(ip: &str, l: &EgressLimits) -> Vec<(&'static str, String, String)> {
+    let key = ip.replace('.', "_");
+    let mut out = vec![];
+    if l.new_connections_per_minute > 0 {
+        let n = l.new_connections_per_minute;
+        out.push((
+            "conn_limits",
+            format!("conn_{key}"),
+            format!("rate over {n}/minute burst {n} packets"),
+        ));
+    }
+    if l.bandwidth_mbit > 0 {
+        out.push((
+            "bandwidth_limits",
+            format!("bandwidth_{key}"),
+            format!(
+                "rate over {} bytes/second",
+                u64::from(l.bandwidth_mbit) * 125_000
+            ),
+        ));
+    }
+    out
 }
 
 pub struct Ruleset {
@@ -69,16 +137,25 @@ pub struct Ruleset {
     pub pins: Vec<(String, String)>,
     /// The egress policies of those machines.
     pub policies: Vec<Policy>,
-    /// The address of every machine on the host: its internet traffic is counted.
+    /// The address of every machine on the host: its internet traffic and its drops are
+    /// counted.
     pub counted: Vec<String>,
 }
 
-/// The counter sets: bytes a machine's address sent to the internet and got back from it.
-const COUNTERS: [&str; 2] = ["internet_out", "internet_in"];
+/// The counter sets: bytes a machine's address sent to the internet and got back from it
+/// (ADR 0017), packets its limits dropped (ADR 0018).
+const COUNTERS: [&str; 5] = [
+    "internet_out",
+    "internet_in",
+    "dropped_port",
+    "dropped_rate",
+    "dropped_bandwidth",
+];
 
 impl Ruleset {
     pub fn render(&self) -> String {
         let (mut via_sources, mut via_allowed, mut egress_none) = (vec![], vec![], vec![]);
+        let (mut blocked_ports, mut limits, mut named) = (vec![], String::new(), vec![]);
         for p in &self.policies {
             match p {
                 Policy::Via { ip, to, host } => {
@@ -87,6 +164,13 @@ impl Ruleset {
                     via_allowed.push(format!("{ip} . {host}"));
                 }
                 Policy::None { ip } => egress_none.push(ip.clone()),
+                Policy::Open { ip, limits: l } => {
+                    blocked_ports.extend(blocked(ip, l));
+                    for (map, name, spec) in rates(ip, l) {
+                        limits += &format!("\tlimit {name} {{\n\t\t{spec}\n\t}}\n");
+                        named.push((map, format!("{ip} : \"{name}\"")));
+                    }
+                }
             }
         }
         let mut s = String::new();
@@ -100,25 +184,60 @@ impl Ruleset {
         }
         s.push_str("\t}\n");
         s.push_str(&set("egress_none", "ipv4_addr", &egress_none));
+        s.push_str(&set(
+            "blocked_ports",
+            "ipv4_addr . inet_service",
+            &blocked_ports,
+        ));
+        // A map names a limit by its name, so the limits come first.
+        s.push_str(&limits);
+        for name in ["conn_limits", "bandwidth_limits"] {
+            let elements: Vec<String> = named
+                .iter()
+                .filter(|(m, _)| *m == name)
+                .map(|(_, e)| e.clone())
+                .collect();
+            s.push_str(&map(name, "ipv4_addr : limit", &elements));
+        }
         for name in COUNTERS {
             s.push_str(&counter_set(name, &self.counted));
         }
+        let (out, back) = (
+            format!("iifname \"by*\" oifname \"{}\"", self.egress),
+            format!("iifname \"{}\" oifname \"by*\"", self.egress),
+        );
         s.push_str("\tchain forward {\n\t\ttype filter hook forward priority 0; policy drop;\n");
         s.push_str("\t\tmeta nfproto ipv6 iifname \"by*\" drop\n");
         // Before the reply accept: a policy set while a connection is open ends it.
         s.push_str("\t\tip saddr @egress_none drop\n");
-        // Counted before the accepts, so replies count too: a lookup in a set with `counter`
-        // adds the packet to its element and goes on to the next rule. Only the route to the
-        // internet crosses this chain: a tenant's own traffic is bridged, endpoints and DNS
-        // end on the host. A first packet to a private network, dropped below, is counted.
+        // The limits (ADR 0018), before the reply accept too, so a port blocked live ends its
+        // connections and the cap holds on every byte. Each drop is counted on the way: the
+        // lookup in a counter set comes last in its rule, so only what is dropped counts.
+        // Forms: a concatenation of address and port looked up in a set of that type, a
+        // stateful object found through a map (`limit name ip saddr map @m`, the wiki's
+        // "Stateful objects" page), `reject with tcp reset`.
         s.push_str(&format!(
-            "\t\tiifname \"by*\" oifname \"{}\" ip saddr @internet_out\n",
-            self.egress
+            "\t\t{out} ip saddr . tcp dport @blocked_ports ip saddr @dropped_port reject with tcp reset\n"
         ));
         s.push_str(&format!(
-            "\t\tiifname \"{}\" oifname \"by*\" ip daddr @internet_in\n",
-            self.egress
+            "\t\t{out} ip saddr . udp dport @blocked_ports ip saddr @dropped_port reject\n"
         ));
+        s.push_str(&format!(
+            "\t\t{out} ct state new limit name ip saddr map @conn_limits ip saddr @dropped_rate drop\n"
+        ));
+        s.push_str(&format!(
+            "\t\t{out} limit name ip saddr map @bandwidth_limits ip saddr @dropped_bandwidth drop\n"
+        ));
+        s.push_str(&format!(
+            "\t\t{back} limit name ip daddr map @bandwidth_limits ip daddr @dropped_bandwidth drop\n"
+        ));
+        // Counted after the limits, so what they drop is not traffic, and before the
+        // accepts, so replies count too: a lookup in a set with `counter` adds the packet to
+        // its element and goes on to the next rule. Only the route to the internet crosses
+        // this chain: a tenant's own traffic is bridged, endpoints and DNS end on the host. A
+        // first packet to a private network, dropped below, is counted.
+        s.push_str(&format!("\t\t{out} ip saddr @internet_out\n"));
+        s.push_str(&format!("\t\t{back} ip daddr @internet_in\n"));
         s.push_str("\t\tct state established,related accept\n");
         s.push_str(&format!(
             "\t\tiifname \"by*\" oifname \"{}\" ip daddr {PRIVATE_NETS} drop\n",
@@ -217,7 +336,16 @@ fn pin(tap: &str, ip: &str) -> String {
 
 /// A named set, with its elements when it has any.
 fn set(name: &str, ty: &str, elements: &[String]) -> String {
-    let mut s = format!("\tset {name} {{\n\t\ttype {ty}\n");
+    collection("set", name, ty, elements)
+}
+
+/// A named map, with its elements when it has any.
+fn map(name: &str, ty: &str, elements: &[String]) -> String {
+    collection("map", name, ty, elements)
+}
+
+fn collection(kind: &str, name: &str, ty: &str, elements: &[String]) -> String {
+    let mut s = format!("\t{kind} {name} {{\n\t\ttype {ty}\n");
     if !elements.is_empty() {
         s.push_str(&format!("\t\telements = {{ {} }}\n", elements.join(", ")));
     }
@@ -236,7 +364,7 @@ fn counter_set(name: &str, elements: &[String]) -> String {
     s
 }
 
-/// What `count` sends: the address in both counter sets; with `delete`, what ends it.
+/// What `count` sends: the address in every counter set; with `delete`, what ends it.
 pub fn counter_elements(verb: &str, ip: &str) -> String {
     COUNTERS
         .iter()
@@ -244,7 +372,7 @@ pub fn counter_elements(verb: &str, ip: &str) -> String {
         .collect()
 }
 
-/// Counts a machine's internet traffic, from zero. Again keeps the counts.
+/// Counts a machine's internet traffic and drops, from zero. Again keeps the counts.
 pub async fn count(ip: &str) -> Result<()> {
     nft(&counter_elements("add", ip)).await
 }
@@ -254,11 +382,20 @@ pub async fn uncount(ip: &str) -> Result<()> {
     missing_is_fine(nft(&counter_elements("delete", ip)).await)
 }
 
-/// Bytes each counted address got from the internet and sent to it, `(in, out)`, since it
-/// was counted: what `nft -j list set` says of both sets.
-pub async fn counters() -> Result<HashMap<String, (u64, u64)>> {
-    let mut bytes = [HashMap::new(), HashMap::new()];
-    for (set, into) in COUNTERS.iter().zip(bytes.iter_mut()) {
+/// What the counter sets hold for one address since it was counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counters {
+    /// Bytes got from the internet and sent to it.
+    pub internet_in: u64,
+    pub internet_out: u64,
+    /// Packets its limits dropped.
+    pub dropped: EgressDrops,
+}
+
+/// The counters of every counted address: what `nft -j list set` says of each set.
+pub async fn counters() -> Result<HashMap<String, Counters>> {
+    let mut sets: [HashMap<String, (u64, u64)>; 5] = Default::default();
+    for (set, into) in COUNTERS.iter().zip(sets.iter_mut()) {
         let out = Command::new("nft")
             .args(["-j", "list", "set", "inet", "briqyard", set])
             .output()
@@ -270,28 +407,38 @@ pub async fn counters() -> Result<HashMap<String, (u64, u64)>> {
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
-        *into = set_bytes(&out.stdout).with_context(|| format!("nft list set {set}"))?;
+        *into = set_counts(&out.stdout).with_context(|| format!("nft list set {set}"))?;
     }
-    let [out, inb] = bytes;
-    Ok(both(&inb, &out))
+    Ok(by_address(&sets))
 }
 
-/// `(in, out)` per address, from the bytes of each direction.
-fn both(inb: &HashMap<String, u64>, out: &HashMap<String, u64>) -> HashMap<String, (u64, u64)> {
-    let mut all: HashMap<String, (u64, u64)> = HashMap::new();
-    for (ip, b) in inb {
-        all.entry(ip.clone()).or_default().0 = *b;
-    }
-    for (ip, b) in out {
-        all.entry(ip.clone()).or_default().1 = *b;
-    }
-    all
+/// Each address's counters, from the sets' `(packets, bytes)` in the order of `COUNTERS`: bytes
+/// for the internet, packets for the drops. An address missing from a set has zero there.
+fn by_address(sets: &[HashMap<String, (u64, u64)>; 5]) -> HashMap<String, Counters> {
+    let [out, inb, port, rate, bandwidth] = sets;
+    let get =
+        |set: &HashMap<String, (u64, u64)>, ip: &str| set.get(ip).copied().unwrap_or_default();
+    sets.iter()
+        .flat_map(|set| set.keys())
+        .map(|ip| {
+            let c = Counters {
+                internet_in: get(inb, ip).1,
+                internet_out: get(out, ip).1,
+                dropped: EgressDrops {
+                    blocked_port: get(port, ip).0,
+                    rate: get(rate, ip).0,
+                    bandwidth: get(bandwidth, ip).0,
+                },
+            };
+            (ip.clone(), c)
+        })
+        .collect()
 }
 
-/// The bytes of each element of a counter set, from `nft -j list set`: `nftables[].set.elem[]`
-/// is `{"elem": {"val": "10.64.1.2", "counter": {"packets": 6, "bytes": 504}}}`; an empty set
-/// has no `elem`.
-fn set_bytes(json: &[u8]) -> Result<HashMap<String, u64>> {
+/// The `(packets, bytes)` of each element of a counter set, from `nft -j list set`:
+/// `nftables[].set.elem[]` is `{"elem": {"val": "10.64.1.2", "counter": {"packets": 6,
+/// "bytes": 504}}}`; an empty set has no `elem`.
+fn set_counts(json: &[u8]) -> Result<HashMap<String, (u64, u64)>> {
     let v: serde_json::Value = serde_json::from_slice(json)?;
     let mut out = HashMap::new();
     let items = v["nftables"]
@@ -306,10 +453,12 @@ fn set_bytes(json: &[u8]) -> Result<HashMap<String, u64>> {
             let ip = e["val"]
                 .as_str()
                 .ok_or_else(|| anyhow!("an element without an address: {e}"))?;
-            let bytes = e["counter"]["bytes"]
-                .as_u64()
-                .ok_or_else(|| anyhow!("{ip}: no counter"))?;
-            out.insert(ip.to_string(), bytes);
+            let count = |field: &str| {
+                e["counter"][field]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("{ip}: no counter"))
+            };
+            out.insert(ip.to_string(), (count("packets")?, count("bytes")?));
         }
     }
     Ok(out)
@@ -408,12 +557,25 @@ mod tests {
                 ("bt0000000000a4".into(), "10.64.0.4".into()),
             ],
             policies: vec![
+                open(),
                 via(),
                 Policy::None {
                     ip: "10.64.0.4".into(),
                 },
             ],
             counted: vec!["10.64.0.2".into(), "10.64.0.3".into()],
+        }
+    }
+
+    /// 10.64.0.2 with every limit: two ports, 600 connections a minute, 100 Mbit/s.
+    fn open() -> Policy {
+        Policy::Open {
+            ip: "10.64.0.2".into(),
+            limits: EgressLimits {
+                blocked_ports: vec![25, 465],
+                new_connections_per_minute: 600,
+                bandwidth_mbit: 100,
+            },
         }
     }
 
@@ -442,6 +604,24 @@ table inet briqyard {
 		type ipv4_addr
 		elements = { 10.64.0.4 }
 	}
+	set blocked_ports {
+		type ipv4_addr . inet_service
+		elements = { 10.64.0.2 . 25, 10.64.0.2 . 465 }
+	}
+	limit conn_10_64_0_2 {
+		rate over 600/minute burst 600 packets
+	}
+	limit bandwidth_10_64_0_2 {
+		rate over 12500000 bytes/second
+	}
+	map conn_limits {
+		type ipv4_addr : limit
+		elements = { 10.64.0.2 : "conn_10_64_0_2" }
+	}
+	map bandwidth_limits {
+		type ipv4_addr : limit
+		elements = { 10.64.0.2 : "bandwidth_10_64_0_2" }
+	}
 	set internet_out {
 		type ipv4_addr
 		counter
@@ -452,10 +632,30 @@ table inet briqyard {
 		counter
 		elements = { 10.64.0.2, 10.64.0.3 }
 	}
+	set dropped_port {
+		type ipv4_addr
+		counter
+		elements = { 10.64.0.2, 10.64.0.3 }
+	}
+	set dropped_rate {
+		type ipv4_addr
+		counter
+		elements = { 10.64.0.2, 10.64.0.3 }
+	}
+	set dropped_bandwidth {
+		type ipv4_addr
+		counter
+		elements = { 10.64.0.2, 10.64.0.3 }
+	}
 	chain forward {
 		type filter hook forward priority 0; policy drop;
 		meta nfproto ipv6 iifname "by*" drop
 		ip saddr @egress_none drop
+		iifname "by*" oifname "eth0" ip saddr . tcp dport @blocked_ports ip saddr @dropped_port reject with tcp reset
+		iifname "by*" oifname "eth0" ip saddr . udp dport @blocked_ports ip saddr @dropped_port reject
+		iifname "by*" oifname "eth0" ct state new limit name ip saddr map @conn_limits ip saddr @dropped_rate drop
+		iifname "by*" oifname "eth0" limit name ip saddr map @bandwidth_limits ip saddr @dropped_bandwidth drop
+		iifname "eth0" oifname "by*" limit name ip daddr map @bandwidth_limits ip daddr @dropped_bandwidth drop
 		iifname "by*" oifname "eth0" ip saddr @internet_out
 		iifname "eth0" oifname "by*" ip daddr @internet_in
 		ct state established,related accept
@@ -525,6 +725,9 @@ table bridge briqyard {
         assert!(s.contains("\tset egress_none {\n\t\ttype ipv4_addr\n\t}\n"));
         assert!(s.contains("\tset via_allowed {\n\t\ttype ipv4_addr . ipv4_addr\n\t}\n"));
         assert!(s.contains("\tset internet_in {\n\t\ttype ipv4_addr\n\t\tcounter\n\t}\n"));
+        assert!(s.contains("\tset blocked_ports {\n\t\ttype ipv4_addr . inet_service\n\t}\n"));
+        assert!(s.contains("\tmap conn_limits {\n\t\ttype ipv4_addr : limit\n\t}\n"));
+        assert!(!s.contains("\tlimit "), "{s}");
     }
 
     #[test]
@@ -588,16 +791,87 @@ table bridge briqyard {
     }
 
     #[test]
-    fn counter_elements_name_both_sets() {
+    fn limit_elements() {
+        // Every limit: the ports, then each rate's named limit before the map element that
+        // names it; taken out in the other order, the element before its limit.
+        assert_eq!(
+            open().elements("add"),
+            "add element inet briqyard blocked_ports { 10.64.0.2 . 25, 10.64.0.2 . 465 }\n\
+             add limit inet briqyard conn_10_64_0_2 { rate over 600/minute burst 600 packets }\n\
+             add element inet briqyard conn_limits { 10.64.0.2 : \"conn_10_64_0_2\" }\n\
+             add limit inet briqyard bandwidth_10_64_0_2 { rate over 12500000 bytes/second }\n\
+             add element inet briqyard bandwidth_limits { 10.64.0.2 : \"bandwidth_10_64_0_2\" }\n"
+        );
+        assert_eq!(
+            open().elements("delete"),
+            "delete element inet briqyard blocked_ports { 10.64.0.2 . 25, 10.64.0.2 . 465 }\n\
+             delete element inet briqyard conn_limits { 10.64.0.2 }\n\
+             delete limit inet briqyard conn_10_64_0_2\n\
+             delete element inet briqyard bandwidth_limits { 10.64.0.2 }\n\
+             delete limit inet briqyard bandwidth_10_64_0_2\n"
+        );
+        // One limit alone: only its lines.
+        let only = |limits| Policy::Open {
+            ip: "10.64.1.9".into(),
+            limits,
+        };
+        let rate = only(EgressLimits {
+            blocked_ports: vec![],
+            new_connections_per_minute: 6,
+            bandwidth_mbit: 0,
+        });
+        assert_eq!(
+            rate.elements("add"),
+            "add limit inet briqyard conn_10_64_1_9 { rate over 6/minute burst 6 packets }\n\
+             add element inet briqyard conn_limits { 10.64.1.9 : \"conn_10_64_1_9\" }\n"
+        );
+        let port = only(EgressLimits {
+            blocked_ports: vec![25],
+            new_connections_per_minute: 0,
+            bandwidth_mbit: 0,
+        });
+        assert_eq!(
+            port.elements("delete"),
+            "delete element inet briqyard blocked_ports { 10.64.1.9 . 25 }\n"
+        );
+        // A change of rate is the same limit's name deleted and added again, in one input.
+        let faster = Policy::Open {
+            ip: "10.64.0.2".into(),
+            limits: EgressLimits {
+                bandwidth_mbit: 2,
+                ..EgressLimits::default()
+            },
+        };
+        assert_eq!(
+            swap_elements(&open(), &faster),
+            open().elements("delete") + &faster.elements("add")
+        );
+        assert!(faster.elements("add").contains(
+            "add limit inet briqyard bandwidth_10_64_0_2 { rate over 250000 bytes/second }\n"
+        ));
+        // The resolver keeps `via` and `none` to internal names, never an open machine.
+        assert!(!open().internal_only());
+        assert!(via().internal_only());
+        assert_eq!(open().ip(), "10.64.0.2");
+    }
+
+    #[test]
+    fn counter_elements_name_every_set() {
         assert_eq!(
             counter_elements("add", "10.64.1.2"),
             "add element inet briqyard internet_out { 10.64.1.2 }\n\
-             add element inet briqyard internet_in { 10.64.1.2 }\n"
+             add element inet briqyard internet_in { 10.64.1.2 }\n\
+             add element inet briqyard dropped_port { 10.64.1.2 }\n\
+             add element inet briqyard dropped_rate { 10.64.1.2 }\n\
+             add element inet briqyard dropped_bandwidth { 10.64.1.2 }\n"
         );
         assert_eq!(
             counter_elements("delete", "10.64.1.2"),
             "delete element inet briqyard internet_out { 10.64.1.2 }\n\
-             delete element inet briqyard internet_in { 10.64.1.2 }\n"
+             delete element inet briqyard internet_in { 10.64.1.2 }\n\
+             delete element inet briqyard dropped_port { 10.64.1.2 }\n\
+             delete element inet briqyard dropped_rate { 10.64.1.2 }\n\
+             delete element inet briqyard dropped_bandwidth { 10.64.1.2 }\n"
         );
     }
 
@@ -605,28 +879,59 @@ table bridge briqyard {
     fn counters_are_read_from_nft_json() {
         // What nft 1.1.6 prints for a counter set, read on the dev VM.
         let listed = br#"{"nftables": [{"metainfo": {"version": "1.1.6", "release_name": "Commodore Bullmoose #7", "json_schema_version": 1}}, {"set": {"family": "inet", "name": "internet_out", "table": "briqyard", "type": "ipv4_addr", "handle": 2, "elem": [{"elem": {"val": "10.64.1.2", "counter": {"packets": 6, "bytes": 504}}}, {"elem": {"val": "10.64.1.3", "counter": {"packets": 0, "bytes": 0}}}], "stmt": [{"counter": null}]}}]}"#;
-        let out = set_bytes(listed).unwrap();
+        let out = set_counts(listed).unwrap();
         assert_eq!(
             out,
-            HashMap::from([("10.64.1.2".to_string(), 504), ("10.64.1.3".to_string(), 0)])
+            HashMap::from([
+                ("10.64.1.2".to_string(), (6, 504)),
+                ("10.64.1.3".to_string(), (0, 0))
+            ])
         );
         // An empty set has no `elem`.
         let empty = br#"{"nftables": [{"metainfo": {}}, {"set": {"family": "inet", "name": "internet_in", "table": "briqyard", "type": "ipv4_addr", "handle": 3, "stmt": [{"counter": null}]}}]}"#;
-        assert!(set_bytes(empty).unwrap().is_empty());
+        assert!(set_counts(empty).unwrap().is_empty());
         // A set without counters is an error, not zero.
         let bare = br#"{"nftables": [{"set": {"elem": [{"elem": {"val": "10.64.1.2"}}]}}]}"#;
         assert_eq!(
-            set_bytes(bare).unwrap_err().to_string(),
+            set_counts(bare).unwrap_err().to_string(),
             "10.64.1.2: no counter"
         );
-        assert!(set_bytes(b"not json").is_err());
-        // In and out side by side, an address seen in one direction only has zero in the other.
-        let inb = HashMap::from([("10.64.1.2".to_string(), 9000)]);
+        assert!(set_counts(b"not json").is_err());
+        // Each set to its field, bytes for the internet, packets for the drops; an address
+        // missing from a set has zero there.
+        let one = |ip: &str, packets, bytes| HashMap::from([(ip.to_string(), (packets, bytes))]);
+        let sets = [
+            out,
+            one("10.64.1.2", 70, 9000),
+            one("10.64.1.2", 1, 60),
+            one("10.64.1.3", 10, 600),
+            one("10.64.1.2", 57, 280980),
+        ];
         assert_eq!(
-            both(&inb, &out),
+            by_address(&sets),
             HashMap::from([
-                ("10.64.1.2".to_string(), (9000, 504)),
-                ("10.64.1.3".to_string(), (0, 0))
+                (
+                    "10.64.1.2".to_string(),
+                    Counters {
+                        internet_in: 9000,
+                        internet_out: 504,
+                        dropped: EgressDrops {
+                            blocked_port: 1,
+                            rate: 0,
+                            bandwidth: 57
+                        }
+                    }
+                ),
+                (
+                    "10.64.1.3".to_string(),
+                    Counters {
+                        dropped: EgressDrops {
+                            rate: 10,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                )
             ])
         );
     }

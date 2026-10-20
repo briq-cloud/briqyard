@@ -98,7 +98,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Ingress controller | ✓ L4 ingress per host, private to the edge | | |
 | Ingress auth, TLS, hostnames | the router, Cloudflare in front | | briq |
 | NetworkPolicy, egress | ✓ `open`, `via`, `none` | | |
-| NetworkPolicy, by port and CIDR | ✗ | blocked ports, rate and bandwidth limits per machine | yard |
+| NetworkPolicy, by port and CIDR | ◐ blocked ports, a connection rate, a bandwidth cap per machine (ADR 0018) | allow-lists by CIDR | yard, later |
 | NetworkPolicy, ingress between pods | ✗ | | yard, later |
 | Egress gateway | ✓ tenant gateway | | |
 | Static egress IP (cloud NAT) | ✗ every machine leaves through its host's address | an additional IP per host for a class of machines | yard (mechanism), briq (who gets it) |
@@ -168,7 +168,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 
 Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit tests, Linux CI and the VM suites, the stress driver after the items that touch the manager, the network or the store:
 
-1. **Egress controls**: blocked ports, connection rate, bandwidth per machine.
+1. **Egress controls**: blocked ports, connection rate, bandwidth per machine. Built: ADR 0018.
 2. **Events, watch, versions**, and `describe` from them.
 3. **Metrics**: per machine series and machine states on `/metrics`, host conditions, image GC and log rotation under them, `top`.
 4. **Probes**: exec, TCP, HTTP; `ready`, which the ingress and `/wait` follow; restart on liveness; a capped backoff with a `crash_loop` reason.
@@ -176,7 +176,7 @@ Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit 
 6. **TLS between the fleet and the hosts**, the certificate pinned at bootstrap.
 7. **Changes at the next cold boot**: image, env, command, size by PATCH.
 8. **Scheduling**: placement by region, hosts under pressure refused, labels on listings; quotas per tenant; logs follow.
-9. **The edge** (briq, in parallel): its servers, Cloudflare in front, client IPs.
+9. **The edge** (briq, in parallel): its servers, Cloudflare in front, client IPs, WebSockets. Built: up-lab/briq#277 (draft).
 
 Decided for the founder (advisor, 2026-10-20): the daemon runs scheduled backups from a policy briq sets; the pool is encrypted with one key per host held by the fleet, built before the first real host (after TLS); events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and briq's healthcheck moves onto them.
 

@@ -105,7 +105,12 @@ Each machine has an egress policy (`egress` on create and PATCH, ADR 0015): `ope
 default), `none` (its tenant, no internet: `egress_none` in the inet forward chain) or
 `via: <machine>` (only that sibling, any port, and the gateway's DNS: `via_sources` and
 `via_allowed` in the bridge chain, IP and ARP, before the pins). Under `via` and `none` the
-resolver answers internal names only, NXDOMAIN for the rest. The policy is set at every start
+resolver answers internal names only, NXDOMAIN for the rest. An `open` machine's policy is its
+limits on internet traffic (`limits`, ADR 0018: blocked ports, new connections a minute, Mbit/s;
+the host's `egress_limits` under the machine's own): `blocked_ports` (address . port, TCP reset,
+UDP unreachable), and a named `limit` per rate found through `conn_limits` and
+`bandwidth_limits`, in the inet forward chain before the reply accept and the internet counters;
+three counter sets count what they drop. The policy is set at every start
 right after the pin, taken out with it, swapped live on a running machine in one transaction, and rendered from
 the running records at daemon start.
 

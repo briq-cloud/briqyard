@@ -5,9 +5,10 @@
 //! tick) and adds what its counters grew by; the tick drains it into the `Ledger`, which holds
 //! the hours not closed yet, writes them once a minute and closes each hour once it is over.
 
+use crate::netw::nft::Counters;
 use crate::store::Store;
 use anyhow::Result;
-use briqyard_api::{Usage, UsageBucket};
+use briqyard_api::{EgressDrops, Usage, UsageBucket};
 use chrono::{DateTime, Duration, DurationRound, Utc};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -90,9 +91,11 @@ pub struct Meter {
     /// The cgroup's CPU time when last read; none until the first read after the daemon
     /// starts, which is where an adopted machine's count starts.
     cpu_usec: Option<u64>,
-    /// The internet counters when last read, `(in, out)`. They start at zero with the meter:
-    /// the daemon renders them afresh at start, and a create adds them.
-    internet: (u64, u64),
+    /// The host's counters when last read. They start at zero with the meter: the daemon
+    /// renders them afresh at start, and a create adds them.
+    net: Counters,
+    /// Packets its egress limits dropped since it booted, as last read.
+    drops: EgressDrops,
     /// What it used since the last drain, by hour.
     pending: BTreeMap<DateTime<Utc>, Usage>,
 }
@@ -103,7 +106,8 @@ impl Meter {
             at,
             disks: Disks::default(),
             cpu_usec: None,
-            internet: (0, 0),
+            net: Counters::default(),
+            drops: EgressDrops::default(),
             pending: BTreeMap::new(),
         }
     }
@@ -135,19 +139,26 @@ impl Meter {
     }
 
     /// A process is about to start: its CPU time counts from what the cgroup holds now (0
-    /// when it has none yet).
+    /// when it has none yet), its drops from none.
     pub fn boot(&mut self, cpu_usec: u64) {
         self.cpu_usec = Some(cpu_usec);
+        self.drops = EgressDrops::default();
+    }
+
+    /// Packets its egress limits dropped since it booted (or the daemon started), as of the
+    /// last reading.
+    pub fn drops(&self) -> EgressDrops {
+        self.drops
     }
 
     /// Adds what the counters grew by since they were last read to the hour of `now`: the
-    /// cgroup's CPU time and the internet counters when they could be read, and the
-    /// endpoints' bytes, `(in, out)`.
+    /// cgroup's CPU time and the host's counters when they could be read, and the endpoints'
+    /// bytes, `(in, out)`.
     pub fn counters(
         &mut self,
         now: DateTime<Utc>,
         cpu_usec: Option<u64>,
-        internet: Option<(u64, u64)>,
+        net: Option<Counters>,
         ingress: (u64, u64),
     ) {
         let u = self.pending.entry(hour_of(now)).or_default();
@@ -157,10 +168,20 @@ impl Meter {
             }
             self.cpu_usec = Some(c);
         }
-        if let Some((i, o)) = internet {
-            u.internet_in_bytes += grown(self.internet.0, i);
-            u.internet_out_bytes += grown(self.internet.1, o);
-            self.internet = (i, o);
+        if let Some(n) = net {
+            let (last, d) = (self.net.dropped, n.dropped);
+            let dropped = EgressDrops {
+                blocked_port: grown(last.blocked_port, d.blocked_port),
+                rate: grown(last.rate, d.rate),
+                bandwidth: grown(last.bandwidth, d.bandwidth),
+            };
+            u.internet_in_bytes += grown(self.net.internet_in, n.internet_in);
+            u.internet_out_bytes += grown(self.net.internet_out, n.internet_out);
+            u.egress_dropped_packets += dropped.total();
+            self.drops.blocked_port += dropped.blocked_port;
+            self.drops.rate += dropped.rate;
+            self.drops.bandwidth += dropped.bandwidth;
+            self.net = n;
         }
         u.ingress_in_bytes += ingress.0;
         u.ingress_out_bytes += ingress.1;
@@ -440,30 +461,75 @@ mod tests {
         let mut m = Meter::new(now);
         // The first CPU reading after a start is where the count starts: an adopted
         // machine's earlier CPU time is not this daemon's to report.
-        m.counters(now, Some(5_000_000), Some((100, 10)), (7, 70));
+        m.counters(now, Some(5_000_000), Some(net(100, 10)), (7, 70));
         let u = m.drain()[&hour_of(now)];
         assert_eq!(u.cpu_seconds, 0.0);
         // The internet counters start at zero with the meter, the endpoints' bytes are added.
         assert_eq!((u.internet_in_bytes, u.internet_out_bytes), (100, 10));
         assert_eq!((u.ingress_in_bytes, u.ingress_out_bytes), (7, 70));
-        m.counters(now, Some(6_500_000), Some((150, 10)), (0, 0));
+        m.counters(now, Some(6_500_000), Some(net(150, 10)), (0, 0));
         let u = m.drain()[&hour_of(now)];
         assert_eq!(u.cpu_seconds, 1.5);
         assert_eq!((u.internet_in_bytes, u.internet_out_bytes), (50, 0));
         // Smaller than last time: the counter began again, all of it is new.
-        m.counters(now, Some(2_000_000), Some((30, 5)), (0, 0));
+        m.counters(now, Some(2_000_000), Some(net(30, 5)), (0, 0));
         let u = m.drain()[&hour_of(now)];
         assert_eq!(u.cpu_seconds, 2.0);
         assert_eq!((u.internet_in_bytes, u.internet_out_bytes), (30, 5));
         // Unreadable this time: nothing added, the next reading covers it.
         m.counters(now, None, None, (0, 0));
-        m.counters(now, Some(3_000_000), Some((40, 5)), (0, 0));
+        m.counters(now, Some(3_000_000), Some(net(40, 5)), (0, 0));
         let u = m.drain()[&hour_of(now)];
         assert_eq!((u.cpu_seconds, u.internet_in_bytes), (1.0, 10));
         // A boot counts from what the cgroup holds before it.
         m.boot(10_000_000);
         m.counters(now, Some(10_250_000), None, (0, 0));
         assert_eq!(m.drain()[&hour_of(now)].cpu_seconds, 0.25);
+    }
+
+    /// The host's counters with these internet bytes and no drops.
+    fn net(inb: u64, out: u64) -> Counters {
+        Counters {
+            internet_in: inb,
+            internet_out: out,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn drops_add_up_in_usage_and_count_from_the_boot_in_the_view() {
+        let now = t("2026-10-20T14:30:00Z");
+        let mut m = Meter::new(now);
+        let dropped = |blocked_port, rate, bandwidth| Counters {
+            dropped: EgressDrops {
+                blocked_port,
+                rate,
+                bandwidth,
+            },
+            ..Default::default()
+        };
+        m.counters(now, None, Some(dropped(2, 5, 0)), (0, 0));
+        assert_eq!(m.drain()[&hour_of(now)].egress_dropped_packets, 7);
+        m.counters(now, None, Some(dropped(3, 5, 10)), (0, 0));
+        assert_eq!(m.drain()[&hour_of(now)].egress_dropped_packets, 11);
+        assert_eq!(
+            m.drops(),
+            EgressDrops {
+                blocked_port: 3,
+                rate: 5,
+                bandwidth: 10
+            }
+        );
+        // A boot: the view counts from none, the counters go on where they were.
+        m.boot(0);
+        assert_eq!(m.drops(), EgressDrops::default());
+        m.counters(now, None, Some(dropped(4, 5, 10)), (0, 0));
+        assert_eq!(m.drain()[&hour_of(now)].egress_dropped_packets, 1);
+        assert_eq!(m.drops().total(), 1);
+        // Counters begun again (a daemon start): all of it is new.
+        m.counters(now, None, Some(dropped(0, 2, 0)), (0, 0));
+        assert_eq!(m.drain()[&hour_of(now)].egress_dropped_packets, 2);
+        assert_eq!(m.drops().rate, 2);
     }
 
     #[test]

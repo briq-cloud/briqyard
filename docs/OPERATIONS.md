@@ -75,6 +75,9 @@ briqyard status
 | `network.range` | `10.64.0.0/10` | Tenant subnets, one /24 each (16,384 tenants) |
 | `network.upstream_dns` | the host's, then `1.1.1.1` | Where the gateway forwards DNS |
 | `network.egress` | the default route's interface | Where machines reach the internet |
+| `egress_limits.blocked_ports` | `[25]` | Destination ports no machine reaches on the internet, TCP and UDP (ADR 0018). A machine's own `limits` override each field |
+| `egress_limits.new_connections_per_minute` | `0` (none) | New internet connections a machine may open a minute, as many at once |
+| `egress_limits.bandwidth_mbit` | `0` (none) | A machine's internet bandwidth, in and out together; at most 100000 |
 | `ingress.tcp_ports` | `20000-29999` | Host ports handed to TCP endpoints |
 | `ingress.bind` | `127.0.0.1` | Where TCP endpoints listen. A public address is refused without `ingress.allowed_clients` or `ingress.allow_public` |
 | `ingress.allowed_clients` | none | The IPv4 networks (`a.b.c.d/n`) that may reach the API, the HTTP ingress and the TCP endpoints; rendered into the daemon's nftables table (`nft list table inet briqyard`). Loopback always may. Empty: anyone who can route to the address |
@@ -151,6 +154,9 @@ backup until sent elsewhere.
   datasets. `briqyard machine set-sleep <id> 3h|never` changes the window without a restart.
 - `briqyard usage --from <hour> --to <hour> [--tenant T] [--json]`: what each machine used
   per hour (ADR 0017); `nft list set inet briqyard internet_out` shows the raw counters.
+- Egress limits (ADR 0018): `briqyard machine get <id>` shows `limits` and `egress_drops`;
+  `briqyard machine set-limits <id> --conn-per-min 0` lifts a rate at once. Raw:
+  `nft list set inet briqyard dropped_port` (also `dropped_rate`, `dropped_bandwidth`).
 
 ## When something is off
 

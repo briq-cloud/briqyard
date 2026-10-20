@@ -90,7 +90,9 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   the sleeper's tick, the init's exit report, fork snapshots freed, the tenant's gateway
   (booted once by what needs it, its failure named, slept by the tick, kept while in use),
   usage (hours split, counter resets, suspended and stopped machines, traffic on its machine,
-  closed hours, a restart, retention, a destroyed machine, the route's range). What still needs the host: a tenant's first create (its bridge and
+  closed hours, a restart, retention, a destroyed machine, the route's range), egress limits
+  (the host's under a machine's own, set at start, swapped on PATCH, withdrawn at stop and
+  destroy, none for `via` and `none`, rendered at daemon start, drops in the view and usage). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, backups, the API
   handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
@@ -98,8 +100,10 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
   backups to a directory store and a restore, egress policies (`via` a gateway machine, `none`,
   back to `open`), a tenant gateway (a forward proxy its consumer's start boots, HTTPS through
-  it and nothing around it, stopped by the sleeper, gone with the tenant), usage (running
-  seconds, internet and ingress bytes, a stopped machine's disk hours). 82 checks.
+  it and nothing around it, stopped by the sleeper, gone with the tenant), egress limits (port
+  25 refused at once while 443 connects, 6 connections a minute then the 7th dropped, lifted
+  live, drops shown, a download capped at 2 Mbit/s), usage (running seconds, internet and
+  ingress bytes, a stopped machine's disk hours). 90 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
