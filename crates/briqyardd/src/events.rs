@@ -242,7 +242,7 @@ impl Events {
         keys.sort();
         let mut seq = 0;
         let mut files = BTreeMap::new();
-        for (i, key) in keys.iter().enumerate().rev() {
+        for key in keys.iter().rev() {
             let p = path(dir, key);
             let newest = files.is_empty() && seq == 0;
             if newest {
@@ -257,7 +257,7 @@ impl Events {
             if newest {
                 seq = events.last().map_or(first.seq, |e| e.seq);
             }
-            files.insert(keys[i].clone(), first.seq);
+            files.insert(key.clone(), first.seq);
         }
         let (tx, _) = broadcast::channel(WATCH_BUFFER);
         Ok(Self {
@@ -426,7 +426,7 @@ impl Events {
             page = match self.read_blocking(cursor, f.clone()).await {
                 Ok(p) => p,
                 Err(err) => {
-                    let _ = tx.try_send(last_line("gone", &format!("{err:#}")));
+                    send(&tx, &mut closing, last_line("gone", &format!("{err:#}"))).await;
                     return;
                 }
             };
@@ -434,7 +434,8 @@ impl Events {
         let start = tokio::time::Instant::now() + HEARTBEAT;
         let mut beat = tokio::time::interval_at(start, HEARTBEAT);
         loop {
-            let out = tokio::select! {
+            // The line to send, and whether it is the last.
+            let (out, last) = tokio::select! {
                 r = rx.recv() => match r {
                     Ok(e) if e.seq <= cursor => continue,
                     Ok(e) => {
@@ -442,25 +443,25 @@ impl Events {
                         if !f.matches(&e) {
                             continue;
                         }
-                        line(&e)
+                        (line(&e), false)
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         let why = format!(
                             "the watch fell {n} events behind the log: watch again from since={cursor}"
                         );
-                        let _ = tx.try_send(last_line("lagged", &why));
-                        return;
+                        (last_line("lagged", &why), true)
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
-                _ = beat.tick() => "{}\n".to_string(),
+                _ = beat.tick() => ("{}\n".to_string(), false),
                 _ = closing.wait_for(|c| *c) => {
+                    // Only if there is room: a daemon going down waits for no reader.
                     let why = format!("the daemon is going down: watch again from since={cursor}");
                     let _ = tx.try_send(last_line("shutdown", &why));
                     return;
                 }
             };
-            if !send(&tx, &mut closing, out).await {
+            if !send(&tx, &mut closing, out).await || last {
                 return;
             }
         }

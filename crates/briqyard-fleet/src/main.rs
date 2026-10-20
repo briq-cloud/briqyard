@@ -958,8 +958,6 @@ struct EventsQuery {
     since: Option<String>,
     tenant: Option<String>,
     machine: Option<String>,
-    #[serde(rename = "type")]
-    kind: Option<String>,
     limit: Option<usize>,
     #[serde(default)]
     watch: bool,
@@ -995,7 +993,7 @@ async fn events(
             "invalid",
             "a watch through the fleet names a tenant or a machine: events are per host, and a stream of every host would go on without one that drops",
         )),
-        (None, None) => return events_of_every_host(&st, &headers, q).await,
+        (None, None) => return events_of_every_host(&st, &headers, &uri, q).await,
     };
     match host {
         Ok(h) if q.watch => forward_watch(&st, &h, &path, &headers).await,
@@ -1029,23 +1027,33 @@ fn cursor(seqs: &std::collections::BTreeMap<String, u64>) -> String {
     parts.join(",")
 }
 
-async fn events_of_every_host(st: &AppState, headers: &HeaderMap, q: EventsQuery) -> Response {
+async fn events_of_every_host(
+    st: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    q: EventsQuery,
+) -> Response {
     let mut since = match parse_cursor(q.since.as_deref().unwrap_or("")) {
         Ok(c) => c,
         Err(refused) => return refused.into_response(),
     };
     let limit = api::events_limit(q.limit);
+    // The query as it came, for the hosts to read, but the cursor: each host gets its own.
+    let rest: String = uri
+        .query()
+        .unwrap_or("")
+        .split('&')
+        .filter(|kv| !kv.is_empty() && !kv.starts_with("since="))
+        .map(|kv| format!("&{kv}"))
+        .collect();
     let hosts = st.reg.lock().unwrap().listed();
     let mut all: Vec<api::Event> = Vec::new();
     let mut next = std::collections::BTreeMap::new();
     for h in hosts {
-        let mut path = format!(
-            "/v1/events?since={}&limit={limit}",
+        let path = format!(
+            "/v1/events?since={}{rest}",
             since.remove(&h.id).unwrap_or(0)
         );
-        if let Some(k) = &q.kind {
-            path.push_str(&format!("&type={k}"));
-        }
         let resp = forward(st, &h, Method::GET, &path, headers, Bytes::new()).await;
         if !resp.status().is_success() {
             return resp;

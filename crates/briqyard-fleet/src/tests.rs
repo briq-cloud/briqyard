@@ -2052,12 +2052,7 @@ async fn a_fleet_wide_read_merges_every_host_by_time_and_is_never_partial() {
         (page.events[0].host.as_str(), page.next.as_str()),
         ("d2", "d1:3,d2:3")
     );
-    assert!(ds[0]
-        .stub
-        .calls()
-        .last()
-        .unwrap()
-        .starts_with("GET /v1/events?since=3&"));
+    assert_eq!(ds[0].stub.calls().last().unwrap(), "GET /v1/events?since=3");
     // A page past its limit: each host's cursor is its last event kept, nothing is skipped.
     let (_, _, body) = call(&f.st, "GET", "/v1/events?limit=3", "api", None).await;
     let page: api::EventsPage = serde_json::from_str(&body).unwrap();
@@ -2068,6 +2063,11 @@ async fn a_fleet_wide_read_merges_every_host_by_time_and_is_never_partial() {
         .collect();
     assert_eq!(got, [("d1", 1), ("d2", 1), ("d1", 2)]);
     assert_eq!(page.next, "d1:2,d2:1");
+    assert_eq!(
+        ds[1].stub.calls().last().unwrap(),
+        "GET /v1/events?since=0&limit=3",
+        "the rest of the query as it came"
+    );
     let (_, _, body) = call(
         &f.st,
         "GET",

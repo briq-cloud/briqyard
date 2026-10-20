@@ -1562,7 +1562,7 @@ impl Manager {
             return;
         }
         let _turn = gw.lock.lock().await;
-        if self.holds(gw) {
+        if self.holds(gw) && gw.snapshot().state == state::STOPPED {
             gw.note(Ev::normal(
                 reason::GATEWAY_STOPPED,
                 "nothing sends through the tenant's gateway: stopped",
@@ -1677,20 +1677,26 @@ impl Manager {
 
     /// Takes the machine's memory from the host and moves it to `starting`, as one step
     /// under the map's lock: two starts that read the same free memory cannot both take it.
+    /// Its event is logged once that lock is let go: the log syncs to disk, and the map is
+    /// every request's. Nothing else moves the machine meanwhile: its own lock is held.
     fn reserve(&self, e: &Entry) -> Result<(), MError> {
-        let machines = self.inner.machines.lock().unwrap();
-        let (used, _) = committed(&machines);
-        let need = e.rec.lock().unwrap().size.memory_mb;
-        admit(used.memory_mb, self.capacity().memory_mb, need)?;
-        e.set_state(state::STARTING, |r| {
-            r.error.clear();
-            r.pid = 0;
-            let ev = match r.suspended {
-                true => Ev::normal(reason::STARTING, "resuming from its memory snapshot"),
-                false => Ev::normal(reason::STARTING, "booting"),
-            };
-            Some(ev.data(json!({ "resume": r.suspended })))
-        });
+        {
+            let machines = self.inner.machines.lock().unwrap();
+            let (used, _) = committed(&machines);
+            let need = e.rec.lock().unwrap().size.memory_mb;
+            admit(used.memory_mb, self.capacity().memory_mb, need)?;
+            e.set_state(state::STARTING, |r| {
+                r.error.clear();
+                r.pid = 0;
+                None
+            });
+        }
+        let resume = e.snapshot().suspended;
+        let ev = match resume {
+            true => Ev::normal(reason::STARTING, "resuming from its memory snapshot"),
+            false => Ev::normal(reason::STARTING, "booting"),
+        };
+        e.note(ev.data(json!({ "resume": resume })));
         Ok(())
     }
 
