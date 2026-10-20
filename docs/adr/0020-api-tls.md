@@ -27,5 +27,7 @@ A create request carries a tenant's environment secrets to the daemon. The fleet
 - A host whose certificate files are removed, or a reinstalled server, has a new fingerprint: its heartbeats are refused until it is pinned again (bootstrap again, or edit `hosts:`). There is no rotation tool.
 - The CLI talks to a daemon over TLS with `--tls-fingerprint`; to a fleet, over the web PKI.
 - The SANs are what the configuration names; a host bound to `0.0.0.0` with no advertise has none. Nothing checks them.
+- A host configured before this ADR with a non-loopback `listen` and an `http://` `fleet.advertise` refuses to start: write `https://` and pin its fingerprint, or set `api_tls: false`.
 - The development VM's daemon listens on `0.0.0.0` for Lima's forwards and sets `api_tls: false`; its fleet sets `tls: off`. The suites stay on plain HTTP; the TLS path is covered by unit tests over loopback.
+- The daemon logs on stderr, as `OPERATIONS.md` always said: stdout is `tls-fingerprint`'s answer.
 - Reopen for mutual TLS (the daemon checking the fleet beyond the bearer) or when a CA arrives with the mesh (`../MESH.md`).

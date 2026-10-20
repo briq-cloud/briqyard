@@ -19,6 +19,8 @@ bash bootstrap-host.sh
 It installs the packages (ZFS, nftables, e2fsprogs), makes the pool (on the device given, or on
 a file for a trial), downloads Firecracker, its jailer and a guest kernel, installs the
 binaries, writes `/etc/briqyard/config.yaml` and the systemd unit, and starts `briqyardd`.
+Off loopback the API serves TLS with a certificate the daemon makes once (ADR 0020); the script
+prints its fingerprint (`== api certificate`, `sha256 <64 hex digits>`).
 With `FLEET_URL` and `ADVERTISE` set, the host registers with a fleet, presenting
 `BRIQYARD_TOKEN`: the fleet takes the registration only when it expects that token at that
 address (the host's `hosts:` entry, below).
@@ -42,9 +44,13 @@ kernel comes from Firecracker's CI bucket until we build and host it ourselves.
 Then, from anywhere that reaches the host:
 
 ```bash
-export BRIQYARD_URL=http://<host>:7420 BRIQYARD_TOKEN=<token>
+export BRIQYARD_URL=https://<host>:7420 BRIQYARD_TOKEN=<token> BRIQYARD_TLS_FINGERPRINT=<fingerprint>
 briqyard status
 ```
+
+The CLI trusts the daemon's certificate by that fingerprint alone. To read it again on the host:
+`briqyardd tls-fingerprint`, or `openssl x509 -in /var/lib/briqyard/api-cert.pem -noout
+-fingerprint -sha256` (colons and case do not matter).
 
 ## Configuration
 
@@ -52,7 +58,8 @@ briqyard status
 
 | Field | Default | Meaning |
 |---|---|---|
-| `listen` | `127.0.0.1:7420` | The API. A public address is refused without `ingress.allowed_clients` or `ingress.allow_public` (ADR 0012); plain HTTP, so TLS or a private network in front |
+| `listen` | `127.0.0.1:7420` | The API. A public address is refused without `ingress.allowed_clients` or `ingress.allow_public` (ADR 0012). TLS unless loopback or `api_tls: false`; `/metrics` and `/healthz` too |
+| `api_tls` | `true` | TLS on a non-loopback `listen`, with the daemon's own certificate (`<data_dir>/api-cert.pem`, made once, ADR 0020). `false`: plain HTTP on any address |
 | `token` | none | Required as `Authorization: Bearer` on every request when set |
 | `metrics_token` | none | A token of its own for `/metrics`, so a scraper never holds the API's. On a loopback `listen`, `/metrics` and `/v1/openapi.yaml` need no token at all |
 | `data_dir` | `/var/lib/briqyard` | State (`state/`), run files (`run/`), image metadata (`images/`), jails (`jail/`). All of it `0700`, root's: records and config drives hold tenant secrets |
@@ -82,13 +89,14 @@ briqyard status
 | `ingress.advertise` | the host's primary address | The address endpoints are reported at (`address` on an endpoint): what a router on another machine dials, a private address when the host has one |
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
 | `capacity.memory_mb`, `capacity.vcpus` | host memory − 2 GB, threads × 4 | What the host hands out; shared vCPUs oversubscribe |
-| `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` |
+| `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start |
 
 ## Where things live
 
 | Path | What |
 |---|---|
 | `<data_dir>/state/{machines,tenants,endpoints}/*.json` | The records, one file each, written atomically |
+| `<data_dir>/api-cert.pem`, `api-key.pem` | The API's certificate and key (`0600`). Both removed, a new pair is made at the next start: a new fingerprint to pin. The certificate without its key: the daemon refuses to start |
 | `<data_dir>/state/usage/<hour>.json` | Each machine's usage in that UTC hour (ADR 0017); the open hour is rewritten once a minute |
 | `<data_dir>/run/<machine>/` | `console.log` (the guest's serial console, timestamped), `config.tar` (the config drive, `0600`), sockets when not jailed |
 | `<jail_dir>/firecracker/<machine>/root/` | The chroot, on `byard/jail`: kernel, config drive (`0400`, the jail's user), device nodes, sockets, `snap.state` and `snap.mem` while suspended |
@@ -163,7 +171,8 @@ backup until sent elsewhere.
 | `the guest did not come up` | The kernel booted but the init did not answer on vsock within `boot_timeout_sec`: console log, then the kernel (`kernel`) and init (`init`) paths |
 | `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk. `used` counts what placement reserved until the next heartbeat |
 | `host h_… is down` (fleet, 503) | The host missed its heartbeats for `placement.down_after_sec`: its machines answer again once it is back. `briqyard host ls`, then the host's `journalctl -u briqyardd` |
-| `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it |
+| `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just ordered gets this until its bootstrap has pinned it |
+| `host …: … is not the pinned …` (fleet, 502 `host_unreachable`) | The host presents another certificate than its record's `tls_fingerprint`: reinstalled (pin the new one), or not the host |
 | `write registry …` (fleet, 500 `registry`) | The fleet's `state_dir` is full or not writable; nothing is recorded until it is |
 | `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
@@ -184,15 +193,27 @@ install yourself is listed under `hosts:` with it:
 ```yaml
 hosts:
   - id: h1
-    url: http://10.0.0.5:7420
+    url: https://10.0.0.5:7420
     token: <the host's token>
+    tls_fingerprint: <what the bootstrap script printed>
     region: fsn
 ```
 
 The fleet polls it every 15 s and accepts its heartbeats; without a `token` it is polled only.
+An `https://` URL needs its `tls_fingerprint` and a fingerprint needs `https://` (refused at
+start otherwise): the fleet accepts that one certificate from the host and nothing else, no CA,
+and refuses a heartbeat reporting another (`tls_mismatch`). A host on plain HTTP (a loopback
+daemon you forwarded) has neither.
 A heartbeat from an address no entry or order expects is refused (`unknown_host`), so no host
 can speak for another. The registry is `<state_dir>/registry.json`; a write that fails is an
 `error` in the fleet's log and a 500 `registry` on the request that needed it.
+
+The fleet's own listener serves TLS with a certificate of yours: `tls: { cert, key }`, PEM
+files, a chain for the fleet's name (Let's Encrypt in production: `certbot certonly
+--standalone -d fleet.example`, then `cert: /etc/letsencrypt/live/fleet.example/fullchain.pem`,
+`key: …/privkey.pem`; restart the fleet after a renewal). Without `tls` it serves plain HTTP,
+and refuses a non-loopback `listen` unless `tls: off` says something in front terminates TLS.
+Hosts check the fleet against the web PKI roots.
 
 ### Adding and removing hosts
 
@@ -240,6 +261,11 @@ set: every two minutes the fleet asks the provider for the server's address, the
 `hack/bootstrap-host.sh` on it over SSH (`ssh_user`, `ssh_key`: the key the provider installed;
 `release`, `pool_device`, `fleet_url`, `allowed_clients` for the script), with a token of its
 own for the host's API.
+Once the script succeeds, a second connection, strict against the pinned SSH key, reads the
+daemon's certificate fingerprint (`briqyardd tls-fingerprint`); the fleet pins it in the same
+write that marks the host `bootstrapped` (the note says `api certificate … pinned`), and dials
+`https://<ip>:7420` with it. A host whose API would be plain HTTP (a loopback `listen`, for
+want of `allowed_clients`) fails the attempt.
 The host is `bootstrapped` once the script succeeds and `ready` at its first heartbeat; a server
 that cannot be installed after `max_attempts` is `failed`, with the last error in its note.
 Without the bootstrap, run the script yourself with `FLEET_URL`, `ADVERTISE` and the
