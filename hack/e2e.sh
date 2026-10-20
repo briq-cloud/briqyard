@@ -240,6 +240,29 @@ for i in $(seq 1 90); do [ "$(briqyard machine get "$W" | jq -r .state)" = stopp
 check "web slept"          '[ "$(briqyard machine get "$W" | jq -r .stopped_reason)" = idle ]'
 check "http request wakes" 'curl -fsS --max-time 90 -H "Host: $WEP" http://127.0.0.1:8080/ | grep -qi "nginx"'
 
+echo "== usage: compute, internet, ingress, a stopped machine's disks"
+from=$(date -u +%Y-%m-%dT%H:00:00Z)
+U=$(briqyard machine run --image nginx:alpine --name use --tenant "$T" --memory 256 --port 80 | jq -r .id)
+for i in $(seq 1 30); do briqyard machine exec "$U" -- wget -qO- http://127.0.0.1/ >/dev/null 2>&1 && break; sleep 1; done
+briqyard machine exec "$U" -- wget -qO /dev/null -T 10 https://example.com >/dev/null 2>&1 || true
+UEP=$(briqyard endpoint add --http --host e2e-use "$U" 80 | jq -r .host)
+curl -fsS -H "Host: $UEP" http://127.0.0.1:8080/ >/dev/null || true
+# The sum of a field over the machine's buckets since $from (the hour may turn meanwhile).
+usage_of() { briqyard usage --from "$from" --to "$(date -u -d '+1 hour' +%Y-%m-%dT%H:00:00Z)" --json | jq "[.[] | select(.machine_id == \"$1\") | .$2] | add // 0"; }
+# The tick measures every 15 s: wait on the values, at most a minute.
+above() { jq -en --argjson v "$(usage_of "$1" "$2")" --argjson min "$3" '$v > $min' >/dev/null; }
+for i in $(seq 1 30); do above "$U" running_seconds 0 && above "$U" internet_in_bytes 0 && above "$U" ingress_out_bytes 0 && break; sleep 2; done
+check "usage: running seconds"   'above "$U" running_seconds 0'
+check "usage: internet in"       'above "$U" internet_in_bytes 0'
+check "usage: ingress out"       'above "$U" ingress_out_bytes 0'
+check "usage: a line in the table" 'briqyard usage --from "$from" --to "$(date -u -d "+1 hour" +%Y-%m-%dT%H:00:00Z)" | grep -q "$U"'
+briqyard machine stop "$U" >/dev/null
+d0=$(usage_of "$U" root_gb_hours)
+for i in $(seq 1 30); do above "$U" root_gb_hours "$d0" && break; sleep 2; done
+check "usage: stopped, disk hours go on" 'above "$U" root_gb_hours "$d0"'
+check "usage: a range off the hour is refused" '! briqyard usage --from "${from%:00:00Z}:30:00Z" --to "$(date -u -d "+1 hour" +%Y-%m-%dT%H:00:00Z)" >/dev/null 2>&1'
+briqyard machine rm "$U" >/dev/null
+
 if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then
   echo "== daemon crash: running machines are adopted"
   K=$(briqyard machine run --image alpine:3.20 --name survivor --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
