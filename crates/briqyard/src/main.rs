@@ -33,7 +33,7 @@ enum Cmd {
     Openapi,
     /// Machines
     #[command(subcommand, alias = "m")]
-    Machine(MachineCmd),
+    Machine(Box<MachineCmd>),
     /// Endpoints: ways in from outside
     #[command(subcommand, alias = "ep")]
     Endpoint(EndpointCmd),
@@ -162,6 +162,12 @@ enum MachineCmd {
         #[arg(value_parser = sleep_arg)]
         sleep: String,
     },
+    /// Change where its traffic may go, at once: briqyard machine set-egress ID open|none|via:MACHINE_ID
+    SetEgress {
+        id: String,
+        #[arg(value_parser = egress_arg)]
+        egress: api::Egress,
+    },
 }
 
 #[derive(Args)]
@@ -181,6 +187,9 @@ struct RunArgs {
     /// Sleep window: 30m, 2h, never
     #[arg(long, default_value = "", value_parser = sleep_arg)]
     sleep: String,
+    /// Where its traffic may go: open (default), none (its tenant only), via:MACHINE_ID
+    #[arg(long, value_parser = egress_arg)]
+    egress: Option<api::Egress>,
     /// Data volume, SIZE:MOUNT (10G:/data)
     #[arg(long)]
     volume: Option<String>,
@@ -359,7 +368,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Status => print_json(&c.call::<api::Status>(GET, "/v1/status", NONE).await?),
         Cmd::Openapi => print!("{}", c.raw(GET, "/v1/openapi.yaml", NONE).await?),
-        Cmd::Machine(m) => match m {
+        Cmd::Machine(m) => match *m {
             MachineCmd::Ls { tenant } => {
                 let path = match tenant {
                     Some(t) => format!("/v1/machines?tenant={t}"),
@@ -435,7 +444,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     sleep: a.sleep.clone(),
                     restart: None,
                     metadata: BTreeMap::new(),
-                    egress: None,
+                    egress: a.egress.clone(),
                     start: if a.no_start { Some(false) } else { None },
                     fork: None,
                     restore: None,
@@ -549,6 +558,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     ports: src.ports.clone(),
                     sleep: src.sleep.clone(),
                     metadata: src.metadata.clone(),
+                    egress: Some(src.egress.clone()),
                     fork: Some(api::ForkSpec {
                         machine_id: id,
                         copy: String::new(),
@@ -588,6 +598,20 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::SetSleep { id, sleep } => {
                 let req = api::UpdateMachineRequest {
                     sleep: Some(sleep),
+                    ..Default::default()
+                };
+                print_json(
+                    &c.call::<api::Machine>(
+                        reqwest::Method::PATCH,
+                        &format!("/v1/machines/{id}"),
+                        Some(&req),
+                    )
+                    .await?,
+                )
+            }
+            MachineCmd::SetEgress { id, egress } => {
+                let req = api::UpdateMachineRequest {
+                    egress: Some(egress),
                     ..Default::default()
                 };
                 print_json(
@@ -736,13 +760,37 @@ fn sleep_arg(s: &str) -> Result<String, String> {
     Ok(s.to_string())
 }
 
+/// An egress policy, `open`, `none` or `via:MACHINE_ID`, checked as the daemon checks it.
+fn egress_arg(s: &str) -> Result<api::Egress, String> {
+    let e = match s.split_once(':') {
+        Some((api::egress::VIA, id)) => api::Egress {
+            mode: api::egress::VIA.into(),
+            via: Some(id.into()),
+        },
+        _ => api::Egress {
+            mode: s.into(),
+            via: None,
+        },
+    };
+    e.check()?;
+    Ok(e)
+}
+
+/// An egress policy as `egress_arg` reads it.
+fn egress_label(e: &api::Egress) -> String {
+    match &e.via {
+        Some(id) => format!("{}:{id}", e.mode),
+        None => e.mode.clone(),
+    }
+}
+
 // --- tables ---
 
 /// `machine ls`.
 fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} HOST\n",
-        "ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP"
+        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {:<18} HOST\n",
+        "ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP", "EGRESS"
     );
     for m in ms {
         let state = if m.stopped_reason.is_empty() {
@@ -751,7 +799,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             format!("{} ({})", m.state, m.stopped_reason)
         };
         out.push_str(&format!(
-            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {}\n",
+            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {:<18} {}\n",
             m.id,
             m.tenant,
             m.name,
@@ -760,6 +808,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             m.ip,
             format!("{}c/{}M", m.size.vcpus, m.size.memory_mb),
             m.sleep,
+            egress_label(&m.egress),
             m.host
         ));
     }

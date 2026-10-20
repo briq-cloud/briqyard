@@ -20,7 +20,7 @@ fn fails(args: &[&str]) -> ErrorKind {
 
 fn machine(cli: Cli) -> MachineCmd {
     match cli.cmd {
-        Cmd::Machine(m) => m,
+        Cmd::Machine(m) => *m,
         _ => panic!("not a machine command"),
     }
 }
@@ -162,6 +162,50 @@ fn a_bad_sleep_window_is_refused_before_any_request() {
         }
         _ => panic!("not set-sleep"),
     }
+}
+
+#[test]
+fn an_egress_policy_is_read_as_the_daemon_checks_it() {
+    let egress = |mode: &str, via: Option<&str>| api::Egress {
+        mode: mode.into(),
+        via: via.map(String::from),
+    };
+    for (arg, want) in [
+        ("open", egress("open", None)),
+        ("none", egress("none", None)),
+        ("via:m_0123456789ab", egress("via", Some("m_0123456789ab"))),
+    ] {
+        let MachineCmd::Run(a) = machine(parse(&["m", "run", "--image", "x", "--egress", arg]))
+        else {
+            panic!("not a run");
+        };
+        assert_eq!(a.egress.as_ref(), Some(&want), "{arg}");
+        assert_eq!(egress_label(&want), arg, "shown as it is written");
+        match machine(parse(&["machine", "set-egress", "m1", arg])) {
+            MachineCmd::SetEgress { id, egress } => assert_eq!((id, egress), ("m1".into(), want)),
+            _ => panic!("not set-egress"),
+        }
+    }
+    let MachineCmd::Run(a) = machine(parse(&["m", "run", "--image", "x"])) else {
+        panic!("not a run");
+    };
+    assert_eq!(a.egress, None, "the daemon's default: open");
+    for bad in ["all", "via", "via:", "via:../x", "open:m_1", ""] {
+        assert_eq!(
+            fails(&["machine", "run", "--image", "x", "--egress", bad]),
+            ErrorKind::ValueValidation,
+            "{bad}"
+        );
+        assert_eq!(
+            fails(&["machine", "set-egress", "m1", bad]),
+            ErrorKind::ValueValidation,
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        fails(&["machine", "set-egress", "m1"]),
+        ErrorKind::MissingRequiredArgument
+    );
 }
 
 #[test]
@@ -497,6 +541,10 @@ fn the_machine_table() {
     b.ip.clear();
     b.host.clear();
     b.sleep = "never".into();
+    b.egress = api::Egress {
+        mode: "via".into(),
+        via: Some("m_0123456789ab".into()),
+    };
     let mut long = a.clone();
     long.id = "m_03".into();
     long.name = "a-rather-long-name-indeed".into();
@@ -507,7 +555,7 @@ fn the_machine_table() {
     assert!(out.ends_with('\n'));
     assert_eq!(
         lines[0],
-        "ID               TENANT     NAME           IMAGE                    STATE              IP           SIZE      SLEEP  HOST"
+        "ID               TENANT     NAME           IMAGE                    STATE              IP           SIZE      SLEEP  EGRESS             HOST"
     );
     // Every column starts where its header does.
     let cols = [
@@ -519,11 +567,12 @@ fn the_machine_table() {
         (87, 12),
         (100, 9),
         (110, 6),
+        (117, 18),
     ];
     let heads: Vec<String> = cols.iter().map(|(at, w)| col(lines[0], *at, *w)).collect();
     assert_eq!(
         heads,
-        ["ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP"]
+        ["ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP", "EGRESS"]
     );
     let row: Vec<String> = cols.iter().map(|(at, w)| col(lines[2], *at, *w)).collect();
     assert_eq!(
@@ -536,14 +585,17 @@ fn the_machine_table() {
             "stopped (idle)",
             "",
             "2c/1024M",
-            "never"
+            "never",
+            "via:m_0123456789ab"
         ],
-        "the stop reason is shown with the state; an empty ip is an empty column"
+        "the stop reason is shown with the state; an empty ip is an empty column; \
+         a via policy in the form set-egress takes"
     );
     assert!(
-        lines[2].ends_with("never  "),
-        "no host: nothing after the sleep"
+        lines[2].ends_with("via:m_0123456789ab "),
+        "no host: nothing after the egress"
     );
+    assert_eq!(col(lines[1], 117, 18), "open");
     // A value wider than its column is not cut: the rest of that row moves right.
     assert!(
         lines[3].contains("a-rather-long-name-indeed ghcr.io/org/some-image:v1.2.3 "),
