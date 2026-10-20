@@ -310,6 +310,18 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
     async fn backups(State(_d): D) -> Json<Vec<serde_json::Value>> {
         Json(vec![])
     }
+    /// The backups of the daemon's machines, destroyed ones' included: one of a machine named
+    /// after the daemon.
+    async fn all_backups(State(d): D) -> Json<Vec<serde_json::Value>> {
+        Json(vec![serde_json::json!({
+            "id": "20261021T101500.123Z", "machine_id": format!("m_{}", d.id), "tenant": "t1",
+            "name": "db", "created_at": "2026-10-21T10:15:00Z", "bytes": 1,
+            "incremental": false, "disks": []
+        })])
+    }
+    async fn delete_backup() -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
     async fn add_endpoint(State(d): D, Path(id): Path<String>) -> Response {
         if !d.machines.lock().unwrap().iter().any(|m| m.id == id) {
             return StatusCode::NOT_FOUND.into_response();
@@ -428,6 +440,11 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         .route("/v1/machines/:id", get(get_machine).delete(delete_machine))
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/backups", get(backups))
+        .route(
+            "/v1/machines/:id/backups/:backup",
+            axum::routing::delete(delete_backup),
+        )
+        .route("/v1/backups", get(all_backups))
         .route("/v1/machines/:id/endpoints", post(add_endpoint))
         .route("/v1/endpoints", get(endpoints))
         .route("/v1/usage", get(usage))
@@ -1731,6 +1748,59 @@ async fn backups_are_listed_from_any_host_that_is_up() {
     .await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(ds[0].stub.calls().len(), before, "a down host is not asked");
+}
+
+#[tokio::test]
+async fn every_backup_is_listed_from_the_tenants_host_or_every_host() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/backups", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let ids: Vec<String> = serde_json::from_str::<Vec<api::Backup>>(&body)
+        .unwrap()
+        .into_iter()
+        .map(|b| b.machine_id)
+        .collect();
+    assert_eq!(ids, ["m_d1", "m_d2"]);
+    // A tenant's: its host alone, the query as it came.
+    f.st.reg
+        .lock()
+        .unwrap()
+        .tenants
+        .insert("t1".into(), "d2".into());
+    let before = ds[0].stub.calls().len();
+    let (s, _, body) = call(&f.st, "GET", "/v1/backups?tenant=t1", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(json(&body).as_array().unwrap().len(), 1);
+    assert_eq!(
+        ds[1].stub.calls().last().unwrap(),
+        "GET /v1/backups?tenant=t1"
+    );
+    assert_eq!(ds[0].stub.calls().len(), before);
+    // Every host or nothing: one down fails the listing.
+    set_state(&f.st, "d1", "down");
+    let (s, _, body) = call(&f.st, "GET", "/v1/backups", "api", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+}
+
+#[tokio::test]
+async fn a_destroyed_machine_s_backup_is_deleted_through_its_tenant() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    f.st.reg
+        .lock()
+        .unwrap()
+        .tenants
+        .insert("t1".into(), "d2".into());
+    // On no host any more: without its tenant, not found.
+    let path = "/v1/machines/m_gone/backups/b1?chain=true";
+    let (s, _, _) = call(&f.st, "DELETE", path, "api", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let path = format!("{path}&tenant=t1");
+    let (s, _, body) = call(&f.st, "DELETE", &path, "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        ds[1].stub.calls().last().unwrap(),
+        &format!("DELETE {path}")
+    );
 }
 
 #[tokio::test]
