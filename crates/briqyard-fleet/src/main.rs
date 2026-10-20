@@ -9,7 +9,7 @@ mod registry;
 
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
@@ -55,6 +55,10 @@ impl AppState {
 }
 
 type S = State<Arc<AppState>>;
+
+/// A forwarded call may legitimately run for minutes (an exec, a create pulling an image);
+/// a watch has no end and is not given one.
+const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
 fn main() {
     let args = Args::parse();
@@ -128,11 +132,10 @@ async fn run(args: Args) -> Result<()> {
         cfg: cfg.clone(),
         reg: Mutex::new(reg),
         policy,
-        // A forwarded call may legitimately run for minutes (an exec, a create pulling an
-        // image); a host that does not even accept the connection is given five seconds.
+        // A host that does not even accept the connection is given five seconds; each call
+        // has its own deadline (`FORWARD_TIMEOUT`, none for a watch).
         http: reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(900))
             .build()?,
         state_path,
         prov: provision::build(&cfg.provisioner),
@@ -169,6 +172,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/machines", get(list_machines).post(create_machine))
         .route("/v1/endpoints", get(list_endpoints))
         .route("/v1/usage", get(usage))
+        .route("/v1/events", get(events))
         .route("/v1/tenants", get(list_tenants))
         .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
         .route(
@@ -517,7 +521,8 @@ async fn get_json<T: serde::de::DeserializeOwned>(
 ) -> Option<T> {
     let mut r = st
         .http
-        .get(format!("{}{}", h.url.trim_end_matches('/'), path));
+        .get(format!("{}{}", h.url.trim_end_matches('/'), path))
+        .timeout(FORWARD_TIMEOUT);
     if !h.token.is_empty() {
         r = r.bearer_auth(&h.token);
     }
@@ -633,6 +638,42 @@ async fn scaler(st: Arc<AppState>) {
 
 // --- the machine API, forwarded ---
 
+/// A host that stopped answering is not asked: its machines are unreachable until it is back.
+fn down(host: &HostRec) -> Option<Response> {
+    (host.state == "down").then(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "host_down",
+            format!(
+                "host {} is down: its machines answer again once it does",
+                host.id
+            ),
+        )
+        .into_response()
+    })
+}
+
+/// A request to a host, with the caller's content type and `If-Match` and the host's token.
+fn to_host(
+    st: &AppState,
+    host: &HostRec,
+    method: Method,
+    path: &str,
+    headers: &HeaderMap,
+) -> reqwest::RequestBuilder {
+    let url = format!("{}{}", host.url.trim_end_matches('/'), path);
+    let mut req = st.http.request(method, &url);
+    for h in [header::CONTENT_TYPE, header::IF_MATCH] {
+        if let Some(v) = headers.get(&h) {
+            req = req.header(h, v);
+        }
+    }
+    if !host.token.is_empty() {
+        req = req.bearer_auth(&host.token);
+    }
+    req
+}
+
 async fn forward(
     st: &AppState,
     host: &HostRec,
@@ -641,26 +682,12 @@ async fn forward(
     headers: &HeaderMap,
     body: Bytes,
 ) -> Response {
-    // A host that stopped answering is not asked: its machines are unreachable until it is back.
-    if host.state == "down" {
-        return err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "host_down",
-            format!(
-                "host {} is down: its machines answer again once it does",
-                host.id
-            ),
-        )
-        .into_response();
+    if let Some(refused) = down(host) {
+        return refused;
     }
-    let url = format!("{}{}", host.url.trim_end_matches('/'), path);
-    let mut req = st.http.request(method, &url).body(body);
-    if let Some(ct) = headers.get(header::CONTENT_TYPE) {
-        req = req.header(header::CONTENT_TYPE, ct);
-    }
-    if !host.token.is_empty() {
-        req = req.bearer_auth(&host.token);
-    }
+    let req = to_host(st, host, method, path, headers)
+        .body(body)
+        .timeout(FORWARD_TIMEOUT);
     match req.send().await {
         Ok(resp) => {
             let status = resp.status();
@@ -674,6 +701,36 @@ async fn forward(
             }
             if let Some(rid) = rid {
                 out.headers_mut().insert("x-request-id", rid);
+            }
+            out.headers_mut().insert(
+                "x-briqyard-host",
+                HeaderValue::from_str(&host.id).unwrap_or(HeaderValue::from_static("?")),
+            );
+            out
+        }
+        Err(e) => err(
+            StatusCode::BAD_GATEWAY,
+            "host_unreachable",
+            format!("host {}: {e}", host.id),
+        )
+        .into_response(),
+    }
+}
+
+/// A watch forwarded: the host's answer streamed through as it comes, with no deadline (its
+/// heartbeat shows it is alive).
+async fn forward_watch(st: &AppState, host: &HostRec, path: &str, headers: &HeaderMap) -> Response {
+    if let Some(refused) = down(host) {
+        return refused;
+    }
+    match to_host(st, host, Method::GET, path, headers).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
+            let mut out = Response::new(Body::from_stream(resp.bytes_stream()));
+            *out.status_mut() = status;
+            if let Some(ct) = ct {
+                out.headers_mut().insert(header::CONTENT_TYPE, ct);
             }
             out.headers_mut().insert(
                 "x-briqyard-host",
@@ -896,6 +953,130 @@ async fn usage(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
     Json(all).into_response()
 }
 
+#[derive(serde::Deserialize)]
+struct EventsQuery {
+    since: Option<String>,
+    tenant: Option<String>,
+    machine: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    limit: Option<usize>,
+    #[serde(default)]
+    watch: bool,
+}
+
+/// Events (ADR 0019), which are per host. With a tenant, from the tenant's host; else with a
+/// machine, from the machine's host: the host's own cursor, a watch streamed through. With
+/// neither, every host, never partial, merged by time with each event's host and a cursor of
+/// every host's: `<host>:<seq>,…`. A watch of every host is refused.
+async fn events(
+    State(st): S,
+    headers: HeaderMap,
+    uri: Uri,
+    Query(q): Query<EventsQuery>,
+) -> Response {
+    let path = match uri.query() {
+        Some(query) => format!("/v1/events?{query}"),
+        None => "/v1/events".into(),
+    };
+    let host = match (&q.tenant, &q.machine) {
+        (Some(t), _) => st.reg.lock().unwrap().host_of_tenant(t).cloned().ok_or_else(|| {
+            err(StatusCode::NOT_FOUND, "not_found", format!("tenant {t} not found"))
+        }),
+        (None, Some(m)) => locate(&st, Indexed::Machine, m).await.ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("machine {m} not found: a destroyed machine's events are read with its tenant, ?tenant=…&machine={m}"),
+            )
+        }),
+        (None, None) if q.watch => Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "a watch through the fleet names a tenant or a machine: events are per host, and a stream of every host would go on without one that drops",
+        )),
+        (None, None) => return events_of_every_host(&st, &headers, q).await,
+    };
+    match host {
+        Ok(h) if q.watch => forward_watch(&st, &h, &path, &headers).await,
+        Ok(h) => forward(&st, &h, Method::GET, &path, &headers, Bytes::new()).await,
+        Err(refused) => refused.into_response(),
+    }
+}
+
+/// A fleet-wide cursor, `<host>:<seq>,…`, as each host's seq; a host it does not name reads
+/// from its start.
+fn parse_cursor(since: &str) -> Result<std::collections::HashMap<String, u64>, Refusal> {
+    let bad = || {
+        err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            format!("since {since:?}: want <host>:<seq>,… as a fleet-wide read's `next` gave it"),
+        )
+    };
+    since
+        .split(',')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (host, seq) = part.rsplit_once(':').ok_or_else(bad)?;
+            Ok((host.to_string(), seq.parse().map_err(|_| bad())?))
+        })
+        .collect()
+}
+
+fn cursor(seqs: &std::collections::BTreeMap<String, u64>) -> String {
+    let parts: Vec<String> = seqs.iter().map(|(h, s)| format!("{h}:{s}")).collect();
+    parts.join(",")
+}
+
+async fn events_of_every_host(st: &AppState, headers: &HeaderMap, q: EventsQuery) -> Response {
+    let mut since = match parse_cursor(q.since.as_deref().unwrap_or("")) {
+        Ok(c) => c,
+        Err(refused) => return refused.into_response(),
+    };
+    let limit = api::events_limit(q.limit);
+    let hosts = st.reg.lock().unwrap().listed();
+    let mut all: Vec<api::Event> = Vec::new();
+    let mut next = std::collections::BTreeMap::new();
+    for h in hosts {
+        let mut path = format!(
+            "/v1/events?since={}&limit={limit}",
+            since.remove(&h.id).unwrap_or(0)
+        );
+        if let Some(k) = &q.kind {
+            path.push_str(&format!("&type={k}"));
+        }
+        let resp = forward(st, &h, Method::GET, &path, headers, Bytes::new()).await;
+        if !resp.status().is_success() {
+            return resp;
+        }
+        let (_, data) = read(resp).await;
+        match serde_json::from_slice::<api::EventsPage>(&data) {
+            Ok(page) => {
+                next.insert(h.id.clone(), page.next.parse().unwrap_or(0));
+                all.extend(page.events.into_iter().map(|e| api::Event {
+                    host: h.id.clone(),
+                    ..e
+                }));
+            }
+            Err(e) => return unreadable(&h, e),
+        }
+    }
+    all.sort_by(|a, b| (a.at, &a.host, a.seq).cmp(&(b.at, &b.host, b.seq)));
+    // Past the limit, a host's cursor is its last event kept, so the next read goes on from it.
+    if all.len() > limit {
+        for e in all.drain(limit..) {
+            let cut = next.get_mut(&e.host).expect("asked");
+            *cut = (*cut).min(e.seq - 1);
+        }
+    }
+    Json(api::EventsPage {
+        events: all,
+        next: cursor(&next),
+    })
+    .into_response()
+}
+
 async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {
     let reg = st.reg.lock().unwrap();
     let mut out: Vec<api::Tenant> = reg
@@ -1051,7 +1232,7 @@ impl Indexed {
 }
 
 /// Finds the host of a machine or an endpoint: from the index, else by asking every host.
-async fn locate(st: &AppState, what: Indexed, id: &str, headers: &HeaderMap) -> Option<HostRec> {
+async fn locate(st: &AppState, what: Indexed, id: &str) -> Option<HostRec> {
     let hosts = {
         let mut reg = st.reg.lock().unwrap();
         let known = what.index(&mut reg).get(id).cloned();
@@ -1060,8 +1241,17 @@ async fn locate(st: &AppState, what: Indexed, id: &str, headers: &HeaderMap) -> 
         }
         reg.ready()
     };
+    // A probe, not the caller's request: none of its headers (its `If-Match` is for the call).
     for h in hosts {
-        let resp = forward(st, &h, Method::GET, &what.path(id), headers, Bytes::new()).await;
+        let resp = forward(
+            st,
+            &h,
+            Method::GET,
+            &what.path(id),
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await;
         if resp.status().is_success() {
             what.index(&mut st.reg.lock().unwrap())
                 .insert(id.to_string(), h.id.clone());
@@ -1121,7 +1311,7 @@ async fn by_machine(
         .find(|(k, _)| k == "id")
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
-    let host = locate(&st, Indexed::Machine, &id, &headers)
+    let host = locate(&st, Indexed::Machine, &id)
         .await
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "machine not found"))?;
     let path = uri
@@ -1170,15 +1360,13 @@ async fn by_endpoint(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, Refusal> {
-    let host = locate(&st, Indexed::Endpoint, &id, &headers)
-        .await
-        .ok_or_else(|| {
-            err(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                format!("endpoint {id} not found"),
-            )
-        })?;
+    let host = locate(&st, Indexed::Endpoint, &id).await.ok_or_else(|| {
+        err(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("endpoint {id} not found"),
+        )
+    })?;
     let path = uri
         .path_and_query()
         .map(|p| p.as_str().to_string())

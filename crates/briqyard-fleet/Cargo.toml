@@ -26,5 +26,6 @@ base64 = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
+futures = { workspace = true }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

@@ -3,6 +3,7 @@
 
 use super::*;
 use axum::body::Body;
+use chrono::TimeZone;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt;
 
@@ -22,6 +23,11 @@ struct Daemon {
     next: AtomicUsize,
     /// A tenant the daemon refuses to delete (answers 409), to test a failed forward.
     keep_tenant: String,
+    /// Its event log, and the `If-Match` of each request that had one.
+    events: Mutex<Vec<api::Event>>,
+    if_match: Mutex<Vec<String>>,
+    /// The open watch's sender: a test sends its live lines.
+    watcher: Mutex<Option<tokio::sync::mpsc::Sender<String>>>,
 }
 
 impl Daemon {
@@ -75,6 +81,25 @@ impl Daemon {
         e
     }
 
+    /// Logs an event at `at` (seconds past 14:00), about a machine of a tenant.
+    fn log(&self, at: u32, tenant: &str, reason: &str) -> api::Event {
+        let mut evs = self.events.lock().unwrap();
+        let e = api::Event {
+            seq: evs.len() as u64 + 1,
+            at: Utc.with_ymd_and_hms(2026, 10, 20, 14, 0, 0).unwrap()
+                + Duration::seconds(at as i64),
+            kind: api::event::NORMAL.into(),
+            reason: reason.into(),
+            message: String::new(),
+            machine_id: format!("m_{}_{}", self.id, evs.len() + 1),
+            tenant: tenant.into(),
+            host: String::new(),
+            data: None,
+        };
+        evs.push(e.clone());
+        e
+    }
+
     fn used_mb(&self) -> u32 {
         self.machines
             .lock()
@@ -101,6 +126,9 @@ async fn start_daemon(id: &str, token: &str) -> Running {
         gateways: Mutex::new(vec![]),
         next: AtomicUsize::new(0),
         keep_tenant: "kept".into(),
+        events: Mutex::new(vec![]),
+        if_match: Mutex::new(vec![]),
+        watcher: Mutex::new(None),
     });
     type D = State<Arc<Daemon>>;
     async fn status(State(d): D) -> Json<api::Status> {
@@ -312,6 +340,52 @@ async fn start_daemon(id: &str, token: &str) -> Running {
         }])
         .into_response()
     }
+    /// The daemon's read, with its cursor rules: the events after `since` that match, up to
+    /// `limit`; `next` the last returned when the page is full, else the last seq. With
+    /// `watch`, NDJSON kept open: the backlog, then what the test sends.
+    async fn events(State(d): D, Query(q): Query<EventsQuery>) -> Response {
+        let since: u64 = q.since.as_deref().unwrap_or("0").parse().unwrap_or(0);
+        let limit = api::events_limit(q.limit);
+        let evs = d.events.lock().unwrap().clone();
+        let last = evs.last().map_or(0, |e| e.seq);
+        if since > last {
+            return err(StatusCode::GONE, "gone", "past the last event").into_response();
+        }
+        let mut page: Vec<api::Event> = evs
+            .into_iter()
+            .filter(|e| e.seq > since)
+            .filter(|e| q.tenant.as_deref().is_none_or(|t| t == e.tenant))
+            .filter(|e| q.machine.as_deref().is_none_or(|m| m == e.machine_id))
+            .collect();
+        page.truncate(limit);
+        if q.watch {
+            let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+            for e in &page {
+                tx.try_send(serde_json::to_string(e).unwrap() + "\n")
+                    .unwrap();
+            }
+            *d.watcher.lock().unwrap() = Some(tx);
+            let lines = futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv()
+                    .await
+                    .map(|l| (Ok::<_, std::convert::Infallible>(l), rx))
+            });
+            return (
+                [(header::CONTENT_TYPE, "application/x-ndjson")],
+                Body::from_stream(lines),
+            )
+                .into_response();
+        }
+        let next = match page.len() == limit {
+            true => page.last().map_or(last, |e| e.seq),
+            false => last,
+        };
+        Json(api::EventsPage {
+            events: page,
+            next: next.to_string(),
+        })
+        .into_response()
+    }
     // Every request is recorded, with its query, and checked for the daemon's token.
     async fn record(State(d): D, req: Request, next: axum::middleware::Next) -> Response {
         let line = format!(
@@ -320,6 +394,12 @@ async fn start_daemon(id: &str, token: &str) -> Running {
             req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
         );
         d.calls.lock().unwrap().push(line);
+        if let Some(v) = req.headers().get(header::IF_MATCH) {
+            d.if_match
+                .lock()
+                .unwrap()
+                .push(v.to_str().unwrap().to_string());
+        }
         if !d.token.is_empty() && bearer(req.headers()) != d.token {
             return err(StatusCode::UNAUTHORIZED, "unauthorized", "bad token").into_response();
         }
@@ -340,6 +420,7 @@ async fn start_daemon(id: &str, token: &str) -> Running {
         .route("/v1/machines/:id/endpoints", post(add_endpoint))
         .route("/v1/endpoints", get(endpoints))
         .route("/v1/usage", get(usage))
+        .route("/v1/events", get(events))
         .route(
             "/v1/endpoints/:id",
             get(get_endpoint).delete(delete_endpoint),
@@ -1885,4 +1966,190 @@ async fn a_gateway_refused_is_answered_as_the_host_said() {
     }
     assert_eq!(ds[0].stub.calls().len(), before);
     assert_eq!(pinned(&f.st, "t2"), None);
+}
+
+// --- events (ADR 0019) ---
+
+#[tokio::test]
+async fn a_scoped_read_goes_to_one_host_with_its_own_cursor() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    ds[0].stub.add("t1", "web", 512);
+    let m = ds[1].stub.add("t2", "db", 512);
+    poll_static_hosts_once(&f.st).await;
+    ds[0].stub.log(1, "t1", "created");
+    ds[1].stub.log(2, "t2", "created");
+    // A tenant's: its host alone, the query as it came, the host named.
+    let (s, headers, body) = call(&f.st, "GET", "/v1/events?tenant=t1&since=0", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d1");
+    let page: api::EventsPage = serde_json::from_str(&body).unwrap();
+    assert_eq!((page.events.len(), page.next.as_str()), (1, "1"));
+    assert_eq!(
+        page.events[0].host, "",
+        "one host's log: no host on each event"
+    );
+    assert_eq!(
+        ds[0].stub.calls().last().unwrap(),
+        "GET /v1/events?tenant=t1&since=0"
+    );
+    assert!(!ds[1]
+        .stub
+        .calls()
+        .iter()
+        .any(|c| c.starts_with("GET /v1/events")));
+    // A machine's: found where it runs.
+    let q = format!("/v1/events?machine={}", m.id);
+    let (s, headers, _) = call(&f.st, "GET", &q, "api", None).await;
+    assert_eq!(
+        (s, &headers["x-briqyard-host"]),
+        (StatusCode::OK, &HeaderValue::from_static("d2"))
+    );
+    // Neither known: 404, the way to a destroyed machine's events in the message.
+    let (s, _, body) = call(&f.st, "GET", "/v1/events?tenant=nobody", "api", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
+    let (s, _, body) = call(&f.st, "GET", "/v1/events?machine=m_gone", "api", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(
+        json(&body)["error"]
+            .as_str()
+            .unwrap()
+            .contains("?tenant=…&machine=m_gone"),
+        "{body}"
+    );
+    // The host's refusal passes through: a cursor past its log.
+    let (s, _, body) = call(&f.st, "GET", "/v1/events?tenant=t1&since=9", "api", None).await;
+    assert_eq!(
+        (s, json(&body)["code"].as_str()),
+        (StatusCode::GONE, Some("gone"))
+    );
+}
+
+#[tokio::test]
+async fn a_fleet_wide_read_merges_every_host_by_time_and_is_never_partial() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    ds[0].stub.log(1, "t1", "created");
+    ds[1].stub.log(2, "t2", "created");
+    ds[0].stub.log(3, "t1", "started");
+    ds[1].stub.log(4, "t2", "started");
+    ds[0].stub.log(5, "t1", "stopped");
+    let (s, _, body) = call(&f.st, "GET", "/v1/events", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let page: api::EventsPage = serde_json::from_str(&body).unwrap();
+    let got: Vec<(&str, u64)> = page
+        .events
+        .iter()
+        .map(|e| (e.host.as_str(), e.seq))
+        .collect();
+    assert_eq!(got, [("d1", 1), ("d2", 1), ("d1", 2), ("d2", 2), ("d1", 3)]);
+    assert_eq!(page.next, "d1:3,d2:2");
+    // From that cursor: each host from its own seq; nothing new, the cursor stays.
+    ds[1].stub.log(6, "t2", "stopped");
+    let (s, _, body) = call(&f.st, "GET", "/v1/events?since=d1:3,d2:2", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let page: api::EventsPage = serde_json::from_str(&body).unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(
+        (page.events[0].host.as_str(), page.next.as_str()),
+        ("d2", "d1:3,d2:3")
+    );
+    assert!(ds[0]
+        .stub
+        .calls()
+        .last()
+        .unwrap()
+        .starts_with("GET /v1/events?since=3&"));
+    // A page past its limit: each host's cursor is its last event kept, nothing is skipped.
+    let (_, _, body) = call(&f.st, "GET", "/v1/events?limit=3", "api", None).await;
+    let page: api::EventsPage = serde_json::from_str(&body).unwrap();
+    let got: Vec<(&str, u64)> = page
+        .events
+        .iter()
+        .map(|e| (e.host.as_str(), e.seq))
+        .collect();
+    assert_eq!(got, [("d1", 1), ("d2", 1), ("d1", 2)]);
+    assert_eq!(page.next, "d1:2,d2:1");
+    let (_, _, body) = call(
+        &f.st,
+        "GET",
+        &format!("/v1/events?since={}", page.next),
+        "api",
+        None,
+    )
+    .await;
+    let page: api::EventsPage = serde_json::from_str(&body).unwrap();
+    let got: Vec<(&str, u64)> = page
+        .events
+        .iter()
+        .map(|e| (e.host.as_str(), e.seq))
+        .collect();
+    assert_eq!(got, [("d2", 2), ("d1", 3), ("d2", 3)]);
+    // A cursor that is not the fleet's, and a watch of every host, are refused.
+    for q in [
+        "/v1/events?since=12",
+        "/v1/events?since=d1:x",
+        "/v1/events?watch=true",
+    ] {
+        let (s, _, body) = call(&f.st, "GET", q, "api", None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{q}: {body}");
+        assert_eq!(json(&body)["code"], "invalid");
+    }
+    // A host down fails the whole read: events missing a host are a partial story.
+    set_state(&f.st, "d2", "down");
+    let (s, _, body) = call(&f.st, "GET", "/v1/events", "api", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "host_down");
+}
+
+/// The next chunk of a stream, one line here, as JSON.
+async fn chunk(w: &mut reqwest::Response) -> serde_json::Value {
+    let c = tokio::time::timeout(std::time::Duration::from_secs(5), w.chunk())
+        .await
+        .expect("a line in time")
+        .unwrap()
+        .expect("open");
+    json(std::str::from_utf8(&c).unwrap().trim())
+}
+
+#[tokio::test]
+async fn a_scoped_watch_is_streamed_through_as_it_comes() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    ds[0].stub.add("t1", "web", 512);
+    poll_static_hosts_once(&f.st).await;
+    ds[0].stub.log(1, "t1", "created");
+    let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", ln.local_addr().unwrap());
+    let app = app(f.st.clone());
+    tokio::spawn(async move { axum::serve(ln, app).await.unwrap() });
+    let mut w = reqwest::Client::new()
+        .get(format!("{url}/v1/events?tenant=t1&watch=true"))
+        .bearer_auth("api")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(w.status(), StatusCode::OK);
+    assert_eq!(w.headers()["content-type"], "application/x-ndjson");
+    assert_eq!(w.headers()["x-briqyard-host"], "d1");
+    assert_eq!(chunk(&mut w).await["reason"], "created");
+    // The host's next line reaches the client while the stream stays open.
+    let live = serde_json::to_string(&ds[0].stub.log(2, "t1", "started")).unwrap() + "\n";
+    let tx = ds[0].stub.watcher.lock().unwrap().clone().unwrap();
+    tx.send(live).await.unwrap();
+    assert_eq!(chunk(&mut w).await["reason"], "started");
+}
+
+#[tokio::test]
+async fn if_match_is_passed_to_the_host() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let m = ds[0].stub.add("t1", "web", 512);
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/v1/machines/{}/start", m.id))
+        .header(header::AUTHORIZATION, "Bearer api")
+        .header(header::IF_MATCH, "7")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app(f.st.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // To the call it was sent with, not to the search for the machine's host before it.
+    assert_eq!(*ds[0].stub.if_match.lock().unwrap(), ["7"]);
 }
