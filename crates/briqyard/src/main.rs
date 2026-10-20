@@ -162,7 +162,7 @@ enum MachineCmd {
         #[arg(value_parser = sleep_arg)]
         sleep: String,
     },
-    /// Change where its traffic may go, at once: briqyard machine set-egress ID open|none|via:MACHINE_ID
+    /// Change where its traffic may go, at once: briqyard machine set-egress ID open|none|via:MACHINE_ID|via:gateway
     SetEgress {
         id: String,
         #[arg(value_parser = egress_arg)]
@@ -187,7 +187,7 @@ struct RunArgs {
     /// Sleep window: 30m, 2h, never
     #[arg(long, default_value = "", value_parser = sleep_arg)]
     sleep: String,
-    /// Where its traffic may go: open (default), none (its tenant only), via:MACHINE_ID
+    /// Where its traffic may go: open (default), none (its tenant only), via:MACHINE_ID, via:gateway (the tenant's)
     #[arg(long, value_parser = egress_arg)]
     egress: Option<api::Egress>,
     /// Data volume, SIZE:MOUNT (10G:/data)
@@ -244,13 +244,41 @@ enum EndpointCmd {
 #[derive(Subcommand)]
 enum TenantCmd {
     Ls,
+    /// Show a tenant, its gateway included
+    Get {
+        id: String,
+    },
     Rm {
         id: String,
     },
+    /// The tenant's gateway: a machine the daemon runs while a machine sends via:gateway
+    #[command(subcommand)]
+    Gateway(GatewayCmd),
     /// Release a tenant from its host (fleet): its next machine is placed afresh
     Unpin {
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum GatewayCmd {
+    /// Make or replace it: briqyard tenant gateway set TENANT --image I --port P [-e K=V] [-- cmd...]
+    Set {
+        tenant: String,
+        #[arg(long)]
+        image: String,
+        /// The port its program listens on
+        #[arg(long)]
+        port: u16,
+        /// K=V, repeatable
+        #[arg(long = "env", short = 'e')]
+        envs: Vec<String>,
+        /// The command, after --
+        #[arg(last = true)]
+        cmd: Vec<String>,
+    },
+    /// Stop and remove it, once no machine runs through it
+    Rm { tenant: String },
 }
 
 #[derive(Subcommand)]
@@ -383,13 +411,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     let base = base.split([':', '@']).next().unwrap_or(base);
                     format!("{base}-{}", suffix())
                 });
-                let mut env = BTreeMap::new();
-                for kv in &a.envs {
-                    let (k, v) = kv
-                        .split_once('=')
-                        .ok_or_else(|| anyhow!("--env {kv:?}: want K=V"))?;
-                    env.insert(k.to_string(), v.to_string());
-                }
+                let env = env_args(&a.envs)?;
                 let mut files = Vec::new();
                 for f in &a.files {
                     let (guest_path, local) = f
@@ -709,8 +731,39 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             TenantCmd::Ls => {
                 print_json(&c.call::<Vec<api::Tenant>>(GET, "/v1/tenants", NONE).await?)
             }
+            TenantCmd::Get { id } => print_json(
+                &c.call::<api::Tenant>(GET, &format!("/v1/tenants/{id}"), NONE)
+                    .await?,
+            ),
             TenantCmd::Rm { id } => {
                 c.raw(DELETE, &format!("/v1/tenants/{id}"), NONE).await?;
+            }
+            TenantCmd::Gateway(GatewayCmd::Set {
+                tenant,
+                image,
+                port,
+                envs,
+                cmd,
+            }) => {
+                let spec = api::GatewaySpec {
+                    image,
+                    cmd: if cmd.is_empty() { None } else { Some(cmd) },
+                    env: env_args(&envs)?,
+                    port,
+                    ..Default::default()
+                };
+                print_json(
+                    &c.call::<api::Tenant>(
+                        PUT,
+                        &format!("/v1/tenants/{tenant}/gateway"),
+                        Some(&spec),
+                    )
+                    .await?,
+                )
+            }
+            TenantCmd::Gateway(GatewayCmd::Rm { tenant }) => {
+                c.raw(DELETE, &format!("/v1/tenants/{tenant}/gateway"), NONE)
+                    .await?;
             }
             TenantCmd::Unpin { id } => {
                 c.raw(POST, &format!("/v1/tenants/{id}/unpin"), NONE)
@@ -754,13 +807,26 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
     Ok(())
 }
 
+/// `-e K=V` flags as an env map; a value may hold `=`.
+fn env_args(kvs: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut env = BTreeMap::new();
+    for kv in kvs {
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--env {kv:?}: want K=V"))?;
+        env.insert(k.to_string(), v.to_string());
+    }
+    Ok(env)
+}
+
 /// A sleep window as the daemon reads it, refused here before the request leaves.
 fn sleep_arg(s: &str) -> Result<String, String> {
     api::parse_sleep(s)?;
     Ok(s.to_string())
 }
 
-/// An egress policy, `open`, `none` or `via:MACHINE_ID`, checked as the daemon checks it.
+/// An egress policy, `open`, `none` or `via:MACHINE_ID` (`via:gateway`), checked as the daemon
+/// checks it.
 fn egress_arg(s: &str) -> Result<api::Egress, String> {
     let e = match s.split_once(':') {
         Some((api::egress::VIA, id)) => api::Egress {

@@ -174,6 +174,7 @@ fn an_egress_policy_is_read_as_the_daemon_checks_it() {
         ("open", egress("open", None)),
         ("none", egress("none", None)),
         ("via:m_0123456789ab", egress("via", Some("m_0123456789ab"))),
+        ("via:gateway", egress("via", Some("gateway"))),
     ] {
         let MachineCmd::Run(a) = machine(parse(&["m", "run", "--image", "x", "--egress", arg]))
         else {
@@ -448,6 +449,57 @@ fn endpoint_tenant_and_image_commands() {
         _ => panic!("not a tenant rm"),
     }
     assert_eq!(fails(&["tenant", "rm"]), ErrorKind::MissingRequiredArgument);
+    match parse(&["tenant", "get", "t1"]).cmd {
+        Cmd::Tenant(TenantCmd::Get { id }) => assert_eq!(id, "t1"),
+        _ => panic!("not a tenant get"),
+    }
+    match parse(&[
+        "tenant",
+        "gateway",
+        "set",
+        "t1",
+        "--image",
+        "proxy:1",
+        "--port",
+        "3128",
+        "-e",
+        "TOKEN=a=b",
+        "--",
+        "proxy",
+        "-v",
+    ])
+    .cmd
+    {
+        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set {
+            tenant,
+            image,
+            port,
+            envs,
+            cmd,
+        })) => {
+            assert_eq!(
+                (tenant.as_str(), image.as_str(), port),
+                ("t1", "proxy:1", 3128)
+            );
+            assert_eq!(env_args(&envs).unwrap()["TOKEN"], "a=b");
+            assert_eq!(cmd, ["proxy", "-v"]);
+        }
+        _ => panic!("not a gateway set"),
+    }
+    // An image and a port are what a gateway needs.
+    assert_eq!(
+        fails(&["tenant", "gateway", "set", "t1", "--image", "proxy:1"]),
+        ErrorKind::MissingRequiredArgument
+    );
+    assert_eq!(
+        fails(&["tenant", "gateway", "set", "t1", "--port", "3128"]),
+        ErrorKind::MissingRequiredArgument
+    );
+    match parse(&["tenant", "gateway", "rm", "t1"]).cmd {
+        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Rm { tenant })) => assert_eq!(tenant, "t1"),
+        _ => panic!("not a gateway rm"),
+    }
+    assert!(env_args(&["NOEQUALS".into()]).is_err());
     match parse(&["tenant", "unpin", "t1"]).cmd {
         Cmd::Tenant(TenantCmd::Unpin { id }) => assert_eq!(id, "t1"),
         _ => panic!("not a tenant unpin"),
