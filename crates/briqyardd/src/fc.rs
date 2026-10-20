@@ -540,9 +540,11 @@ pub struct Boot {
 #[derive(Clone)]
 pub struct Vm {
     pub pid: u32,
+    /// The VMM's API socket.
     pub api: PathBuf,
     /// The vsock Unix socket on the host: where the guest is reached.
     pub vsock: PathBuf,
+    /// The machine's run dir.
     pub dir: PathBuf,
     /// The chroot root when jailed.
     pub chroot: Option<PathBuf>,
