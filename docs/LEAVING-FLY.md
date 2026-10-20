@@ -15,7 +15,7 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 | 1 | Public edge: hosting, IPs, certificates, DDoS | the hosts' ingress, private to the edge (done) | the router (done), edge hosts and certificates in infra | staging |
 | 2 | Volume durability: Fly's daily snapshots | scheduled backups, retention, delete | the schedule and retention per plan | staging |
 | 3 | Egress abuse: our servers' IPs and the provider's abuse desk | blocked ports, rate and bandwidth limits per machine (done) | the limits per plan, abuse response | public traffic |
-| 4 | Observability and alerts | `/metrics`, JSON logs (done), host health | scraping, log shipping, alerts in the monitor | staging |
+| 4 | Observability and alerts | `/metrics`, JSON logs, host conditions (done) | scraping, log shipping, alerts in the monitor | staging |
 | 5 | Host operations: real orders, upgrades, patching | rolling upgrade, real provisioner runs | runbooks, capacity decisions | production |
 | 6 | Host loss | evacuate a host from its backups | the briqs' state while it happens | production |
 | 7 | Regions | region-aware placement | the team's region to the provider (done) | a second region |
@@ -62,10 +62,9 @@ On briqyard: every machine of a host leaves through the host's IP. A sandbox tha
 
 Fly today: logs, metrics and dashboards for every app.
 
-On briqyard: `/metrics` (Prometheus) and one JSON log line per event exist; nothing collects them.
+On briqyard: `/metrics` (Prometheus, per machine and per host), host conditions in the heartbeat (ADR 0021), `briqyard top`, and one JSON log line per event exist; nothing collects them.
 
-- briqyard: a host health summary in the heartbeat (pool free, memory, failed boots), already half there.
-- briq (infra): scrape `/metrics`, ship journald to the same place as Railway's logs, alert from the monitor on host down, pool full, error lines.
+- briq (infra): scrape `/metrics`, ship journald to the same place as Railway's logs, alert from the monitor on host down, `briqyard_host_condition == 1`, error lines.
 
 ## 5. Host operations
 
