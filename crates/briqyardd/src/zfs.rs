@@ -278,6 +278,45 @@ impl Zfs {
             .collect())
     }
 
+    /// The snapshot a clone was made from, as (dataset, snapshot) relative to the pool;
+    /// `None` for a volume that is nobody's clone.
+    pub async fn origin(&self, name: &str) -> Result<Option<(String, String)>> {
+        let out = self
+            .run(&["get", "-H", "-o", "value", "origin", &self.ds(name)])
+            .await?;
+        let v = out.trim();
+        if v.is_empty() || v == "-" {
+            return Ok(None);
+        }
+        let rel = v.strip_prefix(&format!("{}/", self.pool)).unwrap_or(v);
+        let (ds, snap) = rel
+            .split_once('@')
+            .ok_or_else(|| anyhow!("origin of {name}: {v:?}, want dataset@snapshot"))?;
+        Ok(Some((ds.to_string(), snap.to_string())))
+    }
+
+    /// Every snapshot under a dataset, as `name@snap` relative to the pool.
+    pub async fn snapshots_under(&self, name: &str) -> Result<Vec<String>> {
+        let out = self
+            .run(&[
+                "list",
+                "-H",
+                "-t",
+                "snapshot",
+                "-o",
+                "name",
+                "-r",
+                &self.ds(name),
+            ])
+            .await?;
+        let prefix = format!("{}/", self.pool);
+        Ok(out
+            .lines()
+            .filter_map(|l| l.strip_prefix(&prefix))
+            .map(String::from)
+            .collect())
+    }
+
     /// The clones of a snapshot (datasets that still share its blocks).
     pub async fn clones(&self, name: &str, snap: &str) -> Result<Vec<String>> {
         let out = self
@@ -405,10 +444,12 @@ pub(crate) mod fake {
     use super::*;
 
     /// A stand-in for `zfs`, with the fake device root as its state: a directory per parent
-    /// dataset, a file per volume or snapshot. Every call is appended to `calls`, one line
-    /// each; `get` answers come from `answer.<property>` files; `busy` holds how many
-    /// destroys still answer "dataset is busy". Error texts are the real ones, since the
-    /// code matches on them.
+    /// dataset, a file per volume or snapshot, and `<clone>.origin` naming the snapshot a
+    /// clone was made from (`promote` moves that snapshot to the clone and makes the source
+    /// the clone's clone, as ZFS does). Every call is appended to `calls`, one line each;
+    /// `get` answers come from `answer.<property>` files when there is one, else `origin` and
+    /// `clones` from the `.origin` files; `busy` holds how many destroys still answer
+    /// "dataset is busy". Error texts are the real ones, since the code matches on them.
     const FAKE: &str = r#"#!/bin/sh
 DEV="__DEV__"
 printf '%s\n' "$*" >> "__LOG__"
@@ -418,12 +459,12 @@ case "$1" in
   list)
     if [ "$3" = "-t" ]; then
       [ -e "$DEV/$last" ] || missing "$last"
-      ls "$DEV/$last"@* 2>/dev/null | sed "s|^$DEV/||"
+      { ls -d "$DEV/$last"@* 2>/dev/null; [ -d "$DEV/$last" ] && find "$DEV/$last" -name '*@*'; } | sed "s|^$DEV/||" | sort
       exit 0
     fi
     if [ "$6" = "volume" ]; then
       [ -e "$DEV/$last" ] || missing "$last"
-      find "$DEV/$last" -type f -not -name '*@*' | sed "s|^$DEV/||" | sort
+      find "$DEV/$last" -type f -not -name '*@*' -not -name '*.origin' | sed "s|^$DEV/||" | sort
       exit 0
     fi
     case "$last" in *boom*) echo "cannot open '$last': permission denied" >&2; exit 1;; esac
@@ -434,10 +475,17 @@ case "$1" in
     mkdir -p "$(dirname "$DEV/$last")"; : > "$DEV/$last"; exit 0;;
   clone)
     [ -e "$DEV/$2" ] || missing "$2"
-    mkdir -p "$(dirname "$DEV/$3")"; : > "$DEV/$3"; exit 0;;
+    mkdir -p "$(dirname "$DEV/$3")"; : > "$DEV/$3"; echo "$2" > "$DEV/$3.origin"; exit 0;;
   snapshot)
     if [ -e "$DEV/$2" ]; then echo "cannot create snapshot '$2': dataset already exists" >&2; exit 1; fi
     : > "$DEV/$2"; exit 0;;
+  promote)
+    [ -e "$DEV/$2" ] || missing "$2"
+    if [ -f "$DEV/$2.origin" ]; then
+      o=$(cat "$DEV/$2.origin"); src="${o%@*}"; snap="${o#*@}"
+      mv "$DEV/$o" "$DEV/$2@$snap"; echo "$2@$snap" > "$DEV/$src.origin"; rm "$DEV/$2.origin"
+    fi
+    exit 0;;
   destroy)
     if [ -f "$DEV/busy" ] && [ "$(cat "$DEV/busy")" -gt 0 ]; then
       echo $(($(cat "$DEV/busy") - 1)) > "$DEV/busy"
@@ -445,10 +493,20 @@ case "$1" in
     fi
     case "$last" in *boom*) echo "cannot destroy '$last': permission denied" >&2; exit 1;; esac
     [ -e "$DEV/$last" ] || missing "$last"
-    rm -rf "$DEV/$last"; exit 0;;
+    rm -rf "${DEV:?}/${last:?}" "$DEV/$last.origin"; exit 0;;
   get)
     for a in "$@"; do prop="$last_but_one"; last_but_one="$a"; done
-    cat "$DEV/answer.$prop"; exit 0;;
+    if [ -f "$DEV/answer.$prop" ]; then cat "$DEV/answer.$prop"; exit 0; fi
+    case "$prop" in
+      origin)
+        [ -e "$DEV/$last" ] || missing "$last"
+        if [ -f "$DEV/$last.origin" ]; then cat "$DEV/$last.origin"; else echo "-"; fi; exit 0;;
+      clones)
+        [ -e "$DEV/$last" ] || missing "$last"
+        find "$DEV" -name '*.origin' -exec grep -lx "$last" {} + 2>/dev/null | sed "s|^$DEV/||; s|\.origin$||" | sort | paste -sd, -
+        exit 0;;
+    esac
+    exit 0;;
 esac
 exit 0
 "#;
@@ -790,18 +848,89 @@ mod tests {
         f.zfs.create("m/x/root", 1 << 20).await.unwrap();
         f.zfs.snapshot("m/x/root", "fork-y").await.unwrap();
         f.zfs.snapshot("m/x/root", "fork-z").await.unwrap();
-        f.answer("clones", "byard/m/y/root,byard/m/z/root\n");
+        f.zfs
+            .clone_snapshot("m/x/root", "fork-y", "m/y/root")
+            .await
+            .unwrap();
+        f.zfs
+            .clone_snapshot("m/x/root", "fork-z", "m/z/root")
+            .await
+            .unwrap();
         f.calls();
         f.zfs.release_clones("m/x/root").await.unwrap();
         let calls = f.calls();
         let promotes: Vec<&String> = calls.iter().filter(|c| c.starts_with("promote ")).collect();
-        assert_eq!(promotes.len(), 4, "{calls:?}");
-        assert!(calls.contains(&"promote byard/m/y/root".to_string()));
+        assert_eq!(
+            promotes,
+            ["promote byard/m/y/root", "promote byard/m/z/root"],
+            "{calls:?}"
+        );
+        // Promoted: each fork owns the snapshot it was made from, and nothing clones the
+        // source's snapshots any more, so the source can go.
+        assert_eq!(f.zfs.origin("m/y/root").await.unwrap(), None);
+        assert_eq!(f.zfs.snapshots("m/y/root").await.unwrap(), ["fork-y"]);
+        assert!(f.zfs.snapshots("m/x/root").await.unwrap().is_empty());
         // No snapshot, nothing to promote.
         f.zfs.create("m/w/root", 1 << 20).await.unwrap();
         f.calls();
         f.zfs.release_clones("m/w/root").await.unwrap();
         assert!(f.calls().iter().all(|c| !c.starts_with("promote")));
+    }
+
+    #[tokio::test]
+    async fn origins_and_clones_follow_the_clones() {
+        let f = Fake::open("byard").await.unwrap();
+        f.zfs.create("m/s/root", 1 << 20).await.unwrap();
+        assert_eq!(f.zfs.origin("m/s/root").await.unwrap(), None);
+        f.zfs.snapshot("m/s/root", "fork-a").await.unwrap();
+        assert!(f.zfs.clones("m/s/root", "fork-a").await.unwrap().is_empty());
+        f.zfs
+            .clone_snapshot("m/s/root", "fork-a", "m/a/root")
+            .await
+            .unwrap();
+        f.zfs
+            .clone_snapshot("m/s/root", "fork-a", "m/b/root")
+            .await
+            .unwrap();
+        f.calls();
+        // The origin names the snapshot, relative to the pool; the clones name themselves.
+        assert_eq!(
+            f.zfs.origin("m/a/root").await.unwrap(),
+            Some(("m/s/root".to_string(), "fork-a".to_string()))
+        );
+        assert_eq!(
+            f.zfs.clones("m/s/root", "fork-a").await.unwrap(),
+            ["byard/m/a/root", "byard/m/b/root"]
+        );
+        assert_eq!(
+            f.calls(),
+            [
+                "get -H -o value origin byard/m/a/root",
+                "get -H -p -o value clones byard/m/s/root@fork-a"
+            ]
+        );
+        // A clone destroyed is a clone no more.
+        f.zfs.destroy("m/a").await.unwrap();
+        assert_eq!(
+            f.zfs.clones("m/s/root", "fork-a").await.unwrap(),
+            ["byard/m/b/root"]
+        );
+        // Every snapshot under a dataset, by its full relative name.
+        f.zfs.snapshot("m/b/root", "s_1").await.unwrap();
+        assert_eq!(
+            f.zfs.snapshots_under("m").await.unwrap(),
+            ["m/b/root@s_1", "m/s/root@fork-a"]
+        );
+        assert_eq!(
+            f.calls().last().unwrap(),
+            "list -H -t snapshot -o name -r byard/m"
+        );
+        let err = f.zfs.origin("m/nope/root").await.unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+        // What is not a snapshot name is an error, not a clone of nothing.
+        f.answer("origin", "byard/m/s/root\n");
+        let err = f.zfs.origin("m/b/root").await.unwrap_err();
+        assert!(err.to_string().contains("want dataset@snapshot"), "{err}");
     }
 
     #[tokio::test]

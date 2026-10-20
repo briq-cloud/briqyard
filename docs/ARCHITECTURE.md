@@ -18,7 +18,7 @@ Status: v0, in development. The API is not stable yet.
  │                                                                                         │
  │  machine manager ── storage (ZFS) ── network (bridge per tenant, TAP per VM, nft, DNS)  │
  │        │                                                                                │
- │  firecracker process per machine ─ serial log ─ vsock to briqyard-init                  │
+ │  firecracker process per machine ─ serial log ─ vsock to and from briqyard-init         │
  └─────────────────────────────────────────────────────────────────────────────────────────┘
           │ bt<id> (TAP)          │ zvol root (clone of image)   │ zvol data (the volume)
     ┌─────┴──────────────────────┴──────────────────────────────┴───────┐
@@ -43,7 +43,10 @@ States: `created` → `starting` → `running` → `stopping` → `stopped` → 
 → `destroying` → gone. A `stopped` machine keeps both disks. `stopped_reason` says why it
 stopped: `user`, `idle` (went to sleep), `exit` (its process ended; `exit` says how), `host`
 (the daemon stopped it: a shutdown, or a leftover of a crashed daemon; wakeable like `idle`).
-`state_changed_at` moves only with `state`; `updated_at` moves on every write, a touch included.
+`state_changed_at` moves only with `state`; `updated_at` with every change to the machine (a
+state, a setting), never with a use: `last_used_at` is kept in memory and reaches the record
+with the next change or the sleeper's tick, so a busy machine does not rewrite its record on
+every connection. The record on disk says what the machine is, not when it was last touched.
 
 A boot the guest does not survive (the image's fault: no init to run, a command that exits
 at once) leaves the machine in `error` with the console's last lines, and the request answers
@@ -71,6 +74,10 @@ start from the config drive, so an edit inside the machine lasts until then. The
 attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches the host's disk:
 a database on it is as safe as the host's drive. A snapshot is `zfs snapshot`; a fork is a clone
 of a snapshot of both disks, taken while the source runs (crash-consistent for the data volume).
+That snapshot (`@fork-<id>` on the source) pins every block the source has since rewritten, so
+it goes with the last machine cloned from it: a destroy frees the snapshot its disks came from
+once nothing clones it, and the sweep at start removes any `@fork-*` left with no clone. A
+snapshot made with `POST /machines/{id}/snapshots` stays until `DELETE /machines/{id}/snapshots/{snap}`.
 
 The root disk is not mounted by the host, ever: the host writes nothing into guest filesystems.
 Image extraction happens once per image into a directory the host controls: layers in manifest
@@ -110,9 +117,12 @@ entrypoint and command with its environment and user. It listens on vsock port 7
 host: `exec` (a command with stdin, streamed stdout and stderr, exit code, timeout), `put` and
 `get` (files), `ping`, `shutdown`. PID 1 inherits every orphan on the system; the init reaps
 them with `waitid(WNOWAIT)` and leaves alone the children it waits for itself, so a command's
-exit status is never stolen. When the main process exits, the init prints
-`[briqyard] exit code=N oom=B requested=R` on the serial console and resets the machine, which
-ends Firecracker; the daemon reads the line and applies the restart policy.
+exit status is never stolen. When the main process exits, the init connects out to the host
+(vsock port 7422, which Firecracker brings to the daemon as `<vsock socket>_7422`), sends one
+`ExitReport` frame (code, oom, requested), waits for the daemon's close, and resets the machine,
+which ends Firecracker; the daemon settles the machine from the report and applies the restart
+policy (ADR 0004). The `[briqyard] exit …` line on the serial console is a trace for a person;
+nothing reads it, so nothing a guest prints can set its exit.
 
 ### Backups
 
@@ -124,7 +134,8 @@ reaches the store. Local snapshots stay only as the base of the next incremental
 ### Sleep
 
 Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the
-machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`). A start, an
+machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`; idle machines
+are stopped together, a few at a time, never one after another). A start, an
 ingress connection or an exec on an idle machine wakes it. `sleep: "never"` keeps it on. `PATCH
 /machines/{id} {"sleep": "3h"}` changes the window in any state, without a restart.
 

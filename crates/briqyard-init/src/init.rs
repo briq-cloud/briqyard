@@ -2,7 +2,7 @@
 //! host over vsock, halt when the command ends.
 
 use anyhow::{anyhow, Context, Result};
-use briqyard_api::guest::{self, Config, Request, Response};
+use briqyard_api::guest::{self, Config, ExitReport, Request, Response};
 use nix::mount::{mount, MsFlags};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitid, waitpid, Id, WaitPidFlag};
@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Notify;
-use tokio_vsock::{VsockAddr, VsockListener, VMADDR_CID_ANY};
+use tokio_vsock::{VsockAddr, VsockListener, VsockStream, VMADDR_CID_ANY, VMADDR_CID_HOST};
 
 const CONFIG_DEVICE: &str = "/dev/vdb";
 
@@ -105,31 +105,70 @@ pub fn main() {
         .enable_all()
         .build()
         .expect("runtime");
-    let (code, oom, requested) = rt.block_on(run());
-    log!("{}", exit_line(code, oom, requested));
+    let report = rt.block_on(run());
+    log!("{}", exit_line(&report));
+    rt.block_on(report_exit(&report));
     halt();
 }
 
-/// What the daemon reads after `[briqyard] ` when the main process has ended.
-fn exit_line(code: i32, oom: bool, requested: bool) -> String {
-    format!("exit code={code} oom={oom} requested={requested}")
+/// The console's trace of the exit; what counts is the report sent to the host.
+fn exit_line(r: &ExitReport) -> String {
+    format!(
+        "exit code={} oom={} requested={}",
+        r.code, r.oom, r.requested
+    )
 }
 
-async fn run() -> (i32, bool, bool) {
+/// Tells the host how the main process ended: one connection out on [`guest::EXIT_PORT`],
+/// one frame, then the host's close, so the frame is on the host before the reset. Bounded:
+/// a host that does not listen never holds the reset.
+async fn report_exit(r: &ExitReport) {
+    let connect = VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, guest::EXIT_PORT));
+    let sent = async {
+        let mut s = connect.await?;
+        send_exit(&mut s, r).await
+    };
+    match tokio::time::timeout(Duration::from_secs(2), sent).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log!("exit report: {e}"),
+        Err(_) => log!("exit report: the host did not take it in time"),
+    }
+}
+
+/// Writes the report, ends the write side, and reads until the host closes.
+async fn send_exit<S: AsyncRead + AsyncWrite + Unpin>(
+    s: &mut S,
+    r: &ExitReport,
+) -> std::io::Result<()> {
+    s.write_all(&guest::encode_frame(r)?).await?;
+    s.shutdown().await?;
+    let mut sink = [0u8; 64];
+    while s.read(&mut sink).await? > 0 {}
+    Ok(())
+}
+
+/// Boots the guest and runs the main process to its end. A failure before the process
+/// starts reports as a code of its own: 125 the drive or the disks, 126 the command, 127 its
+/// program.
+async fn run() -> ExitReport {
+    let failed = |code: i32| ExitReport {
+        code,
+        ..Default::default()
+    };
     let (cfg, files) = match read_config_drive() {
         Ok(v) => v,
         Err(e) => {
             log!("config drive: {e:#}");
-            return (125, false, false);
+            return failed(125);
         }
     };
     if let Err(e) = setup_mounts(&cfg) {
         log!("mounts: {e:#}");
-        return (125, false, false);
+        return failed(125);
     }
     if let Err(e) = write_files(&files) {
         log!("boot files: {e:#}");
-        return (125, false, false);
+        return failed(125);
     }
     setup_names(&cfg);
     if let Err(e) = setup_network(&cfg).await {
@@ -148,7 +187,7 @@ async fn run() -> (i32, bool, bool) {
         Ok(c) => c,
         Err(e) => {
             log!("command: {e:#}");
-            return (126, false, false);
+            return failed(126);
         }
     };
     let mut child = {
@@ -160,7 +199,7 @@ async fn run() -> (i32, bool, bool) {
             }
             Err(e) => {
                 log!("start {:?}: {e}", cmd.as_std().get_program());
-                return (127, false, false);
+                return failed(127);
             }
         }
     };
@@ -178,9 +217,12 @@ async fn run() -> (i32, bool, bool) {
             255
         }
     };
-    let oom = code == 137 && saw_oom();
     let requested = *st.requested.lock().unwrap();
-    (code, oom, requested)
+    ExitReport {
+        code,
+        oom: code == 137 && saw_oom(),
+        requested,
+    }
 }
 
 fn argv_string(c: &std::process::Command) -> String {
@@ -1125,20 +1167,51 @@ mod tests {
 
     // --- the console ---
 
+    fn report(code: i32, oom: bool, requested: bool) -> ExitReport {
+        ExitReport {
+            code,
+            oom,
+            requested,
+        }
+    }
+
     #[test]
-    fn exit_line_is_what_the_daemon_parses() {
+    fn exit_line_is_the_console_trace() {
         assert_eq!(
-            console_line(format_args!("{}", exit_line(0, false, true))),
+            console_line(format_args!("{}", exit_line(&report(0, false, true)))),
             "[briqyard] exit code=0 oom=false requested=true\n"
         );
         assert_eq!(
-            exit_line(137, true, false),
+            exit_line(&report(137, true, false)),
             "exit code=137 oom=true requested=false"
         );
         assert_eq!(
             console_line(format_args!("started pid={}", 7)),
             "[briqyard] started pid=7\n"
         );
+    }
+
+    #[tokio::test]
+    async fn exit_report_is_one_frame_then_the_hosts_close() {
+        let (mut guest, mut host) = tokio::io::duplex(1024);
+        let r = report(7, false, false);
+        let mut sent = tokio::spawn(async move { send_exit(&mut guest, &r).await });
+        // The host reads one frame and finds the write side ended, then closes.
+        let mut hdr = [0u8; 4];
+        host.read_exact(&mut hdr).await.unwrap();
+        let mut body = vec![0u8; u32::from_be_bytes(hdr) as usize];
+        host.read_exact(&mut body).await.unwrap();
+        assert_eq!(
+            guest::decode_frame::<ExitReport>(&body).unwrap(),
+            report(7, false, false)
+        );
+        assert_eq!(host.read(&mut [0u8; 8]).await.unwrap(), 0);
+        // Until then the init is still waiting on the host.
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut sent)
+            .await
+            .is_err());
+        drop(host);
+        sent.await.unwrap().unwrap();
     }
 
     #[test]

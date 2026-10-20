@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
@@ -199,6 +200,9 @@ pub struct EndpointRec {
 /// A console log past this size is rotated at the next cold boot.
 const CONSOLE_ROTATE_BYTES: u64 = 32 << 20;
 
+/// Idle machines the sleeper stops at once.
+const SLEEPS_AT_ONCE: usize = 8;
+
 /// Makes an id: a prefix and 12 hex characters.
 pub fn new_id(prefix: &str) -> String {
     use rand::RngCore;
@@ -216,6 +220,8 @@ struct Entry {
     stop_req: Mutex<Option<String>>,
     /// Signalled on every state change: what `wait_running` and a stop wait on.
     changed: Notify,
+    /// A use since the record was last written; read and written under `rec`'s lock.
+    unsaved_use: AtomicBool,
 }
 
 impl Entry {
@@ -226,11 +232,21 @@ impl Entry {
             live: Mutex::new(None),
             stop_req: Mutex::new(None),
             changed: Notify::new(),
+            unsaved_use: AtomicBool::new(false),
         })
     }
 
     fn snapshot(&self) -> Record {
         self.rec.lock().unwrap().clone()
+    }
+
+    /// Marks a use now. In memory only: the sleeper reads it here, and the record on disk
+    /// catches up with the next write or the sleeper's tick, so a busy machine does not
+    /// rewrite its record on every connection.
+    fn touch(&self) {
+        let mut r = self.rec.lock().unwrap();
+        r.last_used_at = Some(Utc::now());
+        self.unsaved_use.store(true, Relaxed);
     }
 
     /// The one place `state` is written: `state_changed_at` follows it and whoever waits on
@@ -546,9 +562,38 @@ impl Manager {
                 }
             }
         }
+        // A fork's snapshot on its source outlives a destroy that failed to free it.
+        if let Ok(snaps) = self.inner.zfs.snapshots_under("m").await {
+            for s in snaps {
+                if let Some((ds, snap)) = s.split_once('@') {
+                    if self.free_fork_snapshot(ds, snap).await {
+                        tracing::warn!(snapshot = s, "fork snapshot with no clone, destroyed");
+                        swept += 1;
+                    }
+                }
+            }
+        }
         if swept > 0 {
             tracing::info!(swept, "orphans swept at start");
         }
+    }
+
+    /// Removes a `fork-*` snapshot nothing clones any more: `true` when it did. Kept, with a
+    /// warning, when ZFS cannot say or refuses; the sweep at start tries again.
+    async fn free_fork_snapshot(&self, ds: &str, snap: &str) -> bool {
+        if !snap.starts_with("fork-") {
+            return false;
+        }
+        let z = &self.inner.zfs;
+        let freed = match z.clones(ds, snap).await {
+            Ok(clones) if clones.is_empty() => z.destroy_snapshot(ds, snap).await.map(|_| true),
+            Ok(_) => Ok(false),
+            Err(err) => Err(err),
+        };
+        freed.unwrap_or_else(|err| {
+            tracing::warn!(dataset = ds, snapshot = snap, err = %err, "fork snapshot kept");
+            false
+        })
     }
 
     /// Takes over a VMM a previous daemon left running (it crashed; a shutdown suspends
@@ -585,10 +630,25 @@ impl Manager {
         });
     }
 
+    /// Writes the record: something about the machine changed.
     fn save(&self, e: &Entry) -> Result<()> {
         let rec = {
             let mut r = e.rec.lock().unwrap();
             r.updated_at = Utc::now();
+            e.unsaved_use.store(false, Relaxed);
+            r.clone()
+        };
+        self.inner.store.put("machines", &rec.id, &rec)
+    }
+
+    /// Writes a record whose last use moved since it was last written, as it is: nothing
+    /// about the machine changed, so `updated_at` stays.
+    fn flush_use(&self, e: &Entry) -> Result<()> {
+        let rec = {
+            let r = e.rec.lock().unwrap();
+            if !e.unsaved_use.swap(false, Relaxed) {
+                return Ok(());
+            }
             r.clone()
         };
         self.inner.store.put("machines", &rec.id, &rec)
@@ -1480,7 +1540,7 @@ impl Manager {
         let r = e.snapshot();
         match r.state.as_str() {
             state::RUNNING => {
-                self.touch_entry(&e);
+                e.touch();
                 return Ok(self.view(&e));
             }
             state::STOPPED if r.stopped_reason == stop::USER => {
@@ -1696,16 +1756,25 @@ impl Manager {
     /// Settles the state after the Firecracker process exited.
     async fn settle_exit(&self, e: &Arc<Entry>, pid: u32) {
         let _guard = e.lock.lock().await;
-        {
+        let mut exit = {
             let live = e.live.lock().unwrap();
-            if live.as_ref().map(|l| l.pid) != Some(pid) {
-                return;
+            match live.as_ref() {
+                Some(l) if l.pid == pid => l.exit.clone(),
+                _ => return,
             }
-        }
+        };
         let rec = e.snapshot();
         let _ = self.inner.net.delete_tap(&rec.id, &rec.ip).await;
         *e.live.lock().unwrap() = None;
-        let (code, oom, requested) = self.exit_from_console(&rec);
+        // The init's report, or none: the process is gone, so the wait ends either way. A
+        // process that ended without the init's word (killed, a kernel panic) reads as 255;
+        // nothing the guest prints on its console can set its exit.
+        let _ = exit.wait_for(|r| r.is_some()).await;
+        let report = exit.borrow().clone().unwrap_or(guest::ExitReport {
+            code: 255,
+            ..Default::default()
+        });
+        let (code, oom, requested) = (report.code, report.oom, report.requested);
         let stop_req = e.stop_req.lock().unwrap().take();
         let now = Utc::now();
         let mut restart_again = false;
@@ -1763,11 +1832,6 @@ impl Manager {
                 }
             });
         }
-    }
-
-    /// Reads the init's exit line for this boot.
-    fn exit_from_console(&self, r: &Record) -> (i32, bool, bool) {
-        parse_exit_line(&self.console_since(r, 8 << 20)).unwrap_or((255, false, false))
     }
 
     fn console_since(&self, r: &Record, max: u64) -> String {
@@ -1976,6 +2040,9 @@ impl Manager {
         let rec = e.snapshot();
         let _ = self.inner.net.delete_tap(id, &rec.ip).await;
         // A fork is a clone of this machine's disks: it takes the snapshots over and lives on.
+        // What this machine was cloned from is read after that, since a promotion moves it:
+        // the fork snapshot it leaves behind goes once nothing clones it.
+        let mut origins = Vec::new();
         for ds in [rec.root_dataset(), rec.data_dataset()] {
             if self.inner.zfs.exists(&ds).await.context("disks")? {
                 self.inner
@@ -1983,6 +2050,13 @@ impl Manager {
                     .release_clones(&ds)
                     .await
                     .context("forks of the disks")?;
+                origins.extend(
+                    self.inner
+                        .zfs
+                        .origin(&ds)
+                        .await
+                        .context("origin of the disks")?,
+                );
             }
         }
         self.inner
@@ -1990,6 +2064,9 @@ impl Manager {
             .destroy(&rec.dataset())
             .await
             .context("disks")?;
+        for (ds, snap) in origins {
+            self.free_fork_snapshot(&ds, &snap).await;
+        }
         let _ = tokio::fs::remove_dir_all(self.inner.cfg.run_dir().join(id)).await;
         if let Some(j) = self.jail_for(&rec) {
             let _ =
@@ -2024,18 +2101,12 @@ impl Manager {
     }
 
     pub fn touch(&self, id: &str) -> Result<(), MError> {
-        let e = self.entry(id)?;
-        self.touch_entry(&e);
+        self.entry(id)?.touch();
         Ok(())
     }
 
-    fn touch_entry(&self, e: &Entry) {
-        e.rec.lock().unwrap().last_used_at = Some(Utc::now());
-        let _ = self.save(e);
-    }
-
-    /// Every 15 s: idle machines go to sleep, and a destroy left `destroying` (a daemon
-    /// restart, a disk that was busy) is tried again.
+    /// Every 15 s: idle machines go to sleep, uses since the last tick reach the disk, and a
+    /// destroy left `destroying` (a daemon restart, a disk that was busy) is tried again.
     async fn sleeper(self) {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
         loop {
@@ -2046,7 +2117,7 @@ impl Manager {
 
     async fn tick(&self) {
         let now = Utc::now();
-        let (due, destroying): (Vec<Arc<Entry>>, Vec<String>) = {
+        let (due, used, destroying): (Vec<Arc<Entry>>, Vec<Arc<Entry>>, Vec<String>) = {
             let machines = self.inner.machines.lock().unwrap();
             let due = machines
                 .values()
@@ -2054,6 +2125,11 @@ impl Manager {
                     let r = e.rec.lock().unwrap();
                     r.state == state::RUNNING && idle_past(r.last_used_at, r.sleep_window(), now)
                 })
+                .cloned()
+                .collect();
+            let used = machines
+                .values()
+                .filter(|e| e.unsaved_use.load(Relaxed))
                 .cloned()
                 .collect();
             // One whose lock is held has a destroy under way already.
@@ -2064,16 +2140,30 @@ impl Manager {
                 })
                 .map(|e| e.snapshot().id)
                 .collect();
-            (due, destroying)
+            (due, used, destroying)
         };
+        // Idle machines stop together, a few at a time: one stop can take its grace and a
+        // kill, and a tick with many must not take minutes.
+        let at_once = Arc::new(tokio::sync::Semaphore::new(SLEEPS_AT_ONCE));
+        let mut stops = tokio::task::JoinSet::new();
         for e in due {
-            tracing::info!(machine = e.snapshot().id, "machine idle, going to sleep");
-            let suspend = self.inner.cfg.suspend_on_sleep;
-            if let Err(err) = self
-                .stop_entry(&e, stop::IDLE, Duration::from_secs(10), suspend)
-                .await
-            {
-                tracing::warn!(machine = e.snapshot().id, err = %err, "sleep");
+            let (m, at_once) = (self.clone(), at_once.clone());
+            stops.spawn(async move {
+                let _turn = at_once.acquire().await;
+                tracing::info!(machine = e.snapshot().id, "machine idle, going to sleep");
+                let suspend = m.inner.cfg.suspend_on_sleep;
+                if let Err(err) = m
+                    .stop_entry(&e, stop::IDLE, Duration::from_secs(10), suspend)
+                    .await
+                {
+                    tracing::warn!(machine = e.snapshot().id, err = %err, "sleep");
+                }
+            });
+        }
+        while stops.join_next().await.is_some() {}
+        for e in used {
+            if let Err(err) = self.flush_use(&e) {
+                tracing::warn!(machine = e.snapshot().id, err = %err, "last use not written");
             }
         }
         for id in destroying {
@@ -2272,6 +2362,27 @@ impl Manager {
 
     // --- snapshots ---
 
+    /// Removes a snapshot `snapshot` made, from both disks. Missing is success; a snapshot
+    /// of the daemon's own (a fork's, a backup's) is not the caller's to remove.
+    pub async fn delete_snapshot(&self, id: &str, snap: &str) -> Result<(), MError> {
+        let e = self.entry(id)?;
+        let r = e.snapshot();
+        if !snap.starts_with("s_") || !api::valid_id(snap) {
+            return Err(MError::NotFound);
+        }
+        self.inner
+            .zfs
+            .destroy_snapshot(&r.root_dataset(), snap)
+            .await?;
+        if r.volume.is_some() {
+            self.inner
+                .zfs
+                .destroy_snapshot(&r.data_dataset(), snap)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn snapshot(&self, id: &str) -> Result<api::Snapshot, MError> {
         let e = self.entry(id)?;
         let r = e.snapshot();
@@ -2438,7 +2549,7 @@ impl Manager {
             (r.state.clone(), r.ip.clone())
         };
         if st == state::RUNNING {
-            self.touch_entry(&e);
+            e.touch();
             return Ok(ip.parse().unwrap());
         }
         if !wake {
@@ -2556,27 +2667,6 @@ fn backup_chain<'a>(
     }
     chain.reverse();
     chain
-}
-
-/// Reads the init's exit line, `[briqyard] exit code=N oom=B requested=R`; the last one wins.
-fn parse_exit_line(text: &str) -> Option<(i32, bool, bool)> {
-    let mut found = None;
-    for line in text.lines() {
-        if let Some(rest) = line.split("[briqyard] exit ").nth(1) {
-            let mut code = 255;
-            let (mut oom, mut requested) = (false, false);
-            for kv in rest.split_whitespace() {
-                match kv.split_once('=') {
-                    Some(("code", v)) => code = v.parse().unwrap_or(255),
-                    Some(("oom", v)) => oom = v == "true",
-                    Some(("requested", v)) => requested = v == "true",
-                    _ => {}
-                }
-            }
-            found = Some((code, oom, requested));
-        }
-    }
-    found
 }
 
 fn parse_log_line(line: &str) -> api::LogLine {
@@ -2840,16 +2930,6 @@ mod tests {
     }
 
     #[test]
-    fn exit_lines() {
-        let text =
-            "x\n2026-10-18T22:00:00Z [briqyard] exit code=3 oom=false requested=true\nreboot\n";
-        assert_eq!(parse_exit_line(text), Some((3, false, true)));
-        let two = "[briqyard] exit code=1 oom=false requested=false\n[briqyard] exit code=137 oom=true requested=false\n";
-        assert_eq!(parse_exit_line(two), Some((137, true, false)));
-        assert_eq!(parse_exit_line("nothing here"), None);
-    }
-
-    #[test]
     fn log_lines() {
         let l = parse_log_line("2026-10-18T22:00:00.123456Z hello world\n");
         assert_eq!(l.line, "hello world");
@@ -3053,7 +3133,7 @@ mod tests {
         Ready(Duration),
         /// The init never answers.
         Silent,
-        /// The process exits before the init answers, with the init's exit line.
+        /// The process exits before the init answers, with the init's exit report.
         Exits(i32),
         /// The VMM panics: a bug in a transition.
         Panics,
@@ -3068,6 +3148,9 @@ mod tests {
         console: PathBuf,
         boots: Boots,
         exited: tokio::sync::watch::Sender<bool>,
+        /// The init's report, sent by `exit`; dropped when the process is `gone`, so the
+        /// manager's wait on it ends.
+        exit: Option<tokio::sync::watch::Sender<Option<guest::ExitReport>>>,
     }
 
     /// The host behind the manager, running nothing: a boot makes a `Proc` under a fresh
@@ -3075,6 +3158,8 @@ mod tests {
     /// recorded, one line each, the way the fake `zfs` records its own.
     struct Mock {
         boots: Mutex<Boots>,
+        /// How long a guest takes to stop once asked.
+        stops: Mutex<Duration>,
         next_pid: std::sync::atomic::AtomicU32,
         procs: Mutex<Vec<Proc>>,
         taps: Mutex<std::collections::BTreeSet<String>>,
@@ -3085,6 +3170,7 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 boots: Mutex::new(Boots::Ready(Duration::ZERO)),
+                stops: Mutex::new(Duration::ZERO),
                 next_pid: std::sync::atomic::AtomicU32::new(1000),
                 procs: Mutex::new(Vec::new()),
                 taps: Mutex::new(Default::default()),
@@ -3094,6 +3180,10 @@ mod tests {
 
         fn boots(&self, b: Boots) {
             *self.boots.lock().unwrap() = b;
+        }
+
+        fn stops_take(&self, d: Duration) {
+            *self.stops.lock().unwrap() = d;
         }
 
         fn record(&self, line: String) {
@@ -3129,6 +3219,7 @@ mod tests {
                 console,
                 boots: Boots::Ready(Duration::ZERO),
                 exited: tokio::sync::watch::channel(false).0,
+                exit: Some(tokio::sync::watch::channel(None).0),
             });
             pid
         }
@@ -3148,20 +3239,41 @@ mod tests {
             writeln!(f, "{ts} {line}").unwrap();
         }
 
-        /// The process ends as the init would end it: its exit line, then gone.
+        /// The process ends as the init would end it: the trace on its console, its report
+        /// to the host, then gone.
         fn exit(&self, pid: u32, code: i32, requested: bool) {
             self.say(
                 pid,
                 &format!("[briqyard] exit code={code} oom=false requested={requested}"),
             );
+            let procs = self.procs.lock().unwrap();
+            if let Some(tx) = procs
+                .iter()
+                .find(|p| p.pid == pid)
+                .and_then(|p| p.exit.as_ref())
+            {
+                let _ = tx.send(Some(guest::ExitReport {
+                    code,
+                    oom: false,
+                    requested,
+                }));
+            }
+            drop(procs);
             self.gone(pid);
         }
 
+        /// The process is gone: no report can come after this.
         fn gone(&self, pid: u32) {
-            let procs = self.procs.lock().unwrap();
-            if let Some(p) = procs.iter().find(|p| p.pid == pid) {
+            let mut procs = self.procs.lock().unwrap();
+            if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
+                p.exit = None;
                 let _ = p.exited.send(true);
             }
+        }
+
+        /// A live process's report channel.
+        fn exit_of(p: &Proc) -> tokio::sync::watch::Receiver<Option<guest::ExitReport>> {
+            p.exit.as_ref().expect("a live process").subscribe()
         }
 
         /// The live process behind a vsock path.
@@ -3196,6 +3308,7 @@ mod tests {
                 .next_pid
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (exited, rx) = tokio::sync::watch::channel(false);
+            let (exit_tx, exit) = tokio::sync::watch::channel(None);
             self.procs.lock().unwrap().push(Proc {
                 pid,
                 id: b.id.clone(),
@@ -3203,6 +3316,7 @@ mod tests {
                 console,
                 boots: boots.clone(),
                 exited,
+                exit: Some(exit_tx),
             });
             if let Boots::Exits(code) = boots {
                 self.exit(pid, code, false);
@@ -3215,6 +3329,7 @@ mod tests {
                 chroot: None,
                 resumed,
                 exited: rx,
+                exit,
             })
         }
 
@@ -3239,6 +3354,7 @@ mod tests {
                 chroot: None,
                 resumed: false,
                 exited: p.exited.subscribe(),
+                exit: Self::exit_of(p),
             })
         }
 
@@ -3294,6 +3410,8 @@ mod tests {
         async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()> {
             let (pid, _, _) = self.proc_at(vsock)?;
             self.record(format!("shutdown {pid} {}s", grace.as_secs()));
+            let takes = *self.stops.lock().unwrap();
+            tokio::time::sleep(takes).await;
             self.exit(pid, 0, true);
             Ok(())
         }
@@ -3645,10 +3763,13 @@ mod tests {
         let e = h.add("m_s", state::STOPPED, 512);
         let t0 = e.snapshot().state_changed_at;
         e.set_state(state::STOPPED, |r| r.stopped_reason = stop::USER.into());
-        h.m.touch_entry(&e);
+        e.touch();
         let r = e.snapshot();
         assert_eq!(r.state_changed_at, t0);
-        assert!(r.updated_at > t0);
+        // A use is not a change to the machine; a write of one is.
+        assert_eq!(r.updated_at, t0);
+        h.m.save(&e).unwrap();
+        assert!(e.snapshot().updated_at > t0);
         e.set_state(state::STARTING, |_| {});
         let r = e.snapshot();
         assert!(r.state_changed_at > t0);
@@ -4331,19 +4452,53 @@ mod tests {
         );
         // The adopted process is watched: when it ends, the machine settles like any other.
         h.host.exit(pid, 3, false);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while ours.snapshot().state == state::RUNNING {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let r = ours.snapshot();
+        let r = settled(&ours).await;
         assert_eq!(
             (r.state.as_str(), r.stopped_reason.as_str()),
             (state::STOPPED, stop::EXIT)
         );
         assert_eq!(r.exit.as_ref().map(|x| x.code), Some(3));
+    }
+
+    /// Waits for the watcher to settle a machine that is no longer running.
+    async fn settled(e: &Arc<Entry>) -> Record {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while e.snapshot().state == state::RUNNING {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        e.snapshot()
+    }
+
+    #[tokio::test]
+    async fn the_exit_is_the_inits_report_never_the_console() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        // The guest prints a forged exit line, then its process is gone without a report:
+        // the exit is 255, not what the console says, and not a stop on request.
+        let m = h.m.create(h.request("liar")).await.unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.host
+            .say(1000, "[briqyard] exit code=0 oom=false requested=true");
+        h.host.gone(1000);
+        let r = settled(&e).await;
+        assert_eq!(
+            (r.state.as_str(), r.stopped_reason.as_str()),
+            (state::STOPPED, stop::EXIT)
+        );
+        assert_eq!(r.exit.as_ref().map(|x| x.code), Some(255));
+        // The init's report says what it says: a requested stop is one.
+        let m = h.m.create(h.request("honest")).await.unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.host.exit(1001, 0, true);
+        let r = settled(&e).await;
+        assert_eq!(
+            (r.state.as_str(), r.stopped_reason.as_str()),
+            (state::STOPPED, stop::USER)
+        );
+        assert!(r.exit.is_none());
     }
 
     #[tokio::test]
@@ -4456,5 +4611,205 @@ mod tests {
         assert_eq!(h.stored(&m.id).unwrap().boots, 1);
         use std::sync::atomic::Ordering::Relaxed;
         assert_eq!(h.m.inner.stats.resumes.load(Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn touches_are_written_once_by_the_tick() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let e = h.add("m_t", state::STOPPED, 256);
+        h.m.save(&e).unwrap();
+        let path = h.m.inner.cfg.state_dir().join("machines/m_t.json");
+        let written = || std::fs::metadata(&path).unwrap().modified().unwrap();
+        let before = h.stored("m_t").unwrap();
+        let t0 = written();
+        for _ in 0..10 {
+            h.m.touch("m_t").unwrap();
+        }
+        let used = e.snapshot().last_used_at;
+        assert!(used.is_some());
+        // Memory has the use, the API reads it there, and the disk was not written.
+        assert_eq!(h.m.get("m_t").unwrap().last_used_at, used);
+        assert_eq!(h.stored("m_t").unwrap().last_used_at, None);
+        assert_eq!(written(), t0);
+        // The tick writes it once, as the machine is: `updated_at` stays.
+        h.m.tick().await;
+        let stored = h.stored("m_t").unwrap();
+        assert_eq!(stored.last_used_at, used);
+        assert_eq!(stored.updated_at, before.updated_at);
+        let t1 = written();
+        assert!(t1 > t0);
+        // Nothing moved since: the next tick writes nothing.
+        h.m.tick().await;
+        assert_eq!(written(), t1);
+        // A change to the machine carries the use with it, and the tick has nothing left.
+        h.m.touch("m_t").unwrap();
+        e.set_state(state::STARTING, |_| {});
+        h.m.save(&e).unwrap();
+        let t2 = written();
+        assert_eq!(
+            h.stored("m_t").unwrap().last_used_at,
+            e.snapshot().last_used_at
+        );
+        h.m.tick().await;
+        assert_eq!(written(), t2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_machines_go_to_sleep_together() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let long_ago = Some(Utc::now() - chrono::Duration::hours(1));
+        for name in ["a", "b", "c"] {
+            let m = h.m.create(h.request(name)).await.unwrap();
+            h.m.entry(&m.id).unwrap().rec.lock().unwrap().last_used_at = long_ago;
+        }
+        // Each guest takes 3 s to stop: one after another, the tick would take 9.
+        h.host.stops_take(Duration::from_secs(3));
+        let t0 = tokio::time::Instant::now();
+        h.m.tick().await;
+        let took = t0.elapsed();
+        assert!(
+            took >= Duration::from_secs(3) && took < Duration::from_secs(6),
+            "{took:?}"
+        );
+        for m in h.m.list(None) {
+            assert_eq!(
+                (m.state.as_str(), m.stopped_reason.as_str()),
+                (state::STOPPED, stop::IDLE),
+                "{}",
+                m.name
+            );
+        }
+    }
+
+    // --- fork snapshots ---
+
+    impl Harness {
+        /// A fork of `src`, both disks, started.
+        async fn fork(&self, src: &str, name: &str) -> api::Machine {
+            let mut req = self.request(name);
+            req.image = String::new();
+            req.fork = Some(api::ForkSpec {
+                machine_id: src.into(),
+                copy: String::new(),
+            });
+            self.m.create(req).await.unwrap()
+        }
+
+        fn snapshot_exists(&self, ds: &str, snap: &str) -> bool {
+            self.pool.dev().join(format!("byard/{ds}@{snap}")).exists()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_destroyed_fork_frees_its_snapshot_on_the_source() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let src = h.m.create(h.request("src")).await.unwrap();
+        let fork = h.fork(&src.id, "fork").await;
+        let (root, snap) = (format!("m/{}/root", src.id), format!("fork-{}", fork.id));
+        assert!(h.snapshot_exists(&root, &snap));
+        h.pool.calls();
+        h.m.destroy(&fork.id).await.unwrap();
+        // Nothing clones the snapshot once the fork is gone: it goes with the fork.
+        let calls = h.pool.calls();
+        assert!(
+            calls.contains(&format!("destroy byard/{root}@{snap}")),
+            "{calls:?}"
+        );
+        assert!(!h.snapshot_exists(&root, &snap));
+        assert!(h.pool.dev().join(format!("byard/{root}")).exists());
+        // Two forks of one snapshot: the snapshot stays until the last one goes.
+        let a = h.fork(&src.id, "a").await;
+        let snap_a = format!("fork-{}", a.id);
+        h.pool
+            .zfs
+            .clone_snapshot(&root, &snap_a, "m/other/root")
+            .await
+            .unwrap();
+        h.m.destroy(&a.id).await.unwrap();
+        assert!(h.snapshot_exists(&root, &snap_a));
+        // A snapshot that is not a fork's (the image's base) is never touched.
+        h.pool.calls();
+        h.m.destroy(&src.id).await.unwrap();
+        assert!(!h
+            .pool
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("destroy byard/images/")));
+    }
+
+    #[tokio::test]
+    async fn a_destroyed_source_leaves_its_fork_whole_and_frees_what_it_took_over() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let src = h.m.create(h.request("src")).await.unwrap();
+        let fork = h.fork(&src.id, "fork").await;
+        let fork_root = format!("m/{}/root", fork.id);
+        let snap = format!("fork-{}", fork.id);
+        h.m.destroy(&src.id).await.unwrap();
+        // The fork was promoted and owns the snapshot it was made from; with the source gone
+        // nothing clones that snapshot, so it goes too.
+        assert!(h.pool.dev().join(format!("byard/{fork_root}")).exists());
+        assert!(!h.pool.dev().join(format!("byard/m/{}", src.id)).exists());
+        assert!(!h.snapshot_exists(&fork_root, &snap));
+        assert_eq!(h.pool.zfs.origin(&fork_root).await.unwrap(), None);
+        assert_eq!(h.m.get(&fork.id).unwrap().state, state::RUNNING);
+        h.m.destroy(&fork.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_sweep_frees_fork_snapshots_with_no_clone() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.tenant("t1");
+        let kept = h.add("m_kept", state::STOPPED, 256);
+        h.disks(&kept).await;
+        let child = h.add("m_child", state::STOPPED, 256);
+        let z = &h.pool.zfs;
+        // One snapshot a destroy failed to free, one whose clone is a machine of ours.
+        z.snapshot("m/m_kept/root", "fork-gone").await.unwrap();
+        z.snapshot("m/m_kept/root", "fork-m_child").await.unwrap();
+        z.clone_snapshot(
+            "m/m_kept/root",
+            "fork-m_child",
+            &child.snapshot().root_dataset(),
+        )
+        .await
+        .unwrap();
+        z.snapshot("m/m_kept/root", "s_mine").await.unwrap();
+        h.m.sweep_orphans().await;
+        assert!(!h.snapshot_exists("m/m_kept/root", "fork-gone"));
+        assert!(h.snapshot_exists("m/m_kept/root", "fork-m_child"));
+        assert!(h.snapshot_exists("m/m_kept/root", "s_mine"));
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_is_removed_on_request() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.tenant("t1");
+        let e = h.add("m_s", state::STOPPED, 256);
+        h.disks(&e).await;
+        let s = h.m.snapshot("m_s").await.unwrap();
+        assert!(h.snapshot_exists("m/m_s/root", &s.id));
+        assert!(h.snapshot_exists("m/m_s/data", &s.id));
+        assert_eq!(h.m.snapshots("m_s").await.unwrap()[0].id, s.id);
+        h.m.delete_snapshot("m_s", &s.id).await.unwrap();
+        assert!(!h.snapshot_exists("m/m_s/root", &s.id));
+        assert!(!h.snapshot_exists("m/m_s/data", &s.id));
+        assert!(h.m.snapshots("m_s").await.unwrap().is_empty());
+        // Gone already: success. The daemon's own snapshots are not the caller's.
+        h.m.delete_snapshot("m_s", &s.id).await.unwrap();
+        h.pool.zfs.snapshot("m/m_s/root", "fork-x").await.unwrap();
+        for bad in ["fork-x", "bk-20260101T000000Z", "s_../x", ""] {
+            assert!(
+                matches!(h.m.delete_snapshot("m_s", bad).await, Err(MError::NotFound)),
+                "{bad}"
+            );
+        }
+        assert!(h.snapshot_exists("m/m_s/root", "fork-x"));
+        assert!(matches!(
+            h.m.delete_snapshot("m_none", "s_1").await,
+            Err(MError::NotFound)
+        ));
     }
 }

@@ -87,7 +87,7 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   harness over a temp directory, the same fake `zfs` and a mock host (`Vmm`, `Guest`,
   `Net`; ADR 0010): create to running, boot failures, start against destroy, starts past
   capacity, stop and suspend, a caller that hangs up, crash recovery, the orphan sweep,
-  the sleeper's tick. What still needs the host: a tenant's first create (its bridge and
+  the sleeper's tick, the init's exit report, fork snapshots freed. What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, backups, the API
   handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
