@@ -1,7 +1,7 @@
 //! The hosts the fleet knows, where each tenant lives, and the decisions made from that:
 //! placement, and when to add or release a host. Pure logic, tested without a network.
 
-use briqyard_api::{Capacity, Host};
+use briqyard_api::{self as api, Capacity, Condition, Host};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -52,6 +52,9 @@ pub struct HostRec {
     pub note: String,
     #[serde(default)]
     pub bootstrap_attempts: u32,
+    /// Memory and disk pressure, from the last heartbeat (ADR 0021).
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
 }
 
 /// The host part of a URL (`http://10.0.0.5:7420` → `10.0.0.5`).
@@ -88,7 +91,19 @@ impl HostRec {
             version: self.version.clone(),
             note: self.note.clone(),
             tls_fingerprint: self.tls_fingerprint.clone(),
+            conditions: self.conditions.clone(),
         }
+    }
+
+    /// Why the host takes nothing new: a condition that is true (ADR 0021).
+    pub fn pressure(&self) -> Option<String> {
+        api::under_pressure(&self.conditions)
+            .map(|c| format!("host {} is under {}: {}", self.id, c.kind, c.message))
+    }
+
+    /// Whether a new tenant may be placed here: ready, under the ceiling, no pressure.
+    fn takes_new_tenants(&self, policy: &Policy) -> bool {
+        self.state == "ready" && self.fill() < policy.fill_ceiling && self.pressure().is_none()
     }
 }
 
@@ -195,6 +210,7 @@ impl Registry {
         entry.tenants = h.tenants.clone();
         entry.version = h.version;
         entry.disk_free_mb = h.disk_free_mb;
+        entry.conditions = h.conditions.clone();
         entry.last_seen = now;
         // A host that answers is ready, whatever it was (down, ordered, failed to bootstrap);
         // only a drain is kept.
@@ -254,10 +270,11 @@ impl Registry {
     }
 
     /// The host of a tenant, or the best host for a new one: the readiest with the most free
-    /// memory under the ceiling, with room for `need_mb` of memory and `need_disk_mb` of disk
-    /// (a host that reports no disk figure is not held to it). What the machine needs is
-    /// reserved on the host until its next heartbeat, so a burst of creates does not all land
-    /// on the host the last heartbeat showed emptiest.
+    /// memory under the ceiling and no pressure, with room for `need_mb` of memory and
+    /// `need_disk_mb` of disk (a host that reports no disk figure is not held to it). What the
+    /// machine needs is reserved on the host until its next heartbeat, so a burst of creates
+    /// does not all land on the host the last heartbeat showed emptiest. A pinned tenant's
+    /// host under pressure is the caller's to refuse (`HostRec::pressure`).
     pub fn place(
         &mut self,
         tenant: &str,
@@ -272,8 +289,7 @@ impl Registry {
                     .hosts
                     .values()
                     .filter(|h| {
-                        h.state == "ready"
-                            && h.fill() < policy.fill_ceiling
+                        h.takes_new_tenants(policy)
                             && h.free_memory_mb() >= need_mb
                             && (h.disk_free_mb == 0 || h.disk_free_mb >= need_disk_mb)
                     })
@@ -328,12 +344,12 @@ impl Registry {
         v
     }
 
-    /// Memory free across ready hosts under the ceiling, and the largest single slot.
+    /// Memory free across the hosts that take new tenants, and the largest single slot.
     pub fn free(&self, policy: &Policy) -> (u32, u32) {
         let mut total = 0;
         let mut largest = 0;
         for h in self.hosts.values() {
-            if h.state != "ready" || h.fill() >= policy.fill_ceiling {
+            if !h.takes_new_tenants(policy) {
                 continue;
             }
             let f = h.free_memory_mb();
@@ -421,7 +437,46 @@ mod tests {
             empty_since: None,
             note: String::new(),
             bootstrap_attempts: 0,
+            conditions: vec![],
         }
+    }
+
+    /// A condition of the host's, true or not.
+    fn condition(kind: &str, status: bool) -> Condition {
+        Condition {
+            kind: kind.into(),
+            status,
+            since: Utc::now(),
+            message: "pool 4.0 GB free of 100.0 (4%), under 10%".into(),
+        }
+    }
+
+    #[test]
+    fn a_host_under_pressure_takes_no_new_tenant() {
+        let now = Utc::now();
+        let mut reg = Registry::default();
+        let mut full = host("a", 100_000, 0, 1);
+        full.conditions = vec![
+            condition(api::condition::MEMORY_PRESSURE, false),
+            condition(api::condition::DISK_PRESSURE, true),
+        ];
+        reg.heartbeat(full, now);
+        reg.heartbeat(host("b", 100_000, 50_000, 5), now);
+        let p = Policy::default();
+        // The emptiest host is under pressure: the new tenant goes to the other one.
+        assert_eq!(reg.place("t1", 512, 0, &p).as_deref(), Some("b"));
+        assert_eq!(
+            reg.hosts["a"].pressure().as_deref(),
+            Some("host a is under disk_pressure: pool 4.0 GB free of 100.0 (4%), under 10%")
+        );
+        assert_eq!(reg.hosts["b"].pressure(), None);
+        // Nor does the scaler count its memory as free.
+        assert_eq!(reg.free(&p), (49_488, 49_488));
+        // The heartbeat that clears it lets it take tenants again.
+        let mut cleared = host("a", 100_000, 0, 1);
+        cleared.conditions = vec![condition(api::condition::DISK_PRESSURE, false)];
+        reg.heartbeat(cleared, now);
+        assert_eq!(reg.place("t2", 512, 0, &p).as_deref(), Some("a"));
     }
 
     #[test]

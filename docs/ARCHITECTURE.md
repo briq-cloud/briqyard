@@ -202,6 +202,22 @@ new event as NDJSON with `{}` every 30 s, and closes a watcher that falls 1,024 
 Retention is `events_keep_days` and 100,000 events. The fleet sends a tenant's or a machine's
 read to its host and merges a read of every host, never partial, with a cursor per host.
 
+### Metrics and conditions
+
+The tick's measure is also what the host shows (ADR 0021): each machine's meter keeps its
+counters' totals since the daemon started, the cgroup's memory and the last two readings, and
+`/metrics` formats them with each machine's `machine`, `tenant`, `name` and `role` labels, so a
+scrape probes nothing. `GET /v1/top` takes CPU percent and network rates from the last two
+readings, 15 s apart. After the measure the tick reads the pool once and decides the host's
+conditions (`conditions.rs`): `memory_pressure`, committed memory over `memory_pct` of
+capacity; `disk_pressure`, the pool's free space under `disk_free_pct`. A change is a
+`host_condition` event; `/v1/status` and the heartbeat carry them. Under disk pressure the tick
+removes unused images (no clone, no record naming them), oldest first, counting what each took
+as freed, until the pool is back over the threshold. The console is written by the daemon's
+`console::Writer`, line by line under one lock, and rotated past `console_max_mb` to
+`console.<offset>.log`, named after where it starts: a `/logs` cursor is an offset in the whole
+console and reads across both files.
+
 ### Sleep
 
 Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the
@@ -223,7 +239,9 @@ each machine a quarter-second wake on its next use.
 `briqyard-fleet` offers the same machine API as a daemon and forwards each request to the host
 that runs the machine. It places each tenant on one host: a tenant's machines share a host, so
 its private network needs no overlay. Placement picks, among ready hosts under the fill
-ceiling, the one with the most free memory; a fork lands where its source is. What a placement
+ceiling and with no condition true, the one with the most free memory; a fork lands where its
+source is, and a tenant's host or a fork's source's with a condition true answers 503 `capacity`
+before it is asked. What a placement
 puts on a host is counted as used there until the host's next heartbeat, so a burst of creates
 spreads; a host that answers `capacity` for a tenant's first machine loses the pin, so the
 retry is placed afresh. A tenant's gateway goes to the tenant's host (`GET /v1/tenants/{id}`

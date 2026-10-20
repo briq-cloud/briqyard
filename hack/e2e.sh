@@ -335,6 +335,19 @@ check "usage: stopped, disk hours go on" 'above "$U" root_gb_hours "$d0"'
 check "usage: a range off the hour is refused" '! briqyard usage --from "${from%:00:00Z}:30:00Z" --to "$(date -u -d "+1 hour" +%Y-%m-%dT%H:00:00Z)" >/dev/null 2>&1'
 briqyard machine rm "$U" >/dev/null
 
+echo "== metrics, top, conditions"
+M=$(briqyard machine run --image alpine:3.20 --name top --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+metrics=$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics")
+check "metrics: the machine's CPU series" 'echo "$metrics" | grep -q "^briqyard_machine_cpu_seconds_total{machine=\"$M\",tenant=\"$T\",name=\"top\"} "'
+check "metrics: its state, running"      'echo "$metrics" | grep -qx "briqyard_machine_state{machine=\"$M\",tenant=\"$T\",name=\"top\",state=\"running\"} 1"'
+check "top lists it"                      'briqyard top --tenant "$T" | grep -q "^$M "'
+# Rates need two ticks, 15 s apart.
+windowed() { briqyard top --tenant "$T" --json | jq -e ".[] | select(.machine_id == \"$M\") | .window_sec > 0" >/dev/null; }
+for i in $(seq 1 25); do windowed && break; sleep 2; done
+check "top: rates over the last window"   'windowed'
+check "status: no condition true"         'briqyard status | jq -e "(.conditions | map(.type) | sort) == [\"disk_pressure\", \"memory_pressure\"] and all(.conditions[]; .status == false)" >/dev/null'
+briqyard machine rm "$M" >/dev/null
+
 if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then
   echo "== daemon crash: running machines are adopted"
   K=$(briqyard machine run --image alpine:3.20 --name survivor --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)

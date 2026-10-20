@@ -100,7 +100,12 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   versions (each transition's event and reason, a boot and a start failure, an exit and its
   restart, suspend and resume, the gateway, PATCH, a stale `If-Match`, the seq past the
   records at load, the route's pages, watch and 410; the log itself: seqs across a restart, a
-  torn line, retention, a watch's backlog, lag, heartbeat and shutdown), probes (readiness and
+  torn line, retention, a watch's backlog, lag, heartbeat and shutdown), metrics and
+  conditions (the exposition of machines in every state checked line by line and against the
+  format, no probe per scrape, conditions turning true and clearing with their events, a pool
+  that cannot be read, image removal under disk pressure oldest unused first, `top` from two
+  ticks, the console rotated while two tasks write with no line lost, logs across the rotated
+  file, placement and creates refused on a host under pressure), probes (readiness and
   its events, `/wait` for ready and its `not_ready`, a startup failure that fails the boot and
   one that is a crash, liveness under `on-failure` and `no`, the backoff, its reset and
   `crash_loop`, the ingress waiting for a woken machine, the host's turns, a PATCH on a running
@@ -118,8 +123,10 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   live, drops shown, a download capped at 2 Mbit/s), usage (running seconds, internet and
   ingress bytes, a stopped machine's disk hours), events (a watch from before a stop gets it,
   a stale `If-Match` refused, `describe`, the reasons in order, a cursor past the log
-  refused), probes (an HTTP readiness probe: not ready, then ready and its event, `wait`; an
-  exec liveness probe that fails: `liveness_failed`, restarted, running again). 103 checks.
+  refused), metrics (a running machine's CPU and state series, `top` lists it with rates after
+  two ticks, no condition true on a healthy host), probes (an HTTP readiness probe: not ready, then
+  ready and its event, `wait`; an exec liveness probe that fails: `liveness_failed`, restarted,
+  running again). 108 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,

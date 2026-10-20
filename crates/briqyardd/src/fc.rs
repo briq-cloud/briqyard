@@ -354,18 +354,14 @@ impl Process {
         dir: &Path,
         pci: bool,
         jail: Option<&Jail>,
+        console_max: u64,
     ) -> Result<Self> {
         tokio::fs::create_dir_all(dir).await?;
         let (api, vsock, console, fclog) = paths_for(dir, jail, id);
         let _ = tokio::fs::remove_file(&api).await;
         let _ = tokio::fs::remove_file(&vsock).await;
         // The console holds what the guest prints, the jailer's errors included: ours alone.
-        let out = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&console)
-            .await?;
+        let out = crate::console::Writer::open(dir, console_max).await?;
         // Firecracker's log levels are Error, Warning, Info, Debug, Trace.
         let (mut cmd, chroot, uid, gid) = match jail {
             Some(j) => {
@@ -631,6 +627,8 @@ pub struct Firecracker {
     pub binary: PathBuf,
     /// Firecracker's PCI transport.
     pub pci: bool,
+    /// A console past this size is rotated while the machine runs (ADR 0021).
+    pub console_max: u64,
 }
 
 #[async_trait]
@@ -638,8 +636,15 @@ impl Vmm for Firecracker {
     async fn boot(&self, b: &Boot) -> Result<Vm> {
         let mut resume = b.resume;
         let (proc, exit) = loop {
-            let mut proc =
-                Process::start(&self.binary, &b.id, &b.dir, self.pci, b.jail.as_ref()).await?;
+            let mut proc = Process::start(
+                &self.binary,
+                &b.id,
+                &b.dir,
+                self.pci,
+                b.jail.as_ref(),
+                self.console_max,
+            )
+            .await?;
             let exit = match listen_exit(&proc.vsock, proc.uid, proc.gid, proc.done()) {
                 Ok(rx) => rx,
                 Err(err) => {
@@ -932,7 +937,7 @@ fn place_file(root: &Path, host: &Path, name: &str, uid: u32, gid: u32) -> Resul
 /// Copies console lines with a timestamp in front of each.
 async fn stamp<R: tokio::io::AsyncRead + Unpin>(
     r: R,
-    out: std::sync::Arc<tokio::sync::Mutex<tokio::fs::File>>,
+    out: std::sync::Arc<tokio::sync::Mutex<crate::console::Writer>>,
 ) {
     let mut lines = BufReader::new(r);
     let mut line = Vec::new();
@@ -943,16 +948,9 @@ async fn stamp<R: tokio::io::AsyncRead + Unpin>(
             Ok(_) => {}
         }
         let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
-        let mut o = out.lock().await;
-        let _ = o.write_all(ts.as_bytes()).await;
-        let _ = o.write_all(b" ").await;
-        let _ = o.write_all(&line).await;
-        if !line.ends_with(b"\n") {
-            let _ = o.write_all(b"\n").await;
-        }
+        let _ = out.lock().await.line(&ts, &line).await;
     }
-    let mut o = out.lock().await;
-    let _ = o.flush().await;
+    let _ = out.lock().await.flush().await;
 }
 
 #[cfg(test)]
@@ -1464,10 +1462,7 @@ mod tests {
     async fn console_lines_are_stamped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("console.log");
-        let f = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
+        let f = crate::console::Writer::open(dir.path(), 1 << 20)
             .await
             .unwrap();
         let out = std::sync::Arc::new(tokio::sync::Mutex::new(f));

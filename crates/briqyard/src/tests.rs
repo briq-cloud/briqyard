@@ -887,6 +887,20 @@ fn the_host_table() {
         version: "0.1.0".into(),
         note: String::new(),
         tls_fingerprint: "ab".repeat(32),
+        conditions: vec![
+            api::Condition {
+                kind: "memory_pressure".into(),
+                status: false,
+                since: ts(),
+                message: "8192 MB of 64000 committed (12%)".into(),
+            },
+            api::Condition {
+                kind: "disk_pressure".into(),
+                status: true,
+                since: ts(),
+                message: "pool 4.0 GB free of 100.0 (4%), under 10%".into(),
+            },
+        ],
     };
     let ordered = api::Host {
         id: "h_srv-9".into(),
@@ -899,11 +913,16 @@ fn the_host_table() {
         note: "bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
             .into(),
         tls_fingerprint: String::new(),
+        conditions: vec![],
         ..ready.clone()
     };
     let out = host_table(&[ready, ordered]);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 5, "a pin and a note take a line each");
+    assert_eq!(
+        lines.len(),
+        6,
+        "a pin, a true condition and a note take a line each"
+    );
     assert_eq!(
         lines[0],
         "ID               URL                          STATE        MEMORY MB      VCPUS      MACHINES  TENANTS  LAST SEEN"
@@ -918,14 +937,65 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[3],
+        "                 disk_pressure since 2026-10-19 08:30:00: pool 4.0 GB free of 100.0 (4%), under 10%",
+        "a false condition takes no line"
+    );
+    assert_eq!(
+        lines[4],
         "h_srv-9          -                            provisioning 0/0            0/0        0         0        2026-10-19T08:30:00+00:00",
         "no address yet shows as -"
     );
     assert_eq!(
-        lines[4],
+        lines[5],
         "                 note: bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
     );
     assert!(out.ends_with('\n'));
+}
+
+#[test]
+fn top_takes_a_tenant() {
+    match parse(&["top", "--tenant", "t1"]).cmd {
+        Cmd::Top { tenant, json } => assert_eq!((tenant.as_deref(), json), (Some("t1"), false)),
+        _ => panic!("not a top"),
+    }
+    assert!(matches!(
+        parse(&["top", "--json"]).cmd,
+        Cmd::Top {
+            tenant: None,
+            json: true
+        }
+    ));
+}
+
+#[test]
+fn the_top_table_puts_the_busiest_first() {
+    let m = |id: &str, name: &str, cpu: f64| api::TopMachine {
+        machine_id: id.into(),
+        tenant: "t1".into(),
+        name: name.into(),
+        cpu_percent: cpu,
+        memory_bytes: 100 << 20,
+        memory_limit_bytes: 512 << 20,
+        disk_used_bytes: 2048 << 20,
+        internet_in_bytes_per_sec: 2048.0,
+        internet_out_bytes_per_sec: 512.0,
+        ingress_in_bytes_per_sec: 0.0,
+        ingress_out_bytes_per_sec: 10240.0,
+        window_sec: 15.0,
+        host: "h1".into(),
+        ..Default::default()
+    };
+    let out = top_table(vec![m("m_1", "idle", 0.5), m("m_2", "busy", 87.25)]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "MACHINE          TENANT     NAME            CPU %     MEMORY MB   DISK MB   INTERNET IN/OUT    INGRESS IN/OUT HOST",
+            "m_2              t1         busy             87.2       100/512      2048           2.0/0.5          0.0/10.0 h1",
+            "m_1              t1         idle              0.5       100/512      2048           2.0/0.5          0.0/10.0 h1",
+        ]
+    );
+    assert_eq!(top_table(vec![]).lines().count(), 1, "the header alone");
 }
 
 #[test]
