@@ -95,8 +95,8 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   restart, suspend and resume, the gateway, PATCH, a stale `If-Match`, the seq past the
   records at load, the route's pages, watch and 410; the log itself: seqs across a restart, a
   torn line, retention, a watch's backlog, lag, heartbeat and shutdown). What still needs the host: a tenant's first create (its bridge and
-  the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, backups, the API
-  handlers; those stay with the e2e suite).
+  the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, backups and their
+  event, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
