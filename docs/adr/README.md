@@ -20,3 +20,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0012](0012-host-exposure-and-forwarding-policy.md) | The host exposes its ports to `allowed_clients` only and refuses a public bind without them; forward drops by default; every TAP pinned to its address |
 | [0013](0013-fleet-trust-and-capacity.md) | Fleet: one token per host, capacity reserved at placement, a tenant released by hand |
 | [0014](0014-jail-and-snapshots-on-the-pool.md) | Machine files: jails and memory snapshots on the pool, everything the daemon writes for itself alone |
+| [0015](0015-egress-policy.md) | Egress per machine: open, via a gateway machine, or none; enforced on the host, never by the guest |

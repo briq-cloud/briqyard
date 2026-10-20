@@ -48,6 +48,7 @@ docs/                   architecture, operations, development, mesh design, adr/
 - The API stays briq-shaped (tenant, name, metadata `briq_id`); a new field gets its OpenAPI entry and its CLI column in the same change.
 - Errors carry what failed and what was being done. The daemon logs one JSON line per event, nothing else on stdout. Never log a token or a secret.
 - Lima and Mac specifics live only in `hack/config.dev.yaml`, `hack/vm.sh` and `docs/DEVELOPMENT.md`.
+- **briqyard replaces Fly.** Nothing here exists to match a Fly limitation or to keep a Fly workaround working; when briq's control plane carries one, briqyard offers the native primitive and the control plane drops the workaround.
 
 ## Git
 
