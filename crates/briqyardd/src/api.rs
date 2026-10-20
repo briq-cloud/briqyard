@@ -113,6 +113,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/images", get(list_images))
         .route("/v1/images/:key", axum::routing::delete(delete_image))
         .route("/v1/usage", get(usage))
+        .route("/v1/top", get(top))
         .route("/v1/events", get(events))
         .route("/v1/tenants", get(list_tenants))
         .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
@@ -273,7 +274,7 @@ async fn metrics(State(st): S) -> Response {
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        st.mgr.metrics().await,
+        st.mgr.metrics(),
     )
         .into_response()
 }
@@ -289,6 +290,7 @@ async fn status(State(st): S) -> Json<api::Status> {
         running,
         disk_free_mb: st.mgr.disk_free_mb().await,
         tls_fingerprint: st.tls_fingerprint.clone(),
+        conditions: st.mgr.conditions(),
     })
 }
 
@@ -558,6 +560,11 @@ async fn delete_image(State(st): S, Path(key): Path<String>) -> Result<StatusCod
     let m = st.mgr.clone();
     detached(async move { m.delete_image(&key).await }).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The running machines' use over the tick's last window (ADR 0021).
+async fn top(State(st): S, Query(q): Query<ListQuery>) -> Json<Vec<api::TopMachine>> {
+    Json(st.mgr.top(q.tenant.as_deref()))
 }
 
 #[derive(Deserialize)]

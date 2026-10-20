@@ -1,7 +1,9 @@
 //! briqyardd runs machines on one server.
 
 mod api;
+mod conditions;
 mod config;
+mod console;
 mod events;
 mod fc;
 mod guestc;
@@ -9,6 +11,7 @@ mod heartbeat;
 mod image;
 mod ingress;
 mod machine;
+mod metrics;
 mod netw;
 mod objstore;
 mod store;

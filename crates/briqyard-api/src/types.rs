@@ -691,6 +691,9 @@ pub mod reason {
     pub const IMAGE_PULLED: &str = "image_pulled";
     pub const HOST_STARTED: &str = "host_started";
     pub const ADOPTED: &str = "adopted";
+    /// A host condition changed (ADR 0021).
+    pub const HOST_CONDITION: &str = "host_condition";
+    pub const IMAGE_REMOVED: &str = "image_removed";
     pub const ALL: &[&str] = &[
         CREATED,
         FORKED,
@@ -715,6 +718,8 @@ pub mod reason {
         IMAGE_PULLED,
         HOST_STARTED,
         ADOPTED,
+        HOST_CONDITION,
+        IMAGE_REMOVED,
     ];
 }
 
@@ -777,6 +782,60 @@ pub struct Capacity {
     pub vcpus: u32,
 }
 
+/// Host condition types (ADR 0021), as Kubernetes's node conditions. Each is a pressure:
+/// true is trouble, and the fleet places nothing new on the host while one is.
+pub mod condition {
+    /// Committed memory over `conditions.memory_pct` of capacity.
+    pub const MEMORY_PRESSURE: &str = "memory_pressure";
+    /// The pool's free space under `conditions.disk_free_pct` of its size.
+    pub const DISK_PRESSURE: &str = "disk_pressure";
+    pub const ALL: &[&str] = &[MEMORY_PRESSURE, DISK_PRESSURE];
+}
+
+/// A host condition as the daemon's tick last found it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Condition {
+    /// One of `condition::ALL`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub status: bool,
+    /// When `status` last changed (the daemon's start, until it does).
+    pub since: DateTime<Utc>,
+    /// The figures it was decided on.
+    pub message: String,
+}
+
+/// The first condition that is true, if any.
+pub fn under_pressure(conditions: &[Condition]) -> Option<&Condition> {
+    conditions.iter().find(|c| c.status)
+}
+
+/// A running machine's use over the tick's last window (ADR 0021). `GET /v1/top`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TopMachine {
+    pub machine_id: String,
+    pub tenant: String,
+    pub name: String,
+    /// `gateway` for a tenant's gateway; absent for the tenant's machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// CPU time over the window, in percent of one CPU.
+    pub cpu_percent: f64,
+    pub memory_bytes: u64,
+    /// Its size's memory.
+    pub memory_limit_bytes: u64,
+    pub disk_used_bytes: u64,
+    pub internet_in_bytes_per_sec: f64,
+    pub internet_out_bytes_per_sec: f64,
+    pub ingress_in_bytes_per_sec: f64,
+    pub ingress_out_bytes_per_sec: f64,
+    /// The seconds between the two measures the rates are taken from; 0 until there are two.
+    pub window_sec: f64,
+    /// The host it runs on (fleet).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host: String,
+}
+
 /// A briqyardd as the fleet sees it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Host {
@@ -803,6 +862,9 @@ pub struct Host {
     /// plain HTTP (ADR 0020).
     #[serde(default)]
     pub tls_fingerprint: String,
+    /// What its last heartbeat said (ADR 0021).
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
 }
 
 /// POST /v1/hosts/order (fleet only).
@@ -835,6 +897,9 @@ pub struct RegisterHostRequest {
     /// refuses a heartbeat whose fingerprint is not the one it pinned (ADR 0020).
     #[serde(default)]
     pub tls_fingerprint: String,
+    /// The host's conditions (ADR 0021): the fleet places nothing new while one is true.
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
 }
 
 /// GET /v1/status.
@@ -852,6 +917,9 @@ pub struct Status {
     /// The SHA-256 of the API's certificate; empty when the API is plain HTTP (ADR 0020).
     #[serde(default)]
     pub tls_fingerprint: String,
+    /// Memory and disk pressure, as the tick last found them (ADR 0021).
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
 }
 
 /// Every error response's body.
@@ -1456,6 +1524,7 @@ mod tests {
         expected["tenants"] = json!([]);
         expected["version"] = json!("");
         expected["tls_fingerprint"] = json!("");
+        expected["conditions"] = json!([]);
         let h: Host = round_trip(input, expected);
         assert_eq!(h.note, "");
         let h: Host = same(json!({
@@ -1463,9 +1532,15 @@ mod tests {
             "state": "draining", "capacity": {"memory_mb": 65536, "vcpus": 16},
             "used": {"memory_mb": 1024, "vcpus": 2}, "machines": 2, "tenants": ["t1", "t2"],
             "last_seen": "2026-01-02T03:04:05Z", "version": "0.1.0", "note": "ordered",
-            "tls_fingerprint": "ab01"
+            "tls_fingerprint": "ab01",
+            "conditions": [{"type": "disk_pressure", "status": true,
+                "since": "2026-01-02T03:04:05Z", "message": "pool 4% free"}]
         }));
         assert_eq!(h.tenants, vec!["t1", "t2"]);
+        assert_eq!(
+            under_pressure(&h.conditions).map(|c| c.kind.as_str()),
+            Some(condition::DISK_PRESSURE)
+        );
     }
 
     #[test]
@@ -1482,7 +1557,7 @@ mod tests {
                 "id": "h1", "url": "http://10.0.0.5:7420", "region": "",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
                 "machines": 0, "tenants": [], "version": "", "disk_free_mb": 0,
-                "tls_fingerprint": ""
+                "tls_fingerprint": "", "conditions": []
             }),
         );
         assert_eq!(r.region, "");
@@ -1490,7 +1565,9 @@ mod tests {
             "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1",
             "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 512, "vcpus": 1},
             "machines": 1, "tenants": ["t1"], "version": "0.1.0", "disk_free_mb": 100000,
-            "tls_fingerprint": "ab01"
+            "tls_fingerprint": "ab01",
+            "conditions": [{"type": "memory_pressure", "status": false,
+                "since": "2026-01-02T03:04:05Z", "message": "512 MB of 65536 committed (0%)"}]
         }));
         assert_eq!(r.disk_free_mb, 100000);
         assert_eq!(r.tls_fingerprint, "ab01");
@@ -1508,10 +1585,52 @@ mod tests {
             json!({
                 "version": "0.1.0", "host_id": "h1",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
-                "machines": 3, "running": 1, "disk_free_mb": 0, "tls_fingerprint": ""
+                "machines": 3, "running": 1, "disk_free_mb": 0, "tls_fingerprint": "",
+                "conditions": []
             }),
         );
         assert_eq!(s.running, 1);
+        let s: Status = same(json!({
+            "version": "0.1.0", "host_id": "h1",
+            "capacity": {"memory_mb": 1000, "vcpus": 16}, "used": {"memory_mb": 990, "vcpus": 2},
+            "machines": 3, "running": 3, "disk_free_mb": 10, "tls_fingerprint": "",
+            "conditions": [
+                {"type": "memory_pressure", "status": true, "since": "2026-01-02T03:04:05Z",
+                 "message": "990 MB of 1000 committed (99%), over 95%"},
+                {"type": "disk_pressure", "status": false, "since": "2026-01-02T03:04:05Z",
+                 "message": "pool 50% free"}
+            ]
+        }));
+        assert_eq!(
+            under_pressure(&s.conditions).map(|c| c.kind.as_str()),
+            Some(condition::MEMORY_PRESSURE)
+        );
+        // A condition without its status or time is refused, not read as fine.
+        assert!(serde_json::from_value::<Condition>(
+            json!({"type": "disk_pressure", "message": ""})
+        )
+        .is_err());
+        assert_eq!(condition::ALL, ["memory_pressure", "disk_pressure"]);
+    }
+
+    #[test]
+    fn top_machine() {
+        let t: TopMachine = same(json!({
+            "machine_id": "m_1", "tenant": "t1", "name": "db", "cpu_percent": 12.5,
+            "memory_bytes": 104857600, "memory_limit_bytes": 536870912,
+            "disk_used_bytes": 2147483648u64, "internet_in_bytes_per_sec": 10.0,
+            "internet_out_bytes_per_sec": 2.5, "ingress_in_bytes_per_sec": 0.0,
+            "ingress_out_bytes_per_sec": 1000.0, "window_sec": 15.0
+        }));
+        assert_eq!((t.role, t.host.as_str()), (None, ""));
+        let g: TopMachine = same(json!({
+            "machine_id": "m_2", "tenant": "t1", "name": "gateway", "role": "gateway",
+            "cpu_percent": 0.0, "memory_bytes": 0, "memory_limit_bytes": 268435456,
+            "disk_used_bytes": 0, "internet_in_bytes_per_sec": 0.0,
+            "internet_out_bytes_per_sec": 0.0, "ingress_in_bytes_per_sec": 0.0,
+            "ingress_out_bytes_per_sec": 0.0, "window_sec": 0.0, "host": "h1"
+        }));
+        assert_eq!(g.role.as_deref(), Some("gateway"));
     }
 
     #[test]
@@ -1629,7 +1748,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), reason::ALL.len());
-        assert_eq!(all.len(), 23);
+        assert_eq!(all.len(), 25);
         assert!(all
             .iter()
             .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));

@@ -1,11 +1,14 @@
 //! Machines: their records, disks, network and Firecracker processes, and every lifecycle
 //! transition. One `Manager` per daemon.
 
+use crate::conditions::{self, Conditions};
 use crate::config::Config;
+use crate::console;
 use crate::events::{self, Ev, Events};
 use crate::fc;
 use crate::guestc;
-use crate::image::{self, Builder, ImageConfig};
+use crate::image::{self, Builder, ImageConfig, Removal};
+use crate::metrics;
 use crate::netw::{self, dns::Resolver, host, nft, nft::Ruleset, Range, Subnet};
 use crate::objstore::ObjectStore;
 use crate::store::Store;
@@ -231,14 +234,19 @@ fn held(r: &Record) -> usage::Held {
     }
 }
 
+/// A role as the API names it.
+fn role_name(role: Option<Role>) -> Option<String> {
+    role.map(|role| match role {
+        Role::Gateway => "gateway".to_string(),
+    })
+}
+
 /// Who a usage bucket is about, as the record says now.
 fn usage_identity(r: &Record) -> api::UsageBucket {
     api::UsageBucket {
         machine_id: r.id.clone(),
         tenant: r.tenant.clone(),
-        role: r.role.map(|role| match role {
-            Role::Gateway => "gateway".to_string(),
-        }),
+        role: role_name(r.role),
         metadata: r.metadata.clone(),
         size: r.size,
         ..Default::default()
@@ -320,9 +328,6 @@ pub struct EndpointRec {
     pub created_at: DateTime<Utc>,
 }
 
-/// A console log past this size is rotated at the next cold boot.
-const CONSOLE_ROTATE_BYTES: u64 = 32 << 20;
-
 /// Idle machines the sleeper stops at once.
 const SLEEPS_AT_ONCE: usize = 8;
 
@@ -389,9 +394,16 @@ impl Entry {
         {
             let mut r = self.rec.lock().unwrap();
             if r.state != state {
-                self.meter.lock().unwrap().advance(Utc::now(), held(&r));
+                let now = Utc::now();
+                let mut m = self.meter.lock().unwrap();
+                m.advance(now, held(&r));
+                if r.state == state::STARTING && state == state::RUNNING {
+                    let took = now - r.state_changed_at;
+                    m.boot_seconds = Some(took.num_microseconds().unwrap_or(0) as f64 / 1e6);
+                }
+                drop(m);
                 r.state = state.into();
-                r.state_changed_at = Utc::now();
+                r.state_changed_at = now;
             }
             if let Some(ev) = f(&mut r) {
                 self.note_locked(&mut r, ev);
@@ -455,6 +467,9 @@ struct Inner {
     usage: Mutex<Ledger>,
     /// What happened on the host (ADR 0019).
     events: Events,
+    /// The pool's space as the tick last read it, and the conditions it decided (ADR 0021).
+    pool: Mutex<Option<crate::zfs::Pool>>,
+    conditions: Mutex<Conditions>,
 }
 
 #[derive(Clone)]
@@ -526,6 +541,7 @@ impl Manager {
             vmm: Arc::new(fc::Firecracker {
                 binary: cfg.firecracker.clone(),
                 pci: cfg.pci,
+                console_max: (cfg.console_max_mb as u64) << 20,
             }),
             guest: Arc::new(guestc::Vsock),
             net: Arc::new(host::HostNet),
@@ -548,6 +564,8 @@ impl Manager {
             boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),
             usage: Mutex::new(ledger),
             events,
+            pool: Mutex::new(None),
+            conditions: Mutex::new(Conditions::new(Utc::now())),
         });
         let m = Self { inner };
         m.load()?;
@@ -1753,7 +1771,7 @@ impl Manager {
         if !key.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(MError::NotFound);
         }
-        match self.inner.images.remove(key).await? {
+        match self.inner.images.remove(key, Removal::Request).await? {
             true => Ok(()),
             false => Err(MError::Conflict("machines still use this image".into())),
         }
@@ -1788,52 +1806,131 @@ impl Manager {
         Ok(st)
     }
 
-    /// The Prometheus exposition of what the host does.
-    pub async fn metrics(&self) -> String {
+    /// `/metrics` (ADR 0021): the host's figures and each machine's from the tick's last
+    /// measure. Nothing is probed here: a scrape costs the same however often it comes.
+    pub fn metrics(&self) -> String {
         use std::sync::atomic::Ordering::Relaxed;
-        let mut by_state: std::collections::BTreeMap<String, usize> = Default::default();
-        let mut suspended = 0;
-        {
-            let machines = self.inner.machines.lock().unwrap();
-            for e in machines.values() {
+        let mut entries: Vec<Arc<Entry>> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        entries.sort_by_key(|e| e.snapshot().id);
+        let mut host = metrics::Host::default();
+        let machines: Vec<metrics::Machine> = entries
+            .iter()
+            .map(|e| {
                 let r = e.rec.lock().unwrap();
-                *by_state.entry(r.state.clone()).or_default() += 1;
-                if r.suspended {
-                    suspended += 1;
+                let m = e.meter.lock().unwrap();
+                *host.by_state.entry(r.state.clone()).or_default() += 1;
+                host.suspended += r.suspended as usize;
+                metrics::Machine {
+                    id: r.id.clone(),
+                    tenant: r.tenant.clone(),
+                    name: r.name.clone(),
+                    role: role_name(r.role),
+                    state: r.state.clone(),
+                    counted: m.counted(),
+                    memory_bytes: m.memory_bytes,
+                    memory_limit_bytes: (r.size.memory_mb as u64) << 20,
+                    disk_used_bytes: m.disks.used + m.disks.snapshots,
+                    restarts: m.restarts,
+                    boot_seconds: m.boot_seconds,
                 }
-            }
-        }
-        // Host-level: every machine on the host, gateways included.
-        let total: usize = by_state.values().sum();
+            })
+            .collect();
         let (used, _, _) = self.usage();
         let cap = self.capacity();
-        let tenants = self.inner.tenants.lock().unwrap().len();
-        let endpoints = self.inner.endpoints.lock().unwrap().len();
-        let disk_free = self.disk_free_mb().await;
         let st = &self.inner.stats;
-        let mut out = String::new();
-        out.push_str("# HELP briqyard_machines Machines on this host, by state.\n# TYPE briqyard_machines gauge\n");
-        for (state, n) in &by_state {
-            out.push_str(&format!("briqyard_machines{{state=\"{state}\"}} {n}\n"));
-        }
-        out.push_str(&format!(
-            "briqyard_machines_total {total}\nbriqyard_machines_suspended {suspended}\n"
-        ));
-        out.push_str(&format!("# TYPE briqyard_tenants gauge\nbriqyard_tenants {tenants}\n# TYPE briqyard_endpoints gauge\nbriqyard_endpoints {endpoints}\n"));
-        out.push_str(&format!("# TYPE briqyard_memory_mb gauge\nbriqyard_memory_mb{{kind=\"used\"}} {}\nbriqyard_memory_mb{{kind=\"capacity\"}} {}\n", used.memory_mb, cap.memory_mb));
-        out.push_str(&format!("# TYPE briqyard_vcpus gauge\nbriqyard_vcpus{{kind=\"used\"}} {}\nbriqyard_vcpus{{kind=\"capacity\"}} {}\n", used.vcpus, cap.vcpus));
-        out.push_str(&format!(
-            "# TYPE briqyard_disk_free_mb gauge\nbriqyard_disk_free_mb {disk_free}\n"
-        ));
-        out.push_str(&format!(
-            "# TYPE briqyard_boots_total counter\nbriqyard_boots_total {}\n# TYPE briqyard_resumes_total counter\nbriqyard_resumes_total {}\n# TYPE briqyard_suspends_total counter\nbriqyard_suspends_total {}\n# TYPE briqyard_execs_total counter\nbriqyard_execs_total {}\n# TYPE briqyard_starts_failed_total counter\nbriqyard_starts_failed_total {}\n# TYPE briqyard_backups_total counter\nbriqyard_backups_total {}\n",
-            st.boots.load(Relaxed),
-            st.resumes.load(Relaxed),
-            st.suspends.load(Relaxed),
-            st.execs.load(Relaxed),
-            st.starts_failed.load(Relaxed),
-            st.backups.load(Relaxed)
-        ));
+        host.tenants = self.inner.tenants.lock().unwrap().len();
+        host.endpoints = self.inner.endpoints.lock().unwrap().len();
+        host.memory_mb = (used.memory_mb, cap.memory_mb);
+        host.vcpus = (used.vcpus, cap.vcpus);
+        host.pool = *self.inner.pool.lock().unwrap();
+        host.conditions = self.conditions();
+        host.events = self.inner.events.emitted();
+        host.counters = vec![
+            (
+                "briqyard_boots_total",
+                "Cold boots since the daemon started.",
+                st.boots.load(Relaxed),
+            ),
+            (
+                "briqyard_resumes_total",
+                "Resumes from a memory snapshot.",
+                st.resumes.load(Relaxed),
+            ),
+            (
+                "briqyard_suspends_total",
+                "Stops with a memory snapshot.",
+                st.suspends.load(Relaxed),
+            ),
+            (
+                "briqyard_execs_total",
+                "Commands run in machines.",
+                st.execs.load(Relaxed),
+            ),
+            (
+                "briqyard_starts_failed_total",
+                "Starts that failed.",
+                st.starts_failed.load(Relaxed),
+            ),
+            (
+                "briqyard_backups_total",
+                "Backups sent to the store.",
+                st.backups.load(Relaxed),
+            ),
+        ];
+        metrics::render(&host, &machines)
+    }
+
+    /// The host's conditions as the tick last decided them.
+    pub fn conditions(&self) -> Vec<api::Condition> {
+        self.inner.conditions.lock().unwrap().list()
+    }
+
+    /// The running machines' use over the tick's last window (ADR 0021), of one tenant or
+    /// all, gateways included, by tenant then name.
+    pub fn top(&self, tenant: Option<&str>) -> Vec<api::TopMachine> {
+        let entries: Vec<Arc<Entry>> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        let mut out: Vec<api::TopMachine> = entries
+            .iter()
+            .filter_map(|e| {
+                let r = e.rec.lock().unwrap();
+                if r.state != state::RUNNING || tenant.is_some_and(|t| r.tenant != t) {
+                    return None;
+                }
+                let m = e.meter.lock().unwrap();
+                let rates = m.rates();
+                Some(api::TopMachine {
+                    machine_id: r.id.clone(),
+                    tenant: r.tenant.clone(),
+                    name: r.name.clone(),
+                    role: role_name(r.role),
+                    cpu_percent: rates.cpu_percent,
+                    memory_bytes: m.memory_bytes,
+                    memory_limit_bytes: (r.size.memory_mb as u64) << 20,
+                    disk_used_bytes: m.disks.used + m.disks.snapshots,
+                    internet_in_bytes_per_sec: rates.internet_in,
+                    internet_out_bytes_per_sec: rates.internet_out,
+                    ingress_in_bytes_per_sec: rates.ingress_in,
+                    ingress_out_bytes_per_sec: rates.ingress_out,
+                    window_sec: rates.window_sec,
+                    host: String::new(),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| (&a.tenant, &a.name).cmp(&(&b.tenant, &b.name)));
         out
     }
 
@@ -2508,21 +2605,8 @@ impl Manager {
             ),
             None => None,
         };
-        // A console that grew past the cap is set aside: logs page the current file only, and
-        // the previous one stays for an operator.
-        let console = dir.join("console.log");
-        if tokio::fs::metadata(&console)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0)
-            > CONSOLE_ROTATE_BYTES
-        {
-            let _ = tokio::fs::rename(&console, dir.join("console.log.1")).await;
-        }
-        let console_offset = tokio::fs::metadata(&console)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
+        // Where this boot's lines start in the console (the writer rotates it by size).
+        let console_offset = console::end(&dir).unwrap_or(0);
         e.rec.lock().unwrap().console_offset = console_offset;
         let ip: Ipv4Addr = rec.ip.parse().unwrap();
         let boot = fc::Boot {
@@ -2713,6 +2797,7 @@ impl Manager {
             r.stopped_reason = stop::EXIT.into();
             if again {
                 r.restarts += 1;
+                e.meter.lock().unwrap().restarts += 1;
                 restart_again = true;
                 tracing::warn!(
                     machine = r.id,
@@ -2773,21 +2858,17 @@ impl Manager {
         }
     }
 
+    /// The last `max` bytes of the console since the current boot began.
     fn console_since(&self, r: &Record, max: u64) -> String {
-        let path = self.inner.cfg.run_dir().join(&r.id).join("console.log");
-        let f = match std::fs::File::open(&path) {
-            Ok(f) => f,
-            Err(_) => return String::new(),
-        };
-        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-        let start = r.console_offset.max(len.saturating_sub(max));
-        use std::io::{Read, Seek};
-        let mut f = f;
-        if f.seek(std::io::SeekFrom::Start(start)).is_err() {
+        let dir = self.inner.cfg.run_dir().join(&r.id);
+        let end = console::end(&dir).unwrap_or(0);
+        let from = r.console_offset.max(end.saturating_sub(max));
+        let Ok(Some((_, bytes))) = console::read_from(&dir, from) else {
             return String::new();
-        }
+        };
+        use std::io::Read;
         let mut buf = Vec::new();
-        let _ = f.take(max).read_to_end(&mut buf);
+        let _ = bytes.take(max).read_to_end(&mut buf);
         String::from_utf8_lossy(&buf).into_owned()
     }
 
@@ -3135,10 +3216,10 @@ impl Manager {
         Ok(())
     }
 
-    /// Every 15 s: what machines used since the last tick is measured, idle machines go to
-    /// sleep, then the gateways no machine needs, uses since the last tick reach the disk,
-    /// and a destroy left `destroying` (a daemon restart, a disk that was busy) is tried
-    /// again. The first tick is at once: it is where an adopted machine's CPU count starts.
+    /// Every 15 s: what machines used since the last tick is measured, the host's conditions
+    /// are decided (images removed under disk pressure), idle machines go to sleep, then the
+    /// gateways no machine needs, uses since the last tick reach the disk, and a destroy left
+    /// `destroying` (a daemon restart, a disk that was busy) is tried again. The first tick is at once: it is where an adopted machine's CPU count starts.
     async fn sleeper(self) {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
         loop {
@@ -3150,6 +3231,7 @@ impl Manager {
     async fn tick(&self) {
         let now = Utc::now();
         self.measure(now).await;
+        self.assess(now).await;
         if let Err(err) =
             self.inner
                 .events
@@ -3248,6 +3330,89 @@ impl Manager {
         }
     }
 
+    // --- conditions (ADR 0021) ---
+
+    /// Reads the pool and decides the host's conditions, each change an event. Under disk
+    /// pressure, unused images go, oldest first, until the pool is back over the threshold.
+    /// A pool that cannot be read leaves `disk_pressure` as it was.
+    async fn assess(&self, now: DateTime<Utc>) {
+        let t = self.inner.cfg.conditions;
+        let (used, _, _) = self.usage();
+        let memory = conditions::memory(used.memory_mb, self.capacity().memory_mb, &t);
+        let pool = match self.inner.zfs.pool().await {
+            Ok(p) => Some(p),
+            Err(err) => {
+                tracing::warn!(err = %err, "conditions: pool not read");
+                None
+            }
+        };
+        if let Some(p) = pool {
+            *self.inner.pool.lock().unwrap() = Some(p);
+        }
+        let changed: Vec<api::Condition> = {
+            let mut c = self.inner.conditions.lock().unwrap();
+            let disk = pool.map(|p| conditions::disk(p, &t));
+            [
+                (api::condition::MEMORY_PRESSURE, Some(memory)),
+                (api::condition::DISK_PRESSURE, disk),
+            ]
+            .into_iter()
+            .filter_map(|(kind, found)| c.set(kind, found?, now))
+            .collect()
+        };
+        for c in changed {
+            let ev = match c.status {
+                true => Ev::warning(reason::HOST_CONDITION, format!("{}: {}", c.kind, c.message)),
+                false => Ev::normal(
+                    reason::HOST_CONDITION,
+                    format!("{} cleared: {}", c.kind, c.message),
+                ),
+            };
+            if c.status {
+                tracing::warn!(
+                    condition = c.kind,
+                    message = c.message,
+                    "host condition true"
+                );
+            } else {
+                tracing::info!(
+                    condition = c.kind,
+                    message = c.message,
+                    "host condition cleared"
+                );
+            }
+            let data = json!({ "condition": c.kind, "status": c.status });
+            self.inner.events.emit(ev.data(data));
+        }
+        let short = pool.map_or(0, |p| conditions::disk_short(p, &t));
+        if short > 0 {
+            self.free_images(short).await;
+        }
+    }
+
+    /// Removes unused images until they freed `need` bytes: an image a record names is in
+    /// use, even before its machine's disk clones it.
+    async fn free_images(&self, need: u64) {
+        let named: std::collections::HashSet<String> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.rec.lock().unwrap().image_key.clone())
+            .collect();
+        match self.inner.images.free(need, &named).await {
+            Ok((0, _)) => {}
+            Ok((n, freed)) => tracing::info!(
+                removed = n,
+                freed_mb = freed >> 20,
+                need_mb = need >> 20,
+                "images removed under disk pressure"
+            ),
+            Err(err) => tracing::warn!(err = %err, "images not removed under disk pressure"),
+        }
+    }
+
     /// Reads each source once for these machines (the pool's datasets, the internet
     /// counters), then each machine's cgroup and memory snapshot; adds what each used since
     /// its last measure to its meter, and takes that into the ledger. A source that cannot be
@@ -3280,7 +3445,7 @@ impl Manager {
                 &r.id,
             );
             let memory_snapshot = usage::file_bytes(&files);
-            let cpu = self.inner.vmm.cgroup(&r.id).await.map(|c| c.cpu_usec);
+            let cgroup = self.inner.vmm.cgroup(&r.id).await;
             let (who, used) = {
                 let r = e.rec.lock().unwrap();
                 let mut m = e.meter.lock().unwrap();
@@ -3292,7 +3457,8 @@ impl Manager {
                 }
                 m.advance(now, held(&r));
                 let net = internet.as_ref().and_then(|c| c.get(&r.ip)).copied();
-                m.counters(now, cpu, net, e.traffic.take());
+                m.counters(now, cgroup.map(|c| c.cpu_usec), net, e.traffic.take());
+                m.memory_bytes = cgroup.map_or(0, |c| c.memory_bytes);
                 (usage_identity(&r), m.drain())
             };
             self.inner.usage.lock().unwrap().add(&who, used);
@@ -3495,21 +3661,14 @@ impl Manager {
 
     // --- logs ---
 
-    /// Pages the console. `since` is the byte offset to continue from; `limit` caps lines.
+    /// Pages the console. `since` is an offset in the whole console, the rotated file
+    /// included (ADR 0021); `limit` caps lines.
     pub fn logs(&self, id: &str, since: &str, limit: usize) -> Result<api::LogsResponse, MError> {
         self.entry(id)?;
         let limit = if limit == 0 || limit > 5000 {
             500
         } else {
             limit
-        };
-        let path = self.inner.cfg.run_dir().join(id).join("console.log");
-        let f = match std::fs::File::open(&path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(api::LogsResponse::default())
-            }
-            Err(e) => return Err(MError::Other(e.into())),
         };
         let offset: u64 = if since.is_empty() {
             0
@@ -3518,13 +3677,14 @@ impl Manager {
                 .parse()
                 .map_err(|_| invalid("since must be a cursor from a previous page"))?
         };
-        use std::io::{BufRead, Seek};
-        let mut f = f;
-        f.seek(std::io::SeekFrom::Start(offset))
-            .map_err(|e| MError::Other(e.into()))?;
-        let mut r = std::io::BufReader::with_capacity(64 << 10, f);
+        let dir = self.inner.cfg.run_dir().join(id);
+        let Some((mut pos, mut r)) =
+            console::read_from(&dir, offset).map_err(|e| MError::Other(e.into()))?
+        else {
+            return Ok(api::LogsResponse::default());
+        };
+        use std::io::BufRead;
         let mut resp = api::LogsResponse::default();
-        let mut pos = offset;
         while resp.lines.len() < limit {
             let mut line = String::new();
             let n = r
@@ -4420,8 +4580,8 @@ mod tests {
         refuse_policies: AtomicBool,
         /// No guest port accepts: `wait_port` answers only at its deadline.
         silent_ports: AtomicBool,
-        /// CPU time of each machine's cgroup, in µs; none without an entry.
-        cgroups: Mutex<HashMap<String, u64>>,
+        /// Each machine's cgroup; none without an entry.
+        cgroups: Mutex<HashMap<String, fc::CgroupUse>>,
         /// The counted addresses and their counters.
         counted: Mutex<BTreeMap<String, nft::Counters>>,
         /// `uncount` fails, as an `nft` that refuses its input.
@@ -4446,7 +4606,21 @@ mod tests {
         }
 
         fn cpu(&self, id: &str, usec: u64) {
-            self.cgroups.lock().unwrap().insert(id.into(), usec);
+            self.cgroups
+                .lock()
+                .unwrap()
+                .entry(id.into())
+                .or_default()
+                .cpu_usec = usec;
+        }
+
+        fn memory(&self, id: &str, bytes: u64) {
+            self.cgroups
+                .lock()
+                .unwrap()
+                .entry(id.into())
+                .or_default()
+                .memory_bytes = bytes;
         }
 
         /// Traffic of a counted address, as the forward chain would count it.
@@ -4676,11 +4850,7 @@ mod tests {
         }
 
         async fn cgroup(&self, id: &str) -> Option<fc::CgroupUse> {
-            let cpu_usec = *self.cgroups.lock().unwrap().get(id)?;
-            Some(fc::CgroupUse {
-                cpu_usec,
-                memory_bytes: 0,
-            })
+            self.cgroups.lock().unwrap().get(id).copied()
         }
     }
 
@@ -4885,9 +5055,10 @@ mod tests {
             ..Default::default()
         };
         let zfs = fake.zfs.clone();
-        let images = Builder::new(zfs.clone(), cfg.image_dir(), init, 8).unwrap();
+        let mut images = Builder::new(zfs.clone(), cfg.image_dir(), init, 8).unwrap();
         let store = Store::open(&cfg.state_dir()).unwrap();
         let events = Events::open(&store.dir("events")).unwrap();
+        images.events = Some(events.clone());
         let (endpoint_events, _) = broadcast::channel(64);
         let host = Mock::new();
         let m = Manager {
@@ -4915,6 +5086,8 @@ mod tests {
                 boot_gate: tokio::sync::Semaphore::new(2),
                 usage: Mutex::new(Ledger::default()),
                 events,
+                pool: Mutex::new(None),
+                conditions: Mutex::new(Conditions::new(Utc::now())),
             }),
         };
         fake.calls();
@@ -8169,6 +8342,10 @@ mod tests {
         );
         assert_eq!(restarting.message, "restart 1 in 1 s (at most 3)");
         assert_eq!(restarting.data.as_ref().unwrap()["attempt"], 1);
+        // Counted for `/metrics`, and a start's time measured.
+        let e = h.m.entry(&m.id).unwrap();
+        assert_eq!(e.meter.lock().unwrap().restarts, 1);
+        assert!(e.meter.lock().unwrap().boot_seconds.is_some());
         // An exit with nothing to restart says so, and a clean exit is no warning.
         let mut req = h.request("once");
         req.restart = Some(api::RestartPolicy {
@@ -8529,5 +8706,305 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 409);
+    }
+
+    // --- metrics, conditions, top (ADR 0021) ---
+
+    #[tokio::test]
+    async fn metrics_hold_every_machine_by_its_labels_from_the_last_measure() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let run = h.metered("m_run", state::RUNNING, "2026-10-21T10:00:00Z");
+        let gw = h.metered("m_gw", state::RUNNING, "2026-10-21T10:00:00Z");
+        let _stopped = h.metered("m_stop", state::STOPPED, "2026-10-21T10:00:00Z");
+        let _broken = h.metered("m_err", state::ERROR, "2026-10-21T10:00:00Z");
+        for (e, name, ip) in [(&run, "db", "10.64.1.2"), (&gw, "gateway", "10.64.1.3")] {
+            let mut r = e.rec.lock().unwrap();
+            r.name = name.into();
+            r.ip = ip.into();
+        }
+        gw.rec.lock().unwrap().role = Some(Role::Gateway);
+        h.m.inner.net.count("10.64.1.2").await.unwrap();
+        h.pool.answer(
+            "space",
+            "byard/m/m_run\t-\t4096\t0\nbyard/m/m_run/root\t8589934592\t52428800\t1048576\n",
+        );
+        h.pool.answer("used,available", "950\n50\n");
+        h.host.cpu("m_run", 2_000_000);
+        h.m.measure(at("2026-10-21T10:00:15Z")).await;
+        h.host.cpu("m_run", 4_500_000);
+        h.host.memory("m_run", 100 << 20);
+        h.host.internet("10.64.1.2", 1000, 10);
+        h.m.traffic("m_run").unwrap().sent(300);
+        h.m.measure(at("2026-10-21T10:00:30Z")).await;
+        h.m.assess(at("2026-10-21T10:00:30Z")).await;
+        // A start's time is measured from `starting` to `running`.
+        run.set_state(state::STARTING, |_| None);
+        run.set_state(state::RUNNING, |_| None);
+        let text = h.m.metrics();
+        crate::metrics::check_exposition(&text);
+        let lines: Vec<&str> = text.lines().collect();
+        let db = r#"machine="m_run",tenant="t1",name="db""#;
+        for want in [
+            format!("briqyard_machine_cpu_seconds_total{{{db}}} 2.5"),
+            format!("briqyard_machine_memory_bytes{{{db}}} 104857600"),
+            format!("briqyard_machine_memory_limit_bytes{{{db}}} 536870912"),
+            format!("briqyard_machine_disk_used_bytes{{{db}}} 53481472"),
+            format!("briqyard_machine_internet_in_bytes_total{{{db}}} 1000"),
+            format!("briqyard_machine_internet_out_bytes_total{{{db}}} 10"),
+            format!("briqyard_machine_ingress_out_bytes_total{{{db}}} 300"),
+            format!("briqyard_machine_egress_dropped_packets_total{{{db}}} 0"),
+            format!("briqyard_machine_restarts_total{{{db}}} 0"),
+            format!("briqyard_machine_state{{{db},state=\"running\"}} 1"),
+            r#"briqyard_machine_state{machine="m_gw",tenant="t1",name="gateway",role="gateway",state="running"} 1"#.into(),
+            r#"briqyard_machine_state{machine="m_err",tenant="t1",name="db",state="error"} 1"#.into(),
+            r#"briqyard_machine_state{machine="m_stop",tenant="t1",name="db",state="stopped"} 1"#.into(),
+            // The host's, the names from before included.
+            r#"briqyard_machines{state="running"} 2"#.into(),
+            "briqyard_machines_total 4".into(),
+            r#"briqyard_memory_mb{kind="used"} 1024"#.into(),
+            r#"briqyard_pool_bytes{kind="size"} 1000"#.into(),
+            r#"briqyard_pool_bytes{kind="free"} 50"#.into(),
+            r#"briqyard_host_condition{condition="memory_pressure"} 0"#.into(),
+            r#"briqyard_host_condition{condition="disk_pressure"} 1"#.into(),
+            r#"briqyard_events_total{type="warning",reason="host_condition"} 1"#.into(),
+            "briqyard_boots_total 0".into(),
+        ] {
+            assert!(lines.contains(&want.as_str()), "{want}\n{text}");
+        }
+        // One state series per machine; a boot time only once a start was measured.
+        let states = lines
+            .iter()
+            .filter(|l| l.starts_with(r#"briqyard_machine_state{machine="m_run""#))
+            .count();
+        assert_eq!(states, 1);
+        let boots: Vec<&&str> = lines
+            .iter()
+            .filter(|l| l.starts_with("briqyard_machine_boot_seconds{"))
+            .collect();
+        assert_eq!(boots.len(), 1, "{boots:?}");
+        assert!(boots[0].starts_with(&format!("briqyard_machine_boot_seconds{{{db}}} ")));
+        // A scrape asks nothing of the host: no zfs call, no cgroup read.
+        h.pool.calls();
+        h.host.cgroups.lock().unwrap().clear();
+        let again = h.m.metrics();
+        assert!(h.pool.calls().is_empty());
+        assert!(again.contains(&format!("briqyard_machine_memory_bytes{{{db}}} 104857600")));
+    }
+
+    impl Harness {
+        /// The host's events of a reason, oldest first.
+        fn host_events(&self, reason: &str) -> Vec<api::Event> {
+            let all = self.m.inner.events.read(0, &Default::default(), 5000);
+            all.unwrap()
+                .events
+                .into_iter()
+                .filter(|e| e.reason == reason)
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn conditions_turn_true_and_clear_with_their_events() {
+        let h = harness("10.64.0.0/22", 1000).await;
+        h.pool.answer("used,available", "100\n900\n");
+        let e = h.add("m_a", state::RUNNING, 960);
+        let t0 = at("2026-10-21T10:00:00Z");
+        h.m.assess(t0).await;
+        let c = h.m.conditions();
+        assert_eq!(
+            (c[0].kind.as_str(), c[0].status, c[0].since),
+            ("memory_pressure", true, t0)
+        );
+        assert_eq!(c[0].message, "960 MB of 1000 committed (96%), over 95%");
+        assert!(!c[1].status, "{:?}", c[1]);
+        let evs = h.host_events(reason::HOST_CONDITION);
+        assert_eq!(evs.len(), 1, "only a change is an event: {evs:?}");
+        assert_eq!(
+            (evs[0].kind.as_str(), evs[0].message.as_str()),
+            (
+                "warning",
+                "memory_pressure: 960 MB of 1000 committed (96%), over 95%"
+            )
+        );
+        assert_eq!(
+            evs[0].data,
+            Some(json!({"condition": "memory_pressure", "status": true}))
+        );
+        // Still true at the next tick: no event, the time it turned kept.
+        h.m.assess(t0 + chrono::Duration::seconds(15)).await;
+        assert_eq!(h.host_events(reason::HOST_CONDITION).len(), 1);
+        assert_eq!(h.m.conditions()[0].since, t0);
+        // The machine stops: cleared, a normal event.
+        e.set_state(state::STOPPED, |_| None);
+        let t1 = t0 + chrono::Duration::seconds(30);
+        h.m.assess(t1).await;
+        let evs = h.host_events(reason::HOST_CONDITION);
+        assert_eq!(
+            (evs[1].kind.as_str(), evs[1].message.as_str()),
+            (
+                "normal",
+                "memory_pressure cleared: 0 MB of 1000 committed (0%)"
+            )
+        );
+        assert_eq!(h.m.conditions()[0].since, t1);
+        // The pool fills: disk pressure; a pool that cannot be read leaves it as it was.
+        h.pool.answer("used,available", "950\n50\n");
+        h.m.assess(t1).await;
+        assert!(h.m.conditions()[1].status);
+        assert_eq!(
+            h.host_events(reason::HOST_CONDITION)[2].message,
+            "disk_pressure: pool 0.0 GB free of 0.0 (5%), under 10%"
+        );
+        h.pool.answer("used,available", "-\n");
+        h.m.assess(t1).await;
+        assert!(h.m.conditions()[1].status, "kept");
+        assert_eq!(h.host_events(reason::HOST_CONDITION).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn under_disk_pressure_the_oldest_unused_images_go_until_the_pool_is_back() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        // The seeded image is cloned by a machine; then four more, oldest first.
+        h.m.create(h.request("web")).await.unwrap();
+        let mut keys = vec![];
+        for n in 2..=5 {
+            let r = format!("alpine@sha256:{n:064}");
+            let im =
+                h.m.inner
+                    .images
+                    .seed(&r, ImageConfig::default())
+                    .await
+                    .unwrap();
+            keys.push(im.key);
+        }
+        // The oldest of them is named by a record whose disk is not made yet.
+        h.add("m_new", state::CREATED, 256)
+            .rec
+            .lock()
+            .unwrap()
+            .image_key = keys[0].clone();
+        // 8 GB free of 100: 2 GB short of 10%; each image takes 1 GB.
+        let gb = 1u64 << 30;
+        h.pool
+            .answer("used,available", &format!("{}\n{}\n", 92 * gb, 8 * gb));
+        h.pool.answer("used", &format!("{gb}\n"));
+        h.m.assess(Utc::now()).await;
+        let left: Vec<String> =
+            h.m.images()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|i| i.key)
+                .collect();
+        assert_eq!(left.len(), 3, "{left:?}");
+        assert!(
+            left.contains(&keys[0]) && left.contains(&keys[3]),
+            "{left:?}"
+        );
+        assert!(
+            !left.contains(&keys[1]) && !left.contains(&keys[2]),
+            "{left:?}"
+        );
+        let gone: Vec<(String, String)> = h
+            .host_events(reason::IMAGE_REMOVED)
+            .into_iter()
+            .map(|e| {
+                let d = e.data.unwrap();
+                (
+                    d["key"].as_str().unwrap().into(),
+                    d["reason"].as_str().unwrap().into(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            gone,
+            [
+                (keys[1].clone(), "disk_pressure".into()),
+                (keys[2].clone(), "disk_pressure".into())
+            ]
+        );
+        // Back over the threshold: nothing more goes.
+        h.pool
+            .answer("used,available", &format!("{}\n{}\n", 80 * gb, 20 * gb));
+        h.m.assess(Utc::now()).await;
+        assert_eq!(h.m.images().await.unwrap().len(), 3);
+        // The age rule says so too, and a removal on request.
+        assert_eq!(h.m.gc_images(chrono::Duration::zero()).await, 2);
+        let reasons: Vec<String> = h
+            .host_events(reason::IMAGE_REMOVED)
+            .into_iter()
+            .map(|e| e.data.unwrap()["reason"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(reasons[2..], ["unused", "unused"]);
+    }
+
+    #[tokio::test]
+    async fn top_takes_its_rates_from_the_last_two_ticks() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let a = h.metered("m_a", state::RUNNING, "2026-10-21T10:00:00Z");
+        let b = h.metered("m_b", state::STOPPED, "2026-10-21T10:00:00Z");
+        b.rec.lock().unwrap().ip = "10.64.1.3".into();
+        h.m.inner.net.count("10.64.1.2").await.unwrap();
+        h.host.cpu("m_a", 1_000_000);
+        h.host.memory("m_a", 64 << 20);
+        h.host.internet("10.64.1.2", 100, 10);
+        h.m.measure(at("2026-10-21T10:00:00Z")).await;
+        // One measure: no window yet.
+        let t = h.m.top(None);
+        assert_eq!((t.len(), t[0].window_sec, t[0].cpu_percent), (1, 0.0, 0.0));
+        h.host.cpu("m_a", 4_000_000);
+        h.host.internet("10.64.1.2", 1500, 30);
+        let tr = h.m.traffic("m_a").unwrap();
+        tr.received(30);
+        tr.sent(300);
+        h.m.measure(at("2026-10-21T10:00:15Z")).await;
+        let t = h.m.top(None);
+        assert_eq!(
+            t,
+            vec![api::TopMachine {
+                machine_id: "m_a".into(),
+                tenant: "t1".into(),
+                name: "db".into(),
+                role: None,
+                cpu_percent: 20.0,
+                memory_bytes: 64 << 20,
+                memory_limit_bytes: 512 << 20,
+                disk_used_bytes: 0,
+                internet_in_bytes_per_sec: 100.0,
+                internet_out_bytes_per_sec: 2.0,
+                ingress_in_bytes_per_sec: 2.0,
+                ingress_out_bytes_per_sec: 20.0,
+                window_sec: 15.0,
+                host: String::new(),
+            }],
+            "running machines only"
+        );
+        assert!(h.m.top(Some("t2")).is_empty());
+        assert_eq!(h.m.top(Some("t1")).len(), 1);
+        drop(a);
+    }
+
+    #[tokio::test]
+    async fn logs_read_across_the_rotated_console() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.add("m_a", state::RUNNING, 256);
+        let dir = h.m.inner.cfg.run_dir().join("m_a");
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = |s: &str| format!("2026-10-21T10:00:00.000000Z {s}\n");
+        let (one, two) = (line("one"), line("two"));
+        // `two` rotated away once: the previous file starts at 1000 in the console.
+        std::fs::write(dir.join("console.1000.log"), &one).unwrap();
+        std::fs::write(dir.join("console.log"), &two).unwrap();
+        let page = h.m.logs("m_a", "", 10).unwrap();
+        let got: Vec<&str> = page.lines.iter().map(|l| l.line.as_str()).collect();
+        assert_eq!(got, ["one", "two"]);
+        let end = 1000 + (one.len() + two.len()) as u64;
+        assert_eq!(page.next, end.to_string());
+        // A cursor in the current file, and one past the end.
+        let mid = (1000 + one.len()).to_string();
+        assert_eq!(h.m.logs("m_a", &mid, 10).unwrap().lines.len(), 1);
+        let after = h.m.logs("m_a", &end.to_string(), 10).unwrap();
+        assert_eq!((after.lines.len(), after.next), (0, end.to_string()));
     }
 }

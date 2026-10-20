@@ -82,7 +82,8 @@ impl Traffic {
     }
 }
 
-/// One machine's measure since the tick last drained it.
+/// One machine's measure since the tick last drained it, and its readings as of the last
+/// tick: what `/metrics` and `top` show (ADR 0021).
 #[derive(Debug)]
 pub struct Meter {
     /// Time is accrued up to here.
@@ -98,6 +99,30 @@ pub struct Meter {
     drops: EgressDrops,
     /// What it used since the last drain, by hour.
     pending: BTreeMap<DateTime<Utc>, Usage>,
+    /// What `counters` added since the meter was made (the counter fields only): the totals
+    /// of `/metrics`, counting from the daemon's start as the counters do.
+    counted: Usage,
+    /// `counted` at the last two ticks, the newest second: the window of `top`'s rates.
+    readings: [Option<(DateTime<Utc>, Usage)>; 2],
+    /// Memory its cgroup held at the last tick; 0 without one.
+    pub memory_bytes: u64,
+    /// How long its last start took, `starting` to `running`.
+    pub boot_seconds: Option<f64>,
+    /// Restarts by its policy since the daemon started.
+    pub restarts: u64,
+}
+
+/// What a machine's counters grew by per second between the last two ticks. All zero until
+/// there are two.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rates {
+    pub window_sec: f64,
+    /// Of one CPU.
+    pub cpu_percent: f64,
+    pub internet_in: f64,
+    pub internet_out: f64,
+    pub ingress_in: f64,
+    pub ingress_out: f64,
 }
 
 impl Meter {
@@ -109,6 +134,36 @@ impl Meter {
             net: Counters::default(),
             drops: EgressDrops::default(),
             pending: BTreeMap::new(),
+            counted: Usage::default(),
+            readings: [None, None],
+            memory_bytes: 0,
+            boot_seconds: None,
+            restarts: 0,
+        }
+    }
+
+    /// What its counters added up to since the daemon started, as of the last tick.
+    pub fn counted(&self) -> Usage {
+        self.counted
+    }
+
+    /// The rates between the last two ticks.
+    pub fn rates(&self) -> Rates {
+        let [Some((t0, a)), Some((t1, b))] = self.readings else {
+            return Rates::default();
+        };
+        let secs = (t1 - t0).num_microseconds().unwrap_or(0) as f64 / 1e6;
+        if secs <= 0.0 {
+            return Rates::default();
+        }
+        let per = |x: u64, y: u64| y.saturating_sub(x) as f64 / secs;
+        Rates {
+            window_sec: secs,
+            cpu_percent: (b.cpu_seconds - a.cpu_seconds) * 100.0 / secs,
+            internet_in: per(a.internet_in_bytes, b.internet_in_bytes),
+            internet_out: per(a.internet_out_bytes, b.internet_out_bytes),
+            ingress_in: per(a.ingress_in_bytes, b.ingress_in_bytes),
+            ingress_out: per(a.ingress_out_bytes, b.ingress_out_bytes),
         }
     }
 
@@ -151,9 +206,9 @@ impl Meter {
         self.drops
     }
 
-    /// Adds what the counters grew by since they were last read to the hour of `now`: the
-    /// cgroup's CPU time and the host's counters when they could be read, and the endpoints'
-    /// bytes, `(in, out)`.
+    /// Adds what the counters grew by since they were last read to the hour of `now` and to
+    /// the totals, and takes a reading: the cgroup's CPU time and the host's counters when
+    /// they could be read, and the endpoints' bytes, `(in, out)`.
     pub fn counters(
         &mut self,
         now: DateTime<Utc>,
@@ -161,7 +216,7 @@ impl Meter {
         net: Option<Counters>,
         ingress: (u64, u64),
     ) {
-        let u = self.pending.entry(hour_of(now)).or_default();
+        let mut u = Usage::default();
         if let Some(c) = cpu_usec {
             if let Some(last) = self.cpu_usec {
                 u.cpu_seconds += grown(last, c) as f64 / 1e6;
@@ -185,6 +240,9 @@ impl Meter {
         }
         u.ingress_in_bytes += ingress.0;
         u.ingress_out_bytes += ingress.1;
+        self.pending.entry(hour_of(now)).or_default().add(&u);
+        self.counted.add(&u);
+        self.readings = [self.readings[1], Some((now, self.counted))];
     }
 
     /// What it used since the last drain, by hour.
@@ -530,6 +588,43 @@ mod tests {
         m.counters(now, None, Some(dropped(0, 2, 0)), (0, 0));
         assert_eq!(m.drain()[&hour_of(now)].egress_dropped_packets, 2);
         assert_eq!(m.drops().rate, 2);
+    }
+
+    #[test]
+    fn totals_add_up_and_rates_come_from_the_last_two_readings() {
+        let t0 = t("2026-10-20T14:30:00Z");
+        let mut m = Meter::new(t0);
+        m.counters(t0, Some(1_000_000), Some(net(100, 10)), (0, 0));
+        // One reading: no window yet.
+        assert_eq!(m.rates(), Rates::default());
+        let t1 = t0 + Duration::seconds(15);
+        m.counters(t1, Some(4_000_000), Some(net(1600, 40)), (30, 300));
+        // The totals keep what was drained into the hours.
+        m.drain();
+        let c = m.counted();
+        assert_eq!((c.cpu_seconds, c.internet_in_bytes), (3.0, 1600));
+        assert_eq!((c.ingress_in_bytes, c.ingress_out_bytes), (30, 300));
+        assert_eq!(
+            m.rates(),
+            Rates {
+                window_sec: 15.0,
+                cpu_percent: 20.0,
+                internet_in: 100.0,
+                internet_out: 2.0,
+                ingress_in: 2.0,
+                ingress_out: 20.0,
+            }
+        );
+        // The window moves on with each tick; a boot does not take the totals back.
+        m.boot(0);
+        let t2 = t1 + Duration::seconds(10);
+        m.counters(t2, Some(500_000), Some(net(1600, 40)), (0, 0));
+        assert_eq!(m.counted().cpu_seconds, 3.5);
+        let r = m.rates();
+        assert_eq!(
+            (r.window_sec, r.cpu_percent, r.internet_in),
+            (10.0, 5.0, 0.0)
+        );
     }
 
     #[test]
