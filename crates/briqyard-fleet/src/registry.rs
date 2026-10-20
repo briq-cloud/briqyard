@@ -11,6 +11,8 @@ use std::collections::HashMap;
 pub struct HostRec {
     pub id: String,
     pub url: String,
+    /// The host's API token: what the fleet forwards with, and what the host's heartbeats
+    /// present. Set at the order (the bootstrap writes it into the host) or by `hosts:`.
     #[serde(default)]
     pub token: String,
     #[serde(default)]
@@ -20,10 +22,11 @@ pub struct HostRec {
     /// The provider's own id for the server, when the fleet provisioned it.
     #[serde(default)]
     pub provider_id: String,
-    /// ready, draining, down, provisioning
+    /// ready, draining, down, provisioning, bootstrapped, failed, dry-run
     pub state: String,
     #[serde(default)]
     pub capacity: Capacity,
+    /// What the host reported last, plus what placement reserved on it since.
     #[serde(default)]
     pub used: Capacity,
     #[serde(default)]
@@ -33,7 +36,7 @@ pub struct HostRec {
     pub last_seen: DateTime<Utc>,
     #[serde(default)]
     pub version: String,
-    /// Free space for disks, in MB, from the last heartbeat.
+    /// Free space for disks, in MB, from the last heartbeat, less what placement reserved since.
     #[serde(default)]
     pub disk_free_mb: u64,
     /// When the host last had a machine, for the release decision.
@@ -108,39 +111,25 @@ pub struct Registry {
     pub tenants: HashMap<String, String>,
     /// machine id → host id, learned from creates and listings.
     pub machines: HashMap<String, String>,
+    /// endpoint id → host id, learned the same way.
+    #[serde(default)]
+    pub endpoints: HashMap<String, String>,
     /// When each tenant was pinned by a placement (not by a heartbeat).
     #[serde(default)]
     pub pinned_at: HashMap<String, DateTime<Utc>>,
 }
 
 impl Registry {
-    /// Applies a heartbeat. A host the fleet did not know is added as ready.
-    pub fn heartbeat(&mut self, mut h: HostRec, now: DateTime<Utc>) {
-        // A server the fleet ordered registers under the daemon's own id: the record made at
-        // the order (provider, its id, the token the bootstrap gave it) carries over by address.
-        if !self.hosts.contains_key(&h.id) && !h.url.is_empty() {
-            let ordered = self
-                .hosts
-                .values()
-                .find(|x| {
-                    matches!(x.state.as_str(), "provisioning" | "bootstrapped")
-                        && !x.url.is_empty()
-                        && url_host(&x.url) == url_host(&h.url)
-                })
-                .map(|x| x.id.clone());
-            if let Some(id) = ordered {
-                let old = self.hosts.remove(&id).unwrap();
-                h.provider = old.provider;
-                h.provider_id = old.provider_id;
-                if h.token.is_empty() {
-                    h.token = old.token;
-                }
-                if h.region.is_empty() {
-                    h.region = old.region;
-                }
-                h.note = old.note;
-            }
-        }
+    /// The record a heartbeat from `url` belongs to: the one host at that address.
+    pub fn expecting(&self, url: &str) -> Option<&HostRec> {
+        self.hosts
+            .values()
+            .find(|h| !h.url.is_empty() && url_host(&h.url) == url_host(url))
+    }
+
+    /// Applies a heartbeat (or a poll's answer) to the record of its id, added as ready when
+    /// the fleet did not have it. What the host reports replaces what placement reserved.
+    pub fn heartbeat(&mut self, h: HostRec, now: DateTime<Utc>) {
         let entry = self.hosts.entry(h.id.clone()).or_insert_with(|| HostRec {
             state: "ready".into(),
             empty_since: Some(now),
@@ -160,7 +149,9 @@ impl Registry {
         entry.version = h.version;
         entry.disk_free_mb = h.disk_free_mb;
         entry.last_seen = now;
-        if entry.state == "down" {
+        // A host that answers is ready, whatever it was (down, ordered, failed to bootstrap);
+        // only a drain is kept.
+        if entry.state != "draining" {
             entry.state = "ready".into();
         }
         entry.empty_since = if h.machines == 0 {
@@ -188,6 +179,15 @@ impl Registry {
         self.pinned_at.retain(|t, _| self.tenants.contains_key(t));
     }
 
+    /// Drops a host and everything indexed to it.
+    pub fn forget(&mut self, id: &str) {
+        self.hosts.remove(id);
+        self.tenants.retain(|_, h| h != id);
+        self.machines.retain(|_, h| h != id);
+        self.endpoints.retain(|_, h| h != id);
+        self.pinned_at.retain(|t, _| self.tenants.contains_key(t));
+    }
+
     /// Draining hosts that have nothing left on them: ready to be released.
     pub fn retirable(&self) -> Vec<HostRec> {
         self.hosts
@@ -208,7 +208,9 @@ impl Registry {
 
     /// The host of a tenant, or the best host for a new one: the readiest with the most free
     /// memory under the ceiling, with room for `need_mb` of memory and `need_disk_mb` of disk
-    /// (a host that reports no disk figure is not held to it).
+    /// (a host that reports no disk figure is not held to it). What the machine needs is
+    /// reserved on the host until its next heartbeat, so a burst of creates does not all land
+    /// on the host the last heartbeat showed emptiest.
     pub fn place(
         &mut self,
         tenant: &str,
@@ -216,23 +218,42 @@ impl Registry {
         need_disk_mb: u64,
         policy: &Policy,
     ) -> Option<String> {
-        if let Some(h) = self.tenants.get(tenant) {
-            return Some(h.clone());
-        }
-        let best = self
-            .hosts
-            .values()
-            .filter(|h| {
-                h.state == "ready"
-                    && h.fill() < policy.fill_ceiling
-                    && h.free_memory_mb() >= need_mb
-                    && (h.disk_free_mb == 0 || h.disk_free_mb >= need_disk_mb)
-            })
-            .max_by_key(|h| h.free_memory_mb())?;
-        let id = best.id.clone();
-        self.tenants.insert(tenant.to_string(), id.clone());
-        self.pinned_at.insert(tenant.to_string(), Utc::now());
+        let id = match self.tenants.get(tenant) {
+            Some(h) => h.clone(),
+            None => {
+                let best = self
+                    .hosts
+                    .values()
+                    .filter(|h| {
+                        h.state == "ready"
+                            && h.fill() < policy.fill_ceiling
+                            && h.free_memory_mb() >= need_mb
+                            && (h.disk_free_mb == 0 || h.disk_free_mb >= need_disk_mb)
+                    })
+                    .max_by_key(|h| h.free_memory_mb())?;
+                let id = best.id.clone();
+                self.tenants.insert(tenant.to_string(), id.clone());
+                self.pinned_at.insert(tenant.to_string(), Utc::now());
+                id
+            }
+        };
+        self.reserve(&id, need_mb, need_disk_mb);
         Some(id)
+    }
+
+    /// Counts a machine about to be created on a host as used, until the host reports.
+    pub fn reserve(&mut self, host: &str, need_mb: u32, need_disk_mb: u64) {
+        if let Some(h) = self.hosts.get_mut(host) {
+            h.used.memory_mb = h.used.memory_mb.saturating_add(need_mb);
+            h.disk_free_mb = h.disk_free_mb.saturating_sub(need_disk_mb);
+        }
+    }
+
+    /// Releases a tenant from its host: its next machine is placed afresh. The host's next
+    /// heartbeat pins it again if the tenant still has machines there.
+    pub fn unpin(&mut self, tenant: &str) {
+        self.tenants.remove(tenant);
+        self.pinned_at.remove(tenant);
     }
 
     pub fn host_of_tenant(&self, tenant: &str) -> Option<&HostRec> {
@@ -245,12 +266,17 @@ impl Registry {
 
     /// Hosts that answer requests.
     pub fn ready(&self) -> Vec<HostRec> {
-        let mut v: Vec<HostRec> = self
-            .hosts
-            .values()
-            .filter(|h| h.state == "ready" || h.state == "draining")
-            .cloned()
-            .collect();
+        self.sorted(|h| h.state == "ready" || h.state == "draining")
+    }
+
+    /// Hosts a listing must ask: every one that may hold machines, down ones included, since
+    /// a listing that cannot ask one of them fails rather than leaving its machines out.
+    pub fn listed(&self) -> Vec<HostRec> {
+        self.sorted(|h| matches!(h.state.as_str(), "ready" | "draining" | "down"))
+    }
+
+    fn sorted(&self, keep: impl Fn(&HostRec) -> bool) -> Vec<HostRec> {
+        let mut v: Vec<HostRec> = self.hosts.values().filter(|h| keep(h)).cloned().collect();
         v.sort_by(|a, b| a.id.cmp(&b.id));
         v
     }
@@ -351,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ordered_host_registers_under_its_own_id() {
+    fn a_heartbeat_lands_on_the_record_at_its_address() {
         let now = Utc::now();
         let mut reg = Registry::default();
         let mut ordered = host("h_srv-9", 0, 0, 0);
@@ -361,15 +387,32 @@ mod tests {
         ordered.provider_id = "srv-9".into();
         ordered.token = "t0k".into();
         reg.hosts.insert(ordered.id.clone(), ordered);
-        let mut hb = host("h_byard-20261019", 64_000, 0, 0);
+        assert_eq!(
+            reg.expecting("http://10.0.0.9:7421/")
+                .map(|h| h.id.as_str()),
+            Some("h_srv-9"),
+            "the address, whatever the port"
+        );
+        assert_eq!(reg.expecting("http://10.0.0.8:7420").map(|h| &h.id), None);
+        // The daemon reports under its own id; the fleet applies it to the record it ordered.
+        let mut hb = host("h_srv-9", 64_000, 0, 0);
         hb.url = "http://10.0.0.9:7420".into();
+        hb.token.clear();
         hb.provider.clear();
         reg.heartbeat(hb, now);
-        assert!(!reg.hosts.contains_key("h_srv-9"));
-        let h = &reg.hosts["h_byard-20261019"];
-        assert_eq!(h.state, "ready");
+        assert_eq!(reg.hosts.len(), 1);
+        let h = &reg.hosts["h_srv-9"];
+        assert_eq!(
+            h.state, "ready",
+            "an ordered host is ready at its first heartbeat"
+        );
+        assert_eq!(
+            h.provider, "scaleway",
+            "a heartbeat does not touch the provider fields"
+        );
         assert_eq!(h.provider_id, "srv-9");
-        assert_eq!(h.token, "t0k");
+        assert_eq!(h.token, "t0k", "nor the token");
+        assert_eq!(h.capacity.memory_mb, 64_000);
         assert_eq!(url_host("http://[::1]:7420/x"), "[::1]");
         assert_eq!(url_host("10.0.0.5"), "10.0.0.5");
     }
@@ -463,6 +506,80 @@ mod tests {
             "c has memory but no disk"
         );
         assert_eq!(reg.place("t5", 512, 500, &p).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn placement_reserves_until_the_next_heartbeat() {
+        let now = Utc::now();
+        let mut reg = Registry::default();
+        reg.heartbeat(host("a", 100_000, 0, 0), now);
+        reg.heartbeat(host("b", 100_000, 10_000, 1), now);
+        let p = Policy::default();
+        // A burst: the second tenant sees the first one's memory taken on a.
+        assert_eq!(reg.place("t1", 60_000, 3000, &p).as_deref(), Some("a"));
+        assert_eq!(reg.hosts["a"].used.memory_mb, 60_000);
+        assert_eq!(reg.place("t2", 50_000, 0, &p).as_deref(), Some("b"));
+        // A pinned tenant's machine counts too, and the reservation is memory and disk.
+        reg.hosts.get_mut("a").unwrap().disk_free_mb = 10_000;
+        assert_eq!(reg.place("t1", 10_000, 4000, &p).as_deref(), Some("a"));
+        assert_eq!(reg.hosts["a"].used.memory_mb, 70_000);
+        assert_eq!(reg.hosts["a"].disk_free_mb, 6000);
+        assert_eq!(
+            reg.free(&p),
+            (70_000, 40_000),
+            "the scaler sees the reservations too"
+        );
+        // A fork reserves on the source's host without a placement.
+        reg.reserve("b", 5000, 0);
+        assert_eq!(reg.hosts["b"].used.memory_mb, 65_000);
+        reg.reserve("nobody", 5000, 0);
+        // The host's report replaces the reservation: the create failed, nothing is used.
+        reg.heartbeat(host("a", 100_000, 0, 0), now);
+        assert_eq!(reg.hosts["a"].used.memory_mb, 0);
+        assert_eq!(reg.place("t3", 90_000, 0, &p).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn unpin_releases_a_tenant_for_a_new_placement() {
+        let now = Utc::now();
+        let mut reg = Registry::default();
+        reg.heartbeat(host("a", 100_000, 0, 0), now);
+        reg.heartbeat(host("b", 100_000, 0, 0), now);
+        let p = Policy::default();
+        let first = reg.place("t1", 60_000, 0, &p).unwrap();
+        assert!(reg.pinned_at.contains_key("t1"));
+        reg.unpin("t1");
+        assert_eq!(reg.tenants.get("t1"), None);
+        assert!(!reg.pinned_at.contains_key("t1"));
+        assert_ne!(
+            reg.place("t1", 10_000, 0, &p).unwrap(),
+            first,
+            "placed afresh, on the host with the most room"
+        );
+        reg.unpin("never-pinned");
+    }
+
+    #[test]
+    fn forget_drops_the_host_and_its_index() {
+        let now = Utc::now();
+        let mut reg = Registry::default();
+        let mut a = host("a", 1000, 0, 1);
+        a.tenants = vec!["t1".into()];
+        reg.heartbeat(a, now);
+        reg.heartbeat(host("b", 1000, 0, 0), now);
+        reg.machines.insert("m1".into(), "a".into());
+        reg.machines.insert("m2".into(), "b".into());
+        reg.endpoints.insert("e1".into(), "a".into());
+        reg.tenants.insert("t2".into(), "b".into());
+        reg.forget("a");
+        assert!(!reg.hosts.contains_key("a"));
+        assert_eq!(reg.tenants.get("t1"), None);
+        assert_eq!(reg.tenants.get("t2").map(String::as_str), Some("b"));
+        assert_eq!(reg.machines.get("m1"), None);
+        assert_eq!(reg.machines.get("m2").map(String::as_str), Some("b"));
+        assert_eq!(reg.endpoints.get("e1"), None);
+        assert_eq!(reg.listed().len(), 1);
+        reg.forget("a");
     }
 
     #[test]

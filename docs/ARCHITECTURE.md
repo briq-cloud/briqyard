@@ -121,15 +121,22 @@ each machine a quarter-second wake on its next use.
 `briqyard-fleet` offers the same machine API as a daemon and forwards each request to the host
 that runs the machine. It places each tenant on one host: a tenant's machines share a host, so
 its private network needs no overlay. Placement picks, among ready hosts under the fill
-ceiling, the one with the most free memory; a fork lands where its source is.
+ceiling, the one with the most free memory; a fork lands where its source is. What a placement
+puts on a host is counted as used there until the host's next heartbeat, so a burst of creates
+spreads; a host that answers `capacity` for a tenant's first machine loses the pin, so the
+retry is placed afresh. `POST /v1/tenants/{id}/unpin` releases a tenant by hand (ADR 0013).
 
-Hosts register with their capacity and tenants (`POST /v1/hosts/register`, every 15 s, from
-the daemon's `fleet:` configuration) or are listed in the fleet's configuration and polled. A
-host silent for a minute is `down`: its machines' calls answer 503 `host_down` until it is
-back, and a machine listing is never partial (a tenant's listing asks its host alone; a host
-that is down or does not answer fails the listing), since a control plane reads a machine
-missing from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host. The
-registry (hosts, tenant → host, machine → host) is one JSON file.
+Hosts report their capacity and tenants (`POST /v1/hosts/register`, every 15 s, from the
+daemon's `fleet:` configuration) or are listed in the fleet's configuration and polled. A host
+has one credential, its own API token: the fleet forwards with it and the host's heartbeat
+presents it, and a heartbeat is taken only for the host record that expects that token at that
+address (the record of an order, or a `hosts:` entry); any other is refused. A host silent for
+a minute is `down`: its machines' calls answer 503 `host_down` until it is back, and a listing
+of machines or endpoints is never partial (a tenant's listing asks its host alone; a host that
+is down or does not answer fails the listing), since a control plane reads a machine missing
+from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host. The registry
+(hosts, tenant → host, machine → host, endpoint → host) is one JSON file; a write that fails
+fails the request that needed it.
 
 Provisioners add and release hosts through a cloud API: `hetzner-robot` (dedicated servers,
 monthly), `scaleway` (Elastic Metal, hourly), `static` (none). `POST /v1/hosts/order` orders
@@ -140,10 +147,11 @@ one change a minute, never past `max_hosts`. Adding a host costs money, so every
 stays in `dry_run` unless told otherwise.
 
 A server becomes a host in three steps: the fleet polls the provider for its address, runs
-`hack/bootstrap-host.sh` on it over SSH (the script on stdin, the fleet's URL, its host token
-and a fresh API token in the environment) until it succeeds, and the host turns `ready` on its
-first heartbeat, which carries the daemon's own id: the record made at the order is matched by
-address and its provider fields carry over.
+`hack/bootstrap-host.sh` on it over SSH (the script on stdin, the fleet's URL and a fresh API
+token in the environment) until it succeeds, and the host turns `ready` on its first heartbeat,
+taken for the record made at the order. No provider's API returns the server's SSH host key:
+the key seen at the first successful bootstrap is pinned in `<state_dir>/known_hosts`, its
+fingerprint in the host's note, and later connects are strict against it.
 
 A WireGuard mesh between hosts, so a tenant can span several, is the next step after that: `MESH.md` is its design.
 

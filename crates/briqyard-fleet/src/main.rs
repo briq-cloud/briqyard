@@ -17,7 +17,7 @@ use axum::{Json, Router};
 use briqyard_api as api;
 use chrono::{Duration, Utc};
 use clap::Parser;
-use registry::{HostRec, Policy, Registry, ScalePolicy};
+use registry::{url_host, HostRec, Policy, Registry, ScalePolicy};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -38,14 +38,19 @@ struct AppState {
 }
 
 impl AppState {
-    fn save(&self) {
+    /// Writes the registry. A failure is logged at `error` and returned: a request answers
+    /// 500 with it, a background task has nothing more to do with it.
+    fn save(&self) -> Result<()> {
         let reg = self.reg.lock().unwrap().clone();
-        if let Ok(data) = serde_json::to_vec_pretty(&reg) {
-            let tmp = self.state_path.with_extension("json.tmp");
-            if std::fs::write(&tmp, data).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.state_path);
-            }
+        let tmp = self.state_path.with_extension("json.tmp");
+        let written = serde_json::to_vec_pretty(&reg)
+            .map_err(std::io::Error::other)
+            .and_then(|data| std::fs::write(&tmp, data))
+            .and_then(|_| std::fs::rename(&tmp, &self.state_path));
+        if let Err(e) = &written {
+            tracing::error!(path = %self.state_path.display(), err = %e, "write the registry");
         }
+        written.with_context(|| format!("write registry {}", self.state_path.display()))
     }
 }
 
@@ -165,6 +170,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/endpoints", get(list_endpoints))
         .route("/v1/tenants", get(list_tenants))
         .route("/v1/tenants/:id", axum::routing::delete(delete_tenant))
+        .route("/v1/tenants/:id/unpin", post(unpin_tenant))
         .route("/v1/machines/:id", any(by_machine))
         // Backups live in a store every host shares: the listing goes to any host, even for
         // a machine that no longer exists anywhere; making one goes to the machine's host.
@@ -178,43 +184,71 @@ fn app(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-fn err(status: StatusCode, code: &str, msg: impl Into<String>) -> Response {
-    (
-        status,
-        Json(api::ApiError {
-            error: msg.into(),
-            code: code.into(),
-            request_id: String::new(),
-        }),
-    )
-        .into_response()
+/// An error the fleet answers itself; the daemon's `ApiError` body.
+struct Refusal {
+    status: StatusCode,
+    code: &'static str,
+    error: String,
 }
 
-async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Response {
-    let path = req.uri().path().to_string();
-    let bearer = req
-        .headers()
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(api::ApiError {
+                error: self.error,
+                code: self.code.into(),
+                request_id: String::new(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+fn err(status: StatusCode, code: &'static str, msg: impl Into<String>) -> Refusal {
+    Refusal {
+        status,
+        code,
+        error: msg.into(),
+    }
+}
+
+/// The 500 a request answers when the registry could not be written.
+fn registry_error(e: anyhow::Error) -> Refusal {
+    err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "registry",
+        format!("{e:#}"),
+    )
+}
+
+fn bearer(headers: &HeaderMap) -> &str {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("")
-        .to_string();
-    let want = if path == "/v1/hosts/register" {
-        &st.cfg.host_token
-    } else {
-        &st.cfg.token
-    };
-    if path != "/healthz" && !want.is_empty() && bearer != *want {
+}
+
+async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Response {
+    let path = req.uri().path().to_string();
+    // A heartbeat presents the host's own token, checked against its record by the handler.
+    let open = path == "/healthz" || path == "/v1/hosts/register";
+    if !open
+        && !st.cfg.token.is_empty()
+        && !api::constant_eq(bearer(req.headers()).as_bytes(), st.cfg.token.as_bytes())
+    {
         return err(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "a bearer token is required",
-        );
+        )
+        .into_response();
     }
     let start = std::time::Instant::now();
     let method = req.method().clone();
     let resp = next.run(req).await;
-    if path != "/healthz" && path != "/v1/hosts/register" {
+    if !open {
         tracing::info!(%method, path, status = resp.status().as_u16(), ms = start.elapsed().as_millis() as u64, "request");
     }
     resp
@@ -253,19 +287,61 @@ async fn list_hosts(State(st): S) -> Json<Vec<api::Host>> {
     Json(hosts)
 }
 
-async fn register_host(State(st): S, Json(req): Json<api::RegisterHostRequest>) -> StatusCode {
+/// A daemon's heartbeat. It is taken for the one host record at its address, when it presents
+/// that host's token: the one the bootstrap gave an ordered host, or the one `hosts:` lists.
+/// Nothing else may register, so no host can speak for another.
+async fn register_host(
+    State(st): S,
+    headers: HeaderMap,
+    Json(req): Json<api::RegisterHostRequest>,
+) -> Result<Response, Refusal> {
     let now = Utc::now();
     {
         let mut reg = st.reg.lock().unwrap();
+        let rec = match reg.expecting(&req.url) {
+            Some(r) => r,
+            None => {
+                tracing::warn!(
+                    daemon = req.id,
+                    url = req.url,
+                    "registration refused: no host expected at this address"
+                );
+                return Err(err(
+                    StatusCode::FORBIDDEN,
+                    "unknown_host",
+                    format!(
+                        "no host is expected at {}: order one, or list it under hosts: with its token",
+                        url_host(&req.url)
+                    ),
+                ));
+            }
+        };
+        if rec.token.is_empty()
+            || !api::constant_eq(bearer(&headers).as_bytes(), rec.token.as_bytes())
+        {
+            tracing::warn!(
+                host = rec.id,
+                daemon = req.id,
+                "registration refused: not the host's token"
+            );
+            return Err(err(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "the host's own token is required",
+            ));
+        }
+        let id = rec.id.clone();
+        // What the host reports, applied to its record: the id, token, provider fields and
+        // state are the record's own (`heartbeat` leaves them).
         reg.heartbeat(
             HostRec {
-                id: req.id,
+                id,
                 url: req.url,
-                token: req.api_token,
+                token: String::new(),
                 region: req.region,
                 provider: String::new(),
                 provider_id: String::new(),
-                state: "ready".into(),
+                state: String::new(),
                 capacity: req.capacity,
                 used: req.used,
                 machines: req.machines,
@@ -280,25 +356,27 @@ async fn register_host(State(st): S, Json(req): Json<api::RegisterHostRequest>) 
             now,
         );
     }
-    st.save();
-    StatusCode::NO_CONTENT
+    st.save().map_err(registry_error)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-async fn drain_host(State(st): S, Path(id): Path<String>) -> Response {
-    let mut reg = st.reg.lock().unwrap();
-    match reg.hosts.get_mut(&id) {
-        Some(h) => {
-            h.state = "draining".into();
-            drop(reg);
-            st.save();
-            StatusCode::NO_CONTENT.into_response()
+async fn drain_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
+    {
+        let mut reg = st.reg.lock().unwrap();
+        match reg.hosts.get_mut(&id) {
+            Some(h) => h.state = "draining".into(),
+            None => return Err(err(StatusCode::NOT_FOUND, "not_found", "host not found")),
         }
-        None => err(StatusCode::NOT_FOUND, "not_found", "host not found"),
     }
+    st.save().map_err(registry_error)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// Orders a host from the provisioner now, whether or not the autoscaler is on.
-async fn order_host(State(st): S, Json(req): Json<api::OrderHostRequest>) -> Response {
+async fn order_host(
+    State(st): S,
+    Json(req): Json<api::OrderHostRequest>,
+) -> Result<Response, Refusal> {
     let reason = if req.reason.is_empty() {
         "ordered through the API".to_string()
     } else {
@@ -313,23 +391,23 @@ async fn order_host(State(st): S, Json(req): Json<api::OrderHostRequest>) -> Res
         .filter(|h| h.state != "down")
         .count();
     if counted >= st.cfg.provisioner.max_hosts {
-        return err(
+        return Err(err(
             StatusCode::CONFLICT,
             "max_hosts",
             format!("the fleet has {counted} hosts, its maximum"),
-        );
+        ));
     }
-    match st.prov.create(&reason).await {
-        Ok(server) => {
-            let h = add_ordered(&st, server);
-            (StatusCode::ACCEPTED, Json(h.to_api())).into_response()
-        }
-        Err(e) => err(StatusCode::BAD_GATEWAY, "provisioner", format!("{e:#}")),
-    }
+    let server = st
+        .prov
+        .create(&reason)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, "provisioner", format!("{e:#}")))?;
+    let h = add_ordered(&st, server).map_err(registry_error)?;
+    Ok((StatusCode::ACCEPTED, Json(h.to_api())).into_response())
 }
 
 /// Records a server the provisioner just made.
-fn add_ordered(st: &AppState, server: provision::Server) -> HostRec {
+fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
     let dry = st.cfg.provisioner.dry_run || server.provider_id.starts_with("dry-run-");
     tracing::warn!(
         provider = st.prov.name(),
@@ -367,13 +445,13 @@ fn add_ordered(st: &AppState, server: provision::Server) -> HostRec {
         bootstrap_attempts: 0,
     };
     st.reg.lock().unwrap().hosts.insert(id, h.clone());
-    st.save();
-    h
+    st.save()?;
+    Ok(h)
 }
 
 /// Drains a host and releases it at the provider once nothing runs on it: at once when it is
 /// already empty, else from the scaler as soon as it is.
-async fn retire_host(State(st): S, Path(id): Path<String>) -> Response {
+async fn retire_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
     let host = {
         let mut reg = st.reg.lock().unwrap();
         match reg.hosts.get_mut(&id) {
@@ -383,23 +461,27 @@ async fn retire_host(State(st): S, Path(id): Path<String>) -> Response {
                 }
                 h.clone()
             }
-            None => return err(StatusCode::NOT_FOUND, "not_found", "host not found"),
+            None => return Err(err(StatusCode::NOT_FOUND, "not_found", "host not found")),
         }
     };
-    st.save();
+    st.save().map_err(registry_error)?;
     let empty = host.machines == 0 && host.tenants.is_empty();
     if empty || !matches!(host.state.as_str(), "draining") {
-        match release_host(&st, &host).await {
-            Ok(h) => return Json(h).into_response(),
-            Err(e) => return err(StatusCode::BAD_GATEWAY, "provisioner", format!("{e:#}")),
-        }
+        return match release_host(&st, &host).await {
+            Ok(h) => Ok(Json(h).into_response()),
+            Err(e) => Err(err(
+                StatusCode::BAD_GATEWAY,
+                "provisioner",
+                format!("{e:#}"),
+            )),
+        };
     }
     tracing::info!(
         host = id,
         machines = host.machines,
         "host draining; released once empty"
     );
-    Json(host.to_api()).into_response()
+    Ok(Json(host.to_api()).into_response())
 }
 
 /// Releases a host at its provider (nothing to do for a static one) and forgets it.
@@ -408,26 +490,17 @@ async fn release_host(st: &AppState, h: &HostRec) -> Result<api::Host> {
         st.prov.release(&h.provider_id).await?;
     }
     tracing::warn!(host = h.id, provider_id = h.provider_id, "host released");
-    {
-        let mut reg = st.reg.lock().unwrap();
-        reg.hosts.remove(&h.id);
-        reg.tenants.retain(|_, x| *x != h.id);
-        reg.machines.retain(|_, x| *x != h.id);
-    }
-    st.save();
+    st.reg.lock().unwrap().forget(&h.id);
+    st.save()?;
     let mut out = h.to_api();
     out.state = "released".into();
     Ok(out)
 }
 
-async fn forget_host(State(st): S, Path(id): Path<String>) -> StatusCode {
-    let mut reg = st.reg.lock().unwrap();
-    reg.hosts.remove(&id);
-    reg.tenants.retain(|_, h| *h != id);
-    reg.machines.retain(|_, h| *h != id);
-    drop(reg);
-    st.save();
-    StatusCode::NO_CONTENT
+async fn forget_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
+    st.reg.lock().unwrap().forget(&id);
+    st.save().map_err(registry_error)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn get_json<T: serde::de::DeserializeOwned>(
@@ -483,7 +556,8 @@ async fn poll_static_hosts_once(st: &AppState) -> bool {
         }
     }
     st.reg.lock().unwrap().sweep(&st.policy, Utc::now());
-    st.save();
+    // A background task: a failed write is logged by `save`, and the next round writes again.
+    let _ = st.save();
     unseen
 }
 
@@ -534,7 +608,7 @@ async fn scaler(st: Arc<AppState>) {
             registry::Decision::AddHost => match st.prov.create("the fleet has no slot left").await
             {
                 Ok(server) => {
-                    add_ordered(&st, server);
+                    let _ = add_ordered(&st, server);
                 }
                 Err(e) => tracing::error!(err = %e, "add host"),
             },
@@ -569,7 +643,8 @@ async fn forward(
                 "host {} is down: its machines answer again once it does",
                 host.id
             ),
-        );
+        )
+        .into_response();
     }
     let url = format!("{}{}", host.url.trim_end_matches('/'), path);
     let mut req = st.http.request(method, &url).body(body);
@@ -603,8 +678,18 @@ async fn forward(
             StatusCode::BAD_GATEWAY,
             "host_unreachable",
             format!("host {}: {e}", host.id),
-        ),
+        )
+        .into_response(),
     }
+}
+
+/// A forwarded response, its body read so it can be looked at and sent on.
+async fn read(resp: Response) -> (axum::http::response::Parts, Bytes) {
+    let (parts, body) = resp.into_parts();
+    let data = axum::body::to_bytes(body, 64 << 20)
+        .await
+        .unwrap_or_default();
+    (parts, data)
 }
 
 /// Adds the host id to a machine JSON body.
@@ -618,57 +703,74 @@ fn with_host(body: Bytes, host: &str) -> Bytes {
     }
 }
 
-async fn create_machine(State(st): S, headers: HeaderMap, body: Bytes) -> Response {
-    let req: api::CreateMachineRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => return err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")),
-    };
-    let host = {
+/// The `code` of an error body, empty when it is not one.
+fn error_code(body: &[u8]) -> String {
+    serde_json::from_slice::<api::ApiError>(body)
+        .map(|e| e.code)
+        .unwrap_or_default()
+}
+
+async fn create_machine(
+    State(st): S,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Refusal> {
+    let req: api::CreateMachineRequest = serde_json::from_slice(&body)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
+    // Root disks are thin; a volume takes what it says, plus headroom.
+    let disk = req
+        .volume
+        .as_ref()
+        .map(|v| v.size_gb as u64 * 1024)
+        .unwrap_or(0)
+        + 2048;
+    let (host, first) = {
         let mut reg = st.reg.lock().unwrap();
-        let chosen = match &req.fork {
-            Some(f) => reg.host_of_machine(&f.machine_id).map(|h| h.id.clone()),
-            None => None,
-        }
-        .or_else(|| {
-            // Root disks are thin; a volume takes what it says, plus headroom.
-            let disk = req
-                .volume
-                .as_ref()
-                .map(|v| v.size_gb as u64 * 1024)
-                .unwrap_or(0)
-                + 2048;
-            reg.place(&req.tenant, req.size.memory_mb, disk, &st.policy)
-        });
-        chosen.and_then(|id| reg.hosts.get(&id).cloned())
+        let first = !reg.tenants.contains_key(&req.tenant);
+        let source = req
+            .fork
+            .as_ref()
+            .and_then(|f| reg.host_of_machine(&f.machine_id).map(|h| h.id.clone()));
+        let chosen = match source {
+            Some(id) => {
+                reg.reserve(&id, req.size.memory_mb, disk);
+                Some(id)
+            }
+            None => reg.place(&req.tenant, req.size.memory_mb, disk, &st.policy),
+        };
+        (chosen.and_then(|id| reg.hosts.get(&id).cloned()), first)
     };
-    let host = match host {
-        Some(h) => h,
-        None => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "capacity",
-                "no host has room for this machine",
-            )
-        }
-    };
-    st.save();
+    let host = host.ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "capacity",
+            "no host has room for this machine",
+        )
+    })?;
+    st.save().map_err(registry_error)?;
     let resp = forward(&st, &host, Method::POST, "/v1/machines", &headers, body).await;
-    if resp.status().is_success() {
-        let (parts, body) = resp.into_parts();
-        let data = axum::body::to_bytes(body, 16 << 20)
-            .await
-            .unwrap_or_default();
+    let (parts, data) = read(resp).await;
+    if parts.status.is_success() {
         if let Ok(m) = serde_json::from_slice::<api::Machine>(&data) {
             st.reg
                 .lock()
                 .unwrap()
                 .machines
                 .insert(m.id, host.id.clone());
-            st.save();
         }
-        return Response::from_parts(parts, Body::from(with_host(data, &host.id)));
+        st.save().map_err(registry_error)?;
+        return Ok(Response::from_parts(
+            parts,
+            Body::from(with_host(data, &host.id)),
+        ));
     }
-    resp
+    // The host has no room for the tenant's first machine: the pin this request made goes, so
+    // a retry is placed afresh. A later machine stays: the tenant's network is on this host.
+    if first && error_code(&data) == "capacity" {
+        st.reg.lock().unwrap().unpin(&req.tenant);
+        st.save().map_err(registry_error)?;
+    }
+    Ok(Response::from_parts(parts, Body::from(data)))
 }
 
 /// Lists machines. A listing is the truth for whoever reads it (the control plane marks a
@@ -683,16 +785,7 @@ async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
         let reg = st.reg.lock().unwrap();
         match tenant.as_deref().and_then(|t| reg.host_of_tenant(t)) {
             Some(h) => vec![h.clone()],
-            None => {
-                let mut v: Vec<HostRec> = reg
-                    .hosts
-                    .values()
-                    .filter(|h| matches!(h.state.as_str(), "ready" | "draining" | "down"))
-                    .cloned()
-                    .collect();
-                v.sort_by(|a, b| a.id.cmp(&b.id));
-                v
-            }
+            None => reg.listed(),
         }
     };
     let mut all: Vec<serde_json::Value> = Vec::new();
@@ -705,9 +798,7 @@ async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
         if !resp.status().is_success() {
             return resp;
         }
-        let data = axum::body::to_bytes(resp.into_body(), 64 << 20)
-            .await
-            .unwrap_or_default();
+        let (_, data) = read(resp).await;
         match serde_json::from_slice::<Vec<serde_json::Value>>(&data) {
             Ok(ms) => {
                 let mut reg = st.reg.lock().unwrap();
@@ -719,21 +810,25 @@ async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
                     all.push(m);
                 }
             }
-            Err(e) => {
-                return err(
-                    StatusCode::BAD_GATEWAY,
-                    "host_unreachable",
-                    format!("host {}: unreadable listing: {e}", h.id),
-                )
-            }
+            Err(e) => return unreadable(&h, e),
         }
     }
     Json(all).into_response()
 }
 
+fn unreadable(h: &HostRec, e: serde_json::Error) -> Response {
+    err(
+        StatusCode::BAD_GATEWAY,
+        "host_unreachable",
+        format!("host {}: unreadable listing: {e}", h.id),
+    )
+    .into_response()
+}
+
+/// Lists endpoints, never partially, like machines; each one is indexed to its host.
 async fn list_endpoints(State(st): S, headers: HeaderMap) -> Response {
-    let hosts = st.reg.lock().unwrap().ready();
-    let mut all: Vec<serde_json::Value> = Vec::new();
+    let hosts = st.reg.lock().unwrap().listed();
+    let mut all: Vec<api::Endpoint> = Vec::new();
     for h in hosts {
         let resp = forward(
             &st,
@@ -744,10 +839,19 @@ async fn list_endpoints(State(st): S, headers: HeaderMap) -> Response {
             Bytes::new(),
         )
         .await;
-        if let Ok(data) = axum::body::to_bytes(resp.into_body(), 64 << 20).await {
-            if let Ok(eps) = serde_json::from_slice::<Vec<serde_json::Value>>(&data) {
+        if !resp.status().is_success() {
+            return resp;
+        }
+        let (_, data) = read(resp).await;
+        match serde_json::from_slice::<Vec<api::Endpoint>>(&data) {
+            Ok(eps) => {
+                let mut reg = st.reg.lock().unwrap();
+                for e in &eps {
+                    reg.endpoints.insert(e.id.clone(), h.id.clone());
+                }
                 all.extend(eps);
             }
+            Err(e) => return unreadable(&h, e),
         }
     }
     Json(all).into_response()
@@ -771,11 +875,15 @@ async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {
     Json(out)
 }
 
-async fn delete_tenant(State(st): S, Path(id): Path<String>, headers: HeaderMap) -> Response {
+async fn delete_tenant(
+    State(st): S,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Refusal> {
     let host = st.reg.lock().unwrap().host_of_tenant(&id).cloned();
     let host = match host {
         Some(h) => h,
-        None => return StatusCode::NO_CONTENT.into_response(),
+        None => return Ok(StatusCode::NO_CONTENT.into_response()),
     };
     let resp = forward(
         &st,
@@ -787,33 +895,58 @@ async fn delete_tenant(State(st): S, Path(id): Path<String>, headers: HeaderMap)
     )
     .await;
     if resp.status().is_success() {
-        st.reg.lock().unwrap().tenants.remove(&id);
-        st.save();
+        st.reg.lock().unwrap().unpin(&id);
+        st.save().map_err(registry_error)?;
     }
-    resp
+    Ok(resp)
 }
 
-/// Finds the host of a machine: from the index, else by asking every host.
-async fn locate_machine(st: &AppState, id: &str, headers: &HeaderMap) -> Option<HostRec> {
-    if let Some(h) = st.reg.lock().unwrap().host_of_machine(id).cloned() {
-        return Some(h);
+/// Releases a tenant from its host without touching the host: its next machine is placed
+/// afresh. For the operator moving a tenant (backups, then a restore elsewhere) or freeing
+/// one stuck on a host that is full or gone.
+async fn unpin_tenant(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
+    st.reg.lock().unwrap().unpin(&id);
+    st.save().map_err(registry_error)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// What the fleet indexes to a host, and where a host is asked for one by id.
+#[derive(Clone, Copy)]
+enum Indexed {
+    Machine,
+    Endpoint,
+}
+
+impl Indexed {
+    fn path(self, id: &str) -> String {
+        match self {
+            Indexed::Machine => format!("/v1/machines/{id}"),
+            Indexed::Endpoint => format!("/v1/endpoints/{id}"),
+        }
     }
-    let hosts = st.reg.lock().unwrap().ready();
+
+    fn index(self, reg: &mut Registry) -> &mut std::collections::HashMap<String, String> {
+        match self {
+            Indexed::Machine => &mut reg.machines,
+            Indexed::Endpoint => &mut reg.endpoints,
+        }
+    }
+}
+
+/// Finds the host of a machine or an endpoint: from the index, else by asking every host.
+async fn locate(st: &AppState, what: Indexed, id: &str, headers: &HeaderMap) -> Option<HostRec> {
+    let hosts = {
+        let mut reg = st.reg.lock().unwrap();
+        let known = what.index(&mut reg).get(id).cloned();
+        if let Some(h) = known.and_then(|hid| reg.hosts.get(&hid)) {
+            return Some(h.clone());
+        }
+        reg.ready()
+    };
     for h in hosts {
-        let resp = forward(
-            st,
-            &h,
-            Method::GET,
-            &format!("/v1/machines/{id}"),
-            headers,
-            Bytes::new(),
-        )
-        .await;
+        let resp = forward(st, &h, Method::GET, &what.path(id), headers, Bytes::new()).await;
         if resp.status().is_success() {
-            st.reg
-                .lock()
-                .unwrap()
-                .machines
+            what.index(&mut st.reg.lock().unwrap())
                 .insert(id.to_string(), h.id.clone());
             return Some(h);
         }
@@ -843,7 +976,8 @@ async fn list_backups(
         StatusCode::SERVICE_UNAVAILABLE,
         "no_host",
         "no host is ready",
-    );
+    )
+    .into_response();
     for h in hosts {
         if h.state == "down" {
             continue;
@@ -864,35 +998,51 @@ async fn by_machine(
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
-) -> Response {
+) -> Result<Response, Refusal> {
     let id = params
         .iter()
         .find(|(k, _)| k == "id")
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
-    let host = match locate_machine(&st, &id, &headers).await {
-        Some(h) => h,
-        None => return err(StatusCode::NOT_FOUND, "not_found", "machine not found"),
-    };
+    let host = locate(&st, Indexed::Machine, &id, &headers)
+        .await
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "machine not found"))?;
     let path = uri
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_default();
-    let is_delete = method == Method::DELETE && path == format!("/v1/machines/{id}");
-    let plain_get = method == Method::GET && path == format!("/v1/machines/{id}");
+    let own = format!("/v1/machines/{id}");
+    let is_delete = method == Method::DELETE && path == own;
+    let plain_get = method == Method::GET && path == own;
+    let adds_endpoint = method == Method::POST && path == format!("{own}/endpoints");
     let resp = forward(&st, &host, method, &path, &headers, body).await;
-    if is_delete && resp.status().is_success() {
+    if !resp.status().is_success() {
+        return Ok(resp);
+    }
+    if is_delete {
         st.reg.lock().unwrap().machines.remove(&id);
-        st.save();
+        st.save().map_err(registry_error)?;
     }
-    if plain_get && resp.status().is_success() {
-        let (parts, body) = resp.into_parts();
-        let data = axum::body::to_bytes(body, 16 << 20)
-            .await
-            .unwrap_or_default();
-        return Response::from_parts(parts, Body::from(with_host(data, &host.id)));
+    if plain_get {
+        let (parts, data) = read(resp).await;
+        return Ok(Response::from_parts(
+            parts,
+            Body::from(with_host(data, &host.id)),
+        ));
     }
-    resp
+    if adds_endpoint {
+        let (parts, data) = read(resp).await;
+        if let Ok(e) = serde_json::from_slice::<api::Endpoint>(&data) {
+            st.reg
+                .lock()
+                .unwrap()
+                .endpoints
+                .insert(e.id, host.id.clone());
+            st.save().map_err(registry_error)?;
+        }
+        return Ok(Response::from_parts(parts, Body::from(data)));
+    }
+    Ok(resp)
 }
 
 async fn by_endpoint(
@@ -902,23 +1052,27 @@ async fn by_endpoint(
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
-) -> Response {
+) -> Result<Response, Refusal> {
+    let host = locate(&st, Indexed::Endpoint, &id, &headers)
+        .await
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("endpoint {id} not found"),
+            )
+        })?;
     let path = uri
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_default();
-    let hosts = st.reg.lock().unwrap().ready();
-    for h in hosts {
-        let resp = forward(&st, &h, method.clone(), &path, &headers, body.clone()).await;
-        if resp.status() != StatusCode::NOT_FOUND {
-            return resp;
-        }
+    let is_delete = method == Method::DELETE;
+    let resp = forward(&st, &host, method, &path, &headers, body).await;
+    if is_delete && resp.status().is_success() {
+        st.reg.lock().unwrap().endpoints.remove(&id);
+        st.save().map_err(registry_error)?;
     }
-    err(
-        StatusCode::NOT_FOUND,
-        "not_found",
-        format!("endpoint {id} not found"),
-    )
+    Ok(resp)
 }
 
 #[cfg(test)]

@@ -226,7 +226,13 @@ enum EndpointCmd {
 #[derive(Subcommand)]
 enum TenantCmd {
     Ls,
-    Rm { id: String },
+    Rm {
+        id: String,
+    },
+    /// Release a tenant from its host (fleet): its next machine is placed afresh
+    Unpin {
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -657,6 +663,10 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             }
             TenantCmd::Rm { id } => {
                 c.raw(DELETE, &format!("/v1/tenants/{id}"), NONE).await?;
+            }
+            TenantCmd::Unpin { id } => {
+                c.raw(POST, &format!("/v1/tenants/{id}/unpin"), NONE)
+                    .await?;
             }
         },
         Cmd::Doctor => doctor(),

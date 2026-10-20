@@ -434,9 +434,11 @@ pub struct OrderHostRequest {
     pub reason: String,
 }
 
-/// What a daemon sends the fleet on start and as heartbeats.
+/// What a daemon sends the fleet every 15 s, with its own API token as the bearer: the fleet
+/// accepts it for the host record that expects that token at that address.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisterHostRequest {
+    /// The daemon's own id, for the fleet's log; the fleet keeps the host under its own.
     pub id: String,
     pub url: String,
     #[serde(default)]
@@ -450,9 +452,6 @@ pub struct RegisterHostRequest {
     pub version: String,
     #[serde(default)]
     pub disk_free_mb: u64,
-    /// The daemon's own API token, so the fleet can forward requests to it.
-    #[serde(default)]
-    pub api_token: String,
 }
 
 /// GET /v1/status.
@@ -927,15 +926,14 @@ mod tests {
             json!({
                 "id": "h1", "url": "http://10.0.0.5:7420", "region": "",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
-                "machines": 0, "tenants": [], "version": "", "disk_free_mb": 0, "api_token": ""
+                "machines": 0, "tenants": [], "version": "", "disk_free_mb": 0
             }),
         );
-        assert_eq!(r.api_token, "");
+        assert_eq!(r.region, "");
         let r: RegisterHostRequest = same(json!({
             "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1",
             "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 512, "vcpus": 1},
-            "machines": 1, "tenants": ["t1"], "version": "0.1.0", "disk_free_mb": 100000,
-            "api_token": "secret"
+            "machines": 1, "tenants": ["t1"], "version": "0.1.0", "disk_free_mb": 100000
         }));
         assert_eq!(r.disk_free_mb, 100000);
         assert!(serde_json::from_value::<RegisterHostRequest>(json!({"id": "h1"})).is_err());

@@ -130,8 +130,8 @@ impl Default for Backup {
 #[serde(default, deny_unknown_fields)]
 pub struct FleetClient {
     pub url: String,
-    pub token: String,
-    /// The URL the fleet reaches this daemon at.
+    /// The URL the fleet reaches this daemon at. The heartbeat presents the daemon's own
+    /// `token`, which the fleet expects for this address.
     pub advertise: String,
     pub region: String,
 }
@@ -363,7 +363,6 @@ image_keep_days: 3
 suspend_on_sleep: true
 fleet:
   url: http://fleet:7430
-  token: ft
   advertise: http://10.0.0.5:7420
   region: fsn1
 capacity:
@@ -401,7 +400,6 @@ capacity:
         assert!(c.suspend_on_sleep);
         let f = c.fleet.unwrap();
         assert_eq!(f.url, "http://fleet:7430");
-        assert_eq!(f.token, "ft");
         assert_eq!(f.advertise, "http://10.0.0.5:7420");
         assert_eq!(f.region, "fsn1");
         assert_eq!(c.capacity.memory_mb, 65536);
@@ -424,6 +422,7 @@ capacity:
             ("storage:\n  pol: byard\n", "pol"),
             ("registries:\n  - host: a\n    user: b\n", "user"),
             ("fleet:\n  urll: x\n", "urll"),
+            ("fleet:\n  token: x\n", "token"),
             ("capacity:\n  memory: 1\n", "memory"),
         ] {
             let err = load(yaml).unwrap_err();

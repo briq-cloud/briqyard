@@ -129,7 +129,7 @@ async fn auth_and_log(State(st): S, req: Request, next: Next) -> Response {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        if !constant_eq(got.as_bytes(), st.token.as_bytes()) {
+        if !api::constant_eq(got.as_bytes(), st.token.as_bytes()) {
             let mut resp = (
                 StatusCode::UNAUTHORIZED,
                 Json(api::ApiError {
@@ -151,13 +151,6 @@ async fn auth_and_log(State(st): S, req: Request, next: Next) -> Response {
         tracing::info!(%method, path, status = resp.status().as_u16(), ms = start.elapsed().as_millis() as u64, request_id, "request");
     }
     resp
-}
-
-fn constant_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 async fn openapi(State(st): S) -> Response {
