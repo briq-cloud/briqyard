@@ -52,3 +52,5 @@ Same shape (6 tenants × 4, one round, 6 workers, a daemon SIGKILL), on the merg
 | Why concurrent boots are slow here | One guest alone boots in 4 s with 2.7 s of kernel time; three at once take 8 s, then each later batch longer. The guests' own command (`python3 -m http.server`) spends 10–25 s at 100 % starting up when siblings boot beside it: page-fault-heavy user code under nested virtualization on six shared vCPUs. Not memory (384 MB limit, 232 MB used, zero reclaim), not the init (idle), not the kernel copy into the jail (65 ms for three) |
 
 Consequence: `hack/config.dev.yaml` sets `boot_timeout_sec: 300` so a stress run on the Mac fails on bugs, not on the host. Real servers boot a guest in about a second; the production default stays 120 s.
+
+After the egress policy and the tenant gateway (ADR 0015, 0016), same driver, 4 tenants × 4, a daemon SIGKILL, the dev boot timeout at 300 s: 0 invariant breaks, 0 boot failures; the only API failures are the three status polls that land while the daemon is down on purpose.
