@@ -168,6 +168,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/hosts/:id", axum::routing::delete(forget_host))
         .route("/v1/machines", get(list_machines).post(create_machine))
         .route("/v1/endpoints", get(list_endpoints))
+        .route("/v1/usage", get(usage))
         .route("/v1/tenants", get(list_tenants))
         .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
         .route(
@@ -861,6 +862,33 @@ async fn list_endpoints(State(st): S, headers: HeaderMap) -> Response {
                 }
                 all.extend(eps);
             }
+            Err(e) => return unreadable(&h, e),
+        }
+    }
+    Json(all).into_response()
+}
+
+/// Usage of every host, never partial (ADR 0017): a usage report missing a host is a bill
+/// missing a host. Every listed host is asked, the query as it came (the hosts check it), and
+/// each bucket says which host measured it.
+async fn usage(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
+    let hosts = st.reg.lock().unwrap().listed();
+    let path = match uri.query() {
+        Some(q) => format!("/v1/usage?{q}"),
+        None => "/v1/usage".into(),
+    };
+    let mut all: Vec<api::UsageBucket> = Vec::new();
+    for h in hosts {
+        let resp = forward(&st, &h, Method::GET, &path, &headers, Bytes::new()).await;
+        if !resp.status().is_success() {
+            return resp;
+        }
+        let (_, data) = read(resp).await;
+        match serde_json::from_slice::<Vec<api::UsageBucket>>(&data) {
+            Ok(bs) => all.extend(bs.into_iter().map(|b| api::UsageBucket {
+                host: h.id.clone(),
+                ..b
+            })),
             Err(e) => return unreadable(&h, e),
         }
     }

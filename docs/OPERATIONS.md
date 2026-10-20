@@ -62,6 +62,7 @@ briqyard status
 | `pci` | `false` | Firecracker's PCI transport (needs a guest kernel with PCI) |
 | `root_disk_gb` | `8` | Size of every root disk (thin) |
 | `image_keep_days` | `14` | An image no machine uses is removed this long after it was built |
+| `usage_keep_days` | `90` | Closed hours of usage (`GET /v1/usage`) are kept this long, then removed by the tick |
 | `image_resolve_minutes` | `10` | A tag's digest is reused this long before the registry is asked again; when the registry refuses (a rate limit), the image already on the host serves |
 | `boot_timeout_sec` | `120` | How long a guest may take to answer after its process starts |
 | `boots_at_once` | half the threads, at least 2 | Boots run at once; the rest wait their turn, each with the whole timeout |
@@ -88,6 +89,7 @@ briqyard status
 | Path | What |
 |---|---|
 | `<data_dir>/state/{machines,tenants,endpoints}/*.json` | The records, one file each, written atomically |
+| `<data_dir>/state/usage/<hour>.json` | Each machine's usage in that UTC hour (ADR 0017); the open hour is rewritten once a minute |
 | `<data_dir>/run/<machine>/` | `console.log` (the guest's serial console, timestamped), `config.tar` (the config drive, `0600`), sockets when not jailed |
 | `<jail_dir>/firecracker/<machine>/root/` | The chroot, on `byard/jail`: kernel, config drive (`0400`, the jail's user), device nodes, sockets, `snap.state` and `snap.mem` while suspended |
 | `<data_dir>/images/meta/*.json` | What each image is |
@@ -147,6 +149,8 @@ backup until sent elsewhere.
   machine logs <id>` (its console; `-f` follows).
 - `briqyard machine stats <id>`: CPU time, memory and disk it uses now, from its cgroup and its
   datasets. `briqyard machine set-sleep <id> 3h|never` changes the window without a restart.
+- `briqyard usage --from <hour> --to <hour> [--tenant T] [--json]`: what each machine used
+  per hour (ADR 0017); `nft list set inet briqyard internet_out` shows the raw counters.
 
 ## When something is off
 

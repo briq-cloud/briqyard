@@ -560,6 +560,57 @@ fn host_commands() {
     }
 }
 
+#[test]
+fn usage_takes_a_range_of_hours() {
+    let utc = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    match parse(&[
+        "usage",
+        "--from",
+        "2026-10-20T16:00:00+02:00",
+        "--to",
+        "2026-10-20T15:00:00Z",
+        "--tenant",
+        "t1",
+        "--json",
+    ])
+    .cmd
+    {
+        Cmd::Usage {
+            from,
+            to,
+            tenant,
+            json,
+        } => {
+            assert_eq!(from, utc("2026-10-20T14:00:00Z"), "read as UTC");
+            assert_eq!(to, utc("2026-10-20T15:00:00Z"));
+            assert_eq!(tenant.as_deref(), Some("t1"));
+            assert!(json);
+            // In UTC, the query needs no escaping.
+            assert_eq!(
+                usage_path(from, to, tenant.as_deref()),
+                "/v1/usage?from=2026-10-20T14:00:00Z&to=2026-10-20T15:00:00Z&tenant=t1"
+            );
+            assert_eq!(
+                usage_path(from, to, None),
+                "/v1/usage?from=2026-10-20T14:00:00Z&to=2026-10-20T15:00:00Z"
+            );
+        }
+        _ => panic!("not a usage"),
+    }
+    assert_eq!(
+        fails(&["usage", "--to", "2026-10-20T15:00:00Z"]),
+        ErrorKind::MissingRequiredArgument
+    );
+    assert_eq!(
+        fails(&["usage", "--from", "today", "--to", "2026-10-20T15:00:00Z"]),
+        ErrorKind::ValueValidation
+    );
+}
+
 // --- tables ---
 
 fn ts() -> chrono::DateTime<chrono::Utc> {
@@ -729,6 +780,47 @@ fn the_host_table() {
         "                 note: bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
     );
     assert!(out.ends_with('\n'));
+}
+
+#[test]
+fn the_usage_table() {
+    let b = api::UsageBucket {
+        hour: chrono::DateTime::parse_from_rfc3339("2026-10-20T14:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        machine_id: "m_0123456789ab".into(),
+        tenant: "t1".into(),
+        size: api::Size {
+            vcpus: 1,
+            memory_mb: 512,
+        },
+        usage: api::Usage {
+            running_seconds: 1800.0,
+            cpu_seconds: 12.34,
+            memory_mb_seconds: 512.0 * 1800.0,
+            root_gb_hours: 4.0,
+            volume_gb_hours: 1.0,
+            backup_gb_hours: 0.5,
+            internet_out_bytes: 1200,
+            internet_in_bytes: 34000,
+            ingress_out_bytes: 5600,
+            ingress_in_bytes: 78,
+            ..Default::default()
+        },
+        closed: true,
+        host: "h1".into(),
+        ..Default::default()
+    };
+    let out = usage_table(&[b]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "HOUR              MACHINE          TENANT       RUN H    CPU S  MEM GB·H  DISK GB·H  BACKUP GB·H       INTERNET OUT/IN        INGRESS OUT/IN HOST",
+            "2026-10-20 14:00  m_0123456789ab   t1            0.50     12.3      0.25       5.00         0.50            1200/34000               5600/78 h1",
+        ]
+    );
+    assert_eq!(usage_table(&[]).lines().count(), 1, "the header alone");
 }
 
 #[test]

@@ -229,6 +229,16 @@ paths:
       responses:
         "204": { description: removed }
         "409": { description: machines still use it }
+  /v1/usage:
+    get:
+      summary: "What each machine used, per UTC hour (ADR 0017): measures, no price. The open hour's buckets grow until it closes; a closed bucket never changes; a destroyed machine's stay for `usage_keep_days`. The fleet asks every host and fails when one does not answer, as listings do, and sets `host` on each bucket"
+      parameters:
+        - { name: from, in: query, required: true, description: "the first hour, RFC 3339 (2026-10-20T14:00:00Z)", schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: true, description: "the hour after the last; at most 31 days after `from`", schema: { type: string, format: date-time } }
+        - { name: tenant, in: query, schema: { type: string } }
+      responses:
+        "200": { description: "buckets, by hour then machine", content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/UsageBucket" } } } } }
+        "400": { description: "`invalid`: `from` or `to` missing, not RFC 3339, not on the hour, `to` not after `from`, or more than 31 days" }
   /v1/tenants:
     get:
       summary: Tenants on the host (daemon), or tenant to host (fleet)
@@ -575,6 +585,31 @@ components:
       properties:
         memory_mb: { type: integer }
         vcpus: { type: integer }
+    UsageBucket:
+      type: object
+      description: One machine in one UTC hour. GB is 2^30 bytes.
+      properties:
+        hour: { type: string, format: date-time, description: the hour's start }
+        machine_id: { type: string }
+        tenant: { type: string }
+        role: { type: string, enum: [gateway], description: "the tenant's gateway (ADR 0016); absent for the tenant's machines" }
+        metadata: { type: object, additionalProperties: { type: string }, description: as last in the hour }
+        size: { $ref: "#/components/schemas/Size" }
+        running_seconds: { type: number, description: "with a process: `starting`, `running`, `stopping`" }
+        suspended_seconds: { type: number, description: stopped with a memory snapshot }
+        cpu_seconds: { type: number, description: "CPU time of the machine's cgroup (jailed hosts)" }
+        memory_mb_seconds: { type: number, description: "`size.memory_mb` × running seconds: reserved" }
+        root_gb_hours: { type: number, description: "the root disk's allocated size × hours" }
+        volume_gb_hours: { type: number, description: "the data volume's allocated size × hours" }
+        disk_used_gb_hours: { type: number, description: what the disks take on the pool × hours }
+        snapshot_gb_hours: { type: number, description: "local snapshots, the memory snapshot included, × hours" }
+        backup_gb_hours: { type: number, description: "the machine's backups in the object store × hours" }
+        internet_out_bytes: { type: integer, description: "to the internet, through the host's NAT" }
+        internet_in_bytes: { type: integer }
+        ingress_out_bytes: { type: integer, description: "to clients of the machine's endpoints" }
+        ingress_in_bytes: { type: integer }
+        closed: { type: boolean, description: "the hour is over: the bucket will not change again" }
+        host: { type: string, description: the host that measured it (fleet) }
     Status:
       type: object
       properties:

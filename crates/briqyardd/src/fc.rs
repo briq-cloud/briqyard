@@ -248,6 +248,30 @@ pub fn cgroup_dir(id: &str) -> PathBuf {
         .join(fc_id(id))
 }
 
+/// What a machine's cgroup says.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CgroupUse {
+    /// CPU time since the cgroup was made, in microseconds.
+    pub cpu_usec: u64,
+    /// Memory its processes hold now.
+    pub memory_bytes: u64,
+}
+
+/// `usage_usec` of a `cpu.stat`.
+pub fn cpu_usec(cpu_stat: &str) -> Option<u64> {
+    cpu_stat
+        .lines()
+        .find_map(|l| l.strip_prefix("usage_usec "))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// The memory snapshot of a machine (`snap.state`, `snap.mem`) as the host sees it: in its
+/// chroot when jailed under `jail_base`, in its run dir otherwise.
+pub fn snapshot_files(dir: &Path, jail_base: Option<&Path>, id: &str) -> [PathBuf; 2] {
+    let root = jail_base.map(|b| jail_root(b, id));
+    ["snap.state", "snap.mem"].map(|n| outside_path(root.as_deref(), dir, n))
+}
+
 /// The jailer's command line for a machine: what to run, as whom, where, with what limits.
 fn jailer_args(j: &Jail, id: &str, binary: &Path) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec![
@@ -597,6 +621,9 @@ pub trait Vmm: Send + Sync {
 
     /// Every VMM on the host with the machine id it carries.
     fn processes(&self) -> Vec<(u32, String)>;
+
+    /// What the machine's cgroup says; none without one (not jailed, or never booted).
+    async fn cgroup(&self, id: &str) -> Option<CgroupUse>;
 }
 
 /// The Firecracker on this host.
@@ -782,6 +809,19 @@ impl Vmm for Firecracker {
             }
         }
         out
+    }
+
+    /// The cgroup the jailer made for the machine, while it exists.
+    async fn cgroup(&self, id: &str) -> Option<CgroupUse> {
+        let cg = cgroup_dir(id);
+        let stat = tokio::fs::read_to_string(cg.join("cpu.stat")).await.ok()?;
+        let memory = tokio::fs::read_to_string(cg.join("memory.current"))
+            .await
+            .unwrap_or_default();
+        Some(CgroupUse {
+            cpu_usec: cpu_usec(&stat)?,
+            memory_bytes: memory.trim().parse().unwrap_or(0),
+        })
     }
 }
 
@@ -1183,6 +1223,14 @@ mod tests {
     }
 
     #[test]
+    fn cpu_time_from_cpu_stat() {
+        let stat = "usage_usec 1234567\nuser_usec 1000000\nsystem_usec 234567\nnr_periods 0\n";
+        assert_eq!(cpu_usec(stat), Some(1_234_567));
+        assert_eq!(cpu_usec("user_usec 5\n"), None);
+        assert_eq!(cpu_usec("usage_usec x\n"), None);
+    }
+
+    #[test]
     fn jail_paths() {
         let base = Path::new("/var/lib/briqyard/jail");
         // Firecracker takes only letters, digits and dashes in an id.
@@ -1197,6 +1245,16 @@ mod tests {
             PathBuf::from("/sys/fs/cgroup/firecracker/m-abc123")
         );
         let dir = Path::new("/var/lib/briqyard/run/m_abc123");
+        // A memory snapshot is where Firecracker wrote it: the chroot when jailed.
+        assert_eq!(
+            snapshot_files(dir, None, "m_abc123"),
+            [dir.join("snap.state"), dir.join("snap.mem")]
+        );
+        let root = jail_root(base, "m_abc123");
+        assert_eq!(
+            snapshot_files(dir, Some(base), "m_abc123"),
+            [root.join("snap.state"), root.join("snap.mem")]
+        );
         assert_eq!(
             paths(dir),
             (

@@ -46,6 +46,20 @@ enum Cmd {
     /// Hosts, when talking to a fleet
     #[command(subcommand)]
     Host(HostCmd),
+    /// What each machine used, per hour: briqyard usage --from 2026-10-20T14:00:00Z --to 2026-10-20T15:00:00Z
+    Usage {
+        /// The first hour, RFC 3339
+        #[arg(long, value_parser = hour_arg)]
+        from: chrono::DateTime<chrono::Utc>,
+        /// The hour after the last (at most 31 days after --from)
+        #[arg(long, value_parser = hour_arg)]
+        to: chrono::DateTime<chrono::Utc>,
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Every field, as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Check this machine as a briqyard host: KVM, ZFS, nftables, Firecracker, the kernel
     Doctor,
 }
@@ -776,6 +790,21 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             }
         },
         Cmd::Doctor => doctor(),
+        Cmd::Usage {
+            from,
+            to,
+            tenant,
+            json,
+        } => {
+            let bs: Vec<api::UsageBucket> = c
+                .call(GET, &usage_path(from, to, tenant.as_deref()), NONE)
+                .await?;
+            if json {
+                print_json(&bs);
+            } else {
+                print!("{}", usage_table(&bs));
+            }
+        }
         Cmd::Image(i) => match i {
             ImageCmd::Ls => {
                 let ims: Vec<api::Image> = c.call(GET, "/v1/images", NONE).await?;
@@ -845,6 +874,27 @@ fn egress_arg(s: &str) -> Result<api::Egress, String> {
     };
     e.check()?;
     Ok(e)
+}
+
+/// A moment in RFC 3339, as UTC; whether it is on the hour is the server's to say.
+fn hour_arg(s: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .map_err(|_| format!("{s:?}: want RFC 3339, like 2026-10-20T14:00:00Z"))
+}
+
+/// `GET /v1/usage` for a range, in UTC so the query needs no escaping.
+fn usage_path(
+    from: chrono::DateTime<chrono::Utc>,
+    to: chrono::DateTime<chrono::Utc>,
+    tenant: Option<&str>,
+) -> String {
+    let utc = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let mut p = format!("/v1/usage?from={}&to={}", utc(from), utc(to));
+    if let Some(t) = tenant {
+        p.push_str(&format!("&tenant={t}"));
+    }
+    p
 }
 
 /// An egress policy as `egress_arg` reads it.
@@ -942,6 +992,42 @@ fn host_table(hs: &[api::Host]) -> String {
         if !h.note.is_empty() {
             out.push_str(&format!("{:<16} note: {}\n", "", h.note));
         }
+    }
+    out
+}
+
+/// `usage`: a line per machine and hour. Disk is the allocated root and volume; `--json` has
+/// every measure.
+fn usage_table(bs: &[api::UsageBucket]) -> String {
+    let mut out = format!(
+        "{:<17} {:<16} {:<10} {:>7} {:>8} {:>9} {:>10} {:>12} {:>21} {:>21} HOST\n",
+        "HOUR",
+        "MACHINE",
+        "TENANT",
+        "RUN H",
+        "CPU S",
+        "MEM GB·H",
+        "DISK GB·H",
+        "BACKUP GB·H",
+        "INTERNET OUT/IN",
+        "INGRESS OUT/IN"
+    );
+    for b in bs {
+        let u = &b.usage;
+        out.push_str(&format!(
+            "{:<17} {:<16} {:<10} {:>7.2} {:>8.1} {:>9.2} {:>10.2} {:>12.2} {:>21} {:>21} {}\n",
+            b.hour.format("%Y-%m-%d %H:00"),
+            b.machine_id,
+            b.tenant,
+            u.running_seconds / 3600.0,
+            u.cpu_seconds,
+            u.memory_mb_seconds / 1024.0 / 3600.0,
+            u.root_gb_hours + u.volume_gb_hours,
+            u.backup_gb_hours,
+            format!("{}/{}", u.internet_out_bytes, u.internet_in_bytes),
+            format!("{}/{}", u.ingress_out_bytes, u.ingress_in_bytes),
+            b.host
+        ));
     }
     out
 }

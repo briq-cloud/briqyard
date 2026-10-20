@@ -462,6 +462,24 @@ impl Zfs {
         Ok(())
     }
 
+    /// What each filesystem and volume under `name` takes, in one call.
+    pub async fn space_under(&self, name: &str) -> Result<Vec<Space>> {
+        let out = self
+            .run(&[
+                "list",
+                "-H",
+                "-p",
+                "-o",
+                "name,volsize,usedbydataset,usedbysnapshots",
+                "-r",
+                "-t",
+                "filesystem,volume",
+                &self.ds(name),
+            ])
+            .await?;
+        space_lines(&out, &format!("{}/", self.pool))
+    }
+
     pub async fn used(&self, name: &str) -> Result<u64> {
         let out = self
             .run(&["get", "-H", "-p", "-o", "value", "used", &self.ds(name)])
@@ -477,6 +495,45 @@ impl Zfs {
     }
 }
 
+/// What one dataset takes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Space {
+    /// Relative to the pool (`m/<id>/root`).
+    pub name: String,
+    /// A volume's allocated size; 0 for a filesystem.
+    pub volsize: u64,
+    /// What its own blocks take (`usedbydataset`).
+    pub data: u64,
+    /// What only its snapshots hold (`usedbysnapshots`).
+    pub snapshots: u64,
+}
+
+/// `zfs list -H -p -o name,volsize,usedbydataset,usedbysnapshots` output; `-` is 0.
+fn space_lines(out: &str, prefix: &str) -> Result<Vec<Space>> {
+    let num = |v: &str| -> Result<u64> {
+        match v {
+            "-" => Ok(0),
+            v => v
+                .parse()
+                .map_err(|_| anyhow!("zfs list: {v:?} is not a size")),
+        }
+    };
+    let mut all = Vec::new();
+    for line in out.lines().filter(|l| !l.trim().is_empty()) {
+        let f: Vec<&str> = line.split('\t').collect();
+        let [name, volsize, data, snapshots] = f[..] else {
+            return Err(anyhow!("zfs list: {line:?}: want four fields"));
+        };
+        all.push(Space {
+            name: name.strip_prefix(prefix).unwrap_or(name).to_string(),
+            volsize: num(volsize)?,
+            data: num(data)?,
+            snapshots: num(snapshots)?,
+        });
+    }
+    Ok(all)
+}
+
 /// A `zfs` that is a shell script over a directory: what the manager's tests run on too.
 #[cfg(test)]
 pub(crate) mod fake {
@@ -487,7 +544,7 @@ pub(crate) mod fake {
     /// clone was made from (`promote` moves that snapshot to the clone and makes the source
     /// the clone's clone, as ZFS does). Every call is appended to `calls`, one line each;
     /// `get` answers come from `answer.<property>` files when there is one, else `origin` and
-    /// `clones` from the `.origin` files; `busy` holds how many destroys still answer
+    /// `clones` from the `.origin` files, and `list -p` (space) from `answer.space`; `busy` holds how many destroys still answer
     /// "dataset is busy". Error texts are the real ones, since the code matches on them.
     const FAKE: &str = r#"#!/bin/sh
 DEV="__DEV__"
@@ -496,6 +553,10 @@ for a in "$@"; do last="$a"; done
 missing() { echo "cannot open '$1': dataset does not exist" >&2; exit 1; }
 case "$1" in
   list)
+    if [ "$3" = "-p" ]; then
+      [ -f "$DEV/answer.space" ] && cat "$DEV/answer.space"
+      exit 0
+    fi
     if [ "$3" = "-t" ]; then
       [ -e "$DEV/$last" ] || missing "$last"
       { ls -d "$DEV/$last"@* 2>/dev/null; [ -d "$DEV/$last" ] && find "$DEV/$last" -name '*@*'; } | sed "s|^$DEV/||" | sort
@@ -1012,6 +1073,49 @@ mod tests {
         // What does not parse reads as zero rather than failing a status page.
         f.answer("used", "-\n");
         assert_eq!(f.zfs.used("m/x").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn space_is_read_for_every_dataset_at_once() {
+        let f = Fake::open("byard").await.unwrap();
+        f.answer(
+            "space",
+            "byard/m\t-\t24576\t0\n\
+             byard/m/m_1\t-\t12288\t0\n\
+             byard/m/m_1/root\t8589934592\t52428800\t1048576\n",
+        );
+        f.calls();
+        assert_eq!(
+            f.zfs.space_under("m").await.unwrap(),
+            [
+                Space {
+                    name: "m".into(),
+                    volsize: 0,
+                    data: 24576,
+                    snapshots: 0
+                },
+                Space {
+                    name: "m/m_1".into(),
+                    volsize: 0,
+                    data: 12288,
+                    snapshots: 0
+                },
+                Space {
+                    name: "m/m_1/root".into(),
+                    volsize: 8 << 30,
+                    data: 50 << 20,
+                    snapshots: 1 << 20
+                },
+            ]
+        );
+        assert_eq!(
+            f.calls(),
+            ["list -H -p -o name,volsize,usedbydataset,usedbysnapshots -r -t filesystem,volume byard/m"]
+        );
+        // What is not a size is an error, not a zero: a wrong figure would be billed.
+        assert!(space_lines("byard/m\tx\t0\t0\n", "byard/").is_err());
+        assert!(space_lines("byard/m\t0\t0\n", "byard/").is_err());
+        assert!(space_lines("", "byard/").unwrap().is_empty());
     }
 
     #[tokio::test]

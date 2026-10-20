@@ -507,6 +507,79 @@ pub struct MachineStats {
     pub disk_bytes: u64,
 }
 
+/// What one machine used in one UTC hour (ADR 0017): measures, never a price. `GET /v1/usage`.
+/// One flat object: every name says its group and its unit already.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageBucket {
+    /// The hour's start.
+    pub hour: DateTime<Utc>,
+    pub machine_id: String,
+    pub tenant: String,
+    /// `gateway` for a tenant's gateway (ADR 0016); absent for the tenant's own machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The machine's metadata (the briq id), as it was last in the hour.
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    pub size: Size,
+    #[serde(flatten)]
+    pub usage: Usage,
+    /// The hour is over: the bucket will not change again.
+    pub closed: bool,
+    /// The briqyardd that measured it (set by the fleet).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host: String,
+}
+
+/// The measures of a bucket. GB is 2^30 bytes, as disk sizes are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    /// With a process: from the start's reservation to the process's end (`starting`,
+    /// `running`, `stopping`).
+    pub running_seconds: f64,
+    /// Stopped with a memory snapshot.
+    pub suspended_seconds: f64,
+    /// CPU time the machine's cgroup used (jailed hosts).
+    pub cpu_seconds: f64,
+    /// `size.memory_mb` × running seconds: what was reserved.
+    pub memory_mb_seconds: f64,
+    /// The root disk's allocated size × hours.
+    pub root_gb_hours: f64,
+    /// The data volume's allocated size × hours.
+    pub volume_gb_hours: f64,
+    /// What the disks take on the pool × hours.
+    pub disk_used_gb_hours: f64,
+    /// What local snapshots take, memory snapshots included, × hours.
+    pub snapshot_gb_hours: f64,
+    /// What the machine's backups take in the object store × hours.
+    pub backup_gb_hours: f64,
+    /// Through the host's NAT.
+    pub internet_out_bytes: u64,
+    pub internet_in_bytes: u64,
+    /// Through the host's endpoints; out is to the client.
+    pub ingress_out_bytes: u64,
+    pub ingress_in_bytes: u64,
+}
+
+impl Usage {
+    /// Adds another measure of the same machine and hour.
+    pub fn add(&mut self, o: &Usage) {
+        self.running_seconds += o.running_seconds;
+        self.suspended_seconds += o.suspended_seconds;
+        self.cpu_seconds += o.cpu_seconds;
+        self.memory_mb_seconds += o.memory_mb_seconds;
+        self.root_gb_hours += o.root_gb_hours;
+        self.volume_gb_hours += o.volume_gb_hours;
+        self.disk_used_gb_hours += o.disk_used_gb_hours;
+        self.snapshot_gb_hours += o.snapshot_gb_hours;
+        self.backup_gb_hours += o.backup_gb_hours;
+        self.internet_out_bytes += o.internet_out_bytes;
+        self.internet_in_bytes += o.internet_in_bytes;
+        self.ingress_out_bytes += o.ingress_out_bytes;
+        self.ingress_in_bytes += o.ingress_in_bytes;
+    }
+}
+
 /// An image built on a host.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Image {
@@ -1184,6 +1257,51 @@ mod tests {
             }),
         );
         assert_eq!(s.running, 1);
+    }
+
+    #[test]
+    fn usage_bucket() {
+        // Flat: the identity, every measure by its ADR name, `closed`; no role for a tenant's
+        // own machine, no host from a daemon.
+        let b: UsageBucket = same(json!({
+            "hour": "2026-10-20T14:00:00Z", "machine_id": "m_1", "tenant": "t1",
+            "metadata": {"briq_id": "bq_1"}, "size": {"vcpus": 1, "memory_mb": 512},
+            "running_seconds": 3600.0, "suspended_seconds": 0.0, "cpu_seconds": 12.5,
+            "memory_mb_seconds": 1843200.0, "root_gb_hours": 8.0, "volume_gb_hours": 2.0,
+            "disk_used_gb_hours": 0.5, "snapshot_gb_hours": 0.25, "backup_gb_hours": 0.75,
+            "internet_out_bytes": 100, "internet_in_bytes": 2000,
+            "ingress_out_bytes": 300, "ingress_in_bytes": 40,
+            "closed": true
+        }));
+        assert_eq!(b.usage.cpu_seconds, 12.5);
+        assert_eq!(b.usage.ingress_in_bytes, 40);
+        assert_eq!(b.role, None);
+        let g: UsageBucket = same(json!({
+            "hour": "2026-10-20T15:00:00Z", "machine_id": "m_2", "tenant": "t1",
+            "role": "gateway", "metadata": {}, "size": {"vcpus": 1, "memory_mb": 256},
+            "running_seconds": 1.5, "suspended_seconds": 0.0, "cpu_seconds": 0.0,
+            "memory_mb_seconds": 384.0, "root_gb_hours": 0.0, "volume_gb_hours": 0.0,
+            "disk_used_gb_hours": 0.0, "snapshot_gb_hours": 0.0, "backup_gb_hours": 0.0,
+            "internet_out_bytes": 0, "internet_in_bytes": 0,
+            "ingress_out_bytes": 0, "ingress_in_bytes": 0,
+            "closed": false, "host": "h1"
+        }));
+        assert_eq!(
+            (g.role.as_deref(), g.host.as_str()),
+            (Some("gateway"), "h1")
+        );
+        // A measure left out is refused, not read as zero.
+        assert!(serde_json::from_value::<UsageBucket>(json!({
+            "hour": "2026-10-20T15:00:00Z", "machine_id": "m_2", "tenant": "t1",
+            "size": {"vcpus": 1, "memory_mb": 256}, "closed": false
+        }))
+        .is_err());
+        // Two measures of a machine's hour add up, field by field.
+        let mut u = b.usage;
+        u.add(&g.usage);
+        assert_eq!(u.running_seconds, 3601.5);
+        assert_eq!(u.memory_mb_seconds, 1843584.0);
+        assert_eq!(u.internet_in_bytes, 2000);
     }
 
     #[test]

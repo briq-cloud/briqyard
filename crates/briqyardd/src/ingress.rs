@@ -1,15 +1,19 @@
 //! How the outside reaches a machine: a TCP port on the host per TCP endpoint, and one HTTP
 //! listener that routes by host name. A connection to a sleeping machine's endpoint wakes it.
 //! HTTP routing reads the request head on the raw connection and then splices bytes, so
-//! WebSockets and streaming responses pass through untouched.
+//! WebSockets and streaming responses pass through untouched. The bytes each way are added
+//! to the machine's usage as they pass (ADR 0017).
 
 use crate::machine::{EndpointRec, Manager};
+use crate::usage::Traffic;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
@@ -147,9 +151,11 @@ impl Ingress {
         }
     }
 
-    async fn proxy_tcp(&self, ep: EndpointRec, mut conn: TcpStream) {
+    async fn proxy_tcp(&self, ep: EndpointRec, conn: TcpStream) {
         match self.dial(&ep).await {
             Ok(mut target) => {
+                let traffic = self.mgr.traffic(&ep.machine_id).unwrap_or_default();
+                let mut conn = Counted { conn, traffic };
                 let _ = tokio::io::copy_bidirectional(&mut conn, &mut target).await;
             }
             Err(e) => {
@@ -197,7 +203,50 @@ impl Ingress {
         if target.write_all(&head).await.is_err() {
             return;
         }
+        let traffic = self.mgr.traffic(&ep.machine_id).unwrap_or_default();
+        traffic.received(head.len() as u64);
+        let mut conn = Counted { conn, traffic };
         let _ = tokio::io::copy_bidirectional(&mut conn, &mut target).await;
+    }
+}
+
+/// The client's side of a proxied connection: what is read from it and written to it is
+/// added to the machine's traffic as it passes, so a connection cut short still counts.
+struct Counted<S> {
+    conn: S,
+    traffic: Arc<Traffic>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Counted<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let r = Pin::new(&mut self.conn).poll_read(cx, buf);
+        self.traffic.received((buf.filled().len() - before) as u64);
+        r
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let r = Pin::new(&mut self.conn).poll_write(cx, data);
+        if let Poll::Ready(Ok(n)) = r {
+            self.traffic.sent(n as u64);
+        }
+        r
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.conn).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.conn).poll_shutdown(cx)
     }
 }
 
@@ -255,6 +304,29 @@ mod tests {
         // A path that looks like a header must not be read as one; only the first Host counts.
         let head = b"GET /host:evil HTTP/1.1\r\nX-Host: a\r\nHost: one.example\r\nHost: two.example\r\n\r\n";
         assert_eq!(host_of(head), "one.example");
+    }
+
+    #[tokio::test]
+    async fn a_counted_connection_adds_both_ways_as_bytes_pass() {
+        let (client, near) = tokio::io::duplex(64);
+        let traffic = Arc::new(Traffic::default());
+        let mut conn = Counted {
+            conn: near,
+            traffic: traffic.clone(),
+        };
+        let mut client = client;
+        client.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
+        let mut buf = [0u8; 16];
+        let n = conn.read(&mut buf).await.unwrap();
+        assert_eq!(n, 16);
+        conn.write_all(b"HTTP/1.1 200 OK\r\n\r\nhello")
+            .await
+            .unwrap();
+        // Counted before the connection ends: a tick in the middle takes what passed so far.
+        assert_eq!(traffic.take(), (16, 24));
+        drop(client);
+        assert_eq!(conn.read(&mut buf).await.unwrap(), 0);
+        assert_eq!(traffic.take(), (0, 0));
     }
 
     #[test]
