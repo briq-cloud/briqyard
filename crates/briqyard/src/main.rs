@@ -78,6 +78,14 @@ enum Cmd {
         #[arg(long)]
         watch: bool,
     },
+    /// Running machines by CPU, over the daemon's last 15 s: briqyard top [--tenant T]
+    Top {
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Every field, as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Check this machine as a briqyard host: KVM, ZFS, nftables, Firecracker, the kernel
     Doctor,
 }
@@ -987,6 +995,18 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 eprintln!("(next: --since {next})");
             }
         }
+        Cmd::Top { tenant, json } => {
+            let path = match &tenant {
+                Some(t) => format!("/v1/top?tenant={t}"),
+                None => "/v1/top".into(),
+            };
+            let ms: Vec<api::TopMachine> = c.call(GET, &path, NONE).await?;
+            if json {
+                print_json(&ms);
+            } else {
+                print!("{}", top_table(ms));
+            }
+        }
         Cmd::Usage {
             from,
             to,
@@ -1217,8 +1237,8 @@ fn image_table(ims: &[api::Image]) -> String {
     out
 }
 
-/// `host ls`: a line per host, and its note under it when the provisioner or the bootstrap
-/// left one.
+/// `host ls`: a line per host, and under it its pin, each condition that is true and its
+/// note when the provisioner or the bootstrap left one.
 fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
         "{:<16} {:<28} {:<12} {:<14} {:<10} {:<9} {:<8} LAST SEEN\n",
@@ -1238,6 +1258,15 @@ fn host_table(hs: &[api::Host]) -> String {
         ));
         if !h.tls_fingerprint.is_empty() {
             out.push_str(&format!("{:<16} tls: {}\n", "", h.tls_fingerprint));
+        }
+        for c in h.conditions.iter().filter(|c| c.status) {
+            out.push_str(&format!(
+                "{:<16} {} since {}: {}\n",
+                "",
+                c.kind,
+                c.since.format("%Y-%m-%d %H:%M:%S"),
+                c.message
+            ));
         }
         if !h.note.is_empty() {
             out.push_str(&format!("{:<16} note: {}\n", "", h.note));
@@ -1277,6 +1306,51 @@ fn usage_table(bs: &[api::UsageBucket]) -> String {
             format!("{}/{}", u.internet_out_bytes, u.internet_in_bytes),
             format!("{}/{}", u.ingress_out_bytes, u.ingress_in_bytes),
             b.host
+        ));
+    }
+    out
+}
+
+/// `top`: the busiest first. Memory is used/limit in MB, disk in MB, network in KB/s.
+fn top_table(mut ms: Vec<api::TopMachine>) -> String {
+    ms.sort_by(|a, b| {
+        b.cpu_percent
+            .total_cmp(&a.cpu_percent)
+            .then_with(|| (&a.tenant, &a.name).cmp(&(&b.tenant, &b.name)))
+    });
+    let mb = |b: u64| b >> 20;
+    let kb = |r: f64| r / 1024.0;
+    let mut out = format!(
+        "{:<16} {:<10} {:<14} {:>6} {:>13} {:>9} {:>17} {:>17} HOST\n",
+        "MACHINE",
+        "TENANT",
+        "NAME",
+        "CPU %",
+        "MEMORY MB",
+        "DISK MB",
+        "INTERNET IN/OUT",
+        "INGRESS IN/OUT"
+    );
+    for m in &ms {
+        out.push_str(&format!(
+            "{:<16} {:<10} {:<14} {:>6.1} {:>13} {:>9} {:>17} {:>17} {}\n",
+            m.machine_id,
+            m.tenant,
+            m.name,
+            m.cpu_percent,
+            format!("{}/{}", mb(m.memory_bytes), mb(m.memory_limit_bytes)),
+            mb(m.disk_used_bytes),
+            format!(
+                "{:.1}/{:.1}",
+                kb(m.internet_in_bytes_per_sec),
+                kb(m.internet_out_bytes_per_sec)
+            ),
+            format!(
+                "{:.1}/{:.1}",
+                kb(m.ingress_in_bytes_per_sec),
+                kb(m.ingress_out_bytes_per_sec)
+            ),
+            m.host
         ));
     }
     out

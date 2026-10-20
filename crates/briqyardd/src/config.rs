@@ -71,6 +71,29 @@ pub struct Config {
     /// What the daemon advertises: memory it may hand to machines (default: the host's memory
     /// minus 2 GB) and vCPUs (default: hardware threads times 4).
     pub capacity: Capacity,
+    /// When the host is under pressure (ADR 0021).
+    pub conditions: Conditions,
+    /// A running machine's console is rotated past this size, one previous file kept.
+    pub console_max_mb: u32,
+}
+
+/// The thresholds of the host's conditions (ADR 0021), in percent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Conditions {
+    /// `memory_pressure`: committed memory over this share of capacity.
+    pub memory_pct: u32,
+    /// `disk_pressure`: the pool's free space under this share of its size.
+    pub disk_free_pct: u32,
+}
+
+impl Default for Conditions {
+    fn default() -> Self {
+        Self {
+            memory_pct: 95,
+            disk_free_pct: 10,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -254,6 +277,8 @@ impl Default for Config {
             fleet: None,
             backup: Backup::default(),
             capacity: Capacity::default(),
+            conditions: Conditions::default(),
+            console_max_mb: 64,
         }
     }
 }
@@ -325,6 +350,15 @@ impl Config {
         }
         if self.events_keep_days < 1 {
             bail!("events_keep_days must be at least 1");
+        }
+        if self.console_max_mb < 1 {
+            bail!("console_max_mb must be at least 1");
+        }
+        if !(1..=100).contains(&self.conditions.memory_pct) {
+            bail!("conditions.memory_pct: a share of capacity, 1 to 100");
+        }
+        if self.conditions.disk_free_pct > 99 {
+            bail!("conditions.disk_free_pct: a share of the pool, 0 to 99");
         }
         for (name, p) in [
             ("firecracker", &self.firecracker),
@@ -515,6 +549,14 @@ mod tests {
         assert!(c.fleet.is_none());
         assert_eq!(c.capacity.memory_mb, 0);
         assert_eq!(c.capacity.vcpus, 0);
+        assert_eq!(
+            c.conditions,
+            Conditions {
+                memory_pct: 95,
+                disk_free_pct: 10
+            }
+        );
+        assert_eq!(c.console_max_mb, 64);
     }
 
     #[test]
@@ -585,6 +627,10 @@ fleet:
 capacity:
   memory_mb: 65536
   vcpus: 128
+conditions:
+  memory_pct: 90
+  disk_free_pct: 20
+console_max_mb: 16
 "#,
         )
         .unwrap();
@@ -634,6 +680,14 @@ capacity:
         assert_eq!(f.region, "fsn1");
         assert_eq!(c.capacity.memory_mb, 65536);
         assert_eq!(c.capacity.vcpus, 128);
+        assert_eq!(
+            c.conditions,
+            Conditions {
+                memory_pct: 90,
+                disk_free_pct: 20
+            }
+        );
+        assert_eq!(c.console_max_mb, 16);
     }
 
     #[test]
@@ -708,6 +762,7 @@ capacity:
             ("fleet:\n  token: x\n", "token"),
             ("capacity:\n  memory: 1\n", "memory"),
             ("egress_limits:\n  bandwidth: 1\n", "bandwidth"),
+            ("conditions:\n  memory: 1\n", "memory"),
         ] {
             let err = load(yaml).unwrap_err();
             let msg = format!("{err:#}");
@@ -735,6 +790,29 @@ capacity:
         assert_eq!(err.to_string(), "usage_keep_days must be at least 1");
         let err = load("events_keep_days: 0\n").unwrap_err();
         assert_eq!(err.to_string(), "events_keep_days must be at least 1");
+        let err = load("console_max_mb: 0\n").unwrap_err();
+        assert_eq!(err.to_string(), "console_max_mb must be at least 1");
+        for yaml in [
+            "conditions:\n  memory_pct: 0\n",
+            "conditions:\n  memory_pct: 101\n",
+        ] {
+            let err = load(yaml).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "conditions.memory_pct: a share of capacity, 1 to 100"
+            );
+        }
+        let err = load("conditions:\n  disk_free_pct: 100\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "conditions.disk_free_pct: a share of the pool, 0 to 99"
+        );
+        // One threshold set keeps the other's default.
+        let c = load("conditions:\n  disk_free_pct: 0\n").unwrap();
+        assert_eq!(
+            (c.conditions.memory_pct, c.conditions.disk_free_pct),
+            (95, 0)
+        );
         let err = load("egress_limits:\n  blocked_ports: [0]\n").unwrap_err();
         assert_eq!(
             err.to_string(),

@@ -29,6 +29,7 @@ pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, m
             version: env!("CARGO_PKG_VERSION").into(),
             disk_free_mb: mgr.disk_free_mb().await,
             tls_fingerprint: tls_fingerprint.clone(),
+            conditions: mgr.conditions(),
         };
         let r = client
             .post(format!(
