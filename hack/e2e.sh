@@ -145,6 +145,27 @@ X=$(briqyard machine run --image alpine:3.20 --name exiter --tenant "$T" --memor
 for i in $(seq 1 30); do [ "$(briqyard machine get "$X" | jq -r .exit.code)" != null ] && break; sleep 1; done
 check "exit recorded"  '[ "$(briqyard machine get "$X" | jq -r .exit.code)" = 7 ]'
 
+echo "== events, versions and a watch"
+auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
+EV=$(briqyard machine run --image alpine:3.20 --name evts --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+# A watch from the machine's version: started before the stop, bounded, in the background.
+timeout 60 briqyard events --machine "$EV" --since "$(briqyard machine get "$EV" | jq -r .version)" --watch > /tmp/by-e2e-watch.txt 2>&1 &
+WATCH=$!
+briqyard machine stop "$EV" >/dev/null
+for i in $(seq 1 30); do awk '$4 == "stopped"' /tmp/by-e2e-watch.txt | grep -q . && break; sleep 1; done
+check "a watch from before the stop gets it" 'awk "\$4 == \"stopped\"" /tmp/by-e2e-watch.txt | grep -q "$EV"'
+kill "$WATCH" 2>/dev/null || true; wait "$WATCH" 2>/dev/null || true
+patch_sleep() { curl -s -o /dev/null -w '%{http_code}' -X PATCH ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -H "If-Match: $1" -d '{"sleep":"3h"}' "$BRIQYARD_URL/v1/machines/$EV"; }
+ver=$(briqyard machine get "$EV" | jq -r .version)
+check "a stale If-Match is 409"      '[ "$(patch_sleep $((ver - 1)))" = 409 ]'
+check "the current If-Match passes"  '[ "$(patch_sleep "$ver")" = 200 ]'
+briqyard machine start "$EV" >/dev/null
+check "describe shows its events"    'briqyard machine describe "$EV" | sed -n "/^Events:/,\$p" | grep -q "stopped (user)"'
+briqyard machine rm "$EV" >/dev/null
+reasons=$(briqyard events --machine "$EV" 2>/dev/null | awk 'NR > 1 && $4 ~ /^(created|started|stopped|destroyed)$/ { print $4 }' | paste -sd, -)
+check "events in order ($reasons)"   '[ "$reasons" = created,started,stopped,started,destroyed ]'
+check "a cursor past the log is gone" '! briqyard events --since 999999999 >/dev/null 2>&1'
+
 echo "== postgres with a volume, endpoint, wake on connect"
 P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done

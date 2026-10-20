@@ -697,6 +697,20 @@ mod tests {
     }
 
     #[test]
+    fn the_description_lists_the_reasons_the_daemon_has() {
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../api/openapi.yaml")).unwrap();
+        let listed: Vec<&str> = doc["components"]["schemas"]["Event"]["properties"]["reason"]
+            ["enum"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(listed, api::reason::ALL);
+    }
+
+    #[test]
     fn if_match_is_a_version() {
         let h = |v: &str| {
             let mut m = HeaderMap::new();
