@@ -254,6 +254,9 @@ pub struct Machine {
     /// Stopped with a memory snapshot: the next start resumes where it was.
     #[serde(default)]
     pub suspended: bool,
+    /// The seq of the last event about it (ADR 0019): what `If-Match` compares.
+    #[serde(default)]
+    pub version: u64,
     /// The briqyardd that runs it (set by the fleet).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
@@ -580,6 +583,104 @@ impl Usage {
     }
 }
 
+/// Event types, as Kubernetes's.
+pub mod event {
+    pub const NORMAL: &str = "normal";
+    pub const WARNING: &str = "warning";
+}
+
+/// Why an event happened: a closed list (ADR 0019).
+pub mod reason {
+    pub const CREATED: &str = "created";
+    pub const FORKED: &str = "forked";
+    pub const RESTORED: &str = "restored";
+    pub const STARTING: &str = "starting";
+    pub const STARTED: &str = "started";
+    pub const RESUMED: &str = "resumed";
+    /// For probes: defined, not emitted yet.
+    pub const READY: &str = "ready";
+    pub const STOPPING: &str = "stopping";
+    pub const STOPPED: &str = "stopped";
+    pub const SUSPENDED: &str = "suspended";
+    pub const EXITED: &str = "exited";
+    pub const RESTARTING: &str = "restarting";
+    pub const BOOT_FAILED: &str = "boot_failed";
+    pub const START_FAILED: &str = "start_failed";
+    pub const UPDATED: &str = "updated";
+    pub const EGRESS_CHANGED: &str = "egress_changed";
+    pub const BACKED_UP: &str = "backed_up";
+    pub const DESTROYED: &str = "destroyed";
+    pub const GATEWAY_STARTED: &str = "gateway_started";
+    pub const GATEWAY_STOPPED: &str = "gateway_stopped";
+    pub const IMAGE_PULLED: &str = "image_pulled";
+    pub const HOST_STARTED: &str = "host_started";
+    pub const ADOPTED: &str = "adopted";
+    pub const ALL: &[&str] = &[
+        CREATED,
+        FORKED,
+        RESTORED,
+        STARTING,
+        STARTED,
+        RESUMED,
+        READY,
+        STOPPING,
+        STOPPED,
+        SUSPENDED,
+        EXITED,
+        RESTARTING,
+        BOOT_FAILED,
+        START_FAILED,
+        UPDATED,
+        EGRESS_CHANGED,
+        BACKED_UP,
+        DESTROYED,
+        GATEWAY_STARTED,
+        GATEWAY_STOPPED,
+        IMAGE_PULLED,
+        HOST_STARTED,
+        ADOPTED,
+    ];
+}
+
+/// Something that happened on a host (ADR 0019). `GET /v1/events`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Event {
+    /// One more per event on its host, never reused.
+    pub seq: u64,
+    pub at: DateTime<Utc>,
+    /// `normal` or `warning`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// One of `reason::ALL`.
+    pub reason: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub machine_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tenant: String,
+    /// The host it happened on (set by the fleet on a fleet-wide read).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+/// A page of events, oldest first, and the cursor to read on from.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EventsPage {
+    pub events: Vec<Event>,
+    /// What to send as `since` next: a host's seq, or the fleet's `<host>:<seq>,…`.
+    pub next: String,
+}
+
+/// Events a page holds: 500 unless asked, 5000 at most.
+pub fn events_limit(asked: Option<usize>) -> usize {
+    match asked {
+        None | Some(0) => 500,
+        Some(n) => n.min(5000),
+    }
+}
+
 /// An image built on a host.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Image {
@@ -674,9 +775,12 @@ pub struct ApiError {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub request_id: String,
     /// With `boot_failed`: the machine, in state `error`, kept so the caller can read its
-    /// console and destroy it.
+    /// console and destroy it. With `conflict` on a stale `If-Match`: the machine as it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<Box<Machine>>,
+    /// With `gone`: the oldest event seq the host still keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest: Option<u64>,
 }
 
 /// Parses a sleep window: "30m", "2h", "7d", "never" or "". `None` is never.
@@ -918,6 +1022,7 @@ mod tests {
         expected["endpoints"] = json!([]);
         expected["suspended"] = json!(false);
         expected["egress"] = json!({"mode": "open"});
+        expected["version"] = json!(0);
         let m: Machine = round_trip(input, expected);
         assert_eq!(m.state, state::RUNNING);
         assert_eq!(m.egress, Egress::default());
@@ -950,9 +1055,10 @@ mod tests {
             "state_changed_at": "2026-01-02T03:04:05Z",
             "started_at": "2026-01-02T03:04:05Z", "stopped_at": "2026-01-02T03:04:05Z",
             "last_used_at": "2026-01-02T03:04:05Z", "sleeps_at": "2026-01-02T03:34:05Z",
-            "suspended": true, "host": "h1"
+            "suspended": true, "version": 812, "host": "h1"
         });
         let m: Machine = same(input);
+        assert_eq!(m.version, 812);
         assert_eq!(m.stopped_reason, stop::EXIT);
         assert_eq!(m.egress.mode, egress::NONE);
         assert_eq!(m.exit.as_ref().map(|e| e.code), Some(1));
@@ -1322,10 +1428,58 @@ mod tests {
                 "restart": {"policy": "no", "max_retries": 0}, "egress": {"mode": "open"},
                 "metadata": {}, "endpoints": [],
                 "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:05Z",
-                "state_changed_at": "2026-01-02T03:04:05Z", "suspended": false
+                "state_changed_at": "2026-01-02T03:04:05Z", "suspended": false, "version": 3
             }
         }));
         assert_eq!(e.machine.as_ref().map(|m| m.state.as_str()), Some("error"));
+        // A cursor too old for the log names the oldest seq kept.
+        let e: ApiError = same(json!({"error": "since 3 is gone", "code": "gone", "oldest": 120}));
+        assert_eq!(e.oldest, Some(120));
+    }
+
+    #[test]
+    fn event() {
+        // `type` on the wire (a keyword in Rust); a host event has no machine, tenant or data.
+        let e: Event = same(json!({
+            "seq": 1, "at": "2026-10-20T14:00:00Z", "type": "normal", "reason": "host_started",
+            "message": "daemon started"
+        }));
+        assert_eq!(
+            (e.kind.as_str(), e.machine_id.as_str()),
+            (event::NORMAL, "")
+        );
+        let e: Event = same(json!({
+            "seq": 812, "at": "2026-10-20T14:03:11.204Z", "type": "warning", "reason": "exited",
+            "message": "exited with code 7", "machine_id": "m_1", "tenant": "t1", "host": "h1",
+            "data": {"code": 7, "oom": false, "restarting": true}
+        }));
+        assert_eq!(e.reason, reason::EXITED);
+        assert_eq!(e.data.as_ref().map(|d| d["code"].clone()), Some(json!(7)));
+        // The seq is required: an event is nothing without its place in the log.
+        assert!(serde_json::from_value::<Event>(json!({
+            "at": "2026-10-20T14:00:00Z", "type": "normal", "reason": "created", "message": ""
+        }))
+        .is_err());
+        let p: EventsPage = same(json!({"events": [], "next": "h1:12,h2:40"}));
+        assert_eq!(p.next, "h1:12,h2:40");
+    }
+
+    #[test]
+    fn reasons_and_page_limits() {
+        // A closed list, each once, each a snake_case word.
+        let mut all = reason::ALL.to_vec();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), reason::ALL.len());
+        assert_eq!(all.len(), 23);
+        assert!(all
+            .iter()
+            .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));
+        assert_eq!((event::NORMAL, event::WARNING), ("normal", "warning"));
+        assert_eq!(events_limit(None), 500);
+        assert_eq!(events_limit(Some(0)), 500);
+        assert_eq!(events_limit(Some(20)), 20);
+        assert_eq!(events_limit(Some(usize::MAX)), 5000);
     }
 
     #[test]

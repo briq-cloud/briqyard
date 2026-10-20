@@ -1,9 +1,10 @@
 //! The HTTP API over the machine manager.
 
+use crate::events::Filter;
 use crate::machine::{detached, MError, Manager};
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -110,6 +111,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/images", get(list_images))
         .route("/v1/images/:key", axum::routing::delete(delete_image))
         .route("/v1/usage", get(usage))
+        .route("/v1/events", get(events))
         .route("/v1/tenants", get(list_tenants))
         .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
         .route(
@@ -125,8 +127,10 @@ pub struct AppError {
     status: StatusCode,
     code: &'static str,
     error: String,
-    /// With `boot_failed`: the machine left in `error`.
+    /// With `boot_failed`: the machine left in `error`; with a stale `If-Match`, the machine.
     machine: Option<Box<api::Machine>>,
+    /// With `gone`: the oldest event seq kept.
+    oldest: Option<u64>,
 }
 
 /// The status and code of each manager error. `boot_failed` is a 409 like the other
@@ -139,6 +143,8 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::NotRunning(_) => (StatusCode::CONFLICT, "not_running"),
         MError::BadState(_) => (StatusCode::CONFLICT, "bad_state"),
         MError::BootFailed(_) => (StatusCode::CONFLICT, "boot_failed"),
+        MError::Moved(_) => (StatusCode::CONFLICT, "conflict"),
+        MError::Gone { .. } => (StatusCode::GONE, "gone"),
         MError::Capacity(_) => (StatusCode::SERVICE_UNAVAILABLE, "capacity"),
         MError::TenantInUse => (StatusCode::CONFLICT, "tenant_in_use"),
         MError::GatewayInUse => (StatusCode::CONFLICT, "gateway_in_use"),
@@ -154,12 +160,17 @@ impl From<MError> for AppError {
             MError::Other(err) => format!("{err:#}"),
             other => other.to_string(),
         };
+        let oldest = match &e {
+            MError::Gone { oldest, .. } => Some(*oldest),
+            _ => None,
+        };
         let machine = match e {
             MError::BootFailed(m) => {
                 // The image's fault, not an operator's: a warning.
                 tracing::warn!(machine = m.id, err = %error, "boot failed");
                 Some(m)
             }
+            MError::Moved(m) => Some(m),
             MError::Other(_) => {
                 tracing::error!(err = %error, "request failed");
                 None
@@ -171,6 +182,7 @@ impl From<MError> for AppError {
             code,
             error,
             machine,
+            oldest,
         }
     }
 }
@@ -184,6 +196,7 @@ impl IntoResponse for AppError {
                 code: self.code.into(),
                 request_id: String::new(),
                 machine: self.machine,
+                oldest: self.oldest,
             }),
         )
             .into_response();
@@ -230,6 +243,7 @@ async fn auth_and_log(State(st): S, req: Request, next: Next) -> Response {
                     code: "unauthorized".into(),
                     request_id: request_id.clone(),
                     machine: None,
+                    oldest: None,
                 }),
             )
                 .into_response();
@@ -300,50 +314,79 @@ async fn get_machine(State(st): S, Path(id): Path<String>) -> Result<Json<api::M
     Ok(Json(st.mgr.get(&id)?))
 }
 
+/// `If-Match: <version>` (ADR 0019), the quotes of an HTTP entity tag allowed; absent is no
+/// condition.
+fn if_match(headers: &HeaderMap) -> Result<Option<u64>, AppError> {
+    let Some(v) = headers.get(header::IF_MATCH) else {
+        return Ok(None);
+    };
+    let text = v.to_str().unwrap_or("").trim().trim_matches('"');
+    match text.parse() {
+        Ok(n) => Ok(Some(n)),
+        Err(_) => Err(MError::Invalid(format!(
+            "If-Match {text:?}: want a machine's version, a number"
+        ))
+        .into()),
+    }
+}
+
 async fn update_machine(
     State(st): S,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<api::UpdateMachineRequest>,
 ) -> Result<Json<api::Machine>, AppError> {
+    let at = if_match(&headers)?;
     // Detached too: a policy swap cut short between its two steps would leave none.
     let m = st.mgr.clone();
     Ok(Json(
-        detached(async move { m.update(&id, req).await }).await?,
+        detached(async move { m.update(&id, req, at).await }).await?,
     ))
 }
 
-async fn destroy_machine(State(st): S, Path(id): Path<String>) -> Result<StatusCode, AppError> {
+async fn destroy_machine(
+    State(st): S,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    let at = if_match(&headers)?;
     let m = st.mgr.clone();
-    detached(async move { m.destroy(&id).await }).await?;
+    detached(async move { m.destroy(&id, at).await }).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn start_machine(
     State(st): S,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<api::Machine>, AppError> {
+    let at = if_match(&headers)?;
     let m = st.mgr.clone();
-    Ok(Json(detached(async move { m.start(&id).await }).await?))
+    Ok(Json(detached(async move { m.start(&id, at).await }).await?))
 }
 
 async fn wake_machine(
     State(st): S,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<api::Machine>, AppError> {
+    let at = if_match(&headers)?;
     let m = st.mgr.clone();
-    Ok(Json(detached(async move { m.wake(&id).await }).await?))
+    Ok(Json(detached(async move { m.wake(&id, at).await }).await?))
 }
 
 async fn stop_machine(
     State(st): S,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Option<Json<api::StopRequest>>,
 ) -> Result<Json<api::Machine>, AppError> {
+    let at = if_match(&headers)?;
     let req = body.map(|b| b.0).unwrap_or_default();
     let m = st.mgr.clone();
     Ok(Json(
         detached(async move {
-            m.stop(&id, stop_timeout(req.timeout_sec), req.suspend)
+            m.stop(&id, stop_timeout(req.timeout_sec), req.suspend, at)
                 .await
         })
         .await?,
@@ -531,6 +574,72 @@ async fn usage(
     Ok(Json(st.mgr.usage_buckets(from, to, q.tenant).await?))
 }
 
+#[derive(Deserialize)]
+struct EventsQuery {
+    since: Option<String>,
+    tenant: Option<String>,
+    machine: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    limit: Option<usize>,
+    #[serde(default)]
+    watch: bool,
+}
+
+/// The query's cursor and filter, checked: a seq (absent is 0), ids, a type.
+fn events_query(q: EventsQuery) -> Result<(u64, Filter), MError> {
+    let since = match q.since.as_deref() {
+        None | Some("") => 0,
+        Some(s) => s
+            .parse()
+            .map_err(|_| MError::Invalid(format!("since {s:?}: want a seq, a page's `next`")))?,
+    };
+    for id in [&q.tenant, &q.machine].into_iter().flatten() {
+        if !api::valid_id(id) {
+            return Err(MError::Invalid(format!("{id:?} is not an id")));
+        }
+    }
+    if let Some(k) = &q.kind {
+        if k != api::event::NORMAL && k != api::event::WARNING {
+            return Err(MError::Invalid(format!(
+                "type {k:?}: want \"normal\" or \"warning\""
+            )));
+        }
+    }
+    let f = Filter {
+        tenant: q.tenant,
+        machine: q.machine,
+        kind: q.kind,
+    };
+    Ok((since, f))
+}
+
+/// Events after a cursor (ADR 0019); with `watch=true`, those and each new one, kept open as
+/// NDJSON.
+async fn events(State(st): S, Query(q): Query<EventsQuery>) -> Result<Response, AppError> {
+    let (watch, limit) = (q.watch, api::events_limit(q.limit));
+    let (since, f) = events_query(q)?;
+    if !watch {
+        return Ok(Json(st.mgr.events_page(since, f, limit).await?).into_response());
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+    st.mgr
+        .events()
+        .watch(since, f, tx)
+        .await
+        .map_err(crate::machine::gone)?;
+    let lines = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|l| (Ok::<_, std::convert::Infallible>(l), rx))
+    });
+    Ok((
+        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        Body::from_stream(lines),
+    )
+        .into_response())
+}
+
 async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {
     Json(st.mgr.tenants())
 }
@@ -562,9 +671,6 @@ async fn delete_gateway(State(st): S, Path(id): Path<String>) -> Result<StatusCo
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[allow(dead_code)]
-fn _body(_: Body) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +694,21 @@ mod tests {
         assert_eq!(log_limit(Some(usize::MAX)), MAX_LOG_LINES);
         assert_eq!(log_limit(None), 0);
         assert_eq!(log_limit(Some(10)), 10);
+    }
+
+    #[test]
+    fn if_match_is_a_version() {
+        let h = |v: &str| {
+            let mut m = HeaderMap::new();
+            m.insert(header::IF_MATCH, HeaderValue::from_str(v).unwrap());
+            m
+        };
+        assert_eq!(if_match(&HeaderMap::new()).ok(), Some(None));
+        assert_eq!(if_match(&h("12")).ok(), Some(Some(12)));
+        // An entity tag's quotes are taken off.
+        assert_eq!(if_match(&h("\"12\"")).ok(), Some(Some(12)));
+        let e = if_match(&h("*")).err().unwrap();
+        assert_eq!((e.status, e.code), (StatusCode::BAD_REQUEST, "invalid"));
     }
 
     #[test]
@@ -615,6 +736,24 @@ mod tests {
         assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "boot_failed"));
         assert_eq!(e.error, "boot failed: the guest did not come up: tail");
         assert_eq!(e.machine.as_ref().map(|m| m.id.as_str()), Some("m_1"));
+        // A stale If-Match: 409 `conflict`, with the machine as it is now.
+        let now = api::Machine {
+            id: "m_1".into(),
+            version: 12,
+            ..Default::default()
+        };
+        let e = AppError::from(MError::Moved(Box::new(now)));
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "conflict"));
+        assert_eq!(e.error, "machine m_1 is at version 12: read it again");
+        assert_eq!(e.machine.map(|m| m.version), Some(12));
+        let e = AppError::from(MError::Gone {
+            oldest: 40,
+            message: "since 3: the events after it are gone; the oldest kept is 40".into(),
+        });
+        assert_eq!(
+            (e.status, e.code, e.oldest),
+            (StatusCode::GONE, "gone", Some(40))
+        );
         let e = AppError::from(MError::GatewayInUse);
         assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway_in_use"));
         let e = AppError::from(MError::Gateway("t1".into()));

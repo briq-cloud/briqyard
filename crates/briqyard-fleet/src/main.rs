@@ -205,6 +205,7 @@ impl IntoResponse for Refusal {
                 code: self.code.into(),
                 request_id: String::new(),
                 machine: None,
+                oldest: None,
             }),
         )
             .into_response()

@@ -2,6 +2,7 @@
 
 mod api;
 mod config;
+mod events;
 mod fc;
 mod guestc;
 mod heartbeat;
@@ -140,7 +141,8 @@ async fn run(args: Args) -> Result<()> {
         pool = cfg.storage.pool,
         "briqyardd listening"
     );
-    let shutdown = async {
+    let watches = mgr.events().clone();
+    let shutdown = async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("signal");
         tokio::select! {
@@ -148,6 +150,8 @@ async fn run(args: Args) -> Result<()> {
             _ = term.recv() => {}
         }
         tracing::info!("shutting down");
+        // A watch never ends on its own: the server would wait for it.
+        watches.close();
     };
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown)

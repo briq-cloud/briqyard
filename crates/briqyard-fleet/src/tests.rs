@@ -239,6 +239,7 @@ async fn start_daemon(id: &str, token: &str) -> Running {
                     code: "not_found".into(),
                     request_id: "d-req-1".into(),
                     machine: None,
+                    oldest: None,
                 }),
             )
                 .into_response(),

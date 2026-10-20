@@ -42,12 +42,24 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 impl Store {
     pub fn open(root: &Path) -> Result<Self> {
         private_dir(root)?;
-        for d in ["machines", "tenants", "endpoints", "meta", "usage"] {
+        for d in [
+            "machines",
+            "tenants",
+            "endpoints",
+            "meta",
+            "usage",
+            "events",
+        ] {
             private_dir(&root.join(d))?;
         }
         Ok(Self {
             root: root.to_path_buf(),
         })
+    }
+
+    /// The directory of a kind, for a log that is not one record per file (events).
+    pub fn dir(&self, kind: &str) -> PathBuf {
+        self.root.join(kind)
     }
 
     /// The file of a record. A key is one file name, never a path: the API validates ids,
@@ -151,9 +163,17 @@ mod tests {
     #[test]
     fn open_makes_the_kinds() {
         let (dir, _) = open();
-        for d in ["machines", "tenants", "endpoints", "meta", "usage"] {
+        for d in [
+            "machines",
+            "tenants",
+            "endpoints",
+            "meta",
+            "usage",
+            "events",
+        ] {
             assert!(dir.path().join("state").join(d).is_dir(), "{d}");
         }
+        assert_eq!(store_dir(&dir), dir.path().join("state/events"));
         // Opening again over an existing state dir is fine.
         Store::open(&dir.path().join("state")).unwrap();
     }
@@ -252,7 +272,14 @@ mod tests {
         store.put_meta("host_id", "h_1").unwrap();
         let state = dir.path().join("state");
         assert_eq!(mode(&state), 0o700);
-        for d in ["machines", "tenants", "endpoints", "meta", "usage"] {
+        for d in [
+            "machines",
+            "tenants",
+            "endpoints",
+            "meta",
+            "usage",
+            "events",
+        ] {
             assert_eq!(mode(&state.join(d)), 0o700, "{d}");
         }
         assert_eq!(mode(&state.join("machines/m_a.json")), 0o600);
@@ -300,6 +327,12 @@ mod tests {
         assert_eq!(store.get_meta("host_id").unwrap().as_deref(), Some("h_def"));
         assert!(dir.path().join("state/meta/host_id.json").is_file());
         assert!(!dir.path().join("state/meta/host_id.json.tmp").exists());
+    }
+
+    fn store_dir(dir: &tempfile::TempDir) -> PathBuf {
+        Store::open(&dir.path().join("state"))
+            .unwrap()
+            .dir("events")
     }
 
     fn walk(dir: &Path) -> Vec<String> {

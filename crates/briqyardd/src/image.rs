@@ -6,9 +6,11 @@
 //! `mkfs.ext4 -d` builds the disk without mounting anything. The host never mounts a guest
 //! filesystem, and never holds a layer in memory.
 
+use crate::events::{Ev, Events};
 use crate::store::{private_dir, write_private};
 use crate::zfs::Zfs;
 use anyhow::{anyhow, Context, Result};
+use briqyard_api::reason;
 use chrono::{DateTime, Utc};
 use oci_client::client::ClientConfig;
 use oci_client::manifest::{ImageIndexEntry, OciImageManifest, Platform};
@@ -85,6 +87,8 @@ pub struct Builder {
     /// `resolve_ttl`, a digest never.
     resolved: Mutex<HashMap<String, (String, std::time::Instant)>>,
     pub resolve_ttl: std::time::Duration,
+    /// Where a pull is logged (`image_pulled`); the manager sets it.
+    pub events: Option<Events>,
 }
 
 /// The builds under way, by key: a waiter clones the receiver and is woken when the
@@ -158,6 +162,7 @@ impl Builder {
             building: Mutex::new(HashMap::new()),
             resolved: Mutex::new(HashMap::new()),
             resolve_ttl: std::time::Duration::from_secs(600),
+            events: None,
         })
     }
 
@@ -278,6 +283,7 @@ impl Builder {
             }
         }
         tracing::info!(image = reference, digest, key, "building image");
+        let started = std::time::Instant::now();
         // Pulled by the digest resolved above, so a tag moved since names the same build.
         let pinned = r.clone_with_digest(digest.to_string());
         let (manifest, _, config) = self
@@ -301,6 +307,9 @@ impl Builder {
             return Err(e);
         }
         write_private(&self.meta_path(key), &serde_json::to_vec_pretty(&image)?)?;
+        if let Some(ev) = &self.events {
+            ev.emit(pulled(reference, digest, started.elapsed()));
+        }
         Ok(image)
     }
 
@@ -371,6 +380,16 @@ impl Builder {
 
 /// Refuses an image with no layers or a layer kind the extractor cannot read, before any
 /// layer is pulled.
+/// The event of a pull and build: which image, which digest, how long it took.
+fn pulled(reference: &str, digest: &str, took: std::time::Duration) -> Ev {
+    let secs = (took.as_secs_f64() * 10.0).round() / 10.0;
+    Ev::normal(
+        reason::IMAGE_PULLED,
+        format!("pulled {reference} in {secs} s"),
+    )
+    .data(serde_json::json!({"image": reference, "digest": digest, "seconds": secs}))
+}
+
 fn check_layers(manifest: &OciImageManifest) -> Result<()> {
     if manifest.layers.is_empty() {
         return Err(anyhow!("image has no layers"));
@@ -864,6 +883,34 @@ mod tests {
         .unwrap();
         assert!(!root.path().join("a/y").exists());
         assert!(root.path().join("a/z").exists());
+    }
+
+    #[test]
+    fn a_pull_is_an_event_with_its_digest_and_time() {
+        let ev = pulled(
+            "alpine:3.20",
+            "sha256:abc",
+            std::time::Duration::from_millis(4240),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let log = Events::open(dir.path()).unwrap();
+        log.emit(ev);
+        let e = log
+            .read(0, &Default::default(), 1)
+            .unwrap()
+            .events
+            .remove(0);
+        assert_eq!(
+            (e.reason.as_str(), e.message.as_str()),
+            ("image_pulled", "pulled alpine:3.20 in 4.2 s")
+        );
+        assert_eq!(
+            e.data,
+            Some(
+                serde_json::json!({"image": "alpine:3.20", "digest": "sha256:abc", "seconds": 4.2})
+            )
+        );
+        assert_eq!(e.machine_id, "");
     }
 
     #[test]
