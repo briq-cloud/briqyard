@@ -24,7 +24,7 @@ A create request carries a tenant's environment secrets to the daemon. The fleet
 
 ## Consequences
 
-- A host whose certificate files are removed, or a reinstalled server, has a new fingerprint: its heartbeats are refused until it is pinned again (bootstrap again, or edit `hosts:`). There is no rotation tool.
+- A host whose certificate files are removed, or a reinstalled server, has a new fingerprint: its heartbeats are refused until it is pinned again: `hosts:` for a static host; for an ordered one there is no API yet (the registry's `tls_fingerprint`, by hand, with the fleet stopped). No rotation tool.
 - The CLI talks to a daemon over TLS with `--tls-fingerprint`; to a fleet, over the web PKI.
 - The SANs are what the configuration names; a host bound to `0.0.0.0` with no advertise has none. Nothing checks them.
 - A host configured before this ADR with a non-loopback `listen` and an `http://` `fleet.advertise` refuses to start: write `https://` and pin its fingerprint, or set `api_tls: false`.
