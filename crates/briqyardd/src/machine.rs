@@ -5352,10 +5352,16 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         let e = h.add("m_t", state::STOPPED, 256);
         h.m.save(&e).unwrap();
-        let path = h.m.inner.cfg.state_dir().join("machines/m_t.json");
-        let written = || std::fs::metadata(&path).unwrap().modified().unwrap();
+        // A write is told by content, not by the file's time (Linux stamps files with a coarse
+        // clock): a mark put in the stored record only, which any write from memory removes.
+        let mark = || {
+            let mut r = h.stored("m_t").unwrap();
+            r.metadata.insert("unwritten".into(), "yes".into());
+            h.m.inner.store.put("machines", "m_t", &r).unwrap();
+        };
+        let unwritten = || h.stored("m_t").unwrap().metadata.contains_key("unwritten");
         let before = h.stored("m_t").unwrap();
-        let t0 = written();
+        mark();
         for _ in 0..10 {
             h.m.touch("m_t").unwrap();
         }
@@ -5363,29 +5369,28 @@ mod tests {
         assert!(used.is_some());
         // Memory has the use, the API reads it there, and the disk was not written.
         assert_eq!(h.m.get("m_t").unwrap().last_used_at, used);
-        assert_eq!(h.stored("m_t").unwrap().last_used_at, None);
-        assert_eq!(written(), t0);
+        assert!(unwritten());
         // The tick writes it once, as the machine is: `updated_at` stays.
         h.m.tick().await;
         let stored = h.stored("m_t").unwrap();
+        assert!(!unwritten());
         assert_eq!(stored.last_used_at, used);
         assert_eq!(stored.updated_at, before.updated_at);
-        let t1 = written();
-        assert!(t1 > t0);
         // Nothing moved since: the next tick writes nothing.
+        mark();
         h.m.tick().await;
-        assert_eq!(written(), t1);
+        assert!(unwritten());
         // A change to the machine carries the use with it, and the tick has nothing left.
         h.m.touch("m_t").unwrap();
         e.set_state(state::STARTING, |_| {});
         h.m.save(&e).unwrap();
-        let t2 = written();
         assert_eq!(
             h.stored("m_t").unwrap().last_used_at,
             e.snapshot().last_used_at
         );
+        mark();
         h.m.tick().await;
-        assert_eq!(written(), t2);
+        assert!(unwritten());
     }
 
     #[tokio::test]
