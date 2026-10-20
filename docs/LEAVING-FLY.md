@@ -4,6 +4,8 @@ Mid-term goal: briq runs with no Fly at all. This is what Fly gives briq today t
 
 **The split, as for usage and costs (ADR 0017):** briqyard owns mechanisms on a host and across hosts (run, measure, enforce, move). briq owns policy and product (who may, how much, at what price, what a plan includes) and its own apps (the API, the router). Operations (servers, DNS, certificates, CI) is infra code in briq's repo, using briqyard's commands.
 
+**No migration** (Sylvain, 2026-10-20): customers' briqs are not moved from Fly to briqyard; the switch is a rollover per environment, with no period where one environment runs both and no volume copy tool.
+
 Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS (Cloudflare). The Provider interface is fully implemented by the briqyard adapter: every gap below is under it.
 
 ## Summary

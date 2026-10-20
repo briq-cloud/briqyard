@@ -10,6 +10,7 @@ Most work here is done by agents. Everything an agent needs is in the repo: this
 - `docs/adr/`: every technical decision, with the research and numbers behind it. A new decision is a new ADR in the same change.
 - `docs/OPERATIONS.md`: install, config fields, upgrades, what to watch.
 - `docs/DEVELOPMENT.md`: the dev loop on a Mac (Lima VMs `fc` and `fc2`) and on Linux.
+- `docs/KUBERNETES-MAP.md`: briqyard as the Kubernetes of Firecracker: every Kubernetes feature, its briqyard equivalent, the gap, and whose scope (would kube provide it?).
 - `docs/LEAVING-FLY.md`: what is not covered yet for briq to run without Fly, with the briq/briqyard split.
 - `docs/review-2026-10-20.md`: open findings from the last review. Fix from the top; delete a finding when it is fixed.
 
