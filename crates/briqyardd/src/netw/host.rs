@@ -247,19 +247,26 @@ mod tests {
 
     #[tokio::test]
     async fn a_port_is_waited_for_until_it_listens() {
-        // Free a port, then listen on it a moment later: the wait ends once it accepts.
-        let addr = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
+        // A socket bound and not listening holds its port and refuses connections, so no
+        // other test can take the port while this one counts on it being quiet.
+        let bound = || {
+            let s = tokio::net::TcpSocket::new_v4().unwrap();
+            s.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            s
+        };
+        // It listens a moment later: the wait ends once it accepts.
+        let sock = bound();
+        let addr = sock.local_addr().unwrap();
         let late = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;
-            let ln = tokio::net::TcpListener::bind(addr).await.unwrap();
+            let ln = sock.listen(8).unwrap();
             let _ = ln.accept().await;
         });
         wait_port(addr, Duration::from_secs(5)).await.unwrap();
         late.await.unwrap();
-        // Nothing listens: an error at the deadline, naming the address.
+        // It never listens: an error at the deadline, naming the address.
+        let quiet = bound();
+        let addr = quiet.local_addr().unwrap();
         let t0 = std::time::Instant::now();
         let err = wait_port(addr, Duration::from_millis(500))
             .await
