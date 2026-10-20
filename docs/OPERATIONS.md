@@ -12,6 +12,7 @@ curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/boot
 BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.0 \
 BRIQYARD_POOL_DEVICE=/dev/nvme1n1 \
 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
+ALLOWED_CLIENTS=10.0.0.0/8 \
 bash bootstrap-host.sh
 ```
 
@@ -19,6 +20,22 @@ It installs the packages (ZFS, nftables, e2fsprogs), makes the pool (on the devi
 a file for a trial), downloads Firecracker, its jailer and a guest kernel, installs the
 binaries, writes `/etc/briqyard/config.yaml` and the systemd unit, and starts `briqyardd`.
 With `FLEET_URL`, `FLEET_TOKEN` and `ADVERTISE` set, the host registers with a fleet.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LISTEN` | `0.0.0.0:7420` | The API's address; TCP endpoints and the HTTP ingress bind the same address |
+| `ALLOWED_CLIENTS` | none | Comma-separated IPv4 CIDRs (a bare address is a `/32`) allowed to connect: the fleet's and the routers' networks. Written as `ingress.allowed_clients` |
+| `ALLOW_PUBLIC` | none | `1` writes `ingress.allow_public: true`: anyone can connect, a firewall of your own is in front |
+| `FIRECRACKER_VERSION`, `FIRECRACKER_SHA256` | `v1.17.0` and its release digest | The Firecracker and jailer every host runs |
+| `KERNEL_URL`, `KERNEL_SHA256` | the CI build of `vmlinux-6.18.54` | The guest kernel; the digest is checked after the download |
+
+A public `LISTEN` needs `ALLOWED_CLIENTS` or `ALLOW_PUBLIC`: with neither, the script binds
+the API and the endpoints to loopback (the daemon refuses to start on a public bind without
+one), and a host nobody reaches is the safe side. Every host runs the same
+Firecracker and kernel, so a memory snapshot resumes anywhere and two hosts never differ by
+the day they were installed; run the script again with new pins to upgrade them (stop
+suspended machines first: a snapshot resumes only under the Firecracker that wrote it). The
+kernel comes from Firecracker's CI bucket until we build and host it ourselves.
 
 Then, from anywhere that reaches the host:
 
@@ -189,7 +206,8 @@ delivery assumption above is the one to check first.
 A server the fleet ordered becomes a host on its own when `provisioner.bootstrap.enabled` is
 set: every two minutes the fleet asks the provider for the server's address, then runs
 `hack/bootstrap-host.sh` on it over SSH (`ssh_user`, `ssh_key`: the key the provider installed;
-`release`, `pool_device`, `fleet_url` for the script), with a token of its own for the host's API.
+`release`, `pool_device`, `fleet_url`, `allowed_clients` for the script), with a token of its
+own for the host's API.
 The host is `bootstrapped` once the script succeeds and `ready` at its first heartbeat; a server
 that cannot be installed after `max_attempts` is `failed`, with the last error in its note.
 Without the bootstrap, run the script yourself with `FLEET_URL` and `FLEET_TOKEN` set.

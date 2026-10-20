@@ -79,6 +79,10 @@ pub struct Bootstrap {
     pub pool_device: String,
     /// `FLEET_URL`: this fleet, as the new host reaches it.
     pub fleet_url: String,
+    /// `ALLOWED_CLIENTS`: the networks (CIDRs) the host's API and endpoints accept
+    /// connections from: this fleet's and the routers'. Required when the host listens on a
+    /// public address.
+    pub allowed_clients: Vec<String>,
     /// Tries, two minutes apart, before the host is marked `failed`.
     pub max_attempts: u32,
 }
@@ -93,6 +97,7 @@ impl Default for Bootstrap {
             release: String::new(),
             pool_device: String::new(),
             fleet_url: String::new(),
+            allowed_clients: Vec::new(),
             max_attempts: 90,
         }
     }

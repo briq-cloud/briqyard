@@ -4,7 +4,9 @@
 Runs inside the development VM (or anywhere that reaches the API) with the standard library
 only. Each phase runs its operations in parallel across every machine, records latencies and
 failures, and checks the host's invariants between phases through hack/stress-invariants.sh
-(needs sudo on the host; skipped with --no-invariants).
+(needs sudo on the host; skipped with --no-invariants). After the feature phases come the
+races: a client that hangs up mid-create, a start against a destroy of the same machine, and
+more starts at once than the host has memory for.
 
     python3 hack/stress.py --tenants 6 --per-tenant 4 --rounds 2
     python3 hack/stress.py --url http://127.0.0.1:7430 --crash  # through the fleet, kill the daemon mid-run
@@ -29,6 +31,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# A machine that counts as using the host's memory.
+LIVE = {"running", "starting", "stopping"}
+# The hang-up phase's image, apart from --image: small, so a first run pulls it (the hang-up
+# lands in the pull) and later runs find it built (the hang-up lands in the boot).
+HANGUP_IMAGE = "alpine:3.20"
+
 
 class Api:
     def __init__(self, url, token):
@@ -38,7 +46,8 @@ class Api:
         self.timings = {}  # op -> [seconds]
         self.failures = []  # (op, target, status, message)
 
-    def call(self, method, path, body=None, op=None, timeout=300, expect=None):
+    def request(self, method, path, body=None, op=None, timeout=300):
+        """One call, timed; returns (status, text). Status 0: no answer (refused, timed out)."""
         op = op or f"{method} {path.split('/')[2] if path.count('/') > 2 else path}"
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.url + path, data=data, method=method)
@@ -57,6 +66,11 @@ class Api:
         dt = time.monotonic() - t0
         with self.lock:
             self.timings.setdefault(op, []).append(dt)
+        return status, text
+
+    def call(self, method, path, body=None, op=None, timeout=300, expect=None):
+        """A call whose answer must be 2xx (or in `expect`): anything else is a recorded failure."""
+        status, text = self.request(method, path, body, op, timeout)
         ok = (200 <= status < 300) if expect is None else (status in expect)
         if not ok:
             with self.lock:
@@ -115,6 +129,18 @@ class Run:
     def mget(self, mid):
         return self.api.call("GET", f"/v1/machines/{mid}", op="get")
 
+    def mlist(self):
+        return self.api.call("GET", "/v1/machines", op="list")
+
+    def find_named(self, tenant, name):
+        return next((m for m in self.mlist() if m["tenant"] == tenant and m["name"] == name), None)
+
+    def error_code(self, text):
+        try:
+            return json.loads(text).get("code")
+        except ValueError:
+            return None
+
     def wait_state(self, mid, want, timeout=120):
         deadline = time.monotonic() + timeout
         while True:
@@ -160,8 +186,7 @@ class Run:
             self.log(f"   INVARIANT BROKEN after {label}")
 
     def expected(self):
-        ms = self.api.call("GET", "/v1/machines", op="list")
-        mine = [m for m in ms if m["tenant"].startswith(self.prefix)]
+        mine = [m for m in self.mlist() if m["tenant"].startswith(self.prefix)]
         by = {}
         for m in mine:
             by[m["state"]] = by.get(m["state"], 0) + 1
@@ -382,6 +407,138 @@ class Run:
             self.report_errors("adopted", {b: RuntimeError("not running after the crash") for b in bad})
         self.invariants("crash")
 
+    # ---- the races ----
+    def hangup_mid_create(self):
+        self.phase("hang up on a create after 1 s: the machine settles on its own, the image still builds")
+        t, name = self.tenants[0], "hangup"
+        body = {"tenant": t, "name": name, "image": HANGUP_IMAGE, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}
+        status, text = self.api.request("POST", "/v1/machines", body, op="create (hang up)", timeout=1)
+        self.log(f"   create: {'hung up' if status == 0 else f'answered {status} before the hang-up'}")
+        errs = {}
+        try:
+            # The record, if the create got that far, must leave its pending state by itself.
+            deadline = time.monotonic() + self.a.boot_timeout
+            m = self.find_named(t, name)
+            while m and m["state"] in ("created", "starting"):
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"{m['id']} still {m['state']} {self.a.boot_timeout}s after the hang-up")
+                time.sleep(0.5)
+                m = self.find_named(t, name)
+            self.log(f"   the machine is {m['state']}" if m else "   no machine was made")
+            # The image's build must not be left waiting on the dropped request.
+            again = self.api.call("POST", "/v1/machines", dict(body, name=f"{name}-again"), op="create (again)", timeout=600)
+            self.wait_state(again["id"], {"running"}, timeout=self.a.boot_timeout)
+        except Exception as e:
+            errs[0] = e
+        self.report_errors("hang-up", errs, [f"{t}/{name}"])
+        self.invariants("hang-up")
+
+    def start_vs_destroy(self):
+        self.phase("start and destroy one stopped machine per tenant at the same moment: one wins, none stays destroying")
+        picks = [(k, m) for k, m in self.machines.items() if k[1] == "m2"]
+
+        def one(kv):
+            key, m = kv
+            mid = m["id"]
+            self.api.call("POST", f"/v1/machines/{mid}/stop", {"timeout_sec": 10}, op="stop", timeout=120)
+            self.wait_state(mid, {"stopped"}, timeout=120)
+            go = threading.Barrier(2)
+            answers = {}
+
+            def fire(op, method, path):
+                go.wait()
+                answers[op] = self.api.request(method, path, op=f"{op} (race)", timeout=180)
+
+            threads = [
+                threading.Thread(target=fire, args=("start", "POST", f"/v1/machines/{mid}/start")),
+                threading.Thread(target=fire, args=("destroy", "DELETE", f"/v1/machines/{mid}")),
+            ]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+            for op, (status, text) in answers.items():
+                if status not in (200, 204, 404, 409):
+                    raise RuntimeError(f"{op} answered {status} {text[:80]}")
+            # Whatever the answers, the machine ends gone or settled, never `destroying`.
+            deadline = time.monotonic() + 120
+            while True:
+                status, text = self.api.request("GET", f"/v1/machines/{mid}", op="get")
+                if status == 404:
+                    final = "gone"
+                    break
+                if status != 200:
+                    raise RuntimeError(f"get answered {status} {text[:80]}")
+                state = json.loads(text)["state"]
+                if state in ("running", "stopped"):
+                    final = state
+                    break
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"still {state} 120s after start {answers['start'][0]} / destroy {answers['destroy'][0]}")
+                time.sleep(0.5)
+            self.log(f"   {mid}: start {answers['start'][0]}, destroy {answers['destroy'][0]}, then {final}")
+            if final == "gone":
+                self.machines.pop(key, None)
+                self.endpoints.pop(mid, None)
+            return final
+
+        _, errs = parallel(picks, one, self.a.workers)
+        self.report_errors("start vs destroy", errs, [k for k, _ in picks])
+        self.invariants("start vs destroy")
+
+    def starts_past_capacity(self):
+        self.phase("start 4 machines at once that cannot all fit: 503 capacity for the rest, live memory never over the host's")
+        t = self.tenants[0]
+        s = self.api.call("GET", "/v1/status", op="status")
+        cap = s["capacity"]["memory_mb"]
+        free = cap - s["used"]["memory_mb"]
+        n, mem = 4, free // 3 + 1  # two fit, two do not
+        body = {"tenant": t, "image": self.a.image, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": mem}, "sleep": "never", "start": False}
+        self.log(f"   {free} MB free of {cap}: {n} machines of {mem} MB")
+        made, errs = parallel([f"cap{i}" for i in range(n)], lambda name: self.api.call("POST", "/v1/machines", dict(body, name=name), op="create (stopped)", timeout=600), n)
+        self.report_errors("create stopped", errs)
+        ids = [m["id"] for m in made.values()]
+
+        # Live memory, sampled through the race: it must never exceed the host's.
+        worst = {"mb": 0}
+        done = threading.Event()
+
+        def sample():
+            while not done.is_set():
+                live = sum(m["size"]["memory_mb"] for m in self.mlist() if m["state"] in LIVE)
+                worst["mb"] = max(worst["mb"], live)
+                time.sleep(0.2)
+
+        sampler = threading.Thread(target=sample)
+        sampler.start()
+        try:
+            answers, _ = parallel(ids, lambda mid: self.api.request("POST", f"/v1/machines/{mid}/start", op="start (past capacity)", timeout=300), n)
+            started = [ids[i] for i, (st, _) in answers.items() if st == 200]
+            refused = [ids[i] for i, (st, text) in answers.items() if st == 503 and self.error_code(text) == "capacity"]
+            for mid in started:
+                self.wait_state(mid, {"running"}, timeout=self.a.boot_timeout)
+        finally:
+            done.set()
+            sampler.join()
+        problems = {}
+        for i, (st, text) in answers.items():
+            if ids[i] not in started and ids[i] not in refused:
+                problems[ids[i]] = f"answered {st} {text[:80]}"
+        for mid in refused:
+            state = self.mget(mid)["state"]
+            if state != "stopped":
+                problems[mid] = f"refused, yet {state}"
+        if not started:
+            problems["none"] = "no start was accepted"
+        if not refused:
+            problems["all"] = f"every start was accepted: {n * mem} MB in {free} MB free"
+        if worst["mb"] > cap:
+            problems["sum"] = f"{worst['mb']} MB live for a host of {cap}"
+        self.log(f"   started {len(started)}, refused {len(refused)}, live at most {worst['mb']} MB of {cap}")
+        self.report_errors("starts past capacity", {i: RuntimeError(msg) for i, msg in enumerate(problems.values())}, list(problems))
+        parallel(ids, lambda mid: self.api.call("DELETE", f"/v1/machines/{mid}", op="destroy", timeout=180), n)
+        self.invariants("starts past capacity")
+
     def destroy_all(self):
         self.phase("destroy everything")
 
@@ -391,7 +548,7 @@ class Run:
         _, errs = parallel(list(self.machines.values()), one, self.a.workers)
         self.report_errors("destroy", errs)
         # Whatever a failed phase left in these tenants (a fork, a retry's twin) goes too.
-        left = [m for m in self.api.call("GET", "/v1/machines", op="list") if m["tenant"].startswith(self.prefix)]
+        left = [m for m in self.mlist() if m["tenant"].startswith(self.prefix)]
         if left:
             self.log(f"   {len(left)} machine(s) left by failed phases, destroying them")
             parallel(left, one, self.a.workers)
@@ -440,6 +597,9 @@ class Run:
             if self.a.crash and r == 1:
                 self.crash()
             self.sleep_wake()
+            self.hangup_mid_create()
+            self.start_vs_destroy()
+            self.starts_past_capacity()
             self.destroy_all()
         self.report()
         return 0 if not self.api.failures and not self.broken else 1
