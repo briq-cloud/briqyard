@@ -60,6 +60,19 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// What happened, oldest first: briqyard events [--tenant T] [--machine ID] [--since CURSOR] [--watch]
+    Events {
+        #[arg(long)]
+        tenant: Option<String>,
+        #[arg(long)]
+        machine: Option<String>,
+        /// Read on from a previous read's cursor (printed at the end)
+        #[arg(long)]
+        since: Option<String>,
+        /// Stay connected and print each new event
+        #[arg(long)]
+        watch: bool,
+    },
     /// Check this machine as a briqyard host: KVM, ZFS, nftables, Firecracker, the kernel
     Doctor,
 }
@@ -75,6 +88,10 @@ enum MachineCmd {
     Run(RunArgs),
     /// Show a machine
     Get {
+        id: String,
+    },
+    /// A machine as a person reads it, with its last 20 events
+    Describe {
         id: String,
     },
     Start {
@@ -335,6 +352,11 @@ struct Client {
     http: reqwest::Client,
 }
 
+/// A call's deadline: a create may pull an image for minutes. A watch has none.
+const CALL_TIMEOUT: Duration = Duration::from_secs(900);
+/// A watch with no line this long is gone: the server sends one every 30 s.
+const WATCH_SILENCE: Duration = Duration::from_secs(90);
+
 impl Client {
     async fn call<T: serde::de::DeserializeOwned>(
         &self,
@@ -355,6 +377,18 @@ impl Client {
         path: &str,
         body: Option<&impl serde::Serialize>,
     ) -> Result<String> {
+        let resp = self.send(method, path, body, Some(CALL_TIMEOUT)).await?;
+        Ok(resp.text().await?)
+    }
+
+    /// Sends a request; an answer that is not a success is the error it carries.
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&impl serde::Serialize>,
+        timeout: Option<Duration>,
+    ) -> Result<reqwest::Response> {
         let mut req = self.http.request(method, format!("{}{}", self.base, path));
         if let Some(t) = &self.token {
             req = req.bearer_auth(t);
@@ -362,23 +396,76 @@ impl Client {
         if let Some(b) = body {
             req = req.json(b);
         }
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
         let resp = req
             .send()
             .await
             .with_context(|| format!("request {}", self.base))?;
         let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            if let Ok(e) = serde_json::from_str::<api::ApiError>(&text) {
-                if e.request_id.is_empty() {
-                    bail!("{} ({})", e.error, e.code);
-                }
-                bail!("{} ({}, request {})", e.error, e.code, e.request_id);
-            }
-            bail!("{status}: {}", text.trim());
+        if status.is_success() {
+            return Ok(resp);
         }
-        Ok(text)
+        let text = resp.text().await?;
+        if let Ok(e) = serde_json::from_str::<api::ApiError>(&text) {
+            if e.request_id.is_empty() {
+                bail!("{} ({})", e.error, e.code);
+            }
+            bail!("{} ({}, request {})", e.error, e.code, e.request_id);
+        }
+        bail!("{status}: {}", text.trim());
     }
+
+    /// Every event of a read, page after page, and the cursor after the last.
+    async fn events(&self, path: &str, since: Option<String>) -> Result<(Vec<api::Event>, String)> {
+        let (mut all, mut cursor) = (Vec::new(), since.unwrap_or_default());
+        loop {
+            let page: api::EventsPage = self
+                .call(reqwest::Method::GET, &with_since(path, &cursor), NONE)
+                .await?;
+            let full = page.events.len() == api::events_limit(None);
+            all.extend(page.events);
+            cursor = page.next;
+            if !full {
+                return Ok((all, cursor));
+            }
+        }
+    }
+
+    /// A watch: each event as it comes, until the server ends it (with the reason, an error).
+    async fn watch(&self, path: &str, mut each: impl FnMut(&api::Event)) -> Result<()> {
+        let mut resp = self.send(reqwest::Method::GET, path, NONE, None).await?;
+        let mut buf = Vec::new();
+        loop {
+            let chunk = tokio::time::timeout(WATCH_SILENCE, resp.chunk())
+                .await
+                .map_err(|_| anyhow!("no word from {} in {WATCH_SILENCE:?}", self.base))??;
+            let Some(chunk) = chunk else {
+                bail!("the watch ended");
+            };
+            buf.extend_from_slice(&chunk);
+            while let Some(i) = buf.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buf.drain(..=i).collect();
+                if let Some(e) = watch_line(&String::from_utf8_lossy(&line))? {
+                    each(&e);
+                }
+            }
+        }
+    }
+}
+
+/// A line of a watch: an event, a heartbeat (`{}`: nothing), or the error that ends it.
+fn watch_line(line: &str) -> Result<Option<api::Event>> {
+    let v: serde_json::Value =
+        serde_json::from_str(line).with_context(|| format!("watch line {:?}", line.trim()))?;
+    if v.get("seq").is_some() {
+        return Ok(Some(serde_json::from_value(v)?));
+    }
+    if let Ok(e) = serde_json::from_value::<api::ApiError>(v) {
+        bail!("{} ({})", e.error, e.code);
+    }
+    Ok(None)
 }
 
 fn print_json<T: serde::Serialize>(v: &T) {
@@ -391,8 +478,9 @@ async fn main() {
     let c = Client {
         base: cli.url.trim_end_matches('/').to_string(),
         token: cli.token.clone(),
+        // Each call has its own deadline (`CALL_TIMEOUT`); a watch has none.
         http: reqwest::Client::builder()
-            .timeout(Duration::from_secs(900))
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .unwrap(),
     };
@@ -498,6 +586,14 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 &c.call::<api::Machine>(GET, &format!("/v1/machines/{id}"), NONE)
                     .await?,
             ),
+            MachineCmd::Describe { id } => {
+                let m: api::Machine = c.call(GET, &format!("/v1/machines/{id}"), NONE).await?;
+                // By its tenant: through a fleet, that is the machine's host.
+                let path = events_path(Some(&m.tenant), Some(&m.id), false);
+                let (mut evs, _) = c.events(&path, None).await?;
+                let keep = evs.len().saturating_sub(20);
+                print!("{}", describe(&m, &evs.split_off(keep)));
+            }
             MachineCmd::Start { id } => print_json(
                 &c.call::<api::Machine>(POST, &format!("/v1/machines/{id}/start"), NONE)
                     .await?,
@@ -790,6 +886,25 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             }
         },
         Cmd::Doctor => doctor(),
+        Cmd::Events {
+            tenant,
+            machine,
+            since,
+            watch,
+        } => {
+            let path = events_path(tenant.as_deref(), machine.as_deref(), watch);
+            print!("{}", events_table(&[]));
+            if watch {
+                let path = with_since(&path, since.as_deref().unwrap_or(""));
+                c.watch(&path, |e| print!("{}", event_row(e))).await?;
+            } else {
+                let (evs, next) = c.events(&path, since).await?;
+                for e in &evs {
+                    print!("{}", event_row(e));
+                }
+                eprintln!("(next: --since {next})");
+            }
+        }
         Cmd::Usage {
             from,
             to,
@@ -895,6 +1010,33 @@ fn usage_path(
         p.push_str(&format!("&tenant={t}"));
     }
     p
+}
+
+/// `GET /v1/events` for a tenant, a machine, both or neither.
+fn events_path(tenant: Option<&str>, machine: Option<&str>, watch: bool) -> String {
+    let mut q = Vec::new();
+    if let Some(t) = tenant {
+        q.push(format!("tenant={t}"));
+    }
+    if let Some(m) = machine {
+        q.push(format!("machine={m}"));
+    }
+    if watch {
+        q.push("watch=true".into());
+    }
+    match q.is_empty() {
+        true => "/v1/events".into(),
+        false => format!("/v1/events?{}", q.join("&")),
+    }
+}
+
+/// A path with `since` added; none when the cursor is empty.
+fn with_since(path: &str, since: &str) -> String {
+    match (since.is_empty(), path.contains('?')) {
+        (true, _) => path.into(),
+        (false, true) => format!("{path}&since={since}"),
+        (false, false) => format!("{path}?since={since}"),
+    }
 }
 
 /// An egress policy as `egress_arg` reads it.
@@ -1027,6 +1169,112 @@ fn usage_table(bs: &[api::UsageBucket]) -> String {
             format!("{}/{}", u.internet_out_bytes, u.internet_in_bytes),
             format!("{}/{}", u.ingress_out_bytes, u.ingress_in_bytes),
             b.host
+        ));
+    }
+    out
+}
+
+/// `events`: the header, then `event_row` per event.
+fn events_table(evs: &[api::Event]) -> String {
+    let mut out = format!(
+        "{:<19}  {:<7}  {:<15}  {:<14}  MESSAGE\n",
+        "TIME", "TYPE", "REASON", "MACHINE"
+    );
+    for e in evs {
+        out.push_str(&event_row(e));
+    }
+    out
+}
+
+fn event_row(e: &api::Event) -> String {
+    format!(
+        "{:<19}  {:<7}  {:<15}  {:<14}  {}\n",
+        e.at.format("%Y-%m-%d %H:%M:%S"),
+        e.kind,
+        e.reason,
+        if e.machine_id.is_empty() {
+            "-"
+        } else {
+            &e.machine_id
+        },
+        e.message
+    )
+}
+
+/// `machine describe`: the machine as `kubectl describe` shows a pod, then its events.
+fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
+    let mut lines: Vec<(&str, String)> = vec![
+        ("Name", m.name.clone()),
+        ("ID", m.id.clone()),
+        ("Tenant", m.tenant.clone()),
+    ];
+    if !m.host.is_empty() {
+        lines.push(("Host", m.host.clone()));
+    }
+    lines.push(("Image", m.image.clone()));
+    lines.push(("State", m.state.clone()));
+    if !m.stopped_reason.is_empty() {
+        lines.push(("Reason", m.stopped_reason.clone()));
+    }
+    if let Some(x) = &m.exit {
+        let mut exit = format!("code {} at {}", x.code, x.at.format("%Y-%m-%d %H:%M:%S"));
+        if x.oom_killed {
+            exit.push_str(", out of memory");
+        }
+        if x.restarting {
+            exit.push_str(", restarting");
+        }
+        lines.push(("Exit", exit));
+    }
+    if !m.error.is_empty() {
+        lines.push(("Error", m.error.clone()));
+    }
+    lines.push(("IP", m.ip.clone()));
+    lines.push((
+        "Size",
+        format!("{} vCPU, {} MB", m.size.vcpus, m.size.memory_mb),
+    ));
+    if let Some(v) = &m.volume {
+        lines.push(("Volume", format!("{} GB at {}", v.size_gb, v.mount)));
+    }
+    lines.push(("Egress", egress_label(&m.egress)));
+    let endpoints: Vec<String> = m
+        .endpoints
+        .iter()
+        .map(|e| format!("{} {} {} -> {}", e.id, e.protocol, e.port, e.address))
+        .collect();
+    lines.push((
+        "Endpoints",
+        match endpoints.is_empty() {
+            true => "none".into(),
+            false => endpoints.join(&format!("\n{:15}", "")),
+        },
+    ));
+    let sleep = match m.sleeps_at {
+        Some(t) => format!("{}, sleeps at {}", m.sleep, t.format("%Y-%m-%d %H:%M:%S")),
+        None => m.sleep.clone(),
+    };
+    lines.push(("Sleep", sleep));
+    lines.push(("Version", m.version.to_string()));
+    lines.push((
+        "Created",
+        m.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+    ));
+    let mut out = String::new();
+    for (k, v) in lines {
+        out.push_str(&format!("{:<15}{v}\n", format!("{k}:")));
+    }
+    out.push_str("Events:\n");
+    if evs.is_empty() {
+        out.push_str("  none\n");
+    }
+    for e in evs {
+        out.push_str(&format!(
+            "  {}  {:<7}  {:<15}  {}\n",
+            e.at.format("%Y-%m-%d %H:%M:%S"),
+            e.kind,
+            e.reason,
+            e.message
         ));
     }
     out
