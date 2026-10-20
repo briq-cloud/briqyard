@@ -1,6 +1,6 @@
 # ADR 0019: Events, a watch and versions: what makes an imperative API safe to drive
 
-Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`)
+Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`) and ADR 0022 (the probes' reasons, marked *0022*)
 
 ## Context
 
@@ -28,12 +28,16 @@ briqyard is imperative; briq's reconciler is the declarative layer above it (`..
 | `starting` | normal | its memory reserved, a boot or a resume under way | `resume` |
 | `started` | normal | a cold boot answered | `pid` |
 | `resumed` | normal | a memory snapshot resumed | `pid` |
-| `ready` | normal | defined for probes, not emitted yet | |
+| `ready` | normal | *0022*: `ready` went true through a probe | `probe` |
+| `not_ready` | warning | *0022*: the readiness probe failed its threshold, or a PATCH of the probes reset `ready` | `probe`, `failures` |
 | `stopping` | normal | asked to stop (by a caller, the sleeper, the host) | `reason`, `suspend` |
 | `stopped` | normal; warning for `host` at start | its process is gone; also a sleeping machine stopped on request | `reason` |
 | `suspended` | normal | stopped with a memory snapshot | `reason` |
 | `exited` | warning unless code 0 | its process ended on its own | `code`, `oom`, `restarting` |
 | `restarting` | warning | the restart policy starts it again | `attempt`, `policy`, `delay_sec` |
+| `crash_loop` | warning | *0022*: the third restart in a row, and each after it, with no run of 10 minutes between | `restarts`, `delay_sec` |
+| `liveness_failed` | warning | *0022*: the liveness probe failed its threshold: the process is ended | `failures` |
+| `startup_failed` | warning | *0022*: the startup probe failed its threshold: the boot failed, or the run is ended for the policy | `failures`, `boot` |
 | `boot_failed` | warning | the guest never came up or exited booting (ADR 0011); the console tail in `message` | |
 | `start_failed` | warning | the host failed the start (network, disk, Firecracker): ADR 0011's 500 | |
 | `updated` | normal | a PATCH changed its sleep or metadata, a PUT the gateway's spec | `fields` |
@@ -69,4 +73,4 @@ briqyard is imperative; briq's reconciler is the declarative layer above it (`..
 - A machine's events are read by scanning the host's log (at most 100,000 lines); no index. Reopen with an index per machine if `describe` gets slow.
 - One `fdatasync` per event; transitions already sync their record, so this doubles the syncs of a transition and adds none elsewhere.
 - `image_pulled` is emitted by the image builder, which needs a registry: the unit tests do not cover it, a host does.
-- Not built: events for endpoints and tenants, label selectors on events, a `ready` condition (probes, next).
+- Not built: events for endpoints and tenants, label selectors on events. The `ready` condition is ADR 0022's.

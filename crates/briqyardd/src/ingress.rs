@@ -127,12 +127,13 @@ impl Ingress {
         self.hosts.lock().unwrap().remove(&ep.host.to_lowercase());
     }
 
-    /// Connects to the machine's port, waking it and waiting for the port to listen.
+    /// Connects to the machine's port, waking it, waiting for it to be ready (ADR 0022) and
+    /// for the port to listen, all within the wake timeout.
     async fn dial(&self, ep: &EndpointRec) -> Result<TcpStream> {
         let deadline = tokio::time::Instant::now() + self.wake_timeout;
         let ip = tokio::time::timeout(
             self.wake_timeout,
-            self.mgr.machine_addr(&ep.machine_id, true),
+            self.mgr.ready_addr(&ep.machine_id, self.wake_timeout),
         )
         .await
         .map_err(|_| anyhow!("wake timed out"))??;

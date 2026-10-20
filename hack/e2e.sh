@@ -199,6 +199,24 @@ reasons=$(briqyard events --machine "$EV" 2>/dev/null | awk 'NR > 1 && $4 ~ /^(c
 check "events in order ($reasons)"   '[ "$reasons" = created,started,stopped,started,destroyed ]'
 check "a cursor past the log is gone" '! briqyard events --since 999999999 >/dev/null 2>&1'
 
+echo "== probes: readiness decides ready, liveness restarts"
+# The program serves 5 s after its boot: ready only then, its probe every 10 s.
+RD=$(briqyard machine run --image python:3.12-alpine --name ready --tenant "$T" --memory 256 --readiness http:8080/ -- sh -c 'sleep 5; exec python3 -m http.server 8080' | jq -r .id)
+check "running, not ready at first"  '[ "$(briqyard machine get "$RD" | jq -r .state,.ready | paste -sd, -)" = running,false ]'
+for i in $(seq 1 30); do [ "$(briqyard machine get "$RD" | jq -r .ready)" = true ] && break; sleep 1; done
+check "ready once it serves"         '[ "$(briqyard machine get "$RD" | jq -r .ready)" = true ]'
+check "the ready event listed"       'briqyard events --machine "$RD" | awk "\$4 == \"ready\"" | grep -q .'
+check "wait answers ready"           'briqyard machine wait "$RD" | jq -e .ready >/dev/null'
+briqyard machine rm "$RD" >/dev/null
+# The file goes after 5 s: three failed probes (30 s), the process ended, restarted 10 s later.
+LV=$(briqyard machine run --image alpine:3.20 --name alive --tenant "$T" --memory 128 --liveness "exec:test -f /tmp/alive" -- sh -c 'touch /tmp/alive; sleep 5; rm /tmp/alive; exec sleep 3600' | jq -r .id)
+for i in $(seq 1 60); do [ "$(briqyard machine get "$LV" | jq -r .restarts)" -ge 1 ] && break; sleep 2; done
+check "a failing liveness restarts it" '[ "$(briqyard machine get "$LV" | jq -r .restarts)" -ge 1 ]'
+check "the liveness_failed event"    'briqyard events --machine "$LV" | awk "\$4 == \"liveness_failed\"" | grep -q .'
+for i in $(seq 1 30); do [ "$(briqyard machine get "$LV" | jq -r .state)" = running ] && break; sleep 2; done
+check "running again"                '[ "$(briqyard machine get "$LV" | jq -r .state)" = running ]'
+briqyard machine rm "$LV" >/dev/null
+
 echo "== postgres with a volume, endpoint, wake on connect"
 P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
