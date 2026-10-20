@@ -81,11 +81,11 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Taints, tolerations | ✗ | | — |
 | Drain with eviction | ◐ drain stops placement; machines stay | evacuate a host from backups | yard |
 | Node object, heartbeats | ✓ heartbeat every 15 s, `down` after a minute | | |
-| Node conditions (MemoryPressure, DiskPressure) | ✗ | host conditions; placement refuses a host under pressure | yard |
-| Node-pressure eviction | ✗ a full pool stops every machine | headroom thresholds, events | yard |
+| Node conditions (MemoryPressure, DiskPressure) | ✓ `memory_pressure`, `disk_pressure` in status and the heartbeat, `host_condition` events; the fleet places nothing new on a host under pressure (ADR 0021) | | |
+| Node-pressure eviction | ◐ thresholds and events; unused images removed under disk pressure | stopping machines to free memory or disk | yard |
 | Cluster autoscaler | ◐ provisioner autoscaler, stub-tested, dry run by default | a first real order | yard |
 | Node upgrades | ✗ by hand | `host upgrade`: drain, upgrade, back | yard |
-| `kubectl top node` | ◐ `/v1/status` | | yard (metrics) |
+| `kubectl top node` | ◐ `/v1/status`, committed memory and the pool on `/metrics` | the host's own CPU and memory use | yard |
 
 ## Networking
 
@@ -124,8 +124,8 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Live update of mounted config | ✗ applied at the next cold boot | | — |
 | imagePullSecrets per pod | ◐ registry credentials per host | per machine | yard, later |
 | Image pull, cache | ✓ a root disk per digest, the tag's digest cached | a registry mirror | yard |
-| Image garbage collection under disk pressure | ◐ unused images removed after `image_keep_days` | removal when the pool runs low | yard |
-| Container log rotation | ◐ the console rotates at a cold boot only | rotation by size while running | yard |
+| Image garbage collection under disk pressure | ✓ unused images removed after `image_keep_days`, and oldest first while the pool is under `disk_free_pct` (ADR 0021) | | |
+| Container log rotation | ✓ the console rotated past `console_max_mb` while running, one previous file kept, `/logs` across both (ADR 0021) | | |
 
 ## Observability
 
@@ -135,9 +135,9 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | `kubectl logs -f` | ✗ | follow | yard |
 | `kubectl describe` | ✓ `briqyard machine describe` | | |
 | Events | ✓ (API machinery) | | |
-| kubelet `/metrics`, cAdvisor (per pod CPU, memory, disk, network) | ◐ `/v1/machines/{id}/stats`, `/metrics` for the host | per machine series on `/metrics` | yard |
-| kube-state-metrics (machines by state, restarts) | ✗ | the same series | yard |
-| metrics-server, `kubectl top pod` | ◐ stats | `briqyard top` | yard |
+| kubelet `/metrics`, cAdvisor (per pod CPU, memory, disk, network) | ✓ per-machine series on `/metrics` from the tick's measure (ADR 0021) | | |
+| kube-state-metrics (machines by state, restarts) | ✓ `briqyard_machine_state`, `_restarts_total`, `_boot_seconds` | | |
+| metrics-server, `kubectl top pod` | ✓ `briqyard top`, `GET /v1/top` (the last 15 s) | | |
 | Usage accounting (OpenCost, outside core) | ★ hourly usage buckets (ADR 0017) | | |
 | Cost, billing | | | briq |
 

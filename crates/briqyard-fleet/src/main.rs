@@ -132,6 +132,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         empty_since: None,
         note: String::new(),
         bootstrap_attempts: 0,
+        conditions: vec![],
     }
 }
 
@@ -216,6 +217,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/endpoints", get(list_endpoints))
         .route("/v1/usage", get(usage))
         .route("/v1/backups", get(all_backups))
+        .route("/v1/top", get(top))
         .route("/v1/events", get(events))
         .route("/v1/tenants", get(list_tenants))
         .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
@@ -421,6 +423,7 @@ async fn register_host(
                 empty_since: None,
                 note: String::new(),
                 bootstrap_attempts: 0,
+                conditions: req.conditions,
             },
             now,
         );
@@ -514,6 +517,7 @@ fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
         empty_since: Some(now),
         note: server.note,
         bootstrap_attempts: 0,
+        conditions: vec![],
     };
     st.reg.lock().unwrap().hosts.insert(id, h.clone());
     st.save()?;
@@ -622,6 +626,7 @@ async fn poll_static_hosts_once(st: &AppState) -> bool {
             rec.tenants = tenants;
             rec.version = s.version;
             rec.disk_free_mb = s.disk_free_mb;
+            rec.conditions = s.conditions;
             st.reg.lock().unwrap().heartbeat(rec, now);
         } else if h.capacity.memory_mb == 0 {
             // Never answered yet (it may be starting with us): ask again soon.
@@ -876,6 +881,12 @@ async fn create_machine(
             .fork
             .as_ref()
             .and_then(|f| reg.host_of_machine(&f.machine_id).map(|h| h.id.clone()));
+        refuse_under_pressure(
+            &reg,
+            source
+                .as_deref()
+                .or(reg.tenants.get(&req.tenant).map(|h| h.as_str())),
+        )?;
         let chosen = match source {
             Some(id) => {
                 reg.reserve(&id, req.size.memory_mb, disk);
@@ -911,6 +922,18 @@ async fn create_machine(
     }
     first_refused(&st, &req.tenant, first, &data)?;
     Ok(Response::from_parts(parts, Body::from(data)))
+}
+
+/// A create on a host that takes nothing new while a condition is true (ADR 0021): a pinned
+/// tenant's host, or a fork's source's. 503 `capacity`, which a caller tries again later.
+fn refuse_under_pressure(reg: &Registry, host: Option<&str>) -> Result<(), Refusal> {
+    match host
+        .and_then(|id| reg.hosts.get(id))
+        .and_then(|h| h.pressure())
+    {
+        Some(why) => Err(err(StatusCode::SERVICE_UNAVAILABLE, "capacity", why)),
+        None => Ok(()),
+    }
 }
 
 /// The disk a machine is placed for: root disks are thin, a volume takes what it says, plus
@@ -1066,6 +1089,42 @@ async fn usage(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
             Ok(bs) => all.extend(bs.into_iter().map(|b| api::UsageBucket {
                 host: h.id.clone(),
                 ..b
+            })),
+            Err(e) => return unreadable(&h, e),
+        }
+    }
+    Json(all).into_response()
+}
+
+/// The running machines' use (ADR 0021), asked as machines are listed: a tenant's of its
+/// host, else of every host, never partial, each machine with its host.
+async fn top(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
+    let tenant = uri
+        .query()
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("tenant=")))
+        .map(|t| t.to_string());
+    let hosts: Vec<HostRec> = {
+        let reg = st.reg.lock().unwrap();
+        match tenant.as_deref().and_then(|t| reg.host_of_tenant(t)) {
+            Some(h) => vec![h.clone()],
+            None => reg.listed(),
+        }
+    };
+    let path = match uri.query() {
+        Some(q) => format!("/v1/top?{q}"),
+        None => "/v1/top".into(),
+    };
+    let mut all: Vec<api::TopMachine> = Vec::new();
+    for h in hosts {
+        let resp = forward(&st, &h, Method::GET, &path, &headers, Bytes::new()).await;
+        if !resp.status().is_success() {
+            return resp;
+        }
+        let (_, data) = read(resp).await;
+        match serde_json::from_slice::<Vec<api::TopMachine>>(&data) {
+            Ok(ms) => all.extend(ms.into_iter().map(|m| api::TopMachine {
+                host: h.id.clone(),
+                ..m
             })),
             Err(e) => return unreadable(&h, e),
         }
@@ -1288,6 +1347,7 @@ async fn set_gateway(
     let (host, first) = {
         let mut reg = st.reg.lock().unwrap();
         let first = !reg.tenants.contains_key(&id);
+        refuse_under_pressure(&reg, reg.tenants.get(&id).map(|h| h.as_str()))?;
         let need = disk_need(spec.volume_gb);
         let chosen = reg.place(&id, spec.size().memory_mb, need, &st.policy);
         (chosen.and_then(|h| reg.hosts.get(&h).cloned()), first)

@@ -117,6 +117,8 @@ struct Log {
     files: BTreeMap<String, u64>,
     /// The newest file, open for appending.
     open: Option<(String, std::fs::File)>,
+    /// Events logged since the daemon started, by type and reason: `/metrics`.
+    emitted: BTreeMap<(&'static str, &'static str), u64>,
 }
 
 /// An hour's file name without its extension; names sort as their hours do.
@@ -267,6 +269,7 @@ impl Events {
                     seq,
                     files,
                     open: None,
+                    emitted: BTreeMap::new(),
                 }),
                 tx,
                 closing: watch::channel(false).0,
@@ -286,6 +289,7 @@ impl Events {
     pub fn emit(&self, ev: Ev) -> u64 {
         let mut log = self.inner.log.lock().unwrap();
         log.seq += 1;
+        *log.emitted.entry((ev.kind, ev.reason)).or_default() += 1;
         let e = api::Event {
             seq: log.seq,
             at: Utc::now(),
@@ -303,6 +307,11 @@ impl Events {
         // Under the lock: watchers get the events in seq order.
         let _ = self.inner.tx.send(e.clone());
         e.seq
+    }
+
+    /// How many events were logged since the daemon started, by type and reason.
+    pub fn emitted(&self) -> BTreeMap<(&'static str, &'static str), u64> {
+        self.inner.log.lock().unwrap().emitted.clone()
     }
 
     /// Up to `limit` events after `since` that the filter keeps (blocking: it reads files).
@@ -546,6 +555,13 @@ mod tests {
         // A new daemon goes on from the log.
         let ev = Events::open(dir.path()).unwrap();
         assert_eq!(ev.emit(Ev::normal(reason::HOST_STARTED, "up again")), 3);
+        // Counted from this daemon's start, by type and reason.
+        ev.emit(Ev::warning(reason::EXITED, "exited with code 1"));
+        ev.emit(Ev::warning(reason::EXITED, "exited with code 2"));
+        assert_eq!(
+            ev.emitted().into_iter().collect::<Vec<_>>(),
+            vec![(("normal", "host_started"), 1), (("warning", "exited"), 2)]
+        );
         let p = ev.read(0, &Filter::default(), 10).unwrap();
         let e = &p.events[1];
         assert_eq!(

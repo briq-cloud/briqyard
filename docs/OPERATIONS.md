@@ -68,10 +68,13 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `kernel_args` | none | Appended to the boot arguments |
 | `pci` | `false` | Firecracker's PCI transport (needs a guest kernel with PCI) |
 | `root_disk_gb` | `8` | Size of every root disk (thin) |
-| `image_keep_days` | `14` | An image no machine uses is removed this long after it was built |
+| `image_keep_days` | `14` | An image no machine uses is removed this long after it was built; under disk pressure, sooner (ADR 0021) |
 | `usage_keep_days` | `90` | Closed hours of usage (`GET /v1/usage`) are kept this long, then removed by the tick |
 | `events_keep_days` | `7` | Events (`GET /v1/events`, ADR 0019) are kept this long, and at most 100,000 per host; whole hours go, the newest always stays |
 | `image_resolve_minutes` | `10` | A tag's digest is reused this long before the registry is asked again; when the registry refuses (a rate limit), the image already on the host serves |
+| `conditions.memory_pct` | `95` | `memory_pressure` when committed memory is over this share of capacity (ADR 0021): the fleet places nothing new on the host |
+| `conditions.disk_free_pct` | `10` | `disk_pressure` when the pool's free space is under this share of its size: the fleet places nothing new, and unused images go, oldest first, until it is back. `0`: never |
+| `console_max_mb` | `64` | A running machine's console is rotated past this size; one previous file is kept |
 | `boot_timeout_sec` | `120` | How long a guest may take to answer after its process starts |
 | `boots_at_once` | half the threads, at least 2 | Boots run at once; the rest wait their turn, each with the whole timeout |
 | `backup.store` | none | `s3://bucket/prefix` or `file:///path`; set, `POST /v1/machines/{id}/backups` works. Credentials in `BRIQYARD_S3_ACCESS_KEY` / `BRIQYARD_S3_SECRET_KEY` |
@@ -106,7 +109,7 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `<data_dir>/api-cert.pem`, `api-key.pem` | The API's certificate and key (`0600`). Both removed, a new pair is made at the next start: a new fingerprint to pin. The certificate without its key: the daemon refuses to start |
 | `<data_dir>/state/usage/<hour>.json` | Each machine's usage in that UTC hour (ADR 0017); the open hour is rewritten once a minute |
 | `<data_dir>/state/events/<hour>.ndjson` | The host's events of that hour, one JSON line each, appended and synced (ADR 0019) |
-| `<data_dir>/run/<machine>/` | `console.log` (the guest's serial console, timestamped), `config.tar` (the config drive, `0600`), sockets when not jailed |
+| `<data_dir>/run/<machine>/` | `console.log` (the guest's serial console, timestamped), `console.<offset>.log` (the previous file, rotated at `console_max_mb`, named after where it starts in the console), `config.tar` (the config drive, `0600`), sockets when not jailed |
 | `<jail_dir>/firecracker/<machine>/root/` | The chroot, on `byard/jail`: kernel, config drive (`0400`, the jail's user), device nodes, sockets, `snap.state` and `snap.mem` while suspended |
 | `<data_dir>/images/meta/*.json` | What each image is |
 | `byard/jail` | A filesystem mounted at `jail_dir`: `zfs list byard/jail` is what the jails and the suspended machines hold |
@@ -184,10 +187,32 @@ backup until sent elsewhere.
 
 ## Watch
 
-- `GET /healthz`: the daemon is up. `GET /v1/status`: capacity, use, free disk.
-- `GET /metrics`: Prometheus text: machines by state, memory and vCPUs used and capacity, free
-  disk, counters of boots, resumes, suspends, execs and failed starts. `metrics_token` gives
-  the scraper a token of its own.
+- `GET /healthz`: the daemon is up. `GET /v1/status`: capacity, use, free disk, `conditions`.
+- `GET /metrics`: Prometheus text, from the tick's last measure (15 s; a scrape probes
+  nothing). `metrics_token` gives the scraper a token of its own.
+
+  | Series | Labels | What |
+  |---|---|---|
+  | `briqyard_machines`, `_total`, `_suspended` | `state` | machines on the host |
+  | `briqyard_memory_mb`, `briqyard_vcpus` | `kind="used\|capacity"` | committed to running machines, handed out |
+  | `briqyard_pool_bytes`, `briqyard_disk_free_mb` | `kind="size\|used\|free"` | the pool |
+  | `briqyard_host_condition` | `condition` | 1 while true |
+  | `briqyard_events_total` | `type`, `reason` | events since the daemon started |
+  | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_tenants`, `briqyard_endpoints` | | counts |
+  | `briqyard_machine_cpu_seconds_total` | `machine`, `tenant`, `name`, `role` (a gateway's) | its cgroup's CPU time |
+  | `briqyard_machine_memory_bytes`, `_memory_limit_bytes` | same | its cgroup's memory, its size |
+  | `briqyard_machine_disk_used_bytes` | same | its disks, snapshots and memory snapshot |
+  | `briqyard_machine_{internet,ingress}_{in,out}_bytes_total`, `_egress_dropped_packets_total` | same | its traffic |
+  | `briqyard_machine_restarts_total` | same | restarts by its policy |
+  | `briqyard_machine_state` | same, `state` | 1, one series per machine |
+  | `briqyard_machine_boot_seconds` | same | its last start, `starting` to `running` |
+
+  Counters count from the daemon's start. Alert on `briqyard_host_condition == 1`.
+- `briqyard top [--tenant T]`: running machines by CPU, with memory, disk and network rates over
+  the last 15 s (`GET /v1/top`; through the fleet, a tenant's host or every host).
+- Conditions (ADR 0021): `memory_pressure`, `disk_pressure` in `/v1/status` and `briqyard host
+  ls`; each change is a `host_condition` event (`briqyard events`), a warning when it turns
+  true. Under disk pressure the daemon removes unused images itself (`image_removed` events).
 - Logs: one JSON line per event on stderr (journald under systemd): `journalctl -u briqyardd
   -o cat | jq`. Level with `BRIQYARD_LOG=debug` (or any `tracing` filter).
 - A machine: `briqyard machine get <id>` (state, why it stopped, its process's exit), `briqyard
@@ -209,7 +234,8 @@ backup until sent elsewhere.
 | A machine stays `destroying` | Its disks could not be destroyed (`zfs destroy` in the log); the daemon tries again every 15 s |
 | The process exits at once (`stopped`, `exit.code`) | `briqyard machine logs`: the image's own output. `restart.policy: on-failure` tries three times |
 | `the guest did not come up` | The kernel booted but the init did not answer on vsock within `boot_timeout_sec`: console log, then the kernel (`kernel`) and init (`init`) paths |
-| `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk. `used` counts what placement reserved until the next heartbeat |
+| `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk, conditions. `used` counts what placement reserved until the next heartbeat |
+| `host h_… is under disk_pressure` (fleet, 503 `capacity`) | The tenant's host takes nothing new until the condition clears. Disk: `zfs list -o space byard`; unused images go by themselves, then backups and destroys of what is left. Memory: stop machines, or move the tenant (below) |
 | `host h_… is down` (fleet, 503) | The host missed its heartbeats for `placement.down_after_sec`: its machines answer again once it is back. `briqyard host ls`, then the host's `journalctl -u briqyardd` |
 | `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just ordered gets this until its bootstrap has pinned it |
 | `host …: … is not the pinned …` (fleet, 502 `host_unreachable`) | The host presents another certificate than its record's `tls_fingerprint`: reinstalled (pin the new one), or not the host |

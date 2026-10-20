@@ -30,6 +30,8 @@ struct Daemon {
     watcher: Mutex<Option<tokio::sync::mpsc::Sender<String>>>,
     /// Its certificate's, when it serves TLS.
     tls_fingerprint: String,
+    /// What its status reports (ADR 0021).
+    conditions: Mutex<Vec<api::Condition>>,
 }
 
 impl Daemon {
@@ -139,6 +141,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         tls_fingerprint: cert
             .map(|c| api::tls::fingerprint(c.cert.der()))
             .unwrap_or_default(),
+        conditions: Mutex::new(vec![]),
     });
     type D = State<Arc<Daemon>>;
     async fn status(State(d): D) -> Json<api::Status> {
@@ -158,6 +161,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             running: ms.len(),
             disk_free_mb: 100_000,
             tls_fingerprint: d.tls_fingerprint.clone(),
+            conditions: d.conditions.lock().unwrap().clone(),
         })
     }
     async fn tenants(State(d): D) -> Json<Vec<api::Tenant>> {
@@ -348,6 +352,26 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             StatusCode::NO_CONTENT
         }
     }
+    /// A line per machine, the tenant's when asked, as the daemon's top.
+    async fn top(
+        State(d): D,
+        Query(q): Query<HashMap<String, String>>,
+    ) -> Json<Vec<api::TopMachine>> {
+        let ms = d.machines.lock().unwrap();
+        Json(
+            ms.iter()
+                .filter(|m| q.get("tenant").is_none_or(|t| *t == m.tenant))
+                .map(|m| api::TopMachine {
+                    machine_id: m.id.clone(),
+                    tenant: m.tenant.clone(),
+                    name: m.name.clone(),
+                    cpu_percent: 1.5,
+                    window_sec: 15.0,
+                    ..Default::default()
+                })
+                .collect(),
+        )
+    }
     /// One closed bucket of a machine named after the daemon; a range the daemon would refuse
     /// (no `from`) is refused here too.
     async fn usage(State(d): D, uri: Uri) -> Response {
@@ -448,6 +472,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         .route("/v1/machines/:id/endpoints", post(add_endpoint))
         .route("/v1/endpoints", get(endpoints))
         .route("/v1/usage", get(usage))
+        .route("/v1/top", get(top))
         .route("/v1/events", get(events))
         .route(
             "/v1/endpoints/:id",
@@ -834,7 +859,9 @@ async fn a_heartbeat_lands_on_the_record_ordered_for_its_address() {
         reg.hosts.insert(ordered.id.clone(), ordered);
     }
     // The token the bootstrap gave it is its credential; the fleet's API needs none here.
-    let hb = heartbeat("http://10.0.0.9:7420", 64_000, &["t1"]);
+    let mut hb = heartbeat("http://10.0.0.9:7420", 64_000, &["t1"]);
+    hb["conditions"] = serde_json::json!([{"type": "memory_pressure", "status": true,
+        "since": "2026-10-21T10:00:00Z", "message": "63000 MB of 64000 committed (98%), over 95%"}]);
     let (s, _, body) = call(
         &f.st,
         "POST",
@@ -856,6 +883,11 @@ async fn a_heartbeat_lands_on_the_record_ordered_for_its_address() {
     assert_eq!(h.capacity.memory_mb, 64_000);
     assert_eq!(h.machines, 1);
     assert_eq!(h.note, "bootstrapped at 2026-10-20");
+    assert_eq!(
+        (h.conditions[0].kind.as_str(), h.conditions[0].status),
+        ("memory_pressure", true),
+        "the heartbeat's conditions are the host's"
+    );
     {
         let reg = f.st.reg.lock().unwrap();
         let rec = &reg.hosts["h_srv-9"];
@@ -1589,6 +1621,121 @@ async fn a_listing_adds_the_host_and_is_never_partial() {
     let (s, _, body) = call(&f.st, "GET", "/v1/machines", "api", None).await;
     assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
     assert_eq!(json(&body)["code"], "host_unreachable");
+}
+
+/// A condition a daemon reports, true or not.
+fn pressure(kind: &str, status: bool) -> api::Condition {
+    api::Condition {
+        kind: kind.into(),
+        status,
+        since: Utc::now(),
+        message: "pool 4.0 GB free of 100.0 (4%), under 10%".into(),
+    }
+}
+
+#[tokio::test]
+async fn a_host_under_pressure_takes_no_new_tenant_and_refuses_its_own() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    let src = ds[0].stub.add("t1", "web", 512);
+    ds[1].stub.add("t0", "big", 30_000);
+    *ds[0].stub.conditions.lock().unwrap() = vec![
+        pressure(api::condition::MEMORY_PRESSURE, false),
+        pressure(api::condition::DISK_PRESSURE, true),
+    ];
+    poll_static_hosts_once(&f.st).await;
+    assert_eq!(pinned(&f.st, "t1").as_deref(), Some("d1"));
+    assert_eq!(
+        hosts(&f.st)[0].conditions[1],
+        ds[0].stub.conditions.lock().unwrap()[1],
+        "the poll keeps what the host said"
+    );
+    // A new tenant goes to d2, though d1 is emptier.
+    let (s, headers, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t2", "web", 512)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d2");
+    // The tenant on d1: refused before d1 is asked, with the condition, as `capacity`; so is
+    // a fork of its machine and its gateway.
+    f.st.reg
+        .lock()
+        .unwrap()
+        .machines
+        .insert(src.id.clone(), "d1".into());
+    let mut fork = create_body("t9", "fork", 512);
+    fork["fork"] = serde_json::json!({"machine_id": src.id});
+    for (method, path, body) in [
+        ("POST", "/v1/machines", create_body("t1", "db", 512)),
+        ("POST", "/v1/machines", fork),
+        ("PUT", "/v1/tenants/t1/gateway", gateway_body()),
+    ] {
+        let (s, _, body) = call(&f.st, method, path, "api", Some(body)).await;
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
+        assert_eq!(json(&body)["code"], "capacity");
+        assert_eq!(
+            json(&body)["error"],
+            "host d1 is under disk_pressure: pool 4.0 GB free of 100.0 (4%), under 10%"
+        );
+    }
+    assert!(
+        !ds[0]
+            .stub
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("POST") || c.starts_with("PUT")),
+        "d1 was not asked"
+    );
+    assert_eq!(pinned(&f.st, "t1").as_deref(), Some("d1"), "still pinned");
+    // Cleared at the next report: the tenant's create goes through.
+    ds[0].stub.conditions.lock().unwrap()[1].status = false;
+    poll_static_hosts_once(&f.st).await;
+    let (s, headers, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t1", "db", 512)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d1");
+}
+
+#[tokio::test]
+async fn top_asks_the_tenants_host_or_every_host_never_partially() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    ds[0].stub.add("t1", "web", 512);
+    ds[1].stub.add("t2", "db", 512);
+    poll_static_hosts_once(&f.st).await;
+    let d2_before = ds[1].stub.calls().len();
+    let (s, _, body) = call(&f.st, "GET", "/v1/top?tenant=t1", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let ms: Vec<api::TopMachine> = serde_json::from_str(&body).unwrap();
+    let got: Vec<(&str, &str)> = ms
+        .iter()
+        .map(|m| (m.name.as_str(), m.host.as_str()))
+        .collect();
+    assert_eq!(got, [("web", "d1")]);
+    assert_eq!(ds[0].stub.calls().last().unwrap(), "GET /v1/top?tenant=t1");
+    assert_eq!(ds[1].stub.calls().len(), d2_before, "d2 was not asked");
+    let (s, _, body) = call(&f.st, "GET", "/v1/top", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let ms: Vec<api::TopMachine> = serde_json::from_str(&body).unwrap();
+    let got: Vec<(&str, &str)> = ms
+        .iter()
+        .map(|m| (m.name.as_str(), m.host.as_str()))
+        .collect();
+    assert_eq!(got, [("web", "d1"), ("db", "d2")]);
+    // A host down fails the whole answer.
+    set_state(&f.st, "d2", "down");
+    let (s, _, body) = call(&f.st, "GET", "/v1/top", "api", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "host_down");
 }
 
 #[tokio::test]

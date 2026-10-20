@@ -1,6 +1,6 @@
 # ADR 0019: Events, a watch and versions: what makes an imperative API safe to drive
 
-Date: 2026-10-20 · Status: accepted
+Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`)
 
 ## Context
 
@@ -47,6 +47,8 @@ briqyard is imperative; briq's reconciler is the declarative layer above it (`..
 | `image_pulled` | normal | an image was pulled and built into a root disk | `image`, `digest`, `seconds` |
 | `host_started` | normal | the daemon started | `version`, `machines`, `adopted`, `stopped`, `swept` |
 | `adopted` | normal | a machine left running by a previous daemon was taken over | `pid` |
+| `host_condition` | warning when it turns true, normal when it clears | a host condition changed (ADR 0021) | `condition`, `status` |
+| `image_removed` | normal | an image was removed: under disk pressure, unused past `image_keep_days`, or on request (ADR 0021) | `image`, `digest`, `key`, `reason` |
 
 `updated` and `start_failed` are two more than the first list: without `updated` a PATCH of the sleep window would not move the version, and a host's fault is not the image's (`boot_failed`). `destroying` has no event: the destroy is one critical section and `destroyed` ends it.
 

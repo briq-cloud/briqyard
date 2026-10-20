@@ -18,7 +18,7 @@ use oci_client::secrets::RegistryAuth;
 use oci_client::{Client, Reference};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -378,8 +378,45 @@ impl Builder {
     }
 }
 
-/// Refuses an image with no layers or a layer kind the extractor cannot read, before any
-/// layer is pulled.
+/// Why an image was removed (ADR 0021): `reason` in its `image_removed` event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    /// `DELETE /v1/images/{key}`.
+    Request,
+    /// No machine used it for `image_keep_days`.
+    Unused,
+    /// The pool is under `conditions.disk_free_pct`.
+    DiskPressure,
+}
+
+impl Removal {
+    fn reason(self) -> &'static str {
+        match self {
+            Removal::Request => "request",
+            Removal::Unused => "unused",
+            Removal::DiskPressure => "disk_pressure",
+        }
+    }
+    fn why(self) -> &'static str {
+        match self {
+            Removal::Request => "on request",
+            Removal::Unused => "unused past image_keep_days",
+            Removal::DiskPressure => "unused, the pool under its free threshold",
+        }
+    }
+}
+
+/// The event of an image's removal.
+fn removed(im: &Image, how: Removal) -> Ev {
+    Ev::normal(
+        reason::IMAGE_REMOVED,
+        format!("removed {}: {}", im.r#ref, how.why()),
+    )
+    .data(serde_json::json!({
+        "image": im.r#ref, "digest": im.digest, "key": im.key, "reason": how.reason(),
+    }))
+}
+
 /// The event of a pull and build: which image, which digest, how long it took.
 fn pulled(reference: &str, digest: &str, took: std::time::Duration) -> Ev {
     let secs = (took.as_secs_f64() * 10.0).round() / 10.0;
@@ -390,6 +427,8 @@ fn pulled(reference: &str, digest: &str, took: std::time::Duration) -> Ev {
     .data(serde_json::json!({"image": reference, "digest": digest, "seconds": secs}))
 }
 
+/// Refuses an image with no layers or a layer kind the extractor cannot read, before any
+/// layer is pulled.
 fn check_layers(manifest: &OciImageManifest) -> Result<()> {
     if manifest.layers.is_empty() {
         return Err(anyhow!("image has no layers"));
@@ -454,14 +493,26 @@ impl Builder {
         Ok(out)
     }
 
-    /// Removes an image nobody clones. `Ok(false)`: machines still use it.
-    pub async fn remove(&self, key: &str) -> Result<bool> {
+    /// Removes an image nobody clones, an event saying why. `Ok(false)`: machines still use it.
+    pub async fn remove(&self, key: &str, how: Removal) -> Result<bool> {
         let ds = format!("images/{key}");
         if self.zfs.exists(&ds).await? && !self.zfs.clones(&ds, SNAP).await?.is_empty() {
             return Ok(false);
         }
+        let im = self.load(key);
         self.zfs.destroy(&ds).await?;
         let _ = std::fs::remove_file(self.meta_path(key));
+        if let Some(im) = im {
+            tracing::info!(
+                image = im.r#ref,
+                key,
+                reason = how.reason(),
+                "image removed"
+            );
+            if let Some(ev) = &self.events {
+                ev.emit(removed(&im, how));
+            }
+        }
         Ok(true)
     }
 
@@ -469,12 +520,36 @@ impl Builder {
     pub async fn gc(&self, keep: chrono::Duration) -> Result<usize> {
         let mut removed = 0;
         for (im, clones) in self.list().await? {
-            if clones == 0 && Utc::now() - im.built_at > keep && self.remove(&im.key).await? {
-                tracing::info!(image = im.r#ref, key = im.key, "image removed: unused");
+            if clones == 0
+                && Utc::now() - im.built_at > keep
+                && self.remove(&im.key, Removal::Unused).await?
+            {
                 removed += 1;
             }
         }
         Ok(removed)
+    }
+
+    /// Removes unused images, oldest first, until they freed `need` bytes or none is left
+    /// (ADR 0021): no clone, and no key in `named` (the records' images: a create holds its
+    /// record before it clones). What each takes is counted as freed, since ZFS frees a
+    /// destroyed dataset's blocks in the background. How many went, and what they took.
+    pub async fn free(&self, need: u64, named: &HashSet<String>) -> Result<(usize, u64)> {
+        let (mut removed, mut freed) = (0, 0);
+        for (im, clones) in self.list().await? {
+            if freed >= need {
+                break;
+            }
+            if clones > 0 || named.contains(&im.key) {
+                continue;
+            }
+            let took = self.zfs.used(&im.dataset()).await?;
+            if self.remove(&im.key, Removal::DiskPressure).await? {
+                removed += 1;
+                freed += took;
+            }
+        }
+        Ok((removed, freed))
     }
 }
 
@@ -883,6 +958,60 @@ mod tests {
         .unwrap();
         assert!(!root.path().join("a/y").exists());
         assert!(root.path().join("a/z").exists());
+    }
+
+    #[test]
+    fn a_removal_is_an_event_that_says_why() {
+        let im = Image {
+            r#ref: "alpine:3.20".into(),
+            digest: "sha256:abc".into(),
+            key: "k1".into(),
+            config: ImageConfig::default(),
+            size_gb: 8,
+            built_at: Utc::now(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let log = Events::open(dir.path()).unwrap();
+        for how in [Removal::Request, Removal::Unused, Removal::DiskPressure] {
+            log.emit(removed(&im, how));
+        }
+        let evs = log.read(0, &Default::default(), 10).unwrap().events;
+        let got: Vec<(&str, &str, &str)> = evs
+            .iter()
+            .map(|e| {
+                (
+                    e.reason.as_str(),
+                    e.message.as_str(),
+                    e.data.as_ref().unwrap()["reason"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "image_removed",
+                    "removed alpine:3.20: on request",
+                    "request"
+                ),
+                (
+                    "image_removed",
+                    "removed alpine:3.20: unused past image_keep_days",
+                    "unused"
+                ),
+                (
+                    "image_removed",
+                    "removed alpine:3.20: unused, the pool under its free threshold",
+                    "disk_pressure"
+                ),
+            ]
+        );
+        assert_eq!(
+            evs[0].data,
+            Some(serde_json::json!({
+                "image": "alpine:3.20", "digest": "sha256:abc", "key": "k1", "reason": "request"
+            }))
+        );
     }
 
     #[test]

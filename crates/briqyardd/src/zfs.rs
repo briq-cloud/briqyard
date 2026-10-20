@@ -511,6 +511,44 @@ impl Zfs {
             .await?;
         Ok(out.trim().parse().unwrap_or(0))
     }
+
+    /// The pool's used and free space, in one call. Unlike `free`, a value that does not
+    /// parse is an error: the host's conditions are decided on it (ADR 0021).
+    pub async fn pool(&self) -> Result<Pool> {
+        let out = self
+            .run(&[
+                "get",
+                "-H",
+                "-p",
+                "-o",
+                "value",
+                "used,available",
+                &self.pool,
+            ])
+            .await?;
+        let v: Vec<u64> = out
+            .split_whitespace()
+            .map(|v| v.parse())
+            .collect::<Result<_, _>>()
+            .map_err(|_| anyhow!("zfs get used,available {}: {out:?}", self.pool))?;
+        match v[..] {
+            [used, free] => Ok(Pool { used, free }),
+            _ => Err(anyhow!("zfs get used,available {}: {out:?}", self.pool)),
+        }
+    }
+}
+
+/// The pool's space, in bytes: what its datasets take and what is left for them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pool {
+    pub used: u64,
+    pub free: u64,
+}
+
+impl Pool {
+    pub fn size(&self) -> u64 {
+        self.used + self.free
+    }
 }
 
 /// What one dataset takes.
@@ -1121,6 +1159,22 @@ mod tests {
         // What does not parse reads as zero rather than failing a status page.
         f.answer("used", "-\n");
         assert_eq!(f.zfs.used("m/x").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_pool_is_read_in_one_call_and_never_guessed() {
+        let f = Fake::open("byard").await.unwrap();
+        f.answer("used,available", "300\n700\n");
+        f.calls();
+        let p = f.zfs.pool().await.unwrap();
+        assert_eq!((p.used, p.free, p.size()), (300, 700, 1000));
+        assert_eq!(f.calls(), vec!["get -H -p -o value used,available byard"]);
+        // What does not parse is an error, not an empty pool under pressure.
+        for bad in ["-\n700\n", "300\n", ""] {
+            f.answer("used,available", bad);
+            let err = f.zfs.pool().await.unwrap_err();
+            assert!(err.to_string().contains("used,available byard"), "{err}");
+        }
     }
 
     #[tokio::test]
