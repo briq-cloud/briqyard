@@ -64,7 +64,7 @@ paths:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "404": { $ref: "#/components/responses/Error" }
     patch:
-      summary: Change the sleep window, the metadata, the egress policy or the limits, in any state; a running machine's policy and limits change at once. A change is an event (`egress_changed` for the policy or the limits, else `updated`) and moves `version`; a request that changes nothing does neither
+      summary: Change the sleep window, the metadata, the egress policy, the limits or the probes, in any state; a running machine's policy and limits change at once, and its probes start over as at a boot. A change is an event (`egress_changed` for the policy or the limits, else `updated`) and moves `version`; a request that changes nothing does neither
       parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       requestBody:
         required: true
@@ -73,7 +73,7 @@ paths:
             schema: { $ref: "#/components/schemas/UpdateMachineRequest" }
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
-        "400": { description: "`invalid`: a bad sleep window, an `egress` the machine cannot take, bad `limits`, or an `If-Match` that is not a number" }
+        "400": { description: "`invalid`: a bad sleep window, an `egress` the machine cannot take, bad `limits` or `probes` (the field named), or an `If-Match` that is not a number" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Moved" }
     delete:
@@ -122,11 +122,13 @@ paths:
     parameters:
       - { $ref: "#/components/parameters/id" }
       - { name: timeout, in: query, schema: { type: integer, default: 60, maximum: 600 }, description: seconds }
+      - { name: for, in: query, schema: { type: string, enum: [ready, running], default: ready }, description: "`ready`: running and its probes say it serves (ADR 0022); `running`: its init answered" }
     post:
-      summary: Wait until the machine is running
+      summary: Wait until the machine is ready (or running, with `for=running`)
       responses:
-        "200": { description: running, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
-        "409": { description: it will not run (stopped, error) or did not in time }
+        "200": { description: ready (or running), content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "400": { description: "`invalid`: `for` is not `ready` or `running`" }
+        "409": { description: "`not_ready`: still running not ready at the timeout, the body's `machine` is it with its `probes_status`; `boot_failed` (`for=ready`): it is in `error`, its guest or its startup probe failed the boot, the body's `machine` is it; `not_running`: it will not run (stopped, destroying; `error` with `for=running`), or did not start in time" }
   /v1/machines/{id}/exec:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
@@ -286,7 +288,7 @@ paths:
   /v1/tenants/{id}/gateway:
     parameters: [{ $ref: "#/components/parameters/id" }]
     put:
-      summary: "Make the tenant's gateway (the tenant too, when it has nothing yet), not started unless `start`, or replace its spec: a running one is restarted with it, on the same address, and the spec it has changes nothing (ADR 0016). It is a machine of the daemon named `gateway.internal` in the tenant, absent from `GET /v1/machines`; a machine with `egress: {mode: via, via: gateway}` starts it and waits for its port before its own boot, and the daemon stops it when no such machine runs or starts"
+      summary: "Make the tenant's gateway (the tenant too, when it has nothing yet), not started unless `start`, or replace its spec: a running one is restarted with it, on the same address, and the spec it has changes nothing (ADR 0016). It is a machine of the daemon named `gateway.internal` in the tenant, absent from `GET /v1/machines`; a machine with `egress: {mode: via, via: gateway}` starts it and waits for its port (its `ready` when it has a startup or readiness probe) before its own boot, and the daemon stops it when no such machine runs or starts"
       requestBody:
         required: true
         content:
@@ -294,7 +296,7 @@ paths:
             schema: { $ref: "#/components/schemas/GatewaySpec" }
       responses:
         "200": { description: the tenant, content: { application/json: { schema: { $ref: "#/components/schemas/Tenant" } } } }
-        "400": { description: "`invalid`: no image, no port, a bad size, or a change of `volume_gb`" }
+        "400": { description: "`invalid`: no image, no port, a bad size, bad `probes`, or a change of `volume_gb`" }
         "409": { description: "`conflict`: a machine named `gateway` exists in the tenant; `boot_failed`: the gateway did not come up (asked with `start`, or replaced while running), the body's `machine` is it, in `error` with its console's last lines" }
     delete:
       summary: Stop and destroy the tenant's gateway; none is success
@@ -471,7 +473,8 @@ components:
         metadata: { type: object, additionalProperties: { type: string } }
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent: open, or for a restore the backup's" }
         limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "over the host's, field by field; absent: the host's, or for a restore the backup's" }
-        start: { type: boolean, default: true }
+        probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "absent: none, or for a restore the backup's" }
+        start: { type: boolean, default: true, description: "the answer comes at `running`, not `ready`: `/wait` for that" }
         fork: { $ref: "#/components/schemas/ForkSpec" }
         restore: { $ref: "#/components/schemas/RestoreSpec" }
     Exit:
@@ -501,6 +504,11 @@ components:
         ports: { type: array, items: { type: integer } }
         sleep: { type: string }
         restart: { $ref: "#/components/schemas/RestartPolicy" }
+        restarts: { type: integer, description: "restarts in a row by the restart policy; reset by an exit it does not restart" }
+        restarting_at: { type: string, format: date-time, description: "while `stopped (exit)` and waiting for its restart: when it starts again (10 s doubling to 5 minutes, reset by a run of 10 minutes)" }
+        ready: { type: boolean, description: "running and serving: true at once without a startup or readiness probe, else once they passed; false whenever it is not running" }
+        probes: { $ref: "#/components/schemas/Probes" }
+        probes_status: { $ref: "#/components/schemas/ProbesStatus" }
         egress: { $ref: "#/components/schemas/Egress" }
         limits: { $ref: "#/components/schemas/EgressLimits" }
         egress_drops: { $ref: "#/components/schemas/EgressDrops" }
@@ -579,6 +587,46 @@ components:
         metadata: { type: object, additionalProperties: { type: string } }
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent keeps the current one" }
         limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "the fields it names change, the others stay" }
+        probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "replaces them all; a running machine's start over at once, `ready` as at a boot" }
+    Probe:
+      type: object
+      description: "a check the daemon runs on a running machine (ADR 0022): exactly one of `exec`, `tcp` and `http`. Not a use: it never postpones sleep"
+      properties:
+        exec: { type: array, items: { type: string }, minItems: 1, description: "run in the machine through its init; exit 0 passes" }
+        tcp: { type: integer, minimum: 1, maximum: 65535, description: "a connect from the host to this port of the machine's address" }
+        http: { $ref: "#/components/schemas/HttpProbe" }
+        period_sec: { type: integer, minimum: 1, default: 10 }
+        timeout_sec: { type: integer, minimum: 1, default: 5, description: "for one execution, counted once it holds its turn (32 at once per host)" }
+        failure_threshold: { type: integer, minimum: 1, default: 3, description: failures in a row that fail it }
+        success_threshold: { type: integer, minimum: 1, default: 1, description: "passes in a row that pass it; must be 1 for startup and liveness" }
+        initial_delay_sec: { type: integer, minimum: 0, default: 0, description: "from when it may run: the boot, or the startup probe's pass" }
+    HttpProbe:
+      type: object
+      required: [port]
+      properties:
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        path: { type: string, default: /, description: "a GET from the host; 200 to 399 passes" }
+    Probes:
+      type: object
+      description: "startup runs first and gates the others; readiness sets `ready`; liveness failures end the process, a failure for the restart policy. A startup failure on a run a caller asked for (create, start, wake) fails the boot: `error`, no restart; on a run the restart policy started, it is a crash like a liveness failure"
+      properties:
+        startup: { $ref: "#/components/schemas/Probe" }
+        readiness: { $ref: "#/components/schemas/Probe" }
+        liveness: { $ref: "#/components/schemas/Probe" }
+    ProbeStatus:
+      type: object
+      properties:
+        passed: { type: boolean, description: the last execution passed }
+        message: { type: string, description: "what it answered: `exit 1: …`, `HTTP 503`, a connect error" }
+        failures: { type: integer, description: failures in a row }
+        at: { type: string, format: date-time }
+    ProbesStatus:
+      type: object
+      description: each probe's last result in the current run, in memory (a daemon restart runs them again); absent before its first execution
+      properties:
+        startup: { $ref: "#/components/schemas/ProbeStatus" }
+        readiness: { $ref: "#/components/schemas/ProbeStatus" }
+        liveness: { $ref: "#/components/schemas/ProbeStatus" }
     StopRequest:
       type: object
       properties:
@@ -627,7 +675,8 @@ components:
         size: { allOf: [{ $ref: "#/components/schemas/Size" }], description: "default 1 vCPU, 256 MB" }
         port: { type: integer, minimum: 1, maximum: 65535, description: "the port its program listens on: a start waits for it, within `boot_timeout_sec`" }
         volume_gb: { type: integer, minimum: 1, description: "a data volume at `/data`, fixed for the gateway's life" }
-        start: { type: boolean, default: false, description: "start it now and answer once its port accepts; a running one is left as is. Nothing then keeps it running: the daemon stops it until a `via: gateway` machine starts" }
+        probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "as a machine's; with a startup or readiness probe, a start that needs the gateway waits for its `ready`, not its port" }
+        start: { type: boolean, default: false, description: "start it now and answer once its port accepts (or it is ready); a running one is left as is. Nothing then keeps it running: the daemon stops it until a `via: gateway` machine starts" }
     GatewayView:
       type: object
       properties:
@@ -674,7 +723,7 @@ components:
         seq: { type: integer, description: one more per event on its host, never reused }
         at: { type: string, format: date-time }
         type: { type: string, enum: [normal, warning] }
-        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, stopping, stopped, suspended, exited, restarting, boot_failed, start_failed, updated, egress_changed, backed_up, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted], description: "ADR 0019's table says when each happens; `ready` is not emitted yet" }
+        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, egress_changed, backed_up, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted], description: "ADR 0019's table says when each happens, ADR 0022's for the probes and `crash_loop`" }
         message: { type: string, description: for a person; at most 1 KB }
         machine_id: { type: string }
         tenant: { type: string }

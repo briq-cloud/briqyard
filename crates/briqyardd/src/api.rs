@@ -1,7 +1,7 @@
 //! The HTTP API over the machine manager.
 
 use crate::events::Filter;
-use crate::machine::{detached, MError, Manager};
+use crate::machine::{detached, MError, Manager, Until};
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -146,6 +146,7 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::BadState(_) => (StatusCode::CONFLICT, "bad_state"),
         MError::BootFailed(_) => (StatusCode::CONFLICT, "boot_failed"),
         MError::Moved(_) => (StatusCode::CONFLICT, "conflict"),
+        MError::NotReady(_) => (StatusCode::CONFLICT, "not_ready"),
         MError::Gone { .. } => (StatusCode::GONE, "gone"),
         MError::Capacity(_) => (StatusCode::SERVICE_UNAVAILABLE, "capacity"),
         MError::TenantInUse => (StatusCode::CONFLICT, "tenant_in_use"),
@@ -172,7 +173,7 @@ impl From<MError> for AppError {
                 tracing::warn!(machine = m.id, err = %error, "boot failed");
                 Some(m)
             }
-            MError::Moved(m) => Some(m),
+            MError::Moved(m) | MError::NotReady(m) => Some(m),
             MError::Other(_) => {
                 tracing::error!(err = %error, "request failed");
                 None
@@ -404,6 +405,20 @@ async fn touch_machine(State(st): S, Path(id): Path<String>) -> Result<StatusCod
 #[derive(Deserialize)]
 struct WaitQuery {
     timeout: Option<u64>,
+    /// `ready` (the default) or `running`.
+    #[serde(rename = "for")]
+    until: Option<String>,
+}
+
+/// What a `/wait` waits for: `ready` unless asked for `running` (ADR 0022).
+fn wait_until(asked: Option<&str>) -> Result<Until, MError> {
+    match asked {
+        None | Some("ready") => Ok(Until::Ready),
+        Some("running") => Ok(Until::Running),
+        Some(other) => Err(MError::Invalid(format!(
+            "for {other:?}: want \"ready\" or \"running\""
+        ))),
+    }
 }
 
 async fn wait_machine(
@@ -411,8 +426,9 @@ async fn wait_machine(
     Path(id): Path<String>,
     Query(q): Query<WaitQuery>,
 ) -> Result<Json<api::Machine>, AppError> {
+    let until = wait_until(q.until.as_deref())?;
     Ok(Json(
-        st.mgr.wait_running(&id, wait_timeout(q.timeout)).await?,
+        st.mgr.wait(&id, until, wait_timeout(q.timeout)).await?,
     ))
 }
 
@@ -714,6 +730,19 @@ mod tests {
     }
 
     #[test]
+    fn wait_is_for_ready_unless_asked() {
+        assert_eq!(wait_until(None).ok(), Some(Until::Ready));
+        assert_eq!(wait_until(Some("ready")).ok(), Some(Until::Ready));
+        assert_eq!(wait_until(Some("running")).ok(), Some(Until::Running));
+        let e = AppError::from(wait_until(Some("up")).unwrap_err());
+        assert_eq!((e.status, e.code), (StatusCode::BAD_REQUEST, "invalid"));
+        assert_eq!(
+            e.error,
+            "invalid request: for \"up\": want \"ready\" or \"running\""
+        );
+    }
+
+    #[test]
     fn if_match_is_a_version() {
         let h = |v: &str| {
             let mut m = HeaderMap::new();
@@ -771,6 +800,28 @@ mod tests {
             (e.status, e.code, e.oldest),
             (StatusCode::GONE, "gone", Some(40))
         );
+        // A `/wait` that ran out on a running machine its probes do not pass: the machine.
+        let running = api::Machine {
+            id: "m_1".into(),
+            state: api::state::RUNNING.into(),
+            probes_status: api::ProbesStatus {
+                readiness: Some(api::ProbeStatus {
+                    passed: false,
+                    message: "HTTP 503".into(),
+                    failures: 4,
+                    at: chrono::Utc::now(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let e = AppError::from(MError::NotReady(Box::new(running)));
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "not_ready"));
+        assert_eq!(
+            e.error,
+            "machine m_1 is running, not ready: readiness: HTTP 503"
+        );
+        assert_eq!(e.machine.map(|m| m.state), Some("running".to_string()));
         let e = AppError::from(MError::GatewayInUse);
         assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway_in_use"));
         let e = AppError::from(MError::Gateway("t1".into()));

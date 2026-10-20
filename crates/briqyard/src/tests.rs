@@ -384,13 +384,40 @@ fn machine_lifecycle_commands() {
             MachineCmd::Start { id } if id == "m1" => "start",
             MachineCmd::Wake { id } if id == "m1" => "wake",
             MachineCmd::Touch { id } if id == "m1" => "touch",
-            MachineCmd::Wait { id } if id == "m1" => "wait",
+            MachineCmd::Wait { id, until } if id == "m1" && until == "ready" => "wait",
             MachineCmd::Rm { id } if id == "m1" => "rm",
             MachineCmd::Stats { id } if id == "m1" => "stats",
             _ => "?",
         };
         assert_eq!(got, want, "{args:?}");
     }
+    match machine(parse(&["machine", "wait", "--for", "running", "m1"])) {
+        MachineCmd::Wait { until, .. } => assert_eq!(until, "running"),
+        _ => panic!("not a wait"),
+    }
+    assert_eq!(
+        fails(&["machine", "wait", "--for", "up", "m1"]),
+        ErrorKind::InvalidValue
+    );
+    let MachineCmd::Run(a) = machine(parse(&[
+        "m",
+        "run",
+        "--image",
+        "x",
+        "--readiness",
+        "http:8080/",
+        "--liveness",
+        "exec:test -f /tmp/alive",
+    ])) else {
+        panic!("not a run")
+    };
+    assert_eq!(a.readiness.and_then(|p| p.http).map(|h| h.port), Some(8080));
+    assert_eq!(a.liveness.and_then(|p| p.exec).map(|c| c.len()), Some(3));
+    assert!(a.startup.is_none());
+    assert_eq!(
+        fails(&["m", "run", "--image", "x", "--startup", "udp:53"]),
+        ErrorKind::ValueValidation
+    );
     for sub in [
         "get", "start", "stop", "wake", "touch", "wait", "rm", "stats", "fork", "logs",
     ] {
@@ -569,6 +596,7 @@ fn endpoint_tenant_and_image_commands() {
             start,
             image,
             port,
+            readiness,
             envs,
             cmd,
         })) => {
@@ -576,6 +604,7 @@ fn endpoint_tenant_and_image_commands() {
                 (tenant.as_str(), image.as_str(), port),
                 ("t1", "proxy:1", 3128)
             );
+            assert!(readiness.is_none(), "its port, unless a probe is named");
             assert!(!start, "made, not started, unless asked");
             assert_eq!(env_args(&envs).unwrap()["TOKEN"], "a=b");
             assert_eq!(cmd, ["proxy", "-v"]);
@@ -740,9 +769,11 @@ fn the_machine_table() {
         host: "d1".into(),
         created_at: ts(),
         updated_at: ts(),
+        ready: true,
         ..Default::default()
     };
     let mut b = a.clone();
+    b.ready = false;
     b.id = "m_02".into();
     b.name = "db".into();
     b.state = "stopped".into();
@@ -769,7 +800,7 @@ fn the_machine_table() {
     assert!(out.ends_with('\n'));
     assert_eq!(
         lines[0],
-        "ID               TENANT     NAME           IMAGE                    STATE              IP           SIZE      SLEEP  EGRESS             LIMITS                   HOST"
+        "ID               TENANT     NAME           IMAGE                    STATE              READY IP           SIZE      SLEEP  EGRESS             LIMITS                   HOST"
     );
     // Every column starts where its header does.
     let cols = [
@@ -778,16 +809,20 @@ fn the_machine_table() {
         (28, 14),
         (43, 24),
         (68, 18),
-        (87, 12),
-        (100, 9),
-        (110, 6),
-        (117, 18),
-        (136, 24),
+        (87, 5),
+        (93, 12),
+        (106, 9),
+        (116, 6),
+        (123, 18),
+        (142, 24),
     ];
     let heads: Vec<String> = cols.iter().map(|(at, w)| col(lines[0], *at, *w)).collect();
     assert_eq!(
         heads,
-        ["ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP", "EGRESS", "LIMITS"]
+        [
+            "ID", "TENANT", "NAME", "IMAGE", "STATE", "READY", "IP", "SIZE", "SLEEP", "EGRESS",
+            "LIMITS"
+        ]
     );
     let row: Vec<String> = cols.iter().map(|(at, w)| col(lines[2], *at, *w)).collect();
     assert_eq!(
@@ -798,6 +833,7 @@ fn the_machine_table() {
             "db",
             "nginx:1.27",
             "stopped (idle)",
+            "no",
             "",
             "2c/1024M",
             "never",
@@ -809,11 +845,12 @@ fn the_machine_table() {
     );
     assert_eq!(
         lines[2].len(),
-        136 + 24 + 1,
+        142 + 24 + 1,
         "no host: nothing after the limits"
     );
-    assert_eq!(col(lines[1], 117, 18), "open");
-    assert_eq!(col(lines[1], 136, 24), "-", "nothing limited");
+    assert_eq!(col(lines[1], 87, 5), "yes");
+    assert_eq!(col(lines[1], 123, 18), "open");
+    assert_eq!(col(lines[1], 142, 24), "-", "nothing limited");
     // A value wider than its column is not cut: the rest of that row moves right.
     assert!(
         lines[3].contains("a-rather-long-name-indeed ghcr.io/org/some-image:v1.2.3 "),
@@ -822,7 +859,7 @@ fn the_machine_table() {
     );
     assert_eq!(col(lines[1], 0, 16), "m_01HZX");
     assert_eq!(col(lines[1], 68, 18), "running");
-    assert_eq!(col(lines[1], 87, 12), "10.1.0.2");
+    assert_eq!(col(lines[1], 93, 12), "10.1.0.2");
     assert!(lines[1].ends_with(" d1"));
     assert_eq!(col(lines[1], 43, 24), "nginx:1.27");
     assert_eq!(machine_table(&[]).lines().count(), 1, "the header alone");
@@ -1323,6 +1360,33 @@ fn the_events_table() {
 }
 
 #[test]
+fn probes_from_the_command_line() {
+    let p = probe_arg("http:8080").unwrap();
+    assert_eq!(
+        p.http,
+        Some(api::HttpProbe {
+            port: 8080,
+            path: "/".into()
+        })
+    );
+    assert_eq!(p.period_sec, 10, "the API's timings");
+    let p = probe_arg("http:8080/healthz?x=1").unwrap();
+    assert_eq!(p.http.unwrap().path, "/healthz?x=1");
+    assert_eq!(probe_arg("tcp:5432").unwrap().tcp, Some(5432));
+    assert_eq!(
+        probe_arg("exec:test -f /tmp/alive").unwrap().exec,
+        Some(vec!["test".into(), "-f".into(), "/tmp/alive".into()])
+    );
+    for bad in ["http", "tcp:x", "ftp:21", "tcp:0", "exec:", "http:70000/"] {
+        assert!(probe_arg(bad).is_err(), "{bad}");
+    }
+    assert_eq!(
+        probe_arg("tcp:0").unwrap_err(),
+        "probe.tcp: 0 is not a port"
+    );
+}
+
+#[test]
 fn describe_shows_the_machine_then_its_events() {
     let m = api::Machine {
         id: "m_0123456789ab".into(),
@@ -1376,6 +1440,41 @@ fn describe_shows_the_machine_then_its_events() {
         created_at: ts(),
         version: 12,
         host: "d1".into(),
+        restarts: 2,
+        restarting_at: Some(ts() + chrono::Duration::seconds(20)),
+        probes: api::Probes {
+            readiness: Some(api::Probe {
+                http: Some(api::HttpProbe {
+                    port: 80,
+                    path: "/healthz".into(),
+                }),
+                ..Default::default()
+            }),
+            liveness: Some(api::Probe {
+                exec: Some(vec!["test".into(), "-f".into(), "/tmp/alive".into()]),
+                ..Default::default()
+            }),
+            startup: Some(api::Probe {
+                tcp: Some(80),
+                period_sec: 2,
+                ..Default::default()
+            }),
+        },
+        probes_status: api::ProbesStatus {
+            startup: Some(api::ProbeStatus {
+                passed: true,
+                message: "10.64.1.2:80 accepted".into(),
+                failures: 0,
+                at: ts(),
+            }),
+            readiness: Some(api::ProbeStatus {
+                passed: false,
+                message: "HTTP 503".into(),
+                failures: 2,
+                at: ts(),
+            }),
+            liveness: None,
+        },
         ..Default::default()
     };
     let out = describe(
@@ -1391,8 +1490,13 @@ fn describe_shows_the_machine_then_its_events() {
             "Host:          d1",
             "Image:         nginx:1.27",
             "State:         stopped",
+            "Ready:         no",
             "Reason:        exit",
             "Exit:          code 137 at 2026-10-19 08:30:00, out of memory, restarting",
+            "Restarts:      2, next at 2026-10-19 08:30:20",
+            "Probes:        startup tcp :80, every 2 s: passed (10.64.1.2:80 accepted)",
+            "               readiness http :80/healthz, every 10 s: failed 2 in a row (HTTP 503)",
+            "               liveness exec test -f /tmp/alive, every 10 s: not run yet",
             "IP:            10.64.1.2",
             "Size:          1 vCPU, 256 MB",
             "Volume:        2 GB at /data",
@@ -1418,13 +1522,18 @@ fn describe_shows_the_machine_then_its_events() {
             endpoints: vec![],
             volume: None,
             host: String::new(),
+            restarts: 0,
+            restarting_at: None,
+            probes: api::Probes::default(),
             ..plain
         },
         &[],
     );
     assert!(out.contains("Endpoints:     none\n"), "{out}");
     assert!(out.ends_with("Events:\n  none\n"), "{out}");
-    assert!(!out.contains("Host:") && !out.contains("Exit:"), "{out}");
+    for absent in ["Host:", "Exit:", "Restarts:", "Probes:"] {
+        assert!(!out.contains(absent), "{absent} {out}");
+    }
 }
 
 #[test]

@@ -32,6 +32,16 @@ pub trait Net: Send + Sync {
     /// Returns once a TCP connection to `ip:port` from the host is accepted, or fails at
     /// `timeout`.
     async fn wait_port(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()>;
+    /// One TCP connect to `ip:port` within `timeout`: a TCP probe (ADR 0022).
+    async fn probe_tcp(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()>;
+    /// One HTTP GET of `path` on `ip:port` within `timeout`: its status code.
+    async fn probe_http(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<u16>;
 }
 
 /// iproute2 and nftables on this host.
@@ -78,6 +88,68 @@ impl Net for HostNet {
     async fn wait_port(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()> {
         wait_port(SocketAddr::from((ip, port)), timeout).await
     }
+    async fn probe_tcp(&self, ip: Ipv4Addr, port: u16, timeout: Duration) -> Result<()> {
+        connect_once(SocketAddr::from((ip, port)), timeout).await
+    }
+    async fn probe_http(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<u16> {
+        http_status(SocketAddr::from((ip, port)), path, timeout).await
+    }
+}
+
+/// One connect, accepted within `timeout`, then closed.
+pub async fn connect_once(addr: SocketAddr, timeout: Duration) -> Result<()> {
+    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(anyhow!("{addr}: {e}")),
+        Err(_) => Err(anyhow!("{addr}: no answer within {timeout:?}")),
+    }
+}
+
+/// The status code of `GET path` on `addr`, the whole exchange within `timeout`: an HTTP/1.1
+/// request that asks the server to close, and its status line, read up to 1 KB. Nothing else
+/// of the answer is read.
+pub async fn http_status(addr: SocketAddr, path: &str, timeout: Duration) -> Result<u16> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let exchange = async {
+        let mut s = tokio::net::TcpStream::connect(addr).await?;
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: briqyard-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).await?;
+        let mut head = Vec::with_capacity(128);
+        let mut buf = [0u8; 256];
+        while !head.contains(&b'\n') && head.len() < 1024 {
+            let n = s.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            head.extend_from_slice(&buf[..n]);
+        }
+        anyhow::Ok(head)
+    };
+    let head = match tokio::time::timeout(timeout, exchange).await {
+        Ok(r) => r.map_err(|e| anyhow!("{addr}: {e:#}"))?,
+        Err(_) => return Err(anyhow!("{addr}: no answer within {timeout:?}")),
+    };
+    status_code(&head).ok_or_else(|| anyhow!("{addr}: not an HTTP answer"))
+}
+
+/// The code of an HTTP/1.x status line: `HTTP/1.1 200 OK`.
+fn status_code(head: &[u8]) -> Option<u16> {
+    let line = head.split(|b| *b == b'\n').next()?;
+    let line = std::str::from_utf8(line).ok()?;
+    let mut parts = line.split_whitespace();
+    if !parts.next()?.starts_with("HTTP/1.") {
+        return None;
+    }
+    let code: u16 = parts.next()?.parse().ok()?;
+    (100..=599).contains(&code).then_some(code)
 }
 
 /// Connects until the port accepts: nothing on the host says when a guest's program listens.
@@ -294,6 +366,106 @@ mod tests {
             "{err}"
         );
         assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn status_lines() {
+        assert_eq!(status_code(b"HTTP/1.1 200 OK\r\nServer: x\r\n"), Some(200));
+        assert_eq!(
+            status_code(b"HTTP/1.0 503 Service Unavailable\r\n"),
+            Some(503)
+        );
+        assert_eq!(status_code(b"HTTP/1.1 302\r\n"), Some(302));
+        for bad in [
+            &b""[..],
+            b"SSH-2.0-OpenSSH\r\n",
+            b"HTTP/1.1 OK\r\n",
+            b"HTTP/1.1 9999 x\r\n",
+        ] {
+            assert_eq!(status_code(bad), None, "{:?}", String::from_utf8_lossy(bad));
+        }
+    }
+
+    /// A server on loopback that answers each connection with `answer` once it read a request
+    /// head, and hands the head it read to the test.
+    async fn serve(answer: &'static [u8]) -> (SocketAddr, tokio::sync::mpsc::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = ln.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            while let Ok((mut c, _)) = ln.accept().await {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 512];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match c.read(&mut buf).await {
+                        Ok(n) if n > 0 => head.extend_from_slice(&buf[..n]),
+                        _ => break,
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&head).into_owned()).await;
+                let _ = c.write_all(answer).await;
+            }
+        });
+        (addr, rx)
+    }
+
+    #[tokio::test]
+    async fn an_http_probe_reads_the_status_line_alone() {
+        let (addr, mut heads) =
+            serve(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").await;
+        assert_eq!(
+            http_status(addr, "/healthz?full=1", Duration::from_secs(5))
+                .await
+                .unwrap(),
+            204
+        );
+        let head = heads.recv().await.unwrap();
+        assert!(
+            head.starts_with("GET /healthz?full=1 HTTP/1.1\r\n"),
+            "{head}"
+        );
+        assert!(head.contains(&format!("\r\nHost: {addr}\r\n")), "{head}");
+        assert!(head.contains("\r\nConnection: close\r\n"), "{head}");
+        // A server that answers something else is a failure that says so.
+        let (addr, _) = serve(b"220 smtp ready\r\n").await;
+        let err = http_status(addr, "/", Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), format!("{addr}: not an HTTP answer"));
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_gets_no_answer_fails_at_its_timeout() {
+        // A listener that accepts and never answers: the HTTP probe waits for its line.
+        let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = ln.local_addr().unwrap();
+        let _held = tokio::spawn(async move {
+            let mut conns = Vec::new();
+            while let Ok((c, _)) = ln.accept().await {
+                conns.push(c);
+            }
+        });
+        let t0 = std::time::Instant::now();
+        let err = http_status(addr, "/", Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no answer within"), "{err}");
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+        // The TCP probe is the connect alone: accepted is a pass.
+        connect_once(addr, Duration::from_secs(5)).await.unwrap();
+        // A port bound and not listening refuses: a failure naming the address.
+        let s = tokio::net::TcpSocket::new_v4().unwrap();
+        s.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let quiet = s.local_addr().unwrap();
+        let err = connect_once(quiet, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().starts_with(&format!("{quiet}: ")), "{err}");
+        let err = http_status(quiet, "/", Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().starts_with(&format!("{quiet}: ")), "{err}");
     }
 
     #[test]

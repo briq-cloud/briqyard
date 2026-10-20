@@ -114,8 +114,10 @@ enum MachineCmd {
     Touch {
         id: String,
     },
-    /// Wait until running
+    /// Wait until ready (its probes pass), or until running with --for running
     Wait {
+        #[arg(long = "for", default_value = "ready", value_parser = ["ready", "running"])]
+        until: String,
         id: String,
     },
     /// Destroy a machine and its disks
@@ -264,6 +266,15 @@ struct RunArgs {
     egress: Option<api::Egress>,
     #[command(flatten)]
     limits: LimitArgs,
+    /// Checked before readiness and liveness run; failing, the boot fails: http:PORT[/PATH], tcp:PORT, exec:CMD ARGS
+    #[arg(long, value_parser = probe_arg)]
+    startup: Option<api::Probe>,
+    /// Decides `ready`, which the ingress and `wait` follow: http:PORT[/PATH], tcp:PORT, exec:CMD ARGS
+    #[arg(long, value_parser = probe_arg)]
+    readiness: Option<api::Probe>,
+    /// Failing, the machine is restarted under its restart policy: http:PORT[/PATH], tcp:PORT, exec:CMD ARGS
+    #[arg(long, value_parser = probe_arg)]
+    liveness: Option<api::Probe>,
     /// Data volume, SIZE:MOUNT (10G:/data)
     #[arg(long)]
     volume: Option<String>,
@@ -347,6 +358,9 @@ enum GatewayCmd {
         /// The port its program listens on
         #[arg(long)]
         port: u16,
+        /// A start that needs it waits for this probe instead of its port: http:PORT[/PATH], tcp:PORT, exec:CMD ARGS
+        #[arg(long, value_parser = probe_arg)]
+        readiness: Option<api::Probe>,
         /// K=V, repeatable
         #[arg(long = "env", short = 'e')]
         envs: Vec<String>,
@@ -636,6 +650,12 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     metadata: BTreeMap::new(),
                     egress: a.egress.clone(),
                     limits: a.limits.request()?,
+                    probes: Some(api::Probes {
+                        startup: a.startup.clone(),
+                        readiness: a.readiness.clone(),
+                        liveness: a.liveness.clone(),
+                    })
+                    .filter(|p| !p.is_empty()),
                     start: if a.no_start { Some(false) } else { None },
                     fork: None,
                     restore: None,
@@ -680,9 +700,13 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 c.raw(POST, &format!("/v1/machines/{id}/touch"), NONE)
                     .await?;
             }
-            MachineCmd::Wait { id } => print_json(
-                &c.call::<api::Machine>(POST, &format!("/v1/machines/{id}/wait?timeout=120"), NONE)
-                    .await?,
+            MachineCmd::Wait { until, id } => print_json(
+                &c.call::<api::Machine>(
+                    POST,
+                    &format!("/v1/machines/{id}/wait?timeout=120&for={until}"),
+                    NONE,
+                )
+                .await?,
             ),
             MachineCmd::Rm { id } => {
                 c.raw(DELETE, &format!("/v1/machines/{id}"), NONE).await?;
@@ -938,6 +962,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 start,
                 image,
                 port,
+                readiness,
                 envs,
                 cmd,
             }) => {
@@ -946,6 +971,10 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     cmd: if cmd.is_empty() { None } else { Some(cmd) },
                     env: env_args(&envs)?,
                     port,
+                    probes: api::Probes {
+                        readiness,
+                        ..Default::default()
+                    },
                     start,
                     ..Default::default()
                 };
@@ -1056,6 +1085,31 @@ fn sleep_arg(s: &str) -> Result<String, String> {
     Ok(s.to_string())
 }
 
+/// A probe with the API's timings: `http:PORT[/PATH]`, `tcp:PORT` or `exec:CMD ARGS` (the
+/// command split on spaces), checked as the daemon checks it.
+fn probe_arg(s: &str) -> Result<api::Probe, String> {
+    let bad = || format!("{s:?}: want http:PORT[/PATH], tcp:PORT or exec:CMD ARGS");
+    let port = |p: &str| p.parse::<u16>().map_err(|_| bad());
+    let mut p = api::Probe::default();
+    match s.split_once(':').ok_or_else(bad)? {
+        ("exec", cmd) => p.exec = Some(cmd.split_whitespace().map(String::from).collect()),
+        ("tcp", at) => p.tcp = Some(port(at)?),
+        ("http", at) => {
+            let (at, path) = match at.find('/') {
+                Some(i) => at.split_at(i),
+                None => (at, "/"),
+            };
+            p.http = Some(api::HttpProbe {
+                port: port(at)?,
+                path: path.into(),
+            });
+        }
+        _ => return Err(bad()),
+    }
+    p.check("probe", false)?;
+    Ok(p)
+}
+
 /// An egress policy, `open`, `none` or `via:MACHINE_ID` (`via:gateway`), checked as the daemon
 /// checks it.
 fn egress_arg(s: &str) -> Result<api::Egress, String> {
@@ -1156,8 +1210,18 @@ fn limits_label(l: &api::EgressLimits) -> String {
 /// `machine ls`.
 fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {:<18} {:<24} HOST\n",
-        "ID", "TENANT", "NAME", "IMAGE", "STATE", "IP", "SIZE", "SLEEP", "EGRESS", "LIMITS"
+        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} HOST\n",
+        "ID",
+        "TENANT",
+        "NAME",
+        "IMAGE",
+        "STATE",
+        "READY",
+        "IP",
+        "SIZE",
+        "SLEEP",
+        "EGRESS",
+        "LIMITS"
     );
     for m in ms {
         let state = if m.stopped_reason.is_empty() {
@@ -1166,12 +1230,13 @@ fn machine_table(ms: &[api::Machine]) -> String {
             format!("{} ({})", m.state, m.stopped_reason)
         };
         out.push_str(&format!(
-            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<12} {:<9} {:<6} {:<18} {:<24} {}\n",
+            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {}\n",
             m.id,
             m.tenant,
             m.name,
             m.image,
             state,
+            if m.ready { "yes" } else { "no" },
             m.ip,
             format!("{}c/{}M", m.size.vcpus, m.size.memory_mb),
             m.sleep,
@@ -1321,6 +1386,7 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
     }
     lines.push(("Image", m.image.clone()));
     lines.push(("State", m.state.clone()));
+    lines.push(("Ready", if m.ready { "yes" } else { "no" }.into()));
     if !m.stopped_reason.is_empty() {
         lines.push(("Reason", m.stopped_reason.clone()));
     }
@@ -1334,8 +1400,26 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
         }
         lines.push(("Exit", exit));
     }
+    if m.restarts > 0 || m.restarting_at.is_some() {
+        let mut restarts = m.restarts.to_string();
+        if let Some(t) = m.restarting_at {
+            restarts.push_str(&format!(", next at {}", t.format("%Y-%m-%d %H:%M:%S")));
+        }
+        lines.push(("Restarts", restarts));
+    }
     if !m.error.is_empty() {
         lines.push(("Error", m.error.clone()));
+    }
+    let probes: Vec<String> = [
+        ("startup", &m.probes.startup, &m.probes_status.startup),
+        ("readiness", &m.probes.readiness, &m.probes_status.readiness),
+        ("liveness", &m.probes.liveness, &m.probes_status.liveness),
+    ]
+    .into_iter()
+    .filter_map(|(name, p, st)| p.as_ref().map(|p| probe_line(name, p, st.as_ref())))
+    .collect();
+    if !probes.is_empty() {
+        lines.push(("Probes", probes.join(&format!("\n{:15}", ""))));
     }
     lines.push(("IP", m.ip.clone()));
     lines.push((
@@ -1386,6 +1470,16 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
         ));
     }
     out
+}
+
+/// A probe as `describe` shows it: what it checks, how often, and its last result.
+fn probe_line(name: &str, p: &api::Probe, st: Option<&api::ProbeStatus>) -> String {
+    let last = match st {
+        None => "not run yet".to_string(),
+        Some(s) if s.passed => format!("passed ({})", s.message),
+        Some(s) => format!("failed {} in a row ({})", s.failures, s.message),
+    };
+    format!("{name} {}, every {} s: {last}", p.target(), p.period_sec)
 }
 
 /// What a host needs, checked where this runs; prints one line per check.
