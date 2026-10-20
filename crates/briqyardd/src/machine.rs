@@ -649,8 +649,25 @@ impl Manager {
     }
 
     /// Writes a record whose last use moved since it was last written, as it is: nothing
-    /// about the machine changed, so `updated_at` stays.
-    fn flush_use(&self, e: &Entry) -> Result<()> {
+    /// about the machine changed, so `updated_at` stays. Under the machine's lock, and only
+    /// while the manager still holds the machine: a destroy removes it under that lock, so a
+    /// late write never brings a destroyed record back. A machine in a transition is skipped;
+    /// the transition writes the record itself.
+    fn flush_use(&self, e: &Arc<Entry>) -> Result<()> {
+        let Ok(_turn) = e.lock.try_lock() else {
+            return Ok(());
+        };
+        let id = e.snapshot().id;
+        let held = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|m| Arc::ptr_eq(m, e));
+        if !held {
+            return Ok(());
+        }
         let rec = {
             let r = e.rec.lock().unwrap();
             if !e.unsaved_use.swap(false, Relaxed) {
@@ -4907,6 +4924,25 @@ mod tests {
         );
         h.m.tick().await;
         assert_eq!(written(), t2);
+    }
+
+    #[tokio::test]
+    async fn a_use_never_writes_back_a_machine_that_is_gone_or_busy() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let e = h.add("m_u", state::STOPPED, 256);
+        h.m.save(&e).unwrap();
+        h.m.touch("m_u").unwrap();
+        // A transition holds the machine: the flush leaves it to the transition.
+        let turn = e.lock.try_lock().unwrap();
+        h.m.flush_use(&e).unwrap();
+        assert_eq!(h.stored("m_u").unwrap().last_used_at, None);
+        assert!(e.unsaved_use.load(Relaxed));
+        // The destroy that held it removed it: the flush writes nothing back.
+        h.m.inner.machines.lock().unwrap().remove("m_u");
+        h.m.inner.store.delete("machines", "m_u").unwrap();
+        drop(turn);
+        h.m.flush_use(&e).unwrap();
+        assert!(h.stored("m_u").is_none());
     }
 
     #[tokio::test(start_paused = true)]
