@@ -897,6 +897,28 @@ impl Manager {
         Ok(())
     }
 
+    /// Changes a running machine's policy. From one policy to another is one transaction,
+    /// so there is no moment with neither, and a refusal leaves the old one; the resolver
+    /// keeps the machine in throughout (same address, same gateway).
+    async fn replace_policy(&self, id: &str, new: Option<(Ipv4Addr, nft::Policy)>) -> Result<()> {
+        let held = self.inner.policies.lock().unwrap().get(id).cloned();
+        match (held, new) {
+            (Some((_, old)), Some((gateway, p))) => {
+                if old != p {
+                    self.inner.net.swap_policy(&old, &p).await?;
+                }
+                self.inner
+                    .policies
+                    .lock()
+                    .unwrap()
+                    .insert(id.into(), (gateway, p));
+                Ok(())
+            }
+            (None, new) => self.set_policy(id, new).await,
+            (Some(_), None) => self.unset_policy(id).await,
+        }
+    }
+
     /// Withdraws what a machine's TAP carries on the host: the TAP, its pin and its egress
     /// policy. A policy left behind is replaced by the next start, and gone with the tables
     /// the next daemon renders.
@@ -2263,18 +2285,23 @@ impl Manager {
         }
         // A new policy is written under the entry's lock: no start or stop runs in between.
         let _guard = match &req.egress {
-            Some(eg) => {
-                let guard = e.lock.lock().await;
-                if !self.inner.machines.lock().unwrap().contains_key(id) {
-                    // Destroyed while this waited for the lock.
-                    return Err(MError::NotFound);
-                }
-                let r = e.snapshot();
-                self.check_egress(eg, &r.tenant, &r.id)?;
-                Some(guard)
-            }
+            Some(_) => Some(e.lock.lock().await),
             None => None,
         };
+        if req.egress.is_some() && !self.inner.machines.lock().unwrap().contains_key(id) {
+            // Destroyed while this waited for the lock.
+            return Err(MError::NotFound);
+        }
+        if let Some(eg) = &req.egress {
+            let mut r = e.snapshot();
+            self.check_egress(eg, &r.tenant, &r.id)?;
+            // The tables first: refused, the old policy stays and so does the record.
+            if r.state == state::RUNNING {
+                r.egress = eg.clone();
+                let policy = self.policy_for(&r)?;
+                self.replace_policy(&r.id, policy).await?;
+            }
+        }
         {
             let mut r = e.rec.lock().unwrap();
             if let Some(sl) = req.sleep {
@@ -2283,16 +2310,11 @@ impl Manager {
             if let Some(m) = req.metadata {
                 r.metadata = m;
             }
-            if let Some(eg) = req.egress.clone() {
+            if let Some(eg) = req.egress {
                 r.egress = eg;
             }
         }
         self.save(&e)?;
-        let r = e.snapshot();
-        if req.egress.is_some() && r.state == state::RUNNING {
-            let policy = self.policy_for(&r)?;
-            self.set_policy(&r.id, policy).await?;
-        }
         Ok(self.view(&e))
     }
 
@@ -3361,6 +3383,8 @@ mod tests {
         procs: Mutex<Vec<Proc>>,
         taps: Mutex<std::collections::BTreeSet<String>>,
         calls: Mutex<Vec<String>>,
+        /// Policy calls fail, as an `nft` that refuses its input.
+        refuse_policies: AtomicBool,
     }
 
     impl Mock {
@@ -3372,6 +3396,7 @@ mod tests {
                 procs: Mutex::new(Vec::new()),
                 taps: Mutex::new(Default::default()),
                 calls: Mutex::new(Vec::new()),
+                refuse_policies: AtomicBool::new(false),
             })
         }
 
@@ -3675,12 +3700,25 @@ mod tests {
         }
 
         async fn set_policy(&self, p: &nft::Policy) -> Result<()> {
-            self.record(format!("set_policy {}", policy_line(p)));
-            Ok(())
+            self.policy_call(format!("set_policy {}", policy_line(p)))
         }
 
         async fn unset_policy(&self, p: &nft::Policy) -> Result<()> {
-            self.record(format!("unset_policy {}", policy_line(p)));
+            self.policy_call(format!("unset_policy {}", policy_line(p)))
+        }
+
+        async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()> {
+            let (old, new) = (policy_line(old), policy_line(new));
+            self.policy_call(format!("swap_policy {old} -> {new}"))
+        }
+    }
+
+    impl Mock {
+        fn policy_call(&self, line: String) -> Result<()> {
+            self.record(line);
+            if self.refuse_policies.load(Relaxed) {
+                return Err(anyhow!("nft: refused"));
+            }
             Ok(())
         }
     }
@@ -5139,12 +5177,13 @@ mod tests {
         assert_eq!(changed.egress, egress("none", None));
         assert_eq!(
             h.host.calls(),
-            vec![
-                format!("unset_policy {VIA}"),
-                "set_policy none 10.64.1.3".to_string()
-            ]
+            [format!("swap_policy {VIA} -> none 10.64.1.3")],
+            "one call, one transaction"
         );
         assert!(h.dns_kept("10.64.1.3"));
+        // The same policy again: nothing to change.
+        h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        assert!(h.host.calls().is_empty());
         // Open: nothing in the tables, outside names forwarded again.
         h.m.update(&m.id, set_egress("open", None)).await.unwrap();
         assert_eq!(h.host.calls(), ["unset_policy none 10.64.1.3"]);
@@ -5296,5 +5335,41 @@ mod tests {
         assert!(calls.contains(&"unset_policy none 10.64.1.4".to_string()));
         assert!(h.m.inner.policies.lock().unwrap().is_empty());
         assert!(!h.dns_kept("10.64.1.3") && !h.dns_kept("10.64.1.4"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_swap_keeps_the_old_policy_and_the_record() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let m =
+            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+                .await
+                .unwrap();
+        h.host.calls();
+        h.host.refuse_policies.store(true, Relaxed);
+        let err =
+            h.m.update(&m.id, set_egress("none", None))
+                .await
+                .unwrap_err();
+        assert!(matches!(err, MError::Other(_)), "{err:?}");
+        // One transaction tried, nothing taken out before it.
+        assert_eq!(
+            h.host.calls(),
+            [format!("swap_policy {VIA} -> none 10.64.1.3")]
+        );
+        let via = egress("via", Some(&gw.id));
+        assert_eq!(h.m.get(&m.id).unwrap().egress, via);
+        assert_eq!(h.stored(&m.id).unwrap().egress, via);
+        let held = h.m.inner.policies.lock().unwrap().get(&m.id).cloned();
+        assert!(
+            matches!(held, Some((_, nft::Policy::Via { .. }))),
+            "{held:?}"
+        );
+        assert!(h.dns_kept("10.64.1.3"));
+        // Accepted, it lands.
+        h.host.refuse_policies.store(false, Relaxed);
+        let changed = h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        assert_eq!(changed.egress, egress("none", None));
     }
 }

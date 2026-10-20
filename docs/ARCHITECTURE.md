@@ -106,7 +106,7 @@ default), `none` (its tenant, no internet: `egress_none` in the inet forward cha
 `via: <machine>` (only that sibling, any port, and the gateway's DNS: `via_sources` and
 `via_allowed` in the bridge chain, IP and ARP, before the pins). Under `via` and `none` the
 resolver answers internal names only, NXDOMAIN for the rest. The policy is set at every start
-right after the pin, taken out with it, swapped live on a running machine, and rendered from
+right after the pin, taken out with it, swapped live on a running machine in one transaction, and rendered from
 the running records at daemon start.
 
 No machine has a public address. Something outside reaches a port through the ingress, which is

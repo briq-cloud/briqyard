@@ -18,6 +18,7 @@ pub trait Net: Send + Sync {
     async fn list_taps(&self) -> Result<Vec<String>>;
     async fn set_policy(&self, p: &nft::Policy) -> Result<()>;
     async fn unset_policy(&self, p: &nft::Policy) -> Result<()>;
+    async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()>;
 }
 
 /// iproute2 and nftables on this host.
@@ -48,6 +49,9 @@ impl Net for HostNet {
     }
     async fn unset_policy(&self, p: &nft::Policy) -> Result<()> {
         nft::unset_policy(p).await
+    }
+    async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()> {
+        nft::swap_policy(old, new).await
     }
 }
 

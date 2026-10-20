@@ -231,6 +231,17 @@ pub async fn set_policy(p: &Policy) -> Result<()> {
     nft(&p.elements("add")).await
 }
 
+/// What `swap_policy` sends: the old policy's deletes, then the new one's adds.
+pub fn swap_elements(old: &Policy, new: &Policy) -> String {
+    old.elements("delete") + &new.elements("add")
+}
+
+/// Replaces a machine's policy in one transaction: never neither, and a refusal leaves the
+/// old one in place.
+pub async fn swap_policy(old: &Policy, new: &Policy) -> Result<()> {
+    nft(&swap_elements(old, new)).await
+}
+
 /// Takes it out. Missing is success.
 pub async fn unset_policy(p: &Policy) -> Result<()> {
     missing_is_fine(nft(&p.elements("delete")).await)
@@ -437,6 +448,16 @@ table bridge briqyard {
             "delete element inet briqyard egress_none { 10.64.0.4 }\n"
         );
         assert_eq!((via().ip(), none.ip()), ("10.64.0.3", "10.64.0.4"));
+        // A swap is one input, so one transaction: the old out, then the new in.
+        let none3 = Policy::None {
+            ip: "10.64.0.3".into(),
+        };
+        assert_eq!(
+            swap_elements(&via(), &none3),
+            "delete element bridge briqyard via_sources { 10.64.0.3 }\n\
+             delete element bridge briqyard via_allowed { 10.64.0.3 . 10.64.0.2, 10.64.0.3 . 10.64.0.1 }\n\
+             add element inet briqyard egress_none { 10.64.0.3 }\n"
+        );
     }
 
     #[test]
