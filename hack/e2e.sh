@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end suite against a running briqyardd on this host. Needs: briqyard on PATH, curl, jq,
 # the daemon reachable at $BRIQYARD_URL (default http://127.0.0.1:7420), and the internet.
-# Every machine it makes lives in the tenant "e2e" and is destroyed at the end.
+# Every machine it makes lives in a tenant "e2e-<pid>…" and is destroyed at the end.
 set -euo pipefail
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7420}
 T=e2e-$$
@@ -11,12 +11,14 @@ bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 cleanup() {
   echo "cleanup"
-  for id in $(briqyard machine ls --tenant "$T" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
-  # A machine still settling refuses its destroy; try again until the tenant is empty.
-  for i in $(seq 1 10); do
-    briqyard tenant rm "$T" >/dev/null 2>&1 && break
-    for id in $(briqyard machine ls --tenant "$T" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
-    sleep 2
+  for t in "$T" "$T-eg"; do
+    for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
+    # A machine still settling refuses its destroy; try again until the tenant is empty.
+    for i in $(seq 1 10); do
+      briqyard tenant rm "$t" >/dev/null 2>&1 && break
+      for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
+      sleep 2
+    done
   done
 }
 trap cleanup EXIT
@@ -52,6 +54,30 @@ O=$(briqyard machine run --image alpine:3.20 --name other --tenant "$T-other" --
 aip=$(briqyard machine get "$A" | jq -r .ip)
 check "other tenant cannot reach" '! briqyard machine exec "$O" -- ping -c1 -W2 "$aip" >/dev/null 2>&1'
 briqyard machine rm "$O" >/dev/null; briqyard tenant rm "$T-other" >/dev/null 2>&1 || true
+
+echo "== egress: via a gateway machine, none, open again"
+E="$T-eg"
+serve() { briqyard machine run --image python:3.12-alpine --name "$1" --tenant "$E" --memory 256 -- python3 -m http.server 8080 | jq -r .id; }
+G=$(serve egw); SIB=$(serve eside)
+for m in "$G" "$SIB"; do
+  for i in $(seq 1 30); do briqyard machine exec "$m" -- wget -qO- -T 2 http://127.0.0.1:8080/ >/dev/null 2>&1 && break; sleep 1; done
+done
+V=$(briqyard machine run --image alpine:3.20 --name evia --tenant "$E" --memory 256 --egress "via:$G" -- sleep 3600 | jq -r .id)
+N=$(briqyard machine run --image alpine:3.20 --name enone --tenant "$E" --memory 256 --egress none -- sleep 3600 | jq -r .id)
+reach() { briqyard machine exec "$1" -- wget -qO- -T 3 "$2" >/dev/null 2>&1; }
+check "via shown"                 '[ "$(briqyard machine get "$V" | jq -r .egress.via)" = "$G" ]'
+check "via reaches its gateway"   'reach "$V" http://egw.internal:8080/'
+check "via: no sibling"           '! reach "$V" http://eside.internal:8080/'
+check "via: no internet"          '! reach "$V" http://1.1.1.1/'
+check "via: outside name refused" 'briqyard machine exec "$V" -- nslookup example.com 2>&1 | grep -q NXDOMAIN'
+check "via: gateway name resolves" 'briqyard machine exec "$V" -- nslookup egw.internal 2>&1 | grep -q "10\.6[4-9]\."'
+check "none reaches a sibling"    'reach "$N" http://eside.internal:8080/'
+check "none: no internet"         '! reach "$N" http://1.1.1.1/'
+check "none: outside name refused" 'briqyard machine exec "$N" -- nslookup example.com 2>&1 | grep -q NXDOMAIN'
+briqyard machine set-egress "$N" open >/dev/null
+check "open again: internet"      'reach "$N" http://1.1.1.1/'
+for m in "$V" "$N" "$SIB" "$G"; do briqyard machine rm "$m" >/dev/null; done
+briqyard tenant rm "$E" >/dev/null 2>&1 || true
 
 echo "== stop, start, exit handling"
 briqyard machine stop "$A" >/dev/null
