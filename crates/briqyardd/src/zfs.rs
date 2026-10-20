@@ -11,22 +11,42 @@ pub struct Zfs {
     pool: String,
     /// The `zfs` command; a fake one in tests.
     binary: PathBuf,
+    /// The `udevadm` command; a fake one in tests.
+    udevadm: PathBuf,
     /// Where the kernel exposes zvols (`/dev/zvol/<dataset>`).
     dev_root: PathBuf,
 }
 
+/// The filesystem dataset the jails live on (ADR 0014).
+const JAIL_DATASET: &str = "jail";
+
 impl Zfs {
-    /// Opens the pool and makes the parent datasets the layout needs.
-    pub async fn new(pool: &str) -> Result<Self> {
-        Self::with_paths(pool, Path::new("zfs"), Path::new("/dev/zvol")).await
+    /// Opens the pool, makes the parent datasets the layout needs, and mounts `<pool>/jail`
+    /// at `jail_dir`: every chroot and memory snapshot then lands on the pool, not on `/`.
+    pub async fn new(pool: &str, jail_dir: &Path) -> Result<Self> {
+        Self::with_paths(
+            pool,
+            Path::new("zfs"),
+            Path::new("udevadm"),
+            Path::new("/dev/zvol"),
+            jail_dir,
+        )
+        .await
     }
 
-    /// `new` with the `zfs` binary and the zvol device root given, so tests can stand in for
-    /// both without ZFS on the machine.
-    pub async fn with_paths(pool: &str, binary: &Path, dev_root: &Path) -> Result<Self> {
+    /// `new` with the `zfs` and `udevadm` binaries and the zvol device root given, so tests
+    /// can stand in for all three without ZFS on the machine.
+    pub async fn with_paths(
+        pool: &str,
+        binary: &Path,
+        udevadm: &Path,
+        dev_root: &Path,
+        jail_dir: &Path,
+    ) -> Result<Self> {
         let z = Self {
             pool: pool.to_string(),
             binary: binary.to_path_buf(),
+            udevadm: udevadm.to_path_buf(),
             dev_root: dev_root.to_path_buf(),
         };
         z.run(&["list", "-H", "-o", "name", pool])
@@ -35,7 +55,33 @@ impl Zfs {
         for d in ["images", "m"] {
             z.run(&["create", "-p", &z.ds(d)]).await?;
         }
+        z.mount(JAIL_DATASET, jail_dir).await?;
         Ok(z)
+    }
+
+    /// Makes `name` a filesystem mounted at `dir`, whatever it was before: made, moved or
+    /// mounted as needed, nothing when it is already there.
+    async fn mount(&self, name: &str, dir: &Path) -> Result<()> {
+        let ds = self.ds(name);
+        let want = format!("mountpoint={}", dir.display());
+        if !self.exists(name).await? {
+            self.run(&["create", "-o", &want, &ds]).await?;
+            return Ok(());
+        }
+        if self.get(name, "mountpoint").await? != dir.display().to_string() {
+            self.run(&["set", &want, &ds]).await?;
+        }
+        if self.get(name, "mounted").await? != "yes" {
+            self.run(&["mount", &ds]).await?;
+        }
+        Ok(())
+    }
+
+    async fn get(&self, name: &str, property: &str) -> Result<String> {
+        let out = self
+            .run(&["get", "-H", "-o", "value", property, &self.ds(name)])
+            .await?;
+        Ok(out.trim().to_string())
     }
 
     fn ds(&self, name: &str) -> String {
@@ -129,9 +175,23 @@ impl Zfs {
         self.wait_device(name).await
     }
 
-    /// Waits for udev to make the device node (asynchronous after a create or clone).
+    /// The device node of a volume, once udev has made it. `udevadm settle` waits for the
+    /// events udev holds, bounded. A poll follows because the kernel may register the block
+    /// device after `zfs` returned, so udev may not hold the event yet (ZFS's own `zvol_wait`
+    /// polls for this); where it does, the loop runs once.
     async fn wait_device(&self, name: &str) -> Result<PathBuf> {
         let dev = self.dev(name);
+        let out = Command::new(&self.udevadm)
+            .args(["settle", "--timeout=15"])
+            .output()
+            .await
+            .context("run udevadm")?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "udevadm settle: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
             if tokio::fs::metadata(&dev).await.is_ok() {
@@ -381,35 +441,78 @@ case "$1" in
     [ -e "$DEV/$last" ] || missing "$last"
     rm -rf "$DEV/$last"; exit 0;;
   get)
-    cat "$DEV/answer.$6"; exit 0;;
+    for a in "$@"; do prop="$last_but_one"; last_but_one="$a"; done
+    cat "$DEV/answer.$prop"; exit 0;;
 esac
 exit 0
 "#;
+
+    /// A stand-in for `udevadm`: nothing to settle, the call is logged.
+    const FAKE_UDEVADM: &str = "#!/bin/sh\nprintf 'udevadm %s\\n' \"$*\" >> \"__LOG__\"\n";
 
     struct Fake {
         dir: tempfile::TempDir,
         zfs: Zfs,
     }
 
-    impl Fake {
-        async fn open(pool: &str) -> Result<Fake> {
+    /// The fake binaries and the device root, before the pool is opened.
+    struct Scripts {
+        dir: tempfile::TempDir,
+        zfs: PathBuf,
+        udevadm: PathBuf,
+        dev: PathBuf,
+        jail: PathBuf,
+    }
+
+    impl Scripts {
+        fn new() -> Scripts {
+            use std::os::unix::fs::PermissionsExt;
             let dir = tempfile::tempdir().unwrap();
             let dev = dir.path().join("dev");
             std::fs::create_dir_all(&dev).unwrap();
-            let bin = dir.path().join("zfs");
-            let script = FAKE
-                .replace("__DEV__", dev.to_str().unwrap())
-                .replace("__LOG__", dir.path().join("calls").to_str().unwrap())
-                .replace("__POOL__", "byard");
-            std::fs::write(&bin, script).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let zfs = Zfs::with_paths(pool, &bin, &dev).await?;
-            Ok(Fake { dir, zfs })
+            let log = dir.path().join("calls");
+            let zfs = dir.path().join("zfs");
+            let udevadm = dir.path().join("udevadm");
+            for (bin, script) in [(&zfs, FAKE), (&udevadm, FAKE_UDEVADM)] {
+                let script = script
+                    .replace("__DEV__", dev.to_str().unwrap())
+                    .replace("__LOG__", log.to_str().unwrap())
+                    .replace("__POOL__", "byard");
+                std::fs::write(bin, script).unwrap();
+                std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let jail = dir.path().join("jail");
+            Scripts {
+                dir,
+                zfs,
+                udevadm,
+                dev,
+                jail,
+            }
+        }
+
+        async fn open(self, pool: &str) -> Result<Fake> {
+            let zfs =
+                Zfs::with_paths(pool, &self.zfs, &self.udevadm, &self.dev, &self.jail).await?;
+            Ok(Fake { dir: self.dir, zfs })
+        }
+
+        fn answer(&self, prop: &str, value: &str) {
+            std::fs::write(self.dev.join(format!("answer.{prop}")), value).unwrap();
+        }
+    }
+
+    impl Fake {
+        async fn open(pool: &str) -> Result<Fake> {
+            Scripts::new().open(pool).await
         }
 
         fn dev(&self) -> PathBuf {
             self.dir.path().join("dev")
+        }
+
+        fn jail(&self) -> String {
+            self.dir.path().join("jail").display().to_string()
         }
 
         /// The calls so far, then forgets them.
@@ -425,15 +528,19 @@ exit 0
         }
     }
 
+    const SETTLE: &str = "udevadm settle --timeout=15";
+
     #[tokio::test]
     async fn opening_checks_the_pool_and_makes_the_layout() {
         let f = Fake::open("byard").await.unwrap();
         assert_eq!(
             f.calls(),
             vec![
-                "list -H -o name byard",
-                "create -p byard/images",
-                "create -p byard/m"
+                "list -H -o name byard".to_string(),
+                "create -p byard/images".to_string(),
+                "create -p byard/m".to_string(),
+                "list -H -o name byard/jail".to_string(),
+                format!("create -o mountpoint={} byard/jail", f.jail()),
             ]
         );
         assert!(f.dev().join("byard/images").is_dir());
@@ -443,6 +550,45 @@ exit 0
         let msg = format!("{err:#}");
         assert!(msg.contains("zfs pool nope"), "{msg}");
         assert!(msg.contains("does not exist"), "{msg}");
+    }
+
+    /// `<pool>/jail` is mounted where `jail_dir` says: left alone when it already is, moved
+    /// when the config changed, mounted when it is not.
+    #[tokio::test]
+    async fn the_jail_dataset_follows_the_config() {
+        let s = Scripts::new();
+        std::fs::create_dir_all(s.dev.join("byard")).unwrap();
+        std::fs::write(s.dev.join("byard/jail"), b"").unwrap();
+        s.answer("mountpoint", &format!("{}\n", s.jail.display()));
+        s.answer("mounted", "yes\n");
+        let f = s.open("byard").await.unwrap();
+        let calls = f.calls();
+        assert_eq!(
+            &calls[3..],
+            [
+                "list -H -o name byard/jail",
+                "get -H -o value mountpoint byard/jail",
+                "get -H -o value mounted byard/jail",
+            ]
+        );
+
+        let s = Scripts::new();
+        std::fs::create_dir_all(s.dev.join("byard")).unwrap();
+        std::fs::write(s.dev.join("byard/jail"), b"").unwrap();
+        s.answer("mountpoint", "/var/lib/briqyard/jail\n");
+        s.answer("mounted", "no\n");
+        let f = s.open("byard").await.unwrap();
+        let calls = f.calls();
+        assert_eq!(
+            &calls[3..],
+            [
+                "list -H -o name byard/jail".to_string(),
+                "get -H -o value mountpoint byard/jail".to_string(),
+                format!("set mountpoint={} byard/jail", f.jail()),
+                "get -H -o value mounted byard/jail".to_string(),
+                "mount byard/jail".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -471,18 +617,20 @@ exit 0
         let dev = f.zfs.create("m/x/data", 2 << 30).await.unwrap();
         assert_eq!(dev, f.dev().join("byard/m/x/data"));
         assert!(dev.is_file());
+        // The node is looked for once udev has settled.
         assert_eq!(
             f.calls(),
             vec![
                 "list -H -o name byard/m/x/data",
                 "create -p byard/m/x",
-                "create -s -V 2147483648 -b 16K -o compression=lz4 byard/m/x/data"
+                "create -s -V 2147483648 -b 16K -o compression=lz4 byard/m/x/data",
+                SETTLE,
             ]
         );
         // An existing volume is returned as is: no second create.
         let again = f.zfs.create("m/x/data", 2 << 30).await.unwrap();
         assert_eq!(again, dev);
-        assert_eq!(f.calls(), vec!["list -H -o name byard/m/x/data"]);
+        assert_eq!(f.calls(), vec!["list -H -o name byard/m/x/data", SETTLE]);
     }
 
     #[tokio::test]
@@ -497,7 +645,8 @@ exit 0
             f.calls(),
             vec![
                 "list -H -o name byard/flat",
-                "create -s -V 1048576 -b 16K -o compression=lz4 byard/flat"
+                "create -s -V 1048576 -b 16K -o compression=lz4 byard/flat",
+                SETTLE,
             ]
         );
     }
@@ -568,7 +717,8 @@ exit 0
             vec![
                 "list -H -o name byard/m/y/root",
                 "create -p byard/m/y",
-                "clone byard/images/abc@base byard/m/y/root"
+                "clone byard/images/abc@base byard/m/y/root",
+                SETTLE,
             ]
         );
         // The clone exists: nothing is cloned again.
@@ -576,7 +726,7 @@ exit 0
             .clone_snapshot("images/abc", "base", "m/y/root")
             .await
             .unwrap();
-        assert_eq!(f.calls(), vec!["list -H -o name byard/m/y/root"]);
+        assert_eq!(f.calls(), vec!["list -H -o name byard/m/y/root", SETTLE]);
     }
 
     #[tokio::test]
@@ -666,11 +816,20 @@ exit 0
         let err = Zfs::with_paths(
             "byard",
             Path::new("/nonexistent/zfs"),
+            Path::new("/nonexistent/udevadm"),
             Path::new("/dev/zvol"),
+            Path::new("/var/lib/briqyard/jail"),
         )
         .await
         .err()
         .unwrap();
         assert!(format!("{err:#}").contains("run zfs"), "{err:#}");
+        // The device wait needs udevadm as much as it needs zfs.
+        let s = Scripts::new();
+        let udevadm = s.udevadm.clone();
+        let f = s.open("byard").await.unwrap();
+        std::fs::remove_file(&udevadm).unwrap();
+        let err = f.zfs.create("m/x/root", 1 << 20).await.unwrap_err();
+        assert!(format!("{err:#}").contains("run udevadm"), "{err:#}");
     }
 }

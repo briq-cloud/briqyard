@@ -853,7 +853,7 @@ impl Manager {
                 st.uptime_sec = (Utc::now() - t).num_seconds().max(0) as u64;
             }
             if self.jail_for(&r).is_some() {
-                let cg = PathBuf::from("/sys/fs/cgroup/firecracker").join(r.id.replace('_', "-"));
+                let cg = fc::cgroup_dir(&r.id);
                 if let Ok(text) = tokio::fs::read_to_string(cg.join("cpu.stat")).await {
                     for line in text.lines() {
                         if let Some(v) = line.strip_prefix("usage_usec ") {

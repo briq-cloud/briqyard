@@ -61,6 +61,9 @@ async fn run(args: Args) -> Result<()> {
         return Err(anyhow!("config {} not found", args.config.display()));
     };
     let cfg = config::Config::load(path)?;
+    // Nothing the daemon writes is for other users: records, config drives and consoles hold
+    // tenant secrets (ADR 0014).
+    nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
     if !nix::unistd::geteuid().is_root() {
         return Err(anyhow!(
             "briqyardd must run as root (ZFS, TAP devices, nftables)"
@@ -74,9 +77,12 @@ async fn run(args: Args) -> Result<()> {
     } else {
         tracing::warn!("no jailer configured: Firecracker runs as root, for development only");
     }
-    std::fs::create_dir_all(&cfg.data_dir)?;
+    store::private_dir(&cfg.data_dir)?;
     let store = store::Store::open(&cfg.state_dir())?;
-    let zfs = zfs::Zfs::new(&cfg.storage.pool).await?;
+    let zfs = zfs::Zfs::new(&cfg.storage.pool, &cfg.jail_base()).await?;
+    for d in [cfg.jail_base(), cfg.run_dir()] {
+        store::private_dir(&d)?;
+    }
     let mut images = image::Builder::new(
         zfs.clone(),
         cfg.image_dir(),
