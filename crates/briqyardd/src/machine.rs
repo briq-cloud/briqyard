@@ -2754,17 +2754,10 @@ fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Writes a drive whole, through a temp file next to it, so a crash leaves the previous
-/// drive or none, never half of one.
+/// Writes a drive whole and for the daemon alone (it holds the machine's secrets): through a
+/// temp file next to it, so a crash leaves the previous drive or none, never half of one.
 fn write_drive(path: &Path, data: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let tmp = path.with_extension("tar.tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(data)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    crate::store::write_private(path, data)
 }
 
 #[cfg(test)]
