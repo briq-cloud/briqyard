@@ -4,8 +4,9 @@
 //! address so a guest cannot send as anyone else.
 //!
 //! The tables are rendered once at start. A machine's pin is one element added to or removed
-//! from the `pins` set; tenants need no change at all: the rules name their bridges by prefix
-//! (`by*`), which only the daemon makes.
+//! from the `pins` set, its egress policy (ADR 0015) a few more in the sets beside it;
+//! tenants need no change at all: the rules name their bridges by prefix (`by*`), which only
+//! the daemon makes.
 
 use anyhow::{anyhow, Context, Result};
 use std::process::Stdio;
@@ -15,6 +16,44 @@ use tokio::process::Command;
 /// The networks a tenant may not reach, whatever the host routes to them.
 const PRIVATE_NETS: &str =
     "{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 }";
+
+/// A machine's egress policy as the tables hold it (ADR 0015), keyed on its pinned address.
+/// `open` is the absence of one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Policy {
+    /// `ip` reaches `to` (its gateway machine) and `host` (the tenant's `.1`), nothing else:
+    /// elements of `via_sources` and `via_allowed` in the bridge table.
+    Via {
+        ip: String,
+        to: String,
+        host: String,
+    },
+    /// `ip` reaches its tenant and not the internet: an element of `egress_none` in the inet
+    /// table, where the route out is.
+    None { ip: String },
+}
+
+impl Policy {
+    /// The machine's address, which the policy is keyed on.
+    pub fn ip(&self) -> &str {
+        match self {
+            Policy::Via { ip, .. } | Policy::None { ip } => ip,
+        }
+    }
+
+    /// The `add element` lines of this policy; with `delete`, the lines that end it.
+    fn elements(&self, verb: &str) -> String {
+        match self {
+            Policy::Via { ip, to, host } => format!(
+                "{verb} element bridge briqyard via_sources {{ {ip} }}\n\
+                 {verb} element bridge briqyard via_allowed {{ {ip} . {to}, {ip} . {host} }}\n"
+            ),
+            Policy::None { ip } => {
+                format!("{verb} element inet briqyard egress_none {{ {ip} }}\n")
+            }
+        }
+    }
+}
 
 pub struct Ruleset {
     pub egress: String,
@@ -26,10 +65,23 @@ pub struct Ruleset {
     /// `(tap, ip)` of every machine whose TAP exists: the guest behind it sends as that
     /// address and nothing else.
     pub pins: Vec<(String, String)>,
+    /// The egress policies of those machines.
+    pub policies: Vec<Policy>,
 }
 
 impl Ruleset {
     pub fn render(&self) -> String {
+        let (mut via_sources, mut via_allowed, mut egress_none) = (vec![], vec![], vec![]);
+        for p in &self.policies {
+            match p {
+                Policy::Via { ip, to, host } => {
+                    via_sources.push(ip.clone());
+                    via_allowed.push(format!("{ip} . {to}"));
+                    via_allowed.push(format!("{ip} . {host}"));
+                }
+                Policy::None { ip } => egress_none.push(ip.clone()),
+            }
+        }
         let mut s = String::new();
         s.push_str("table inet briqyard\ndelete table inet briqyard\ntable inet briqyard {\n");
         s.push_str("\tset allowed_clients {\n\t\ttype ipv4_addr\n\t\tflags interval\n");
@@ -40,8 +92,11 @@ impl Ruleset {
             ));
         }
         s.push_str("\t}\n");
+        s.push_str(&set("egress_none", "ipv4_addr", &egress_none));
         s.push_str("\tchain forward {\n\t\ttype filter hook forward priority 0; policy drop;\n");
         s.push_str("\t\tmeta nfproto ipv6 iifname \"by*\" drop\n");
+        // Before the reply accept: a policy set while a connection is open ends it.
+        s.push_str("\t\tip saddr @egress_none drop\n");
         s.push_str("\t\tct state established,related accept\n");
         s.push_str(&format!(
             "\t\tiifname \"by*\" oifname \"{}\" ip daddr {PRIVATE_NETS} drop\n",
@@ -76,14 +131,23 @@ impl Ruleset {
         s.push_str(
             "table bridge briqyard\ndelete table bridge briqyard\ntable bridge briqyard {\n",
         );
-        s.push_str("\tset pins {\n\t\ttype ifname . ipv4_addr\n");
-        if !self.pins.is_empty() {
-            let els: Vec<String> = self.pins.iter().map(|(t, ip)| pin(t, ip)).collect();
-            s.push_str(&format!("\t\telements = {{ {} }}\n", els.join(", ")));
-        }
-        s.push_str("\t}\n");
+        let pins: Vec<String> = self.pins.iter().map(|(t, ip)| pin(t, ip)).collect();
+        s.push_str(&set("pins", "ifname . ipv4_addr", &pins));
+        s.push_str(&set("via_sources", "ipv4_addr", &via_sources));
+        s.push_str(&set("via_allowed", "ipv4_addr . ipv4_addr", &via_allowed));
         s.push_str(
             "\tchain prerouting {\n\t\ttype filter hook prerouting priority -200; policy drop;\n",
+        );
+        // A `via` source may send to its allowed pairs only, in IP and in ARP alike: it
+        // resolves its gateway machine and `.1`, answers no other sibling's ARP (so none can
+        // address it; its replies would be dropped here anyway), and never learns the rest
+        // of the subnet. Forms: a concatenation looked up in a named set of a concatenated
+        // type (`ip saddr . ip daddr @myset`, the wiki's "Concatenations" page), a negated
+        // set reference (`ip daddr != @blackhole`, its "Sets" page), and the ARP fields
+        // `arp saddr ip` / `arp daddr ip` (nft(8), ARP HEADER EXPRESSION).
+        s.push_str("\t\tip saddr @via_sources ip saddr . ip daddr != @via_allowed drop\n");
+        s.push_str(
+            "\t\tarp saddr ip @via_sources arp saddr ip . arp daddr ip != @via_allowed drop\n",
         );
         s.push_str("\t\tiifname . arp saddr ip @pins accept\n");
         s.push_str("\t\tiifname . ip saddr @pins accept\n");
@@ -129,6 +193,16 @@ fn pin(tap: &str, ip: &str) -> String {
     format!("\"{tap}\" . {ip}")
 }
 
+/// A named set, with its elements when it has any.
+fn set(name: &str, ty: &str, elements: &[String]) -> String {
+    let mut s = format!("\tset {name} {{\n\t\ttype {ty}\n");
+    if !elements.is_empty() {
+        s.push_str(&format!("\t\telements = {{ {} }}\n", elements.join(", ")));
+    }
+    s.push_str("\t}\n");
+    s
+}
+
 /// What `pin_source` sends: one element into the `pins` set.
 pub fn pin_element(tap: &str, ip: &str) -> String {
     format!("add element bridge briqyard pins {{ {} }}\n", pin(tap, ip))
@@ -149,7 +223,33 @@ pub async fn pin_source(tap: &str, ip: &str) -> Result<()> {
 
 /// Ends the pin. Missing is success.
 pub async fn unpin_source(tap: &str, ip: &str) -> Result<()> {
-    match nft(&unpin_element(tap, ip)).await {
+    missing_is_fine(nft(&unpin_element(tap, ip)).await)
+}
+
+/// Puts a machine's policy in the tables. Again is fine.
+pub async fn set_policy(p: &Policy) -> Result<()> {
+    nft(&p.elements("add")).await
+}
+
+/// What `swap_policy` sends: the old policy's deletes, then the new one's adds.
+pub fn swap_elements(old: &Policy, new: &Policy) -> String {
+    old.elements("delete") + &new.elements("add")
+}
+
+/// Replaces a machine's policy in one transaction: never neither, and a refusal leaves the
+/// old one in place.
+pub async fn swap_policy(old: &Policy, new: &Policy) -> Result<()> {
+    nft(&swap_elements(old, new)).await
+}
+
+/// Takes it out. Missing is success.
+pub async fn unset_policy(p: &Policy) -> Result<()> {
+    missing_is_fine(nft(&p.elements("delete")).await)
+}
+
+/// A delete of an element that is not there is what was wanted.
+fn missing_is_fine(r: Result<()>) -> Result<()> {
+    match r {
         Err(e) if e.to_string().contains("No such file or directory") => Ok(()),
         r => r,
     }
@@ -190,7 +290,26 @@ mod tests {
             range: "10.64.0.0/10".into(),
             allowed_clients: vec!["10.0.0.0/8".into(), "192.168.64.1/32".into()],
             ports: daemon_ports("0.0.0.0:7420", "0.0.0.0:8080", "20000-29999").unwrap(),
-            pins: vec![("btabcdef123456".into(), "10.64.0.2".into())],
+            pins: vec![
+                ("btabcdef123456".into(), "10.64.0.2".into()),
+                ("bt0000000000a3".into(), "10.64.0.3".into()),
+                ("bt0000000000a4".into(), "10.64.0.4".into()),
+            ],
+            policies: vec![
+                via(),
+                Policy::None {
+                    ip: "10.64.0.4".into(),
+                },
+            ],
+        }
+    }
+
+    /// 10.64.0.3 through its gateway machine 10.64.0.2.
+    fn via() -> Policy {
+        Policy::Via {
+            ip: "10.64.0.3".into(),
+            to: "10.64.0.2".into(),
+            host: "10.64.0.1".into(),
         }
     }
 
@@ -206,9 +325,14 @@ table inet briqyard {
 		flags interval
 		elements = { 10.0.0.0/8, 192.168.64.1/32 }
 	}
+	set egress_none {
+		type ipv4_addr
+		elements = { 10.64.0.4 }
+	}
 	chain forward {
 		type filter hook forward priority 0; policy drop;
 		meta nfproto ipv6 iifname "by*" drop
+		ip saddr @egress_none drop
 		ct state established,related accept
 		iifname "by*" oifname "eth0" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 } drop
 		iifname "by*" oifname "eth0" accept
@@ -234,10 +358,20 @@ delete table bridge briqyard
 table bridge briqyard {
 	set pins {
 		type ifname . ipv4_addr
-		elements = { "btabcdef123456" . 10.64.0.2 }
+		elements = { "btabcdef123456" . 10.64.0.2, "bt0000000000a3" . 10.64.0.3, "bt0000000000a4" . 10.64.0.4 }
+	}
+	set via_sources {
+		type ipv4_addr
+		elements = { 10.64.0.3 }
+	}
+	set via_allowed {
+		type ipv4_addr . ipv4_addr
+		elements = { 10.64.0.3 . 10.64.0.2, 10.64.0.3 . 10.64.0.1 }
 	}
 	chain prerouting {
 		type filter hook prerouting priority -200; policy drop;
+		ip saddr @via_sources ip saddr . ip daddr != @via_allowed drop
+		arp saddr ip @via_sources arp saddr ip . arp daddr ip != @via_allowed drop
 		iifname . arp saddr ip @pins accept
 		iifname . ip saddr @pins accept
 	}
@@ -251,6 +385,7 @@ table bridge briqyard {
         let r = Ruleset {
             allowed_clients: vec![],
             pins: vec![],
+            policies: vec![],
             ..ruleset()
         };
         let s = r.render();
@@ -261,6 +396,8 @@ table bridge briqyard {
             s.contains("\tset allowed_clients {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t}\n")
         );
         assert!(s.contains("\tset pins {\n\t\ttype ifname . ipv4_addr\n\t}\n"));
+        assert!(s.contains("\tset egress_none {\n\t\ttype ipv4_addr\n\t}\n"));
+        assert!(s.contains("\tset via_allowed {\n\t\ttype ipv4_addr . ipv4_addr\n\t}\n"));
     }
 
     #[test]
@@ -293,6 +430,33 @@ table bridge briqyard {
         assert_eq!(
             unpin_element("btabcdef123456", "10.64.0.2"),
             "delete element bridge briqyard pins { \"btabcdef123456\" . 10.64.0.2 }\n"
+        );
+    }
+
+    #[test]
+    fn policy_elements() {
+        assert_eq!(
+            via().elements("add"),
+            "add element bridge briqyard via_sources { 10.64.0.3 }\n\
+             add element bridge briqyard via_allowed { 10.64.0.3 . 10.64.0.2, 10.64.0.3 . 10.64.0.1 }\n"
+        );
+        let none = Policy::None {
+            ip: "10.64.0.4".into(),
+        };
+        assert_eq!(
+            none.elements("delete"),
+            "delete element inet briqyard egress_none { 10.64.0.4 }\n"
+        );
+        assert_eq!((via().ip(), none.ip()), ("10.64.0.3", "10.64.0.4"));
+        // A swap is one input, so one transaction: the old out, then the new in.
+        let none3 = Policy::None {
+            ip: "10.64.0.3".into(),
+        };
+        assert_eq!(
+            swap_elements(&via(), &none3),
+            "delete element bridge briqyard via_sources { 10.64.0.3 }\n\
+             delete element bridge briqyard via_allowed { 10.64.0.3 . 10.64.0.2, 10.64.0.3 . 10.64.0.1 }\n\
+             add element inet briqyard egress_none { 10.64.0.3 }\n"
         );
     }
 

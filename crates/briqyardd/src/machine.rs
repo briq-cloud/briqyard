@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::fc;
 use crate::guestc;
 use crate::image::{self, Builder, ImageConfig};
-use crate::netw::{self, dns::Resolver, host, nft::Ruleset, Range, Subnet};
+use crate::netw::{self, dns::Resolver, host, nft, nft::Ruleset, Range, Subnet};
 use crate::objstore::ObjectStore;
 use crate::store::Store;
 use crate::zfs::Zfs;
@@ -77,6 +77,9 @@ pub struct Record {
     #[serde(default)]
     pub sleep: String,
     pub restart: api::RestartPolicy,
+    /// Where its traffic may go (ADR 0015); a record from before has none: open.
+    #[serde(default)]
+    pub egress: api::Egress,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
     pub state: String,
@@ -295,6 +298,9 @@ struct Inner {
     tenants: Mutex<HashMap<String, Tenant>>,
     endpoints: Mutex<HashMap<String, EndpointRec>>,
     endpoint_events: broadcast::Sender<(EndpointRec, bool)>,
+    /// The egress policy the tables hold for each machine, with its tenant's gateway: what a
+    /// stop takes out, even once the gateway machine it names is gone.
+    policies: Mutex<HashMap<String, (Ipv4Addr, nft::Policy)>>,
     /// Held while a tenant is made (its subnet index, bridge and record), see `ensure_tenant`.
     tenant_create: tokio::sync::Mutex<()>,
     /// Where backups go; none when `backup.store` is empty.
@@ -385,6 +391,7 @@ impl Manager {
             tenants: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
             endpoint_events,
+            policies: Mutex::new(HashMap::new()),
             tenant_create: tokio::sync::Mutex::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),
@@ -472,7 +479,7 @@ impl Manager {
             if rec.pid > 0 && self.inner.vmm.machine_of(rec.pid).as_deref() == Some(&rec.id) {
                 self.inner.vmm.kill(rec.pid);
             }
-            let _ = self.inner.net.delete_tap(&rec.id, &rec.ip).await;
+            self.unplug(&rec.id, &rec.ip).await;
             e.set_state(state::STOPPED, |r| {
                 r.stopped_reason = stop::HOST.into();
                 r.pid = 0;
@@ -728,11 +735,19 @@ impl Manager {
         Ok(t)
     }
 
-    /// Installs the host's nftables tables, once at start. A running record may be adopted
-    /// with its TAP, so it is pinned here; everything else pins and unpins as it goes.
+    /// Installs the host's nftables tables, once at start.
     async fn apply_rules(&self) -> Result<()> {
+        self.rules()?.apply().await
+    }
+
+    /// The tables as the daemon starts. A running record may be adopted with its TAP, so it
+    /// is pinned here with its egress policy, which `policies` and the resolver then hold;
+    /// everything else pins and sets its policy as it goes. A `via` machine whose gateway
+    /// machine is gone (destroyed while it ran, then the daemon crashed) gets no pin: nothing
+    /// it sends leaves its TAP.
+    fn rules(&self) -> Result<Ruleset> {
         let cfg = &self.inner.cfg;
-        let mut pins: Vec<(String, String)> = self
+        let running: Vec<Record> = self
             .inner
             .machines
             .lock()
@@ -740,10 +755,28 @@ impl Manager {
             .values()
             .map(|e| e.snapshot())
             .filter(|r| r.state == state::RUNNING)
-            .map(|r| (netw::tap_name(&r.id), r.ip))
             .collect();
+        let mut pins = Vec::new();
+        for r in running {
+            let Ok(policy) = self.policy_for(&r) else {
+                continue;
+            };
+            pins.push((netw::tap_name(&r.id), r.ip.clone()));
+            if let Some((gateway, p)) = policy {
+                self.hold_policy(&r.id, gateway, p);
+            }
+        }
         pins.sort();
-        Ruleset {
+        let mut policies: Vec<nft::Policy> = self
+            .inner
+            .policies
+            .lock()
+            .unwrap()
+            .values()
+            .map(|(_, p)| p.clone())
+            .collect();
+        policies.sort_by(|a, b| a.ip().cmp(b.ip()));
+        Ok(Ruleset {
             egress: self.inner.egress.clone(),
             range: self.inner.range.to_string(),
             allowed_clients: cfg
@@ -754,9 +787,146 @@ impl Manager {
                 .collect::<Result<_>>()?,
             ports: netw::nft::daemon_ports(&cfg.listen, &cfg.ingress.http, &cfg.ingress.tcp_ports)?,
             pins,
+            policies,
+        })
+    }
+
+    // --- egress (ADR 0015) ---
+
+    /// An egress policy a machine of `tenant` may take: one of the modes, and for `via` a
+    /// machine of the same tenant other than `me`.
+    fn check_egress(&self, e: &api::Egress, tenant: &str, me: &str) -> Result<(), MError> {
+        e.check().map_err(invalid)?;
+        if e.mode == api::egress::VIA {
+            self.via_target(e, tenant, me)?;
         }
-        .apply()
-        .await
+        Ok(())
+    }
+
+    /// The address of the machine a `via` policy names: fixed for that machine's life.
+    fn via_target(&self, e: &api::Egress, tenant: &str, me: &str) -> Result<String, MError> {
+        let id = e.via.as_deref().unwrap_or_default();
+        if id == me {
+            return Err(invalid("egress.via names the machine itself"));
+        }
+        let target = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|e| e.snapshot())
+            .filter(|r| r.state != state::DESTROYING)
+            .ok_or_else(|| invalid(format!("egress.via {id}: no such machine")))?;
+        if target.tenant != tenant {
+            return Err(invalid(format!(
+                "egress.via {id}: a machine of another tenant"
+            )));
+        }
+        Ok(target.ip)
+    }
+
+    /// The policy a record asks for, resolved against its tenant, with the tenant's gateway:
+    /// `None` for open.
+    fn policy_for(&self, r: &Record) -> Result<Option<(Ipv4Addr, nft::Policy)>, MError> {
+        if r.egress.mode == api::egress::OPEN {
+            return Ok(None);
+        }
+        let t = self
+            .tenant_of(&r.tenant)
+            .ok_or_else(|| anyhow!("tenant network is gone"))?;
+        let gateway = t.subnet.gateway();
+        let p = if r.egress.mode == api::egress::VIA {
+            nft::Policy::Via {
+                ip: r.ip.clone(),
+                to: self.via_target(&r.egress, &r.tenant, &r.id)?,
+                host: gateway.to_string(),
+            }
+        } else {
+            nft::Policy::None { ip: r.ip.clone() }
+        };
+        Ok(Some((gateway, p)))
+    }
+
+    /// Puts a machine's policy in the tables and the resolver, in place of what they held
+    /// for it; open leaves nothing. The resolver keeps the machine in from before the
+    /// tables do until after they stop.
+    async fn set_policy(&self, id: &str, policy: Option<(Ipv4Addr, nft::Policy)>) -> Result<()> {
+        self.unset_policy(id).await?;
+        let Some((gateway, p)) = policy else {
+            return Ok(());
+        };
+        let ip: Ipv4Addr = p.ip().parse()?;
+        self.inner.dns.internal_only(gateway, ip, true);
+        if let Err(err) = self.inner.net.set_policy(&p).await {
+            self.inner.dns.internal_only(gateway, ip, false);
+            return Err(err);
+        }
+        self.inner
+            .policies
+            .lock()
+            .unwrap()
+            .insert(id.into(), (gateway, p));
+        Ok(())
+    }
+
+    /// Records a policy the tables hold already (rendered at start).
+    fn hold_policy(&self, id: &str, gateway: Ipv4Addr, p: nft::Policy) {
+        if let Ok(ip) = p.ip().parse() {
+            self.inner.dns.internal_only(gateway, ip, true);
+        }
+        self.inner
+            .policies
+            .lock()
+            .unwrap()
+            .insert(id.into(), (gateway, p));
+    }
+
+    /// Takes a machine's policy out of the tables, then out of the resolver. None held is
+    /// success.
+    async fn unset_policy(&self, id: &str) -> Result<()> {
+        let held = self.inner.policies.lock().unwrap().get(id).cloned();
+        let Some((gateway, p)) = held else {
+            return Ok(());
+        };
+        self.inner.net.unset_policy(&p).await?;
+        if let Ok(ip) = p.ip().parse() {
+            self.inner.dns.internal_only(gateway, ip, false);
+        }
+        self.inner.policies.lock().unwrap().remove(id);
+        Ok(())
+    }
+
+    /// Changes a running machine's policy. From one policy to another is one transaction,
+    /// so there is no moment with neither, and a refusal leaves the old one; the resolver
+    /// keeps the machine in throughout (same address, same gateway).
+    async fn replace_policy(&self, id: &str, new: Option<(Ipv4Addr, nft::Policy)>) -> Result<()> {
+        let held = self.inner.policies.lock().unwrap().get(id).cloned();
+        match (held, new) {
+            (Some((_, old)), Some((gateway, p))) => {
+                if old != p {
+                    self.inner.net.swap_policy(&old, &p).await?;
+                }
+                self.inner
+                    .policies
+                    .lock()
+                    .unwrap()
+                    .insert(id.into(), (gateway, p));
+                Ok(())
+            }
+            (None, new) => self.set_policy(id, new).await,
+            (Some(_), None) => self.unset_policy(id).await,
+        }
+    }
+
+    /// Withdraws what a machine's TAP carries on the host: the TAP, its pin and its egress
+    /// policy. A policy left behind is replaced by the next start, and gone with the tables
+    /// the next daemon renders.
+    async fn unplug(&self, id: &str, ip: &str) {
+        let _ = self.inner.net.delete_tap(id, ip).await;
+        if let Err(err) = self.unset_policy(id).await {
+            tracing::warn!(machine = id, err = %err, "egress policy left in the tables");
+        }
     }
 
     /// Republishes a tenant's names on its gateway.
@@ -868,6 +1038,7 @@ impl Manager {
             ports: r.ports.clone(),
             sleep: r.sleep.clone(),
             restart: r.restart.clone(),
+            egress: r.egress.clone(),
             metadata: r.metadata.clone(),
             endpoints: self.endpoints_of(&r.id),
             created_at: r.created_at,
@@ -1135,6 +1306,7 @@ impl Manager {
             ports: req.ports.clone(),
             sleep: sleep_setting(&req.sleep),
             restart,
+            egress: req.egress.clone().unwrap_or_default(),
             metadata: req.metadata.clone(),
             state: state::CREATED.into(),
             stopped_reason: String::new(),
@@ -1155,6 +1327,7 @@ impl Manager {
             console_offset: 0,
             suspended: false,
         };
+        self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
         let mut src: Option<Arc<Entry>> = None;
         let mut restore_from: Option<api::Backup> = None;
         if let Some(rs) = &req.restore {
@@ -1180,6 +1353,10 @@ impl Manager {
             }
             if req.ports.is_empty() {
                 rec.ports = was.ports;
+            }
+            if req.egress.is_none() {
+                rec.egress = was.egress;
+                self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
             }
             if rec.size == api::Size::default() {
                 rec.size = was.size;
@@ -1269,6 +1446,17 @@ impl Manager {
             }
             if r.tenant == t.rec.id {
                 used.push(r.host_num as u32);
+            }
+        }
+        // The address a `via` policy in the tables names stays its gateway's, even once that
+        // machine is gone: given to a new machine, it would be reachable through the policy.
+        for (_, p) in self.inner.policies.lock().unwrap().values() {
+            if let nft::Policy::Via { to, .. } = p {
+                if let Ok(to) = to.parse::<Ipv4Addr>() {
+                    if to.octets()[..3] == t.subnet.network.octets()[..3] {
+                        used.push(to.octets()[3] as u32);
+                    }
+                }
             }
         }
         let n = netw::first_free(used, 2, 254)
@@ -1571,6 +1759,8 @@ impl Manager {
             state::CREATED | state::STOPPED | state::ERROR => {}
             other => return Err(MError::BadState(other.into())),
         }
+        // Resolved before anything moves: a `via` whose machine is gone refuses the start.
+        let policy = self.policy_for(&rec)?;
         self.reserve(e)?;
         let _ = self.save(e);
         // The host's fault (a network, disk or Firecracker error): the machine ends in
@@ -1598,6 +1788,7 @@ impl Manager {
             .ensure_tap(&rec.id, &netw::bridge_name(t.rec.subnet_index), &rec.ip)
             .await
             .map_err(fail)?;
+        self.set_policy(&rec.id, policy).await.map_err(fail)?;
         let dir = cfg.run_dir().join(&rec.id);
         tokio::fs::create_dir_all(&dir)
             .await
@@ -1764,7 +1955,7 @@ impl Manager {
             }
         };
         let rec = e.snapshot();
-        let _ = self.inner.net.delete_tap(&rec.id, &rec.ip).await;
+        self.unplug(&rec.id, &rec.ip).await;
         *e.live.lock().unwrap() = None;
         // The init's report, or none: the process is gone, so the wait ends either way. A
         // process that ended without the init's word (killed, a kernel panic) reads as 255;
@@ -1888,7 +2079,7 @@ impl Manager {
         *e.live.lock().unwrap() = None;
         *e.stop_req.lock().unwrap() = None;
         let r = e.snapshot();
-        let _ = self.inner.net.delete_tap(&r.id, &r.ip).await;
+        self.unplug(&r.id, &r.ip).await;
         e.changed.notify_waiters();
     }
 
@@ -2038,7 +2229,7 @@ impl Manager {
             let _ = self.delete_endpoint(&ep.id);
         }
         let rec = e.snapshot();
-        let _ = self.inner.net.delete_tap(id, &rec.ip).await;
+        self.unplug(id, &rec.ip).await;
         // A fork is a clone of this machine's disks: it takes the snapshots over and lives on.
         // What this machine was cloned from is read after that, since a promotion moves it:
         // the fork snapshot it leaves behind goes once nothing clones it.
@@ -2081,11 +2272,33 @@ impl Manager {
 
     // --- use and sleep ---
 
-    /// Changes the sleep window or the metadata of a machine, in any state.
-    pub fn update(&self, id: &str, req: api::UpdateMachineRequest) -> Result<api::Machine, MError> {
+    /// Changes the sleep window, the metadata or the egress policy of a machine, in any
+    /// state; a running machine's policy changes in the tables at once.
+    pub async fn update(
+        &self,
+        id: &str,
+        req: api::UpdateMachineRequest,
+    ) -> Result<api::Machine, MError> {
         let e = self.entry(id)?;
         if let Some(sl) = &req.sleep {
             api::parse_sleep(sl).map_err(invalid)?;
+        }
+        // Under the entry's lock, like every transition: no start or stop runs in between,
+        // and a destroy that ran first has removed the machine, whose record is not written
+        // back.
+        let _guard = e.lock.lock().await;
+        if !self.inner.machines.lock().unwrap().contains_key(id) {
+            return Err(MError::NotFound);
+        }
+        if let Some(eg) = &req.egress {
+            let mut r = e.snapshot();
+            self.check_egress(eg, &r.tenant, &r.id)?;
+            // The tables first: refused, the old policy stays and so does the record.
+            if r.state == state::RUNNING {
+                r.egress = eg.clone();
+                let policy = self.policy_for(&r)?;
+                self.replace_policy(&r.id, policy).await?;
+            }
         }
         {
             let mut r = e.rec.lock().unwrap();
@@ -2094,6 +2307,9 @@ impl Manager {
             }
             if let Some(m) = req.metadata {
                 r.metadata = m;
+            }
+            if let Some(eg) = req.egress {
+                r.egress = eg;
             }
         }
         self.save(&e)?;
@@ -3104,6 +3320,7 @@ mod tests {
             ports: vec![5432],
             sleep: "30m".into(),
             restart: api::RestartPolicy::default(),
+            egress: api::Egress::default(),
             metadata: BTreeMap::new(),
             state: state::CREATED.into(),
             stopped_reason: String::new(),
@@ -3164,6 +3381,8 @@ mod tests {
         procs: Mutex<Vec<Proc>>,
         taps: Mutex<std::collections::BTreeSet<String>>,
         calls: Mutex<Vec<String>>,
+        /// Policy calls fail, as an `nft` that refuses its input.
+        refuse_policies: AtomicBool,
     }
 
     impl Mock {
@@ -3175,6 +3394,7 @@ mod tests {
                 procs: Mutex::new(Vec::new()),
                 taps: Mutex::new(Default::default()),
                 calls: Mutex::new(Vec::new()),
+                refuse_policies: AtomicBool::new(false),
             })
         }
 
@@ -3476,6 +3696,37 @@ mod tests {
         async fn list_taps(&self) -> Result<Vec<String>> {
             Ok(self.taps.lock().unwrap().iter().cloned().collect())
         }
+
+        async fn set_policy(&self, p: &nft::Policy) -> Result<()> {
+            self.policy_call(format!("set_policy {}", policy_line(p)))
+        }
+
+        async fn unset_policy(&self, p: &nft::Policy) -> Result<()> {
+            self.policy_call(format!("unset_policy {}", policy_line(p)))
+        }
+
+        async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()> {
+            let (old, new) = (policy_line(old), policy_line(new));
+            self.policy_call(format!("swap_policy {old} -> {new}"))
+        }
+    }
+
+    impl Mock {
+        fn policy_call(&self, line: String) -> Result<()> {
+            self.record(line);
+            if self.refuse_policies.load(Relaxed) {
+                return Err(anyhow!("nft: refused"));
+            }
+            Ok(())
+        }
+    }
+
+    /// A policy as the mock records it.
+    fn policy_line(p: &nft::Policy) -> String {
+        match p {
+            nft::Policy::Via { ip, to, host } => format!("via {ip} to {to} host {host}"),
+            nft::Policy::None { ip } => format!("none {ip}"),
+        }
     }
 
     /// A manager over a temp directory, the fake `zfs` and the mock host: every transition
@@ -3528,6 +3779,7 @@ mod tests {
                 tenants: Mutex::new(HashMap::new()),
                 endpoints: Mutex::new(HashMap::new()),
                 endpoint_events,
+                policies: Mutex::new(HashMap::new()),
                 tenant_create: tokio::sync::Mutex::new(()),
                 backups: None,
                 boot_gate: tokio::sync::Semaphore::new(2),
@@ -3804,13 +4056,16 @@ mod tests {
         h.add("m_n", state::STOPPED, 512);
         let set = |sleep: &str| api::UpdateMachineRequest {
             sleep: Some(sleep.into()),
-            metadata: None,
+            ..Default::default()
         };
-        assert_eq!(h.m.update("m_n", set("never")).unwrap().sleep, "never");
-        assert_eq!(h.m.update("m_n", set("")).unwrap().sleep, "never");
-        assert_eq!(h.m.update("m_n", set("3h")).unwrap().sleep, "3h");
+        assert_eq!(
+            h.m.update("m_n", set("never")).await.unwrap().sleep,
+            "never"
+        );
+        assert_eq!(h.m.update("m_n", set("")).await.unwrap().sleep, "never");
+        assert_eq!(h.m.update("m_n", set("3h")).await.unwrap().sleep, "3h");
         assert!(matches!(
-            h.m.update("m_n", set("soon")),
+            h.m.update("m_n", set("soon")).await,
             Err(MError::Invalid(_))
         ));
     }
@@ -4811,5 +5066,332 @@ mod tests {
             h.m.delete_snapshot("m_none", "s_1").await,
             Err(MError::NotFound)
         ));
+    }
+
+    // --- egress (ADR 0015) ---
+
+    fn egress(mode: &str, via: Option<&str>) -> api::Egress {
+        api::Egress {
+            mode: mode.into(),
+            via: via.map(String::from),
+        }
+    }
+
+    fn set_egress(mode: &str, via: Option<&str>) -> api::UpdateMachineRequest {
+        api::UpdateMachineRequest {
+            egress: Some(egress(mode, via)),
+            ..Default::default()
+        }
+    }
+
+    /// The message of an `invalid` refusal.
+    fn refused<T: std::fmt::Debug>(r: Result<T, MError>) -> String {
+        match r {
+            Err(MError::Invalid(msg)) => msg,
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+
+    impl Harness {
+        fn request_egress(
+            &self,
+            name: &str,
+            mode: &str,
+            via: Option<&str>,
+        ) -> api::CreateMachineRequest {
+            api::CreateMachineRequest {
+                egress: Some(egress(mode, via)),
+                ..self.request(name)
+            }
+        }
+
+        /// Whether tenant `t1`'s resolver answers `ip` from the tenant's names alone.
+        fn dns_kept(&self, ip: &str) -> bool {
+            let gateway = Ipv4Addr::new(10, 64, 1, 1);
+            self.m
+                .inner
+                .dns
+                .is_internal_only(gateway, ip.parse().unwrap())
+        }
+    }
+
+    const VIA: &str = "via 10.64.1.3 to 10.64.1.2 host 10.64.1.1";
+
+    #[tokio::test]
+    async fn a_via_machine_is_kept_to_its_gateway_while_it_runs() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let gw = h.m.create(h.request("gw")).await.unwrap();
+        h.host.calls();
+        let m =
+            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+                .await
+                .unwrap();
+        assert_eq!(m.egress, egress("via", Some(&gw.id)));
+        assert_eq!(h.stored(&m.id).unwrap().egress, m.egress);
+        // The TAP and its pin, then the policy, then the boot.
+        let tap = netw::tap_name(&m.id);
+        assert_eq!(
+            h.host.calls(),
+            vec![
+                format!("ensure_tap {tap} by1 10.64.1.3"),
+                format!("set_policy {VIA}"),
+                format!("boot {} tap={tap} resume=false", m.id),
+                "wait_ready 1001".to_string(),
+            ]
+        );
+        assert!(h.dns_kept("10.64.1.3"));
+        assert!(!h.dns_kept("10.64.1.2"), "the gateway machine is open");
+        // A stop takes it out right after the pin.
+        h.m.stop(&m.id, Duration::from_secs(3), false)
+            .await
+            .unwrap();
+        let calls = h.host.calls();
+        let at = |line: String| calls.iter().position(|c| *c == line);
+        let unpinned = at(format!("delete_tap {tap} 10.64.1.3")).expect("unpinned");
+        assert_eq!(
+            at(format!("unset_policy {VIA}")),
+            Some(unpinned + 1),
+            "{calls:?}"
+        );
+        assert!(!h.dns_kept("10.64.1.3"));
+        assert!(h.m.inner.policies.lock().unwrap().is_empty());
+        // Every start sets it again.
+        h.m.start(&m.id).await.unwrap();
+        assert!(h.host.calls().contains(&format!("set_policy {VIA}")));
+    }
+
+    #[tokio::test]
+    async fn a_policy_changes_at_once_on_a_running_machine() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let m =
+            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+                .await
+                .unwrap();
+        h.host.calls();
+        let changed = h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        assert_eq!(changed.egress, egress("none", None));
+        assert_eq!(
+            h.host.calls(),
+            [format!("swap_policy {VIA} -> none 10.64.1.3")],
+            "one call, one transaction"
+        );
+        assert!(h.dns_kept("10.64.1.3"));
+        // The same policy again: nothing to change.
+        h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        assert!(h.host.calls().is_empty());
+        // Open: nothing in the tables, outside names forwarded again.
+        h.m.update(&m.id, set_egress("open", None)).await.unwrap();
+        assert_eq!(h.host.calls(), ["unset_policy none 10.64.1.3"]);
+        assert!(!h.dns_kept("10.64.1.3"));
+        // Stopped: the record changes, the next start applies it.
+        h.m.stop(&m.id, Duration::from_secs(3), false)
+            .await
+            .unwrap();
+        h.host.calls();
+        h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        assert!(h.host.calls().is_empty());
+        assert_eq!(h.stored(&m.id).unwrap().egress, egress("none", None));
+        h.m.start(&m.id).await.unwrap();
+        assert!(h
+            .host
+            .calls()
+            .contains(&"set_policy none 10.64.1.3".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_via_names_another_machine_of_the_tenant() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        h.tenant("t2");
+        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let other =
+            h.m.create(api::CreateMachineRequest {
+                tenant: "t2".into(),
+                ..h.request("other")
+            })
+            .await
+            .unwrap();
+        let m = h.m.create(h.request("sbx")).await.unwrap();
+        h.host.calls();
+        h.pool.calls();
+        let missing = "m_000000000000";
+        for (via, want) in [
+            (
+                other.id.as_str(),
+                format!("egress.via {}: a machine of another tenant", other.id),
+            ),
+            (missing, format!("egress.via {missing}: no such machine")),
+        ] {
+            let create = h.m.create(h.request_egress("sbx2", "via", Some(via))).await;
+            assert_eq!(refused(create), want);
+            let update = h.m.update(&m.id, set_egress("via", Some(via))).await;
+            assert_eq!(refused(update), want);
+        }
+        assert_eq!(
+            refused(h.m.update(&m.id, set_egress("via", Some(&m.id))).await),
+            "egress.via names the machine itself"
+        );
+        assert_eq!(
+            refused(h.m.create(h.request_egress("sbx2", "via", None)).await),
+            "egress.via must name a machine of the tenant"
+        );
+        // Nothing applied, made or changed.
+        assert!(h.host.calls().is_empty());
+        let zfs = h.pool.calls();
+        assert!(zfs.is_empty(), "{zfs:?}");
+        assert!(h.m.list(None).iter().all(|x| x.name != "sbx2"));
+        assert_eq!(h.stored(&m.id).unwrap().egress, api::Egress::default());
+        // Its own tenant's machine is a gateway.
+        h.m.update(&m.id, set_egress("via", Some(&gw.id)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_gateway_destroyed_under_a_via_machine_leaves_it_reaching_nothing() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let m =
+            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+                .await
+                .unwrap();
+        h.m.destroy(&gw.id).await.unwrap();
+        // The policy stays, and so does the address it names: a new machine gets another.
+        assert_eq!(h.m.create(h.request("next")).await.unwrap().ip, "10.64.1.4");
+        h.host.calls();
+        // A stop takes out what was set, gateway or not.
+        h.m.stop(&m.id, Duration::from_secs(3), false)
+            .await
+            .unwrap();
+        assert!(h.host.calls().contains(&format!("unset_policy {VIA}")));
+        // A start is refused until the policy names a machine that is there; nothing moves.
+        assert_eq!(
+            refused(h.m.start(&m.id).await),
+            format!("egress.via {}: no such machine", gw.id)
+        );
+        assert!(h.host.calls().is_empty());
+        assert_eq!(h.stored(&m.id).unwrap().state, state::STOPPED);
+        // Named by no policy, the address is free again.
+        assert_eq!(h.m.create(h.request("last")).await.unwrap().ip, "10.64.1.2");
+    }
+
+    #[tokio::test]
+    async fn the_tables_at_start_hold_the_running_policies() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.tenant("t1");
+        let add = |id: &str, st: &str, n: u8, eg: api::Egress| {
+            let e = h.add(id, st, 256);
+            let mut r = e.rec.lock().unwrap();
+            r.name = id.trim_start_matches("m_").into();
+            (r.host_num, r.ip, r.egress) = (n, format!("10.64.1.{n}"), eg);
+        };
+        add("m_gw", state::RUNNING, 2, api::Egress::default());
+        add("m_via", state::RUNNING, 3, egress("via", Some("m_gw")));
+        add("m_none", state::RUNNING, 4, egress("none", None));
+        // Its gateway is gone: no pin, so nothing it sends leaves its TAP.
+        add("m_lost", state::RUNNING, 5, egress("via", Some("m_gone")));
+        add("m_off", state::STOPPED, 6, egress("none", None));
+        let r = h.m.rules().unwrap();
+        let pin = |tap: &str, ip: &str| (tap.to_string(), ip.to_string());
+        assert_eq!(
+            r.pins,
+            [
+                pin("btgw", "10.64.1.2"),
+                pin("btnone", "10.64.1.4"),
+                pin("btvia", "10.64.1.3")
+            ]
+        );
+        assert_eq!(
+            r.policies,
+            [
+                nft::Policy::Via {
+                    ip: "10.64.1.3".into(),
+                    to: "10.64.1.2".into(),
+                    host: "10.64.1.1".into()
+                },
+                nft::Policy::None {
+                    ip: "10.64.1.4".into()
+                }
+            ]
+        );
+        assert!(r
+            .render()
+            .contains("elements = { 10.64.1.3 . 10.64.1.2, 10.64.1.3 . 10.64.1.1 }"));
+        // Held as if set: the resolver keeps them in, and a stop takes them out.
+        assert!(h.dns_kept("10.64.1.3") && h.dns_kept("10.64.1.4"));
+        assert!(!h.dns_kept("10.64.1.5") && !h.dns_kept("10.64.1.6"));
+        assert_eq!(h.m.inner.policies.lock().unwrap().len(), 2);
+        // None of them is adopted (no process): each is unplugged, policy included.
+        h.host.calls();
+        h.m.recover().await;
+        let calls = h.host.calls();
+        assert!(calls.contains(&format!("unset_policy {VIA}")), "{calls:?}");
+        assert!(calls.contains(&"unset_policy none 10.64.1.4".to_string()));
+        assert!(h.m.inner.policies.lock().unwrap().is_empty());
+        assert!(!h.dns_kept("10.64.1.3") && !h.dns_kept("10.64.1.4"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_swap_keeps_the_old_policy_and_the_record() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let m =
+            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+                .await
+                .unwrap();
+        h.host.calls();
+        h.host.refuse_policies.store(true, Relaxed);
+        let err =
+            h.m.update(&m.id, set_egress("none", None))
+                .await
+                .unwrap_err();
+        assert!(matches!(err, MError::Other(_)), "{err:?}");
+        // One transaction tried, nothing taken out before it.
+        assert_eq!(
+            h.host.calls(),
+            [format!("swap_policy {VIA} -> none 10.64.1.3")]
+        );
+        let via = egress("via", Some(&gw.id));
+        assert_eq!(h.m.get(&m.id).unwrap().egress, via);
+        assert_eq!(h.stored(&m.id).unwrap().egress, via);
+        let held = h.m.inner.policies.lock().unwrap().get(&m.id).cloned();
+        assert!(
+            matches!(held, Some((_, nft::Policy::Via { .. }))),
+            "{held:?}"
+        );
+        assert!(h.dns_kept("10.64.1.3"));
+        // Accepted, it lands.
+        h.host.refuse_policies.store(false, Relaxed);
+        let changed = h.m.update(&m.id, set_egress("none", None)).await.unwrap();
+        assert_eq!(changed.egress, egress("none", None));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_patch_waiting_on_a_destroy_finds_nothing() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        // The guest takes a while to stop: the destroy holds the lock meanwhile.
+        h.host.stops_take(Duration::from_secs(3));
+        let d = h.m.clone();
+        let id = m.id.clone();
+        let destroy = tokio::spawn(async move { d.destroy(&id).await });
+        while h.m.get(&m.id).unwrap().state != state::DESTROYING {
+            tokio::task::yield_now().await;
+        }
+        let set = api::UpdateMachineRequest {
+            sleep: Some("3h".into()),
+            ..Default::default()
+        };
+        let patched = h.m.update(&m.id, set).await;
+        destroy.await.unwrap().unwrap();
+        assert!(matches!(patched, Err(MError::NotFound)), "{patched:?}");
+        assert!(h.stored(&m.id).is_none(), "the record is not written back");
+        assert!(matches!(h.m.get(&m.id), Err(MError::NotFound)));
     }
 }

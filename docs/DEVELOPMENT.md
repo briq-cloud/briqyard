@@ -93,7 +93,8 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
-  backups to a directory store and a restore. 54 checks.
+  backups to a directory store and a restore, egress policies (`via` a gateway machine, `none`,
+  back to `open`). 64 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,

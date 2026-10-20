@@ -1,8 +1,9 @@
 //! The gateway's DNS: answers `<name>.internal` for the tenant whose gateway the query came in
-//! on, and forwards everything else upstream as raw packets.
+//! on, and forwards everything else upstream as raw packets, except for the sources whose
+//! egress policy keeps them inside (ADR 0015): they get internal answers only.
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -13,6 +14,8 @@ pub struct Resolver {
     upstream: Arc<Vec<SocketAddr>>,
     /// gateway → name (lowercase, no trailing dot) → address
     names: Arc<RwLock<HashMap<Ipv4Addr, HashMap<String, Ipv4Addr>>>>,
+    /// gateway → the sources answered from `names` alone
+    internal_only: Arc<RwLock<HashMap<Ipv4Addr, HashSet<Ipv4Addr>>>>,
     listeners: Arc<RwLock<HashMap<Ipv4Addr, tokio::task::JoinHandle<()>>>>,
 }
 
@@ -40,6 +43,7 @@ impl Resolver {
         Self {
             upstream: Arc::new(ups),
             names: Default::default(),
+            internal_only: Default::default(),
             listeners: Default::default(),
         }
     }
@@ -53,8 +57,32 @@ impl Resolver {
         self.names.write().unwrap().insert(gateway, names);
     }
 
+    /// Answers `source` on `gateway` from the tenant's names alone; `false` ends that.
+    pub fn internal_only(&self, gateway: Ipv4Addr, source: Ipv4Addr, on: bool) {
+        let mut all = self.internal_only.write().unwrap();
+        let set = all.entry(gateway).or_default();
+        if on {
+            set.insert(source);
+        } else {
+            set.remove(&source);
+            if set.is_empty() {
+                all.remove(&gateway);
+            }
+        }
+    }
+
+    /// Whether `internal_only` holds `source` on `gateway`.
+    pub fn is_internal_only(&self, gateway: Ipv4Addr, source: Ipv4Addr) -> bool {
+        self.internal_only
+            .read()
+            .unwrap()
+            .get(&gateway)
+            .is_some_and(|s| s.contains(&source))
+    }
+
     pub fn unset(&self, gateway: Ipv4Addr) {
         self.names.write().unwrap().remove(&gateway);
+        self.internal_only.write().unwrap().remove(&gateway);
         if let Some(h) = self.listeners.write().unwrap().remove(&gateway) {
             h.abort();
         }
@@ -86,17 +114,23 @@ impl Resolver {
             let me = self.clone();
             let sock = sock.clone();
             tokio::spawn(async move {
-                if let Some(resp) = me.answer(gateway, &q).await {
+                let std::net::IpAddr::V4(source) = from.ip() else {
+                    return;
+                };
+                if let Some(resp) = me.answer(gateway, source, &q).await {
                     let _ = sock.send_to(&resp, from).await;
                 }
             });
         }
     }
 
-    async fn answer(&self, gateway: Ipv4Addr, q: &[u8]) -> Option<Vec<u8>> {
+    async fn answer(&self, gateway: Ipv4Addr, source: Ipv4Addr, q: &[u8]) -> Option<Vec<u8>> {
         let parsed = parse_question(q)?;
-        if let Some(stem) = parsed.name.strip_suffix(".internal") {
-            let _ = stem;
+        // A source kept inside gets NXDOMAIN for every name the tenant does not have, never
+        // a forward. Not REFUSED: glibc and Go fail at once on it, but musl ignores it and
+        // waits out its timeout (5 s; res_msend.c: "ignore all other codes such as
+        // refusal"), while NXDOMAIN is final for all three.
+        if self.is_internal_only(gateway, source) || parsed.name.ends_with(".internal") {
             let ip = self
                 .names
                 .read()
@@ -225,5 +259,52 @@ mod tests {
         assert_eq!(&r[r.len() - 4..], &[10, 64, 0, 2]);
         let nx = build_answer(&q, &p, None);
         assert_eq!(nx[3] & 0x0F, 3);
+    }
+
+    #[tokio::test]
+    async fn a_source_kept_inside_gets_internal_answers_only() {
+        // The upstream is a socket that answers every query with the same reply, so a
+        // forward is seen for what it is.
+        let up = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let r = Resolver::new(&[up.local_addr().unwrap().to_string()]);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            while let Ok((n, from)) = up.recv_from(&mut buf).await {
+                let mut resp = buf[..n].to_vec();
+                resp[2] |= 0x80;
+                resp.extend_from_slice(b"upstream");
+                let _ = up.send_to(&resp, from).await;
+            }
+        });
+        let gw = Ipv4Addr::new(10, 64, 1, 1);
+        let (kept, open) = (Ipv4Addr::new(10, 64, 1, 3), Ipv4Addr::new(10, 64, 1, 4));
+        let db = Ipv4Addr::new(10, 64, 1, 2);
+        r.set(gw, HashMap::from([("db.internal".to_string(), db)]));
+        r.internal_only(gw, kept, true);
+        let outside = query("example.com", 1);
+        let from_open = r.answer(gw, open, &outside).await.unwrap();
+        assert!(
+            from_open.ends_with(b"upstream"),
+            "an open source is forwarded"
+        );
+        let from_kept = r.answer(gw, kept, &outside).await.unwrap();
+        assert_eq!(from_kept[3] & 0x0F, 3, "NXDOMAIN");
+        assert!(!from_kept.ends_with(b"upstream"));
+        let inside = r.answer(gw, kept, &query("db.internal", 1)).await.unwrap();
+        assert_eq!(&inside[inside.len() - 4..], &db.octets());
+        // Only on its own gateway, and until it is lifted.
+        let other_gw = Ipv4Addr::new(10, 64, 2, 1);
+        assert!(r
+            .answer(other_gw, kept, &outside)
+            .await
+            .unwrap()
+            .ends_with(b"upstream"));
+        r.internal_only(gw, kept, false);
+        assert!(r
+            .answer(gw, kept, &outside)
+            .await
+            .unwrap()
+            .ends_with(b"upstream"));
+        assert!(r.internal_only.read().unwrap().is_empty());
     }
 }

@@ -63,7 +63,7 @@ paths:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "404": { $ref: "#/components/responses/Error" }
     patch:
-      summary: Change the sleep window or the metadata, in any state
+      summary: Change the sleep window, the metadata or the egress policy, in any state; a running machine's policy changes at once
       requestBody:
         required: true
         content:
@@ -71,6 +71,8 @@ paths:
             schema: { $ref: "#/components/schemas/UpdateMachineRequest" }
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "400": { description: "`invalid`: a bad sleep window, or an `egress` the machine cannot take" }
+        "404": { $ref: "#/components/responses/Error" }
     delete:
       summary: Destroy a machine, its endpoints and its disks
       responses:
@@ -358,6 +360,12 @@ components:
       properties:
         machine_id: { type: string }
         copy: { type: string, enum: [disk, config], default: disk }
+    Egress:
+      type: object
+      description: "where the machine's traffic may go, enforced on the host (ADR 0015); a refusal names the field"
+      properties:
+        mode: { type: string, enum: [open, via, none], default: open, description: "open: its tenant and the internet; via: only the `via` machine (any port) and its gateway's DNS; none: its tenant, no internet. Under via and none, DNS answers internal names only (NXDOMAIN for the rest)" }
+        via: { type: string, description: "for `via` only: a machine of the same tenant, not this one" }
     CreateMachineRequest:
       type: object
       required: [tenant, name, size]
@@ -375,6 +383,7 @@ components:
         sleep: { type: string, description: '"30m", "2h", "7d" or "never"; stops the machine after that long without use' }
         restart: { $ref: "#/components/schemas/RestartPolicy" }
         metadata: { type: object, additionalProperties: { type: string } }
+        egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent: open, or for a restore the backup's" }
         start: { type: boolean, default: true }
         fork: { $ref: "#/components/schemas/ForkSpec" }
         restore: { $ref: "#/components/schemas/RestoreSpec" }
@@ -405,6 +414,7 @@ components:
         ports: { type: array, items: { type: integer } }
         sleep: { type: string }
         restart: { $ref: "#/components/schemas/RestartPolicy" }
+        egress: { $ref: "#/components/schemas/Egress" }
         metadata: { type: object, additionalProperties: { type: string } }
         endpoints: { type: array, items: { $ref: "#/components/schemas/Endpoint" } }
         created_at: { type: string, format: date-time }
@@ -477,6 +487,7 @@ components:
       properties:
         sleep: { type: string }
         metadata: { type: object, additionalProperties: { type: string } }
+        egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent keeps the current one" }
     StopRequest:
       type: object
       properties:

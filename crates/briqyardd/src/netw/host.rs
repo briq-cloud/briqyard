@@ -6,8 +6,8 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use tokio::process::Command;
 
-/// The host network as the manager drives it: the bridges, TAPs and pins below on the
-/// host, a mock in the manager's tests.
+/// The host network as the manager drives it: the bridges, TAPs, pins and egress policies
+/// below on the host, a mock in the manager's tests.
 #[async_trait]
 pub trait Net: Send + Sync {
     async fn ensure_bridge(&self, s: &Subnet) -> Result<String>;
@@ -16,6 +16,9 @@ pub trait Net: Send + Sync {
     async fn delete_tap(&self, machine_id: &str, ip: &str) -> Result<()>;
     async fn delete_link(&self, name: &str) -> Result<()>;
     async fn list_taps(&self) -> Result<Vec<String>>;
+    async fn set_policy(&self, p: &nft::Policy) -> Result<()>;
+    async fn unset_policy(&self, p: &nft::Policy) -> Result<()>;
+    async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()>;
 }
 
 /// iproute2 and nftables on this host.
@@ -40,6 +43,15 @@ impl Net for HostNet {
     }
     async fn list_taps(&self) -> Result<Vec<String>> {
         list_taps().await
+    }
+    async fn set_policy(&self, p: &nft::Policy) -> Result<()> {
+        nft::set_policy(p).await
+    }
+    async fn unset_policy(&self, p: &nft::Policy) -> Result<()> {
+        nft::unset_policy(p).await
+    }
+    async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()> {
+        nft::swap_policy(old, new).await
     }
 }
 
