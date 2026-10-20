@@ -7,7 +7,7 @@ hosts:
     region: dev
   # The second VM of docs/DEVELOPMENT.md ("Two hosts on the Mac"): the fleet forwards to it
   # with this token and takes its heartbeats with it (a host nobody expects is refused).
-  # - id: fc2
+  - id: fc2
   #   url: http://192.168.64.1:27420
   #   token: fc2-token
   #   region: dev
