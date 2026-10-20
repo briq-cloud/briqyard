@@ -19,7 +19,7 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 | 7 | Regions | region-aware placement | the team's region to the provider (done) | a second region |
 | 8 | A team across hosts | WireGuard mesh or vRack (`MESH.md`) | nothing | a team outgrows a host |
 | 9 | Encryption at rest | ZFS native encryption per tenant | key policy | production |
-| 10 | Usage and costs | usage buckets (ADR 0017, building) | cost model, billing of disk and network | billing them |
+| 10 | Usage and costs | usage buckets (ADR 0017, built) | collection, cost model, billing of disk and network | billing them |
 | 11 | Image pulls at scale | a registry mirror per region | nothing | many hosts |
 | 12 | CI and staging on real hardware | e2e on a KVM runner | the deploy smoke test against briqyard | staging |
 | 13 | Fleet availability | state beyond one JSON file | nothing | production |
@@ -105,7 +105,7 @@ On briqyard: datasets are plain. ZFS native encryption per tenant dataset is the
 
 ## 10. Usage and costs
 
-ADR 0017: briqyard measures compute, disk, object storage and network per machine in hourly buckets, with no price; briq collects closed hours and owns the cost model and billing. Being built.
+ADR 0017, built 2026-10-20: briqyard measures compute, disk, object storage and network per machine in hourly buckets, with no price; `GET /v1/usage`, whole or failed through the fleet. briq collects closed hours and owns the cost model and billing (not built). Two holes before billing storage: a destroyed machine's backups stay in the store with no bucket after its last hour (fixed by item 2's backup delete and retention, or by reporting backups per store object), and `host retire` takes the host's stored hours with it (retire should wait until briq has collected the host's last closed hour).
 
 ## 11. Image pulls at scale
 
