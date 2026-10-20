@@ -7,14 +7,15 @@ use nix::mount::{mount, MsFlags};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitid, waitpid, Id, WaitPidFlag};
 use nix::unistd::Pid;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::Command;
@@ -25,8 +26,40 @@ const CONFIG_DEVICE: &str = "/dev/vdb";
 
 static CONSOLE: OnceLock<Mutex<fs::File>> = OnceLock::new();
 
-/// Children we spawned and wait for ourselves. The orphan reaper leaves these alone.
-static TRACKED: Mutex<Option<HashSet<i32>>> = Mutex::new(None);
+/// Children we spawned and wait for ourselves. The orphan reaper leaves these alone, and
+/// every change wakes it.
+static TRACKED: Mutex<Tracked> = Mutex::new(Tracked {
+    pids: BTreeSet::new(),
+    changes: 0,
+});
+static TRACKED_CHANGED: Condvar = Condvar::new();
+
+struct Tracked {
+    pids: BTreeSet<i32>,
+    /// Counts every insert and remove: a waiter tells a change it did not see by it.
+    changes: u64,
+}
+
+impl Tracked {
+    fn insert(&mut self, pid: i32) {
+        self.pids.insert(pid);
+        self.changed();
+    }
+
+    fn remove(&mut self, pid: i32) {
+        self.pids.remove(&pid);
+        self.changed();
+    }
+
+    fn contains(&self, pid: i32) -> bool {
+        self.pids.contains(&pid)
+    }
+
+    fn changed(&mut self) {
+        self.changes += 1;
+        TRACKED_CHANGED.notify_all();
+    }
+}
 
 /// One console line: the daemon reads the `[briqyard] ` prefix.
 fn console_line(args: std::fmt::Arguments) -> String {
@@ -66,7 +99,6 @@ pub fn main() {
     if let Ok(f) = fs::OpenOptions::new().write(true).open("/dev/console") {
         let _ = CONSOLE.set(Mutex::new(f));
     }
-    *TRACKED.lock().unwrap() = Some(HashSet::new());
     std::thread::spawn(reap_orphans);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -123,7 +155,7 @@ async fn run() -> (i32, bool, bool) {
         let mut tracked = TRACKED.lock().unwrap();
         match cmd.spawn() {
             Ok(c) => {
-                tracked.as_mut().unwrap().insert(c.id().unwrap_or(0) as i32);
+                tracked.insert(c.id().unwrap_or(0) as i32);
                 c
             }
             Err(e) => {
@@ -136,7 +168,7 @@ async fn run() -> (i32, bool, bool) {
     *st.main_pid.lock().unwrap() = Some(pid);
     log!("started pid={pid} {}", argv_string(cmd.as_std()));
     let status = child.wait().await;
-    TRACKED.lock().unwrap().as_mut().unwrap().remove(&pid);
+    TRACKED.lock().unwrap().remove(pid);
     *st.main_pid.lock().unwrap() = None;
     st.main_done.notify_waiters();
     let code = match status {
@@ -170,16 +202,27 @@ fn exit_code(s: std::process::ExitStatus) -> i32 {
 /// PID 1 inherits every orphan and must reap them, but a plain wait on any child would steal
 /// the statuses of the children we wait for ourselves. Peek without reaping, and reap only
 /// what nobody tracks. The spawn path holds the same lock while registering a new child.
+///
+/// `waitid` blocks until a child has exited, so the reaper sleeps only when it cannot: with
+/// no child at all (`ECHILD`: the next one is our own spawn), or with a tracked child's
+/// status waiting for its owner (the kernel reports the same child until it is collected).
+/// Both end with a change to `TRACKED`, which wakes it.
 fn reap_orphans() {
     loop {
+        let seen = TRACKED.lock().unwrap().changes;
         match reap_one() {
-            Ok(Reaped::Orphan(_)) => {}
-            Ok(Reaped::Ours(_)) => std::thread::sleep(Duration::from_millis(10)),
-            Ok(Reaped::Nothing) => std::thread::sleep(Duration::from_millis(50)),
-            Err(nix::errno::Errno::ECHILD) => std::thread::sleep(Duration::from_millis(100)),
-            Err(nix::errno::Errno::EINTR) => {}
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(Reaped::Orphan(_)) | Err(nix::errno::Errno::EINTR) => {}
+            Ok(Reaped::Ours(pid)) => wait_tracked(|t| !t.contains(pid.as_raw())),
+            Ok(Reaped::Nothing) | Err(_) => wait_tracked(|t| t.changes != seen),
         }
+    }
+}
+
+/// Blocks until `done` holds for the tracked children.
+fn wait_tracked(done: impl Fn(&Tracked) -> bool) {
+    let mut t = TRACKED.lock().unwrap();
+    while !done(&t) {
+        t = TRACKED_CHANGED.wait(t).unwrap();
     }
 }
 
@@ -201,10 +244,7 @@ fn reap_one() -> nix::Result<Reaped> {
         None => return Ok(Reaped::Nothing),
     };
     let tracked = TRACKED.lock().unwrap();
-    let is_ours = tracked
-        .as_ref()
-        .map(|t| t.contains(&pid.as_raw()))
-        .unwrap_or(false);
+    let is_ours = tracked.contains(pid.as_raw());
     if !is_ours {
         let _ = waitpid(pid, None);
     }
@@ -731,11 +771,12 @@ fn saw_oom() -> bool {
 }
 
 fn halt() -> ! {
+    // A write to the console returns once the tty holds the bytes; the serial port sends
+    // them as the kernel gets to it. The exit line must be out before the reset.
     if let Some(c) = CONSOLE.get() {
-        let _ = c.lock().unwrap().flush();
+        let _ = unsafe { libc::tcdrain(c.lock().unwrap().as_raw_fd()) };
     }
     nix::unistd::sync();
-    std::thread::sleep(Duration::from_millis(50));
     // Firecracker exits when the guest resets.
     let _ = nix::sys::reboot::reboot(nix::sys::reboot::RebootMode::RB_AUTOBOOT);
     loop {
@@ -922,7 +963,7 @@ where
         let mut tracked = TRACKED.lock().unwrap();
         match cmd.spawn() {
             Ok(c) => {
-                tracked.as_mut().unwrap().insert(c.id().unwrap_or(0) as i32);
+                tracked.insert(c.id().unwrap_or(0) as i32);
                 c
             }
             Err(e) => {
@@ -977,7 +1018,7 @@ where
             (child.wait().await, true)
         }
     };
-    TRACKED.lock().unwrap().as_mut().unwrap().remove(&pid);
+    TRACKED.lock().unwrap().remove(pid);
     // Grandchildren may keep the pipes open; give them a moment, then let go.
     let drain = async {
         for r in readers {
@@ -1000,27 +1041,20 @@ mod tests {
     use nix::sys::wait::WaitStatus;
     use std::time::Instant;
 
-    /// Children spawned here are tracked like the init's own, so the reaper test (which
-    /// reaps any untracked exited child of this process) never steals their status.
-    fn track_init() {
-        TRACKED.lock().unwrap().get_or_insert_with(HashSet::new);
-    }
-
     fn untrack(pid: i32) {
-        TRACKED.lock().unwrap().as_mut().unwrap().remove(&pid);
+        TRACKED.lock().unwrap().remove(pid);
     }
 
-    /// Spawns a process tracked under the TRACKED lock, as the init does.
+    /// Spawns a process tracked under the TRACKED lock, as the init does: the reaper test
+    /// reaps any untracked exited child of this process and must not steal its status.
     fn spawn_tracked(cmd: &mut std::process::Command) -> std::process::Child {
-        track_init();
         let mut tracked = TRACKED.lock().unwrap();
         let child = cmd.spawn().unwrap();
-        tracked.as_mut().unwrap().insert(child.id() as i32);
+        tracked.insert(child.id() as i32);
         child
     }
 
     fn state_with(cfg: Config) -> Arc<State> {
-        track_init();
         let env = build_env(&cfg.env);
         Arc::new(State {
             cfg,
@@ -1744,7 +1778,7 @@ mod tests {
         let st = state();
         let f = exec(&st, exec_req(&["sh", "-c", "echo $$"])).await;
         let pid: i32 = text(&f, "stdout").trim().parse().unwrap();
-        assert!(!TRACKED.lock().unwrap().as_ref().unwrap().contains(&pid));
+        assert!(!TRACKED.lock().unwrap().contains(pid));
     }
 
     // --- the handler over an in-memory stream ---
@@ -1884,7 +1918,7 @@ mod tests {
         let mut tracked = TRACKED.lock().unwrap();
         let mut child = cmd.spawn().unwrap();
         let pid = child.id().unwrap() as i32;
-        tracked.as_mut().unwrap().insert(pid);
+        tracked.insert(pid);
         drop(tracked);
         *st.main_pid.lock().unwrap() = Some(pid);
         let st = st.clone();
@@ -1970,11 +2004,30 @@ mod tests {
 
     // --- the reaper ---
 
+    #[test]
+    fn the_reaper_waits_until_a_tracked_child_is_collected() {
+        // No such process: the tracked set alone is what is waited on.
+        let pid = -4242;
+        TRACKED.lock().unwrap().insert(pid);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            wait_tracked(|t| !t.contains(pid));
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "woke before the child was collected"
+        );
+        untrack(pid);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("woke on the removal");
+        waiter.join().unwrap();
+    }
+
     // The orphan is left unwaited on purpose: reaping it is what the test checks.
     #[allow(clippy::zombie_processes)]
     #[test]
     fn reaper_leaves_tracked_children_and_reaps_orphans() {
-        track_init();
         // Ours: still running, held by its stdin. The orphan: exits at once, nobody waits.
         let mut ours = spawn_tracked(
             std::process::Command::new("cat")
