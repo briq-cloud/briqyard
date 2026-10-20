@@ -2283,13 +2283,11 @@ impl Manager {
         if let Some(sl) = &req.sleep {
             api::parse_sleep(sl).map_err(invalid)?;
         }
-        // A new policy is written under the entry's lock: no start or stop runs in between.
-        let _guard = match &req.egress {
-            Some(_) => Some(e.lock.lock().await),
-            None => None,
-        };
-        if req.egress.is_some() && !self.inner.machines.lock().unwrap().contains_key(id) {
-            // Destroyed while this waited for the lock.
+        // Under the entry's lock, like every transition: no start or stop runs in between,
+        // and a destroy that ran first has removed the machine, whose record is not written
+        // back.
+        let _guard = e.lock.lock().await;
+        if !self.inner.machines.lock().unwrap().contains_key(id) {
             return Err(MError::NotFound);
         }
         if let Some(eg) = &req.egress {
@@ -5371,5 +5369,29 @@ mod tests {
         h.host.refuse_policies.store(false, Relaxed);
         let changed = h.m.update(&m.id, set_egress("none", None)).await.unwrap();
         assert_eq!(changed.egress, egress("none", None));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_patch_waiting_on_a_destroy_finds_nothing() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        // The guest takes a while to stop: the destroy holds the lock meanwhile.
+        h.host.stops_take(Duration::from_secs(3));
+        let d = h.m.clone();
+        let id = m.id.clone();
+        let destroy = tokio::spawn(async move { d.destroy(&id).await });
+        while h.m.get(&m.id).unwrap().state != state::DESTROYING {
+            tokio::task::yield_now().await;
+        }
+        let set = api::UpdateMachineRequest {
+            sleep: Some("3h".into()),
+            ..Default::default()
+        };
+        let patched = h.m.update(&m.id, set).await;
+        destroy.await.unwrap().unwrap();
+        assert!(matches!(patched, Err(MError::NotFound)), "{patched:?}");
+        assert!(h.stored(&m.id).is_none(), "the record is not written back");
+        assert!(matches!(h.m.get(&m.id), Err(MError::NotFound)));
     }
 }
