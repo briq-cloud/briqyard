@@ -296,6 +296,21 @@ async fn start_daemon(id: &str, token: &str) -> Running {
             StatusCode::NO_CONTENT
         }
     }
+    /// One closed bucket of a machine named after the daemon; a range the daemon would refuse
+    /// (no `from`) is refused here too.
+    async fn usage(State(d): D, uri: Uri) -> Response {
+        if !uri.query().unwrap_or("").contains("from=") {
+            return err(StatusCode::BAD_REQUEST, "invalid", "from is required").into_response();
+        }
+        Json(vec![api::UsageBucket {
+            hour: "2026-10-20T14:00:00Z".parse().unwrap(),
+            machine_id: format!("m_{}", d.id),
+            tenant: "t1".into(),
+            closed: true,
+            ..Default::default()
+        }])
+        .into_response()
+    }
     // Every request is recorded, with its query, and checked for the daemon's token.
     async fn record(State(d): D, req: Request, next: axum::middleware::Next) -> Response {
         let line = format!(
@@ -323,6 +338,7 @@ async fn start_daemon(id: &str, token: &str) -> Running {
         .route("/v1/machines/:id/backups", get(backups))
         .route("/v1/machines/:id/endpoints", post(add_endpoint))
         .route("/v1/endpoints", get(endpoints))
+        .route("/v1/usage", get(usage))
         .route(
             "/v1/endpoints/:id",
             get(get_endpoint).delete(delete_endpoint),
@@ -1440,6 +1456,45 @@ async fn a_listing_adds_the_host_and_is_never_partial() {
     set_state(&f.st, "d2", "ready");
     f.st.reg.lock().unwrap().hosts.get_mut("d2").unwrap().url = "http://127.0.0.1:1".into();
     let (s, _, body) = call(&f.st, "GET", "/v1/machines", "api", None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(json(&body)["code"], "host_unreachable");
+}
+
+#[tokio::test]
+async fn usage_asks_every_host_and_is_never_partial() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    let q = "/v1/usage?from=2026-10-20T14:00:00Z&to=2026-10-20T15:00:00Z&tenant=t1";
+    let (s, _, body) = call(&f.st, "GET", q, "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let bs: Vec<api::UsageBucket> = serde_json::from_str(&body).unwrap();
+    let got: Vec<(&str, &str)> = bs
+        .iter()
+        .map(|b| (b.machine_id.as_str(), b.host.as_str()))
+        .collect();
+    assert_eq!(got, [("m_d1", "d1"), ("m_d2", "d2")]);
+    for d in &ds {
+        assert_eq!(
+            d.stub.calls().last().unwrap(),
+            &format!("GET {q}"),
+            "every host, the query as it came"
+        );
+    }
+    // The hosts check the range: their refusal is the answer.
+    let (s, _, body) = call(&f.st, "GET", "/v1/usage?to=x", "api", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(json(&body)["code"], "invalid");
+    // A host down fails the whole report, without asking it: a report missing a host is a
+    // bill missing a host.
+    set_state(&f.st, "d2", "down");
+    let d2_before = ds[1].stub.calls().len();
+    let (s, _, body) = call(&f.st, "GET", q, "api", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "host_down");
+    assert_eq!(ds[1].stub.calls().len(), d2_before);
+    // A host that does not answer fails it too.
+    set_state(&f.st, "d2", "ready");
+    f.st.reg.lock().unwrap().hosts.get_mut("d2").unwrap().url = "http://127.0.0.1:1".into();
+    let (s, _, body) = call(&f.st, "GET", q, "api", None).await;
     assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
     assert_eq!(json(&body)["code"], "host_unreachable");
 }
