@@ -265,9 +265,9 @@ briqyard tenant rm <tenant>                        # its network and gateway on 
 briqyard machine restore --from <id> --tenant <tenant> --name <name>   # placed afresh
 ```
 
-A tenant's gateway (ADR 0016) is not backed up: `briqyard tenant gateway set` it again on the
-new host, through that host's daemon (the fleet does not forward it yet), before the first
-`via:gateway` machine starts there.
+A tenant's gateway (ADR 0016) is not backed up: `briqyard tenant gateway set` it again once the
+tenant is unpinned (the fleet places the tenant with it), before the restores of its
+`via:gateway` machines.
 
 `briqyard tenant unpin <tenant>` (`POST /v1/tenants/{id}/unpin`) drops the pin without asking
 the host, for a host that is down for good or a pin left on a full host. A tenant unpinned

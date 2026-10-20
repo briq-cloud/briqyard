@@ -175,7 +175,9 @@ its private network needs no overlay. Placement picks, among ready hosts under t
 ceiling, the one with the most free memory; a fork lands where its source is. What a placement
 puts on a host is counted as used there until the host's next heartbeat, so a burst of creates
 spreads; a host that answers `capacity` for a tenant's first machine loses the pin, so the
-retry is placed afresh. `POST /v1/tenants/{id}/unpin` releases a tenant by hand (ADR 0013).
+retry is placed afresh. A tenant's gateway goes to the tenant's host (`GET /v1/tenants/{id}`
+and `/gateway` are forwarded there); a PUT for a tenant with no host places it as a first machine
+would, the gateway's size as the need. `POST /v1/tenants/{id}/unpin` releases a tenant by hand (ADR 0013).
 
 Hosts report their capacity and tenants (`POST /v1/hosts/register`, every 15 s, from the
 daemon's `fleet:` configuration) or are listed in the fleet's configuration and polled. A host

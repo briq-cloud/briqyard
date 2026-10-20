@@ -12,7 +12,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, post, put};
 use axum::{Json, Router};
 use briqyard_api as api;
 use chrono::{Duration, Utc};
@@ -169,7 +169,11 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/machines", get(list_machines).post(create_machine))
         .route("/v1/endpoints", get(list_endpoints))
         .route("/v1/tenants", get(list_tenants))
-        .route("/v1/tenants/:id", axum::routing::delete(delete_tenant))
+        .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
+        .route(
+            "/v1/tenants/:id/gateway",
+            put(set_gateway).delete(delete_gateway),
+        )
         .route("/v1/tenants/:id/unpin", post(unpin_tenant))
         .route("/v1/machines/:id", any(by_machine))
         // Backups live in a store every host shares: the listing goes to any host, even for
@@ -718,13 +722,7 @@ async fn create_machine(
 ) -> Result<Response, Refusal> {
     let req: api::CreateMachineRequest = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-    // Root disks are thin; a volume takes what it says, plus headroom.
-    let disk = req
-        .volume
-        .as_ref()
-        .map(|v| v.size_gb as u64 * 1024)
-        .unwrap_or(0)
-        + 2048;
+    let disk = disk_need(req.volume.as_ref().map(|v| v.size_gb));
     let (host, first) = {
         let mut reg = st.reg.lock().unwrap();
         let first = !reg.tenants.contains_key(&req.tenant);
@@ -765,13 +763,24 @@ async fn create_machine(
             Body::from(with_host(data, &host.id)),
         ));
     }
-    // The host has no room for the tenant's first machine: the pin this request made goes, so
-    // a retry is placed afresh. A later machine stays: the tenant's network is on this host.
-    if first && error_code(&data) == "capacity" {
-        st.reg.lock().unwrap().unpin(&req.tenant);
+    first_refused(&st, &req.tenant, first, &data)?;
+    Ok(Response::from_parts(parts, Body::from(data)))
+}
+
+/// The disk a machine is placed for: root disks are thin, a volume takes what it says, plus
+/// headroom.
+fn disk_need(volume_gb: Option<u32>) -> u64 {
+    volume_gb.map(|gb| gb as u64 * 1024).unwrap_or(0) + 2048
+}
+
+/// A host with no room for a tenant's first machine (or gateway): the pin the request made
+/// goes, so a retry is placed afresh. A later one keeps it: the tenant's network is there.
+fn first_refused(st: &AppState, tenant: &str, first: bool, answer: &[u8]) -> Result<(), Refusal> {
+    if first && error_code(answer) == "capacity" {
+        st.reg.lock().unwrap().unpin(tenant);
         st.save().map_err(registry_error)?;
     }
-    Ok(Response::from_parts(parts, Body::from(data)))
+    Ok(())
 }
 
 /// Lists machines. A listing is the truth for whoever reads it (the control plane marks a
@@ -901,6 +910,83 @@ async fn delete_tenant(
         st.save().map_err(registry_error)?;
     }
     Ok(resp)
+}
+
+/// A tenant, from its host, with that host.
+async fn get_tenant(
+    State(st): S,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Refusal> {
+    let host = st.reg.lock().unwrap().host_of_tenant(&id).cloned();
+    let host = host.ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "tenant not found"))?;
+    let path = format!("/v1/tenants/{id}");
+    let resp = forward(&st, &host, Method::GET, &path, &headers, Bytes::new()).await;
+    let (parts, data) = read(resp).await;
+    let data = match parts.status.is_success() {
+        true => with_host(data, &host.id),
+        false => data,
+    };
+    Ok(Response::from_parts(parts, Body::from(data)))
+}
+
+/// Puts a tenant's gateway on the tenant's host; a tenant with none yet is placed as its first
+/// machine would be, the gateway's size as the need.
+async fn set_gateway(
+    State(st): S,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Refusal> {
+    let spec: api::GatewaySpec = serde_json::from_slice(&body)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
+    if !api::valid_id(&id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "tenant must be a-z, 0-9, _ or -, at most 64 characters",
+        ));
+    }
+    let (host, first) = {
+        let mut reg = st.reg.lock().unwrap();
+        let first = !reg.tenants.contains_key(&id);
+        let need = disk_need(spec.volume_gb);
+        let chosen = reg.place(&id, spec.size().memory_mb, need, &st.policy);
+        (chosen.and_then(|h| reg.hosts.get(&h).cloned()), first)
+    };
+    let host = host.ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "capacity",
+            "no host has room for this gateway",
+        )
+    })?;
+    st.save().map_err(registry_error)?;
+    let path = format!("/v1/tenants/{id}/gateway");
+    let resp = forward(&st, &host, Method::PUT, &path, &headers, body).await;
+    let (parts, data) = read(resp).await;
+    if parts.status.is_success() {
+        return Ok(Response::from_parts(
+            parts,
+            Body::from(with_host(data, &host.id)),
+        ));
+    }
+    first_refused(&st, &id, first, &data)?;
+    Ok(Response::from_parts(parts, Body::from(data)))
+}
+
+/// Removes a tenant's gateway on its host; a tenant the fleet never placed has none.
+async fn delete_gateway(
+    State(st): S,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Refusal> {
+    let host = st.reg.lock().unwrap().host_of_tenant(&id).cloned();
+    let Some(host) = host else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
+    let path = format!("/v1/tenants/{id}/gateway");
+    Ok(forward(&st, &host, Method::DELETE, &path, &headers, Bytes::new()).await)
 }
 
 /// Releases a tenant from its host without touching the host: its next machine is placed
