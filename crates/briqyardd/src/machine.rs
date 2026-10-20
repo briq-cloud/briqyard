@@ -7,7 +7,6 @@ use crate::fc;
 use crate::guestc;
 use crate::image::{self, Builder, ImageConfig};
 use crate::netw::{self, dns::Resolver, host, nft, nft::Ruleset, Range, Subnet};
-use crate::objstore::ObjectStore;
 use crate::store::Store;
 use crate::usage::{self, Ledger, Meter, Traffic};
 use crate::zfs::Zfs;
@@ -25,11 +24,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
 
+mod backups;
+use backups::{Backups, Schedule, Turn};
+
 /// What the API maps to statuses.
 #[derive(Debug, thiserror::Error)]
 pub enum MError {
     #[error("machine not found")]
     NotFound,
+    #[error("backup {0} not found")]
+    NoBackup(String),
     #[error("invalid request: {0}")]
     Invalid(String),
     #[error("{0}")]
@@ -161,9 +165,12 @@ pub struct Record {
     /// Stopped with a memory snapshot: the next start resumes where it was.
     #[serde(default)]
     pub suspended: bool,
-    /// What this machine's backups sent to the store, all of them: what they take there.
+    /// What this machine's backups take in the store.
     #[serde(default)]
     pub backup_bytes: u64,
+    /// Its backup schedule (ADR 0023).
+    #[serde(default)]
+    pub backup: Schedule,
     /// The seq of the last event about it (ADR 0019); written only by `Entry::note_locked`.
     #[serde(default)]
     pub version: u64,
@@ -351,6 +358,8 @@ struct Entry {
     traffic: Arc<Traffic>,
     /// The host's event log: what an event about it goes to.
     events: Events,
+    /// Held by each backup and deletion of its backups.
+    backup_turn: Turn,
 }
 
 impl Entry {
@@ -365,6 +374,7 @@ impl Entry {
             meter: Mutex::new(Meter::new(Utc::now())),
             traffic: Arc::default(),
             events,
+            backup_turn: Turn::default(),
         })
     }
 
@@ -447,8 +457,8 @@ struct Inner {
     policies: Mutex<HashMap<String, (Ipv4Addr, nft::Policy)>>,
     /// Held while a tenant is made (its subnet index, bridge and record), see `ensure_tenant`.
     tenant_create: tokio::sync::Mutex<()>,
-    /// Where backups go; none when `backup.store` is empty.
-    backups: Option<ObjectStore>,
+    /// The backup store, the gate of scheduled backups, the holders (ADR 0023).
+    backups: Backups,
     /// Boots run at once; see `boots_at_once`.
     boot_gate: tokio::sync::Semaphore,
     /// The hours of usage not closed yet.
@@ -498,20 +508,7 @@ impl Manager {
                 / 2)
             .max(2)
         };
-        let backups = if cfg.backup.store.is_empty() {
-            None
-        } else {
-            let st = ObjectStore::open(
-                &cfg.backup.store,
-                &cfg.backup.endpoint,
-                &cfg.backup.region,
-                &std::env::var("BRIQYARD_S3_ACCESS_KEY").unwrap_or_default(),
-                &std::env::var("BRIQYARD_S3_SECRET_KEY").unwrap_or_default(),
-            )
-            .context("backup")?;
-            tracing::info!(store = st.describe(), "backups on");
-            Some(st)
-        };
+        let backups = Backups::open(&cfg.backup, &store)?;
         let (endpoint_events, _) = broadcast::channel(64);
         let ledger = Ledger::load(&store, Utc::now()).context("usage")?;
         let events = Events::open(&store.dir("events")).context("events")?;
@@ -1661,6 +1658,9 @@ impl Manager {
             last_used_at: r.last_used_at,
             sleeps_at,
             suspended: r.suspended,
+            backup: r.backup.policy.clone(),
+            last_backup_at: r.backup.last_at,
+            next_backup_at: r.backup.next_at,
             version: r.version,
             host: String::new(),
         }
@@ -1956,6 +1956,7 @@ impl Manager {
             console_offset: 0,
             suspended: false,
             backup_bytes: 0,
+            backup: backups::schedule_of(&req.backup, &self.inner.cfg.backup, now)?,
             version: 0,
         };
         self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
@@ -2192,190 +2193,6 @@ impl Manager {
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             }
-        }
-        Ok(())
-    }
-
-    // --- backups ---
-
-    fn backup_store(&self) -> Result<&ObjectStore, MError> {
-        self.inner
-            .backups
-            .as_ref()
-            .ok_or_else(|| invalid("backups are off on this host (backup.store)"))
-    }
-
-    /// Sends the machine's disks to the store: whole the first time, then what changed since
-    /// the last backup whose snapshot is still on the host. A running machine's backup is
-    /// crash-consistent (what a power cut would leave); a stopped one's is clean.
-    pub async fn backup(&self, id: &str) -> Result<api::Backup, MError> {
-        let e = self.own_entry(id)?;
-        let store = self.backup_store()?;
-        let rec = e.snapshot();
-        if rec.state == state::DESTROYING {
-            return Err(MError::BadState(rec.state));
-        }
-        let bid = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-        let snap = format!("bk-{bid}");
-        let z = &self.inner.zfs;
-        let mut disks = Vec::new();
-        let mut total = 0u64;
-        let mut incremental = false;
-        for (disk, ds) in [("root", rec.root_dataset()), ("data", rec.data_dataset())] {
-            if !z.exists(&ds).await? {
-                continue;
-            }
-            let base = newest_backup_snapshot(&z.snapshots(&ds).await?);
-            z.snapshot(&ds, &snap).await?;
-            let key = format!("backups/{}/{disk}/{bid}.zfs", rec.id);
-            let mut child = z.send(&ds, &snap, base.as_deref())?;
-            let stdout = child.stdout.take().expect("piped");
-            let sent = store
-                .put(&key, stdout)
-                .await
-                .with_context(|| format!("backup {disk} of {}", rec.id))?;
-            Zfs::finish(child, "zfs send").await?;
-            if base.is_some() {
-                incremental = true;
-            }
-            total += sent;
-            disks.push(api::BackupDisk {
-                disk: disk.into(),
-                key,
-                bytes: sent,
-                from: base.map(|b| b.trim_start_matches("bk-").to_string()),
-            });
-            // The newest snapshots stay as the base of the next send; the rest go.
-            let keep = self.inner.cfg.backup.keep_snapshots.max(1) as usize;
-            let mut snaps: Vec<String> = z
-                .snapshots(&ds)
-                .await?
-                .into_iter()
-                .filter(|s| s.starts_with("bk-"))
-                .collect();
-            snaps.sort();
-            while snaps.len() > keep {
-                let old = snaps.remove(0);
-                if let Err(err) = z.destroy_snapshot(&ds, &old).await {
-                    tracing::warn!(machine = rec.id, snapshot = old, err = %err, "old backup snapshot kept");
-                }
-            }
-        }
-        // What the store holds for the machine, under its lock and only while it is still
-        // here: a destroy in between removed the record, which is not written back.
-        {
-            let _turn = e.lock.lock().await;
-            if self.holds(&e) {
-                e.rec.lock().unwrap().backup_bytes += total;
-                let kind = if incremental { "incremental" } else { "whole" };
-                e.note(
-                    Ev::normal(
-                        reason::BACKED_UP,
-                        format!("backup {bid}: {total} bytes, {kind}"),
-                    )
-                    .data(json!({ "backup": bid, "bytes": total, "incremental": incremental })),
-                );
-                self.save(&e)?;
-            }
-        }
-        let b = api::Backup {
-            id: bid.clone(),
-            machine_id: rec.id.clone(),
-            tenant: rec.tenant.clone(),
-            name: rec.name.clone(),
-            created_at: Utc::now(),
-            bytes: total,
-            incremental,
-            disks,
-            machine: Some(serde_json::to_value(&rec).unwrap_or_default()),
-        };
-        store
-            .put_bytes(
-                &format!("backups/{}/{bid}.json", rec.id),
-                &serde_json::to_vec_pretty(&b).unwrap_or_default(),
-            )
-            .await
-            .context("backup record")?;
-        self.inner
-            .stats
-            .backups
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tracing::info!(
-            machine = rec.id,
-            backup = bid,
-            bytes = total,
-            incremental,
-            "backup made"
-        );
-        Ok(b)
-    }
-
-    /// The backups of a machine in the store, oldest first; the machine may be gone.
-    pub async fn backups(&self, machine_id: &str) -> Result<Vec<api::Backup>, MError> {
-        if !api::valid_id(machine_id) {
-            return Err(invalid("not a machine id"));
-        }
-        let store = self.backup_store()?;
-        let mut out = Vec::new();
-        for key in store.list(&format!("backups/{machine_id}/")).await? {
-            if !key.ends_with(".json") {
-                continue;
-            }
-            let data = store.get_bytes(&key).await?;
-            match serde_json::from_slice::<api::Backup>(&data) {
-                Ok(mut b) => {
-                    b.machine = None;
-                    out.push(b);
-                }
-                Err(err) => tracing::warn!(key, err = %err, "unreadable backup record"),
-            }
-        }
-        out.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(out)
-    }
-
-    async fn find_backup(&self, machine_id: &str, which: &str) -> Result<api::Backup, MError> {
-        let store = self.backup_store()?;
-        let id = if which.is_empty() || which == "latest" {
-            let all = self.backups(machine_id).await?;
-            all.last()
-                .map(|b| b.id.clone())
-                .ok_or_else(|| invalid(format!("no backup of {machine_id} in the store")))?
-        } else {
-            which.to_string()
-        };
-        let data = store
-            .get_bytes(&format!("backups/{machine_id}/{id}.json"))
-            .await
-            .map_err(|_| MError::NotFound)?;
-        serde_json::from_slice(&data).map_err(|e| invalid(format!("backup {id}: {e}")))
-    }
-
-    /// Makes the machine's disks from a backup: the whole chain of streams, oldest first,
-    /// received into the new datasets.
-    async fn receive_disks(&self, e: &Arc<Entry>, b: &api::Backup) -> Result<()> {
-        let store = self.backup_store()?;
-        let rec = e.snapshot();
-        let all = self.backups(&b.machine_id).await?;
-        for disk in &b.disks {
-            let chain = backup_chain(&all, b, &disk.disk);
-            let ds = if disk.disk == "data" {
-                rec.data_dataset()
-            } else {
-                rec.root_dataset()
-            };
-            self.inner.zfs.create_parent(&ds).await?;
-            for step in chain {
-                let mut child = self.inner.zfs.receive(&ds)?;
-                let mut stdin = child.stdin.take().expect("piped");
-                let mut reader = store.get(&step.key).await?;
-                tokio::io::copy(&mut reader, &mut stdin)
-                    .await
-                    .with_context(|| format!("restore {}", step.key))?;
-                drop(stdin);
-                Zfs::finish(child, "zfs receive").await?;
-            }
-            self.inner.zfs.device(&ds).await?;
         }
         Ok(())
     }
@@ -3048,6 +2865,10 @@ impl Manager {
                 tokio::fs::remove_dir_all(fc::jail_root(&j.base, id).parent().unwrap_or(&j.base))
                     .await;
         }
+        // Its backups stay, for a restore: a holder keeps them listed, counted and finite.
+        if rec.backup_bytes > 0 || rec.backup.last.is_some() {
+            self.hold(&rec, rec.backup_bytes, e.backup_turn.clone())?;
+        }
         self.inner.store.delete("machines", id)?;
         self.remove_machine(&e);
         self.inner
@@ -3074,6 +2895,7 @@ impl Manager {
             api::parse_sleep(sl).map_err(invalid)?;
         }
         check_limits(req.limits.as_ref())?;
+        backups::check_update(&req.backup)?;
         // Under the entry's lock, like every transition: no start or stop runs in between,
         // and a destroy that ran first has removed the machine, whose record is not written
         // back.
@@ -3121,6 +2943,7 @@ impl Manager {
             if let Some(l) = req.limits {
                 r.limits = l.over(&r.limits);
             }
+            backups::update(&mut r, req.backup)?;
             if let Some(ev) = change_event(&was, &r) {
                 e.note_locked(&mut r, ev);
             }
@@ -3220,6 +3043,8 @@ impl Manager {
                 tracing::warn!(machine = id, err = %err, "resume destroy");
             }
         }
+        // Detached: they run past this tick.
+        drop(self.backup_step(now));
     }
 
     // --- usage (ADR 0017) ---
@@ -3236,6 +3061,7 @@ impl Manager {
             .cloned()
             .collect();
         self.meter(&entries, now).await;
+        self.meter_holders(now);
         let keep = self.inner.cfg.usage_keep_days;
         let settled = self
             .inner
@@ -3818,6 +3644,7 @@ fn change_event(was: &Record, now: &Record) -> Option<Ev> {
     let fields = changed(&[
         ("sleep", was.sleep != now.sleep),
         ("metadata", was.metadata != now.metadata),
+        ("backup", was.backup.policy != now.backup.policy),
     ]);
     if fields.is_empty() {
         return None;
@@ -3882,37 +3709,6 @@ fn check_limits(l: Option<&api::EgressLimits>) -> Result<(), MError> {
         Some(Err(e)) => Err(invalid(format!("limits.{e}"))),
         _ => Ok(()),
     }
-}
-
-/// The newest backup snapshot (`bk-<id>`) among a dataset's snapshots: the base of the next
-/// incremental send.
-fn newest_backup_snapshot(snaps: &[String]) -> Option<String> {
-    snaps.iter().filter(|s| s.starts_with("bk-")).max().cloned()
-}
-
-/// The streams to receive, oldest first, to get one disk of a backup: the backup's own stream
-/// preceded by the ones it continues from, back to a whole one.
-fn backup_chain<'a>(
-    all: &'a [api::Backup],
-    target: &'a api::Backup,
-    disk: &str,
-) -> Vec<&'a api::BackupDisk> {
-    let mut chain = Vec::new();
-    let mut cur = target.disks.iter().find(|d| d.disk == disk);
-    let mut guard = 0;
-    while let Some(d) = cur {
-        chain.push(d);
-        guard += 1;
-        cur = match &d.from {
-            Some(from) if guard < 10_000 => all
-                .iter()
-                .find(|b| &b.id == from)
-                .and_then(|b| b.disks.iter().find(|x| x.disk == disk)),
-            _ => None,
-        };
-    }
-    chain.reverse();
-    chain
 }
 
 fn parse_log_line(line: &str) -> api::LogLine {
@@ -4127,55 +3923,6 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
-    fn backup_chains() {
-        let disk = |key: &str, from: Option<&str>| api::BackupDisk {
-            disk: "root".into(),
-            key: key.into(),
-            bytes: 1,
-            from: from.map(String::from),
-        };
-        let b = |id: &str, from: Option<&str>| api::Backup {
-            id: id.into(),
-            machine_id: "m_1".into(),
-            tenant: "t".into(),
-            name: "n".into(),
-            created_at: Utc::now(),
-            bytes: 1,
-            incremental: from.is_some(),
-            disks: vec![disk(&format!("k-{id}"), from)],
-            machine: None,
-        };
-        let all = vec![
-            b("a", None),
-            b("b", Some("a")),
-            b("c", Some("b")),
-            b("d", None),
-        ];
-        let keys = |t: &api::Backup| -> Vec<String> {
-            backup_chain(&all, t, "root")
-                .iter()
-                .map(|d| d.key.clone())
-                .collect()
-        };
-        assert_eq!(keys(&all[2]), vec!["k-a", "k-b", "k-c"]);
-        assert_eq!(keys(&all[0]), vec!["k-a"]);
-        assert_eq!(keys(&all[3]), vec!["k-d"]);
-        assert!(backup_chain(&all, &all[2], "data").is_empty());
-        // A base that is not in the store ends the chain where it is.
-        let orphan = b("e", Some("zz"));
-        assert_eq!(keys(&orphan), vec!["k-e"]);
-        assert_eq!(
-            newest_backup_snapshot(&[
-                "fork-x".into(),
-                "bk-20260101T000000Z".into(),
-                "bk-20260102T000000Z".into()
-            ]),
-            Some("bk-20260102T000000Z".into())
-        );
-        assert_eq!(newest_backup_snapshot(&["fork-x".into()]), None);
-    }
-
-    #[test]
     fn log_lines() {
         let l = parse_log_line("2026-10-18T22:00:00.123456Z hello world\n");
         assert_eq!(l.line, "hello world");
@@ -4373,6 +4120,7 @@ mod tests {
             console_offset: 0,
             suspended: false,
             backup_bytes: 0,
+            backup: Schedule::default(),
             version: 0,
         }
     }
@@ -4839,11 +4587,11 @@ mod tests {
 
     /// A manager over a temp directory, the fake `zfs` and the mock host: every transition
     /// runs, and what it did to the disks, the processes and the network is on record.
-    struct Harness {
-        pool: crate::zfs::fake::Fake,
+    pub(super) struct Harness {
+        pub(super) pool: crate::zfs::fake::Fake,
         host: Arc<Mock>,
         _dir: tempfile::TempDir,
-        m: Manager,
+        pub(super) m: Manager,
     }
 
     async fn harness(range: &str, memory_mb: u32) -> Harness {
@@ -4867,29 +4615,35 @@ mod tests {
         memory_mb: u32,
         egress_limits: crate::config::EgressLimits,
     ) -> Harness {
+        harness_config(|cfg| {
+            cfg.network.range = range.into();
+            cfg.capacity = crate::config::Capacity {
+                memory_mb,
+                vcpus: 1000,
+            };
+            cfg.egress_limits = egress_limits;
+        })
+        .await
+    }
+
+    /// A harness on a configuration `f` changes; its data directory is the harness's.
+    pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let fake = crate::zfs::fake::Fake::open("byard").await.unwrap();
         let init = dir.path().join("init");
         std::fs::write(&init, b"init").unwrap();
-        let cfg = Config {
+        let mut cfg = Config {
             data_dir: dir.path().join("data"),
-            network: crate::config::Network {
-                range: range.into(),
-                ..Default::default()
-            },
-            capacity: crate::config::Capacity {
-                memory_mb,
-                vcpus: 1000,
-            },
-            egress_limits,
             ..Default::default()
         };
+        f(&mut cfg);
         let zfs = fake.zfs.clone();
         let images = Builder::new(zfs.clone(), cfg.image_dir(), init, 8).unwrap();
         let store = Store::open(&cfg.state_dir()).unwrap();
         let events = Events::open(&store.dir("events")).unwrap();
         let (endpoint_events, _) = broadcast::channel(64);
         let host = Mock::new();
+        let backups = Backups::open(&cfg.backup, &store).unwrap();
         let m = Manager {
             inner: Arc::new(Inner {
                 stats: Stats::default(),
@@ -4911,7 +4665,7 @@ mod tests {
                 endpoint_events,
                 policies: Mutex::new(HashMap::new()),
                 tenant_create: tokio::sync::Mutex::new(()),
-                backups: None,
+                backups,
                 boot_gate: tokio::sync::Semaphore::new(2),
                 usage: Mutex::new(Ledger::default()),
                 events,
@@ -4932,7 +4686,7 @@ mod tests {
 
     impl Harness {
         /// Registers a machine in `state`, as if loaded, and returns its entry.
-        fn add(&self, id: &str, state: &str, memory_mb: u32) -> Arc<Entry> {
+        pub(super) fn add(&self, id: &str, state: &str, memory_mb: u32) -> Arc<Entry> {
             let mut r = record();
             r.id = id.into();
             r.state = state.into();
@@ -4977,7 +4731,7 @@ mod tests {
 
         /// A create request in tenant `t1` from the seeded image, started unless told
         /// otherwise; no volume, since a volume is formatted with the host's `mkfs.ext4`.
-        fn request(&self, name: &str) -> api::CreateMachineRequest {
+        pub(super) fn request(&self, name: &str) -> api::CreateMachineRequest {
             api::CreateMachineRequest {
                 tenant: "t1".into(),
                 name: name.into(),
@@ -4992,7 +4746,7 @@ mod tests {
         }
 
         /// Tenant `t1` and the image in place, so a `request` can be created.
-        async fn ready(&self) {
+        pub(super) async fn ready(&self) {
             self.tenant("t1");
             self.m
                 .inner
@@ -5004,7 +4758,7 @@ mod tests {
         }
 
         /// The machine's record as the store has it.
-        fn stored(&self, id: &str) -> Option<Record> {
+        pub(super) fn stored(&self, id: &str) -> Option<Record> {
             self.m.inner.store.get("machines", id).unwrap()
         }
     }
@@ -7604,7 +7358,7 @@ mod tests {
 
     // --- usage (ADR 0017) ---
 
-    fn at(s: &str) -> DateTime<Utc> {
+    pub(super) fn at(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
     }
 
@@ -7619,7 +7373,7 @@ mod tests {
         }
 
         /// The buckets of `[from, to)`.
-        async fn buckets(&self, from: &str, to: &str) -> Vec<api::UsageBucket> {
+        pub(super) async fn buckets(&self, from: &str, to: &str) -> Vec<api::UsageBucket> {
             self.m.usage_buckets(at(from), at(to), None).await.unwrap()
         }
 
@@ -8025,7 +7779,7 @@ mod tests {
 
     impl Harness {
         /// The events about a machine, oldest first.
-        fn events_of(&self, id: &str) -> Vec<api::Event> {
+        pub(super) fn events_of(&self, id: &str) -> Vec<api::Event> {
             let f = events::Filter {
                 machine: Some(id.into()),
                 ..Default::default()
@@ -8033,7 +7787,7 @@ mod tests {
             self.m.inner.events.read(0, &f, 5000).unwrap().events
         }
 
-        fn reasons(&self, id: &str) -> Vec<String> {
+        pub(super) fn reasons(&self, id: &str) -> Vec<String> {
             self.events_of(id).into_iter().map(|e| e.reason).collect()
         }
 
