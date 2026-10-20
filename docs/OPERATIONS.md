@@ -96,7 +96,9 @@ briqyard status
 | `byard/m/<machine>/root`, `.../data` | A machine's disks |
 
 Every disk is a ZFS zvol: `zfs list -t all -r byard` shows them, `zfs get used,referenced` what
-they take. A machine's `fork-*` and `s_*` snapshots on its disks are its forks' and its own.
+they take. A machine's `fork-*` and `s_*` snapshots on its disks are its forks' and its own: a
+`fork-*` goes with the last machine cloned from it (the sweep at start catches what a failed
+destroy left), an `s_*` with `briqyard machine snapshot rm <id> <snap>`.
 
 ## Upgrade
 

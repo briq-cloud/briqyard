@@ -128,10 +128,9 @@ enum MachineCmd {
         id: String,
         guest_path: String,
     },
-    /// Snapshot both disks
-    Snapshot {
-        id: String,
-    },
+    /// Snapshots of both disks, kept on the host
+    #[command(subcommand)]
+    Snapshot(SnapshotCmd),
     /// CPU, memory and disk the machine uses now
     Stats {
         id: String,
@@ -202,6 +201,16 @@ struct RunArgs {
     /// The command, after --
     #[arg(last = true)]
     cmd: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum SnapshotCmd {
+    /// Snapshot both disks now
+    Create { id: String },
+    /// List a machine's snapshots
+    Ls { id: String },
+    /// Remove a snapshot
+    Rm { id: String, snap: String },
 }
 
 #[derive(Subcommand)]
@@ -623,10 +632,24 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 &c.call::<api::MachineStats>(GET, &format!("/v1/machines/{id}/stats"), NONE)
                     .await?,
             ),
-            MachineCmd::Snapshot { id } => print_json(
-                &c.call::<api::Snapshot>(POST, &format!("/v1/machines/{id}/snapshots"), NONE)
+            MachineCmd::Snapshot(s) => match s {
+                SnapshotCmd::Create { id } => print_json(
+                    &c.call::<api::Snapshot>(POST, &format!("/v1/machines/{id}/snapshots"), NONE)
+                        .await?,
+                ),
+                SnapshotCmd::Ls { id } => print_json(
+                    &c.call::<Vec<api::Snapshot>>(
+                        GET,
+                        &format!("/v1/machines/{id}/snapshots"),
+                        NONE,
+                    )
                     .await?,
-            ),
+                ),
+                SnapshotCmd::Rm { id, snap } => {
+                    c.raw(DELETE, &format!("/v1/machines/{id}/snapshots/{snap}"), NONE)
+                        .await?;
+                }
+            },
         },
         Cmd::Endpoint(e) => match e {
             EndpointCmd::Add {

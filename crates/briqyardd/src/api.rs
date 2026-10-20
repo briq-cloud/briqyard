@@ -97,6 +97,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(list_backups).post(make_backup),
         )
         .route("/v1/machines/:id/snapshots", get(snapshots).post(snapshot))
+        .route(
+            "/v1/machines/:id/snapshots/:snap",
+            axum::routing::delete(delete_snapshot),
+        )
         .route("/v1/machines/:id/endpoints", post(create_endpoint))
         .route("/v1/endpoints", get(list_endpoints))
         .route(
@@ -447,6 +451,15 @@ async fn snapshots(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<api::Snapshot>>, AppError> {
     Ok(Json(st.mgr.snapshots(&id).await?))
+}
+
+async fn delete_snapshot(
+    State(st): S,
+    Path((id, snap)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    let m = st.mgr.clone();
+    detached(async move { m.delete_snapshot(&id, &snap).await }).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_endpoint(

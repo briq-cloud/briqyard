@@ -180,6 +180,13 @@ paths:
       summary: Snapshot both disks now
       responses:
         "201": { description: snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/Snapshot" } } } }
+  /v1/machines/{id}/snapshots/{snap}:
+    parameters: [{ $ref: "#/components/parameters/id" }, { name: snap, in: path, required: true, schema: { type: string } }]
+    delete:
+      summary: Remove a snapshot made here, from both disks; missing is success
+      responses:
+        "204": { description: removed }
+        "404": { description: no such machine, or not a snapshot of the caller's }
   /v1/machines/{id}/endpoints:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:

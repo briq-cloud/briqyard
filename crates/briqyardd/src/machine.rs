@@ -546,9 +546,38 @@ impl Manager {
                 }
             }
         }
+        // A fork's snapshot on its source outlives a destroy that failed to free it.
+        if let Ok(snaps) = self.inner.zfs.snapshots_under("m").await {
+            for s in snaps {
+                if let Some((ds, snap)) = s.split_once('@') {
+                    if self.free_fork_snapshot(ds, snap).await {
+                        tracing::warn!(snapshot = s, "fork snapshot with no clone, destroyed");
+                        swept += 1;
+                    }
+                }
+            }
+        }
         if swept > 0 {
             tracing::info!(swept, "orphans swept at start");
         }
+    }
+
+    /// Removes a `fork-*` snapshot nothing clones any more: `true` when it did. Kept, with a
+    /// warning, when ZFS cannot say or refuses; the sweep at start tries again.
+    async fn free_fork_snapshot(&self, ds: &str, snap: &str) -> bool {
+        if !snap.starts_with("fork-") {
+            return false;
+        }
+        let z = &self.inner.zfs;
+        let freed = match z.clones(ds, snap).await {
+            Ok(clones) if clones.is_empty() => z.destroy_snapshot(ds, snap).await.map(|_| true),
+            Ok(_) => Ok(false),
+            Err(err) => Err(err),
+        };
+        freed.unwrap_or_else(|err| {
+            tracing::warn!(dataset = ds, snapshot = snap, err = %err, "fork snapshot kept");
+            false
+        })
     }
 
     /// Takes over a VMM a previous daemon left running (it crashed; a shutdown suspends
@@ -1980,6 +2009,9 @@ impl Manager {
         let rec = e.snapshot();
         let _ = self.inner.net.delete_tap(id, &rec.ip).await;
         // A fork is a clone of this machine's disks: it takes the snapshots over and lives on.
+        // What this machine was cloned from is read after that, since a promotion moves it:
+        // the fork snapshot it leaves behind goes once nothing clones it.
+        let mut origins = Vec::new();
         for ds in [rec.root_dataset(), rec.data_dataset()] {
             if self.inner.zfs.exists(&ds).await.context("disks")? {
                 self.inner
@@ -1987,6 +2019,13 @@ impl Manager {
                     .release_clones(&ds)
                     .await
                     .context("forks of the disks")?;
+                origins.extend(
+                    self.inner
+                        .zfs
+                        .origin(&ds)
+                        .await
+                        .context("origin of the disks")?,
+                );
             }
         }
         self.inner
@@ -1994,6 +2033,9 @@ impl Manager {
             .destroy(&rec.dataset())
             .await
             .context("disks")?;
+        for (ds, snap) in origins {
+            self.free_fork_snapshot(&ds, &snap).await;
+        }
         let _ = tokio::fs::remove_dir_all(self.inner.cfg.run_dir().join(id)).await;
         if let Some(j) = self.jail_for(&rec) {
             let _ =
@@ -2275,6 +2317,27 @@ impl Manager {
     }
 
     // --- snapshots ---
+
+    /// Removes a snapshot `snapshot` made, from both disks. Missing is success; a snapshot
+    /// of the daemon's own (a fork's, a backup's) is not the caller's to remove.
+    pub async fn delete_snapshot(&self, id: &str, snap: &str) -> Result<(), MError> {
+        let e = self.entry(id)?;
+        let r = e.snapshot();
+        if !snap.starts_with("s_") || !api::valid_id(snap) {
+            return Err(MError::NotFound);
+        }
+        self.inner
+            .zfs
+            .destroy_snapshot(&r.root_dataset(), snap)
+            .await?;
+        if r.volume.is_some() {
+            self.inner
+                .zfs
+                .destroy_snapshot(&r.data_dataset(), snap)
+                .await?;
+        }
+        Ok(())
+    }
 
     pub async fn snapshot(&self, id: &str) -> Result<api::Snapshot, MError> {
         let e = self.entry(id)?;
@@ -4492,5 +4555,136 @@ mod tests {
         assert_eq!(h.stored(&m.id).unwrap().boots, 1);
         use std::sync::atomic::Ordering::Relaxed;
         assert_eq!(h.m.inner.stats.resumes.load(Relaxed), 1);
+    }
+
+    // --- fork snapshots ---
+
+    impl Harness {
+        /// A fork of `src`, both disks, started.
+        async fn fork(&self, src: &str, name: &str) -> api::Machine {
+            let mut req = self.request(name);
+            req.image = String::new();
+            req.fork = Some(api::ForkSpec {
+                machine_id: src.into(),
+                copy: String::new(),
+            });
+            self.m.create(req).await.unwrap()
+        }
+
+        fn snapshot_exists(&self, ds: &str, snap: &str) -> bool {
+            self.pool.dev().join(format!("byard/{ds}@{snap}")).exists()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_destroyed_fork_frees_its_snapshot_on_the_source() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let src = h.m.create(h.request("src")).await.unwrap();
+        let fork = h.fork(&src.id, "fork").await;
+        let (root, snap) = (format!("m/{}/root", src.id), format!("fork-{}", fork.id));
+        assert!(h.snapshot_exists(&root, &snap));
+        h.pool.calls();
+        h.m.destroy(&fork.id).await.unwrap();
+        // Nothing clones the snapshot once the fork is gone: it goes with the fork.
+        let calls = h.pool.calls();
+        assert!(
+            calls.contains(&format!("destroy byard/{root}@{snap}")),
+            "{calls:?}"
+        );
+        assert!(!h.snapshot_exists(&root, &snap));
+        assert!(h.pool.dev().join(format!("byard/{root}")).exists());
+        // Two forks of one snapshot: the snapshot stays until the last one goes.
+        let a = h.fork(&src.id, "a").await;
+        let snap_a = format!("fork-{}", a.id);
+        h.pool
+            .zfs
+            .clone_snapshot(&root, &snap_a, "m/other/root")
+            .await
+            .unwrap();
+        h.m.destroy(&a.id).await.unwrap();
+        assert!(h.snapshot_exists(&root, &snap_a));
+        // A snapshot that is not a fork's (the image's base) is never touched.
+        h.pool.calls();
+        h.m.destroy(&src.id).await.unwrap();
+        assert!(!h
+            .pool
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("destroy byard/images/")));
+    }
+
+    #[tokio::test]
+    async fn a_destroyed_source_leaves_its_fork_whole_and_frees_what_it_took_over() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let src = h.m.create(h.request("src")).await.unwrap();
+        let fork = h.fork(&src.id, "fork").await;
+        let fork_root = format!("m/{}/root", fork.id);
+        let snap = format!("fork-{}", fork.id);
+        h.m.destroy(&src.id).await.unwrap();
+        // The fork was promoted and owns the snapshot it was made from; with the source gone
+        // nothing clones that snapshot, so it goes too.
+        assert!(h.pool.dev().join(format!("byard/{fork_root}")).exists());
+        assert!(!h.pool.dev().join(format!("byard/m/{}", src.id)).exists());
+        assert!(!h.snapshot_exists(&fork_root, &snap));
+        assert_eq!(h.pool.zfs.origin(&fork_root).await.unwrap(), None);
+        assert_eq!(h.m.get(&fork.id).unwrap().state, state::RUNNING);
+        h.m.destroy(&fork.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_sweep_frees_fork_snapshots_with_no_clone() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.tenant("t1");
+        let kept = h.add("m_kept", state::STOPPED, 256);
+        h.disks(&kept).await;
+        let child = h.add("m_child", state::STOPPED, 256);
+        let z = &h.pool.zfs;
+        // One snapshot a destroy failed to free, one whose clone is a machine of ours.
+        z.snapshot("m/m_kept/root", "fork-gone").await.unwrap();
+        z.snapshot("m/m_kept/root", "fork-m_child").await.unwrap();
+        z.clone_snapshot(
+            "m/m_kept/root",
+            "fork-m_child",
+            &child.snapshot().root_dataset(),
+        )
+        .await
+        .unwrap();
+        z.snapshot("m/m_kept/root", "s_mine").await.unwrap();
+        h.m.sweep_orphans().await;
+        assert!(!h.snapshot_exists("m/m_kept/root", "fork-gone"));
+        assert!(h.snapshot_exists("m/m_kept/root", "fork-m_child"));
+        assert!(h.snapshot_exists("m/m_kept/root", "s_mine"));
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_is_removed_on_request() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.tenant("t1");
+        let e = h.add("m_s", state::STOPPED, 256);
+        h.disks(&e).await;
+        let s = h.m.snapshot("m_s").await.unwrap();
+        assert!(h.snapshot_exists("m/m_s/root", &s.id));
+        assert!(h.snapshot_exists("m/m_s/data", &s.id));
+        assert_eq!(h.m.snapshots("m_s").await.unwrap()[0].id, s.id);
+        h.m.delete_snapshot("m_s", &s.id).await.unwrap();
+        assert!(!h.snapshot_exists("m/m_s/root", &s.id));
+        assert!(!h.snapshot_exists("m/m_s/data", &s.id));
+        assert!(h.m.snapshots("m_s").await.unwrap().is_empty());
+        // Gone already: success. The daemon's own snapshots are not the caller's.
+        h.m.delete_snapshot("m_s", &s.id).await.unwrap();
+        h.pool.zfs.snapshot("m/m_s/root", "fork-x").await.unwrap();
+        for bad in ["fork-x", "bk-20260101T000000Z", "s_../x", ""] {
+            assert!(
+                matches!(h.m.delete_snapshot("m_s", bad).await, Err(MError::NotFound)),
+                "{bad}"
+            );
+        }
+        assert!(h.snapshot_exists("m/m_s/root", "fork-x"));
+        assert!(matches!(
+            h.m.delete_snapshot("m_none", "s_1").await,
+            Err(MError::NotFound)
+        ));
     }
 }

@@ -71,6 +71,10 @@ start from the config drive, so an edit inside the machine lasts until then. The
 attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches the host's disk:
 a database on it is as safe as the host's drive. A snapshot is `zfs snapshot`; a fork is a clone
 of a snapshot of both disks, taken while the source runs (crash-consistent for the data volume).
+That snapshot (`@fork-<id>` on the source) pins every block the source has since rewritten, so
+it goes with the last machine cloned from it: a destroy frees the snapshot its disks came from
+once nothing clones it, and the sweep at start removes any `@fork-*` left with no clone. A
+snapshot made with `POST /machines/{id}/snapshots` stays until `DELETE /machines/{id}/snapshots/{snap}`.
 
 The root disk is not mounted by the host, ever: the host writes nothing into guest filesystems.
 Image extraction happens once per image into a directory the host controls: layers in manifest

@@ -238,7 +238,6 @@ fn machine_lifecycle_commands() {
         (vec!["machine", "wait", "m1"], "wait"),
         (vec!["machine", "rm", "m1"], "rm"),
         (vec!["machine", "destroy", "m1"], "rm"),
-        (vec!["machine", "snapshot", "m1"], "snapshot"),
         (vec!["machine", "stats", "m1"], "stats"),
     ] {
         let got = match machine(parse(&args)) {
@@ -248,20 +247,41 @@ fn machine_lifecycle_commands() {
             MachineCmd::Touch { id } if id == "m1" => "touch",
             MachineCmd::Wait { id } if id == "m1" => "wait",
             MachineCmd::Rm { id } if id == "m1" => "rm",
-            MachineCmd::Snapshot { id } if id == "m1" => "snapshot",
             MachineCmd::Stats { id } if id == "m1" => "stats",
             _ => "?",
         };
         assert_eq!(got, want, "{args:?}");
     }
     for sub in [
-        "get", "start", "stop", "wake", "touch", "wait", "rm", "snapshot", "stats", "fork", "logs",
+        "get", "start", "stop", "wake", "touch", "wait", "rm", "stats", "fork", "logs",
     ] {
         assert_eq!(
             fails(&["machine", sub]),
             ErrorKind::MissingRequiredArgument,
             "{sub} needs an id"
         );
+    }
+    // Snapshots: create, ls and rm, each on a machine; rm names the snapshot too.
+    for (args, want) in [
+        (vec!["machine", "snapshot", "create", "m1"], "create"),
+        (vec!["machine", "snapshot", "ls", "m1"], "ls"),
+        (vec!["machine", "snapshot", "rm", "m1", "s_1"], "rm"),
+    ] {
+        let got = match machine(parse(&args)) {
+            MachineCmd::Snapshot(SnapshotCmd::Create { id }) if id == "m1" => "create",
+            MachineCmd::Snapshot(SnapshotCmd::Ls { id }) if id == "m1" => "ls",
+            MachineCmd::Snapshot(SnapshotCmd::Rm { id, snap }) if id == "m1" && snap == "s_1" => {
+                "rm"
+            }
+            _ => "?",
+        };
+        assert_eq!(got, want, "{args:?}");
+    }
+    for args in [
+        vec!["machine", "snapshot", "create"],
+        vec!["machine", "snapshot", "rm", "m1"],
+    ] {
+        assert_eq!(fails(&args), ErrorKind::MissingRequiredArgument, "{args:?}");
     }
     match machine(parse(&["machine", "ls", "--tenant", "t1"])) {
         MachineCmd::Ls { tenant } => assert_eq!(tenant.as_deref(), Some("t1")),
