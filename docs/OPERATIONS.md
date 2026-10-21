@@ -286,7 +286,7 @@ snapshot, or is whole.
 | `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
 | `dataset is busy` | A zvol a Firecracker just released; the daemon retries for ten seconds |
-| `host call refused: not from the host's address` (fleet), `unknown_host` `…'s calls come from …` | The host's heartbeat or key request reached the fleet from another address than its `url` (NAT, another route): list the host by the address it calls from, or put the fleet behind a proxy with `tls: off` |
+| `host call refused: not from the host's address` (fleet), `unknown_host` `…'s calls come from …` | The host's heartbeat or key request reached the fleet from another address than its `url` (NAT, another route): list the host by the address it calls from. Behind a local proxy (`tls: off`, loopback `listen`): the proxy must set `X-Forwarded-For` |
 | `pool locked: its key could not be loaded` | The daemon waits for the pool's key (ADR 0026), `err` says why: the fleet unreachable or refusing (`unknown_host`, `unauthorized`: as for a heartbeat), the key file missing, `Incorrect key provided` (the fleet's registry lost or restored from before the host: the pool cannot be read with another key) |
 | `pool … is not encrypted` | A pool made before ADR 0026 or by hand: move what it holds, destroy it, run the bootstrap again |
 | `… holds files and byard/… is not mounted there` | The daemon's directories hold files on `/` (a host from before ADR 0026): stop the daemon, move the contents onto the dataset (mount it elsewhere, copy, empty the directory) |
@@ -329,7 +329,8 @@ Each host's pool key is in its record (ADR 0026): made at the host's first `POST
 /v1/hosts/key` (its bootstrap creating the pool), served to that host alone (its token, at its
 address, as a heartbeat), never listed, gone when the host is retired or forgotten. `briqyard
 host rm` refuses a host that holds a key (409 `pool_key`) unless `--force`: its pool is
-unreadable at its next restart, and a static host polled back gets a key its pool does not open. **Losing the
+unreadable at its next restart, and a static host polled back gets a key its pool does not open.
+A drained static host stays drained: only an ordered host is released once it is empty. **Losing the
 registry loses every key**: a host keeps running while its key is loaded, and cannot read its
 pool after its next reboot. Back the registry up before a host holds anything that matters
 (below); a host still up can be re-keyed with `zfs change-key`. The fleet's `state_dir` must be
@@ -373,7 +374,10 @@ keyed (order it again), a rotated token (put it in the record), a drain, or a fo
 
 Where the fleet terminates the connection (its `tls`, or plain on loopback), a host's
 heartbeat and key request must come from the address in its `url`: a host is listed by its
-address, not a name. Behind `tls: off` only the token is checked. **Retire or forget a host
+address, not a name. A fleet behind a proxy on the same machine (Caddy terminating TLS for
+the fleet's name) has `tls: off` and a loopback `listen` (`127.0.0.1:7430`): the caller is
+the last `X-Forwarded-For` value, which the proxy writes, and a call without one is refused.
+Behind `tls: off` on any other address only the token is checked. **Retire or forget a host
 before its server or a disk leaves our hands.** A disk the provider swaps while the host stays
 carries the host's token: rotate it (a static host: a new `token` in its `hosts:` entry and in
 its `/etc/briqyard/config.yaml`, then restart the fleet and the daemon; an ordered host: no
