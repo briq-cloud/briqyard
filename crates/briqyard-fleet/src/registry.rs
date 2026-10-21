@@ -334,11 +334,18 @@ impl Registry {
         self.pinned_at.retain(|t, _| self.tenants.contains_key(t));
     }
 
-    /// Draining hosts that have nothing left on them: ready to be released.
+    /// Draining hosts a provider gave that have nothing left on them: ready to be released.
+    /// A static host is never: there is nothing to release, and forgetting it would take its
+    /// pool key while `hosts:` polls it back (ADR 0026).
     pub fn retirable(&self) -> Vec<HostRec> {
         self.hosts
             .values()
-            .filter(|h| h.state == "draining" && h.machines == 0 && h.tenants.is_empty())
+            .filter(|h| {
+                h.state == "draining"
+                    && !h.provider_id.is_empty()
+                    && h.machines == 0
+                    && h.tenants.is_empty()
+            })
             .cloned()
             .collect()
     }
@@ -759,6 +766,7 @@ mod tests {
         let mut reg = Registry::default();
         let mut busy = host("a", 1000, 100, 1);
         busy.tenants = vec!["t".into()];
+        busy.provider_id = "srv-a".into();
         reg.heartbeat(busy, now);
         reg.hosts.get_mut("a").unwrap().state = "draining".into();
         assert!(reg.retirable().is_empty());
@@ -771,6 +779,19 @@ mod tests {
             "a heartbeat keeps a drain"
         );
         assert_eq!(reg.retirable().len(), 1);
+        // A static host (no provider) drained and empty is not released: there is nothing to
+        // release, and the forget would take its pool key while `hosts:` polls it back.
+        let mut fixed = host("s", 1000, 0, 0);
+        fixed.tenants.clear();
+        reg.heartbeat(fixed, now);
+        reg.hosts.get_mut("s").unwrap().state = "draining".into();
+        assert_eq!(
+            reg.retirable()
+                .iter()
+                .map(|h| h.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a"]
+        );
         assert_eq!(
             reg.place("t2", "", 10, 0, &Policy::default()),
             None,

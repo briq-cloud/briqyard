@@ -328,7 +328,8 @@ Each host's pool key is in its record (ADR 0026): made at the host's first `POST
 /v1/hosts/key` (its bootstrap creating the pool), served to that host alone (its token, at its
 address, as a heartbeat), never listed, gone when the host is retired or forgotten. `briqyard
 host rm` refuses a host that holds a key (409 `pool_key`) unless `--force`: its pool is
-unreadable at its next restart, and a static host polled back gets a key its pool does not open. **Losing the
+unreadable at its next restart, and a static host polled back gets a key its pool does not open.
+A drained static host stays drained: only an ordered host is released once it is empty. **Losing the
 registry loses every key**: a host keeps running while its key is loaded, and cannot read its
 pool after its next reboot. Keep the registry backed up (and the backup encrypted) before a
 host holds anything that matters; a host still up can be re-keyed with `zfs change-key`. The
