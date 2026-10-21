@@ -110,6 +110,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/machines/:id/snapshots/:snap",
             axum::routing::delete(delete_snapshot),
         )
+        .route(
+            "/v1/machines/:id/snapshots/:snap/restore",
+            post(restore_snapshot),
+        )
         .route("/v1/machines/:id/endpoints", post(create_endpoint))
         .route("/v1/endpoints", get(list_endpoints))
         .route(
@@ -147,7 +151,9 @@ pub struct AppError {
 /// "not in that state" answers; `capacity` stays a 503, which the control plane retries later.
 fn status_of(e: &MError) -> (StatusCode, &'static str) {
     match e {
-        MError::NotFound | MError::NoBackup(_) => (StatusCode::NOT_FOUND, "not_found"),
+        MError::NotFound | MError::NoBackup(_) | MError::NoSnapshot(_) => {
+            (StatusCode::NOT_FOUND, "not_found")
+        }
         MError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
         MError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
         MError::NotRunning(_) => (StatusCode::CONFLICT, "not_running"),
@@ -598,10 +604,24 @@ async fn stats(State(st): S, Path(id): Path<String>) -> Result<Json<api::Machine
 async fn snapshot(
     State(st): S,
     Path(id): Path<String>,
+    body: Option<Json<api::SnapshotRequest>>,
 ) -> Result<(StatusCode, Json<api::Snapshot>), AppError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
     let m = st.mgr.clone();
-    let s = detached(async move { m.snapshot(&id).await }).await?;
+    let s = detached(async move { m.snapshot(&id, req).await }).await?;
     Ok((StatusCode::CREATED, Json(s)))
+}
+
+async fn restore_snapshot(
+    State(st): S,
+    Path((id, snap)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<api::Machine>, AppError> {
+    let at = if_match(&headers)?;
+    let m = st.mgr.clone();
+    Ok(Json(
+        detached(async move { m.restore_snapshot(&id, &snap, at).await }).await?,
+    ))
 }
 
 async fn snapshots(
