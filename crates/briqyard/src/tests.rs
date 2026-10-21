@@ -238,6 +238,48 @@ fn an_egress_policy_is_read_as_the_daemon_checks_it() {
 }
 
 #[test]
+fn disk_limits_are_read_as_the_daemon_checks_them() {
+    let run = |extra: &[&str]| {
+        let args = [&["machine", "run", "--image", "x"][..], extra].concat();
+        let MachineCmd::Run(a) = machine(parse(&args)) else {
+            panic!("not a run");
+        };
+        a.disk.request()
+    };
+    // Nothing named: none sent, the host's for its size apply.
+    assert_eq!(run(&[]).unwrap(), None);
+    assert_eq!(
+        run(&["--disk-bw", "8", "--disk-iops", "500", "--disk-burst", "0"]).unwrap(),
+        Some(api::DiskLimits {
+            bandwidth_mb: Some(8),
+            iops: Some(500),
+            burst_sec: Some(0),
+        })
+    );
+    let MachineCmd::SetDiskLimits { id, limits } = machine(parse(&[
+        "machine",
+        "set-disk-limits",
+        "m1",
+        "--disk-bw",
+        "0",
+    ])) else {
+        panic!("not set-disk-limits");
+    };
+    assert_eq!(id, "m1");
+    assert_eq!(
+        limits.request().unwrap(),
+        Some(api::DiskLimits {
+            bandwidth_mb: Some(0),
+            ..Default::default()
+        })
+    );
+    assert_eq!(
+        run(&["--disk-iops", "20000000"]).unwrap_err().to_string(),
+        "disk_limits.iops: at most 10000000"
+    );
+}
+
+#[test]
 fn limits_are_read_as_the_daemon_checks_them() {
     let run = |extra: &[&str]| {
         let args = [&["machine", "run", "--image", "x"][..], extra].concat();
@@ -1031,6 +1073,11 @@ fn the_machine_table() {
         new_connections_per_minute: Some(600),
         bandwidth_mbit: Some(100),
     };
+    b.disk_limits = api::DiskLimits {
+        bandwidth_mb: Some(64),
+        iops: Some(8000),
+        burst_sec: Some(10),
+    };
     b.backup = Some(api::BackupPolicy {
         every: "6h".into(),
         keep: 4,
@@ -1050,7 +1097,7 @@ fn the_machine_table() {
     assert!(out.ends_with('\n'));
     assert_eq!(
         lines[0],
-        "ID               TENANT     NAME           IMAGE                    STATE              READY IP           SIZE      SLEEP  EGRESS             LIMITS                   BACKUP   PENDING      HOST"
+        "ID               TENANT     NAME           IMAGE                    STATE              READY IP           SIZE      SLEEP  EGRESS             LIMITS                   DISK             BACKUP   PENDING      HOST"
     );
     // Every column starts where its header does.
     let cols = [
@@ -1065,15 +1112,16 @@ fn the_machine_table() {
         (116, 6),
         (123, 18),
         (142, 24),
-        (167, 8),
-        (176, 12),
+        (167, 16),
+        (184, 8),
+        (193, 12),
     ];
     let heads: Vec<String> = cols.iter().map(|(at, w)| col(lines[0], *at, *w)).collect();
     assert_eq!(
         heads,
         [
             "ID", "TENANT", "NAME", "IMAGE", "STATE", "READY", "IP", "SIZE", "SLEEP", "EGRESS",
-            "LIMITS", "BACKUP", "PENDING"
+            "LIMITS", "DISK", "BACKUP", "PENDING"
         ]
     );
     let row: Vec<String> = cols.iter().map(|(at, w)| col(lines[2], *at, *w)).collect();
@@ -1091,20 +1139,22 @@ fn the_machine_table() {
             "never",
             "via:m_0123456789ab",
             "25,465 600/min 100Mbit",
+            "64MB/s 8000io",
             "6h/4",
             "image,env"
         ],
         "the stop reason is shown with the state; an empty ip is an empty column; \
-         a via policy in the form set-egress takes; the limits short; the schedule as \
+         a via policy in the form set-egress takes; the limits and the disk's short; the schedule as \
          every/keep; what changes at the next start"
     );
     assert_eq!(
         lines[2].len(),
-        176 + 12 + 1,
+        193 + 12 + 1,
         "no host: nothing after the pending fields"
     );
-    assert_eq!(col(lines[1], 167, 8), "-", "no schedule");
-    assert_eq!(col(lines[1], 176, 12), "-", "nothing pending");
+    assert_eq!(col(lines[1], 167, 16), "-", "no disk limit");
+    assert_eq!(col(lines[1], 184, 8), "-", "no schedule");
+    assert_eq!(col(lines[1], 193, 12), "-", "nothing pending");
     assert_eq!(col(lines[1], 87, 5), "yes");
     assert_eq!(col(lines[1], 123, 18), "open");
     assert_eq!(col(lines[1], 142, 24), "-", "nothing limited");
@@ -1836,6 +1886,11 @@ fn describe_shows_the_machine_then_its_events() {
                 ..Default::default()
             }),
         },
+        disk_limits: api::DiskLimits {
+            bandwidth_mb: Some(32),
+            iops: Some(4000),
+            burst_sec: Some(10),
+        },
         probes_status: api::ProbesStatus {
             startup: Some(api::ProbeStatus {
                 passed: true,
@@ -1876,6 +1931,7 @@ fn describe_shows_the_machine_then_its_events() {
             "IP:            10.64.1.2",
             "Size:          1 vCPU, 256 MB",
             "Volume:        2 GB at /data",
+            "Disk limits:   32MB/s 4000io each, 10s burst",
             "Egress:        via:gateway",
             "Endpoints:     ep_1 http 80 -> http://web-ab12.byard.localhost",
             "               ep_2 tcp 5432 -> 10.0.0.5:20001",

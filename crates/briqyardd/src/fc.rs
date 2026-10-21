@@ -3,11 +3,13 @@
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use briqyard_api::guest;
+use briqyard_api::{self as api, guest};
 use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -89,6 +91,12 @@ impl Client {
             .map(|_| ())
     }
 
+    async fn patch<T: Serialize>(&self, path: &str, v: &T) -> Result<()> {
+        self.call("PATCH", path, Some(&serde_json::to_string(v)?))
+            .await
+            .map(|_| ())
+    }
+
     pub async fn machine_config(&self, vcpus: u32, memory_mb: u32) -> Result<()> {
         self.put(
             "/machine-config",
@@ -105,7 +113,8 @@ impl Client {
         .await
     }
 
-    /// `cache` is "Unsafe" (no flush) or "Writeback" (a guest flush is a host fsync).
+    /// `cache` is "Unsafe" (no flush) or "Writeback" (a guest flush is a host fsync); `rate`
+    /// limits what the guest does on it.
     pub async fn drive(
         &self,
         id: &str,
@@ -113,8 +122,27 @@ impl Client {
         root: bool,
         read_only: bool,
         cache: &str,
+        rate: Option<&DiskRate>,
     ) -> Result<()> {
-        self.put(&format!("/drives/{id}"), &json!({"drive_id": id, "path_on_host": path, "is_root_device": root, "is_read_only": read_only, "cache_type": cache})).await
+        let mut d = json!({"drive_id": id, "path_on_host": path, "is_root_device": root, "is_read_only": read_only, "cache_type": cache});
+        if let Some(r) = rate {
+            d["rate_limiter"] = r.rate_limiter();
+        }
+        self.put(&format!("/drives/{id}"), &d).await
+    }
+
+    /// A running machine's drive takes these limits now, its buckets full.
+    pub async fn drive_rate(&self, id: &str, rate: &DiskRate) -> Result<()> {
+        self.patch(
+            &format!("/drives/{id}"),
+            &json!({"drive_id": id, "rate_limiter": rate.rate_limiter()}),
+        )
+        .await
+    }
+
+    /// Where Firecracker writes its metrics, a line a minute (before the boot or the load).
+    pub async fn metrics(&self, path: &Path) -> Result<()> {
+        self.put("/metrics", &json!({"metrics_path": path})).await
     }
 
     pub async fn network_interface(&self, id: &str, tap: &str, mac: &str) -> Result<()> {
@@ -208,6 +236,92 @@ pub struct Jail {
     /// Memory the Firecracker process may use, in MB (the guest's memory plus Firecracker's
     /// own); 0 for no limit.
     pub memory_mb: u32,
+}
+
+/// Firecracker's rate limiter on one disk (ADR 0030): bytes and requests a second, each a
+/// token bucket one second deep, plus a burst given once; 0 is no limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiskRate {
+    pub bandwidth_mb: u32,
+    pub iops: u32,
+    pub burst_sec: u32,
+}
+
+impl DiskRate {
+    /// A drive's `rate_limiter`. A bucket of size 0 is none, so a PATCH with one lifts it.
+    pub fn rate_limiter(&self) -> serde_json::Value {
+        let bucket = |per_sec: u64| json!({"size": per_sec, "one_time_burst": per_sec * self.burst_sec as u64, "refill_time": 1000});
+        json!({
+            "bandwidth": bucket((self.bandwidth_mb as u64) << 20),
+            "ops": bucket(self.iops as u64),
+        })
+    }
+
+    /// As the API shows it: every field there.
+    pub fn view(&self) -> api::DiskLimits {
+        api::DiskLimits {
+            bandwidth_mb: Some(self.bandwidth_mb),
+            iops: Some(self.iops),
+            burst_sec: Some(self.burst_sec),
+        }
+    }
+}
+
+/// What a machine's disks did, from Firecracker's metrics: totals since the daemon started,
+/// across its boots (ADR 0030).
+#[derive(Debug, Default)]
+pub struct DiskIo {
+    pub read_bytes: AtomicU64,
+    pub write_bytes: AtomicU64,
+    /// Requests the rate limiter held back.
+    pub throttled: AtomicU64,
+}
+
+impl DiskIo {
+    /// Adds one of Firecracker's metrics lines: each counter there is what it grew by since the
+    /// line before; `block` is every drive's together. A line that does not parse adds nothing.
+    pub fn add(&self, line: &str) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        let b = &v["block"];
+        let n = |k: &str| b[k].as_u64().unwrap_or(0);
+        self.read_bytes.fetch_add(n("read_bytes"), Relaxed);
+        self.write_bytes.fetch_add(n("write_bytes"), Relaxed);
+        self.throttled
+            .fetch_add(n("rate_limiter_throttled_events"), Relaxed);
+    }
+}
+
+/// The metrics pipe, next to the API socket.
+const METRICS_FIFO: &str = "metrics.fifo";
+
+/// Reads Firecracker's metrics lines from the pipe at `path` into `io` until `done`. Opened
+/// for reading and writing, it never reads an end of file while no writer has it open.
+/// Firecracker opens it non-blocking: a full pipe loses a line, never stalls the VMM (ADR 0030).
+fn read_metrics(path: &Path, io: Arc<DiskIo>, mut done: watch::Receiver<bool>) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let rx = tokio::net::unix::pipe::Receiver::from_file(f)
+        .with_context(|| format!("metrics pipe {}", path.display()))?;
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(rx).lines();
+        loop {
+            tokio::select! {
+                line = lines.next_line() => match line {
+                    Ok(Some(l)) => io.add(&l),
+                    _ => break,
+                },
+                _ = done.wait_for(|d| *d) => break,
+            }
+        }
+    });
+    Ok(())
 }
 
 /// One running Firecracker.
@@ -304,6 +418,9 @@ fn jailer_args(j: &Jail, id: &str, binary: &Path) -> Vec<std::ffi::OsString> {
     if j.cpus > 0 {
         args.push("--cgroup".into());
         args.push(format!("cpu.max={} 100000", j.cpus as u64 * 100_000).into());
+        // Under contention CPU goes by size: the default weight (100) per vCPU (ADR 0030).
+        args.push("--cgroup".into());
+        args.push(format!("cpu.weight={}", j.cpus * 100).into());
     }
     if j.memory_mb > 0 {
         args.push("--cgroup".into());
@@ -514,6 +631,18 @@ impl Process {
         Ok(PathBuf::from("/").join(name))
     }
 
+    /// Makes the metrics pipe next to the sockets, owned by the jail's user, reads it into
+    /// `io` while the process runs, and tells Firecracker to write there.
+    pub async fn metrics_to(&self, io: Arc<DiskIo>) -> Result<()> {
+        let path = self.outside(METRICS_FIFO);
+        let _ = std::fs::remove_file(&path);
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600))
+            .with_context(|| format!("mkfifo {}", path.display()))?;
+        std::os::unix::fs::chown(&path, Some(self.uid), Some(self.gid))?;
+        read_metrics(&path, io, self.done())?;
+        self.client.metrics(&self.inside(METRICS_FIFO)).await
+    }
+
     /// Where Firecracker sees the vsock socket (inside the chroot when jailed) and a file name
     /// next to its sockets, for snapshots.
     pub fn inside(&self, name: &str) -> PathBuf {
@@ -570,6 +699,10 @@ pub struct Boot {
     pub mac: String,
     /// Resume from the snapshot next to the sockets when there is one.
     pub resume: bool,
+    /// The limits on the root disk and the volume.
+    pub disk: DiskRate,
+    /// Where its disks' metrics add up.
+    pub disk_io: Arc<DiskIo>,
 }
 
 /// A machine's VMM as the manager keeps it: the process, its sockets, and when it is gone.
@@ -612,8 +745,19 @@ pub trait Vmm: Send + Sync {
     async fn boot(&self, b: &Boot) -> Result<Vm>;
 
     /// Takes over a VMM a previous daemon left: `Some` when `pid` runs machine `id` and its
-    /// API says the machine runs.
-    async fn adopt(&self, id: &str, dir: &Path, jail: Option<&Jail>, pid: u32) -> Option<Vm>;
+    /// API says the machine runs. Its disks' metrics add up in `disk_io` again.
+    async fn adopt(
+        &self,
+        id: &str,
+        dir: &Path,
+        jail: Option<&Jail>,
+        pid: u32,
+        disk_io: Arc<DiskIo>,
+    ) -> Option<Vm>;
+
+    /// Gives a running machine's disks these limits now: the root disk, and the volume when
+    /// it has one.
+    async fn disk_rate(&self, vm: &Vm, rate: &DiskRate, volume: bool) -> Result<()>;
 
     /// Pauses the machine and writes its memory and state next to its sockets, for the
     /// next boot to resume. An error means the VMM refused and the machine runs on.
@@ -667,6 +811,11 @@ impl Vmm for Firecracker {
                 }
             };
             let c = proc.client.clone();
+            if let Err(err) = proc.metrics_to(b.disk_io.clone()).await {
+                proc.kill();
+                proc.wait().await;
+                return Err(err.context("firecracker metrics"));
+            }
             let (snap_state, snap_mem) = (proc.outside("snap.state"), proc.outside("snap.mem"));
             resume = resume && snap_state.exists() && snap_mem.exists();
             if resume {
@@ -685,7 +834,13 @@ impl Vmm for Firecracker {
                         "eth0",
                         &b.tap,
                     )
-                    .await
+                    .await?;
+                    // The snapshot holds the limits of the run it paused: today's go on.
+                    c.drive_rate("rootfs", &b.disk).await?;
+                    if b.data.is_some() {
+                        c.drive_rate("data", &b.disk).await?;
+                    }
+                    Ok::<(), anyhow::Error>(())
                 };
                 match load.await {
                     Ok(()) => break (proc, exit),
@@ -704,11 +859,14 @@ impl Vmm for Firecracker {
                 let root = proc.expose_block(&b.root, "root")?;
                 c.machine_config(b.vcpus, b.memory_mb).await?;
                 c.boot_source(&kernel, &b.boot_args).await?;
-                c.drive("rootfs", &root, true, false, "Writeback").await?;
-                c.drive("config", &config, false, true, "Unsafe").await?;
+                c.drive("rootfs", &root, true, false, "Writeback", Some(&b.disk))
+                    .await?;
+                c.drive("config", &config, false, true, "Unsafe", None)
+                    .await?;
                 if let Some(d) = &b.data {
                     let data = proc.expose_block(d, "data")?;
-                    c.drive("data", &data, false, false, "Writeback").await?;
+                    c.drive("data", &data, false, false, "Writeback", Some(&b.disk))
+                        .await?;
                 }
                 c.network_interface("eth0", &b.tap, &b.mac).await?;
                 c.vsock(3, &proc.inside("vsock.sock")).await?;
@@ -746,7 +904,14 @@ impl Vmm for Firecracker {
 
     /// The process must be alive, be Firecracker, and answer on the machine's API socket as
     /// running. It is nobody's child, so its pid is polled for `exited`.
-    async fn adopt(&self, id: &str, dir: &Path, jail: Option<&Jail>, pid: u32) -> Option<Vm> {
+    async fn adopt(
+        &self,
+        id: &str,
+        dir: &Path,
+        jail: Option<&Jail>,
+        pid: u32,
+        disk_io: Arc<DiskIo>,
+    ) -> Option<Vm> {
         if self.machine_of(pid).as_deref() != Some(id) {
             return None;
         }
@@ -764,6 +929,12 @@ impl Vmm for Firecracker {
         // a new one on the same path takes the report.
         let (uid, gid) = jail.map(|j| (j.uid, j.gid)).unwrap_or((0, 0));
         let exit = listen_exit(&vsock, uid, gid, exited.clone()).ok()?;
+        // The pipe Firecracker was told at its boot; without one, no disk metrics this run.
+        let chroot = jail.map(|j| jail_root(&j.base, id));
+        let pipe = outside_path(chroot.as_deref(), dir, METRICS_FIFO);
+        if let Err(err) = read_metrics(&pipe, disk_io, exited.clone()) {
+            tracing::warn!(machine = id, err = %err, "disk metrics not read");
+        }
         let machine = id.to_string();
         tokio::spawn(async move {
             while machine_of(pid).as_deref() == Some(machine.as_str()) {
@@ -776,11 +947,20 @@ impl Vmm for Firecracker {
             api,
             vsock,
             dir: dir.to_path_buf(),
-            chroot: jail.map(|j| jail_root(&j.base, id)),
+            chroot,
             resumed: false,
             exited,
             exit,
         })
+    }
+
+    async fn disk_rate(&self, vm: &Vm, rate: &DiskRate, volume: bool) -> Result<()> {
+        let c = Client::new(&vm.api);
+        c.drive_rate("rootfs", rate).await.context("root disk")?;
+        if volume {
+            c.drive_rate("data", rate).await.context("volume")?;
+        }
+        Ok(())
     }
 
     async fn snapshot(&self, vm: &Vm) -> Result<()> {
@@ -1057,12 +1237,12 @@ mod tests {
     #[tokio::test]
     async fn every_call_has_its_path_and_body() {
         let (_dir, path) = socket();
-        let server = serve(&path, vec![NO_CONTENT; 9]);
+        let server = serve(&path, vec![NO_CONTENT; 12]);
         let c = Client::new(&path);
         c.boot_source(Path::new("/vmlinux"), "console=ttyS0")
             .await
             .unwrap();
-        c.drive("rootfs", Path::new("/root"), true, false, "Writeback")
+        c.drive("rootfs", Path::new("/root"), true, false, "Writeback", None)
             .await
             .unwrap();
         c.network_interface("eth0", "tm1", "06:b1:0a:40:00:02")
@@ -1083,6 +1263,23 @@ mod tests {
         )
         .await
         .unwrap();
+        let rate = DiskRate {
+            bandwidth_mb: 2,
+            iops: 100,
+            burst_sec: 3,
+        };
+        c.drive(
+            "data",
+            Path::new("/data"),
+            false,
+            false,
+            "Writeback",
+            Some(&rate),
+        )
+        .await
+        .unwrap();
+        c.drive_rate("data", &DiskRate::default()).await.unwrap();
+        c.metrics(Path::new("/metrics.fifo")).await.unwrap();
         let seen = server.await.unwrap();
         let first = |i: usize| seen[i].lines().next().unwrap().to_string();
         assert_eq!(first(0), "PUT /boot-source HTTP/1.1");
@@ -1121,6 +1318,95 @@ mod tests {
         assert_eq!(load["resume_vm"], true);
         assert_eq!(load["mem_backend"]["backend_path"], "/snap.mem");
         assert_eq!(load["network_overrides"][0]["host_dev_name"], "tm1");
+        // A limited drive: buckets a second deep, the burst given once.
+        assert_eq!(first(9), "PUT /drives/data HTTP/1.1");
+        assert_eq!(
+            body(&seen[9])["rate_limiter"],
+            serde_json::json!({
+                "bandwidth": {"size": 2 << 20, "one_time_burst": 3 * (2 << 20), "refill_time": 1000},
+                "ops": {"size": 100, "one_time_burst": 300, "refill_time": 1000},
+            })
+        );
+        // No limit is buckets of size 0, which Firecracker reads as none: a PATCH lifts them.
+        assert_eq!(first(10), "PATCH /drives/data HTTP/1.1");
+        assert_eq!(
+            body(&seen[10]),
+            serde_json::json!({"drive_id": "data", "rate_limiter": {
+                "bandwidth": {"size": 0, "one_time_burst": 0, "refill_time": 1000},
+                "ops": {"size": 0, "one_time_burst": 0, "refill_time": 1000},
+            }})
+        );
+        assert_eq!(first(11), "PUT /metrics HTTP/1.1");
+        assert_eq!(
+            body(&seen[11]),
+            serde_json::json!({"metrics_path": "/metrics.fifo"})
+        );
+    }
+
+    #[test]
+    fn disk_io_adds_what_each_metrics_line_grew_by() {
+        let io = DiskIo::default();
+        let line = |r: u64, w: u64, t: u64| {
+            serde_json::json!({
+                "utc_timestamp_ms": 1,
+                "block": {"read_bytes": r, "write_bytes": w, "rate_limiter_throttled_events": t},
+                "block_rootfs": {"read_bytes": r, "write_bytes": w, "rate_limiter_throttled_events": t},
+            })
+            .to_string()
+        };
+        io.add(&line(4096, 0, 0));
+        io.add(&line(0, 1 << 20, 7));
+        io.add("{\"block\": {\"read_b"); // a torn line adds nothing
+        io.add(&serde_json::json!({"api_server": {}}).to_string());
+        let got = |c: &AtomicU64| c.load(Relaxed);
+        assert_eq!(
+            (
+                got(&io.read_bytes),
+                got(&io.write_bytes),
+                got(&io.throttled)
+            ),
+            (4096, 1 << 20, 7)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_metrics_pipe_is_read_until_the_process_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(METRICS_FIFO);
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let io = Arc::new(DiskIo::default());
+        let (done_tx, done) = watch::channel(false);
+        read_metrics(&path, io.clone(), done).unwrap();
+        // Firecracker opens it as it does: read and write, non-blocking.
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut fc = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        for t in [2, 3] {
+            let l = serde_json::json!({"block": {"rate_limiter_throttled_events": t}});
+            writeln!(fc, "{l}").unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while io.throttled.load(Relaxed) < 5 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(io.throttled.load(Relaxed), 5);
+        // Once the process is gone the reader stops: later lines are not counted.
+        done_tx.send(true).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        writeln!(
+            fc,
+            "{}",
+            serde_json::json!({"block": {"rate_limiter_throttled_events": 9}})
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(io.throttled.load(Relaxed), 5);
     }
 
     #[tokio::test]
@@ -1425,6 +1711,8 @@ mod tests {
                 "--new-pid-ns",
                 "--cgroup",
                 "cpu.max=200000 100000",
+                "--cgroup",
+                "cpu.weight=200",
                 "--cgroup",
                 "memory.max=805306368",
             ]

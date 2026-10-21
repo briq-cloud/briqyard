@@ -152,6 +152,9 @@ pub struct Record {
     /// Its own limits on its internet traffic, over the host's (ADR 0018).
     #[serde(default)]
     pub limits: api::EgressLimits,
+    /// Its own limits on each of its disks, over the host's for its size (ADR 0030).
+    #[serde(default)]
+    pub disk_limits: api::DiskLimits,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
     pub state: String,
@@ -496,6 +499,8 @@ struct Entry {
     meter: Mutex<Meter>,
     /// Bytes through its endpoints, added by the ingress as they pass.
     traffic: Arc<Traffic>,
+    /// What its disks did, added from Firecracker's metrics (ADR 0030).
+    disk_io: Arc<fc::DiskIo>,
     /// The host's event log: what an event about it goes to.
     events: Events,
     /// Held by each backup and deletion of its backups.
@@ -517,6 +522,7 @@ impl Entry {
             unsaved_use: AtomicBool::new(false),
             meter: Mutex::new(Meter::new(Utc::now())),
             traffic: Arc::default(),
+            disk_io: Arc::default(),
             events,
             backup_turn: Turn::default(),
             probe: Mutex::default(),
@@ -993,7 +999,7 @@ impl Manager {
         let Some(vm) = self
             .inner
             .vmm
-            .adopt(&rec.id, &dir, jail.as_ref(), pid)
+            .adopt(&rec.id, &dir, jail.as_ref(), pid, e.disk_io.clone())
             .await
         else {
             return false;
@@ -1891,6 +1897,7 @@ impl Manager {
             egress: r.egress.clone(),
             limits: self.inner.cfg.egress_limits.with(&r.limits).view(),
             egress_drops: e.meter.lock().unwrap().drops(),
+            disk_limits: self.disk_rate(&r).view(),
             metadata: r.metadata.clone(),
             endpoints: self.endpoints_of(&r.id),
             created_at: r.created_at,
@@ -2106,6 +2113,9 @@ impl Manager {
                     disk_used_bytes: m.disks.used + m.disks.snapshots,
                     restarts: m.restarts,
                     boot_seconds: m.boot_seconds,
+                    disk_read_bytes: e.disk_io.read_bytes.load(Relaxed),
+                    disk_write_bytes: e.disk_io.write_bytes.load(Relaxed),
+                    disk_throttled: e.disk_io.throttled.load(Relaxed),
                 }
             })
             .collect();
@@ -2267,6 +2277,7 @@ impl Manager {
         }
         api::parse_sleep(&req.sleep).map_err(invalid)?;
         check_limits(req.limits.as_ref())?;
+        check_disk_limits(req.disk_limits.as_ref())?;
         if let Some(p) = &req.probes {
             p.check().map_err(invalid)?;
         }
@@ -2299,6 +2310,7 @@ impl Manager {
             probes: req.probes.clone().unwrap_or_default(),
             egress: req.egress.clone().unwrap_or_default(),
             limits: req.limits.clone().unwrap_or_default(),
+            disk_limits: req.disk_limits.clone().unwrap_or_default(),
             metadata: req.metadata.clone(),
             state: state::CREATED.into(),
             stopped_reason: String::new(),
@@ -2363,6 +2375,9 @@ impl Manager {
             }
             if req.limits.is_none() {
                 rec.limits = was.limits;
+            }
+            if req.disk_limits.is_none() {
+                rec.disk_limits = was.disk_limits;
             }
             if req.probes.is_none() {
                 rec.probes = was.probes;
@@ -2783,6 +2798,8 @@ impl Manager {
             tap,
             mac: netw::mac_for(ip),
             resume: rec.suspended,
+            disk: self.disk_rate(&rec),
+            disk_io: e.disk_io.clone(),
         };
         // Boots take their turn: a host asked for many at once boots a few at a time, each
         // with the whole timeout, instead of all of them crawling past it together.
@@ -2944,6 +2961,14 @@ impl Manager {
             // Guest memory, plus what Firecracker itself needs around it.
             memory_mb: rec.size.memory_mb + 256,
         })
+    }
+
+    /// The limits on each of its disks: its own over the host's for its size (ADR 0030).
+    fn disk_rate(&self, rec: &Record) -> fc::DiskRate {
+        self.inner
+            .cfg
+            .disk_limits
+            .with(rec.size.vcpus, &rec.disk_limits)
     }
 
     fn boot_args(&self) -> String {
@@ -3421,6 +3446,7 @@ impl Manager {
             api::parse_sleep(sl).map_err(invalid)?;
         }
         check_limits(req.limits.as_ref())?;
+        check_disk_limits(req.disk_limits.as_ref())?;
         backups::check_update(&req.backup)?;
         if let Some(p) = &req.probes {
             p.check().map_err(invalid)?;
@@ -3459,6 +3485,21 @@ impl Manager {
                 self.replace_policy(&r.id, policy).await?;
             }
         }
+        if let Some(l) = &req.disk_limits {
+            // Firecracker first: refused, the disks keep their limits and the record its own.
+            let mut r = e.snapshot();
+            let was = self.disk_rate(&r);
+            r.disk_limits = l.over(&r.disk_limits);
+            let now = self.disk_rate(&r);
+            let live = e.live.lock().unwrap().clone();
+            if let (Some(vm), true) = (live, now != was && r.state == state::RUNNING) {
+                self.inner
+                    .vmm
+                    .disk_rate(&vm, &now, r.volume.is_some())
+                    .await
+                    .context("disk limits")?;
+            }
+        }
         {
             let mut r = e.rec.lock().unwrap();
             let was = r.clone();
@@ -3473,6 +3514,9 @@ impl Manager {
             }
             if let Some(l) = req.limits {
                 r.limits = l.over(&r.limits);
+            }
+            if let Some(l) = req.disk_limits {
+                r.disk_limits = l.over(&r.disk_limits);
             }
             backups::update(&mut r, req.backup)?;
             if let Some(p) = req.probes {
@@ -4339,6 +4383,7 @@ fn change_event(was: &Record, now: &Record) -> Option<Ev> {
         ("metadata", was.metadata != now.metadata),
         ("backup", was.backup.policy != now.backup.policy),
         ("probes", was.probes != now.probes),
+        ("disk_limits", was.disk_limits != now.disk_limits),
     ]);
     if fields.is_empty() {
         return None;
@@ -4487,6 +4532,14 @@ fn check_size(size: &api::Size) -> Result<(), MError> {
 fn check_limits(l: Option<&api::EgressLimits>) -> Result<(), MError> {
     match l.map(|l| l.check()) {
         Some(Err(e)) => Err(invalid(format!("limits.{e}"))),
+        _ => Ok(()),
+    }
+}
+
+/// Disk limits a request may set (ADR 0030); none is fine.
+fn check_disk_limits(l: Option<&api::DiskLimits>) -> Result<(), MError> {
+    match l.map(|l| l.check()) {
+        Some(Err(e)) => Err(invalid(format!("disk_limits.{e}"))),
         _ => Ok(()),
     }
 }
@@ -4948,6 +5001,7 @@ mod tests {
             probes: api::Probes::default(),
             egress: api::Egress::default(),
             limits: api::EgressLimits::default(),
+            disk_limits: api::DiskLimits::default(),
             metadata: BTreeMap::new(),
             state: state::CREATED.into(),
             stopped_reason: String::new(),
@@ -5040,6 +5094,11 @@ mod tests {
         http_codes: Mutex<HashMap<(Ipv4Addr, u16), u16>>,
         /// The size each machine last booted with, as Firecracker is given it.
         booted: Mutex<HashMap<String, api::Size>>,
+        /// The limits each machine's disks have now: given at boot, changed live, and
+        /// whether the volume was given them too.
+        disks: Mutex<HashMap<String, (fc::DiskRate, bool)>>,
+        /// A live change of disk limits fails, as a Firecracker that refuses the PATCH.
+        refuse_disk_rate: AtomicBool,
     }
 
     impl Mock {
@@ -5063,6 +5122,8 @@ mod tests {
                 closed: Mutex::new(Default::default()),
                 http_codes: Mutex::new(HashMap::new()),
                 booted: Mutex::new(HashMap::new()),
+                disks: Mutex::new(HashMap::new()),
+                refuse_disk_rate: AtomicBool::new(false),
             })
         }
 
@@ -5236,6 +5297,10 @@ mod tests {
                 memory_mb: b.memory_mb,
             };
             self.booted.lock().unwrap().insert(b.id.clone(), size);
+            self.disks
+                .lock()
+                .unwrap()
+                .insert(b.id.clone(), (b.disk, b.data.is_some()));
             if let Boots::Panics = boots {
                 panic!("the VMM panicked");
             }
@@ -5280,6 +5345,7 @@ mod tests {
             dir: &Path,
             _jail: Option<&fc::Jail>,
             pid: u32,
+            _disk_io: Arc<fc::DiskIo>,
         ) -> Option<fc::Vm> {
             self.record(format!("adopt {id} {pid}"));
             let procs = self.procs.lock().unwrap();
@@ -5297,6 +5363,19 @@ mod tests {
                 exited: p.exited.subscribe(),
                 exit: Self::exit_of(p),
             })
+        }
+
+        async fn disk_rate(&self, vm: &fc::Vm, rate: &fc::DiskRate, volume: bool) -> Result<()> {
+            self.record(format!(
+                "disk-rate {} {}mb {}iops",
+                vm.pid, rate.bandwidth_mb, rate.iops
+            ));
+            if self.refuse_disk_rate.load(Relaxed) {
+                anyhow::bail!("firecracker: 400 drive update refused");
+            }
+            let id = self.machine_of(vm.pid).unwrap();
+            self.disks.lock().unwrap().insert(id, (*rate, volume));
+            Ok(())
         }
 
         async fn snapshot(&self, vm: &fc::Vm) -> Result<()> {
@@ -7369,6 +7448,182 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(changed.egress, egress("none", None));
+    }
+
+    // --- disk limits (ADR 0030) ---
+
+    fn disk(bandwidth_mb: u32, iops: u32, burst_sec: u32) -> fc::DiskRate {
+        fc::DiskRate {
+            bandwidth_mb,
+            iops,
+            burst_sec,
+        }
+    }
+
+    fn set_disk(l: api::DiskLimits) -> api::UpdateMachineRequest {
+        api::UpdateMachineRequest {
+            disk_limits: Some(l),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn disks_boot_with_the_host_s_limits_for_the_size_under_the_machine_s_own() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        // The host's default for 1 vCPU, on the root disk only: it has no volume.
+        assert_eq!(m.disk_limits, disk(32, 4000, 10).view());
+        let disks = |id: &str| h.host.disks.lock().unwrap().get(id).copied();
+        assert_eq!(disks(&m.id), Some((disk(32, 4000, 10), false)));
+        let mut req = h.request("db");
+        req.size.vcpus = 2;
+        req.disk_limits = Some(api::DiskLimits {
+            iops: Some(500),
+            ..Default::default()
+        });
+        let db = h.m.create(req).await.unwrap();
+        // Its own value over the host's; the rest scale with its 2 vCPUs.
+        assert_eq!(db.disk_limits, disk(64, 500, 10).view());
+        assert_eq!(disks(&db.id), Some((disk(64, 500, 10), false)));
+        assert_eq!(
+            h.stored(&db.id).unwrap().disk_limits,
+            api::DiskLimits {
+                iops: Some(500),
+                ..Default::default()
+            },
+            "the record keeps its own values, not the host's"
+        );
+        // A new size is the next boot's, and so are the limits it brings.
+        let grown = api::Size {
+            vcpus: 4,
+            memory_mb: 256,
+        };
+        let patched =
+            h.m.update(&m.id, spec(|s| s.size = Some(grown)), None)
+                .await
+                .unwrap();
+        assert_eq!(patched.disk_limits, disk(32, 4000, 10).view());
+        let up = h.m.restart(&m.id, None).await.unwrap();
+        assert_eq!(up.disk_limits, disk(128, 16000, 10).view());
+        assert_eq!(disks(&m.id), Some((disk(128, 16000, 10), false)));
+        // Refused before anything is made, with the field named.
+        let mut bad = h.request("bad");
+        bad.disk_limits = Some(api::DiskLimits {
+            burst_sec: Some(4000),
+            ..Default::default()
+        });
+        assert_eq!(
+            refused(h.m.create(bad).await),
+            "disk_limits.burst_sec: at most 3600"
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_limits_change_at_once_on_a_running_machine_and_at_the_boot_otherwise() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        h.host.calls();
+        let disks = |id: &str| h.host.disks.lock().unwrap().get(id).copied();
+        let slow = api::DiskLimits {
+            bandwidth_mb: Some(2),
+            ..Default::default()
+        };
+        let changed =
+            h.m.update(&m.id, set_disk(slow.clone()), None)
+                .await
+                .unwrap();
+        assert_eq!(changed.disk_limits, disk(2, 4000, 10).view());
+        assert_eq!(disks(&m.id), Some((disk(2, 4000, 10), false)));
+        let pid = h.stored(&m.id).unwrap().pid;
+        assert_eq!(h.host.calls(), [format!("disk-rate {pid} 2mb 4000iops")]);
+        // A machine with a volume: both disks take it (a unit test has no `mkfs.ext4` to
+        // make one, so the record says it has one).
+        h.m.entry(&m.id).unwrap().rec.lock().unwrap().volume = Some(api::VolumeSpec {
+            size_gb: 1,
+            mount: "/data".into(),
+        });
+        let iops = api::DiskLimits {
+            iops: Some(100),
+            ..Default::default()
+        };
+        h.m.update(&m.id, set_disk(iops), None).await.unwrap();
+        assert_eq!(disks(&m.id), Some((disk(2, 100, 10), true)));
+        h.m.entry(&m.id).unwrap().rec.lock().unwrap().volume = None;
+        let back = api::DiskLimits {
+            iops: Some(4000),
+            ..Default::default()
+        };
+        let changed = h.m.update(&m.id, set_disk(back), None).await.unwrap();
+        h.host.calls();
+        let ev = h.events_of(&m.id).pop().unwrap();
+        assert_eq!(
+            (ev.reason.as_str(), ev.message.as_str()),
+            ("updated", "disk_limits changed")
+        );
+        // The same again changes nothing: no call, no event.
+        let version = changed.version;
+        let same = h.m.update(&m.id, set_disk(slow), None).await.unwrap();
+        assert!(h.host.calls().is_empty());
+        assert_eq!(same.version, version);
+        // Refused by Firecracker: the disks and the record keep what they had.
+        h.host.refuse_disk_rate.store(true, Relaxed);
+        let lift = api::DiskLimits {
+            bandwidth_mb: Some(0),
+            ..Default::default()
+        };
+        let err = h.m.update(&m.id, set_disk(lift.clone()), None).await;
+        assert!(matches!(err, Err(MError::Other(_))), "{err:?}");
+        assert_eq!(
+            h.m.get(&m.id).unwrap().disk_limits,
+            disk(2, 4000, 10).view()
+        );
+        assert_eq!(h.stored(&m.id).unwrap().disk_limits.bandwidth_mb, Some(2));
+        h.host.refuse_disk_rate.store(false, Relaxed);
+        // Stopped: only the record, and the next boot is given it.
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        h.host.calls();
+        h.m.update(&m.id, set_disk(lift), None).await.unwrap();
+        assert!(!h.host.calls().iter().any(|c| c.starts_with("disk-rate")));
+        h.m.start(&m.id, None).await.unwrap();
+        assert_eq!(disks(&m.id), Some((disk(0, 4000, 10), false)));
+        // Out of bounds: refused, named.
+        let bad = api::DiskLimits {
+            bandwidth_mb: Some(100_001),
+            ..Default::default()
+        };
+        assert_eq!(
+            refused(h.m.update(&m.id, set_disk(bad), None).await),
+            "disk_limits.bandwidth_mb: at most 100000"
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_metrics_add_up_per_machine_across_its_boots() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let io = h.m.entry(&m.id).unwrap().disk_io.clone();
+        let line = |w: u64, t: u64| {
+            json!({"block": {"write_bytes": w, "rate_limiter_throttled_events": t}}).to_string()
+        };
+        io.add(&line(1 << 20, 3));
+        h.m.restart(&m.id, None).await.unwrap();
+        // A new process starts its counters at zero; the machine's go on.
+        io.add(&line(1 << 20, 4));
+        let text = h.m.metrics();
+        crate::metrics::check_exposition(&text);
+        let l = format!(r#"machine="{}",tenant="t1",name="web""#, m.id);
+        for want in [
+            format!("briqyard_machine_disk_write_bytes_total{{{l}}} 2097152"),
+            format!("briqyard_machine_disk_throttled_total{{{l}}} 7"),
+            format!("briqyard_machine_disk_read_bytes_total{{{l}}} 0"),
+        ] {
+            assert!(text.lines().any(|x| x == want), "{want}\n{text}");
+        }
     }
 
     // --- egress limits (ADR 0018) ---

@@ -39,6 +39,10 @@ pub struct Machine {
     pub disk_used_bytes: u64,
     pub restarts: u64,
     pub boot_seconds: Option<f64>,
+    /// Its disks, from Firecracker's metrics (a line a minute), since the daemon started.
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
+    pub disk_throttled: u64,
 }
 
 impl Machine {
@@ -95,7 +99,7 @@ type Series = (
 );
 
 /// The per-machine series, but the state.
-const MACHINE_SERIES: [Series; 11] = [
+const MACHINE_SERIES: [Series; 14] = [
     (
         "briqyard_machine_cpu_seconds_total",
         "counter",
@@ -149,6 +153,24 @@ const MACHINE_SERIES: [Series; 11] = [
         "counter",
         "Packets its egress limits dropped.",
         |m| Some(m.counted.egress_dropped_packets.to_string()),
+    ),
+    (
+        "briqyard_machine_disk_read_bytes_total",
+        "counter",
+        "Bytes its guest read from its disks.",
+        |m| Some(m.disk_read_bytes.to_string()),
+    ),
+    (
+        "briqyard_machine_disk_write_bytes_total",
+        "counter",
+        "Bytes its guest wrote to its disks.",
+        |m| Some(m.disk_write_bytes.to_string()),
+    ),
+    (
+        "briqyard_machine_disk_throttled_total",
+        "counter",
+        "Disk requests its disk limits held back.",
+        |m| Some(m.disk_throttled.to_string()),
     ),
     (
         "briqyard_machine_restarts_total",
@@ -394,6 +416,9 @@ mod tests {
             disk_used_bytes: 4096,
             restarts: 1,
             boot_seconds: None,
+            disk_read_bytes: 0,
+            disk_write_bytes: 0,
+            disk_throttled: 0,
         }
     }
 
@@ -404,6 +429,8 @@ mod tests {
         gw.name = "gate\"way\\".into();
         let mut run = machine("m_1", "running");
         run.boot_seconds = Some(1.25);
+        run.disk_write_bytes = 64 << 20;
+        run.disk_throttled = 12;
         let h = Host {
             by_state: BTreeMap::from([("running".into(), 1), ("stopped".into(), 1)]),
             memory_mb: (512, 4096),
@@ -425,6 +452,8 @@ mod tests {
             "briqyard_boots_total 3",
             r#"briqyard_machine_cpu_seconds_total{machine="m_1",tenant="t1",name="db"} 2.5"#,
             r#"briqyard_machine_boot_seconds{machine="m_1",tenant="t1",name="db"} 1.25"#,
+            r#"briqyard_machine_disk_write_bytes_total{machine="m_1",tenant="t1",name="db"} 67108864"#,
+            r#"briqyard_machine_disk_throttled_total{machine="m_1",tenant="t1",name="db"} 12"#,
             r#"briqyard_machine_restarts_total{machine="m_2",tenant="t1",name="gate\"way\\",role="gateway"} 1"#,
             r#"briqyard_machine_state{machine="m_2",tenant="t1",name="gate\"way\\",role="gateway",state="stopped"} 1"#,
         ] {

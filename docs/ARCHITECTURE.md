@@ -121,6 +121,15 @@ where they were, while the machine's spec is the one it was taken with. A restor
 intent first; one cut short is finished by the next restore, start or daemon start. A new image's
 root disk (ADR 0024) is the same swap, from the image's `@base`.
 
+Each disk the guest writes (the root disk and the volume) has Firecracker's rate limiter
+(ADR 0030): MB a second and requests a second, by default a rate per vCPU of the machine's size
+(`disk_limits` in the config), a machine's own `disk_limits` over it; a burst of `burst_sec` at
+those rates once per start. Given at boot, set again after a resume (the snapshot holds the old
+run's), changed on a running machine by `PATCH /drives` at once. Firecracker's metrics come
+through a pipe in the jail, a line a minute: disk bytes and throttled requests per machine on
+`/metrics`. CPU is bounded by the jail's cgroup: `cpu.max` at the machine's vCPUs, `cpu.weight`
+100 per vCPU, so a host short of CPU shares it by size.
+
 The root disk is not mounted by the host, ever: the host writes nothing into guest filesystems.
 Image extraction happens once per image into a directory the host controls: layers in manifest
 order, whiteouts applied, every path resolved inside the directory (a symlink in a layer never
