@@ -62,7 +62,7 @@ for i in $(seq 1 30); do hosts >/dev/null 2>&1 && break; sleep 1; done
 check "the same key from the restored registry" '[ "$(host_key)" = "$key" ]'
 
 echo "== the second host rebooted, as its pool sees it"
-on_second "systemctl stop briqyardd && zfs list -H -o name,mounted -t filesystem -r byard | awk '\$2 == \"yes\" { print \$1 }' | tac | xargs -r -n1 zfs unmount && zfs unload-key byard"
+on_second "systemctl stop briqyardd && zfs list -H -o name,mounted -t filesystem -r byard | awk '\$2 == \"yes\" { print \$1 }' | tac | xargs -r -n1 zfs unmount && { [ \"\$(zfs get -H -o value keystatus byard)\" = unavailable ] || zfs unload-key byard; }"
 check "its pool locked"                '[ "$(on_second "zfs get -H -o value keystatus byard")" = unavailable ]'
 started=$(on_second "date +%s")
 on_second "systemctl start briqyardd"
