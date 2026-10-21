@@ -217,6 +217,31 @@ for i in $(seq 1 30); do [ "$(briqyard machine get "$LV" | jq -r .state)" = runn
 check "running again"                '[ "$(briqyard machine get "$LV" | jq -r .state)" = running ]'
 briqyard machine rm "$LV" >/dev/null
 
+echo "== changes at the next boot: env, files, then the image (ADR 0024)"
+# The program serves its boot file and the env it booted with; the volume holds a mark.
+printf v1 > /tmp/by-e2e-page.txt
+AP=$(briqyard machine run --image python:3.12-alpine --name apply --tenant "$T" --memory 256 --volume 1G:/data -e V=1 --file /srv/page.txt=/tmp/by-e2e-page.txt -- sh -c 'cd /srv && echo "$V" > v.txt && exec python3 -m http.server 8080' | jq -r .id)
+page() { briqyard machine exec "$AP" -- wget -qO- -T 2 "http://127.0.0.1:8080/$1" 2>/dev/null; }
+serving() { for i in $(seq 1 30); do page v.txt >/dev/null && return 0; sleep 1; done; return 1; }
+serving || true
+check "serves V=1 and its file"        '[ "$(page v.txt)" = 1 ] && [ "$(page page.txt)" = v1 ]'
+briqyard machine exec "$AP" -- sh -c 'echo kept > /data/mark' >/dev/null
+printf v2 > /tmp/by-e2e-page.txt
+briqyard machine set "$AP" -e V=2 --file /srv/page.txt=/tmp/by-e2e-page.txt >/dev/null
+check "set: pending shown"             '[ "$(briqyard machine get "$AP" | jq -r ".state, (.pending.fields | join(\",\"))" | paste -sd " " -)" = "running env,files" ]'
+check "set: still the old values"      '[ "$(page v.txt)" = 1 ] && [ "$(page page.txt)" = v1 ]'
+briqyard machine restart "$AP" >/dev/null
+serving || true
+check "restart: the new values"        '[ "$(page v.txt)" = 2 ] && [ "$(page page.txt)" = v2 ]'
+check "restart: nothing pending"       '[ "$(briqyard machine get "$AP" | jq -r .pending)" = null ]'
+check "the applied event"              'briqyard events --machine "$AP" | awk "\$4 == \"applied\"" | grep -q .'
+briqyard machine set "$AP" --image python:3.13-alpine >/dev/null
+briqyard machine restart "$AP" >/dev/null
+serving || true
+check "a new image: python 3.13"       'briqyard machine exec "$AP" -- python3 --version | grep -q "^Python 3\.13\."'
+check "a new image: the volume kept"   '[ "$(briqyard machine exec "$AP" -- cat /data/mark)" = kept ]'
+briqyard machine rm "$AP" >/dev/null
+
 echo "== postgres with a volume, endpoint, wake on connect"
 P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m --readiness "exec:pg_isready -h 127.0.0.1 -U postgres" | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done

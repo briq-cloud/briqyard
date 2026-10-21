@@ -219,6 +219,10 @@ backup until sent elsewhere.
   machine logs <id>` (its console; `-f` follows).
 - `briqyard machine stats <id>`: CPU time, memory and disk it uses now, from its cgroup and its
   datasets. `briqyard machine set-sleep <id> 3h|never` changes the window without a restart.
+- What a machine runs (ADR 0024): `briqyard machine set <id> --image … --memory … -e K=V -- cmd…`
+  is `pending` (in `get`, `describe`, the `PENDING` column) until its next start; `briqyard
+  machine restart <id>` applies it now. A new image is pulled at that start and the root disk
+  made again from it; the data volume stays.
 - `briqyard usage --from <hour> --to <hour> [--tenant T] [--json]`: what each machine used
   per hour (ADR 0017); `nft list set inet briqyard internet_out` shows the raw counters.
 - Egress limits (ADR 0018): `briqyard machine get <id>` shows `limits` and `egress_drops`;
@@ -230,6 +234,8 @@ backup until sent elsewhere.
 | Symptom | Look at |
 |---|---|
 | A create or start answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the last console lines. `briqyard machine logs`, then destroy it |
+| A start after `machine set --image` answers 409 `boot_failed`, `error: image …` | The new image could not be pulled or built; the change is still `pending`. `machine set` another image (or the one it runs, which drops the change) and start again |
+| A start after `machine set --memory` answers 503 `capacity` | The host has no room for the new size; the change is still `pending`. Through a fleet, the tenant stays on its host: move it (backups, `tenant unpin`, restores) |
 | A machine is `stopped (host)` | The daemon stopped it: a restart of `briqyardd` without a suspend, or a crashed daemon's leftover. The next use wakes it |
 | A machine stays `destroying` | Its disks could not be destroyed (`zfs destroy` in the log); the daemon tries again every 15 s |
 | The process exits at once (`stopped`, `exit.code`) | `briqyard machine logs`: the image's own output. `restart.policy: on-failure` tries three times, 10 s, 20 s, 40 s apart (`restarting_at`); `crash_loop` events from the third |

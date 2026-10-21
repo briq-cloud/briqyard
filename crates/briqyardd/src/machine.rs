@@ -116,6 +116,10 @@ pub struct Record {
     pub image_key: String,
     pub image_digest: String,
     pub image_config: ImageConfig,
+    /// The image the root disk was made from: when it is not `image_key`, the next start
+    /// makes the root disk again (ADR 0024).
+    #[serde(default)]
+    pub root_key: String,
     #[serde(default)]
     pub entrypoint: Option<Vec<String>>,
     #[serde(default)]
@@ -191,6 +195,11 @@ pub struct Record {
     /// The seq of the last event about it (ADR 0019); written only by `Entry::note_locked`.
     #[serde(default)]
     pub version: u64,
+    /// What a PATCH changes at the next start, and since when (ADR 0024).
+    #[serde(default)]
+    pub pending: Option<api::SpecChange>,
+    #[serde(default)]
+    pub pending_since: Option<DateTime<Utc>>,
 }
 
 impl Record {
@@ -216,16 +225,25 @@ impl Record {
     pub fn data_dataset(&self) -> String {
         format!("m/{}/data", self.id)
     }
+    /// Whether its next start makes the root disk again: a new image pending, or one applied
+    /// whose root disk is not made yet (ADR 0024).
+    fn remakes_root(&self) -> bool {
+        self.root_key != self.image_key || self.pending.as_ref().is_some_and(|p| p.image.is_some())
+    }
     pub fn sleep_window(&self) -> Option<Duration> {
         api::parse_sleep(&self.sleep).ok().flatten()
     }
 
     /// Brings a record written by an earlier daemon to the current shape: `sleep` was `""`
-    /// for never, and `state_changed_at` did not exist (its best stand-in is `updated_at`).
+    /// for never, `state_changed_at` did not exist (its best stand-in is `updated_at`), nor
+    /// `root_key` (the root disk was always made from the record's image).
     fn migrate(&mut self) {
         self.sleep = sleep_setting(&self.sleep);
         if self.state_changed_at == DateTime::<Utc>::default() {
             self.state_changed_at = self.updated_at;
+        }
+        if self.root_key.is_empty() {
+            self.root_key = self.image_key.clone();
         }
     }
 }
@@ -405,6 +423,28 @@ impl Entry {
 
     fn snapshot(&self) -> Record {
         self.rec.lock().unwrap().clone()
+    }
+
+    /// Its lock for a start, after its backup turn when that start makes the root disk again
+    /// (ADR 0024): a backup takes the turn then the lock, so this start does too, and no
+    /// backup sends a disk while it is replaced. Whether it will is read again under the
+    /// lock: a PATCH in between takes the turn on the next round.
+    async fn lock_for_start(
+        &self,
+    ) -> (
+        Option<tokio::sync::OwnedMutexGuard<()>>,
+        tokio::sync::MutexGuard<'_, ()>,
+    ) {
+        loop {
+            let turn = match self.snapshot().remakes_root() {
+                true => Some(self.backup_turn.clone().lock_owned().await),
+                false => None,
+            };
+            let guard = self.lock.lock().await;
+            if turn.is_some() || !self.snapshot().remakes_root() {
+                return (turn, guard);
+            }
+        }
     }
 
     /// Marks a use now. In memory only: the sleeper reads it here, and the record on disk
@@ -1391,9 +1431,9 @@ impl Manager {
         self.tenant(tenant)
     }
 
-    /// A new spec on the same machine, address and volume: stopped if it runs, its root disk
-    /// made again when the image changed, started again. The spec it has already changes
-    /// nothing, so a control plane may put it again. Under the tenant's lock.
+    /// A new spec on the same machine, address and volume: stopped if it runs, started again
+    /// (a new image's root disk is made by the next start, ADR 0024). The spec it has already
+    /// changes nothing, so a control plane may put it again. Under the tenant's lock.
     async fn replace_gateway(
         &self,
         gw: &Arc<Entry>,
@@ -1430,19 +1470,6 @@ impl Manager {
                 state::CREATED | state::STOPPED | state::ERROR
             ) {
                 return Err(MError::BadState(r.state));
-            }
-            if im.key != r.image_key {
-                let z = &self.inner.zfs;
-                z.destroy(&r.root_dataset())
-                    .await
-                    .context("the gateway's previous root disk")?;
-                z.clone_snapshot(
-                    &format!("images/{}", im.key),
-                    image::SNAP,
-                    &r.root_dataset(),
-                )
-                .await
-                .context("the gateway's root disk")?;
             }
             {
                 let mut r = gw.rec.lock().unwrap();
@@ -1535,7 +1562,7 @@ impl Manager {
     /// let go while it is waited for, since its probes take it to end a failed boot.
     async fn run_gateway(&self, gw: &Arc<Entry>) -> Result<(), MError> {
         let (started, live) = {
-            let _turn = gw.lock.lock().await;
+            let _turns = gw.lock_for_start().await;
             let started = gw.snapshot().state != state::RUNNING;
             if started {
                 self.start_boxed(gw, true).await?;
@@ -1582,14 +1609,7 @@ impl Manager {
             self.end_process(gw, &live, Duration::ZERO).await;
         }
         let tail = self.last_console_lines(&r, 5);
-        gw.set_state(state::ERROR, |r| {
-            r.error = format!("{why}: {tail}");
-            r.stopped_at = Some(Utc::now());
-            r.pid = 0;
-            Some(Ev::warning(reason::BOOT_FAILED, r.error.clone()))
-        });
-        let _ = self.save(gw);
-        Err(MError::BootFailed(Box::new(self.view(gw))))
+        Err(self.boot_failed(gw, format!("{why}: {tail}")))
     }
 
     /// What a machine that needs the gateway answers when the gateway did not come up:
@@ -1739,6 +1759,8 @@ impl Manager {
             last_backup_at: r.backup.last_at,
             next_backup_at: r.backup.next_at,
             version: r.version,
+            pending: r.pending.as_ref().map(|p| p.view()),
+            pending_since: r.pending_since,
             host: String::new(),
         }
     }
@@ -1783,20 +1805,33 @@ impl Manager {
 
     /// Takes the machine's memory from the host and moves it to `starting`, as one step
     /// under the map's lock: two starts that read the same free memory cannot both take it.
-    /// Its event is logged once that lock is let go: the log syncs to disk, and the map is
-    /// every request's. Nothing else moves the machine meanwhile: its own lock is held.
-    fn reserve(&self, e: &Entry) -> Result<(), MError> {
+    /// A pending change goes onto the record in that step (ADR 0024), its size the one
+    /// reserved, with `image` its new image, resolved. Its events are logged once that lock is
+    /// let go: the log syncs to disk, and the map is every request's. Nothing else moves the
+    /// machine meanwhile: its own lock is held.
+    fn reserve(&self, e: &Entry, image: Option<image::Image>) -> Result<(), MError> {
+        let mut applied = None;
         {
             let machines = self.inner.machines.lock().unwrap();
             let (used, _) = committed(&machines);
-            let need = e.rec.lock().unwrap().size.memory_mb;
-            admit(used.memory_mb, self.capacity().memory_mb, need)?;
+            let need = {
+                let r = e.rec.lock().unwrap();
+                r.pending.as_ref().and_then(|p| p.size).unwrap_or(r.size)
+            };
+            admit(used.memory_mb, self.capacity().memory_mb, need.memory_mb)?;
             e.set_state(state::STARTING, |r| {
                 r.error.clear();
                 r.pid = 0;
                 r.restarting_at = None;
+                applied = apply_pending(r, image);
                 None
             });
+        }
+        if let Some(fields) = applied {
+            e.note(
+                Ev::normal(reason::APPLIED, format!("{} applied", fields.join(", ")))
+                    .data(json!({ "fields": fields })),
+            );
         }
         let resume = e.snapshot().suspended;
         let ev = match resume {
@@ -2047,9 +2082,12 @@ impl Manager {
         }
         // A restore with no size takes the backup's; everything else says its size.
         let size_from_backup = req.restore.is_some() && req.size == api::Size::default();
-        if !size_from_backup {
-            check_size(&req.size)?;
+        // What it runs, checked as a PATCH of it is (ADR 0024).
+        let mut spec = req.spec();
+        if size_from_backup {
+            spec.size = None;
         }
+        spec.check().map_err(invalid)?;
         if let Some(v) = &req.volume {
             if v.size_gb < 1 || !v.mount.starts_with('/') {
                 return Err(invalid("volume needs size_gb >= 1 and an absolute mount"));
@@ -2060,16 +2098,7 @@ impl Manager {
         if let Some(p) = &req.probes {
             p.check().map_err(invalid)?;
         }
-        for f in &req.files {
-            if !f.path.starts_with('/') {
-                return Err(invalid(format!("file {:?}: path must be absolute", f.path)));
-            }
-        }
-        let restart = match &req.restart {
-            None => api::RestartPolicy::default(),
-            Some(r) if ["no", "on-failure", "always"].contains(&r.policy.as_str()) => r.clone(),
-            Some(_) => return Err(invalid("restart.policy must be no, on-failure or always")),
-        };
+        let restart = req.restart.clone().unwrap_or_default();
         if self.name_taken(&req.tenant, &req.name) {
             return Err(MError::Conflict(
                 "a machine with that name exists in the tenant".into(),
@@ -2085,6 +2114,7 @@ impl Manager {
             image_key: String::new(),
             image_digest: String::new(),
             image_config: ImageConfig::default(),
+            root_key: String::new(),
             entrypoint: req.entrypoint.clone(),
             cmd: req.cmd.clone(),
             env: req.env.clone(),
@@ -2121,6 +2151,8 @@ impl Manager {
             backup_bytes: 0,
             backup: backups::schedule_of(&req.backup, &self.inner.cfg.backup, now)?,
             version: 0,
+            pending: None,
+            pending_since: None,
         };
         self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
         let mut src: Option<Arc<Entry>> = None;
@@ -2134,6 +2166,8 @@ impl Manager {
             rec.image_key = was.image_key;
             rec.image_digest = was.image_digest;
             rec.image_config = was.image_config;
+            // The root disk comes from the backup: made from what it was made from.
+            rec.root_key = was.root_key;
             if rec.entrypoint.is_none() {
                 rec.entrypoint = was.entrypoint;
             }
@@ -2205,6 +2239,9 @@ impl Manager {
             rec.image_key = im.key;
             rec.image_digest = im.digest;
             rec.image_config = im.config;
+        }
+        if rec.root_key.is_empty() {
+            rec.root_key = rec.image_key.clone();
         }
         let t = self.ensure_tenant(&req.tenant).await?;
         let e = self.add_machine(rec, &t)?;
@@ -2376,7 +2413,7 @@ impl Manager {
 
     pub async fn start(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _guard = e.lock.lock().await;
+        let _turns = e.lock_for_start().await;
         self.check_version(&e, at)?;
         if e.snapshot().state != state::RUNNING {
             self.start_entry(&e, true).await?;
@@ -2388,7 +2425,7 @@ impl Manager {
     /// one stopped on purpose stays stopped.
     pub async fn wake(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _guard = e.lock.lock().await;
+        let _turns = e.lock_for_start().await;
         self.check_version(&e, at)?;
         let r = e.snapshot();
         match r.state.as_str() {
@@ -2427,6 +2464,18 @@ impl Manager {
             state::CREATED | state::STOPPED | state::ERROR => {}
             other => return Err(MError::BadState(other.into())),
         }
+        // A pending change's image is pulled and built before anything moves (ADR 0024): a
+        // failure is the boot's, and the change waits for the next start.
+        let image = match rec.pending.as_ref().and_then(|p| p.image.clone()) {
+            Some(reference) => match self.inner.images.ensure(&reference).await {
+                Ok(im) => Some(im),
+                Err(err) => {
+                    self.inner.stats.starts_failed.fetch_add(1, Relaxed);
+                    return Err(self.boot_failed(e, format!("image {reference}: {err:#}")));
+                }
+            },
+            None => None,
+        };
         // Resolved before anything moves: a `via` whose machine is gone refuses the start.
         let policy = self.policy_for(&rec)?;
         // Through the tenant's gateway: it runs first, and the tenant's lock is kept until
@@ -2439,7 +2488,7 @@ impl Manager {
             ),
             false => None,
         };
-        self.reserve(e)?;
+        self.reserve(e, image)?;
         drop(gateway_turn);
         let _ = self.save(e);
         // The host's fault (a network, disk or Firecracker error): the machine ends in
@@ -2458,6 +2507,13 @@ impl Manager {
             let _ = self.save(e);
             MError::Other(err)
         };
+        // A new image's root disk first (ADR 0024).
+        let rec = e.snapshot();
+        if rec.root_key != rec.image_key {
+            self.remake_root(e).await.map_err(fail)?;
+        }
+        // What this boot runs: the record, the change it applied on it.
+        let rec = e.snapshot();
         let t = match self.tenant_of(&rec.tenant) {
             Some(t) => t,
             None => return Err(fail(anyhow!("tenant network is gone"))),
@@ -2558,19 +2614,9 @@ impl Manager {
             // finds nothing to settle and no restart policy applies. The machine stays in
             // `error`, with the console's last lines, for the caller to read and destroy.
             self.end_process(e, &live, Duration::ZERO).await;
-            self.inner
-                .stats
-                .starts_failed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.stats.starts_failed.fetch_add(1, Relaxed);
             let tail = self.last_console_lines(&rec, 5);
-            e.set_state(state::ERROR, |r| {
-                r.error = format!("{why}: {tail}");
-                r.stopped_at = Some(Utc::now());
-                r.pid = 0;
-                Some(Ev::warning(reason::BOOT_FAILED, r.error.clone()))
-            });
-            let _ = self.save(e);
-            return Err(MError::BootFailed(Box::new(self.view(e))));
+            return Err(self.boot_failed(e, format!("{why}: {tail}")));
         }
         let (_, _, generation) = self.reset_probes(e);
         e.set_state(state::RUNNING, |r| {
@@ -2606,6 +2652,52 @@ impl Manager {
             self.inner.stats.boots.fetch_add(1, Relaxed);
         }
         Ok(())
+    }
+
+    /// A boot the machine's spec fails (ADR 0011): the machine left in `error` with why, a
+    /// `boot_failed` event, and the 409 that carries the machine. Its process is already gone.
+    fn boot_failed(&self, e: &Entry, why: String) -> MError {
+        e.set_state(state::ERROR, |r| {
+            r.error = why;
+            r.stopped_at = Some(Utc::now());
+            r.pid = 0;
+            Some(Ev::warning(reason::BOOT_FAILED, r.error.clone()))
+        });
+        let _ = self.save(e);
+        MError::BootFailed(Box::new(self.view(e)))
+    }
+
+    /// Makes the root disk again from the record's image, before a boot (ADR 0024): forks of
+    /// the old one take its snapshots over and the fork snapshot it came from goes once
+    /// nothing clones it, as at a destroy; the data volume is not touched. The image comes
+    /// from the cache, pulled again when the host removed it since the start resolved it.
+    async fn remake_root(&self, e: &Entry) -> Result<()> {
+        let im = self.inner.images.ensure(&e.snapshot().image).await?;
+        let base = im.dataset();
+        {
+            let mut r = e.rec.lock().unwrap();
+            r.image_key = im.key;
+            r.image_digest = im.digest;
+            r.image_config = im.config;
+        }
+        let r = e.snapshot();
+        let (z, root) = (&self.inner.zfs, r.root_dataset());
+        let mut origin = None;
+        if z.exists(&root).await.context("root disk")? {
+            z.release_clones(&root)
+                .await
+                .context("forks of the root disk")?;
+            origin = z.origin(&root).await.context("origin of the root disk")?;
+            z.destroy(&root).await.context("the previous root disk")?;
+        }
+        if let Some((ds, snap)) = origin {
+            self.free_fork_snapshot(&ds, &snap).await;
+        }
+        z.clone_snapshot(&base, image::SNAP, &root)
+            .await
+            .context("the root disk")?;
+        e.rec.lock().unwrap().root_key = r.image_key;
+        self.save(e)
     }
 
     /// The jail of a machine, when the daemon runs Firecracker under the jailer: one uid per
@@ -2764,7 +2856,7 @@ impl Manager {
         let (m, e) = (self.clone(), e.clone());
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let _guard = e.lock.lock().await;
+            let _turns = e.lock_for_start().await;
             let r = e.snapshot();
             if r.state != state::STOPPED || r.stopped_reason != stop::EXIT {
                 return;
@@ -3067,8 +3159,10 @@ impl Manager {
 
     /// Changes the sleep window, the metadata, the egress policy, the limits or the probes of a
     /// machine, in any state; a running machine's policy changes in the tables at once, and its
-    /// probes start over. A change is an event (`egress_changed` for the policy or the limits,
-    /// else `updated`); a request that changes nothing is none.
+    /// probes start over. What it runs (`spec`) changes at its next start (ADR 0024): kept as
+    /// `pending` meanwhile, a running machine running on as it was. A change is an event
+    /// (`egress_changed` for the policy or the limits, `updated` for the rest, one with
+    /// `pending` for the spec); a request that changes nothing is none.
     pub async fn update(
         &self,
         id: &str,
@@ -3084,6 +3178,7 @@ impl Manager {
         if let Some(p) = &req.probes {
             p.check().map_err(invalid)?;
         }
+        req.spec.check().map_err(invalid)?;
         // Under the entry's lock, like every transition: no start or stop runs in between,
         // and a destroy that ran first has removed the machine, whose record is not written
         // back.
@@ -3139,12 +3234,46 @@ impl Manager {
             if let Some(ev) = change_event(&was, &r) {
                 e.note_locked(&mut r, ev);
             }
+            let pending = pending_after(&r, req.spec);
+            if pending != r.pending {
+                r.pending_since = match pending {
+                    Some(_) => r.pending_since.or(Some(Utc::now())),
+                    None => None,
+                };
+                let fields = pending
+                    .clone()
+                    .unwrap_or_default()
+                    .changed_from(&r.pending.take().unwrap_or_default());
+                r.pending = pending;
+                let ev = Ev::normal(
+                    reason::UPDATED,
+                    format!("{} change at the next start", fields.join(", ")),
+                );
+                e.note_locked(
+                    &mut r,
+                    ev.data(json!({ "fields": fields, "pending": true })),
+                );
+            }
             reprobe = r.probes != was.probes && r.state == state::RUNNING;
         }
         self.save(&e)?;
         drop(gateway_turn);
         if reprobe {
             self.restart_probes(&e);
+        }
+        Ok(self.view(&e))
+    }
+
+    /// Stops the machine and starts it again: what a PATCH left pending applies now (ADR 0024).
+    /// One that is not running is started. `at` is the caller's `If-Match`, checked by the
+    /// stop, whose events move the version.
+    pub async fn restart(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
+        let e = self.own_entry(id)?;
+        self.stop_entry(&e, stop::USER, Duration::ZERO, false, at)
+            .await?;
+        let _turns = e.lock_for_start().await;
+        if e.snapshot().state != state::RUNNING {
+            self.start_entry(&e, true).await?;
         }
         Ok(self.view(&e))
     }
@@ -3947,6 +4076,64 @@ fn change_event(was: &Record, now: &Record) -> Option<Ev> {
     Some(ev.data(json!({ "fields": fields })))
 }
 
+/// What the next start applies after a PATCH of `change` (ADR 0024): the pending change with
+/// `change` over it, less what the record already has; None when nothing is left.
+fn pending_after(r: &Record, change: api::SpecChange) -> Option<api::SpecChange> {
+    let p = r.pending.clone().unwrap_or_default();
+    let next = api::SpecChange {
+        image: change.image.or(p.image).filter(|v| *v != r.image),
+        entrypoint: (change.entrypoint.or(p.entrypoint))
+            .filter(|v| Some(v) != r.entrypoint.as_ref()),
+        cmd: change.cmd.or(p.cmd).filter(|v| Some(v) != r.cmd.as_ref()),
+        env: change.env.or(p.env).filter(|v| *v != r.env),
+        files: change.files.or(p.files).filter(|v| *v != r.files),
+        size: change.size.or(p.size).filter(|v| *v != r.size),
+        ports: change.ports.or(p.ports).filter(|v| *v != r.ports),
+        restart: change.restart.or(p.restart).filter(|v| *v != r.restart),
+    };
+    (!next.is_empty()).then_some(next)
+}
+
+/// Puts the pending change on the record, in the step that starts the machine (ADR 0024);
+/// `image` is its new image, resolved. A change to what a memory snapshot holds drops the
+/// snapshot: that start is cold. The fields applied; None when nothing was pending.
+fn apply_pending(r: &mut Record, image: Option<image::Image>) -> Option<Vec<&'static str>> {
+    let p = r.pending.take()?;
+    r.pending_since = None;
+    let fields = p.fields();
+    if p.touches_snapshot() {
+        r.suspended = false;
+    }
+    if let (Some(reference), Some(im)) = (p.image, image) {
+        r.image = reference;
+        r.image_key = im.key;
+        r.image_digest = im.digest;
+        r.image_config = im.config;
+    }
+    if let Some(v) = p.entrypoint {
+        r.entrypoint = Some(v);
+    }
+    if let Some(v) = p.cmd {
+        r.cmd = Some(v);
+    }
+    if let Some(v) = p.env {
+        r.env = v;
+    }
+    if let Some(v) = p.files {
+        r.files = v;
+    }
+    if let Some(v) = p.size {
+        r.size = v;
+    }
+    if let Some(v) = p.ports {
+        r.ports = v;
+    }
+    if let Some(v) = p.restart {
+        r.restart = v;
+    }
+    Some(fields)
+}
+
 /// What `/wait` waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Until {
@@ -4022,13 +4209,7 @@ async fn host_ip(interface: &str) -> Option<Ipv4Addr> {
 }
 
 fn check_size(size: &api::Size) -> Result<(), MError> {
-    if !(1..=32).contains(&size.vcpus) {
-        return Err(invalid("size.vcpus must be 1..32"));
-    }
-    if !(128..=262144).contains(&size.memory_mb) {
-        return Err(invalid("size.memory_mb must be 128..262144"));
-    }
-    Ok(())
+    size.check().map_err(invalid)
 }
 
 /// Limits a request may set (ADR 0018); none is fine.
@@ -4428,6 +4609,7 @@ mod tests {
             image: "postgres:17".into(),
             image_key: "deadbeef".into(),
             image_digest: "sha256:abc".into(),
+            root_key: "deadbeef".into(),
             image_config: ImageConfig {
                 entrypoint: vec!["docker-entrypoint.sh".into()],
                 cmd: vec!["postgres".into()],
@@ -4482,6 +4664,8 @@ mod tests {
             backup_bytes: 0,
             backup: Schedule::default(),
             version: 0,
+            pending: None,
+            pending_since: None,
         }
     }
 
@@ -4544,6 +4728,8 @@ mod tests {
         closed: Mutex<std::collections::HashSet<(Ipv4Addr, u16)>>,
         /// What an HTTP probe of an address and port answers; 200 when absent.
         http_codes: Mutex<HashMap<(Ipv4Addr, u16), u16>>,
+        /// The size each machine last booted with, as Firecracker is given it.
+        booted: Mutex<HashMap<String, api::Size>>,
     }
 
     impl Mock {
@@ -4566,6 +4752,7 @@ mod tests {
                 execs_most: Default::default(),
                 closed: Mutex::new(Default::default()),
                 http_codes: Mutex::new(HashMap::new()),
+                booted: Mutex::new(HashMap::new()),
             })
         }
 
@@ -4734,6 +4921,11 @@ mod tests {
         async fn boot(&self, b: &fc::Boot) -> Result<fc::Vm> {
             let boots = self.boots.lock().unwrap().clone();
             self.record(format!("boot {} tap={} resume={}", b.id, b.tap, b.resume));
+            let size = api::Size {
+                vcpus: b.vcpus,
+                memory_mb: b.memory_mb,
+            };
+            self.booted.lock().unwrap().insert(b.id.clone(), size);
             if let Boots::Panics = boots {
                 panic!("the VMM panicked");
             }
@@ -5218,7 +5410,7 @@ mod tests {
             let admitted = std::thread::scope(|s| {
                 let handles: Vec<_> = entries
                     .iter()
-                    .map(|e| s.spawn(|| h.m.reserve(e).is_ok()))
+                    .map(|e| s.spawn(|| h.m.reserve(e, None).is_ok()))
                     .collect();
                 handles
                     .into_iter()
@@ -5234,13 +5426,13 @@ mod tests {
         let h = harness("10.64.0.0/22", 512).await;
         let a = h.add("m_a", state::STOPPED, 512);
         let b = h.add("m_b", state::STOPPED, 512);
-        assert!(h.m.reserve(&a).is_ok());
-        assert!(matches!(h.m.reserve(&b), Err(MError::Capacity(_))));
+        assert!(h.m.reserve(&a, None).is_ok());
+        assert!(matches!(h.m.reserve(&b, None), Err(MError::Capacity(_))));
         assert_eq!(a.snapshot().state, state::STARTING);
         assert_eq!(b.snapshot().state, state::STOPPED);
         // A machine on its way down still holds its memory.
         a.set_state(state::STOPPING, |_| None);
-        assert!(matches!(h.m.reserve(&b), Err(MError::Capacity(_))));
+        assert!(matches!(h.m.reserve(&b, None), Err(MError::Capacity(_))));
         assert!(admit(0, 100, 100).is_ok());
         assert!(admit(1, 100, 100).is_err());
         assert!(admit(u32::MAX, u32::MAX, 1).is_err());
@@ -5423,16 +5615,23 @@ mod tests {
         let mut r = record();
         r.sleep = String::new();
         r.state_changed_at = DateTime::<Utc>::default();
+        r.root_key.clear();
         r.migrate();
         assert_eq!(r.sleep, "never");
         assert_eq!(r.state_changed_at, r.updated_at);
+        assert_eq!(
+            r.root_key, r.image_key,
+            "the root disk was made from its image"
+        );
         // A current record is left alone.
         let mut r = record();
         r.state_changed_at = r.updated_at + chrono::Duration::seconds(5);
+        r.root_key = "older".into();
         let before = r.clone();
         r.migrate();
         assert_eq!(r.sleep, before.sleep);
         assert_eq!(r.state_changed_at, before.state_changed_at);
+        assert_eq!(r.root_key, "older");
         // One representation of "never", whatever the API was sent.
         assert_eq!(sleep_setting(""), "never");
         assert_eq!(sleep_setting("  "), "never");
@@ -9696,5 +9895,468 @@ mod tests {
         assert_eq!(h.m.logs("m_a", &mid, 10).unwrap().lines.len(), 1);
         let after = h.m.logs("m_a", &end.to_string(), 10).unwrap();
         assert_eq!((after.lines.len(), after.next), (0, end.to_string()));
+    }
+
+    // --- changes at the next boot (ADR 0024) ---
+
+    /// A PATCH of what the machine runs.
+    fn spec(f: impl FnOnce(&mut api::SpecChange)) -> api::UpdateMachineRequest {
+        let mut req = api::UpdateMachineRequest::default();
+        f(&mut req.spec);
+        req
+    }
+
+    fn env(k: &str, v: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(k.to_string(), v.to_string())])
+    }
+
+    impl Harness {
+        /// The guest config and the boot files on the config drive the machine's last start
+        /// wrote.
+        fn drive(&self, id: &str) -> (guest::Config, Vec<(String, u32, Vec<u8>)>) {
+            let path = self.m.inner.cfg.run_dir().join(id).join("config.tar");
+            let mut all = entries(&std::fs::read(path).unwrap());
+            let cfg = serde_json::from_slice(&all.remove(0).2).unwrap();
+            (cfg, all)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_change_of_what_it_runs_waits_for_the_next_start() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        h.m.inner
+            .images
+            .seed(IMAGE2, ImageConfig::default())
+            .await
+            .unwrap();
+        let mut req = h.request("web");
+        req.env = env("V", "1");
+        let m = h.m.create(req).await.unwrap();
+        h.host.calls();
+        let change = spec(|s| {
+            s.image = Some(IMAGE2.into());
+            s.env = Some(env("V", "2"));
+            s.files = Some(vec![api::File {
+                path: "/srv/index.html".into(),
+                base64: guest::base64_encode(b"v2"),
+                mode: None,
+            }]);
+        });
+        // A stale If-Match is refused and leaves nothing pending.
+        let stale = h.m.update(&m.id, change.clone(), Some(m.version - 1)).await;
+        assert!(matches!(stale, Err(MError::Moved(_))), "{stale:?}");
+        assert!(h.m.get(&m.id).unwrap().pending.is_none());
+        let patched =
+            h.m.update(&m.id, change.clone(), Some(m.version))
+                .await
+                .unwrap();
+        // It runs on as it was: the same process, the same image; the change is pending.
+        assert_eq!(
+            (patched.state.as_str(), patched.image.as_str()),
+            (state::RUNNING, IMAGE)
+        );
+        let calls = h.host.calls();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("boot") || c.starts_with("kill")),
+            "{calls:?}"
+        );
+        let pending = patched.pending.clone().unwrap();
+        assert_eq!(pending.fields, ["image", "env", "files"]);
+        assert_eq!(pending.image.as_deref(), Some(IMAGE2));
+        assert!(patched.pending_since.is_some());
+        let e = h.events_of(&m.id).pop().unwrap();
+        assert_eq!(
+            (e.reason.as_str(), e.message.as_str()),
+            ("updated", "image, env, files change at the next start")
+        );
+        assert_eq!(
+            e.data,
+            Some(json!({"fields": ["image", "env", "files"], "pending": true}))
+        );
+        assert_eq!(patched.version, e.seq);
+        // The same change again is none: no event, the version stays.
+        let same = h.m.update(&m.id, change, None).await.unwrap();
+        assert_eq!(same.version, patched.version);
+        // A second PATCH goes over the first; its event names what it moved.
+        let cmd = vec!["sh".to_string(), "-c".into(), "echo $V".into()];
+        let more =
+            h.m.update(&m.id, spec(|s| s.cmd = Some(cmd.clone())), None)
+                .await
+                .unwrap();
+        assert_eq!(
+            more.pending.unwrap().fields,
+            ["image", "cmd", "env", "files"]
+        );
+        assert_eq!(
+            more.pending_since, patched.pending_since,
+            "the oldest change"
+        );
+        assert_eq!(
+            h.events_of(&m.id).pop().unwrap().data,
+            Some(json!({"fields": ["cmd"], "pending": true}))
+        );
+        // A restart applies it, after its If-Match.
+        let stale = h.m.restart(&m.id, Some(patched.version)).await;
+        assert!(matches!(stale, Err(MError::Moved(_))), "{stale:?}");
+        let applied = h.m.restart(&m.id, Some(more.version)).await.unwrap();
+        assert_eq!(
+            (applied.state.as_str(), applied.image.as_str()),
+            (state::RUNNING, IMAGE2)
+        );
+        assert!(applied.pending.is_none() && applied.pending_since.is_none());
+        let reasons = h.reasons(&m.id);
+        assert_eq!(
+            reasons[reasons.len() - 5..],
+            ["stopping", "stopped", "applied", "starting", "started"]
+        );
+        let ev = h
+            .events_of(&m.id)
+            .into_iter()
+            .find(|e| e.reason == "applied");
+        assert_eq!(
+            ev.map(|e| (e.message, e.data)),
+            Some((
+                "image, cmd, env, files applied".to_string(),
+                Some(json!({"fields": ["image", "cmd", "env", "files"]}))
+            ))
+        );
+        // The boot read the new spec: its config drive carries it.
+        let (cfg, files) = h.drive(&m.id);
+        assert_eq!(cfg.env.get("V").map(String::as_str), Some("2"));
+        assert_eq!(cfg.cmd, cmd);
+        assert_eq!(
+            files,
+            [("files/srv/index.html".to_string(), 0o644, b"v2".to_vec())]
+        );
+        assert_eq!(h.stored(&m.id).unwrap().boots, 2);
+    }
+
+    #[tokio::test]
+    async fn a_new_image_makes_the_root_disk_again_and_keeps_the_volume() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let im =
+            h.m.inner
+                .images
+                .seed(IMAGE2, ImageConfig::default())
+                .await
+                .unwrap();
+        let e = h.add("m_x", state::STOPPED, 256);
+        h.disks(&e).await;
+        let dev = h.pool.dev();
+        std::fs::write(dev.join("byard/m/m_x/data"), b"the database").unwrap();
+        // A fork of its root disk, as a create with `fork` makes one.
+        let z = &h.pool.zfs;
+        z.snapshot("m/m_x/root", "fork-m_child").await.unwrap();
+        z.clone_snapshot("m/m_x/root", "fork-m_child", "m/m_child/root")
+            .await
+            .unwrap();
+        h.m.update("m_x", spec(|s| s.image = Some(IMAGE2.into())), None)
+            .await
+            .unwrap();
+        h.pool.calls();
+        h.m.start("m_x", None).await.unwrap();
+        let r = h.stored("m_x").unwrap();
+        assert_eq!(
+            (r.image.as_str(), r.image_key.as_str(), r.root_key.as_str()),
+            (IMAGE2, im.key.as_str(), im.key.as_str())
+        );
+        // The root disk is a clone of the new image; the volume was never touched.
+        let origin = std::fs::read_to_string(dev.join("byard/m/m_x/root.origin")).unwrap();
+        assert_eq!(origin.trim(), format!("byard/images/{}@base", im.key));
+        assert_eq!(
+            std::fs::read(dev.join("byard/m/m_x/data")).unwrap(),
+            b"the database"
+        );
+        let calls = h.pool.calls();
+        assert!(
+            calls.contains(&"destroy -r byard/m/m_x/root".to_string()),
+            "{calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.contains("m_x/data") && !c.starts_with("list ")),
+            "{calls:?}"
+        );
+        // The fork took the old root's snapshot over and lives on, whole; the snapshot went
+        // once nothing cloned it.
+        assert!(dev.join("byard/m/m_child/root").exists());
+        assert!(!dev.join("byard/m/m_child/root.origin").exists());
+        assert!(!dev.join("byard/m/m_child/root@fork-m_child").exists());
+        // The next start has nothing to make.
+        h.m.stop("m_x", Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        h.pool.calls();
+        h.m.start("m_x", None).await.unwrap();
+        let calls = h.pool.calls();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("clone ") || c.starts_with("destroy ")),
+            "{calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_root_disk_is_made_from_the_image_the_cache_has_for_it_now() {
+        // The build its record names is gone from the host (removed since the start resolved
+        // it): the root disk comes from the image as the cache answers for its reference.
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let im = h.m.inner.images.ensure(IMAGE).await.unwrap();
+        let e = h.add("m_y", state::STOPPED, 256);
+        h.disks(&e).await;
+        {
+            let mut r = e.rec.lock().unwrap();
+            r.image = IMAGE.into();
+            r.root_key = "older".into();
+        }
+        h.m.start("m_y", None).await.unwrap();
+        let r = h.stored("m_y").unwrap();
+        assert_eq!((r.image_key, r.root_key), (im.key.clone(), im.key));
+    }
+
+    #[tokio::test]
+    async fn a_root_disk_is_made_again_only_once_no_backup_runs() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        h.m.inner
+            .images
+            .seed(IMAGE2, ImageConfig::default())
+            .await
+            .unwrap();
+        let e = h.add("m_x", state::STOPPED, 256);
+        h.disks(&e).await;
+        // A backup under way holds the turn, as `backup_entry`'s callers do.
+        let backup = e.backup_turn.clone().lock_owned().await;
+        // A start with no root disk to make does not wait for it.
+        h.m.start("m_x", None).await.unwrap();
+        h.m.stop("m_x", Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        h.m.update("m_x", spec(|s| s.image = Some(IMAGE2.into())), None)
+            .await
+            .unwrap();
+        h.pool.calls();
+        let m = h.m.clone();
+        let mut start = tokio::spawn(async move { m.start("m_x", None).await });
+        let waited = tokio::time::timeout(Duration::from_millis(300), &mut start).await;
+        assert!(waited.is_err(), "the start waits for the backup");
+        let calls = h.pool.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("destroy ")),
+            "{calls:?}"
+        );
+        assert_eq!(h.m.get("m_x").unwrap().state, state::STOPPED);
+        drop(backup);
+        let up = start.await.unwrap().unwrap();
+        assert_eq!(
+            (up.state.as_str(), up.image.as_str()),
+            (state::RUNNING, IMAGE2)
+        );
+        let key = h.m.inner.images.ensure(IMAGE2).await.unwrap().key;
+        assert_eq!(h.stored("m_x").unwrap().root_key, key);
+    }
+
+    #[tokio::test]
+    async fn a_new_size_is_reserved_at_the_start_and_refused_past_the_host() {
+        let h = harness("10.64.0.0/22", 1024).await;
+        h.ready().await;
+        let a = h.m.create(h.request("a")).await.unwrap();
+        let mut big = h.request("b");
+        big.size.memory_mb = 512;
+        let b = h.m.create(big).await.unwrap();
+        let grown = api::Size {
+            vcpus: 2,
+            memory_mb: 768,
+        };
+        let patched =
+            h.m.update(&a.id, spec(|s| s.size = Some(grown)), None)
+                .await
+                .unwrap();
+        // It runs on at its size: the host holds 256 for it.
+        assert_eq!(patched.size.memory_mb, 256);
+        assert_eq!(h.m.usage().0.memory_mb, 768);
+        h.m.stop(&a.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        // b holds 512: 768 more do not fit, and the change waits for a start that fits.
+        let full = h.m.start(&a.id, None).await;
+        assert!(matches!(full, Err(MError::Capacity(_))), "{full:?}");
+        let still = h.m.get(&a.id).unwrap();
+        assert_eq!(
+            (still.state.as_str(), still.size.memory_mb),
+            (state::STOPPED, 256)
+        );
+        assert_eq!(still.pending.and_then(|p| p.size), Some(grown));
+        h.m.stop(&b.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        // A restart of a stopped machine is a start.
+        let up = h.m.restart(&a.id, None).await.unwrap();
+        assert_eq!((up.state.as_str(), up.size), (state::RUNNING, grown));
+        assert_eq!(
+            h.m.usage().0,
+            api::Capacity {
+                memory_mb: 768,
+                vcpus: 2
+            }
+        );
+        assert_eq!(h.host.booted.lock().unwrap().get(&a.id), Some(&grown));
+    }
+
+    #[tokio::test]
+    async fn a_change_to_what_a_memory_snapshot_holds_makes_the_next_start_cold() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let suspend = || h.m.stop(&m.id, Duration::from_secs(1), true, None);
+        assert!(suspend().await.unwrap().suspended);
+        // The ports are the daemon's: a resume applies them.
+        h.m.update(&m.id, spec(|s| s.ports = Some(vec![8080])), None)
+            .await
+            .unwrap();
+        h.host.calls();
+        let back = h.m.start(&m.id, None).await.unwrap();
+        assert_eq!(back.ports, [8080]);
+        let calls = h.host.calls();
+        assert!(
+            calls.iter().any(|c| c.ends_with(" resume=true")),
+            "{calls:?}"
+        );
+        // The env is in the guest's memory: the snapshot is dropped, the boot is cold.
+        assert!(suspend().await.unwrap().suspended);
+        h.m.update(&m.id, spec(|s| s.env = Some(env("V", "2"))), None)
+            .await
+            .unwrap();
+        h.host.calls();
+        let cold = h.m.start(&m.id, None).await.unwrap();
+        assert!(!cold.suspended);
+        let calls = h.host.calls();
+        assert!(
+            calls.iter().any(|c| c.ends_with(" resume=false")),
+            "{calls:?}"
+        );
+        let evs = h.events_of(&m.id);
+        let starting = evs.iter().rev().find(|e| e.reason == "starting").unwrap();
+        assert_eq!(starting.data, Some(json!({"resume": false})));
+        assert_eq!(evs.last().map(|e| e.reason.as_str()), Some("started"));
+        assert_eq!(h.drive(&m.id).0.env.get("V").map(String::as_str), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn an_image_that_cannot_be_pulled_fails_the_boot_and_stays_pending() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        h.host.calls();
+        // No registry answers there.
+        let nowhere =
+            "127.0.0.1:1/nothing@sha256:0000000000000000000000000000000000000000000000000000000000000009";
+        h.m.update(&m.id, spec(|s| s.image = Some(nowhere.into())), None)
+            .await
+            .unwrap();
+        let failed = match h.m.start(&m.id, None).await {
+            Err(MError::BootFailed(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            (failed.state.as_str(), failed.image.as_str()),
+            (state::ERROR, IMAGE)
+        );
+        assert!(
+            failed.error.starts_with(&format!("image {nowhere}: ")),
+            "{}",
+            failed.error
+        );
+        assert_eq!(failed.pending.map(|p| p.fields), Some(vec!["image".into()]));
+        assert_eq!(
+            h.reasons(&m.id).last().map(String::as_str),
+            Some("boot_failed")
+        );
+        assert!(!h.host.calls().iter().any(|c| c.starts_with("boot ")));
+        // A PATCH back to the image it has leaves nothing pending; the start boots that.
+        let fixed =
+            h.m.update(&m.id, spec(|s| s.image = Some(IMAGE.into())), None)
+                .await
+                .unwrap();
+        assert!(fixed.pending.is_none() && fixed.pending_since.is_none());
+        assert_eq!(h.m.start(&m.id, None).await.unwrap().state, state::RUNNING);
+    }
+
+    #[tokio::test]
+    async fn create_and_patch_refuse_a_bad_spec_in_the_same_words() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let file = |path: &str, base64: &str, mode: Option<&str>| api::File {
+            path: path.into(),
+            base64: base64.into(),
+            mode: mode.map(String::from),
+        };
+        let bad = [
+            (
+                spec(|s| {
+                    s.size = Some(api::Size {
+                        vcpus: 0,
+                        memory_mb: 256,
+                    })
+                }),
+                "size.vcpus must be 1..32",
+            ),
+            (
+                spec(|s| s.files = Some(vec![file("etc/x", "", None)])),
+                "file \"etc/x\": path must be absolute",
+            ),
+            (
+                spec(|s| s.files = Some(vec![file("/x", "!!", None)])),
+                "file \"/x\": ",
+            ),
+            (
+                spec(|s| s.files = Some(vec![file("/x", "", Some("9"))])),
+                "file \"/x\": mode \"9\": want octal digits",
+            ),
+            (
+                spec(|s| s.env = Some(env("A=B", "1"))),
+                "env \"A=B\": a name is not empty and holds no \"=\"",
+            ),
+            (spec(|s| s.ports = Some(vec![0])), "ports: 0 is not a port"),
+            (
+                spec(|s| {
+                    s.restart = Some(api::RestartPolicy {
+                        policy: "sometimes".into(),
+                        max_retries: 0,
+                    })
+                }),
+                "restart.policy must be no, on-failure or always",
+            ),
+        ];
+        for (patch, want) in bad {
+            let s = patch.spec.clone();
+            let mut req = h.request("bad");
+            req.size = s.size.unwrap_or(req.size);
+            req.files = s.files.unwrap_or_default();
+            req.env = s.env.unwrap_or_default();
+            req.ports = s.ports.unwrap_or_default();
+            req.restart = s.restart;
+            let at_create = refused(h.m.create(req).await);
+            let at_patch = refused(h.m.update(&m.id, patch, None).await);
+            assert!(at_create.starts_with(want), "{at_create:?}, want {want:?}");
+            assert_eq!(at_create, at_patch);
+        }
+        assert!(h.m.get(&m.id).unwrap().pending.is_none());
+        let empty = refused(
+            h.m.update(&m.id, spec(|s| s.image = Some("".into())), None)
+                .await,
+        );
+        assert_eq!(empty, "image must not be empty");
     }
 }

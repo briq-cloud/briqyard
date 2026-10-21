@@ -58,6 +58,17 @@ a start takes the host's memory and moves to `starting` in one step under the ma
 lock, so starts that race never oversubscribe it; a destroy holds the machine's lock from the
 state check to the record's removal and, when it fails, is tried again every 15 s.
 
+A PATCH of what a machine runs (`image`, `entrypoint`, `cmd`, `env`, `files`, `size`, `ports`,
+`restart`; ADR 0024), checked by the same `SpecChange::check` as a create, is kept as `pending`
+and applied at the next start, never to a running process: a start or wake after a stop, a
+restart by the policy, or `POST /restart`. A new image is pulled and built before anything
+moves (a failure is `boot_failed`, the change kept); the change goes onto the record in the
+step that reserves the memory, so a new size is reserved there (`capacity` past the host);
+then a new image's root disk is cloned again from its `@base` (forks of the old one promoted,
+as at a destroy) and the boot reads the record. The data volume is never touched. A change to
+anything a memory snapshot holds (all but `ports` and `restart`) makes that start cold.
+`updated` (`pending: true`) marks the PATCH, `applied` the start.
+
 ### Probes and restarts
 
 A machine may have a startup, a readiness and a liveness probe (ADR 0022, `machine/probes.rs`),
@@ -205,7 +216,7 @@ log's last line and every record's version. A state change says what happened th
 `Entry::set_state`, whose closure returns the event; the other facts (a create, a restart, a
 PATCH, a backup, a destroy, the gateway serving or put to sleep, an image pull, the daemon's
 start, an adoption) are logged where they happen. The seq of the last event about a machine is
-its `version`; `PATCH`, `DELETE`, `start`, `stop` and `wake` take `If-Match` and answer 409
+its `version`; `PATCH`, `DELETE`, `start`, `stop`, `wake` and `restart` take `If-Match` and answer 409
 `conflict` with the machine when it moved. `GET /v1/events` reads from a cursor (`since`, 410
 `gone` when it is pruned or past the log); `watch=true` subscribes, sends the backlog, then each
 new event as NDJSON with `{}` every 30 s, and closes a watcher that falls 1,024 events behind.
