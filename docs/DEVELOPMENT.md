@@ -137,7 +137,11 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   words), labels, quotas and logs follow (a listing by labels, the quota at create, fork,
   start and the gateway with its message and event, its use; a follow from the start and
   from a cursor, across rotations, ending at the destroy, its heartbeat and shutdown;
-  placement by region and the cross-region refusal through stub hosts in two regions), the
+  placement by region and the cross-region refusal through stub hosts in two regions), disk
+  limits (the host's per vCPU under a machine's own at boot, a new size's at the next boot, a
+  live change and a refused one, a stopped machine's at its start, the drive and metrics
+  requests Firecracker gets, metrics lines added per machine across boots, the jail's
+  `cpu.weight`), the
   pool's key (an unencrypted pool refused, a loaded key left alone, loaded from a file and from
   a stub fleet as the host, each failed try saying why without the key, the wait ended by a
   stop; `load-key` with the key on stdin; a filesystem never mounted over files; the fleet's
@@ -164,11 +168,14 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
   new image: Python 3.13, the volume's file kept), labels, a quota and a follow (`ls -l` selecting one machine, a
   refused selector, a second create refused 403 `quota` with its use and event, `logs -f`
-  receiving a line printed after it began and ending at the destroy), encryption at rest
+  receiving a line printed after it began and ending at the destroy), disk limits (a machine's
+  own over the host's for 2 vCPUs; at 4 MB/s, 32 MiB written to the volume in 5 s or more and
+  16 MiB read from the root disk in 2 s or more, with O_DIRECT; `cpu.weight` 200; lifted live;
+  set while suspended and in force after the resume; throttling on `/metrics`), encryption at rest
   (the pool and every dataset under it encrypted, records, runs, images and jails on it, the
   key in none of the daemon's files nor its log; the daemon stopped and the pool locked as a
   reboot leaves it: without its key file no API and the reason logged, the file back and it
-  starts, a machine of before runs again). 141 checks.
+  starts, a machine of before runs again). 148 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,

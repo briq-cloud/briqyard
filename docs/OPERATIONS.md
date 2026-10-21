@@ -99,6 +99,9 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `egress_limits.blocked_ports` | `[25]` | Destination ports no machine reaches on the internet, TCP and UDP (ADR 0018). A machine's own `limits` override each field |
 | `egress_limits.new_connections_per_minute` | `0` (none) | New internet connections a machine may open a minute, as many at once |
 | `egress_limits.bandwidth_mbit` | `0` (none) | A machine's internet bandwidth, in and out together; at most 100000 |
+| `disk_limits.bandwidth_mb_per_vcpu` | `32` | MB a second on each disk of a machine (root and volume), per vCPU of its size (ADR 0030). A machine's own `disk_limits` override each field with an absolute value. `0`: none |
+| `disk_limits.iops_per_vcpu` | `4000` | Disk requests a second, per vCPU, on each disk. `0`: none |
+| `disk_limits.burst_sec` | `10` | Seconds at those rates let through at full speed once after a start, a wake or a change |
 | `ingress.tcp_ports` | `20000-29999` | Host ports handed to TCP endpoints |
 | `ingress.bind` | `127.0.0.1` | Where TCP endpoints listen. A public address is refused without `ingress.allowed_clients` or `ingress.allow_public` |
 | `ingress.allowed_clients` | none | The IPv4 networks (`a.b.c.d/n`) that may reach the API, the HTTP ingress and the TCP endpoints; rendered into the daemon's nftables table (`nft list table inet briqyard`). Loopback always may. Empty: anyone who can route to the address |
@@ -217,6 +220,7 @@ backup until sent elsewhere.
   | `briqyard_machine_memory_bytes`, `_memory_limit_bytes` | same | its cgroup's memory, its size |
   | `briqyard_machine_disk_used_bytes` | same | its disks, snapshots and memory snapshot |
   | `briqyard_machine_{internet,ingress}_{in,out}_bytes_total`, `_egress_dropped_packets_total` | same | its traffic |
+  | `briqyard_machine_disk_{read,write}_bytes_total`, `_disk_throttled_total` | same | its disks, and the requests its disk limits held back; from Firecracker's metrics, a line a minute |
   | `briqyard_machine_restarts_total` | same | restarts by its policy |
   | `briqyard_machine_state` | same, `state` | 1, one series per machine |
   | `briqyard_machine_boot_seconds` | same | its last start, `starting` to `running` |
@@ -246,6 +250,9 @@ backup until sent elsewhere.
 - Egress limits (ADR 0018): `briqyard machine get <id>` shows `limits` and `egress_drops`;
   `briqyard machine set-limits <id> --conn-per-min 0` lifts a rate at once. Raw:
   `nft list set inet briqyard dropped_port` (also `dropped_rate`, `dropped_bandwidth`).
+- Disk limits (ADR 0030): `briqyard machine get <id>` shows `disk_limits` in force (the `DISK`
+  column); `briqyard machine set-disk-limits <id> --disk-bw 0` lifts one on a running machine at
+  once. A machine at its limit grows `briqyard_machine_disk_throttled_total`.
 
 ## When something is off
 
