@@ -891,7 +891,7 @@ fn listen_exit(
             _ = done.wait_for(|d| *d) => None,
         };
         if let Some((mut s, _)) = accepted {
-            if let Ok(report) = crate::guestc::read_frame::<guest::ExitReport>(&mut s).await {
+            if let Ok(report) = crate::guestc::read_frame::<_, guest::ExitReport>(&mut s).await {
                 let _ = tx.send(Some(report));
             }
         }

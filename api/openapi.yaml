@@ -144,6 +144,22 @@ paths:
         "409": { description: "`not_ready`: still running not ready at the timeout, the body's `machine` is it with its `probes_status`; `boot_failed` (`for=ready`): it is in `error`, its guest or its startup probe failed the boot, the body's `machine` is it; `not_running`: it will not run (stopped, destroying; `error` with `for=running`), or did not start in time" }
   /v1/machines/{id}/exec:
     parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: "An exec session (ADR 0029): a WebSocket upgrade (`Connection: Upgrade`, `Upgrade: websocket`, the bearer token as for every route). Every message is binary, its first byte the channel: 0 stdin (to the server), 1 stdout, 2 stderr (empty with `tty`), 3 the end (`SessionEnd`, last), 4 a resize (`Resize`, to the server), 255 a close (payload `0`: stdin's end; nothing on a terminal, where ^D is a byte). The command starts before the `101`; closing the connection ends it (SIGKILL to its process group; on a terminal SIGHUP first, SIGKILL 5 s later). The machine is in use while the session is open: it does not go to sleep. A ping every 30 s; a client silent for 90 s is gone. A `session_opened` event. Through the fleet, relayed as bytes to the machine's host"
+      parameters:
+        - { name: cmd, in: query, required: true, schema: { type: array, items: { type: string } }, style: form, explode: true, description: "one per argument, in order" }
+        - { name: env, in: query, schema: { type: array, items: { type: string } }, style: form, explode: true, description: "`NAME=VALUE`, one per variable" }
+        - { name: cwd, in: query, schema: { type: string } }
+        - { name: timeout_ms, in: query, schema: { type: integer, default: 0, maximum: 3600000 }, description: "the command's deadline; 0 is none: it lasts as long as the session" }
+        - { name: wake, in: query, schema: { type: boolean, default: true }, description: "wake a sleeping machine (and wait for it to be ready) before the command" }
+        - { name: tty, in: query, schema: { type: boolean, default: false }, description: "a pseudo-terminal: one output, `TERM` from `env` (`xterm` when absent), the command its session leader" }
+        - { name: cols, in: query, schema: { type: integer, default: 80, maximum: 65535 } }
+        - { name: rows, in: query, schema: { type: integer, default: 24, maximum: 65535 } }
+      responses:
+        "101": { description: "the session; its messages as above" }
+        "400": { description: "`invalid`: not an upgrade, no `cmd`, an unknown parameter or a value that does not parse" }
+        "404": { description: "`not_found`" }
+        "409": { description: "`not_running`: not running and `wake` was false, or the guest did not take the command; `boot_failed`: the wake did not boot" }
     post:
       summary: Run a command inside the machine
       requestBody:
@@ -633,6 +649,20 @@ components:
         stdin: { type: string }
         timeout_ms: { type: integer, default: 300000, maximum: 3600000 }
         wake: { type: boolean, default: true, description: Wake a sleeping machine for the command; false answers 409 when it is not running }
+    SessionEnd:
+      type: object
+      description: "the last message of a session (channel 3): how the command ended, or, with `code`, why the session ended without it (`not_running`: the machine went down; `invalid`: a message the server could not read; `internal`)"
+      properties:
+        exit_code: { type: integer }
+        timed_out: { type: boolean }
+        code: { type: string }
+        error: { type: string }
+    Resize:
+      type: object
+      required: [cols, rows]
+      properties:
+        cols: { type: integer }
+        rows: { type: integer }
     ExecResult:
       type: object
       properties:
@@ -846,7 +876,7 @@ components:
         seq: { type: integer, description: one more per event on its host, never reused }
         at: { type: string, format: date-time }
         type: { type: string, enum: [normal, warning] }
-        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`" }
+        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded, session_opened], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`, ADR 0029's for `session_opened`" }
         message: { type: string, description: for a person; at most 1 KB }
         machine_id: { type: string }
         tenant: { type: string }

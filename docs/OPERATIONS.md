@@ -198,7 +198,7 @@ backup until sent elsewhere.
   | `briqyard_pool_bytes`, `briqyard_disk_free_mb` | `kind="size\|used\|free"` | the pool |
   | `briqyard_host_condition` | `condition` | 1 while true |
   | `briqyard_events_total` | `type`, `reason` | events since the daemon started |
-  | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_tenants`, `briqyard_endpoints` | | counts |
+  | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_tenants`, `briqyard_endpoints` | | counts (`execs`: exec sessions included) |
   | `briqyard_machine_cpu_seconds_total` | `machine`, `tenant`, `name`, `role` (a gateway's) | its cgroup's CPU time |
   | `briqyard_machine_memory_bytes`, `_memory_limit_bytes` | same | its cgroup's memory, its size |
   | `briqyard_machine_disk_used_bytes` | same | its disks, snapshots and memory snapshot |
@@ -221,6 +221,10 @@ backup until sent elsewhere.
 - Quotas (ADR 0025): `briqyard tenant quota <tenant>` shows a tenant's limits and use;
   `--machines N --memory-mb N --vcpus N --disk-gb N` puts exactly those (briq sets them from the
   plan). A refusal is a `quota_exceeded` warning in `briqyard events --tenant <tenant>`.
+- A shell in a machine (ADR 0029): `briqyard machine exec -it <id> -- sh`; `-i` alone for a pipe.
+  Each session is a `session_opened` event (`briqyard events --machine <id>`) and an `exec
+  session ended` log line with its code and length. A machine with a session open does not go
+  to sleep; a client silent for 90 s is dropped and its command ended.
 - `briqyard machine stats <id>`: CPU time, memory and disk it uses now, from its cgroup and its
   datasets. `briqyard machine set-sleep <id> 3h|never` changes the window without a restart.
 - What a machine runs (ADR 0024): `briqyard machine set <id> --image … --memory … -e K=V -- cmd…`
@@ -258,6 +262,8 @@ backup until sent elsewhere.
 | `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
 | `dataset is busy` | A zvol a Firecracker just released; the daemon retries for ten seconds |
+| A machine with `sleep` set never sleeps | A session is open on it (`session_opened` without its `exec session ended` line): it is in use until its client leaves |
+| `-t needs a terminal on stdin` | `machine exec -t` from a script or a pipe: use `-i` alone |
 | A jail refuses to start | `<run>/<machine>/console.log` holds the jailer's own messages |
 
 ## A fleet

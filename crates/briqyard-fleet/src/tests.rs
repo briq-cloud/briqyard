@@ -306,6 +306,43 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         )
             .into_response()
     }
+    /// A session (ADR 0029) as the daemon serves one, reduced: its stdin back on stdout until
+    /// stdin closes, then an exit of 7. A machine not running is refused before the upgrade.
+    async fn exec_session(
+        State(d): D,
+        Path(id): Path<String>,
+        ws: axum::extract::ws::WebSocketUpgrade,
+    ) -> Response {
+        use api::session::{channel, message, parse};
+        use axum::extract::ws::Message;
+        let running = d
+            .machines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.id == id && m.state == api::state::RUNNING);
+        if !running {
+            return err(
+                StatusCode::CONFLICT,
+                "not_running",
+                "machine is not running: stopped",
+            )
+            .into_response();
+        }
+        ws.on_upgrade(|mut socket| async move {
+            while let Some(Ok(Message::Binary(b))) = socket.recv().await {
+                let reply = match parse(&b) {
+                    Some((channel::STDIN, p)) => message(channel::STDOUT, p),
+                    Some((channel::CLOSE, _)) => message(channel::EXIT, br#"{"exit_code":7}"#),
+                    _ => continue,
+                };
+                let last = reply[0] == channel::EXIT;
+                if socket.send(Message::Binary(reply)).await.is_err() || last {
+                    break;
+                }
+            }
+        })
+    }
     /// Like the daemon: a bad name is refused, and a machine that does not fit in what the
     /// host has left.
     async fn create(State(d): D, Json(req): Json<api::CreateMachineRequest>) -> Response {
@@ -516,6 +553,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         .route("/v1/machines/:id", get(get_machine).delete(delete_machine))
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/logs", get(logs))
+        .route("/v1/machines/:id/exec", get(exec_session))
         .route("/v1/tenants/:id/quota", get(get_quota).put(put_quota))
         .route("/v1/machines/:id/backups", get(backups))
         .route(
@@ -2801,4 +2839,91 @@ async fn a_logs_follow_is_streamed_through_as_it_comes() {
         tx.send(l.to_string() + "\n").await.unwrap();
         assert_eq!(chunk(&mut w).await["line"], line);
     }
+}
+
+// --- exec sessions (ADR 0029) ---
+
+/// The fleet on a port of its own: an upgrade needs a real connection.
+async fn serve_fleet(f: &Fleet) -> String {
+    let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = ln.local_addr().unwrap();
+    let app = app(f.st.clone());
+    tokio::spawn(async move { axum::serve(ln, app).await.unwrap() });
+    addr.to_string()
+}
+
+#[tokio::test]
+async fn a_session_is_relayed_unchanged_to_the_machines_host() {
+    use api::session::{channel, message, parse};
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+    let (f, ds) = fleet_with_daemons(2).await;
+    let m = ds[1].stub.add("t1", "sbx", 512);
+    let addr = serve_fleet(&f).await;
+    let mut req = format!("ws://{addr}/v1/machines/{}/exec?cmd=sh&tty=true", m.id)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer api".parse().unwrap());
+    let tcp = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let (mut ws, resp) = tokio_tungstenite::client_async(req, tcp).await.unwrap();
+    assert_eq!(resp.headers()["x-briqyard-host"], "d2");
+    // The handshake reached the machine's host, with its query and the host's token.
+    assert_eq!(
+        ds[1].stub.calls().last().unwrap(),
+        &format!("GET /v1/machines/{}/exec?cmd=sh&tty=true", m.id)
+    );
+    ws.send(Message::Binary(message(channel::STDIN, b"hi\n")))
+        .await
+        .unwrap();
+    let Some(Ok(Message::Binary(b))) = ws.next().await else {
+        panic!("no echo")
+    };
+    assert_eq!(parse(&b), Some((channel::STDOUT, &b"hi\n"[..])));
+    ws.send(Message::Binary(message(channel::CLOSE, &[channel::STDIN])))
+        .await
+        .unwrap();
+    let Some(Ok(Message::Binary(b))) = ws.next().await else {
+        panic!("no exit")
+    };
+    assert_eq!(parse(&b), Some((channel::EXIT, &br#"{"exit_code":7}"#[..])));
+}
+
+#[tokio::test]
+async fn a_session_refused_by_the_host_or_not_a_websocket_is_an_answer() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let m = ds[0].stub.add("t1", "sbx", 512);
+    let addr = serve_fleet(&f).await;
+    let http = reqwest::Client::new();
+    // Not an upgrade: refused by the fleet, before any host is asked.
+    let r = http
+        .get(format!("http://{addr}/v1/machines/{}/exec?cmd=sh", m.id))
+        .bearer_auth("api")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(&r.text().await.unwrap())["code"], "invalid");
+    // A machine no host has: 404, as for every machine route.
+    let upgrade = |url: String| {
+        http.get(url)
+            .bearer_auth("api")
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .send()
+    };
+    let r = upgrade(format!("http://{addr}/v1/machines/m_none/exec?cmd=sh"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    // The host's refusal comes back as it said it.
+    ds[0].stub.machines.lock().unwrap()[0].state = api::state::STOPPED.into();
+    let r = upgrade(format!("http://{addr}/v1/machines/{}/exec?cmd=sh", m.id))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert_eq!(r.headers()["x-briqyard-host"], "d1");
+    assert_eq!(json(&r.text().await.unwrap())["code"], "not_running");
 }

@@ -145,9 +145,14 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
   new image: Python 3.13, the volume's file kept), labels, a quota and a follow (`ls -l` selecting one machine, a
   refused selector, a second create refused 403 `quota` with its use and event, `logs -f`
-  receiving a line printed after it began and ending at the destroy). 132 checks.
+  receiving a line printed after it began and ending at the destroy), exec sessions (`-i`
+  streaming stdin, stderr apart and the code; `-it` driven by `hack/exec-tty.py`: a terminal of
+  the size sent, a resize followed, the exit code; the client's close hanging up a tty command
+  and killing a piped one; the `session_opened` event; a machine with a session open kept awake
+  past its window, asleep once it closed). 144 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
-  daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
+  daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
+  relayed. 21 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases

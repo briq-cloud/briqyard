@@ -14,6 +14,7 @@ mod machine;
 mod metrics;
 mod netw;
 mod objstore;
+mod session;
 mod store;
 mod tls;
 mod usage;

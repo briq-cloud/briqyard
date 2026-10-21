@@ -18,6 +18,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 axum = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }
 async-trait = "0.1"
@@ -27,6 +29,8 @@ base64 = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true, features = ["ws"] }
+tokio-tungstenite = { workspace = true }
 futures = { workspace = true }
 tempfile = "3"
 rcgen = { workspace = true }

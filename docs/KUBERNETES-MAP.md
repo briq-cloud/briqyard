@@ -51,7 +51,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | Pod | ✓ machine | | |
 | Change image, env, command, size (`kubectl apply`, `set image`, in-place resize) | ✓ PATCH of image, entrypoint, cmd, env, files, size, ports, restart, `pending` until the next start, `POST /restart`; the root disk follows the image, the volume stays (ADR 0024) | a change to a running process (memory hot-plug) | |
-| `kubectl exec -it`, attach | ◐ exec with stdin and streamed output, no TTY | a TTY | yard, later |
+| `kubectl exec -it`, attach | ✓ exec sessions over a WebSocket: stdin streamed, a terminal with resize, the exit code, the client's close ends the command, use while open, through the fleet (ADR 0029) | attach to the main process (its output is `logs -f`) | yard, later |
 | `kubectl cp` | ✓ `/files` | | |
 | Pod phases and conditions | ✓ states, `stopped_reason`, exit code, `ready` (ADR 0022) | | |
 | Liveness, readiness, startup probes | ✓ in the daemon: exec, TCP, HTTP, Kubernetes's timings, 32 at once per host (ADR 0022) | gRPC probes | yard, later |
@@ -181,4 +181,4 @@ Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit 
 
 Decided for the founder (advisor, 2026-10-20): the daemon runs scheduled backups from a policy briq sets; the pool is encrypted with one key per host held by the fleet, built before the first real host (after TLS); events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and briq's healthcheck moves onto them.
 
-Later, in the tables above: groups and load balancing, the mesh, volume expansion, encryption at rest, scoped tokens, fleet HA, `host upgrade`, evacuation, a TTY for exec.
+Later, in the tables above: groups and load balancing, the mesh, volume expansion, encryption at rest, scoped tokens, fleet HA, `host upgrade`, evacuation. Built since: a TTY for exec (ADR 0029).

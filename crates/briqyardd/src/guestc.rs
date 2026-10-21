@@ -6,8 +6,13 @@ use async_trait::async_trait;
 use briqyard_api::guest::{self, Request, Response};
 use std::path::Path;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+/// An exec's connection to the init, past its request: its output frames to read, its input
+/// frames to write (ADR 0029). Closing it ends the command.
+pub trait Conn: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn for T {}
 
 /// The guest as the manager reaches it, by the machine's vsock socket: the init over vsock
 /// on the host, a mock in the manager's tests.
@@ -15,7 +20,10 @@ use tokio::net::UnixStream;
 pub trait Guest: Send + Sync {
     async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<()>;
     async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()>;
+    /// Runs a command and collects what it printed.
     async fn exec(&self, vsock: &Path, req: Request) -> Result<ExecOutput>;
+    /// Starts a command and hands its connection over.
+    async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>>;
     async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()>;
     async fn get(&self, vsock: &Path, path: &str) -> Result<Vec<u8>>;
 }
@@ -33,6 +41,9 @@ impl Guest for Vsock {
     }
     async fn exec(&self, vsock: &Path, req: Request) -> Result<ExecOutput> {
         exec(vsock, req).await
+    }
+    async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>> {
+        Ok(Box::new(session(vsock, req).await?))
     }
     async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()> {
         put(vsock, path, mode, data).await
@@ -60,14 +71,19 @@ pub async fn dial(uds: &Path) -> Result<UnixStream> {
     Ok(r.into_inner())
 }
 
-async fn write_request(s: &mut UnixStream, req: &Request) -> Result<()> {
+/// Writes one frame: a request, or an exec's input after it.
+pub async fn write_request<W: AsyncWrite + Unpin>(s: &mut W, req: &Request) -> Result<()> {
     s.write_all(&guest::encode_frame(req)?).await?;
     s.flush().await?;
     Ok(())
 }
 
 /// Reads one frame of the guest protocol.
-pub async fn read_frame<T: serde::de::DeserializeOwned>(s: &mut UnixStream) -> Result<T> {
+pub async fn read_frame<R, T>(s: &mut R) -> Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: serde::de::DeserializeOwned,
+{
     let mut hdr = [0u8; 4];
     s.read_exact(&mut hdr).await?;
     let n = u32::from_be_bytes(hdr) as usize;
@@ -77,10 +93,6 @@ pub async fn read_frame<T: serde::de::DeserializeOwned>(s: &mut UnixStream) -> R
     let mut body = vec![0u8; n];
     s.read_exact(&mut body).await?;
     Ok(guest::decode_frame(&body)?)
-}
-
-async fn read_response(s: &mut UnixStream) -> Result<Response> {
-    read_frame(s).await
 }
 
 #[derive(Debug)]
@@ -98,10 +110,22 @@ pub const MAX_OUTPUT: usize = 4 << 20;
 #[error("the guest connection closed before the command ended")]
 pub struct Closed;
 
-pub async fn exec(uds: &Path, mut req: Request) -> Result<ExecOutput> {
+/// Starts a command: the connection, its request sent, for the output to be read from and
+/// the input written to.
+pub async fn session(uds: &Path, mut req: Request) -> Result<UnixStream> {
     req.op = "exec".into();
     let mut s = dial(uds).await?;
     write_request(&mut s, &req).await?;
+    Ok(s)
+}
+
+/// Runs a command to its end: one session, its output collected.
+pub async fn exec(uds: &Path, req: Request) -> Result<ExecOutput> {
+    collect(&mut session(uds, req).await?).await
+}
+
+/// Reads an exec's output frames to its `exit`; a connection closed before it is [`Closed`].
+pub async fn collect<R: AsyncRead + Unpin>(s: &mut R) -> Result<ExecOutput> {
     let mut out = ExecOutput {
         stdout: Vec::new(),
         stderr: Vec::new(),
@@ -109,7 +133,7 @@ pub async fn exec(uds: &Path, mut req: Request) -> Result<ExecOutput> {
         timed_out: false,
     };
     loop {
-        let r = match read_response(&mut s).await {
+        let r: Response = match read_frame(s).await {
             Ok(r) => r,
             Err(e) => {
                 if e.downcast_ref::<std::io::Error>()
@@ -143,7 +167,7 @@ fn append(buf: &mut Vec<u8>, data: &[u8]) {
 async fn round_trip(uds: &Path, req: Request) -> Result<Response> {
     let mut s = dial(uds).await?;
     write_request(&mut s, &req).await?;
-    let r = read_response(&mut s).await?;
+    let r: Response = read_frame(&mut s).await?;
     if r.kind == "error" {
         return Err(anyhow!("{}", r.message));
     }
@@ -342,6 +366,60 @@ mod tests {
         assert_eq!(seen.cwd, "/work");
         assert_eq!(seen.stdin, b"in");
         assert_eq!(seen.timeout_ms, 500);
+    }
+
+    #[tokio::test]
+    async fn a_session_is_the_exec_connection_kept_for_input() {
+        let (_dir, path) = socket();
+        let ln = UnixListener::bind(&path).unwrap();
+        // The init's side: the request, then input frames, answered by an echo and the exit.
+        let init = tokio::spawn(async move {
+            let (s, _) = ln.accept().await.unwrap();
+            let mut r = BufReader::new(s);
+            let mut line = String::new();
+            r.read_line(&mut line).await.unwrap();
+            let mut s = r.into_inner();
+            s.write_all(OK.as_bytes()).await.unwrap();
+            let req: Request = read_frame(&mut s).await.unwrap();
+            let input: Request = read_frame(&mut s).await.unwrap();
+            let close: Request = read_frame(&mut s).await.unwrap();
+            for a in [
+                Response::chunk("stdout", input.data.clone()),
+                Response::exit(0, false),
+            ] {
+                s.write_all(&frame(&a)).await.unwrap();
+            }
+            (req, input.op, close.op)
+        });
+        let req = Request {
+            cmd: vec!["cat".into()],
+            interactive: true,
+            tty: true,
+            cols: 100,
+            rows: 30,
+            ..Default::default()
+        };
+        let mut s = session(&path, req).await.unwrap();
+        for f in [
+            Request {
+                op: "stdin".into(),
+                data: b"typed".to_vec(),
+                ..Default::default()
+            },
+            Request {
+                op: "close_stdin".into(),
+                ..Default::default()
+            },
+        ] {
+            write_request(&mut s, &f).await.unwrap();
+        }
+        let out = collect(&mut s).await.unwrap();
+        assert_eq!((out.stdout.as_slice(), out.code), (&b"typed"[..], 0));
+        let (seen, input, close) = init.await.unwrap();
+        assert_eq!(seen.op, "exec");
+        assert!(seen.interactive && seen.tty);
+        assert_eq!((seen.cols, seen.rows), (100, 30));
+        assert_eq!((input.as_str(), close.as_str()), ("stdin", "close_stdin"));
     }
 
     #[tokio::test]
