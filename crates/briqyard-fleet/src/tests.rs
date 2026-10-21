@@ -691,12 +691,28 @@ async fn call_from(
     token: &str,
     body: Option<serde_json::Value>,
 ) -> (StatusCode, HeaderMap, String) {
+    call_with(st, peer, &[], method, path, token, body).await
+}
+
+/// `call_from` with request headers of its own (a proxy's `X-Forwarded-For`).
+async fn call_with(
+    st: &Arc<AppState>,
+    peer: std::net::IpAddr,
+    extra: &[(&str, &str)],
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, HeaderMap, String) {
     let mut req = axum::http::Request::builder()
         .method(method)
         .uri(path)
         .extension(axum::extract::ConnectInfo(std::net::SocketAddr::new(
             peer, 40000,
         )));
+    for (k, v) in extra {
+        req = req.header(*k, *v);
+    }
     if !token.is_empty() {
         req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -1055,9 +1071,11 @@ async fn a_host_call_must_come_from_the_host() {
     .await;
     assert_eq!(s, StatusCode::OK, "{text}");
 
+    // tls: off on a public address: whatever is in front is unknown, the token alone.
     let behind = fleet(
         config::Config {
-            hosts,
+            hosts: hosts.clone(),
+            listen: "0.0.0.0:7430".into(),
             tls: config::Tls::Off,
             ..Default::default()
         },
@@ -1073,6 +1091,45 @@ async fn a_host_call_must_come_from_the_host() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "tls: off checks the token alone: {text}");
+
+    // tls: off on loopback: a proxy of ours in front; its last X-Forwarded-For is the caller.
+    let local = fleet(
+        config::Config {
+            hosts,
+            listen: "127.0.0.1:7430".into(),
+            tls: config::Tls::Off,
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let proxy = std::net::IpAddr::from([127, 0, 0, 1]);
+    let key = |xff: &'static [(&'static str, &'static str)]| {
+        let st = local.st.clone();
+        async move {
+            call_with(
+                &st,
+                proxy,
+                xff,
+                "POST",
+                "/v1/hosts/key",
+                "s1-token",
+                ask("http://10.0.0.1:7420"),
+            )
+            .await
+        }
+    };
+    let (s, _, text) = key(&[("x-forwarded-for", "203.0.113.7, 10.0.0.1")]).await;
+    assert_eq!(s, StatusCode::OK, "the proxy's own value, the last: {text}");
+    let (s, _, text) = key(&[("x-forwarded-for", "10.0.0.1, 203.0.113.7")]).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "a forged first value counts for nothing: {text}"
+    );
+    assert!(text.contains("not 203.0.113.7"), "{text}");
+    let (s, _, text) = key(&[]).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "no header, no address: {text}");
+    assert!(text.contains("not an unknown address"), "{text}");
 }
 
 #[tokio::test]

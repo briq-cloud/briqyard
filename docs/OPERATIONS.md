@@ -337,7 +337,10 @@ fleet's `state_dir` must be on an encrypted disk: it opens every pool.
 
 Where the fleet terminates the connection (its `tls`, or plain on loopback), a host's
 heartbeat and key request must come from the address in its `url`: a host is listed by its
-address, not a name. Behind `tls: off` only the token is checked. **Retire or forget a host
+address, not a name. A fleet behind a proxy on the same machine (Caddy terminating TLS for
+the fleet's name) has `tls: off` and a loopback `listen` (`127.0.0.1:7430`): the caller is
+the last `X-Forwarded-For` value, which the proxy writes, and a call without one is refused.
+Behind `tls: off` on any other address only the token is checked. **Retire or forget a host
 before its server or a disk leaves our hands.** A disk the provider swaps while the host stays
 carries the host's token: rotate it (a static host: a new `token` in its `hosts:` entry and in
 its `/etc/briqyard/config.yaml`, then restart the fleet and the daemon; an ordered host: no

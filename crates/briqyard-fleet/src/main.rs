@@ -383,9 +383,12 @@ async fn list_hosts(State(st): S) -> Json<Vec<api::Host>> {
     Json(hosts)
 }
 
-/// Who made a host's call, as the fleet sees it: the connection's peer, and whether the fleet
-/// terminates the connection itself (its own TLS, or plain on loopback) so that the peer is the
-/// host's. Behind `tls: off` the peer is whatever is in front, so it proves nothing.
+/// Who made a host's call, as the fleet sees it, and whether that is known.
+/// - The fleet terminates the connection (its own TLS, or plain on loopback): the peer.
+/// - `tls: off` on a loopback listener: a proxy of ours in front, by construction (nothing
+///   else reaches a loopback port), so the last `X-Forwarded-For` value, which the proxy
+///   writes; a call without one is from an unknown address.
+/// - `tls: off` on any other address: whatever is in front, unknown: the token alone.
 #[derive(Clone, Copy, Debug)]
 struct Caller {
     peer: Option<std::net::IpAddr>,
@@ -393,10 +396,46 @@ struct Caller {
 }
 
 impl Caller {
-    fn of(st: &AppState, info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>) -> Caller {
+    fn of(
+        st: &AppState,
+        info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+        headers: &HeaderMap,
+    ) -> Caller {
+        let connection = info.map(|i| i.0.ip().to_canonical());
+        if !matches!(st.cfg.tls, config::Tls::Off) {
+            return Caller {
+                peer: connection,
+                checked: true,
+            };
+        }
+        let loopback = st
+            .cfg
+            .listen
+            .parse::<std::net::SocketAddr>()
+            .is_ok_and(|a| a.ip().is_loopback());
+        if !loopback {
+            return Caller {
+                peer: connection,
+                checked: false,
+            };
+        }
+        let forwarded = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .last()
+            .and_then(|v| {
+                v.trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .ok()
+            })
+            .map(|ip| ip.to_canonical());
         Caller {
-            peer: info.map(|i| i.0.ip().to_canonical()),
-            checked: !matches!(st.cfg.tls, config::Tls::Off),
+            peer: forwarded,
+            checked: true,
         }
     }
 }
@@ -483,7 +522,7 @@ async fn host_key(
     headers: HeaderMap,
     Json(req): Json<api::HostKeyRequest>,
 ) -> Result<Response, Refusal> {
-    let caller = Caller::of(&st, info);
+    let caller = Caller::of(&st, info, &headers);
     let _turn = st.key_turn.lock().await;
     let (id, key, made) = {
         let mut reg = st.reg.lock().unwrap();
@@ -520,7 +559,7 @@ async fn register_host(
     Json(req): Json<api::RegisterHostRequest>,
 ) -> Result<Response, Refusal> {
     let now = Utc::now();
-    let caller = Caller::of(&st, info);
+    let caller = Caller::of(&st, info, &headers);
     {
         let mut reg = st.reg.lock().unwrap();
         let call = format!("heartbeat of {}", req.id);
