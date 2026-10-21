@@ -60,7 +60,8 @@ sleep 16
 check "back after rm (a static host is polled again)" 'briqyard host ls | awk "NR>1" | grep -q ready'
 
 REL=/var/lib/briqyard-fleet/release
-if [ -d "$REL" ]; then
+# The fleet keeps its state directory to itself: root looks.
+if sudo -n test -d "$REL" 2>/dev/null; then
   echo "== host upgrade: this build again, a machine running (ADR 0027)"
   # The VM's own host, the one the fleet reaches over SSH; the machine is placed there.
   UP=$(hosts | jq -r '.[] | select(.url | test("//127[.]0[.]0[.]1:")) | .id')
