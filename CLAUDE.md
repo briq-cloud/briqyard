@@ -56,7 +56,7 @@ docs/                   architecture, operations, development, mesh design, adr/
 
 - **Every change goes through a PR.** Never commit or push to `main`. One branch per task (`feat/…`, `fix/…`, `docs/…`) in its own worktree: `git worktree add ../briqyard-<task> -b <branch> origin/main`. This checkout stays on `main`.
 - A PR body says what was built, the checks with their numbers (unit, clippy, e2e, fleet suites), the choices to review, and its merge order when it depends on another PR. A draft while still pushing.
-- The founder reviews and approves before a merge. Merge with a merge commit once CI is green; a PR that conflicts with one merged before it is updated on its own branch, its checks run again.
+- An advisor agent (Fable) reviews every PR and approves before a merge; the founder delegated the review. Its findings are fixed on the branch and checked again. Merge with a merge commit once CI is green; a PR that conflicts with one merged before it is updated on its own branch, its checks run again.
 - Delete the worktree and the branch once merged.
 - The monorepo side (`BriqyardProvider`, PR up-lab/briq#250) lives in `/Users/uplab/projects/briq-briqyard-provider` and follows that repo's `CLAUDE.md`.
 - Never commit `target/`, `bin/`, `.env`, a token or a key.
