@@ -180,10 +180,30 @@ paths:
       responses:
         "200": { description: backups, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Backup" } } } } }
     post:
-      summary: Send the machine's disks to the backup store, whole the first time and what changed after (crash-consistent while it runs)
+      summary: "Send the machine's disks to the backup store (crash-consistent while it runs), after any backup of it under way: whole the first time and every `keep`-th, else what changed since the last; then, with a schedule, the backups that are neither among the newest `keep` nor a base of one go (ADR 0023). Its schedule's next time is `every` from now"
       responses:
         "201": { description: backup made, content: { application/json: { schema: { $ref: "#/components/schemas/Backup" } } } }
         "400": { description: backups are off on this host }
+  /v1/machines/{id}/backups/{backup}:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: backup, in: path, required: true, schema: { type: string } }
+      - { name: chain, in: query, description: "also delete every backup that continues from it", schema: { type: boolean, default: false } }
+      - { name: tenant, in: query, description: "through the fleet, for a machine destroyed: its tenant finds its host", schema: { type: string } }
+    delete:
+      summary: "Delete a backup of a machine of this host, or of one destroyed here (ADR 0023): its streams, then its record; a `backup_deleted` event"
+      responses:
+        "204": { description: deleted }
+        "404": { description: "`not_found`: no such machine here, or no such backup of it" }
+        "409": { description: "`conflict`: other backups continue from it, named in `error`; `?chain=true` deletes them too" }
+  /v1/backups:
+    get:
+      summary: "Every backup of the host's machines, destroyed ones' included, by machine then age (ADR 0023); a destroyed machine's carry `deletes_at`. Through the fleet: with `tenant`, the tenant's host; else every host, never partial"
+      parameters:
+        - { name: tenant, in: query, schema: { type: string } }
+      responses:
+        "200": { description: backups, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Backup" } } } } }
+        "400": { description: "`invalid`: backups are off on this host, or a bad tenant id" }
   /v1/machines/{id}/snapshots:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -416,10 +436,17 @@ components:
       properties:
         machine_id: { type: string, description: the backed-up machine; it may no longer exist }
         backup: { type: string, description: a backup id, or "latest" (the default) }
+    BackupPolicy:
+      type: object
+      required: [every, keep]
+      description: "a backup every `every`, the newest `keep` kept with what they continue from (ADR 0023); a refusal names the field (`backup.every`, `backup.keep`)"
+      properties:
+        every: { type: string, description: '"6h", "1d": at least 1h' }
+        keep: { type: integer, minimum: 1 }
     Backup:
       type: object
       properties:
-        id: { type: string, description: a timestamp, later ids sort later }
+        id: { type: string, description: "a timestamp to the millisecond (20261021T101500.123Z), later ids sort later" }
         machine_id: { type: string }
         tenant: { type: string }
         name: { type: string }
@@ -435,6 +462,7 @@ components:
               key: { type: string }
               bytes: { type: integer }
               from: { type: string, description: the backup this stream continues from }
+        deletes_at: { type: string, format: date-time, description: "a destroyed machine's backup: when the host deletes it (`backup.keep_destroyed_days` after the destroy)" }
     ForkSpec:
       type: object
       required: [machine_id]
@@ -480,6 +508,7 @@ components:
         metadata: { type: object, additionalProperties: { type: string } }
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent: open, or for a restore the backup's" }
         limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "over the host's, field by field; absent: the host's, or for a restore the backup's" }
+        backup: { oneOf: [{ $ref: "#/components/schemas/BackupPolicy" }, { type: "null" }], description: "absent: the host's `backup.default_every` and `default_keep` (none unless configured); null: none. A restore or a fork takes this, not its source's" }
         probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "absent: none, or for a restore the backup's" }
         start: { type: boolean, default: true, description: "the answer comes at `running`, not `ready`: `/wait` for that" }
         fork: { $ref: "#/components/schemas/ForkSpec" }
@@ -528,6 +557,9 @@ components:
         stopped_at: { type: string, format: date-time }
         last_used_at: { type: string, format: date-time }
         sleeps_at: { type: string, format: date-time, description: when it stops if nothing uses it }
+        backup: { $ref: "#/components/schemas/BackupPolicy" }
+        last_backup_at: { type: string, format: date-time, description: when its newest backup in the store was made }
+        next_backup_at: { type: string, format: date-time, description: "when the daemon backs it up next: `every` after the last backup, 15 minutes after a failed one; a machine with no process whose disks wrote nothing is not backed up again and its time moves on" }
         version: { type: integer, description: "the seq of the last event about it: every event moves it, its last use does not; what `If-Match` compares" }
         host: { type: string, description: the host that runs it (fleet) }
     Endpoint:
@@ -594,6 +626,7 @@ components:
         metadata: { type: object, additionalProperties: { type: string } }
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent keeps the current one" }
         limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "the fields it names change, the others stay" }
+        backup: { oneOf: [{ $ref: "#/components/schemas/BackupPolicy" }, { type: "null" }], description: "absent keeps it, null removes it; the next time is `every` after the last backup" }
         probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "replaces them all; a running machine's start over at once, `ready` as at a boot" }
     Probe:
       type: object
@@ -715,7 +748,7 @@ components:
         volume_gb_hours: { type: number, description: "the data volume's allocated size × hours" }
         disk_used_gb_hours: { type: number, description: what the disks take on the pool × hours }
         snapshot_gb_hours: { type: number, description: "local snapshots, the memory snapshot included, × hours" }
-        backup_gb_hours: { type: number, description: "the machine's backups in the object store × hours" }
+        backup_gb_hours: { type: number, description: "the machine's backups in the object store × hours; a destroyed machine's go on in its buckets until they are deleted (ADR 0023)" }
         internet_out_bytes: { type: integer, description: "to the internet, through the host's NAT" }
         internet_in_bytes: { type: integer }
         ingress_out_bytes: { type: integer, description: "to clients of the machine's endpoints" }
@@ -730,7 +763,7 @@ components:
         seq: { type: integer, description: one more per event on its host, never reused }
         at: { type: string, format: date-time }
         type: { type: string, enum: [normal, warning] }
-        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, egress_changed, backed_up, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`" }
+        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, egress_changed, backed_up, backup_failed, backup_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups" }
         message: { type: string, description: for a person; at most 1 KB }
         machine_id: { type: string }
         tenant: { type: string }

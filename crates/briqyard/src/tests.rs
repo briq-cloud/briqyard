@@ -736,6 +736,130 @@ fn usage_takes_a_range_of_hours() {
 
 // --- tables ---
 
+#[test]
+fn backup_schedules_and_backup_commands() {
+    let run = |extra: &[&str]| -> Result<Option<Option<api::BackupPolicy>>> {
+        let args: Vec<&str> = ["machine", "run", "--image", "x"]
+            .iter()
+            .chain(extra)
+            .copied()
+            .collect();
+        let MachineCmd::Run(a) = machine(parse(&args)) else {
+            panic!("not a run");
+        };
+        a.backup.request()
+    };
+    assert_eq!(run(&[]).unwrap(), None, "the host's default");
+    assert_eq!(
+        run(&["--backup-every", "6h", "--backup-keep", "4"]).unwrap(),
+        Some(Some(api::BackupPolicy {
+            every: "6h".into(),
+            keep: 4
+        }))
+    );
+    assert_eq!(run(&["--no-backup"]).unwrap(), Some(None));
+    // Checked as the daemon checks it, before any request.
+    let err = run(&["--backup-every", "30m", "--backup-keep", "4"]).unwrap_err();
+    assert_eq!(err.to_string(), r#"backup.every "30m": at least 1h"#);
+    for bad in [
+        vec!["machine", "run", "--image", "x", "--backup-every", "6h"],
+        vec!["machine", "run", "--image", "x", "--backup-keep", "4"],
+    ] {
+        assert_eq!(fails(&bad), ErrorKind::MissingRequiredArgument, "{bad:?}");
+    }
+    assert_eq!(
+        fails(&[
+            "machine",
+            "run",
+            "--image",
+            "x",
+            "--no-backup",
+            "--backup-every",
+            "6h",
+            "--backup-keep",
+            "1"
+        ]),
+        ErrorKind::ArgumentConflict
+    );
+    match machine(parse(&[
+        "machine",
+        "set-backup",
+        "m1",
+        "--every",
+        "1d",
+        "--keep",
+        "5",
+    ])) {
+        MachineCmd::SetBackup {
+            id,
+            every,
+            keep,
+            off,
+        } => {
+            assert_eq!(
+                (id.as_str(), every.as_deref(), keep, off),
+                ("m1", Some("1d"), Some(5), false)
+            )
+        }
+        _ => panic!("not set-backup"),
+    }
+    match machine(parse(&["machine", "set-backup", "m1", "--off"])) {
+        MachineCmd::SetBackup { off, every, .. } => assert!(off && every.is_none()),
+        _ => panic!("not set-backup"),
+    }
+    assert_eq!(
+        fails(&["machine", "set-backup", "m1"]),
+        ErrorKind::MissingRequiredArgument
+    );
+    assert_eq!(
+        fails(&[
+            "machine",
+            "set-backup",
+            "m1",
+            "--off",
+            "--every",
+            "1d",
+            "--keep",
+            "1"
+        ]),
+        ErrorKind::ArgumentConflict
+    );
+    match parse(&["backup", "rm", "m1", "b1", "--chain"]).cmd {
+        Cmd::Backup(BackupCmd::Rm {
+            machine,
+            backup,
+            chain,
+            tenant,
+        }) => {
+            assert_eq!(
+                backup_rm_path(&machine, &backup, chain, tenant.as_deref()),
+                "/v1/machines/m1/backups/b1?chain=true"
+            )
+        }
+        _ => panic!("not backup rm"),
+    }
+    assert_eq!(
+        backup_rm_path("m1", "b1", false, None),
+        "/v1/machines/m1/backups/b1"
+    );
+    assert_eq!(
+        backup_rm_path("m1", "b1", true, Some("t1")),
+        "/v1/machines/m1/backups/b1?chain=true&tenant=t1"
+    );
+    match parse(&["backups", "--tenant", "t1"]).cmd {
+        Cmd::Backups { tenant } => assert_eq!(tenant.as_deref(), Some("t1")),
+        _ => panic!("not backups"),
+    }
+    assert!(matches!(
+        parse(&["backups"]).cmd,
+        Cmd::Backups { tenant: None }
+    ));
+    assert_eq!(
+        fails(&["backup", "rm", "m1"]),
+        ErrorKind::MissingRequiredArgument
+    );
+}
+
 fn ts() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339("2026-10-19T08:30:00Z")
         .unwrap()
@@ -790,6 +914,10 @@ fn the_machine_table() {
         new_connections_per_minute: Some(600),
         bandwidth_mbit: Some(100),
     };
+    b.backup = Some(api::BackupPolicy {
+        every: "6h".into(),
+        keep: 4,
+    });
     let mut long = a.clone();
     long.id = "m_03".into();
     long.name = "a-rather-long-name-indeed".into();
@@ -800,7 +928,7 @@ fn the_machine_table() {
     assert!(out.ends_with('\n'));
     assert_eq!(
         lines[0],
-        "ID               TENANT     NAME           IMAGE                    STATE              READY IP           SIZE      SLEEP  EGRESS             LIMITS                   HOST"
+        "ID               TENANT     NAME           IMAGE                    STATE              READY IP           SIZE      SLEEP  EGRESS             LIMITS                   BACKUP   HOST"
     );
     // Every column starts where its header does.
     let cols = [
@@ -815,13 +943,14 @@ fn the_machine_table() {
         (116, 6),
         (123, 18),
         (142, 24),
+        (167, 8),
     ];
     let heads: Vec<String> = cols.iter().map(|(at, w)| col(lines[0], *at, *w)).collect();
     assert_eq!(
         heads,
         [
             "ID", "TENANT", "NAME", "IMAGE", "STATE", "READY", "IP", "SIZE", "SLEEP", "EGRESS",
-            "LIMITS"
+            "LIMITS", "BACKUP"
         ]
     );
     let row: Vec<String> = cols.iter().map(|(at, w)| col(lines[2], *at, *w)).collect();
@@ -838,16 +967,19 @@ fn the_machine_table() {
             "2c/1024M",
             "never",
             "via:m_0123456789ab",
-            "25,465 600/min 100Mbit"
+            "25,465 600/min 100Mbit",
+            "6h/4"
         ],
         "the stop reason is shown with the state; an empty ip is an empty column; \
-         a via policy in the form set-egress takes; the limits short"
+         a via policy in the form set-egress takes; the limits short; the schedule as \
+         every/keep"
     );
     assert_eq!(
         lines[2].len(),
-        142 + 24 + 1,
-        "no host: nothing after the limits"
+        167 + 8 + 1,
+        "no host: nothing after the schedule"
     );
+    assert_eq!(col(lines[1], 167, 8), "-", "no schedule");
     assert_eq!(col(lines[1], 87, 5), "yes");
     assert_eq!(col(lines[1], 123, 18), "open");
     assert_eq!(col(lines[1], 142, 24), "-", "nothing limited");
@@ -1481,6 +1613,12 @@ fn describe_shows_the_machine_then_its_events() {
             mount: "/data".into(),
         }),
         sleep: "30m".into(),
+        backup: Some(api::BackupPolicy {
+            every: "6h".into(),
+            keep: 4,
+        }),
+        last_backup_at: Some(ts()),
+        next_backup_at: Some(ts() + chrono::Duration::hours(6)),
         egress: api::Egress {
             mode: "via".into(),
             via: Some("gateway".into()),
@@ -1574,6 +1712,7 @@ fn describe_shows_the_machine_then_its_events() {
             "Endpoints:     ep_1 http 80 -> http://web-ab12.byard.localhost",
             "               ep_2 tcp 5432 -> 10.0.0.5:20001",
             "Sleep:         30m",
+            "Backup:        every 6h, keep 4; last 2026-10-19 08:30:00, next 2026-10-19 14:30:00",
             "Version:       12",
             "Created:       2026-10-19 08:30:00",
             "Events:",
@@ -1592,6 +1731,8 @@ fn describe_shows_the_machine_then_its_events() {
             endpoints: vec![],
             volume: None,
             host: String::new(),
+            backup: None,
+            last_backup_at: None,
             restarts: 0,
             restarting_at: None,
             probes: api::Probes::default(),
@@ -1600,6 +1741,7 @@ fn describe_shows_the_machine_then_its_events() {
         &[],
     );
     assert!(out.contains("Endpoints:     none\n"), "{out}");
+    assert!(out.contains("Backup:        none\n"), "{out}");
     assert!(out.ends_with("Events:\n  none\n"), "{out}");
     for absent in ["Host:", "Exit:", "Restarts:", "Probes:"] {
         assert!(!out.contains(absent), "{absent} {out}");

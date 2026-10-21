@@ -215,6 +215,44 @@ pub struct Backup {
     /// Backup snapshots kept on the host per machine: the newest is the base of the next
     /// incremental send, the rest only cost space.
     pub keep_snapshots: u32,
+    /// The schedule of a machine created without one (ADR 0023): both or neither; none by
+    /// default.
+    pub default_every: String,
+    pub default_keep: u32,
+    /// Scheduled backups run at once, at most.
+    pub at_once: u32,
+    /// How long a destroyed machine's backups stay in the store.
+    pub keep_destroyed_days: u32,
+}
+
+impl Backup {
+    /// The schedule a machine created without one gets.
+    pub fn default_policy(&self) -> Option<api::BackupPolicy> {
+        (!self.default_every.is_empty()).then(|| api::BackupPolicy {
+            every: self.default_every.clone(),
+            keep: self.default_keep,
+        })
+    }
+
+    fn check(&self) -> Result<()> {
+        match self.default_policy() {
+            None if self.default_keep > 0 => {
+                bail!("backup.default_keep needs backup.default_every")
+            }
+            Some(p) => {
+                p.check()
+                    .map_err(|e| anyhow::anyhow!("backup.default_{e}"))?;
+            }
+            None => {}
+        }
+        if self.at_once < 1 {
+            bail!("backup.at_once must be at least 1");
+        }
+        if self.keep_destroyed_days < 1 {
+            bail!("backup.keep_destroyed_days must be at least 1");
+        }
+        Ok(())
+    }
 }
 
 impl Default for Backup {
@@ -224,6 +262,10 @@ impl Default for Backup {
             endpoint: String::new(),
             region: String::new(),
             keep_snapshots: 1,
+            default_every: String::new(),
+            default_keep: 0,
+            at_once: 2,
+            keep_destroyed_days: 30,
         }
     }
 }
@@ -375,6 +417,7 @@ impl Config {
         if let Err(e) = self.egress_limits.view().check() {
             bail!("egress_limits.{e}");
         }
+        self.backup.check()?;
         self.check_exposure()?;
         self.check_advertise()
     }
@@ -834,6 +877,47 @@ console_max_mb: 16
         }
         // The jailer may stay empty (no jail) and is not checked for an absolute path here.
         load("jailer: \"\"\n").unwrap();
+    }
+
+    #[test]
+    fn the_backup_section() {
+        let b = Config::load(None).unwrap().backup;
+        assert!(b.store.is_empty());
+        assert_eq!(b.keep_snapshots, 1);
+        assert_eq!(b.default_policy(), None, "no schedule unless configured");
+        assert_eq!((b.at_once, b.keep_destroyed_days), (2, 30));
+        let b = load(
+            "backup:\n  store: file:///b\n  default_every: 1d\n  default_keep: 5\n  at_once: 4\n  keep_destroyed_days: 7\n",
+        )
+        .unwrap()
+        .backup;
+        assert_eq!(
+            b.default_policy(),
+            Some(api::BackupPolicy {
+                every: "1d".into(),
+                keep: 5
+            })
+        );
+        assert_eq!((b.at_once, b.keep_destroyed_days), (4, 7));
+        for (yaml, want) in [
+            (
+                "default_every: 30m\n  default_keep: 2",
+                r#"backup.default_every "30m": at least 1h"#,
+            ),
+            ("default_every: 6h", "backup.default_keep: at least 1"),
+            (
+                "default_keep: 3",
+                "backup.default_keep needs backup.default_every",
+            ),
+            ("at_once: 0", "backup.at_once must be at least 1"),
+            (
+                "keep_destroyed_days: 0",
+                "backup.keep_destroyed_days must be at least 1",
+            ),
+        ] {
+            let err = load(&format!("backup:\n  {yaml}\n")).unwrap_err();
+            assert_eq!(err.to_string(), want, "{yaml}");
+        }
     }
 
     #[test]

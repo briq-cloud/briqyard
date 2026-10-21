@@ -49,6 +49,7 @@ impl Store {
             "meta",
             "usage",
             "events",
+            "holders",
         ] {
             private_dir(&root.join(d))?;
         }
@@ -170,6 +171,7 @@ mod tests {
             "meta",
             "usage",
             "events",
+            "holders",
         ] {
             assert!(dir.path().join("state").join(d).is_dir(), "{d}");
         }
@@ -279,6 +281,7 @@ mod tests {
             "meta",
             "usage",
             "events",
+            "holders",
         ] {
             assert_eq!(mode(&state.join(d)), 0o700, "{d}");
         }
