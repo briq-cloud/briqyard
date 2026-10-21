@@ -12,15 +12,15 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 
 | # | Gap | briqyard | briq | Before |
 |---|---|---|---|---|
-| 1 | Public edge: hosting, IPs, certificates, DDoS | the hosts' ingress, private to the edge (done) | the router (done), edge hosts and certificates in infra | staging |
+| 1 | Public edge: hosting, IPs, certificates, DDoS | the hosts' ingress, private to the edge (done) | the router, edge servers, Cloudflare in front, WebSockets (built: up-lab/briq#277, draft) | staging |
 | 2 | Volume durability: Fly's daily snapshots | scheduled backups, retention, delete (done); a run against a real bucket | the schedule and retention per plan | staging |
 | 3 | Egress abuse: our servers' IPs and the provider's abuse desk | blocked ports, rate and bandwidth limits per machine (done) | the limits per plan, abuse response | public traffic |
 | 4 | Observability and alerts | `/metrics`, JSON logs, host conditions (done) | scraping, log shipping, alerts in the monitor | staging |
 | 5 | Host operations: real orders, upgrades, patching | rolling upgrade, real provisioner runs | runbooks, capacity decisions | production |
 | 6 | Host loss | evacuate a host from its backups | the briqs' state while it happens | production |
-| 7 | Regions | region-aware placement (done) | the team's region to the briqyard adapter | a second region |
+| 7 | Regions | region-aware placement (done) | the team's region to the briqyard adapter (done, #250) | a second region |
 | 8 | A team across hosts | WireGuard mesh or vRack (`MESH.md`) | nothing | a team outgrows a host |
-| 9 | Encryption at rest | ZFS native encryption per tenant | key policy | production |
+| 9 | Encryption at rest | the pool encrypted, one key per host held by the fleet, over TLS (decided; TLS built: ADR 0020) | nothing | the first real host |
 | 10 | Usage and costs | usage buckets (ADR 0017, built) | collection, cost model, billing of disk and network | billing them |
 | 11 | Image pulls at scale | a registry mirror per region | nothing | many hosts |
 | 12 | CI and staging on real hardware | e2e on a KVM runner | the deploy smoke test against briqyard | staging |

@@ -150,7 +150,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Pod security, seccomp | ★ Firecracker's own seccomp; the guest is root in its VM only | | |
 | ResourceQuota, LimitRange per namespace | ◐ a quota per tenant: machines, memory, vCPUs, disk, set by briq (ADR 0025) | LimitRange (a size per machine): briq's plan check | yard (values from briq) |
 | Plans, what a plan allows | | | briq |
-| Egress abuse (outside core) | ✗ | (Networking) | yard; the response to abuse is briq's |
+| Egress abuse (outside core) | ✓ blocked ports, a connection rate, a bandwidth cap per machine, drops counted (ADR 0018) | | yard; the response to abuse is briq's |
 | Private endpoints, tokens | | | briq |
 | Workload identity (a token to a cloud API) | | the credential gateway | briq |
 | PodDisruptionBudget, PriorityClass, HPA, VPA, RWX volumes | weighed, not needed: one machine per briq, no replicas | | — |
