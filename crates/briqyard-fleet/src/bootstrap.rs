@@ -10,6 +10,9 @@
 //! The host's API certificate (ADR 0020): once the script has succeeded and the SSH key is
 //! pinned, a second, strict connection reads its fingerprint (`briqyardd tls-fingerprint`),
 //! recorded with the state `bootstrapped`, before the host's first heartbeat can be taken.
+//!
+//! An upgrade (ADR 0027, `upgrade.rs`) runs the same script with another release: one way to
+//! install a host.
 
 use crate::registry::url_host;
 use crate::AppState;
@@ -22,6 +25,26 @@ const SCRIPT: &str = include_str!("../../../hack/bootstrap-host.sh");
 
 /// Prints the host's API certificate fingerprint, from the configuration the script wrote.
 const FINGERPRINT_CMD: &str = "briqyardd --config /etc/briqyard/config.yaml tls-fingerprint";
+
+/// Prints the installed daemon's version, `briqyardd 0.1.0+fdad892eeefa`.
+const VERSION_CMD: &str = "briqyardd --version";
+
+/// Where the project's releases are, `<RELEASES>/v<version>/briqyardd-linux-<arch>`.
+const RELEASES: &str = "https://github.com/briq-cloud/briqyard/releases/download";
+
+/// What `BRIQYARD_RELEASE` is for a release asked as a URL (as it is) or as a version of the
+/// project's releases (`0.2.0`, `v0.2.0`); None for anything else.
+pub fn release_url(release: &str) -> Option<String> {
+    if release.contains("://") {
+        return Some(release.trim_end_matches('/').to_string());
+    }
+    let v = release.strip_prefix('v').unwrap_or(release);
+    let ok = !v.is_empty()
+        && v.split('.').count() == 3
+        && v.split('.')
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    ok.then(|| format!("{RELEASES}/v{v}"))
+}
 
 /// An ordered host's API URL: TLS, with the certificate the bootstrap pins.
 pub fn host_url(ip: &str) -> String {
@@ -72,7 +95,7 @@ pub async fn run(st: Arc<AppState>) {
                 continue;
             }
             let ip = url_host(&h.url).to_string();
-            let outcome = match install(&st, &h.id, &ip, &h.url, &h.token).await {
+            let outcome = match install(&st, &h.id, &ip, &h.url, &h.token, &b.release).await {
                 Ok(note) => api_fingerprint(&st, &ip).await.map(|fp| (note, fp)),
                 Err(e) => Err(e),
             };
@@ -132,6 +155,31 @@ async fn api_fingerprint(st: &AppState, ip: &str) -> anyhow::Result<String> {
     parse_api_fingerprint(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// The daemon's version installed on the host, read over the pinned SSH key.
+pub async fn installed_version(st: &AppState, ip: &str) -> anyhow::Result<String> {
+    let b = &st.cfg.provisioner.bootstrap;
+    let known_hosts = st.cfg.state_dir.join("known_hosts");
+    let mut args = ssh_base(b, ip, &known_hosts, true);
+    args.push(VERSION_CMD.into());
+    let out = ssh(&args, b"", Duration::from_secs(60)).await?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    match (out.status.success(), parse_version(&text)) {
+        (true, Some(v)) => Ok(v),
+        _ => anyhow::bail!(
+            "read the installed version: ssh exited {}: {} {}",
+            out.status.code().unwrap_or(-1),
+            text.trim(),
+            tail(&out.stderr)
+        ),
+    }
+}
+
+/// The version `briqyardd --version` printed (`briqyardd 0.1.0+fdad892eeefa`).
+fn parse_version(out: &str) -> Option<String> {
+    let v = out.trim().strip_prefix("briqyardd ")?.trim();
+    (!v.is_empty() && !v.contains(char::is_whitespace)).then(|| v.to_string())
+}
+
 /// What `briqyardd tls-fingerprint` printed: the fingerprint, or nothing for a plain API.
 fn parse_api_fingerprint(out: &str) -> anyhow::Result<String> {
     if out.trim().is_empty() {
@@ -175,14 +223,16 @@ fn tail(b: &[u8]) -> String {
 }
 
 /// Runs the bootstrap script on the server through `ssh`, the script on stdin, the settings
-/// in its environment. Nothing of it is on a command line the server's other users could see.
-/// Answers the note for the host: when it was bootstrapped, and the host key pinned.
-async fn install(
+/// in its environment, the binaries from `release`. Nothing of it is on a command line the
+/// server's other users could see. Answers the note for the host: when it was bootstrapped,
+/// and the host key pinned.
+pub async fn install(
     st: &AppState,
     host: &str,
     ip: &str,
     url: &str,
     token: &str,
+    release: &str,
 ) -> anyhow::Result<String> {
     let b = &st.cfg.provisioner.bootstrap;
     let script = if b.script.as_os_str().is_empty() {
@@ -203,7 +253,16 @@ async fn install(
     } else {
         st.cfg.state_dir.join(format!("known_hosts.{ip}"))
     };
-    let args = ssh_args(b, &st.cfg.own_url(), ip, url, token, &known_hosts, pinned);
+    let args = ssh_args(
+        b,
+        &st.cfg.own_url(),
+        ip,
+        url,
+        token,
+        release,
+        &known_hosts,
+        pinned,
+    );
     let out = ssh(&args, script.as_bytes(), Duration::from_secs(1800)).await?;
     let seen = if pinned {
         None
@@ -286,12 +345,14 @@ fn fingerprints(known_hosts: &str) -> Vec<String> {
 /// settings in the environment of `bash -s` (the script arrives on stdin). Every value is
 /// single-quoted for the remote shell. `own_url` is the fleet's own when `fleet_url` is not set;
 /// `url` is the host's API, what it advertises.
+#[allow(clippy::too_many_arguments)]
 fn ssh_args(
     b: &crate::config::Bootstrap,
     own_url: &str,
     ip: &str,
     url: &str,
     token: &str,
+    release: &str,
     known_hosts: &Path,
     pinned: bool,
 ) -> Vec<String> {
@@ -305,7 +366,7 @@ fn ssh_args(
         shq(fleet_url),
         shq(url),
         shq(token),
-        shq(&b.release),
+        shq(release),
         shq(&b.pool_device),
         shq(&b.allowed_clients.join(","))
     );
@@ -376,6 +437,7 @@ mod tests {
             "10.0.0.9",
             &host_url("10.0.0.9"),
             "t0k'en",
+            &b.release,
             kh,
             true,
         );
@@ -413,6 +475,7 @@ mod tests {
             "10.0.0.9",
             "https://10.0.0.9:7420",
             "t",
+            "",
             kh,
             false,
         );
@@ -470,6 +533,49 @@ mod tests {
             r.note,
             format!("bootstrapped at now; api certificate {fp} pinned")
         );
+    }
+
+    #[test]
+    fn a_release_is_a_url_or_a_version() {
+        assert_eq!(
+            release_url("https://example.test/r/v0.2.0/").as_deref(),
+            Some("https://example.test/r/v0.2.0")
+        );
+        assert_eq!(
+            release_url("file:///var/lib/briqyard-fleet/release").as_deref(),
+            Some("file:///var/lib/briqyard-fleet/release")
+        );
+        let v = "https://github.com/briq-cloud/briqyard/releases/download/v0.2.0";
+        assert_eq!(release_url("0.2.0").as_deref(), Some(v));
+        assert_eq!(release_url("v0.2.0").as_deref(), Some(v));
+        for bad in [
+            "",
+            "v",
+            "0.2",
+            "latest",
+            "0.2.0; rm -rf /",
+            "0..1",
+            "1.2.3.4",
+        ] {
+            assert_eq!(release_url(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_installed_version_is_read_from_the_daemon() {
+        assert_eq!(
+            parse_version("briqyardd 0.1.0+fdad892eeefa\n").as_deref(),
+            Some("0.1.0+fdad892eeefa")
+        );
+        assert_eq!(parse_version("briqyard-fleet 0.1.0\n"), None);
+        assert_eq!(parse_version("briqyardd \n"), None);
+        assert_eq!(parse_version("bash: briqyardd: command not found"), None);
+        let b = crate::config::Bootstrap::default();
+        let kh = Path::new("/var/lib/briqyard-fleet/known_hosts");
+        let mut args = ssh_base(&b, "10.0.0.9", kh, true);
+        args.push(VERSION_CMD.into());
+        assert_eq!(args[5], "StrictHostKeyChecking=yes");
+        assert_eq!(args[13], "briqyardd --version");
     }
 
     #[test]

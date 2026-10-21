@@ -6,6 +6,7 @@ mod bootstrap;
 mod config;
 mod provision;
 mod registry;
+mod upgrade;
 
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
@@ -23,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
-#[command(name = "briqyard-fleet", version, about = "briqyard across hosts")]
+#[command(name = "briqyard-fleet", version = api::VERSION, about = "briqyard across hosts")]
 struct Args {
     #[arg(long, default_value = "/etc/briqyard/fleet.yaml")]
     config: PathBuf,
@@ -40,6 +41,8 @@ struct AppState {
     pinned: Mutex<HashMap<String, reqwest::Client>>,
     state_path: PathBuf,
     prov: Box<dyn provision::Provisioner>,
+    /// Held by the host upgrade under way: one at a time (ADR 0027).
+    upgrade: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// A host that does not even accept the connection is given five seconds. No deadline for
@@ -133,6 +136,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         note: String::new(),
         bootstrap_attempts: 0,
         conditions: vec![],
+        started: Default::default(),
     }
 }
 
@@ -155,6 +159,7 @@ async fn run(args: Args) -> Result<()> {
     for h in &cfg.hosts {
         reg.heartbeat(static_host(h, now), now);
     }
+    upgrade::interrupted(&mut reg);
     let policy = Policy {
         fill_ceiling: cfg.placement.fill_ceiling,
         down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
@@ -169,6 +174,7 @@ async fn run(args: Args) -> Result<()> {
         pinned: Mutex::new(HashMap::new()),
         state_path,
         prov: provision::build(&cfg.provisioner),
+        upgrade: Default::default(),
     });
     tokio::spawn(poll_static_hosts(state.clone()));
     tokio::spawn(scaler(state.clone()));
@@ -180,7 +186,7 @@ async fn run(args: Args) -> Result<()> {
     tracing::info!(
         addr = cfg.listen,
         tls = matches!(cfg.tls, config::Tls::Files { .. }),
-        version = env!("CARGO_PKG_VERSION"),
+        version = api::VERSION,
         provisioner = cfg.provisioner.kind,
         dry_run = cfg.provisioner.dry_run,
         "briqyard-fleet listening"
@@ -211,6 +217,8 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/hosts/register", post(register_host))
         .route("/v1/hosts/order", post(order_host))
         .route("/v1/hosts/:id/drain", post(drain_host))
+        .route("/v1/hosts/:id/undrain", post(undrain_host))
+        .route("/v1/hosts/:id/upgrade", post(upgrade::upgrade_host))
         .route("/v1/hosts/:id/retire", post(retire_host))
         .route("/v1/hosts/:id", axum::routing::delete(forget_host))
         .route("/v1/machines", get(list_machines).post(create_machine))
@@ -331,7 +339,7 @@ async fn status(State(st): S) -> Json<serde_json::Value> {
     }
     // The daemon's Status, plus what only a fleet knows.
     Json(serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"), "host_id": "fleet",
+        "version": api::VERSION, "host_id": "fleet",
         "capacity": cap, "used": used, "machines": machines, "running": machines,
         "hosts": reg.hosts.len(), "ready": ready, "tenants": reg.tenants.len(),
         "provisioner": st.cfg.provisioner.kind, "dry_run": st.cfg.provisioner.dry_run,
@@ -425,6 +433,7 @@ async fn register_host(
                 note: String::new(),
                 bootstrap_attempts: 0,
                 conditions: req.conditions,
+                started: req.started,
             },
             now,
         );
@@ -433,11 +442,35 @@ async fn register_host(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Places nothing new on a host (Kubernetes's cordon); its machines go on.
 async fn drain_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
+    set_host_state(&st, &id, "draining", |_| true)
+}
+
+/// Undoes a drain or a retire: the host takes new tenants again.
+async fn undrain_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
+    set_host_state(&st, &id, "ready", |s| matches!(s, "draining" | "retiring"))
+}
+
+/// Moves a host from a state `from` accepts to `to`; 409 from any other (an upgrade under way
+/// owns its host's state, ADR 0027).
+fn set_host_state(
+    st: &AppState,
+    id: &str,
+    to: &str,
+    from: impl Fn(&str) -> bool,
+) -> Result<Response, Refusal> {
     {
         let mut reg = st.reg.lock().unwrap();
-        match reg.hosts.get_mut(&id) {
-            Some(h) => h.state = "draining".into(),
+        match reg.hosts.get_mut(id) {
+            Some(h) if h.state == "upgrading" || !from(&h.state) => {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "conflict",
+                    format!("host {id} is {}", h.state),
+                ))
+            }
+            Some(h) => h.state = to.into(),
             None => return Err(err(StatusCode::NOT_FOUND, "not_found", "host not found")),
         }
     }
@@ -519,21 +552,29 @@ fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
         note: server.note,
         bootstrap_attempts: 0,
         conditions: vec![],
+        started: Default::default(),
     };
     st.reg.lock().unwrap().hosts.insert(id, h.clone());
     st.save()?;
     Ok(h)
 }
 
-/// Drains a host and releases it at the provider once nothing runs on it: at once when it is
-/// already empty, else from the scaler as soon as it is.
+/// Takes nothing new on a host and releases it at the provider once nothing runs on it: at
+/// once when it is already empty, else from the scaler as soon as it is.
 async fn retire_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
     let host = {
         let mut reg = st.reg.lock().unwrap();
         match reg.hosts.get_mut(&id) {
+            Some(h) if h.state == "upgrading" => {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "conflict",
+                    format!("host {id} is upgrading"),
+                ))
+            }
             Some(h) => {
-                if h.state == "ready" || h.state == "down" {
-                    h.state = "draining".into();
+                if matches!(h.state.as_str(), "ready" | "draining" | "down") {
+                    h.state = "retiring".into();
                 }
                 h.clone()
             }
@@ -542,7 +583,7 @@ async fn retire_host(State(st): S, Path(id): Path<String>) -> Result<Response, R
     };
     st.save().map_err(registry_error)?;
     let empty = host.machines == 0 && host.tenants.is_empty();
-    if empty || !matches!(host.state.as_str(), "draining") {
+    if empty || !matches!(host.state.as_str(), "retiring") {
         return match release_host(&st, &host).await {
             Ok(h) => Ok(Json(h).into_response()),
             Err(e) => Err(err(
@@ -555,7 +596,7 @@ async fn retire_host(State(st): S, Path(id): Path<String>) -> Result<Response, R
     tracing::info!(
         host = id,
         machines = host.machines,
-        "host draining; released once empty"
+        "host retiring; released once empty"
     );
     Ok(Json(host.to_api()).into_response())
 }
@@ -628,6 +669,7 @@ async fn poll_static_hosts_once(st: &AppState) -> bool {
             rec.version = s.version;
             rec.disk_free_mb = s.disk_free_mb;
             rec.conditions = s.conditions;
+            rec.started = s.started;
             st.reg.lock().unwrap().heartbeat(rec, now);
         } else if h.capacity.memory_mb == 0 {
             // Never answered yet (it may be starting with us): ask again soon.

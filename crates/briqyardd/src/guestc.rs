@@ -13,7 +13,9 @@ use tokio::net::UnixStream;
 /// on the host, a mock in the manager's tests.
 #[async_trait]
 pub trait Guest: Send + Sync {
-    async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<()>;
+    /// Waits for the init to answer; its version (ADR 0027), empty from an init older than
+    /// the report.
+    async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<String>;
     async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()>;
     async fn exec(&self, vsock: &Path, req: Request) -> Result<ExecOutput>;
     async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()>;
@@ -25,7 +27,7 @@ pub struct Vsock;
 
 #[async_trait]
 impl Guest for Vsock {
-    async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<()> {
+    async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<String> {
         wait_ready(vsock, timeout).await
     }
     async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()> {
@@ -216,12 +218,12 @@ pub async fn shutdown(uds: &Path, grace: Duration) -> Result<()> {
     Ok(())
 }
 
-/// Polls `ping` until the init answers or the timeout passes.
-pub async fn wait_ready(uds: &Path, timeout: Duration) -> Result<()> {
+/// Polls `ping` until the init answers or the timeout passes; the version its `pong` says.
+pub async fn wait_ready(uds: &Path, timeout: Duration) -> Result<String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let last = match tokio::time::timeout(Duration::from_secs(2), ping(uds)).await {
-            Ok(Ok(_)) => return Ok(()),
+            Ok(Ok(pong)) => return Ok(pong.version),
             Ok(Err(e)) => e.to_string(),
             Err(_) => "timeout".to_string(),
         };
@@ -469,7 +471,23 @@ mod tests {
         assert!(msg.contains("did not answer within"), "{msg}");
         assert!(msg.contains("last: vsock"), "{msg}");
 
+        // An init older than the version report answers none: an empty version.
         let _server = serve(&path, OK, vec![frame(&Response::new("pong"))]);
-        wait_ready(&path, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(wait_ready(&path, Duration::from_secs(5)).await.unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn wait_ready_answers_the_inits_version() {
+        let (_dir, path) = socket();
+        let pong = Response {
+            kind: "pong".into(),
+            version: "0.1.0+fdad892eeefa".into(),
+            ..Default::default()
+        };
+        let _server = serve(&path, OK, vec![frame(&pong)]);
+        assert_eq!(
+            wait_ready(&path, Duration::from_secs(5)).await.unwrap(),
+            "0.1.0+fdad892eeefa"
+        );
     }
 }

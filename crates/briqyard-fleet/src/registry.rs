@@ -1,7 +1,7 @@
 //! The hosts the fleet knows, where each tenant lives, and the decisions made from that:
 //! placement, and when to add or release a host. Pure logic, tested without a network.
 
-use briqyard_api::{self as api, Capacity, Condition, Host};
+use briqyard_api::{self as api, Capacity, Condition, DaemonStart, Host};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,7 +27,8 @@ pub struct HostRec {
     /// The provider's own id for the server, when the fleet provisioned it.
     #[serde(default)]
     pub provider_id: String,
-    /// ready, draining, down, provisioning, bootstrapped, failed, dry-run
+    /// ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed,
+    /// dry-run
     pub state: String,
     #[serde(default)]
     pub capacity: Capacity,
@@ -55,6 +56,16 @@ pub struct HostRec {
     /// Memory and disk pressure, from the last heartbeat (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    /// The daemon's last start, from the last heartbeat (ADR 0027).
+    #[serde(default)]
+    pub started: DaemonStart,
+}
+
+/// Whether a host in this state serves its machines. Placement takes only `ready`; a host
+/// `draining` (taking nothing new), `retiring` (released once empty) or `upgrading` (ADR
+/// 0027) still answers for what it has.
+pub fn serving(state: &str) -> bool {
+    matches!(state, "ready" | "draining" | "retiring" | "upgrading")
 }
 
 /// The host part of a URL (`http://10.0.0.5:7420` → `10.0.0.5`).
@@ -92,6 +103,7 @@ impl HostRec {
             note: self.note.clone(),
             tls_fingerprint: self.tls_fingerprint.clone(),
             conditions: self.conditions.clone(),
+            started: self.started,
         }
     }
 
@@ -222,10 +234,11 @@ impl Registry {
         entry.version = h.version;
         entry.disk_free_mb = h.disk_free_mb;
         entry.conditions = h.conditions.clone();
+        entry.started = h.started;
         entry.last_seen = now;
         // A host that answers is ready, whatever it was (down, ordered, failed to bootstrap);
-        // only a drain is kept.
-        if entry.state != "draining" {
+        // only what an operator asked is kept: a drain, a retire, an upgrade under way.
+        if !serving(&entry.state) {
             entry.state = "ready".into();
         }
         entry.empty_since = if h.machines == 0 {
@@ -262,11 +275,11 @@ impl Registry {
         self.pinned_at.retain(|t, _| self.tenants.contains_key(t));
     }
 
-    /// Draining hosts that have nothing left on them: ready to be released.
+    /// Retiring hosts that have nothing left on them: ready to be released.
     pub fn retirable(&self) -> Vec<HostRec> {
         self.hosts
             .values()
-            .filter(|h| h.state == "draining" && h.machines == 0 && h.tenants.is_empty())
+            .filter(|h| h.state == "retiring" && h.machines == 0 && h.tenants.is_empty())
             .cloned()
             .collect()
     }
@@ -348,13 +361,13 @@ impl Registry {
 
     /// Hosts that answer requests.
     pub fn ready(&self) -> Vec<HostRec> {
-        self.sorted(|h| h.state == "ready" || h.state == "draining")
+        self.sorted(|h| serving(&h.state))
     }
 
     /// Hosts a listing must ask: every one that may hold machines, down ones included, since
     /// a listing that cannot ask one of them fails rather than leaving its machines out.
     pub fn listed(&self) -> Vec<HostRec> {
-        self.sorted(|h| matches!(h.state.as_str(), "ready" | "draining" | "down"))
+        self.sorted(|h| serving(&h.state) || h.state == "down")
     }
 
     fn sorted(&self, keep: impl Fn(&HostRec) -> bool) -> Vec<HostRec> {
@@ -457,6 +470,7 @@ mod tests {
             note: String::new(),
             bootstrap_attempts: 0,
             conditions: vec![],
+            started: Default::default(),
         }
     }
 
@@ -655,22 +669,35 @@ mod tests {
         let mut busy = host("a", 1000, 100, 1);
         busy.tenants = vec!["t".into()];
         reg.heartbeat(busy, now);
-        reg.hosts.get_mut("a").unwrap().state = "draining".into();
+        reg.hosts.get_mut("a").unwrap().state = "retiring".into();
         assert!(reg.retirable().is_empty());
         let mut empty = host("a", 1000, 0, 0);
         empty.tenants.clear();
         reg.heartbeat(empty, now);
         reg.tenants.clear();
         assert_eq!(
-            reg.hosts["a"].state, "draining",
-            "a heartbeat keeps a drain"
+            reg.hosts["a"].state, "retiring",
+            "a heartbeat keeps a retire"
         );
         assert_eq!(reg.retirable().len(), 1);
         assert_eq!(
             reg.place("t2", "", 10, 0, &Policy::default()),
             None,
-            "no placement on a draining host"
+            "no placement on a retiring host"
         );
+        // A drain, an upgrade: kept by a heartbeat, never released, nothing placed.
+        for state in ["draining", "upgrading"] {
+            reg.hosts.get_mut("a").unwrap().state = state.into();
+            reg.heartbeat(host("a", 1000, 0, 0), now);
+            assert_eq!(reg.hosts["a"].state, state);
+            assert!(reg.retirable().is_empty(), "{state}");
+            assert_eq!(
+                reg.place("t2", "", 10, 0, &Policy::default()),
+                None,
+                "{state}"
+            );
+            assert_eq!(reg.listed().len(), 1, "a listing asks a host {state}");
+        }
     }
 
     #[test]

@@ -78,14 +78,14 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Fit by resources | ✓ memory and disk, reserved at placement | | |
 | Node selectors, node affinity, topology | ✓ a create's `region` places a new tenant on a host of it; a tenant never spans regions (ADR 0025) | autoscaling per region | yard, later |
 | Pod affinity | ◐ a tenant's machines share a host, forced | | — |
-| Cordon | ✓ drain | | |
+| Cordon | ✓ `host drain`, `host undrain`; a drained host is never released (`retire` is its own state, ADR 0027) | | |
 | Taints, tolerations | ✗ | | — |
 | Drain with eviction | ◐ drain stops placement; machines stay | evacuate a host from backups | yard |
 | Node object, heartbeats | ✓ heartbeat every 15 s, `down` after a minute | | |
 | Node conditions (MemoryPressure, DiskPressure) | ✓ `memory_pressure`, `disk_pressure` in status and the heartbeat, `host_condition` events; the fleet places nothing new on a host under pressure (ADR 0021) | | |
 | Node-pressure eviction | ◐ thresholds and events; unused images removed under disk pressure | stopping machines to free memory or disk | yard |
 | Cluster autoscaler | ◐ provisioner autoscaler, stub-tested, dry run by default | a first real order | yard |
-| Node upgrades | ✗ by hand | `host upgrade`: drain, upgrade, back | yard |
+| Node upgrades | ◐ `host upgrade` (`--all` one host at a time): `upgrading`, the bootstrap script with the release, the daemon hands its machines over, back on a heartbeat from the new version (ADR 0027) | OS and kernel patching (a reboot): drain, `systemctl stop`, reboot, undrain by hand | yard |
 | `kubectl top node` | ◐ `/v1/status`, committed memory and the pool on `/metrics` | the host's own CPU and memory use | yard |
 
 ## Networking
@@ -162,7 +162,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Control plane HA (etcd quorum) | ✗ one fleet process, one file | state the fleet can rebuild from the hosts | yard, later |
 | etcd backup | ✗ | the registry file copied to the object store on each write | yard |
 | Cluster provisioning | ✓ bootstrap script, provisioners | | |
-| Version skew, upgrades | ✗ | `host upgrade` | yard |
+| Version skew, upgrades | ✓ every binary and the init say `0.1.0+<commit>`; the wire is additive, unknown fields and values ignored; the fleet first, a host never newer (ADR 0027) | the init travels in the root disk: old inits live on until an image change | yard |
 | Multi-cluster | ◐ regions on hosts, placement by region (ADR 0025) | a fleet per region, or one across | yard, later |
 
 ## Order of work
@@ -181,4 +181,4 @@ Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit 
 
 Decided for the founder (advisor, 2026-10-20): the daemon runs scheduled backups from a policy briq sets; the pool is encrypted with one key per host held by the fleet, built before the first real host (after TLS); events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and briq's healthcheck moves onto them.
 
-Later, in the tables above: groups and load balancing, the mesh, volume expansion, encryption at rest, scoped tokens, fleet HA, `host upgrade`, evacuation, a TTY for exec.
+Later, in the tables above: groups and load balancing, the mesh, volume expansion, encryption at rest, scoped tokens, fleet HA, OS patching through the fleet, evacuation, a TTY for exec.

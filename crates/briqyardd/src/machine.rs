@@ -203,6 +203,12 @@ pub struct Record {
     pub pending: Option<api::SpecChange>,
     #[serde(default)]
     pub pending_since: Option<DateTime<Utc>>,
+    /// What the init said at the last boot (ADR 0027).
+    #[serde(default)]
+    pub init_version: String,
+    /// What ran the last boot (`Vmm::version`): a memory snapshot resumes only under it.
+    #[serde(default)]
+    pub vmm_version: String,
 }
 
 impl Record {
@@ -631,6 +637,8 @@ struct Inner {
     /// The pool's space as the tick last read it, and the conditions it decided (ADR 0021).
     pool: Mutex<Option<crate::zfs::Pool>>,
     conditions: Mutex<Conditions>,
+    /// This daemon's start and what it did with what the previous one left (ADR 0027).
+    started: Mutex<api::DaemonStart>,
 }
 
 #[derive(Clone)]
@@ -690,6 +698,7 @@ impl Manager {
                 binary: cfg.firecracker.clone(),
                 pci: cfg.pci,
                 console_max: (cfg.console_max_mb as u64) << 20,
+                version: fc::vmm_version(&cfg.firecracker)?,
             }),
             guest: Arc::new(guestc::Vsock),
             net: Arc::new(host::HostNet),
@@ -715,6 +724,7 @@ impl Manager {
             events,
             pool: Mutex::new(None),
             conditions: Mutex::new(Conditions::new(Utc::now())),
+            started: Mutex::new(api::DaemonStart::default()),
         });
         let m = Self { inner };
         m.load()?;
@@ -728,16 +738,22 @@ impl Manager {
         let (adopted, stopped) = m.recover().await;
         let swept = m.sweep_orphans().await;
         let machines = m.inner.machines.lock().unwrap().len();
+        *m.inner.started.lock().unwrap() = api::DaemonStart {
+            at: Utc::now(),
+            adopted,
+            stopped,
+        };
         m.inner.events.emit(
             Ev::normal(
                 reason::HOST_STARTED,
                 format!("daemon started: {adopted} machines adopted, {stopped} marked stopped, {swept} leftovers swept"),
             )
             .data(json!({
-                "version": env!("CARGO_PKG_VERSION"), "machines": machines,
-                "adopted": adopted, "stopped": stopped, "swept": swept,
+                "version": api::VERSION, "vmm_version": m.inner.vmm.version(),
+                "machines": machines, "adopted": adopted, "stopped": stopped, "swept": swept,
             })),
         );
+        m.start_stopped_by_host();
         let sleeper = m.clone();
         tokio::spawn(async move { sleeper.sleeper().await });
         Ok(m)
@@ -1050,10 +1066,10 @@ impl Manager {
             .is_some_and(|m| Arc::ptr_eq(m, e))
     }
 
-    /// Suspends every running machine (a stop when Firecracker refuses); the daemon is going
-    /// down, and after its restart each one resumes on first use in well under a second.
-    /// Stopped by the host, not idle: the next use wakes it whatever its sleep window says.
-    /// Then the usage up to now is written: the next daemon goes on from it.
+    /// Suspends every running machine (a stop when Firecracker refuses): the daemon is going
+    /// down, the host perhaps with it (a reboot). Stopped by the host, not idle: the next
+    /// daemon starts each one again (ADR 0027), resumed when nothing under it changed. Then
+    /// what the next daemon goes on from is written.
     pub async fn close(&self) {
         let entries: Vec<Arc<Entry>> = self
             .inner
@@ -1081,6 +1097,34 @@ impl Manager {
         for t in tasks {
             let _ = t.await;
         }
+        self.write_down().await;
+    }
+
+    /// Leaves every machine as it is for the next daemon to adopt (ADR 0027: an upgrade):
+    /// writes the last uses the records lack and the usage up to now, and nothing else.
+    pub async fn hand_over(&self) {
+        let running = self.usage().1;
+        tracing::info!(running, "handing the machines over to the next daemon");
+        self.write_down().await;
+    }
+
+    /// What the next daemon goes on from: the last uses not on the records yet, and the
+    /// usage measured up to now.
+    async fn write_down(&self) {
+        let used: Vec<Arc<Entry>> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| e.unsaved_use.load(Relaxed))
+            .cloned()
+            .collect();
+        for e in used {
+            if let Err(err) = self.flush_use(&e) {
+                tracing::warn!(machine = e.snapshot().id, err = %err, "last use not written");
+            }
+        }
         let now = Utc::now();
         self.measure(now).await;
         if let Err(err) = self
@@ -1091,6 +1135,39 @@ impl Manager {
             .write(&self.inner.store, now)
         {
             tracing::warn!(err = %err, "usage not written");
+        }
+    }
+
+    /// Starts again the machines the host stopped (the last shutdown suspended them, or a
+    /// previous daemon could not hand them over) whose sleep window has not run out: what ran
+    /// before the daemon went down runs once it is back, used or not (ADR 0027). Detached,
+    /// through the boot gate; a gateway is started by what needs it.
+    fn start_stopped_by_host(&self) {
+        let now = Utc::now();
+        let left: Vec<Arc<Entry>> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| {
+                let r = e.rec.lock().unwrap();
+                stopped_by_host(&r) && !idle_past(r.last_used_at, r.sleep_window(), now)
+            })
+            .cloned()
+            .collect();
+        for e in left {
+            let m = self.clone();
+            tokio::spawn(async move {
+                let _turns = e.lock_for_start().await;
+                // A call may have moved it meanwhile (a wake, a stop, a destroy).
+                if !stopped_by_host(&e.snapshot()) {
+                    return;
+                }
+                if let Err(err) = m.start_entry(&e, false).await {
+                    tracing::warn!(machine = e.snapshot().id, err = %err, "start again after the daemon's start");
+                }
+            });
         }
     }
 
@@ -1883,6 +1960,8 @@ impl Manager {
             version: r.version,
             pending: r.pending.as_ref().map(|p| p.view()),
             pending_since: r.pending_since,
+            init_version: r.init_version.clone(),
+            vmm_version: r.vmm_version.clone(),
             host: String::new(),
         }
     }
@@ -1943,6 +2022,10 @@ impl Manager {
             .map(|t| t.rec.quota)
             .unwrap_or_default();
         let mut applied = None;
+        // A memory snapshot taken under another Firecracker or host kernel is not loaded
+        // (ADR 0027): this start is cold.
+        let vmm = self.inner.vmm.version();
+        let mut dropped = None;
         let over = {
             let machines = self.inner.machines.lock().unwrap();
             let size = {
@@ -1964,6 +2047,10 @@ impl Manager {
                         r.pid = 0;
                         r.restarting_at = None;
                         applied = apply_pending(r, image);
+                        if r.suspended && r.vmm_version != vmm {
+                            r.suspended = false;
+                            dropped = Some(r.vmm_version.clone());
+                        }
                         None
                     });
                     None
@@ -1982,11 +2069,19 @@ impl Manager {
             );
         }
         let resume = e.snapshot().suspended;
-        let ev = match resume {
-            true => Ev::normal(reason::STARTING, "resuming from its memory snapshot"),
-            false => Ev::normal(reason::STARTING, "booting"),
+        let ev = match (resume, dropped) {
+            (true, _) => Ev::normal(reason::STARTING, "resuming from its memory snapshot")
+                .data(json!({ "resume": true })),
+            (false, None) => {
+                Ev::normal(reason::STARTING, "booting").data(json!({ "resume": false }))
+            }
+            (false, Some(was)) => Ev::normal(
+                reason::STARTING,
+                format!("booting: its memory snapshot was taken under {was}, the host runs {vmm}"),
+            )
+            .data(json!({ "resume": false, "snapshot_vmm": was })),
         };
-        e.note(ev.data(json!({ "resume": resume })));
+        e.note(ev);
         Ok(())
     }
 
@@ -2133,6 +2228,16 @@ impl Manager {
     /// The host's conditions as the tick last decided them.
     pub fn conditions(&self) -> Vec<api::Condition> {
         self.inner.conditions.lock().unwrap().list()
+    }
+
+    /// This daemon's start (ADR 0027).
+    pub fn started(&self) -> api::DaemonStart {
+        *self.inner.started.lock().unwrap()
+    }
+
+    /// What a machine booted now runs under (ADR 0027).
+    pub fn vmm_version(&self) -> String {
+        self.inner.vmm.version()
     }
 
     /// The running machines' use over the tick's last window (ADR 0021), of one tenant or
@@ -2301,6 +2406,8 @@ impl Manager {
             version: 0,
             pending: None,
             pending_since: None,
+            init_version: String::new(),
+            vmm_version: String::new(),
         };
         self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
         let mut src: Option<Arc<Entry>> = None;
@@ -2761,6 +2868,7 @@ impl Manager {
             r.suspended = false;
             if !live.resumed {
                 r.boots += 1;
+                r.vmm_version = self.inner.vmm.version();
             }
         }
         let _ = self.save(e);
@@ -2776,6 +2884,9 @@ impl Manager {
             // `exited` is sent once the console is fully written, so the tail is complete.
             _ = exited.changed() => Err("the machine exited during boot".to_string()),
         };
+        if let Ok(init) = &outcome {
+            e.rec.lock().unwrap().init_version = init.clone();
+        }
         if let Err(why) = outcome {
             // The image's fault: the process is ended here, under the lock, so the watcher
             // finds nothing to settle and no restart policy applies. The machine stays in
@@ -4583,6 +4694,11 @@ fn sleeps_at(last_used: Option<DateTime<Utc>>, window: Option<Duration>) -> Opti
     last_used?.checked_add_signed(w)
 }
 
+/// A tenant's machine the host stopped: what the daemon's start boots again.
+fn stopped_by_host(r: &Record) -> bool {
+    r.state == state::STOPPED && r.stopped_reason == stop::HOST && r.is_tenants()
+}
+
 /// Whether the sleep window has run out at `now`. A clock that went backwards (a last use
 /// in the future) is not idle.
 fn idle_past(
@@ -4945,6 +5061,8 @@ mod tests {
             version: 0,
             pending: None,
             pending_since: None,
+            init_version: String::new(),
+            vmm_version: String::new(),
         }
     }
 
@@ -5009,6 +5127,10 @@ mod tests {
         http_codes: Mutex<HashMap<(Ipv4Addr, u16), u16>>,
         /// The size each machine last booted with, as Firecracker is given it.
         booted: Mutex<HashMap<String, api::Size>>,
+        /// What the VMM says it is (ADR 0027): another value is an upgraded Firecracker.
+        vmm_version: Mutex<String>,
+        /// The version the guests' inits answer with.
+        init_version: Mutex<String>,
     }
 
     impl Mock {
@@ -5032,6 +5154,8 @@ mod tests {
                 closed: Mutex::new(Default::default()),
                 http_codes: Mutex::new(HashMap::new()),
                 booted: Mutex::new(HashMap::new()),
+                vmm_version: Mutex::new("v1.17.0/test".into()),
+                init_version: Mutex::new("0.1.0+init".into()),
             })
         }
 
@@ -5298,12 +5422,16 @@ mod tests {
         async fn cgroup(&self, id: &str) -> Option<fc::CgroupUse> {
             self.cgroups.lock().unwrap().get(id).copied()
         }
+
+        fn version(&self) -> String {
+            self.vmm_version.lock().unwrap().clone()
+        }
     }
 
     #[async_trait::async_trait]
     impl guestc::Guest for Mock {
         /// Answers as the real wait does: only at the deadline when the init is silent.
-        async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<()> {
+        async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<String> {
             let (pid, boots, exited) = self.proc_at(vsock)?;
             self.record(format!("wait_ready {pid}"));
             let answers = async {
@@ -5317,7 +5445,8 @@ mod tests {
             };
             tokio::time::timeout(timeout, answers)
                 .await
-                .map_err(|_| anyhow!("guest init did not answer within {timeout:?}"))
+                .map_err(|_| anyhow!("guest init did not answer within {timeout:?}"))?;
+            Ok(self.init_version.lock().unwrap().clone())
         }
 
         async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()> {
@@ -5583,6 +5712,7 @@ mod tests {
                 events,
                 pool: Mutex::new(None),
                 conditions: Mutex::new(Conditions::new(Utc::now())),
+                started: Mutex::new(api::DaemonStart::default()),
             }),
         };
         fake.calls();
@@ -10939,5 +11069,163 @@ mod tests {
                 .await,
         );
         assert_eq!(empty, "image must not be empty");
+    }
+
+    // --- upgrades (ADR 0027) ---
+
+    #[tokio::test]
+    async fn a_boot_records_what_the_init_says_and_what_ran_it() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        assert_eq!(
+            (m.init_version.as_str(), m.vmm_version.as_str()),
+            ("0.1.0+init", "v1.17.0/test")
+        );
+        let r = h.stored(&m.id).unwrap();
+        assert_eq!(
+            (r.init_version.as_str(), r.vmm_version.as_str()),
+            ("0.1.0+init", "v1.17.0/test")
+        );
+        // A cold boot under another init and Firecracker records them.
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        *h.host.init_version.lock().unwrap() = "0.2.0+b".into();
+        *h.host.vmm_version.lock().unwrap() = "v1.18.0/test".into();
+        let m = h.m.start(&m.id, None).await.unwrap();
+        assert_eq!(
+            (m.init_version.as_str(), m.vmm_version.as_str()),
+            ("0.2.0+b", "v1.18.0/test")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_taken_under_another_vmm_is_not_resumed() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let suspend = || h.m.stop(&m.id, Duration::from_secs(1), true, None);
+        assert!(suspend().await.unwrap().suspended);
+        // Firecracker (or the host kernel) changed under the suspended machine: a cold boot.
+        *h.host.vmm_version.lock().unwrap() = "v1.18.0/test".into();
+        h.host.calls();
+        let back = h.m.start(&m.id, None).await.unwrap();
+        assert!(!back.suspended);
+        assert!(h.host.calls().iter().any(|c| c.ends_with(" resume=false")));
+        let starting = h
+            .events_of(&m.id)
+            .into_iter()
+            .rev()
+            .find(|e| e.reason == "starting")
+            .unwrap();
+        assert_eq!(
+            starting.message,
+            "booting: its memory snapshot was taken under v1.17.0/test, the host runs v1.18.0/test"
+        );
+        assert_eq!(
+            starting.data,
+            Some(json!({"resume": false, "snapshot_vmm": "v1.17.0/test"}))
+        );
+        assert_eq!(back.vmm_version, "v1.18.0/test");
+        // Taken and resumed under the same one: a resume.
+        assert!(suspend().await.unwrap().suspended);
+        h.host.calls();
+        h.m.start(&m.id, None).await.unwrap();
+        assert!(h.host.calls().iter().any(|c| c.ends_with(" resume=true")));
+        // A snapshot from before the versions were recorded says none: cold, once.
+        assert!(suspend().await.unwrap().suspended);
+        h.m.entry(&m.id)
+            .unwrap()
+            .rec
+            .lock()
+            .unwrap()
+            .vmm_version
+            .clear();
+        h.host.calls();
+        h.m.start(&m.id, None).await.unwrap();
+        assert!(h.host.calls().iter().any(|c| c.ends_with(" resume=false")));
+    }
+
+    #[tokio::test]
+    async fn a_hand_over_leaves_every_machine_running_for_the_next_daemon() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        h.m.touch(&m.id).unwrap();
+        h.host.calls();
+        h.m.hand_over().await;
+        assert_eq!(
+            h.host.calls(),
+            Vec::<String>::new(),
+            "nothing stopped, suspended or killed"
+        );
+        let r = h.stored(&m.id).unwrap();
+        assert_eq!(
+            (r.state.as_str(), r.pid),
+            (state::RUNNING, m_pid(&h, &m.id))
+        );
+        assert!(
+            r.last_used_at >= m.last_used_at,
+            "the last use is on the record"
+        );
+        // What the next daemon's start finds: the machine, still running, adopted.
+        assert_eq!(h.m.recover().await, (1, 0));
+    }
+
+    /// The machine's process as the manager holds it.
+    fn m_pid(h: &Harness, id: &str) -> u32 {
+        h.m.entry(id).unwrap().snapshot().pid
+    }
+
+    #[tokio::test]
+    async fn a_daemons_start_boots_again_what_the_host_stopped() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let a = h.m.create(h.request("a")).await.unwrap();
+        let b = h.m.create(h.request("b")).await.unwrap();
+        let c = h.m.create(h.request("c")).await.unwrap();
+        let mut never = h.request("d");
+        never.sleep = "never".into();
+        let d = h.m.create(never).await.unwrap();
+        h.m.stop(&c.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        // The daemon's stop: every running machine suspended, stopped by the host.
+        h.m.close().await;
+        for id in [&a.id, &b.id, &d.id] {
+            let r = h.stored(id).unwrap();
+            assert_eq!(
+                (r.state.as_str(), r.stopped_reason.as_str(), r.suspended),
+                ("stopped", "host", true)
+            );
+        }
+        // b's window ran out while the host was down; d never sleeps.
+        let long_ago = Utc::now() - chrono::Duration::hours(2);
+        h.m.entry(&b.id).unwrap().rec.lock().unwrap().last_used_at = Some(long_ago);
+        h.m.entry(&d.id).unwrap().rec.lock().unwrap().last_used_at = Some(long_ago);
+        h.host.calls();
+        h.m.start_stopped_by_host();
+        let running = |id: &str| h.m.get(id).unwrap().state == state::RUNNING;
+        eventually("a and d running again", || running(&a.id) && running(&d.id)).await;
+        let calls = h.host.calls();
+        let boots: Vec<&String> = calls.iter().filter(|c| c.starts_with("boot ")).collect();
+        assert_eq!(boots.len(), 2, "{calls:?}");
+        assert!(
+            boots.iter().all(|c| c.ends_with(" resume=true")),
+            "{boots:?}"
+        );
+        // b sleeps on, wakeable; c was stopped on purpose.
+        let b = h.m.get(&b.id).unwrap();
+        assert_eq!(
+            (b.state.as_str(), b.stopped_reason.as_str()),
+            ("stopped", "host")
+        );
+        let c = h.m.get(&c.id).unwrap();
+        assert_eq!(
+            (c.state.as_str(), c.stopped_reason.as_str()),
+            ("stopped", "user")
+        );
+        assert!(h.m.wake(&b.id, None).await.unwrap().state == state::RUNNING);
     }
 }

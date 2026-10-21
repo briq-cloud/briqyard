@@ -46,6 +46,13 @@ hack/vm.sh e2e         # install, then run hack/e2e.sh inside the VM
 Everything under nested virtualization is slower than on a real server; the timings are not a
 benchmark.
 
+`hack/vm.sh install` also lays out what `hack/fleet-smoke.sh` upgrades the VM's own host to
+(ADR 0027): this build's binaries under a release's names in `/var/lib/briqyard-fleet/release`
+(`file://` for `--release`), and the fleet's SSH key (`/etc/briqyard/fleet_ssh_key`, made once)
+in root's `authorized_keys`, so the fleet runs the bootstrap script on its own VM over SSH. The
+version a build says is `0.1.0+<commit>` of the checkout it was built from (`git` in the VM
+reads the mount; uncommitted changes say their HEAD's commit).
+
 ### Two hosts on the Mac
 
 A second VM is a second host, so the fleet's placement, forwarding and host-down path run
@@ -123,7 +130,11 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   words), labels, quotas and logs follow (a listing by labels, the quota at create, fork,
   start and the gateway with its message and event, its use; a follow from the start and
   from a cursor, across rotations, ending at the destroy, its heartbeat and shutdown;
-  placement by region and the cross-region refusal through stub hosts in two regions). What still needs the host: a tenant's first create (its bridge and
+  placement by region and the cross-region refusal through stub hosts in two regions), upgrades
+  (the init's and the VMM's versions recorded at boot, a snapshot of another VMM booted cold, a
+  hand-over that touches no machine and the adoption after it, the daemon's start booting again
+  what the host stopped within its window, old and new wire shapes decoding, the fleet's
+  refusals, its wait for a new start and its end states, drain apart from retire). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
@@ -145,9 +156,13 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
   new image: Python 3.13, the volume's file kept), labels, a quota and a follow (`ls -l` selecting one machine, a
   refused selector, a second create refused 403 `quota` with its use and event, `logs -f`
-  receiving a line printed after it began and ending at the destroy). 132 checks.
+  receiving a line printed after it began and ending at the destroy), versions and a hand-over
+  (status and the init say the build, `vmm_version` the host's; SIGUSR2 then a start: still
+  running, adopted, no second boot; a stop then a start: running again unasked, resumed). 141 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
-  daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
+  daemon in the VM, a dry-run provisioner for order and retire), drain and undrain, and a
+  `host upgrade` of the VM's own host to this build with a machine running (back `ready`, a new
+  start of this version that adopted it, the machine answering, never booted again). 29 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases

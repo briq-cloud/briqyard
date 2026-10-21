@@ -9,7 +9,7 @@ use std::ops::ControlFlow;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "briqyard", version, about = "Machines in Firecracker microVMs")]
+#[command(name = "briqyard", version = api::VERSION, about = "Machines in Firecracker microVMs")]
 struct Cli {
     /// The daemon or fleet to talk to.
     #[arg(
@@ -581,7 +581,23 @@ enum HostCmd {
     Drain {
         id: String,
     },
-    /// Drain a host and release it at its provider once nothing runs on it
+    /// Place new tenants on a drained or retiring host again
+    Undrain {
+        id: String,
+    },
+    /// Install another release on a host, its machines running: drained, installed, back
+    /// once its daemon heartbeats with the new version (ADR 0027)
+    Upgrade {
+        /// The host; with --all, every ready or draining host, one at a time
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<String>,
+        #[arg(long)]
+        all: bool,
+        /// A release URL, or a version of the project's releases (0.2.0)
+        #[arg(long)]
+        release: String,
+    },
+    /// Take no new tenant on a host and release it at its provider once nothing runs on it
     Retire {
         id: String,
     },
@@ -601,6 +617,8 @@ struct Client {
 const CALL_TIMEOUT: Duration = Duration::from_secs(900);
 /// A watch with no line this long is gone: the server sends one every 30 s.
 const WATCH_SILENCE: Duration = Duration::from_secs(90);
+/// A host upgrade: the bootstrap script's half hour, then the host's return.
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(2400);
 
 impl Client {
     async fn call<T: serde::de::DeserializeOwned>(
@@ -1396,6 +1414,41 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             HostCmd::Drain { id } => {
                 c.raw(POST, &format!("/v1/hosts/{id}/drain"), NONE).await?;
             }
+            HostCmd::Undrain { id } => {
+                c.raw(POST, &format!("/v1/hosts/{id}/undrain"), NONE)
+                    .await?;
+            }
+            HostCmd::Upgrade { id, all, release } => {
+                let ids = match (id, all) {
+                    (Some(id), _) => vec![id],
+                    (None, _) => {
+                        let hs: Vec<api::Host> = c.call(GET, "/v1/hosts", NONE).await?;
+                        let (ids, skipped) = upgrade_order(&hs);
+                        for (id, state) in skipped {
+                            eprintln!("{id}: {state}, not upgraded");
+                        }
+                        ids
+                    }
+                };
+                let req = api::UpgradeHostRequest { release };
+                for (i, id) in ids.iter().enumerate() {
+                    eprintln!("{id}: upgrading");
+                    let path = format!("/v1/hosts/{id}/upgrade");
+                    match c.send(POST, &path, Some(&req), Some(UPGRADE_TIMEOUT)).await {
+                        Ok(resp) => {
+                            let h: api::Host = resp.json().await?;
+                            println!("{id}: {}", h.note);
+                        }
+                        Err(e) => {
+                            let left = &ids[i + 1..];
+                            match left.is_empty() {
+                                true => bail!("{id}: {e:#}"),
+                                false => bail!("{id}: {e:#}; not upgraded: {}", left.join(", ")),
+                            }
+                        }
+                    }
+                }
+            }
             HostCmd::Retire { id } => print_json(
                 &c.call::<api::Host>(POST, &format!("/v1/hosts/{id}/retire"), NONE)
                     .await?,
@@ -1711,14 +1764,30 @@ fn image_table(ims: &[api::Image]) -> String {
 
 /// `host ls`: a line per host, and under it its pin, each condition that is true and its
 /// note when the provisioner or the bootstrap left one.
+/// What `host upgrade --all` upgrades, in order: the ready and draining hosts by id; and the
+/// others, with their state, which it leaves.
+fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, String)>) {
+    let mut hs: Vec<&api::Host> = hs.iter().collect();
+    hs.sort_by(|a, b| a.id.cmp(&b.id));
+    let (up, left): (Vec<&api::Host>, Vec<&api::Host>) = hs
+        .into_iter()
+        .partition(|h| matches!(h.state.as_str(), "ready" | "draining"));
+    (
+        up.into_iter().map(|h| h.id.clone()).collect(),
+        left.into_iter()
+            .map(|h| (h.id.clone(), h.state.clone()))
+            .collect(),
+    )
+}
+
 fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
-        "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} LAST SEEN\n",
-        "ID", "URL", "STATE", "REGION", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS"
+        "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {:<20} LAST SEEN\n",
+        "ID", "URL", "STATE", "REGION", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS", "VERSION"
     );
     for h in hs {
         out.push_str(&format!(
-            "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {}\n",
+            "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {:<20} {}\n",
             h.id,
             if h.url.is_empty() { "-" } else { &h.url },
             h.state,
@@ -1727,6 +1796,11 @@ fn host_table(hs: &[api::Host]) -> String {
             format!("{}/{}", h.used.vcpus, h.capacity.vcpus),
             h.machines,
             h.tenants.len(),
+            if h.version.is_empty() {
+                "-"
+            } else {
+                &h.version
+            },
             h.last_seen.to_rfc3339()
         ));
         if !h.tls_fingerprint.is_empty() {
@@ -1912,6 +1986,24 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
         lines.push(("Volume", format!("{} GB at {}", v.size_gb, v.mount)));
     }
     lines.push(("Egress", egress_label(&m.egress)));
+    // What runs it (ADR 0027): the init its root disk carries, the VMM of its last boot.
+    if !m.init_version.is_empty() || !m.vmm_version.is_empty() {
+        let or_unknown = |v: &str| {
+            if v.is_empty() {
+                "unknown".to_string()
+            } else {
+                v.to_string()
+            }
+        };
+        lines.push((
+            "Runs on",
+            format!(
+                "init {}, vmm {}",
+                or_unknown(&m.init_version),
+                or_unknown(&m.vmm_version)
+            ),
+        ));
+    }
     let endpoints: Vec<String> = m
         .endpoints
         .iter()

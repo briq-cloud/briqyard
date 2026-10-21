@@ -613,6 +613,14 @@ pub struct Machine {
     pub pending: Option<Pending>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_since: Option<DateTime<Utc>>,
+    /// The init its root disk carries, as it said at the last boot (ADR 0027); empty before
+    /// its first boot, or from an init older than the report.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub init_version: String,
+    /// What ran it at its last boot: Firecracker's version and the host kernel's release,
+    /// `v1.17.0/6.8.0-45-generic`. A memory snapshot resumes only under the same (ADR 0027).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vmm_version: String,
     /// The briqyardd that runs it (set by the fleet).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
@@ -1347,7 +1355,7 @@ pub struct Host {
     pub region: String,
     #[serde(default)]
     pub provider: String,
-    /// ready, draining, down, provisioning, bootstrapped, failed, dry-run
+    /// ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed, dry-run
     pub state: String,
     pub capacity: Capacity,
     pub used: Capacity,
@@ -1367,6 +1375,30 @@ pub struct Host {
     /// What its last heartbeat said (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    /// Its daemon's last start, from its heartbeat (ADR 0027).
+    #[serde(default)]
+    pub started: DaemonStart,
+}
+
+/// When a daemon started and what it did with the machines the previous one left running
+/// (ADR 0027): an upgrade waits for a start after its install, and fails one that stopped a
+/// machine instead of handing it over.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonStart {
+    pub at: DateTime<Utc>,
+    /// Left running and taken over.
+    pub adopted: usize,
+    /// Left running and found gone or not answering: marked stopped, and booted again when
+    /// its sleep window had not run out.
+    pub stopped: usize,
+}
+
+/// POST /v1/hosts/{id}/upgrade (fleet only, ADR 0027).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpgradeHostRequest {
+    /// A release URL (where `briqyardd-linux-<arch>` and its siblings are), or a version
+    /// (`0.2.0`, `v0.2.0`) of the project's releases.
+    pub release: String,
 }
 
 /// POST /v1/hosts/order (fleet only).
@@ -1402,6 +1434,9 @@ pub struct RegisterHostRequest {
     /// The host's conditions (ADR 0021): the fleet places nothing new while one is true.
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    /// The daemon's start (ADR 0027).
+    #[serde(default)]
+    pub started: DaemonStart,
 }
 
 /// GET /v1/status.
@@ -1422,6 +1457,13 @@ pub struct Status {
     /// Memory and disk pressure, as the tick last found them (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    /// The daemon's start (ADR 0027).
+    #[serde(default)]
+    pub started: DaemonStart,
+    /// What a machine booted now runs under: Firecracker's version and the host kernel's
+    /// release (ADR 0027).
+    #[serde(default)]
+    pub vmm_version: String,
 }
 
 /// Every error response's body.
@@ -1779,6 +1821,7 @@ mod tests {
         assert_eq!(m.started_at, None);
         assert_eq!(m.sleeps_at, None);
         assert_eq!(m.host, "");
+        assert_eq!((m.init_version.as_str(), m.vmm_version.as_str()), ("", ""));
     }
 
     #[test]
@@ -1808,6 +1851,7 @@ mod tests {
             "suspended": true, "backup": {"every": "6h", "keep": 4},
             "last_backup_at": "2026-01-02T03:04:05Z", "next_backup_at": "2026-01-02T09:04:05Z",
             "version": 812, "host": "h1",
+            "init_version": "0.1.0+fdad892eeefa", "vmm_version": "v1.17.0/6.8.0-45-generic",
             "restarts": 2, "restarting_at": "2026-01-02T03:04:25Z", "ready": false
         });
         let mut input = input;
@@ -1847,6 +1891,7 @@ mod tests {
         assert_eq!(m.endpoints[0].host_port, Some(20001));
         assert_eq!(m.sleeps_at.map(|t| (t - ts()).num_minutes()), Some(30));
         assert!(m.suspended);
+        assert_eq!(m.init_version, "0.1.0+fdad892eeefa");
     }
 
     #[test]
@@ -2410,6 +2455,7 @@ mod tests {
         expected["version"] = json!("");
         expected["tls_fingerprint"] = json!("");
         expected["conditions"] = json!([]);
+        expected["started"] = json!({"at": "1970-01-01T00:00:00Z", "adopted": 0, "stopped": 0});
         let h: Host = round_trip(input, expected);
         assert_eq!(h.note, "");
         let h: Host = same(json!({
@@ -2419,9 +2465,11 @@ mod tests {
             "last_seen": "2026-01-02T03:04:05Z", "version": "0.1.0", "note": "ordered",
             "tls_fingerprint": "ab01",
             "conditions": [{"type": "disk_pressure", "status": true,
-                "since": "2026-01-02T03:04:05Z", "message": "pool 4% free"}]
+                "since": "2026-01-02T03:04:05Z", "message": "pool 4% free"}],
+            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0}
         }));
         assert_eq!(h.tenants, vec!["t1", "t2"]);
+        assert_eq!(h.started.adopted, 2);
         assert_eq!(
             under_pressure(&h.conditions).map(|c| c.kind.as_str()),
             Some(condition::DISK_PRESSURE)
@@ -2442,7 +2490,7 @@ mod tests {
                 "id": "h1", "url": "http://10.0.0.5:7420", "region": "",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
                 "machines": 0, "tenants": [], "version": "", "disk_free_mb": 0,
-                "tls_fingerprint": "", "conditions": []
+                "tls_fingerprint": "", "conditions": [], "started": {"at": "1970-01-01T00:00:00Z", "adopted": 0, "stopped": 0}
             }),
         );
         assert_eq!(r.region, "");
@@ -2452,7 +2500,8 @@ mod tests {
             "machines": 1, "tenants": ["t1"], "version": "0.1.0", "disk_free_mb": 100000,
             "tls_fingerprint": "ab01",
             "conditions": [{"type": "memory_pressure", "status": false,
-                "since": "2026-01-02T03:04:05Z", "message": "512 MB of 65536 committed (0%)"}]
+                "since": "2026-01-02T03:04:05Z", "message": "512 MB of 65536 committed (0%)"}],
+            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0}
         }));
         assert_eq!(r.disk_free_mb, 100000);
         assert_eq!(r.tls_fingerprint, "ab01");
@@ -2471,7 +2520,7 @@ mod tests {
                 "version": "0.1.0", "host_id": "h1",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
                 "machines": 3, "running": 1, "disk_free_mb": 0, "tls_fingerprint": "",
-                "conditions": []
+                "conditions": [], "started": {"at": "1970-01-01T00:00:00Z", "adopted": 0, "stopped": 0}, "vmm_version": ""
             }),
         );
         assert_eq!(s.running, 1);
@@ -2484,7 +2533,8 @@ mod tests {
                  "message": "990 MB of 1000 committed (99%), over 95%"},
                 {"type": "disk_pressure", "status": false, "since": "2026-01-02T03:04:05Z",
                  "message": "pool 50% free"}
-            ]
+            ],
+            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0}, "vmm_version": "v1.17.0/6.8.0-45-generic"
         }));
         assert_eq!(
             under_pressure(&s.conditions).map(|c| c.kind.as_str()),
@@ -2496,6 +2546,13 @@ mod tests {
         )
         .is_err());
         assert_eq!(condition::ALL, ["memory_pressure", "disk_pressure"]);
+    }
+
+    #[test]
+    fn upgrade_request() {
+        let r: UpgradeHostRequest = same(json!({"release": "0.2.0"}));
+        assert_eq!(r.release, "0.2.0");
+        assert!(serde_json::from_value::<UpgradeHostRequest>(json!({})).is_err());
     }
 
     #[test]

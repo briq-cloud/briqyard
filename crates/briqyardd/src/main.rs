@@ -29,7 +29,7 @@ const OPENAPI: &str = include_str!("../../../api/openapi.yaml");
 #[derive(Parser)]
 #[command(
     name = "briqyardd",
-    version,
+    version = briqyard_api::VERSION,
     about = "briqyard host daemon: machines in Firecracker microVMs"
 )]
 struct Args {
@@ -176,27 +176,32 @@ async fn run(args: Args) -> Result<()> {
     tracing::info!(
         addr = cfg.listen,
         tls_fingerprint = fingerprint,
-        version = env!("CARGO_PKG_VERSION"),
+        version = briqyard_api::VERSION,
         host_id = mgr.host_id(),
         pool = cfg.storage.pool,
         "briqyardd listening"
     );
     let handle = axum_server::Handle::new();
+    // SIGTERM (a stop, a reboot) suspends the machines; SIGUSR2 (an upgrade) leaves them
+    // running for the next daemon to adopt (ADR 0027).
+    let hand_over = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
-        let handle = handle.clone();
+        let (handle, hand_over) = (handle.clone(), hand_over.clone());
         let watches = mgr.events().clone();
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate())?;
+        let mut usr2 = signal(SignalKind::user_defined2())?;
         tokio::spawn(async move {
-            let mut term =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("signal");
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = term.recv() => {}
+                _ = usr2.recv() => hand_over.store(true, std::sync::atomic::Ordering::SeqCst),
             }
             tracing::info!("shutting down");
-            // A watch never ends on its own: the server would wait for it.
+            // A watch never ends on its own: the server would wait for it. A request still
+            // running after the grace (a long exec) is cut: the machines come first.
             watches.close();
-            handle.graceful_shutdown(None);
+            handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
         });
     }
     let app = api::router(state).into_make_service();
@@ -215,7 +220,13 @@ async fn run(args: Args) -> Result<()> {
                 .await?
         }
     }
-    tokio::time::timeout(std::time::Duration::from_secs(60), mgr.close())
+    let down = async {
+        match hand_over.load(std::sync::atomic::Ordering::SeqCst) {
+            true => mgr.hand_over().await,
+            false => mgr.close().await,
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), down)
         .await
         .ok();
     Ok(())

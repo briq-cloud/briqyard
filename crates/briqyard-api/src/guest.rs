@@ -8,6 +8,12 @@
 //! One connection goes the other way: when the main process ends, the init connects to the
 //! host on [`EXIT_PORT`] and sends one [`ExitReport`] frame, then waits for the host to close
 //! before it resets the machine.
+//!
+//! A machine keeps the init it booted with while daemons are upgraded under it, so both sides
+//! read what the other's version writes (ADR 0027): changes are additive (a field is added
+//! with a default that means what its absence meant, never renamed, retyped or removed);
+//! unknown fields are ignored; an unknown `op` is answered `error` "unknown op <op>"; an
+//! unknown response `type` in a stream is skipped. The init says its version in `pong`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -108,6 +114,9 @@ pub struct Response {
     pub uptime: f64,
     #[serde(default)]
     pub main_pid: i32,
+    /// The init's version, in a `pong` (ADR 0027); empty from an init older than the field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 /// How the main process ended, sent by the init on [`EXIT_PORT`] before the machine resets.
@@ -405,6 +414,57 @@ mod tests {
         let back: ExitReport = read_frame(&mut &buf[..]).unwrap();
         assert_eq!(back, r);
         assert_eq!(ExitReport::default().code, 0);
+    }
+
+    #[test]
+    fn a_pong_says_the_inits_version() {
+        let r: Response = same(json!({
+            "type": "pong", "data": "", "code": 0, "timed_out": false, "message": "",
+            "uptime": 1.0, "main_pid": 7, "version": "0.1.0+fdad892eeefa"
+        }));
+        assert_eq!(r.version, "0.1.0+fdad892eeefa");
+        // Written only when there is one: every other frame is as it was.
+        assert!(serde_json::to_value(Response::new("ok"))
+            .unwrap()
+            .get("version")
+            .is_none());
+    }
+
+    /// What each side of the oldest version still running may send (ADR 0027): the current
+    /// types read it, and read what a newer side adds (fields, an op, a type) without failing.
+    #[test]
+    fn old_and_new_shapes_decode() {
+        // A pong from an init older than its version: no version, which the daemon shows as
+        // unknown.
+        let r: Response =
+            serde_json::from_value(json!({"type": "pong", "uptime": 3.5, "main_pid": 9})).unwrap();
+        assert_eq!((r.version.as_str(), r.main_pid), ("", 9));
+        // The first exit report, and one with a field a later init adds.
+        let r: ExitReport =
+            serde_json::from_value(json!({"code": 1, "oom": false, "requested": true})).unwrap();
+        assert!(r.requested);
+        let r: ExitReport = serde_json::from_value(
+            json!({"code": 2, "oom": true, "requested": false, "signal": 9}),
+        )
+        .unwrap();
+        assert_eq!((r.code, r.oom), (2, true));
+        // A request with a field and an op this init does not know: decoded, the op answered
+        // `unknown op` by the init's dispatch.
+        let r: Request =
+            serde_json::from_value(json!({"op": "resize", "rows": 40, "cols": 120})).unwrap();
+        assert_eq!(r.op, "resize");
+        // A response of a type the daemon does not know, with a field it does not know.
+        let r: Response =
+            serde_json::from_value(json!({"type": "progress", "percent": 50})).unwrap();
+        assert_eq!(r.kind, "progress");
+        // A drive from a newer daemon: its new field ignored by this init.
+        let c: Config = serde_json::from_value(json!({
+            "hostname": "a", "ip": "10.64.0.2/24", "gateway": "10.64.0.1", "dns": [],
+            "entrypoint": [], "cmd": ["sleep"], "env": {}, "workdir": "/", "user": "",
+            "mounts": [], "files": [], "stop_timeout_sec": 10, "sysctls": {"a": "1"}
+        }))
+        .unwrap();
+        assert_eq!(c.cmd, ["sleep"]);
     }
 
     #[test]

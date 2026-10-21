@@ -439,6 +439,30 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   check "one boot"         '[ "$(briqyard machine logs "$K" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
   briqyard machine stop "$K" >/dev/null
   check "stop after crash" '[ "$(briqyard machine get "$K" | jq -r .state)" = stopped ]'
+
+  echo "== versions, a hand-over (an upgrade) and a stop (a reboot): ADR 0027"
+  V=$(briqyard machine run --image alpine:3.20 --name handover --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
+  build=$(briqyardd --version | awk '{print $2}')
+  check "status says the build"      '[ "$(briqyard status | jq -r .version)" = "$build" ]'
+  check "the init says its version"  '[ "$(briqyard machine get "$V" | jq -r .init_version)" = "$build" ]'
+  check "what ran it is the host's"  '[ "$(briqyard machine get "$V" | jq -r .vmm_version)" = "$(briqyard status | jq -r .vmm_version)" ]'
+  # What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start.
+  pid=$(systemctl show -p MainPID --value briqyardd)
+  sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
+  for i in $(seq 1 100); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
+  sudo systemctl start briqyardd
+  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  check "handed over: still running" '[ "$(briqyard machine get "$V" | jq -r .state)" = running ]'
+  check "the new daemon adopted it"  'briqyard status | jq -e ".started.adopted >= 1 and .started.stopped == 0" >/dev/null'
+  check "exec after the hand-over"   '[ "$(briqyard machine exec "$V" -- hostname)" = handover ]'
+  check "never booted again"         '[ "$(briqyard machine logs "$V" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+  # A stop suspends it; the next start brings it back unasked, from its memory snapshot.
+  sudo systemctl stop briqyardd
+  sudo systemctl start briqyardd
+  for i in $(seq 1 60); do [ "$(briqyard machine get "$V" 2>/dev/null | jq -r .state)" = running ] && break; sleep 1; done
+  check "running again after a stop and a start" '[ "$(briqyard machine get "$V" | jq -r .state)" = running ]'
+  check "resumed, not booted"        '[ "$(briqyard machine logs "$V" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+  briqyard machine rm "$V" >/dev/null
 fi
 
 echo

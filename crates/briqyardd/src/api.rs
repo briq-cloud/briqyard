@@ -291,7 +291,7 @@ async fn metrics(State(st): S) -> Response {
 async fn status(State(st): S) -> Json<api::Status> {
     let (used, running, machines) = st.mgr.usage();
     Json(api::Status {
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: api::VERSION.into(),
         host_id: st.mgr.host_id().into(),
         capacity: st.mgr.capacity(),
         used,
@@ -300,6 +300,8 @@ async fn status(State(st): S) -> Json<api::Status> {
         disk_free_mb: st.mgr.disk_free_mb().await,
         tls_fingerprint: st.tls_fingerprint.clone(),
         conditions: st.mgr.conditions(),
+        started: st.mgr.started(),
+        vmm_version: st.mgr.vmm_version(),
     })
 }
 

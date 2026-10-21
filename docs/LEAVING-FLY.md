@@ -16,7 +16,7 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 | 2 | Volume durability: Fly's daily snapshots | scheduled backups, retention, delete (done); a run against a real bucket | the schedule and retention per plan | staging |
 | 3 | Egress abuse: our servers' IPs and the provider's abuse desk | blocked ports, rate and bandwidth limits per machine (done) | the limits per plan, abuse response | public traffic |
 | 4 | Observability and alerts | `/metrics`, JSON logs, host conditions (done) | scraping, log shipping, alerts in the monitor | staging |
-| 5 | Host operations: real orders, upgrades, patching | rolling upgrade, real provisioner runs | runbooks, capacity decisions | production |
+| 5 | Host operations: real orders, upgrades, patching | rolling upgrade (built: ADR 0027), real provisioner runs, OS patching | runbooks, capacity decisions | production |
 | 6 | Host loss | evacuate a host from its backups | the briqs' state while it happens | production |
 | 7 | Regions | region-aware placement (done) | the team's region to the briqyard adapter (done, #250) | a second region |
 | 8 | A team across hosts | WireGuard mesh or vRack (`MESH.md`) | nothing | a team outgrows a host |
@@ -69,9 +69,9 @@ On briqyard: `/metrics` (Prometheus, per machine and per host), host conditions 
 
 Fly today: hardware, kernels, the hypervisor, capacity: all Fly's.
 
-On briqyard: provisioners for OVH, Scaleway, Hetzner, stub-tested only; upgrades by hand.
+On briqyard: provisioners for OVH, Scaleway, Hetzner, stub-tested only. `host upgrade` (ADR 0027): one host or `--all` one at a time, the daemon handing its machines over (no pause, ingress connections reset); verified in the dev VM, not yet on a real host.
 
-- briqyard: `host upgrade` across the fleet (drain, upgrade, undrain, one at a time; suspend makes it a quarter-second pause per machine); a first real order through each provisioner.
+- briqyard: a first real order through each provisioner; a first `host upgrade --all` on real hosts; release digests checked by the script; OS patching (a reboot) through the fleet.
 - briq (ops): runbooks, when to order, kernel and Firecracker version bumps through the pinned bootstrap (ADR 0007).
 
 ## 6. Host loss
