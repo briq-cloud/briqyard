@@ -69,7 +69,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | CronJob | ✗ | | briq: a schedule on a workload is briq's; a schedule on what the host owns (its disks: backups) is the host's |
 | Ephemeral containers (debug) | ✓ exec | | |
 | — | ★ sleep on idle, wake on connect | | |
-| — | ★ suspend and resume in 0.2 s | Kubernetes checkpointing is alpha | |
+| — | ★ suspend and resume in 0.2 s; snapshots with memory, restored to resume where they were (ADR 0031) | Kubernetes checkpointing is alpha | |
 | — | ★ fork with the disk | | |
 
 ## Scheduling and nodes
@@ -113,7 +113,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | PV, PVC, StorageClass | ✓ a volume per machine | | |
 | Volume expansion | ✗ | grow the zvol and the filesystem at boot | yard, later |
-| VolumeSnapshot, restore | ◐ local snapshots (list, delete), fork, backups and restore anywhere | rollback to a named local snapshot | yard, later |
+| VolumeSnapshot, restore | ★ named snapshots of both disks, restored in place with newer snapshots, forks and the backup chain kept (ADR 0031); fork; backups and restore anywhere | a fork from a named snapshot | yard, later |
 | Scheduled backups and retention (Velero) | ✓ `backup: { every, keep }` run by the daemon, whole chains pruned, delete, a destroyed machine's kept `keep_destroyed_days` (ADR 0023) | | yard (values from briq) |
 | Encryption at rest (CSI, etcd secrets) | ✗ records, config drives and disks in clear (0600) | the pool encrypted at bootstrap, one key per host held by the fleet, handed over TLS at start, never on the host's disk | yard, before the first real host |
 | emptyDir, tmpfs | ✓ `/tmp` | | |

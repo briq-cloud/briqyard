@@ -1,6 +1,6 @@
 # ADR 0019: Events, a watch and versions: what makes an imperative API safe to drive
 
-Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`), ADR 0022 (the probes' reasons, marked *0022*), ADR 0023 (the backups' reasons), ADR 0024 (`applied`) and ADR 0025 (`quota_exceeded`)
+Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`), ADR 0022 (the probes' reasons, marked *0022*), ADR 0023 (the backups' reasons), ADR 0024 (`applied`), ADR 0025 (`quota_exceeded`) and ADR 0031 (`snapshot_taken`, `snapshot_deleted`, `restored` for a snapshot)
 
 ## Context
 

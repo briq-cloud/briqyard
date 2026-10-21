@@ -225,20 +225,38 @@ paths:
   /v1/machines/{id}/snapshots:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
-      summary: List snapshots
+      summary: List its snapshots, oldest first (ADR 0031)
       responses:
         "200": { description: snapshots, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Snapshot" } } } } }
     post:
-      summary: Snapshot both disks now
+      summary: "Snapshot both disks at one instant, and the memory with `memory: true`; a `snapshot_taken` event"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SnapshotRequest" }
       responses:
         "201": { description: snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/Snapshot" } } } }
+        "400": { description: "`invalid`: a bad name" }
+        "409": { description: "`conflict`: the name is taken; `not_running`: memory asked of a machine with no process; `bad_state`: destroying, or a restore unfinished" }
   /v1/machines/{id}/snapshots/{snap}:
-    parameters: [{ $ref: "#/components/parameters/id" }, { name: snap, in: path, required: true, schema: { type: string } }]
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/snap" }]
     delete:
-      summary: Remove a snapshot made here, from both disks; missing is success
+      summary: "Delete a snapshot, from both disks and its memory; missing is success; a `snapshot_deleted` event. What a retired disk still clones goes with it"
       responses:
-        "204": { description: removed }
-        "404": { description: no such machine, or not a snapshot of the caller's }
+        "204": { description: deleted }
+        "404": { description: no such machine }
+        "409": { description: "`bad_state`: a restore unfinished" }
+  /v1/machines/{id}/snapshots/{snap}/restore:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/snap" }]
+    post:
+      summary: "Take the disks back to the snapshot, and the memory when it holds it and the spec is the same (ADR 0031): a running machine is stopped, then booted or resumed; any other stays as it is. Newer snapshots, forks and the backup chain are kept. A `restored` event"
+      parameters: [{ $ref: "#/components/parameters/ifMatch" }]
+      responses:
+        "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "404": { description: "`not_found`: no such machine or snapshot" }
+        "409": { description: "`bad_state`: starting, stopping or destroying; `boot_failed`: restored, then the guest did not come up; `conflict`: a stale `If-Match`" }
+        "500": { description: "`internal`: the disks could not be swapped; the restore is finished by the next restore, start or daemon start" }
   /v1/machines/{id}/endpoints:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
@@ -428,6 +446,12 @@ components:
       name: id
       in: path
       required: true
+      schema: { type: string }
+    snap:
+      name: snap
+      in: path
+      required: true
+      description: a snapshot's id or name
       schema: { type: string }
     ifMatch:
       name: If-Match
@@ -742,12 +766,20 @@ components:
       properties:
         suspend: { type: boolean, description: keep a memory snapshot so the next start resumes in well under a second; a plain stop when Firecracker refuses }
         timeout_sec: { type: integer, default: 10, maximum: 600 }
+    SnapshotRequest:
+      type: object
+      properties:
+        name: { type: string, description: "to find it by again: a-z, 0-9, _ and -, at most 64, not starting with s_; unique on the machine" }
+        memory: { type: boolean, description: "its memory too, on a running machine, paused while it is written: a restore resumes its processes where they were" }
     Snapshot:
       type: object
       properties:
         id: { type: string }
         machine_id: { type: string }
+        name: { type: string }
         created_at: { type: string, format: date-time }
+        disks: { type: array, items: { type: string, enum: [root, data] }, description: "the disks it holds; a new image drops root (ADR 0024)" }
+        memory: { type: boolean, description: "it holds the memory: a restore resumes, unless the image, command, env, files or size changed since" }
     MachineStats:
       type: object
       properties:
@@ -840,7 +872,7 @@ components:
         root_gb_hours: { type: number, description: "the root disk's allocated size × hours" }
         volume_gb_hours: { type: number, description: "the data volume's allocated size × hours" }
         disk_used_gb_hours: { type: number, description: what the disks take on the pool × hours }
-        snapshot_gb_hours: { type: number, description: "local snapshots, the memory snapshot included, × hours" }
+        snapshot_gb_hours: { type: number, description: "local snapshots, retired disks and memory snapshots included, × hours" }
         backup_gb_hours: { type: number, description: "the machine's backups in the object store × hours; a destroyed machine's go on in its buckets until they are deleted (ADR 0023)" }
         internet_out_bytes: { type: integer, description: "to the internet, through the host's NAT" }
         internet_in_bytes: { type: integer }
@@ -856,7 +888,7 @@ components:
         seq: { type: integer, description: one more per event on its host, never reused }
         at: { type: string, format: date-time }
         type: { type: string, enum: [normal, warning] }
-        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`" }
+        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, snapshot_taken, snapshot_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`, ADR 0031's for snapshots and a restore to one" }
         message: { type: string, description: for a person; at most 1 KB }
         machine_id: { type: string }
         tenant: { type: string }
@@ -898,7 +930,7 @@ components:
         cpu_percent: { type: number, description: "CPU time over the window, in percent of one CPU (jailed hosts)" }
         memory_bytes: { type: integer, description: "what its process holds, from its cgroup (jailed hosts)" }
         memory_limit_bytes: { type: integer, description: its size's memory }
-        disk_used_bytes: { type: integer, description: "its disks, their snapshots and its memory snapshot on the pool" }
+        disk_used_bytes: { type: integer, description: "its disks, their snapshots, the disks a restore retired and its memory snapshots on the pool" }
         internet_in_bytes_per_sec: { type: number }
         internet_out_bytes_per_sec: { type: number }
         ingress_in_bytes_per_sec: { type: number }
