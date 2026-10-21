@@ -20,9 +20,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn for T {}
 pub trait Guest: Send + Sync {
     async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<()>;
     async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()>;
-    /// Runs a command and collects what it printed.
-    async fn exec(&self, vsock: &Path, req: Request) -> Result<ExecOutput>;
-    /// Starts a command and hands its connection over.
+    /// Starts a command and hands its connection over: [`collect`] reads it to the exit.
     async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>>;
     async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()>;
     async fn get(&self, vsock: &Path, path: &str) -> Result<Vec<u8>>;
@@ -38,9 +36,6 @@ impl Guest for Vsock {
     }
     async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()> {
         shutdown(vsock, grace).await
-    }
-    async fn exec(&self, vsock: &Path, req: Request) -> Result<ExecOutput> {
-        exec(vsock, req).await
     }
     async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>> {
         Ok(Box::new(session(vsock, req).await?))
@@ -117,11 +112,6 @@ pub async fn session(uds: &Path, mut req: Request) -> Result<UnixStream> {
     let mut s = dial(uds).await?;
     write_request(&mut s, &req).await?;
     Ok(s)
-}
-
-/// Runs a command to its end: one session, its output collected.
-pub async fn exec(uds: &Path, req: Request) -> Result<ExecOutput> {
-    collect(&mut session(uds, req).await?).await
 }
 
 /// Reads an exec's output frames to its `exit`; a connection closed before it is [`Closed`].
@@ -354,7 +344,9 @@ mod tests {
             timeout_ms: 500,
             ..Default::default()
         };
-        let out = exec(&path, req).await.unwrap();
+        let out = collect(&mut session(&path, req).await.unwrap())
+            .await
+            .unwrap();
         assert_eq!(out.stdout, b"hello\n");
         assert_eq!(out.stderr, b"warn\n");
         assert_eq!(out.code, 3);
@@ -430,7 +422,9 @@ mod tests {
             OK,
             vec![frame(&Response::error("no such file: /bin/nope"))],
         );
-        let err = exec(&path, Request::default()).await.unwrap_err();
+        let err = collect(&mut session(&path, Request::default()).await.unwrap())
+            .await
+            .unwrap_err();
         assert_eq!(err.to_string(), "no such file: /bin/nope");
     }
 
@@ -442,7 +436,9 @@ mod tests {
             OK,
             vec![frame(&Response::chunk("stdout", b"partial".to_vec()))],
         );
-        let err = exec(&path, Request::default()).await.unwrap_err();
+        let err = collect(&mut session(&path, Request::default()).await.unwrap())
+            .await
+            .unwrap_err();
         assert!(err.downcast_ref::<Closed>().is_some(), "{err}");
     }
 
@@ -454,7 +450,9 @@ mod tests {
             OK,
             vec![((guest::MAX_FRAME as u32) + 1).to_be_bytes().to_vec()],
         );
-        let err = exec(&path, Request::default()).await.unwrap_err();
+        let err = collect(&mut session(&path, Request::default()).await.unwrap())
+            .await
+            .unwrap_err();
         assert_eq!(err.to_string(), "frame too large");
     }
 

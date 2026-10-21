@@ -955,9 +955,17 @@ where
 /// How long a command on a terminal has after its hangup before it is killed.
 const HANGUP_GRACE: Duration = Duration::from_secs(5);
 
-/// What the command's stdin gets, in order: bytes, then maybe its end.
+/// The most stdin the init holds for a command that has not read it yet (ADR 0029).
+const STDIN_QUEUE_BYTES: usize = 16 << 20;
+
+/// What the command's stdin gets, in order: bytes, then maybe its end. Bytes from the host
+/// hold their room in the queue until written.
 enum Input {
-    Data(Vec<u8>),
+    Data {
+        bytes: Vec<u8>,
+        /// Its room in the queue, given back when the bytes are written (dropped).
+        _room: Option<tokio::sync::OwnedSemaphorePermit>,
+    },
     Close,
 }
 
@@ -1072,14 +1080,18 @@ where
     };
     let (to_stdin, stdin_rx) = tokio::sync::mpsc::unbounded_channel();
     if !req.stdin.is_empty() {
-        let _ = to_stdin.send(Input::Data(req.stdin.clone()));
+        let _ = to_stdin.send(Input::Data {
+            bytes: req.stdin.clone(),
+            _room: None,
+        });
     }
     if !req.interactive {
         let _ = to_stdin.send(Input::Close);
     }
     tokio::spawn(write_stdin(sink, stdin_rx));
     let (gone_tx, mut gone) = tokio::sync::oneshot::channel();
-    let host = tokio::spawn(read_input(input, to_stdin, pty.clone(), gone_tx));
+    let budget = Arc::new(tokio::sync::Semaphore::new(STDIN_QUEUE_BYTES));
+    let host = tokio::spawn(read_input(input, to_stdin, pty.clone(), gone_tx, budget));
     let mut readers = Vec::new();
     if let Some(p) = &pty {
         let (p, s) = (p.clone(), stream.clone());
@@ -1166,18 +1178,29 @@ where
 
 /// The host's frames after an exec's request, until it closes the connection: the command's
 /// stdin and its end, the terminal's size. The close fires `gone`.
+///
+/// Stdin goes through a queue, so a command slow to read it does not keep the close from
+/// being seen; the queue holds `budget` bytes at most (PID 1's memory is the machine's). Full,
+/// the reader waits for room and reads no more of the connection: the host's writes stall, and
+/// the client's behind them.
 async fn read_input<R: AsyncRead + Unpin>(
     mut input: R,
     stdin: tokio::sync::mpsc::UnboundedSender<Input>,
     pty: Option<Arc<Pty>>,
     gone: tokio::sync::oneshot::Sender<()>,
+    budget: Arc<tokio::sync::Semaphore>,
 ) {
-    // Stdin goes through a queue: a command that does not read it must not keep the host's
-    // close from being seen.
     while let Ok(f) = read_request(&mut input).await {
         match f.op.as_str() {
             "stdin" => {
-                let _ = stdin.send(Input::Data(f.data));
+                let room = f.data.len().clamp(1, STDIN_QUEUE_BYTES) as u32;
+                let Ok(held) = budget.clone().acquire_many_owned(room).await else {
+                    break;
+                };
+                let _ = stdin.send(Input::Data {
+                    bytes: f.data,
+                    _room: Some(held),
+                });
             }
             "close_stdin" => {
                 let _ = stdin.send(Input::Close);
@@ -1201,8 +1224,8 @@ async fn write_stdin(sink: Option<Stdin>, mut rx: tokio::sync::mpsc::UnboundedRe
     let mut sink = sink;
     while let Some(i) = rx.recv().await {
         let written = match (i, &mut sink) {
-            (Input::Data(d), Some(Stdin::Pipe(p))) => p.write_all(&d).await,
-            (Input::Data(d), Some(Stdin::Pty(p))) => p.write_all(&d).await,
+            (Input::Data { bytes, .. }, Some(Stdin::Pipe(p))) => p.write_all(&bytes).await,
+            (Input::Data { bytes, .. }, Some(Stdin::Pty(p))) => p.write_all(&bytes).await,
             (Input::Close, Some(Stdin::Pipe(_))) => {
                 sink = None;
                 Ok(())
@@ -2423,6 +2446,37 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(3));
             wait_until("the command is killed", || gone(pid));
         }
+    }
+
+    #[tokio::test]
+    async fn the_stdin_queue_is_bounded_and_holds_back_the_host() {
+        // A queue's worth of stdin and one megabyte more, then the host's close.
+        let mb = guest::encode_frame(&stdin(&"x".repeat(1 << 20))).unwrap();
+        let full = STDIN_QUEUE_BYTES >> 20;
+        let input = std::io::Cursor::new(mb.repeat(full + 1));
+        let (tx, mut queued) = tokio::sync::mpsc::unbounded_channel();
+        let (gone_tx, gone) = tokio::sync::oneshot::channel();
+        let budget = Arc::new(tokio::sync::Semaphore::new(STDIN_QUEUE_BYTES));
+        let mut reader = tokio::spawn(read_input(input, tx, None, gone_tx, budget));
+        // Nothing writes the command's stdin: the reader waits with the queue full, so it
+        // reads no more of the connection (the host's writes stall behind it).
+        let waited = tokio::time::timeout(Duration::from_secs(5), &mut reader).await;
+        assert!(waited.is_err(), "the reader went past a full queue");
+        let mut held = Vec::new();
+        while let Ok(i) = queued.try_recv() {
+            held.push(i);
+        }
+        assert_eq!(held.len(), full);
+        // Written (dropped) frees its room: the rest comes in, then the close.
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(20), reader)
+            .await
+            .expect("the reader goes on once the queue drains")
+            .unwrap();
+        assert!(gone.await.is_ok());
+        assert!(
+            matches!(queued.try_recv(), Ok(Input::Data { bytes, _room: Some(_) }) if bytes.len() == 1 << 20)
+        );
     }
 
     #[tokio::test]

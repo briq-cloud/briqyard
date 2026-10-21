@@ -141,13 +141,14 @@ pub struct Resize {
     pub rows: u16,
 }
 
-/// The last message of a session, on [`channel::EXIT`]: how the command ended, or, with
-/// `code` set, why the session ended without it (`code` and `error` as an `ApiError`'s).
+/// The last message of a session, on [`channel::EXIT`]: how the command ended (`exit_code`,
+/// `timed_out` when its deadline ended it), or why the session ended without it (`code` and
+/// `error` as an `ApiError`'s, and no `exit_code`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEnd {
-    #[serde(default)]
-    pub exit_code: i32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub code: String,
@@ -274,21 +275,27 @@ mod tests {
     #[test]
     fn end_and_resize_on_the_wire() {
         let e = SessionEnd {
-            exit_code: 3,
+            exit_code: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_value(&e).unwrap(), json!({"exit_code": 0}));
+        let e = SessionEnd {
+            exit_code: Some(137),
+            timed_out: true,
             ..Default::default()
         };
         assert_eq!(
             serde_json::to_value(&e).unwrap(),
-            json!({"exit_code": 3, "timed_out": false})
+            json!({"exit_code": 137, "timed_out": true})
         );
+        // A session that ended without the command's end has no exit code to misread.
         let f = SessionEnd::failed("not_running", "the machine went down during the command");
         assert_eq!(
             serde_json::to_value(&f).unwrap(),
-            json!({"exit_code": 0, "timed_out": false, "code": "not_running",
-                   "error": "the machine went down during the command"})
+            json!({"code": "not_running", "error": "the machine went down during the command"})
         );
         let back: SessionEnd = serde_json::from_value(json!({"exit_code": 137})).unwrap();
-        assert_eq!(back.exit_code, 137);
+        assert_eq!((back.exit_code, back.timed_out), (Some(137), false));
         let r: Resize = serde_json::from_value(json!({"cols": 100, "rows": 30})).unwrap();
         assert_eq!(
             r,

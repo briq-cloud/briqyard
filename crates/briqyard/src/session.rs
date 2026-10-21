@@ -144,13 +144,13 @@ where
 
 /// The exit code of a session's end, or the error it ended with.
 fn ended(end: SessionEnd, err: &mut impl Write) -> Result<i32> {
-    if !end.code.is_empty() {
+    let Some(code) = end.exit_code.filter(|_| end.code.is_empty()) else {
         bail!("{} ({})", end.error, end.code);
-    }
+    };
     if end.timed_out {
         let _ = writeln!(err, "(timed out)");
     }
-    Ok(end.exit_code)
+    Ok(code)
 }
 
 /// Stdin in chunks as it comes, then its end; on a thread, since a read of it blocks.

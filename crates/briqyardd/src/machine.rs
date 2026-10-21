@@ -481,8 +481,9 @@ struct Entry {
     changed: Notify,
     /// A use since the record was last written; read and written under `rec`'s lock.
     unsaved_use: AtomicBool,
-    /// Exec sessions open on it (ADR 0029): in use, it does not go to sleep.
-    sessions: AtomicUsize,
+    /// Commands running in it for a caller, exec sessions included (ADR 0029): in use, it does
+    /// not go to sleep.
+    in_flight: AtomicUsize,
     /// Its usage since the tick last took it (ADR 0017); locked after `rec`, never before.
     meter: Mutex<Meter>,
     /// Bytes through its endpoints, added by the ingress as they pass.
@@ -508,7 +509,7 @@ impl Entry {
             stop_req: Mutex::new(None),
             changed: Notify::new(),
             unsaved_use: AtomicBool::new(false),
-            sessions: AtomicUsize::new(0),
+            in_flight: AtomicUsize::new(0),
             meter: Mutex::new(Meter::new(Utc::now())),
             traffic: Arc::default(),
             disk_io: Arc::default(),
@@ -605,7 +606,7 @@ pub struct InUse(Arc<Entry>);
 
 impl InUse {
     fn new(e: Arc<Entry>) -> Self {
-        e.sessions.fetch_add(1, Relaxed);
+        e.in_flight.fetch_add(1, Relaxed);
         e.touch();
         Self(e)
     }
@@ -614,7 +615,7 @@ impl InUse {
 impl Drop for InUse {
     fn drop(&mut self) {
         self.0.touch();
-        self.0.sessions.fetch_sub(1, Relaxed);
+        self.0.in_flight.fetch_sub(1, Relaxed);
     }
 }
 
@@ -1867,7 +1868,7 @@ impl Manager {
     fn view(&self, e: &Entry) -> api::Machine {
         let r = e.snapshot();
         let running = r.state == state::RUNNING;
-        let sleeps_at = if running && e.sessions.load(Relaxed) == 0 {
+        let sleeps_at = if running && e.in_flight.load(Relaxed) == 0 {
             sleeps_at(r.last_used_at, r.sleep_window())
         } else {
             None
@@ -3554,7 +3555,7 @@ impl Manager {
                 .filter(|e| {
                     let r = e.rec.lock().unwrap();
                     r.state == state::RUNNING
-                        && e.sessions.load(Relaxed) == 0
+                        && e.in_flight.load(Relaxed) == 0
                         && idle_past(r.last_used_at, r.sleep_window(), now)
                 })
                 .cloned()
@@ -3919,12 +3920,9 @@ impl Manager {
         detached(async move { m.wake(&id, None).await }).await
     }
 
+    /// Runs a command to its end (the JSON exec): a session whose stdin is the request's,
+    /// read to its exit (ADR 0029). The machine is in use while it runs.
     pub async fn exec(&self, id: &str, req: api::ExecRequest) -> Result<api::ExecResult, MError> {
-        self.inner
-            .stats
-            .execs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let sock = self.running_vsock(id, req.wake).await?;
         let timeout_ms = if req.timeout_ms == 0 {
             300_000
         } else {
@@ -3939,9 +3937,10 @@ impl Manager {
             timeout_ms,
             ..Default::default()
         };
+        let (mut conn, _in_use) = self.start_command(id, req.wake, greq).await?;
         let out = tokio::time::timeout(
             Duration::from_millis(timeout_ms + 10_000),
-            self.inner.guest.exec(&sock, greq),
+            guestc::collect(&mut conn),
         )
         .await
         .map_err(|_| MError::NotRunning("the command did not finish".into()))?
@@ -3952,7 +3951,6 @@ impl Manager {
                 MError::Other(err)
             }
         })?;
-        let _ = self.touch(id);
         Ok(api::ExecResult {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -3971,12 +3969,6 @@ impl Manager {
         if req.cmd.is_empty() {
             return Err(invalid("cmd is required"));
         }
-        self.inner
-            .stats
-            .execs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let e = self.own_entry(id)?;
-        let sock = self.running_vsock(id, req.wake).await?;
         let program = req.cmd[0].clone();
         let greq = guest::Request {
             op: "exec".into(),
@@ -3990,16 +3982,9 @@ impl Manager {
             rows: req.rows,
             ..Default::default()
         };
-        let conn = tokio::time::timeout(
-            Duration::from_secs(10),
-            self.inner.guest.session(&sock, greq),
-        )
-        .await
-        .map_err(|_| MError::NotRunning("the guest did not take the command".into()))?
-        .map_err(MError::Other)?;
-        let in_use = InUse::new(e.clone());
+        let (conn, in_use) = self.start_command(id, req.wake, greq).await?;
         let (machine, tenant) = {
-            let r = e.rec.lock().unwrap();
+            let r = in_use.0.rec.lock().unwrap();
             (r.id.clone(), r.tenant.clone())
         };
         // A use, not a change: the machine's version does not move (ADR 0019).
@@ -4014,6 +3999,30 @@ impl Manager {
             machine,
             in_use,
         })
+    }
+
+    /// The one way a command starts in a machine for a caller: woken when asked, the guest's
+    /// connection once it took the command, and the machine in use while `InUse` lives.
+    async fn start_command(
+        &self,
+        id: &str,
+        wake: bool,
+        req: guest::Request,
+    ) -> Result<(Box<dyn guestc::Conn>, InUse), MError> {
+        self.inner
+            .stats
+            .execs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let e = self.own_entry(id)?;
+        let sock = self.running_vsock(id, wake).await?;
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.inner.guest.session(&sock, req),
+        )
+        .await
+        .map_err(|_| MError::NotRunning("the guest did not take the command".into()))?
+        .map_err(MError::Other)?;
+        Ok((conn, InUse::new(e)))
     }
 
     pub async fn put_file(&self, id: &str, req: api::PutFileRequest) -> Result<(), MError> {
@@ -5142,7 +5151,7 @@ mod tests {
         exec_codes: Mutex<HashMap<String, i32>>,
         /// How long an exec takes, and how many run at once now and at most.
         exec_takes: Mutex<Duration>,
-        execs_now: std::sync::atomic::AtomicUsize,
+        execs_now: Arc<std::sync::atomic::AtomicUsize>,
         execs_most: std::sync::atomic::AtomicUsize,
         /// The ports of an address a TCP probe finds closed; every other one accepts.
         closed: Mutex<std::collections::HashSet<(Ipv4Addr, u16)>>,
@@ -5495,49 +5504,45 @@ mod tests {
             Ok(())
         }
 
-        async fn exec(&self, vsock: &Path, req: guest::Request) -> Result<guestc::ExecOutput> {
-            let (pid, _, _) = self.proc_at(vsock)?;
-            let cmd = req.cmd.join(" ");
-            self.record(format!("exec {pid} {cmd}"));
-            use std::sync::atomic::Ordering::SeqCst;
-            let now = self.execs_now.fetch_add(1, SeqCst) + 1;
-            self.execs_most.fetch_max(now, SeqCst);
-            let takes = *self.exec_takes.lock().unwrap();
-            tokio::time::sleep(takes).await;
-            self.execs_now.fetch_sub(1, SeqCst);
-            let code = self
-                .exec_codes
-                .lock()
-                .unwrap()
-                .get(&cmd)
-                .copied()
-                .unwrap_or(0);
-            Ok(guestc::ExecOutput {
-                stdout: b"ok\n".to_vec(),
-                stderr: if code == 0 {
-                    Vec::new()
-                } else {
-                    b"no\n".to_vec()
-                },
-                code,
-                timed_out: false,
-            })
-        }
-
-        /// A session as the init runs one, reduced: each `stdin` frame back as stdout, a
-        /// `resize` as a `COLSxROWS` line, the command's code at `close_stdin`.
+        /// The init, reduced. A command (not `interactive`): `ok` on stdout (`no` on stderr too
+        /// when it fails) after `exec_takes`, its code from `exec_codes`. A session: each
+        /// `stdin` frame back as stdout, a `resize` as a `COLSxROWS` line, its code at
+        /// `close_stdin`.
         async fn session(
             &self,
             vsock: &Path,
             req: guest::Request,
         ) -> Result<Box<dyn guestc::Conn>> {
+            use std::sync::atomic::Ordering::SeqCst;
+            use tokio::io::AsyncWriteExt;
             let (pid, _, _) = self.proc_at(vsock)?;
             let cmd = req.cmd.join(" ");
-            self.record(format!("session {pid} {cmd} tty={}", req.tty));
             let code = self.exec_codes.lock().unwrap().get(&cmd).copied();
             let (ours, theirs) = tokio::io::duplex(1 << 16);
+            if !req.interactive {
+                self.record(format!("exec {pid} {cmd}"));
+                let now = self.execs_now.fetch_add(1, SeqCst) + 1;
+                self.execs_most.fetch_max(now, SeqCst);
+                let takes = *self.exec_takes.lock().unwrap();
+                let running = self.execs_now.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(takes).await;
+                    running.fetch_sub(1, SeqCst);
+                    let code = code.unwrap_or(0);
+                    let mut out = vec![guest::Response::chunk("stdout", b"ok\n".to_vec())];
+                    if code != 0 {
+                        out.push(guest::Response::chunk("stderr", b"no\n".to_vec()));
+                    }
+                    out.push(guest::Response::exit(code, false));
+                    let mut theirs = theirs;
+                    for r in out {
+                        let _ = theirs.write_all(&guest::encode_frame(&r).unwrap()).await;
+                    }
+                });
+                return Ok(Box::new(ours));
+            }
+            self.record(format!("session {pid} {cmd} tty={}", req.tty));
             tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt;
                 let (mut rd, mut wr) = tokio::io::split(theirs);
                 while let Ok(f) = guestc::read_frame::<_, guest::Request>(&mut rd).await {
                     let out = match f.op.as_str() {
@@ -10132,6 +10137,40 @@ mod tests {
         assert_eq!(
             (slept.state.as_str(), slept.stopped_reason.as_str()),
             (state::STOPPED, stop::IDLE)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_in_flight_keeps_the_machine_awake() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("job")).await.unwrap();
+        *h.host.exec_takes.lock().unwrap() = Duration::from_secs(3);
+        let mgr = h.m.clone();
+        let id = m.id.clone();
+        let job = tokio::spawn(async move {
+            mgr.exec(
+                &id,
+                api::ExecRequest {
+                    cmd: vec!["migrate".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+        eventually("the command runs", || {
+            h.host.execs_now.load(std::sync::atomic::Ordering::SeqCst) == 1
+        })
+        .await;
+        // Its window ran out while it runs: it is in use, it does not sleep under it.
+        h.m.entry(&m.id).unwrap().rec.lock().unwrap().last_used_at =
+            Some(Utc::now() - chrono::Duration::hours(1));
+        h.m.tick().await;
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
+        let out = job.await.unwrap().unwrap();
+        assert_eq!((out.exit_code, out.stdout.as_str()), (0, "ok\n"));
+        assert!(
+            h.m.get(&m.id).unwrap().last_used_at > Some(Utc::now() - chrono::Duration::minutes(1))
         );
     }
 

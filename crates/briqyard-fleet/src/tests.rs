@@ -2927,3 +2927,37 @@ async fn a_session_refused_by_the_host_or_not_a_websocket_is_an_answer() {
     assert_eq!(r.headers()["x-briqyard-host"], "d1");
     assert_eq!(json(&r.text().await.unwrap())["code"], "not_running");
 }
+
+#[tokio::test]
+async fn a_host_unreachable_never_shows_the_sessions_query() {
+    // The query holds the session's env: an error names the host, never the URL.
+    let (f, ds) = fleet_with_daemons(1).await;
+    let m = ds[0].stub.add("t1", "sbx", 512);
+    f.st.reg
+        .lock()
+        .unwrap()
+        .machines
+        .insert(m.id.clone(), "d1".into());
+    f.st.reg.lock().unwrap().hosts.get_mut("d1").unwrap().url = "http://127.0.0.1:1".into();
+    let addr = serve_fleet(&f).await;
+    let r = reqwest::Client::new()
+        .get(format!(
+            "http://{addr}/v1/machines/{}/exec?cmd=sh&env=TOKEN=hunter2",
+            m.id
+        ))
+        .bearer_auth("api")
+        .header("connection", "Upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+    let body = r.text().await.unwrap();
+    assert_eq!(json(&body)["code"], "host_unreachable");
+    assert!(
+        !body.contains("hunter2") && !body.contains("exec?"),
+        "{body}"
+    );
+}

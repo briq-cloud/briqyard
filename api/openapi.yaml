@@ -660,7 +660,7 @@ components:
         wake: { type: boolean, default: true, description: Wake a sleeping machine for the command; false answers 409 when it is not running }
     SessionEnd:
       type: object
-      description: "the last message of a session (channel 3): how the command ended, or, with `code`, why the session ended without it (`not_running`: the machine went down; `invalid`: a message the server could not read; `internal`)"
+      description: "the last message of a session (channel 3): how the command ended (`exit_code`, `timed_out` when its deadline ended it), or, with `code` and no `exit_code`, why the session ended without it (`not_running`: the machine went down; `invalid`: a message the server could not read; `internal`)"
       properties:
         exit_code: { type: integer }
         timed_out: { type: boolean }

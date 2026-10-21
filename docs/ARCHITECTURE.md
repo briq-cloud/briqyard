@@ -272,7 +272,7 @@ cannot pass it together. A refusal is 403 `quota` and a `quota_exceeded` event.
 
 ### Sleep
 
-Use is an exec, an ingress connection, an exec session for as long as it is open (ADR 0029), or
+Use is an exec or an exec session for as long as it runs (ADR 0029), an ingress connection, or
 an explicit `POST /machines/{id}/touch`. After the
 machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`; idle machines
 are stopped together, a few at a time, never one after another). A start, an

@@ -508,6 +508,7 @@ async fn exec_session(
     let session = st.mgr.open_session(&id, req).await?;
     Ok(ws
         .max_message_size(MAX_SESSION_MESSAGE)
+        .max_frame_size(MAX_SESSION_MESSAGE)
         .on_upgrade(move |socket| crate::session::serve(socket, session)))
 }
 

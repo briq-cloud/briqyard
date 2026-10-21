@@ -36,7 +36,7 @@ pub async fn serve(socket: WebSocket, session: Session) {
         Ended::Command(e) if e.code.is_empty() => {
             tracing::info!(
                 machine,
-                exit_code = e.exit_code,
+                exit_code = e.exit_code.unwrap_or_default(),
                 timed_out = e.timed_out,
                 secs,
                 "exec session ended"
@@ -57,7 +57,8 @@ pub async fn serve(socket: WebSocket, session: Session) {
 
 /// Carries a session until the command ends or the client goes. A ping goes out every
 /// `heartbeat`; a client heard from (anything, its pongs included) in none of the last three
-/// is gone. Dropping `conn` at the end is what ends a command whose client went.
+/// is gone, and so is one that takes no message for as long (it stopped reading: a laptop
+/// asleep). Dropping `conn` at the end is what ends a command whose client went.
 pub async fn pump<Rx, Tx>(
     mut from_client: Rx,
     mut to_client: Tx,
@@ -78,6 +79,7 @@ where
             }
         }
     });
+    let gone_after = 3 * heartbeat;
     let mut beat = tokio::time::interval_at(Instant::now() + heartbeat, heartbeat);
     let mut heard = Instant::now();
     let end = loop {
@@ -93,14 +95,14 @@ where
                     "stdout" => channel::STDOUT,
                     "stderr" => channel::STDERR,
                     "exit" => break Some(SessionEnd {
-                        exit_code: r.code,
+                        exit_code: Some(r.code),
                         timed_out: r.timed_out,
                         ..Default::default()
                     }),
                     "error" => break Some(SessionEnd::failed("internal", r.message)),
                     _ => continue,
                 };
-                if to_client.send(Message::Binary(wire::message(ch, &r.data))).await.is_err() {
+                if !send(&mut to_client, Message::Binary(wire::message(ch, &r.data)), gone_after).await {
                     break None;
                 }
             }
@@ -121,8 +123,8 @@ where
                 }
             }
             _ = beat.tick() => {
-                if heard.elapsed() > 3 * heartbeat
-                    || to_client.send(Message::Ping(Vec::new())).await.is_err()
+                if heard.elapsed() > gone_after
+                    || !send(&mut to_client, Message::Ping(Vec::new()), gone_after).await
                 {
                     break None;
                 }
@@ -134,16 +136,20 @@ where
         return Ended::ClientGone;
     };
     let last = serde_json::to_vec(&end).unwrap_or_default();
-    let _ = to_client
-        .send(Message::Binary(wire::message(channel::EXIT, &last)))
-        .await;
-    let _ = to_client
-        .send(Message::Close(Some(CloseFrame {
+    let exit = Message::Binary(wire::message(channel::EXIT, &last));
+    if send(&mut to_client, exit, gone_after).await {
+        let close = Message::Close(Some(CloseFrame {
             code: 1000,
             reason: "".into(),
-        })))
-        .await;
+        }));
+        send(&mut to_client, close, gone_after).await;
+    }
     Ended::Command(end)
+}
+
+/// Sends a message, false when the client does not take it within `within`.
+async fn send<Tx: Sink<Message> + Unpin>(tx: &mut Tx, m: Message, within: Duration) -> bool {
+    matches!(tokio::time::timeout(within, tx.send(m)).await, Ok(Ok(())))
 }
 
 /// The guest frame a client's message asks for; `None` for one with nothing to do (an
@@ -263,12 +269,12 @@ mod tests {
         let (ch, end) = binary(b.client_hears().await);
         assert_eq!(ch, channel::EXIT);
         let end: SessionEnd = serde_json::from_slice(&end).unwrap();
-        assert_eq!((end.exit_code, end.code.as_str()), (3, ""));
+        assert_eq!((end.exit_code, end.code.as_str()), (Some(3), ""));
         assert!(matches!(b.client_hears().await, Message::Close(Some(c)) if c.code == 1000));
         assert_eq!(
             b.ended.await.unwrap(),
             Ended::Command(SessionEnd {
-                exit_code: 3,
+                exit_code: Some(3),
                 ..Default::default()
             })
         );
@@ -337,6 +343,32 @@ mod tests {
         assert_eq!(ch, channel::EXIT);
         let end: SessionEnd = serde_json::from_slice(&end).unwrap();
         assert!(end.timed_out);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_stops_reading_is_left() {
+        // The client's side holds one message and reads none: a laptop asleep. Output keeps
+        // coming; the session ends three heartbeats later instead of holding the machine.
+        let (client_tx, rx) = mpsc::unbounded::<Result<Message, axum::Error>>();
+        let (tx, _unread) = mpsc::channel::<Message>(0);
+        let (ours, mut guest) = tokio::io::duplex(1 << 16);
+        let ended = tokio::spawn(pump(rx, tx, Box::new(ours), Duration::from_secs(30)));
+        tokio::spawn(async move {
+            loop {
+                let f = guest::encode_frame(&Response::chunk("stdout", vec![b'x'; 1024])).unwrap();
+                if guest.write_all(&f).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let started = Instant::now();
+        assert_eq!(ended.await.unwrap(), Ended::ClientGone);
+        assert!(
+            started.elapsed() <= Duration::from_secs(120),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(client_tx);
     }
 
     #[tokio::test(start_paused = true)]

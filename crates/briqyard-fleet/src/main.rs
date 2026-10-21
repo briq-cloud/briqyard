@@ -768,7 +768,7 @@ async fn forward(
     };
     match req.send().await {
         Ok(resp) => relay(resp, host).await,
-        Err(e) => unreachable_host(host, &e),
+        Err(e) => unreachable_host(host, e),
     }
 }
 
@@ -796,11 +796,12 @@ fn host_header(host: &HostRec) -> HeaderValue {
     HeaderValue::from_str(&host.id).unwrap_or(HeaderValue::from_static("?"))
 }
 
-fn unreachable_host(host: &HostRec, e: &reqwest::Error) -> Response {
+/// A host that did not answer: its id and why, never the URL (a session's query holds its env).
+fn unreachable_host(host: &HostRec, e: reqwest::Error) -> Response {
     err(
         StatusCode::BAD_GATEWAY,
         "host_unreachable",
-        format!("host {}: {}", host.id, causes(e)),
+        format!("host {}: {}", host.id, causes(&e.without_url())),
     )
     .into_response()
 }
@@ -853,7 +854,7 @@ async fn exec_session(
     }
     let resp = match to.send().await {
         Ok(r) => r,
-        Err(e) => return Ok(unreachable_host(&host, &e)),
+        Err(e) => return Ok(unreachable_host(&host, e)),
     };
     if resp.status() != StatusCode::SWITCHING_PROTOCOLS {
         return Ok(relay(resp, &host).await);
@@ -875,7 +876,7 @@ async fn exec_session(
                 let why = c
                     .err()
                     .map(|e| e.to_string())
-                    .or(u.err().map(|e| e.to_string()));
+                    .or(u.err().map(|e| causes(&e.without_url())));
                 tracing::warn!(machine, err = why.unwrap_or_default(), "session upgrade");
                 return;
             }
@@ -910,7 +911,7 @@ async fn forward_watch(st: &AppState, host: &HostRec, path: &str, headers: &Head
                 .insert("x-briqyard-host", host_header(host));
             out
         }
-        Err(e) => unreachable_host(host, &e),
+        Err(e) => unreachable_host(host, e),
     }
 }
 
