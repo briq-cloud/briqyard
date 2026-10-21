@@ -59,7 +59,7 @@ esac
 
 # Loopback or RFC 1918: reachable from this host or its private network only.
 private() {
-  case "$1" in 127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;; esac
+  case "${1#[}" in 127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|::1]*|::1|f[cd]*:*|fe80:*) return 0 ;; esac
   return 1
 }
 # Where the API and the endpoints listen, who may reach them, and the URL the fleet knows the
@@ -82,7 +82,8 @@ advertise=${ADVERTISE:-$scheme://$(hostname -I | awk '{print $1}'):7420}
 # loopback or private address, as the daemon checks.
 case "$FLEET_URL" in
   http://*)
-    fleet_host=${FLEET_URL#http://}; fleet_host=${fleet_host%%/*}; fleet_host=${fleet_host%:*}
+    fleet_host=${FLEET_URL#http://}; fleet_host=${fleet_host%%/*}
+    case "$fleet_host" in \[*) fleet_host=${fleet_host%%]*}] ;; *) fleet_host=${fleet_host%:*} ;; esac
     private "$fleet_host" || { echo "FLEET_URL=$FLEET_URL is plain HTTP to an address the internet could reach: write https://, or a private address"; exit 1; }
     ;;
 esac

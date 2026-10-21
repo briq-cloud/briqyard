@@ -450,9 +450,12 @@ paths:
   /v1/hosts/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     delete:
-      summary: Forget a host (fleet only)
+      summary: "Forget a host (fleet only). A host whose record holds a pool key is refused unless `force`: the key goes with the record (ADR 0026)"
+      parameters:
+        - { name: force, in: query, schema: { type: boolean, default: false }, description: "forget a host that holds a pool key: its pool is unreadable at its next restart" }
       responses:
         "204": { description: forgotten }
+        "409": { description: "the host holds a pool key (`pool_key`): retire it, or force" }
 components:
   parameters:
     id:
@@ -1000,7 +1003,7 @@ components:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]

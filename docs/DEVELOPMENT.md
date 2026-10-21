@@ -158,7 +158,8 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   or address, written `0600` before it is answered, in no listing, gone with the host; a
   registry that does not parse refused, never read as empty, and fields it does not know
   written back; a host call from another address than its record's refused unless behind
-  `tls: off`). What still needs the host: a tenant's first create (its bridge and
+  `tls: off`; a key whose write failed taken back, never served; a keyed host forgotten only by
+  force). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,

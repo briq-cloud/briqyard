@@ -594,6 +594,7 @@ fn fleet_at(
         http: reqwest::Client::new(),
         pinned: Mutex::new(HashMap::new()),
         prov,
+        key_turn: Default::default(),
     });
     Fleet { st, _dir: dir }
 }
@@ -980,7 +981,7 @@ async fn a_host_gets_its_own_pool_key_and_no_other() {
 
     let (_, _, listed) = call(&f.st, "GET", "/v1/hosts", "api", None).await;
     assert!(!listed.contains(&key), "never listed: {listed}");
-    let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/s1", "api", None).await;
+    let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/s1?force=true", "api", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert!(!std::fs::read_to_string(&f.st.state_path)
         .unwrap()
@@ -1165,6 +1166,87 @@ async fn status_sums_the_ready_hosts_and_hosts_are_sorted() {
     let states: Vec<&str> = hs.iter().map(|h| h.state.as_str()).collect();
     assert_eq!(states, ["down", "ready", "draining"]);
     assert_eq!(hs[1].tenants, ["t1", "t2"]);
+}
+
+/// Forgetting a host that holds a pool key is refused unless forced: the key goes with the
+/// record, and a static host polled back would get a key its pool does not open.
+#[tokio::test]
+async fn a_keyed_host_is_forgotten_only_by_force() {
+    let f = fleet(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "s1-token".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    seed(&f.st, "plain", 64_000, 0, 0, &[]);
+    let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/plain", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "no key: forgotten as before");
+    let ask = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/hosts/s1", "", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert_eq!(json(&body)["code"], "pool_key");
+    assert!(
+        body.contains("the pool is unreadable at the host's next restart; retire it, or --force"),
+        "{body}"
+    );
+    assert!(f.st.reg.lock().unwrap().hosts.contains_key("s1"), "kept");
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/hosts/s1?force=true", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(
+        !saved(&f.st).hosts.contains_key("s1"),
+        "forgotten, its key with it"
+    );
+}
+
+/// A key the registry could not be written with is not kept: the next ask is refused the same
+/// way rather than served a key only memory holds (ADR 0026).
+#[tokio::test]
+async fn a_key_that_could_not_be_written_is_not_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let nowhere = dir.path().join("missing").join("registry.json");
+    let f = fleet_at(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "s1-token".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+        dir,
+        nowhere.clone(),
+    );
+    let ask = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
+    for attempt in 1..=2 {
+        let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask.clone()).await;
+        assert_eq!(
+            s,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "attempt {attempt}: {body}"
+        );
+        assert_eq!(json(&body)["code"], "registry");
+        assert!(
+            f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty(),
+            "attempt {attempt}"
+        );
+    }
+    std::fs::create_dir_all(nowhere.parent().unwrap()).unwrap();
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        saved(&f.st).hosts["s1"].pool_key.expose(),
+        json(&body)["key"].as_str().unwrap()
+    );
 }
 
 #[tokio::test]

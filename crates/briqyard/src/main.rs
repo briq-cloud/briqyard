@@ -633,9 +633,12 @@ enum HostCmd {
     Retire {
         id: String,
     },
-    /// Forget a host (its machines are not touched)
+    /// Forget a host (its machines are not touched). A host with a pool key is refused unless
+    /// --force: the key goes with the record and its pool is unreadable at its next restart
     Rm {
         id: String,
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1479,8 +1482,12 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 &c.call::<api::Host>(POST, &format!("/v1/hosts/{id}/retire"), NONE)
                     .await?,
             ),
-            HostCmd::Rm { id } => {
-                c.raw(DELETE, &format!("/v1/hosts/{id}"), NONE).await?;
+            HostCmd::Rm { id, force } => {
+                let q = if force { "?force=true" } else { "" };
+                c.raw(DELETE, &format!("/v1/hosts/{id}{q}"), NONE).await?;
+                if force {
+                    eprintln!("host {id} forgotten: a pool key it held went with its record, and its pool is unreadable at its next restart");
+                }
             }
         },
     }
