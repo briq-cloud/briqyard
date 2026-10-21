@@ -933,6 +933,7 @@ components:
         version: { type: string }
         note: { type: string, description: What the provisioner or the bootstrap last said }
         tls_fingerprint: { type: string, description: "SHA-256 of the host's API certificate, pinned by the fleet; empty on plain HTTP" }
+        public_tcp_ports: { type: array, items: { type: integer }, description: "ports its public interface takes besides SSH, from its bootstrap (ADR 0028); absent: none" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" }, description: from its last heartbeat }
     AddHostRequest:
       type: object
@@ -942,6 +943,7 @@ components:
         address: { type: string, description: "the API's IPv4 address, on the fleet's private network when it has one (the vRack address); default: `ssh`" }
         region: { type: string }
         id: { type: string, description: "default: `h_` and the address, dots as dashes" }
+        public_tcp_ports: { type: array, items: { type: integer }, description: "ports its public interface takes besides SSH, and its machines reach on it (an edge's on the host); absent: the fleet's `provisioner.bootstrap.public_tcp_ports`, empty: none. Kept on the host for every later bootstrap" }
     OrderHostRequest:
       type: object
       properties:

@@ -1136,6 +1136,7 @@ fn bootstrapping_fleet() -> Fleet {
     let mut cfg = config::Config::default();
     cfg.provisioner.bootstrap.enabled = true;
     cfg.provisioner.bootstrap.private_network = "10.42.0.0/16".into();
+    cfg.provisioner.bootstrap.public_tcp_ports = vec![80, 443];
     fleet(cfg, Box::new(provision::Static))
 }
 
@@ -1181,13 +1182,27 @@ async fn a_server_bought_by_hand_is_added_for_the_bootstrap() {
         );
     }
     assert!(saved(&f.st).hosts.contains_key("h_10-42-0-11"), "written");
-    // One address only: the API there too, its id named.
-    let (s, _, body) = add(serde_json::json!({"ssh": "51.68.1.3", "id": "gra-2"})).await;
+    assert_eq!(
+        h.public_tcp_ports,
+        [80, 443],
+        "the fleet's, kept on the host"
+    );
+    // One address only: the API there too, its id named; no public ports of its own (a host
+    // without an edge), whatever the fleet's are.
+    let (s, _, body) = add(serde_json::json!({
+        "ssh": "51.68.1.3", "id": "gra-2", "public_tcp_ports": []
+    }))
+    .await;
     assert_eq!(s, StatusCode::ACCEPTED, "{body}");
     let h: api::Host = serde_json::from_str(&body).unwrap();
     assert_eq!(
         (h.id.as_str(), h.url.as_str(), h.ssh.as_str()),
         ("gra-2", "https://51.68.1.3:7420", "")
+    );
+    assert_eq!(
+        f.st.reg.lock().unwrap().hosts["gra-2"].public_tcp_ports,
+        Some(vec![]),
+        "its own, empty: never the fleet's"
     );
     // The same server again, by its address, its id or its SSH address.
     for body in [
@@ -1228,6 +1243,10 @@ async fn a_server_bought_by_hand_is_added_for_the_bootstrap() {
         (
             serde_json::json!({"ssh": "51.68.1.4", "id": "Gra 1"}),
             "id \"Gra 1\": a-z, 0-9, _ and -",
+        ),
+        (
+            serde_json::json!({"ssh": "51.68.1.4", "public_tcp_ports": [443, 0]}),
+            "public_tcp_ports: 0 is not a port",
         ),
     ] {
         let (s, _, text) = add(body.clone()).await;

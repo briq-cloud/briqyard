@@ -13,7 +13,7 @@ use crate::netw::{self, dns::Resolver, host, nft, nft::Ruleset, Range, Subnet};
 use crate::store::Store;
 use crate::usage::{self, Ledger, Meter, Traffic};
 use crate::zfs::Zfs;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use briqyard_api::guest;
 use briqyard_api::{self as api, reason, state, stop};
 use chrono::{DateTime, Utc};
@@ -753,8 +753,8 @@ impl Manager {
         &self.inner.host_id
     }
 
-    /// Reads the records. A tenant whose subnet index is outside `network.range` is refused
-    /// here, with the fix, rather than found by the first request that needs its subnet. The
+    /// Reads the records. A tenant whose subnet index is outside `network.range`, or an
+    /// endpoint whose port is outside `ingress.tcp_ports`, is refused here, with the fix, rather than found by the first request that needs its subnet. The
     /// event log goes on past every machine's version.
     fn load(&self) -> Result<()> {
         let st = &self.inner.store;
@@ -781,7 +781,19 @@ impl Manager {
                 .unwrap()
                 .insert(id, Entry::new(r, self.inner.events.clone()));
         }
+        // An endpoint port outside the range would listen where the daemon's table does not
+        // hold it for `allowed_clients`: refused, like a tenant outside `network.range`.
+        let spec = &self.inner.cfg.ingress.tcp_ports;
+        let (lo, hi) = port_range(spec).map_err(|e| anyhow!("{e}"))?;
         for ep in st.list::<EndpointRec>("endpoints")? {
+            if let Some(p) = ep.host_port.filter(|p| !(lo..=hi).contains(p)) {
+                bail!(
+                    "endpoint {} (machine {}) holds host port {p}, outside ingress.tcp_ports \
+                     {spec}: put the range back, or remove the endpoint",
+                    ep.id,
+                    ep.machine_id
+                );
+            }
             self.inner
                 .endpoints
                 .lock()
@@ -6083,6 +6095,37 @@ mod tests {
         h.m.inner.store.put("tenants", "t1", &t).unwrap();
         h.m.load().unwrap();
         assert_eq!(h.m.tenants()[0].router, "10.64.3.1");
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_port_outside_the_range_is_refused_at_load() {
+        // A port the daemon's table does not keep for allowed_clients: refused, not opened.
+        let h = harness_config(|c| c.ingress.tcp_ports = "30000-32767".into()).await;
+        let ep = EndpointRec {
+            id: "ep_1".into(),
+            machine_id: "m_1".into(),
+            tenant: "t1".into(),
+            port: 5432,
+            protocol: "tcp".into(),
+            host_port: Some(20001),
+            host: String::new(),
+            created_at: Utc::now(),
+        };
+        h.m.inner.store.put("endpoints", "ep_1", &ep).unwrap();
+        let err = format!("{:#}", h.m.load().unwrap_err());
+        assert_eq!(
+            err,
+            "endpoint ep_1 (machine m_1) holds host port 20001, outside ingress.tcp_ports \
+             30000-32767: put the range back, or remove the endpoint"
+        );
+        assert!(h.m.inner.endpoints.lock().unwrap().is_empty());
+        let ep = EndpointRec {
+            host_port: Some(30001),
+            ..ep
+        };
+        h.m.inner.store.put("endpoints", "ep_1", &ep).unwrap();
+        h.m.load().unwrap();
+        assert_eq!(h.m.all_endpoints().len(), 1);
     }
 
     #[tokio::test]

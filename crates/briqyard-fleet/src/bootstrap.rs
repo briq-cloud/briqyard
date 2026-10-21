@@ -69,7 +69,7 @@ pub async fn run(st: Arc<AppState>) {
                 continue;
             }
             let ip = ssh_address(&h).to_string();
-            let outcome = match install(&st, &h.id, &ip, &h.url, &h.token).await {
+            let outcome = match install(&st, &h, &ip).await {
                 Ok(note) => api_fingerprint(&st, &ip).await.map(|fp| (note, fp)),
                 Err(e) => Err(e),
             };
@@ -227,13 +227,8 @@ fn tail(b: &[u8]) -> String {
 /// Runs the bootstrap script on the server through `ssh`, the script on stdin, the settings
 /// in its environment. Nothing of it is on a command line the server's other users could see.
 /// Answers the note for the host: when it was bootstrapped, and the host key pinned.
-async fn install(
-    st: &AppState,
-    host: &str,
-    ip: &str,
-    url: &str,
-    token: &str,
-) -> anyhow::Result<String> {
+async fn install(st: &AppState, h: &crate::registry::HostRec, ip: &str) -> anyhow::Result<String> {
+    let host = h.id.as_str();
     let b = &st.cfg.provisioner.bootstrap;
     let script = if b.script.as_os_str().is_empty() {
         SCRIPT.to_string()
@@ -253,7 +248,7 @@ async fn install(
     } else {
         st.cfg.state_dir.join(format!("known_hosts.{ip}"))
     };
-    let args = ssh_args(b, &st.cfg.own_url(), ip, url, token, &known_hosts, pinned);
+    let args = ssh_args(b, &st.cfg.own_url(), ip, h, &known_hosts, pinned);
     let out = ssh(&args, script.as_bytes(), Duration::from_secs(1800)).await?;
     let seen = if pinned {
         None
@@ -334,17 +329,20 @@ fn fingerprints(known_hosts: &str) -> Vec<String> {
 
 /// The bootstrap's `ssh` arguments: [`ssh_base`], then the remote command, which puts the
 /// settings in the environment of `bash -s` (the script arrives on stdin). Every value is
-/// single-quoted for the remote shell. `own_url` is the fleet's own when `fleet_url` is not set;
-/// `url` is the host's API, what it advertises.
+/// single-quoted for the remote shell. `own_url` is the fleet's own when `fleet_url` is not set.
+/// From the host's record: its API's URL (what it advertises), its token and its public ports,
+/// its own or else the fleet's (a record from before they were kept), so a re-run never takes
+/// another host's edge ports away, or adds them.
 fn ssh_args(
     b: &crate::config::Bootstrap,
     own_url: &str,
     ip: &str,
-    url: &str,
-    token: &str,
+    h: &crate::registry::HostRec,
     known_hosts: &Path,
     pinned: bool,
 ) -> Vec<String> {
+    let (url, token) = (h.url.as_str(), h.token.as_str());
+    let public_tcp_ports = h.public_tcp_ports.as_deref().unwrap_or(&b.public_tcp_ports);
     let fleet_url = if b.fleet_url.is_empty() {
         own_url
     } else {
@@ -361,7 +359,7 @@ fn ssh_args(
         shq(&b.allowed_clients.join(","))
     );
     if let Some(private) = private_address(b, url) {
-        let ports: Vec<String> = b.public_tcp_ports.iter().map(|p| p.to_string()).collect();
+        let ports: Vec<String> = public_tcp_ports.iter().map(|p| p.to_string()).collect();
         env += &format!(
             " PRIVATE_ADDRESS={} PRIVATE_INTERFACE={} PUBLIC_TCP_PORTS={}",
             shq(&private),
@@ -419,6 +417,16 @@ mod tests {
         assert_eq!(shq(""), "''");
     }
 
+    /// A host's record as the bootstrap reads it.
+    fn rec(url: &str, token: &str, public_tcp_ports: Option<Vec<u16>>) -> crate::registry::HostRec {
+        crate::registry::HostRec {
+            url: url.into(),
+            token: token.into(),
+            public_tcp_ports,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn ssh_command() {
         let b = crate::config::Bootstrap {
@@ -434,8 +442,7 @@ mod tests {
             &b,
             "http://0.0.0.0:7430",
             "10.0.0.9",
-            &host_url("10.0.0.9"),
-            "t0k'en",
+            &rec(&host_url("10.0.0.9"), "t0k'en", None),
             kh,
             true,
         );
@@ -475,8 +482,7 @@ mod tests {
             &named,
             "https://0.0.0.0:7430",
             "10.0.0.9",
-            "https://10.0.0.9:7420",
-            "t",
+            &rec("https://10.0.0.9:7420", "t", Some(vec![80, 443])),
             kh,
             false,
         );
@@ -499,13 +505,13 @@ mod tests {
             ..Default::default()
         };
         let kh = Path::new("/kh");
-        // SSH to the public address, the API on the vRack.
+        // SSH to the public address, the API on the vRack; the host's own ports, not the
+        // fleet's default.
         let args = ssh_args(
             &b,
             "https://fleet.example",
             "51.68.1.2",
-            "https://10.42.0.11:7420",
-            "t",
+            &rec("https://10.42.0.11:7420", "t", Some(vec![80, 443])),
             kh,
             false,
         );
@@ -522,9 +528,23 @@ mod tests {
         );
         assert!(
             remote.ends_with(
-                " PRIVATE_ADDRESS='10.42.0.11/16' PRIVATE_INTERFACE='enp3s0f1' PUBLIC_TCP_PORTS='7430,80' bash -s"
+                " PRIVATE_ADDRESS='10.42.0.11/16' PRIVATE_INTERFACE='enp3s0f1' PUBLIC_TCP_PORTS='80,443' bash -s"
             ),
             "{remote}"
+        );
+        // A record from before hosts kept their ports: the fleet's.
+        let args = ssh_args(
+            &b,
+            "https://fleet.example",
+            "51.68.1.2",
+            &rec("https://10.42.0.11:7420", "t", None),
+            kh,
+            false,
+        );
+        assert!(
+            args[13].ends_with(" PUBLIC_TCP_PORTS='7430,80' bash -s"),
+            "{}",
+            args[13]
         );
         // An API outside the private network (an ordered host on its public address): no
         // private settings, the public interface stays as it is.
@@ -532,8 +552,7 @@ mod tests {
             &b,
             "https://fleet.example",
             "51.68.1.2",
-            "https://51.68.1.2:7420",
-            "t",
+            &rec("https://51.68.1.2:7420", "t", Some(vec![80, 443])),
             kh,
             false,
         );

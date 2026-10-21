@@ -332,6 +332,7 @@ has shown the right product, location and count.
 
 ```bash
 briqyard host add 51.68.1.2 --address 10.42.0.11 --region gra   # POST /v1/hosts: a server you bought, bootstrapped
+                                             # --public-tcp-ports 80,443,… (or none): its own, else the fleet's
 briqyard host order --reason "launch week"   # POST /v1/hosts/order: a server, state provisioning
 briqyard host ls                             # its note says what the provider and the bootstrap last did
 briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: drain, then release once empty
@@ -464,7 +465,9 @@ raidLevel: 1, size: 102400}]}}]`, the provisioner's own body.
 the one whose MAC the manager shows as Private (server, Network interfaces): `ip -br link |
 grep -i <mac>` names it. Pick the range (`10.42.0.0/16`) and the server's address in it.
 
-**4. The fleet, on this server**, on loopback: the edge's Caddy serves its name (step 6). The
+**4. The fleet, on this server**, on loopback with `tls: off`: the edge's Caddy serves its name
+(step 6). Once the pool key lands (PR #2, ADR 0026), the fleet checks a key request by the
+caller's address, which on a loopback listener it reads from Caddy's `X-Forwarded-For`. The
 repository is private, so the binaries come from your Mac:
 
 ```bash
@@ -488,7 +491,8 @@ shell's history).
 `/etc/briqyard/fleet.yaml`:
 
 ```yaml
-listen: 127.0.0.1:7430                     # plain HTTP: the edge's Caddy terminates TLS
+listen: 127.0.0.1:7430                     # loopback, plain HTTP: the edge's Caddy terminates TLS
+tls: off
 token: <openssl rand -hex 24: what briq and the CLI present>
 state_dir: /var/lib/briqyard-fleet
 provisioner:
@@ -502,9 +506,8 @@ provisioner:
     private_network: 10.42.0.0/16
     private_interface: enp3s0f1
     allowed_clients: [10.42.0.0/16]
-    # The edge's: HTTP, HTTPS and its TCP listeners (briq's infra/edge/host/staging.env).
-    # Machines reach them at the host's address too (network.host_ports).
-    public_tcp_ports: [80, 443, 5432, 3306, 6379, 27017, 5671, 7687, 6334]
+    # Hosts without an edge open nothing more than SSH; the edge's host says its own (step 5).
+    public_tcp_ports: []
 ```
 
 The fleet's state (`/var/lib/briqyard-fleet`: the registry with every host's token, the pinned
@@ -518,11 +521,17 @@ kernel has ZFS and KVM:
 ```bash
 modprobe zfs && ls /dev/kvm
 export BRIQYARD_URL=http://127.0.0.1:7430 BRIQYARD_TOKEN=$(sed -n 's/^token: *//p' /etc/briqyard/fleet.yaml)
-briqyard host add <public ip> --address 10.42.0.11 --region gra
+briqyard host add <public ip> --address 10.42.0.11 --region gra \
+  --public-tcp-ports 80,443,5432,3306,6379,27017,5671,7687,6334
 briqyard host ls     # within two minutes: the note, the keys pinned
-printf 'capacity:\n  reserved_memory_mb: 3072\n' >> /etc/briqyard/config.yaml && systemctl restart briqyardd
+grep -q '^capacity:' /etc/briqyard/config.yaml || printf 'capacity:\n  reserved_memory_mb: 3072\n' >> /etc/briqyard/config.yaml
+systemctl restart briqyardd
 ```
 
+The ports are the edge's (HTTP, HTTPS, the TCP listeners of briq's `infra/edge/host/staging.env`):
+its public interface takes them, and its machines reach them at its address
+(`network.host_ports`). They stay on the host's record (`host ls`: `public tcp:`), so a later
+bootstrap of it, or another host added, changes nothing for the other.
 Putting the vRack address on its interface runs `netplan apply`, which renews the public
 interface's DHCP lease too: a second's pause, SSH sessions survive. The note names the SSH key
 pinned (`SHA256:…`): compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. Then
@@ -629,8 +638,8 @@ internet. After a kernel upgrade, check that `ip -br link` still names the publi
 once the interface is renamed (fix the name, `systemctl restart briqyard-firewall`).
 
 **11. Undo**: `briqyard host retire <id>` (drained, forgotten once it runs nothing). On the
-server: `systemctl disable --now briq-edge briqyardd briqyard-firewall`, `nft delete table inet
-briqyard_host`, `zpool destroy byard`, `sgdisk -d <n>` the `briqyard-pool` partition of each
+server: `systemctl disable --now briq-edge briqyardd briqyard-firewall`, `rm
+/etc/briq-edge/sites/fleet.caddy`, `nft delete table inet briqyard_host`, `zpool destroy byard`, `sgdisk -d <n>` the `briqyard-pool` partition of each
 disk (`sgdisk -p`), `rm /etc/netplan/60-briqyard-private.yaml && netplan apply`. Or reinstall
 it from the OVH manager. Locked out of SSH: Netboot in rescue mode, mount the root RAID
 (`mdadm --assemble --scan`), remove `etc/systemd/system/sysinit.target.wants/briqyard-firewall.service`,

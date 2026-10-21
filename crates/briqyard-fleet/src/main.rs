@@ -133,6 +133,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         empty_since: None,
         note: String::new(),
         bootstrap_attempts: 0,
+        public_tcp_ports: None,
         conditions: vec![],
     }
 }
@@ -426,6 +427,7 @@ async fn register_host(
                 empty_since: None,
                 note: String::new(),
                 bootstrap_attempts: 0,
+                public_tcp_ports: None,
                 conditions: req.conditions,
             },
             now,
@@ -563,6 +565,13 @@ fn new_added_host(
     if !api::valid_id(&id) {
         return Err(invalid(format!("id {id:?}: a-z, 0-9, _ and -")));
     }
+    let public_tcp_ports = Some(
+        req.public_tcp_ports
+            .unwrap_or_else(|| b.public_tcp_ports.clone()),
+    );
+    if public_tcp_ports.iter().flatten().any(|&p| p == 0) {
+        return Err(invalid("public_tcp_ports: 0 is not a port".into()));
+    }
     Ok(HostRec {
         id,
         url,
@@ -587,6 +596,7 @@ fn new_added_host(
         empty_since: Some(now),
         note: "added; waiting for the bootstrap".into(),
         bootstrap_attempts: 0,
+        public_tcp_ports,
         conditions: vec![],
     })
 }
@@ -631,6 +641,7 @@ fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
         empty_since: Some(now),
         note: server.note,
         bootstrap_attempts: 0,
+        public_tcp_ports: Some(st.cfg.provisioner.bootstrap.public_tcp_ports.clone()),
         conditions: vec![],
     };
     st.reg.lock().unwrap().hosts.insert(id, h.clone());

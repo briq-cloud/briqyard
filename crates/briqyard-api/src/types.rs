@@ -1429,6 +1429,9 @@ pub struct Host {
     /// plain HTTP (ADR 0020).
     #[serde(default)]
     pub tls_fingerprint: String,
+    /// The ports its public interface takes besides SSH, from its bootstrap (ADR 0028).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_tcp_ports: Vec<u16>,
     /// What its last heartbeat said (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
@@ -1448,6 +1451,10 @@ pub struct AddHostRequest {
     /// The host's id; empty: `h_` and the address.
     #[serde(default)]
     pub id: String,
+    /// Ports its public interface takes besides SSH (an edge's on it); absent: the fleet's
+    /// `provisioner.bootstrap.public_tcp_ports`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_tcp_ports: Option<Vec<u16>>,
 }
 
 /// POST /v1/hosts/order (fleet only).

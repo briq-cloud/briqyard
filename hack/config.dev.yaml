@@ -20,7 +20,7 @@ network:
   # A host port nothing listens on: e2e reads a refusal at once as reached, a drop as not.
   host_ports: [9443]
 ingress:
-  tcp_ports: 20000-29999
+  tcp_ports: 30000-32767
   http: 0.0.0.0:8080
   domain: byard.localhost
   bind: 0.0.0.0

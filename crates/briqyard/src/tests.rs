@@ -826,6 +826,7 @@ fn host_commands() {
             address,
             region,
             id,
+            ..
         }) => assert_eq!(
             (ssh.as_str(), address.as_str(), region.as_str(), id.as_str()),
             ("51.68.1.2", "10.42.0.11", "gra", ""),
@@ -1195,6 +1196,7 @@ fn the_host_table() {
         version: "0.1.0".into(),
         note: String::new(),
         tls_fingerprint: "ab".repeat(32),
+        public_tcp_ports: vec![],
         conditions: vec![
             api::Condition {
                 kind: "memory_pressure".into(),
@@ -1231,14 +1233,15 @@ fn the_host_table() {
         ssh: "51.68.1.2".into(),
         region: "gra".into(),
         note: String::new(),
+        public_tcp_ports: vec![80, 443, 5432],
         ..ordered.clone()
     };
     let out = host_table(&[ready, ordered, added]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines.len(),
-        8,
-        "an SSH address, a pin, a true condition and a note take a line each"
+        9,
+        "an SSH address, a pin, public ports, a true condition and a note take a line each"
     );
     assert_eq!(
         lines[0],
@@ -1274,7 +1277,38 @@ fn the_host_table() {
         lines[7], "                 ssh: 51.68.1.2",
         "the SSH address when it is not the API's"
     );
+    assert_eq!(lines[8], "                 public tcp: 80,443,5432");
     assert!(out.ends_with('\n'));
+}
+
+#[test]
+fn host_add_takes_its_public_ports() {
+    for (arg, want) in [
+        (None, None),
+        (Some("80,443,5432"), Some(vec![80, 443, 5432])),
+        (Some("none"), Some(vec![])),
+    ] {
+        let mut args = vec!["host", "add", "51.68.1.2"];
+        if let Some(a) = arg {
+            args.extend(["--public-tcp-ports", a]);
+        }
+        match parse(&args).cmd {
+            Cmd::Host(HostCmd::Add {
+                public_tcp_ports, ..
+            }) => assert_eq!(
+                public_tcp_ports
+                    .as_deref()
+                    .map(port_list)
+                    .transpose()
+                    .unwrap(),
+                want
+            ),
+            _ => panic!("not a host add"),
+        }
+    }
+    for bad in ["", "80,", "0", "http"] {
+        assert!(port_list(bad).is_err(), "{bad:?}");
+    }
 }
 
 #[test]
