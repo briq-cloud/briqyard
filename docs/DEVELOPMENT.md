@@ -110,7 +110,11 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   one that is a crash, liveness under `on-failure` and `no`, the backoff, its reset and
   `crash_loop`, the ingress waiting for a woken machine, the host's turns, a PATCH on a running
   machine, the gateway waited for ready, an adopted machine; the HTTP client and the TCP
-  connect against loopback servers). What still needs the host: a tenant's first create (its bridge and
+  connect against loopback servers), labels, quotas and logs follow (a listing by labels,
+  the quota at create, fork, start and the gateway with its message and event, its use; a
+  follow from the start and from a cursor, across rotations, ending at the destroy, its
+  heartbeat and shutdown; placement by region and the cross-region refusal through stub
+  hosts in two regions). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, backups and their
   event, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
@@ -126,7 +130,9 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   refused), metrics (a running machine's CPU and state series, `top` lists it with rates after
   two ticks, no condition true on a healthy host), probes (an HTTP readiness probe: not ready, then
   ready and its event, `wait`; an exec liveness probe that fails: `liveness_failed`, restarted,
-  running again). 108 checks.
+  running again), labels, a quota and a follow (`ls -l` selecting one machine, a refused
+  selector, a second create refused 403 `quota` with its use and event, `logs -f` receiving a
+  line printed after it began and ending at the destroy). 116 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,

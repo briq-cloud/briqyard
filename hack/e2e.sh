@@ -11,7 +11,7 @@ bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 cleanup() {
   echo "cleanup"
-  for t in "$T" "$T-eg" "$T-gw"; do
+  for t in "$T" "$T-eg" "$T-gw" "$T-q"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
     for i in $(seq 1 10); do
@@ -216,6 +216,33 @@ check "the liveness_failed event"    'briqyard events --machine "$LV" | awk "\$4
 for i in $(seq 1 30); do [ "$(briqyard machine get "$LV" | jq -r .state)" = running ] && break; sleep 2; done
 check "running again"                '[ "$(briqyard machine get "$LV" | jq -r .state)" = running ]'
 briqyard machine rm "$LV" >/dev/null
+
+echo "== labels, a quota, logs follow"
+LW=$(briqyard machine run --image alpine:3.20 --name lweb --tenant "$T" --memory 128 -l app=web -- sleep 3600 | jq -r .id)
+briqyard machine run --image alpine:3.20 --name ldb --tenant "$T" --memory 128 -l app=db --no-start >/dev/null
+selected() { briqyard machine ls --tenant "$T" "$@" | awk 'NR > 1 { print $1 }'; }
+check "ls -l app=web lists one"      '[ "$(selected -l app=web)" = "$LW" ]'
+check "ls -l app lists both"         '[ "$(selected -l app | wc -l)" -eq 2 ]'
+check "a != selector is refused"     '! briqyard machine ls -l "app!=web" >/dev/null 2>&1'
+Q="$T-q"
+briqyard tenant quota "$Q" --machines 1 >/dev/null
+briqyard machine run --image alpine:3.20 --name q1 --tenant "$Q" --memory 128 --no-start >/dev/null
+second=$(curl -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"tenant\":\"$Q\",\"name\":\"q2\",\"image\":\"alpine:3.20\",\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines")
+check "quota: the second create is 403 quota" '[ "${second##* }" = 403 ] && [ "$(echo "${second% *}" | jq -r .code)" = quota ]'
+check "quota: its use shown"         '[ "$(briqyard tenant quota "$Q" | jq -c "[.quota.machines, .used.machines]")" = "[1,1]" ]'
+check "quota: the refusal is an event" 'briqyard events --tenant "$Q" | awk "\$4 == \"quota_exceeded\"" | grep -q .'
+FL=$(briqyard machine run --image alpine:3.20 --name follow --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+timeout 60 briqyard machine logs -f "$FL" > /tmp/by-e2e-follow.txt 2>&1 &
+FOLLOW=$!
+# Connected once it printed the boot's lines; the next line is printed after that.
+for i in $(seq 1 30); do grep -q "\[briqyard\] started" /tmp/by-e2e-follow.txt && break; sleep 1; done
+briqyard machine exec "$FL" -- sh -c 'echo e2e-followed > /dev/console'
+for i in $(seq 1 30); do grep -q e2e-followed /tmp/by-e2e-follow.txt && break; sleep 1; done
+check "logs -f gets a line printed after it began" 'grep -q e2e-followed /tmp/by-e2e-follow.txt'
+briqyard machine rm "$FL" >/dev/null
+for i in $(seq 1 10); do kill -0 "$FOLLOW" 2>/dev/null || break; sleep 1; done
+check "logs -f ends at the destroy"  '! kill -0 "$FOLLOW" 2>/dev/null && grep -q "was destroyed" /tmp/by-e2e-follow.txt'
+kill "$FOLLOW" 2>/dev/null || true; wait "$FOLLOW" 2>/dev/null || true
 
 echo "== postgres with a volume, endpoint, wake on connect"
 P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m | jq -r .id)
