@@ -286,19 +286,59 @@ async fn restore(
     let reg = b.fetch(from, &backup::identity(identity)?).await?;
     std::fs::create_dir_all(&cfg.state_dir)?;
     write_registry(state_path, &reg).with_context(|| format!("write {}", state_path.display()))?;
+    print!(
+        "{}",
+        restored(&reg, &format!("{} {from}", b.describe()), state_path)
+    );
+    Ok(())
+}
+
+/// What a restore wrote, for the operator to check before starting the fleet on it: the
+/// fleet will trust each host by this address, token and pin.
+fn restored(reg: &Registry, from: &str, path: &std::path::Path) -> String {
     let keys = reg
         .hosts
         .values()
         .filter(|h| !h.pool_key.is_empty())
         .count();
-    println!(
-        "restored {} hosts ({keys} pool keys) and {} tenants from {} {from} into {}",
+    let mut out = format!(
+        "restored {} hosts ({keys} pool keys) and {} tenants from {from} into {}\n",
         reg.hosts.len(),
         reg.tenants.len(),
-        b.describe(),
-        state_path.display()
+        path.display()
     );
-    Ok(())
+    if let Some(newest) = reg.hosts.values().map(|h| h.last_seen).max() {
+        out += &format!("newest heartbeat in it: {}\n", newest.to_rfc3339());
+    }
+    out += "the fleet will trust, once started:\n";
+    let mut hosts: Vec<&HostRec> = reg.hosts.values().collect();
+    hosts.sort_by(|a, b| a.id.cmp(&b.id));
+    for h in hosts {
+        let pin = if h.tls_fingerprint.is_empty() {
+            "no pin".to_string()
+        } else {
+            format!(
+                "pin {}…",
+                &h.tls_fingerprint[..h.tls_fingerprint.len().min(16)]
+            )
+        };
+        out += &format!(
+            "  {}  {}  {pin}  {}  {}\n",
+            h.id,
+            h.url,
+            if h.token.is_empty() {
+                "no token"
+            } else {
+                "token"
+            },
+            if h.pool_key.is_empty() {
+                "no pool key"
+            } else {
+                "pool key"
+            }
+        );
+    }
+    out
 }
 
 /// The HTTP API: every route, behind the bearer check.
@@ -561,8 +601,7 @@ async fn host_key(
     // A key in use is in the backup: written now when the store does not hold it yet.
     if let Some(b) = &st.backup {
         if !b.holds(&id, &key).await {
-            let reg = st.reg.lock().unwrap().clone();
-            if let Err(e) = b.push(&reg).await {
+            if let Err(e) = b.push(&st.reg).await {
                 tracing::error!(
                     host = id,
                     err = format!("{e:#}"),
@@ -571,7 +610,7 @@ async fn host_key(
                 return Err(err(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "backup",
-                    format!("the registry's backup could not be written, and no key is handed out before it is: {e:#}"),
+                    "the registry's backup could not be written, and no key is handed out before it is: the fleet's log says why",
                 ));
             }
         }

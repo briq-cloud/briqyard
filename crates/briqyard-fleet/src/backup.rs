@@ -14,6 +14,10 @@ use std::path::Path;
 /// The newest backup; one more per UTC day (`registry-<day>.json.age`), the last of that day.
 pub const LATEST: &str = "fleet/registry.json.age";
 
+/// A write of the registry is given this long: a key request waits on it, and the store's
+/// client allows an hour for a machine's backup.
+const PUT_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct Backup {
     store: ObjectStore,
     recipient: age::x25519::Recipient,
@@ -51,24 +55,24 @@ impl Backup {
     }
 
     /// Writes the registry when it differs from what the store holds: the newest and the
-    /// day's copy, encrypted. `false` when there was nothing to write.
-    pub async fn push(&self, reg: &Registry) -> Result<bool> {
-        let data = encode(reg);
-        let digest: [u8; 32] = Sha256::digest(&data).into();
+    /// day's copy, encrypted. `false` when there was nothing to write. The registry is read
+    /// once this write has its turn, so a write never lands an older registry over a newer one.
+    pub async fn push(&self, reg: &std::sync::Mutex<Registry>) -> Result<bool> {
         let mut last = self.last.lock().await;
+        let reg = reg.lock().unwrap().clone();
+        let data = encode(&reg);
+        let digest: [u8; 32] = Sha256::digest(&data).into();
         if last.digest == Some(digest) {
             return Ok(false);
         }
         let sealed = age::encrypt(&self.recipient, &data).context("encrypt the registry")?;
         let day = chrono::Utc::now().format("%Y-%m-%d");
-        self.store
-            .put_bytes(&format!("fleet/registry-{day}.json.age"), &sealed)
-            .await
-            .context("write the registry's backup")?;
-        self.store
-            .put_bytes(LATEST, &sealed)
-            .await
-            .context("write the registry's backup")?;
+        for object in [format!("fleet/registry-{day}.json.age"), LATEST.to_string()] {
+            tokio::time::timeout(PUT_WITHIN, self.store.put_bytes(&object, &sealed))
+                .await
+                .map_err(|_| anyhow!("{object}: no answer within {} s", PUT_WITHIN.as_secs()))?
+                .context("write the registry's backup")?;
+        }
         *last = Written {
             digest: Some(digest),
             keys: reg
@@ -165,8 +169,7 @@ pub async fn run(st: std::sync::Arc<crate::AppState>) {
         return;
     };
     loop {
-        let reg = st.reg.lock().unwrap().clone();
-        match backup.push(&reg).await {
+        match backup.push(&st.reg).await {
             Ok(true) => tracing::debug!(store = backup.describe(), "registry backed up"),
             Ok(false) => {}
             Err(e) => tracing::error!(
@@ -182,6 +185,33 @@ pub async fn run(st: std::sync::Arc<crate::AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write reads the registry once it has its turn: one that waited behind another
+    /// writes the registry as it is then, never the one it was called with.
+    #[tokio::test]
+    async fn a_write_that_waited_writes_the_newest_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("backup.key");
+        let b = std::sync::Arc::new(backup(&dir.path().join("store"), &keygen(&key).unwrap()));
+        let reg = std::sync::Arc::new(std::sync::Mutex::new(Registry::default()));
+        let turn = b.last.lock().await;
+        let waiting = {
+            let (b, reg) = (b.clone(), reg.clone());
+            tokio::spawn(async move { b.push(&reg).await })
+        };
+        tokio::task::yield_now().await;
+        reg.lock()
+            .unwrap()
+            .tenants
+            .insert("t-newer".into(), "h1".into());
+        drop(turn);
+        assert!(waiting.await.unwrap().unwrap());
+        let back = b.fetch(LATEST, &identity(&key).unwrap()).await.unwrap();
+        assert!(
+            back.tenants.contains_key("t-newer"),
+            "the registry as it was at the write"
+        );
+    }
 
     fn backup(dir: &Path, recipient: &str) -> Backup {
         Backup::open(&crate::config::Backup {
@@ -222,6 +252,7 @@ mod tests {
         h.note = "the first".into();
         reg.hosts.insert("h1".into(), h);
         let (k, _) = reg.pool_key("h1").unwrap();
+        let reg = std::sync::Mutex::new(reg);
         assert!(!b.holds("h1", &k).await);
         assert!(b.push(&reg).await.unwrap());
         assert!(b.holds("h1", &k).await);

@@ -342,20 +342,26 @@ backup:
   recipient: age1…                       # what keygen printed
 ```
 
-with `BRIQYARD_S3_ACCESS_KEY` and `BRIQYARD_S3_SECRET_KEY` in the fleet's environment. The fleet
+with `BRIQYARD_S3_ACCESS_KEY` and `BRIQYARD_S3_SECRET_KEY` in the fleet's environment: the
+fleet's own key, never a host's. In the bucket's policy the hosts' key writes `backups/` only and
+the fleet's `fleet/` only, and versioning is on. The fleet
 writes `fleet/registry.json.age` once a minute when the registry changed, and
 `fleet/registry-<day>.json.age` with the last of each day; a host's pool key is served only once
 the store holds it (503 `backup` otherwise). A failed write is `registry backup` at `error`.
 
 To restore, on the fleet's host: stop the fleet, move `registry.json` aside if there is one,
-copy the identity there for the moment, then
+copy the identity there for the moment, export the fleet's `BRIQYARD_S3_ACCESS_KEY` and
+`BRIQYARD_S3_SECRET_KEY` (an S3 store), then
 
 ```bash
 briqyard-fleet restore --identity fleet-backup.key        # --from fleet/registry-2026-10-21.json.age for a day's
 ```
 
-which writes the registry (`0600`) and refuses to write over one. Start the fleet, remove the
-identity from the host. Placements made since the backup come back from the hosts' heartbeats.
+which writes the registry (`0600`), refuses to write over one, and prints what the fleet will
+trust: each host's id, url, pin prefix, token and pool key there or not, and the newest
+heartbeat in the backup. Check them, then start the fleet and remove the identity from the
+host. From the backup's last minute, a restore does not bring back an ordered host not yet
+keyed (order it again), a rotated token (put it in the record), a drain, or a forget. Placements made since the backup come back from the hosts' heartbeats.
 `age -d -i fleet-backup.key registry.json.age` reads a backup without us.
 
 Where the fleet terminates the connection (its `tls`, or plain on loopback), a host's

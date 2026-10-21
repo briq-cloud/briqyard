@@ -204,14 +204,14 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
 ## Layout
 
 ```
-crates/briqyard-api     the API types and the host–guest protocol (shared by everything)
-crates/briqyardd        the daemon: config, state, zfs, netw (bridges, nft, dns), fc, image,
-                        guestc (vsock client), machine (the manager), ingress, api
-crates/briqyard-init    PID 1 inside the guest
-crates/briqyard         the CLI
-crates/briqyard-fleet   the orchestrator across hosts
+crates/briqyard-api      the API types and the host–guest protocol (shared by everything)
+crates/briqyardd         the daemon: config, state, zfs, netw (bridges, nft, dns), fc, image,
+                         guestc (vsock client), machine (the manager), ingress, api
+crates/briqyard-init     PID 1 inside the guest
+crates/briqyard          the CLI
+crates/briqyard-fleet    the orchestrator across hosts
 crates/briqyard-objstore the object store (S3 or a directory), shared by the daemon and the fleet
-api/openapi.yaml        the API description, served at /v1/openapi.yaml
-hack/                   dev VM, systemd units, dev configs, the shell suites, the stress driver
-docs/adr                every technical decision; docs/research the numbers behind them
+api/openapi.yaml         the API description, served at /v1/openapi.yaml
+hack/                    dev VM, systemd units, dev configs, the shell suites, the stress driver
+docs/adr                 every technical decision; docs/research the numbers behind them
 ```

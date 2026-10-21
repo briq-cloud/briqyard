@@ -17,15 +17,15 @@ Most work here is done by agents. Everything an agent needs is in the repo: this
 ## Layout
 
 ```
-crates/briqyard-api     API types and the host–guest protocol (shared by everything)
-crates/briqyardd        the daemon: config, store, zfs, netw (bridge, nft, dns), fc, image, guestc, machine, ingress, api
-crates/briqyard-init    PID 1 inside the guest, static musl
-crates/briqyard         the CLI
-crates/briqyard-fleet   placement, forwarding, host registry, provisioners, bootstrap, the registry's backup
+crates/briqyard-api      API types and the host–guest protocol (shared by everything)
+crates/briqyardd         the daemon: config, store, zfs, netw (bridge, nft, dns), fc, image, guestc, machine, ingress, api
+crates/briqyard-init     PID 1 inside the guest, static musl
+crates/briqyard          the CLI
+crates/briqyard-fleet    placement, forwarding, host registry, provisioners, bootstrap, the registry's backup
 crates/briqyard-objstore the object store (S3 or a directory): machine backups, the registry's backup
-api/openapi.yaml        the API, served at /v1/openapi.yaml
-hack/                   dev VM, systemd units, dev configs, the shell suites, the stress driver
-docs/                   architecture, operations, development, mesh design, adr/, research/
+api/openapi.yaml         the API, served at /v1/openapi.yaml
+hack/                    dev VM, systemd units, dev configs, the shell suites, the stress driver
+docs/                    architecture, operations, development, mesh design, adr/, research/
 ```
 
 ## Commands
