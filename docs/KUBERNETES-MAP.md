@@ -59,7 +59,8 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Readiness gates traffic (endpoints follow Ready) | ✓ the ingress, `/wait` and the gateway's start wait for `ready` | another replica to send to (groups) | yard, later |
 | `terminationGracePeriod` | ✓ stop timeout, SIGTERM then reset | | |
 | preStop hook | ✗ | | — |
-| Requests, limits | ✓ size (vCPUs, memory) as cgroup limits | | |
+| Requests, limits | ✓ size (vCPUs, memory) as cgroup limits; CPU shared by size under contention (`cpu.weight`, ADR 0030) | | |
+| Block IO limits (no pod field: cgroup v2 `io.max` set on the node by hand, or a CSI driver's QoS) | ★ `disk_limits` per machine: MB/s and IOPS on each disk with a burst, by size from the host's config, changed live (ADR 0030) | | |
 | Init containers | ◐ boot steps (briq recipes) | commands the init runs before the main process | yard, later (briq composes them) |
 | Sidecars | ✗ one main process; exec for the rest | | — |
 | Deployment, ReplicaSet (replicas, rolling update) | ✗ | a group of machines behind one name | yard, later |
@@ -136,7 +137,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | `kubectl logs -f` | ✓ `/logs?follow=true` as NDJSON across rotations, `machine logs -f`, through the fleet (ADR 0025) | | |
 | `kubectl describe` | ✓ `briqyard machine describe` | | |
 | Events | ✓ (API machinery) | | |
-| kubelet `/metrics`, cAdvisor (per pod CPU, memory, disk, network) | ✓ per-machine series on `/metrics` from the tick's measure (ADR 0021) | | |
+| kubelet `/metrics`, cAdvisor (per pod CPU, memory, disk, network) | ✓ per-machine series on `/metrics` from the tick's measure (ADR 0021); disk bytes and throttling from Firecracker (ADR 0030) | | |
 | kube-state-metrics (machines by state, restarts) | ✓ `briqyard_machine_state`, `_restarts_total`, `_boot_seconds` | | |
 | metrics-server, `kubectl top pod` | ✓ `briqyard top`, `GET /v1/top` (the last 15 s) | | |
 | Usage accounting (OpenCost, outside core) | ★ hourly usage buckets (ADR 0017) | | |

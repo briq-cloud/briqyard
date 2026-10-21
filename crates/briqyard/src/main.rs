@@ -255,6 +255,12 @@ enum MachineCmd {
         #[command(flatten)]
         limits: LimitArgs,
     },
+    /// Change the limits it names on each of its disks, at once: briqyard machine set-disk-limits ID --disk-bw 8
+    SetDiskLimits {
+        id: String,
+        #[command(flatten)]
+        limits: DiskArgs,
+    },
 }
 
 /// Limits on a machine's internet traffic; each one left out is the machine's (on a run, the
@@ -287,6 +293,37 @@ impl LimitArgs {
     }
 }
 
+/// Limits on each of a machine's disks (the root disk and the volume); each one left out is
+/// the machine's (on a run, the host's for its size).
+#[derive(Args)]
+struct DiskArgs {
+    /// MB a second, reads and writes together; 0: no limit
+    #[arg(long)]
+    disk_bw: Option<u32>,
+    /// Requests a second; 0: no limit
+    #[arg(long)]
+    disk_iops: Option<u32>,
+    /// Seconds at the rates let through at full speed once, after a start or a change
+    #[arg(long)]
+    disk_burst: Option<u32>,
+}
+
+impl DiskArgs {
+    /// The request's `disk_limits`, checked as the daemon checks them; none when nothing is
+    /// named.
+    fn request(&self) -> Result<Option<api::DiskLimits>> {
+        let l = api::DiskLimits {
+            bandwidth_mb: self.disk_bw,
+            iops: self.disk_iops,
+            burst_sec: self.disk_burst,
+        };
+        if let Err(e) = l.check() {
+            bail!("disk_limits.{e}");
+        }
+        Ok((l != api::DiskLimits::default()).then_some(l))
+    }
+}
+
 #[derive(Args)]
 struct RunArgs {
     #[arg(long)]
@@ -315,6 +352,8 @@ struct RunArgs {
     egress: Option<api::Egress>,
     #[command(flatten)]
     limits: LimitArgs,
+    #[command(flatten)]
+    disk: DiskArgs,
     #[command(flatten)]
     backup: BackupArgs,
     /// Checked before readiness and liveness run; failing, the boot fails: http:PORT[/PATH], tcp:PORT, exec:CMD ARGS
@@ -894,6 +933,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     region: a.region.clone(),
                     egress: a.egress.clone(),
                     limits: a.limits.request()?,
+                    disk_limits: a.disk.request()?,
                     backup: a.backup.request()?,
                     probes: Some(api::Probes {
                         startup: a.startup.clone(),
@@ -1050,6 +1090,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     metadata: src.metadata.clone(),
                     egress: Some(src.egress.clone()),
                     limits: Some(src.limits.clone()),
+                    disk_limits: Some(src.disk_limits.clone()),
                     fork: Some(api::ForkSpec {
                         machine_id: id,
                         copy: String::new(),
@@ -1145,6 +1186,23 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::SetEgress { id, egress } => {
                 let req = api::UpdateMachineRequest {
                     egress: Some(egress),
+                    ..Default::default()
+                };
+                print_json(
+                    &c.call::<api::Machine>(
+                        reqwest::Method::PATCH,
+                        &format!("/v1/machines/{id}"),
+                        Some(&req),
+                    )
+                    .await?,
+                )
+            }
+            MachineCmd::SetDiskLimits { id, limits } => {
+                let Some(limits) = limits.request()? else {
+                    bail!("name a limit: --disk-bw, --disk-iops or --disk-burst");
+                };
+                let req = api::UpdateMachineRequest {
+                    disk_limits: Some(limits),
                     ..Default::default()
                 };
                 print_json(
@@ -1640,6 +1698,23 @@ fn limits_label(l: &api::EgressLimits) -> String {
     }
 }
 
+/// The disk limits in force, short: `32MB/s 4000io` (the burst in `describe`); `-` when
+/// nothing is limited.
+fn disk_label(l: &api::DiskLimits) -> String {
+    let mut parts = Vec::new();
+    if let Some(n) = l.bandwidth_mb.filter(|n| *n > 0) {
+        parts.push(format!("{n}MB/s"));
+    }
+    if let Some(n) = l.iops.filter(|n| *n > 0) {
+        parts.push(format!("{n}io"));
+    }
+    if parts.is_empty() {
+        "-".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
 /// A backup schedule in a table: `6h/4` (every, keep), `-` for none.
 fn backup_label(p: Option<&api::BackupPolicy>) -> String {
     match p {
@@ -1653,7 +1728,7 @@ fn backup_label(p: Option<&api::BackupPolicy>) -> String {
 /// `machine ls`.
 fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<8} {:<12} HOST\n",
+        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
         "ID",
         "TENANT",
         "NAME",
@@ -1665,6 +1740,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
         "SLEEP",
         "EGRESS",
         "LIMITS",
+        "DISK",
         "BACKUP",
         "PENDING"
     );
@@ -1679,7 +1755,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             None => "-".into(),
         };
         out.push_str(&format!(
-            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<8} {:<12} {}\n",
+            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {}\n",
             m.id,
             m.tenant,
             m.name,
@@ -1691,6 +1767,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             m.sleep,
             egress_label(&m.egress),
             limits_label(&m.limits),
+            disk_label(&m.disk_limits),
             backup_label(m.backup.as_ref()),
             pending,
             m.host
@@ -1935,6 +2012,12 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
     if let Some(v) = &m.volume {
         lines.push(("Volume", format!("{} GB at {}", v.size_gb, v.mount)));
     }
+    let d = &m.disk_limits;
+    let disk = match disk_label(d).as_str() {
+        "-" => "none".to_string(),
+        l => format!("{l} each, {}s burst", d.burst_sec.unwrap_or(0)),
+    };
+    lines.push(("Disk limits", disk));
     lines.push(("Egress", egress_label(&m.egress)));
     let endpoints: Vec<String> = m
         .endpoints
