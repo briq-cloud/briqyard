@@ -8,24 +8,24 @@ VM=${VM:-fc}
 SRC=$PWD
 cmd=${1:-install}
 VMHOME=$(limactl shell "$VM" sh -c 'echo $HOME' | tr -d '\r')
+# A target dir per tree: cargo hashes a path package relative to its workspace, so trees that
+# shared one would reuse each other's builds. Remove it when the worktree goes.
+TARGET=$VMHOME/target-$(basename "$SRC")
 
 # cargo cannot write into the read-only mount: lock file resolved here, target dir in the VM.
 build() {
   cargo generate-lockfile --offline 2>/dev/null || cargo generate-lockfile >/dev/null
-  # Every worktree builds into the VM's one target dir, and cargo tells a path package fresh by
-  # its files' times: touched, this tree's sources are newer than another tree's last build.
-  find crates -name '*.rs' -exec touch {} +
   # The init must be static: the guest has no shared libraries of ours. musl gives that.
-  limactl shell "$VM" bash -lc "export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR=\$HOME/target; cd '$SRC' && cargo build --release --workspace --exclude briqyard-init 2>&1 | tail -3 && cargo build --release -p briqyard-init --target \$(uname -m)-unknown-linux-musl 2>&1 | tail -3"
+  limactl shell "$VM" bash -lc "set -o pipefail; export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR=$TARGET; cd '$SRC' && cargo build --release --workspace --exclude briqyard-init 2>&1 | tail -3 && cargo build --release -p briqyard-init --target \$(uname -m)-unknown-linux-musl 2>&1 | tail -3"
 }
 
 install() {
   build
   limactl shell "$VM" sudo bash -s <<EOF
 set -e
-T=$VMHOME/target/release
+T=$TARGET/release
 install -m 0755 "\$T/briqyardd" /usr/local/bin/briqyardd
-install -m 0755 "$VMHOME/target/$(limactl shell "$VM" uname -m | tr -d "\r")-unknown-linux-musl/release/briqyard-init" /usr/local/bin/briqyard-init
+install -m 0755 "$TARGET/$(limactl shell "$VM" uname -m | tr -d "\r")-unknown-linux-musl/release/briqyard-init" /usr/local/bin/briqyard-init
 install -m 0755 "\$T/briqyard" /usr/local/bin/briqyard
 install -m 0755 "\$T/briqyard-fleet" /usr/local/bin/briqyard-fleet
 mkdir -p /etc/briqyard /var/lib/briqyard

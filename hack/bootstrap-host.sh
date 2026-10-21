@@ -14,8 +14,8 @@
 #
 # The pool (ADR 0028): one device, or two as a mirror. A device is a whole disk, a partition, or
 # a disk the OS is installed on, whose largest free space becomes a partition for the pool.
-# A device that holds a mounted filesystem, swap, or a filesystem the pool did not make is
-# refused.
+# A device that holds a mounted filesystem, swap, any filesystem or a pool not imported is
+# refused: nothing is overwritten.
 #
 # The API and the endpoints listen on LISTEN's address: PRIVATE_ADDRESS's when it is set (a
 # private network such as OVH's vRack), else 0.0.0.0:7420. A public address needs
@@ -99,10 +99,9 @@ pool_partition() { lsblk -nro PATH,PARTLABEL "$1" | awk '$2 == "briqyard-pool" {
 # disk with partitions (the OS on part of it) gets one in its largest free space, labelled
 # briqyard-pool and found by that label on a later run. Never a device in use.
 pool_device() {
-  local dev label start end sector out used sig uuid
+  local dev start end sector out used sig uuid
   dev=$(readlink -f "$1")
   [ -b "$dev" ] || fail "$1 is not a block device"
-  label=$(lsblk -dno PARTLABEL "$dev")
   if [ "$(lsblk -dno TYPE "$dev")" != part ] && [ -n "$(lsblk -nro TYPE "$dev" | awk '$1 == "part"')" ]; then
     if [ -z "$(pool_partition "$dev")" ]; then
       [ "$(blkid -p -o value -s PTTYPE "$dev")" = gpt ] || fail "$1 has partitions but no GPT: name a partition for the pool"
@@ -115,16 +114,15 @@ pool_device() {
       [ -n "$(pool_partition "$dev")" ] || fail "$1: no briqyard-pool partition after sgdisk"
       echo "   $1: $(pool_partition "$dev"), $(( (end - start) * sector >> 30 )) GB of free space" >&2
     fi
-    dev=$(pool_partition "$dev"); label=briqyard-pool
+    dev=$(pool_partition "$dev")
   fi
   used=$(lsblk -nro MOUNTPOINTS "$dev" | grep . | paste -sd, - || true)
   [ -z "$used" ] || fail "$1 is in use (mounted at $used): the pool takes a device nothing uses"
   [ "$(lsblk -nro NAME "$dev" | wc -l)" = 1 ] || fail "$1 is in use by $(lsblk -nro NAME "$dev" | sed 1d | paste -sd, -) (RAID, LVM, partitions)"
-  # The partition labelled for the pool is overwritten; any other filesystem is someone's.
-  if [ "$label" != briqyard-pool ]; then
-    sig=$(blkid -p -o value -s TYPE "$dev" 2>/dev/null || true)
-    [ -z "$sig" ] || fail "$1 holds $sig: wipefs -a it if it is meant for the pool"
-  fi
+  # Nothing is overwritten: a pool there is one not imported (a re-run, a reinstalled OS).
+  sig=$(blkid -p -o value -s TYPE "$dev" 2>/dev/null || true)
+  [ "$sig" != zfs_member ] || fail "$1 holds a pool: zpool import $POOL, or wipefs -a it if it is meant for a new one"
+  [ -z "$sig" ] || fail "$1 holds $sig: wipefs -a it if it is meant for the pool"
   # A partition by its id: disk names may change order across reboots.
   uuid=$(lsblk -dno PARTUUID "$dev")
   if [ -n "$uuid" ] && [ -e "/dev/disk/by-partuuid/$uuid" ]; then echo "/dev/disk/by-partuuid/$uuid"; else echo "$dev"; fi
@@ -138,9 +136,11 @@ if ! zpool list "$POOL" >/dev/null 2>&1; then
       dev=$(pool_device "$d") || exit 1
       vdevs+=("$dev")
     done
+    # -f for a mirror of two sizes alone (a disk's free space beside a whole disk): every
+    # member was checked to hold nothing above.
     case ${#vdevs[@]} in
       1) ;;
-      2) vdevs=(mirror "${vdevs[@]}") ;;
+      2) vdevs=(-f mirror "${vdevs[@]}") ;;
       *) fail "BRIQYARD_POOL_DEVICE names ${#vdevs[@]} devices: one, or two for a mirror" ;;
     esac
   else
@@ -149,7 +149,7 @@ if ! zpool list "$POOL" >/dev/null 2>&1; then
     vdevs=(/var/lib/briqyard/pool.img)
     echo "   (a file-backed pool: fine for a trial, not for production)"
   fi
-  zpool create -f -o ashift=12 -O compression=lz4 -O atime=off "$POOL" "${vdevs[@]}"
+  zpool create -o ashift=12 -O compression=lz4 -O atime=off "$POOL" "${vdevs[@]}"
   echo "   ${vdevs[*]}"
 fi
 
@@ -174,7 +174,10 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
   [ -n "$public_dev" ] || fail "no default route: machines would have no way to the internet"
   [ "$public_dev" != "$private_dev" ] || fail "the default route goes through $private_dev, the private interface"
   # A table of its own, loaded before the network at every boot; the daemon's are apart.
-  ports=22${PUBLIC_TCP_PORTS:+,$PUBLIC_TCP_PORTS}
+  # SSH's own ports, as sshd runs them: a literal 22 would lock out a server on another.
+  ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}' | paste -sd, -)
+  [ -n "$ssh_ports" ] || fail "sshd -T names no port: closing the public interface would close SSH"
+  ports=$ssh_ports${PUBLIC_TCP_PORTS:+,$PUBLIC_TCP_PORTS}
   mkdir -p /etc/briqyard
   cat > /etc/briqyard/firewall.nft <<EOF
 table inet briqyard_host
@@ -231,19 +234,22 @@ fi
 
 # A file of the release. With BRIQYARD_RELEASE_TOKEN, through GitHub's API: a private
 # repository's assets are not served at their download URL.
+# `assets` is the release's JSON from GitHub's API, read once below when there is a token.
 release_file() {
-  local name=$1 dest=$2 repo tag id
+  local name=$1 dest=$2 id
   if [ -z "$RELEASE_TOKEN" ]; then curl -fsSL -o "$dest" "$RELEASE/$name"; return; fi
-  repo=${RELEASE#https://github.com/}; tag=${repo##*/releases/download/}; repo=${repo%%/releases/download/*}
-  [ "$repo" != "$tag" ] || fail "BRIQYARD_RELEASE=$RELEASE: with a token, a GitHub release (https://github.com/<owner>/<repo>/releases/download/<tag>)"
-  [ -n "${RELEASE_ASSETS:-}" ] || RELEASE_ASSETS=$(curl -fsSL -H "Authorization: Bearer $RELEASE_TOKEN" "https://api.github.com/repos/$repo/releases/tags/$tag")
-  id=$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id' <<<"$RELEASE_ASSETS")
+  id=$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id' <<<"$assets")
   [ -n "$id" ] || fail "release $tag of $repo has no $name"
   curl -fsSL -H "Authorization: Bearer $RELEASE_TOKEN" -H "Accept: application/octet-stream" -o "$dest" "https://api.github.com/repos/$repo/releases/assets/$id"
 }
 
 echo "== binaries"
 if [ -n "$RELEASE" ]; then
+  if [ -n "$RELEASE_TOKEN" ]; then
+    repo=${RELEASE#https://github.com/}; tag=${repo##*/releases/download/}; repo=${repo%%/releases/download/*}
+    [ "$repo" != "$tag" ] || fail "BRIQYARD_RELEASE=$RELEASE: with a token, a GitHub release (https://github.com/<owner>/<repo>/releases/download/<tag>)"
+    assets=$(curl -fsSL -H "Authorization: Bearer $RELEASE_TOKEN" "https://api.github.com/repos/$repo/releases/tags/$tag")
+  fi
   # Every file checked against the release's digests before any is installed.
   dl=$(mktemp -d)
   release_file "SHA256SUMS-$ARCH" "$dl/SHA256SUMS"

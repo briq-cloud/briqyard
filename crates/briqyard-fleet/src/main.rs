@@ -489,11 +489,11 @@ async fn add_host(State(st): S, Json(req): Json<api::AddHostRequest>) -> Result<
     let h = new_added_host(&st.cfg.provisioner.bootstrap, req, Utc::now())?;
     {
         let mut reg = st.reg.lock().unwrap();
-        if let Some(other) = reg
-            .hosts
-            .values()
-            .find(|o| o.id == h.id || (!o.url.is_empty() && url_host(&o.url) == url_host(&h.url)))
-        {
+        if let Some(other) = reg.hosts.values().find(|o| {
+            o.id == h.id
+                || (!o.url.is_empty() && url_host(&o.url) == url_host(&h.url))
+                || (!h.ssh.is_empty() && o.ssh == h.ssh)
+        }) {
             return Err(err(
                 StatusCode::CONFLICT,
                 "conflict",
@@ -531,7 +531,7 @@ fn new_added_host(
         && req
             .ssh
             .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b':'));
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-'));
     if !ssh_ok {
         return Err(invalid(format!(
             "ssh {:?}: want the server's address or name",

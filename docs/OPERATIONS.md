@@ -30,12 +30,12 @@ address (the host's `hosts:` entry, below).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BRIQYARD_POOL_DEVICE` | none (a file, `BRIQYARD_POOL_FILE_GB`, 50) | One device, or two comma-separated for a mirror (ADR 0028): a partition, an empty disk, or a disk with the OS on part of it, whose largest free space (10 GB or more) becomes a `briqyard-pool` partition. Mounted, swap, RAID or LVM members and other filesystems are refused |
+| `BRIQYARD_POOL_DEVICE` | none (a file, `BRIQYARD_POOL_FILE_GB`, 50) | One device, or two comma-separated for a mirror (ADR 0028): a partition, an empty disk, or a disk with the OS on part of it, whose largest free space (10 GB or more) becomes a `briqyard-pool` partition. Mounted, swap, RAID or LVM members, any filesystem and a pool not imported (a re-run with the pool exported: `zpool import byard`) are refused; nothing is overwritten |
 | `BRIQYARD_RELEASE`, `BRIQYARD_RELEASE_TOKEN` | `./bin` | Where the binaries are; each checked against the release's `SHA256SUMS-<arch>`. The token (contents read) fetches a private GitHub repository's release through its API |
 | `BRIQYARD_ARC_GB` | 10 % of memory, 1 to 16 | The ZFS cache's ceiling (`/etc/modprobe.d/briqyard-zfs.conf`); the daemon's default capacity leaves it out |
 | `PRIVATE_ADDRESS` | none | The host's address on a private network, with its prefix (`10.42.0.11/16`): `LISTEN`, the endpoints and `ADVERTISE` default to it, and the public interface takes SSH and `PUBLIC_TCP_PORTS` only (`nft list table inet briqyard_host`, loaded by `briqyard-firewall.service` at boot) |
 | `PRIVATE_INTERFACE` | none | Where `PRIVATE_ADDRESS` is put (netplan, `/etc/netplan/60-briqyard-private.yaml`) when no interface has it yet |
-| `PUBLIC_TCP_PORTS` | none | Ports the public interface takes besides 22, comma-separated (the fleet's, 80 for certbot) |
+| `PUBLIC_TCP_PORTS` | none | Ports the public interface takes besides SSH's own (read from `sshd -T`), comma-separated (the fleet's, 80 for certbot) |
 | `LISTEN` | `PRIVATE_ADDRESS`'s, else `0.0.0.0:7420` | The API's address; TCP endpoints and the HTTP ingress bind the same address |
 | `ALLOWED_CLIENTS` | none | Comma-separated IPv4 CIDRs (a bare address is a `/32`) allowed to connect: the fleet's and the routers' networks. Written as `ingress.allowed_clients` |
 | `ALLOW_PUBLIC` | none | `1` writes `ingress.allow_public: true`: anyone can connect, a firewall of your own is in front |
@@ -427,6 +427,10 @@ One server, the fleet on it, the API and the endpoints on the vRack, the public 
 closed to all but SSH and the fleet's port (ADR 0028). The values below (`10.42.0.0/16`,
 `10.42.0.11`, `enp3s0f1`, `fleet.stg.briq.cloud`) are examples: write yours.
 
+**Endpoints are not reachable from the internet** until briq's edge runs on our servers in the
+vRack (up-lab/briq#277): Fly's edge cannot reach the vRack. Until then the host takes machines,
+exec, files and backups, not public traffic.
+
 **1. Order** (OVH manager, Bare Metal Cloud, Dedicated servers):
 
 | | |
@@ -448,6 +452,8 @@ closed to all but SSH and the fleet's port (ADR 0028). The values below (`10.42.
 No partition fills the disks: the rest of each NVMe stays free for the pool. Add your SSH key
 and, from the second server on, the fleet's (`/etc/briqyard/fleet_ssh_key.pub` on its server).
 After the install, `sgdisk -p /dev/nvme0n1` ends with the free space (`Total free space is …`).
+On a UEFI server (`ls /sys/firmware/efi` lists something), `findmnt /boot/efi` must show the
+EFI partition OVH adds on its own; none there: reinstall before going on.
 If the manager makes the last partition fill the disk, reinstall through the API console
 (`POST /dedicated/server/{serviceName}/reinstall`) with `operatingSystem: ubuntu2404-server_64`,
 your key as `customizations.sshKey`, and `storage: [{partitioning: {layout: [{mountPoint:
@@ -470,9 +476,14 @@ scp hack/briqyard-fleet.service root@<public ip>:/etc/systemd/system/
 ssh root@<public ip>
 chmod 0755 /usr/local/bin/briqyard /usr/local/bin/briqyard-fleet && mkdir -p /etc/briqyard
 ssh-keygen -q -t ed25519 -N '' -f /etc/briqyard/fleet_ssh_key && cat /etc/briqyard/fleet_ssh_key.pub >> /root/.ssh/authorized_keys
-apt-get install -y certbot && certbot certonly --standalone -d fleet.stg.briq.cloud   # its DNS record first
-echo "BRIQYARD_RELEASE_TOKEN=<fine-grained token, contents read on briq-cloud/briqyard>" > /etc/briqyard/fleet.env && chmod 0600 /etc/briqyard/fleet.env
+apt-get install -y certbot && certbot certonly --standalone -d fleet.stg.briq.cloud --deploy-hook 'systemctl restart briqyard-fleet'   # its DNS record first
+install -m 0600 /dev/null /etc/briqyard/fleet.env && nano /etc/briqyard/fleet.env   # BRIQYARD_RELEASE_TOKEN=…
+install -m 0600 /dev/null /etc/briqyard/fleet.yaml && nano /etc/briqyard/fleet.yaml # below
 ```
+
+The release token is a fine-grained GitHub token, read-only on `briq-cloud/briqyard`'s
+contents, expiring in 30 days: written with an editor, never with `echo` (it would stay in the
+shell's history).
 
 `/etc/briqyard/fleet.yaml`:
 
@@ -495,11 +506,18 @@ provisioner:
     public_tcp_ports: [7430, 80]          # briq reaches the fleet; certbot renews
 ```
 
-`systemctl daemon-reload && systemctl enable --now briqyard-fleet`.
+`systemctl daemon-reload && systemctl enable --now briqyard-fleet`. The fleet's state
+(`/var/lib/briqyard-fleet`: the registry with every host's token, the pinned SSH keys) lives
+only there until the fleet backs itself up (ADR 0032): copy it off the server after each host
+change, `scp -r root@<public ip>:/var/lib/briqyard-fleet ~/briqyard-fleet-<date>`, and keep the
+copy as private as the fleet's config. briq's side: its control plane gets
+`BRIQYARD_URL=https://fleet.stg.briq.cloud:7430` and the fleet's `token` as `BRIQYARD_TOKEN`.
 
-**5. Add the server to the fleet**, from your Mac (`cargo build --release -p briqyard`):
+**5. Add the server to the fleet**, from your Mac (`cargo build --release -p briqyard`), once
+the server's kernel has ZFS and KVM:
 
 ```bash
+ssh root@<public ip> 'modprobe zfs && ls /dev/kvm'
 export BRIQYARD_URL=https://fleet.stg.briq.cloud:7430 BRIQYARD_TOKEN=<the fleet's token>
 briqyard host add <public ip> --address 10.42.0.11 --region gra
 briqyard host ls     # within two minutes: the note, then ready
@@ -540,6 +558,11 @@ smoke runs from anywhere that reaches the fleet and touches no real host.
 | Machines | `briqyard top`, `briqyard events --watch` |
 | The kernel | `dmesg -T \| grep -iE 'kvm\|oom\|nvme\|mce'` |
 | The public interface | `nft list chain inet briqyard_host input`: the drop counter grows with the internet's scans |
+
+Never enable `nftables.service` or ufw: they flush every table, ours and the daemon's. After a
+kernel upgrade, check that `ip -br link` still names the public interface as
+`/etc/briqyard/firewall.nft` does: the rule `iifname != "<public>" accept` lets everything in
+once the interface is renamed (fix the name, `systemctl restart briqyard-firewall`).
 
 **8. Undo**: `briqyard host retire <id>` (drained, forgotten once it runs nothing). On the
 server: `systemctl disable --now briqyardd briqyard-firewall`, `nft delete table inet

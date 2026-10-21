@@ -43,6 +43,10 @@ hack/vm.sh logs        # follow the daemon's log
 hack/vm.sh e2e         # install, then run hack/e2e.sh inside the VM
 ```
 
+One target dir per tree in the VM (`$HOME/target-<tree's directory>`, the unit tests' too):
+cargo hashes a path package relative to its workspace, so a shared one hands out another
+tree's builds. Delete it when the worktree goes.
+
 Everything under nested virtualization is slower than on a real server; the timings are not a
 benchmark.
 
@@ -94,7 +98,7 @@ D0=$(losetup -fP --show /srv/byt/disk0.img); D1=$(losetup -fP --show /srv/byt/di
 sgdisk -n 1:0:+2G "$D0"; partx -u "$D0"; mkfs.ext4 -q "${D0}p1"; mount "${D0}p1" /mnt/byt-os   # the "OS"
 ip link add byvrack0 type dummy && ip link set byvrack0 up                                  # the "vRack"
 ssh-keygen -q -t ed25519 -N '' -f /etc/byt-fleet/key && cat /etc/byt-fleet/key.pub >> /root/.ssh/authorized_keys
-ln -sfn "$PWD/bin" /root/bin       # the binaries hack/vm.sh built, copied out of fc
+ln -sfn "$PWD/bin" /root/bin       # the binaries hack/vm.sh built, copied out of fc's target-<tree>
 ```
 
 A fleet on fc2 itself (`listen: 127.0.0.1:7431`, `provisioner.bootstrap`: `enabled`, `ssh_key:

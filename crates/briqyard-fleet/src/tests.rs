@@ -1189,10 +1189,11 @@ async fn a_server_bought_by_hand_is_added_for_the_bootstrap() {
         (h.id.as_str(), h.url.as_str(), h.ssh.as_str()),
         ("gra-2", "https://51.68.1.3:7420", "")
     );
-    // The same server again, by its address or its id.
+    // The same server again, by its address, its id or its SSH address.
     for body in [
         serde_json::json!({"ssh": "51.68.1.9", "address": "10.42.0.11"}),
         serde_json::json!({"ssh": "51.68.1.9", "address": "10.42.0.12", "id": "gra-2"}),
+        serde_json::json!({"ssh": "51.68.1.2", "address": "10.42.0.13"}),
     ] {
         let (s, _, text) = add(body).await;
         assert_eq!(s, StatusCode::CONFLICT, "{text}");
@@ -1210,6 +1211,10 @@ async fn a_server_bought_by_hand_is_added_for_the_bootstrap() {
         ),
         (
             serde_json::json!({"ssh": "root@1.2.3.4"}),
+            "want the server's address or name",
+        ),
+        (
+            serde_json::json!({"ssh": "1.2.3.4:2222"}),
             "want the server's address or name",
         ),
         (
