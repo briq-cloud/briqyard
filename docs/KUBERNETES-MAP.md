@@ -161,7 +161,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | Control plane HA (etcd quorum) | ✗ one fleet process, one file | state the fleet can rebuild from the hosts | yard, later |
-| etcd backup | ✗ | the registry file copied to the object store on each write | yard |
+| etcd backup | ✓ the registry written to the object store once a minute when it changed and before a key is served, encrypted with age to a key kept offline; `briqyard-fleet restore` (ADR 0032) | | |
 | Cluster provisioning | ✓ bootstrap script, provisioners | | |
 | Version skew, upgrades | ✗ | `host upgrade` | yard |
 | Multi-cluster | ◐ regions on hosts, placement by region (ADR 0025) | a fleet per region, or one across | yard, later |

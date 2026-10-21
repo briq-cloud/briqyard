@@ -276,6 +276,7 @@ backup until sent elsewhere.
 | `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just ordered gets this until its bootstrap has pinned it |
 | `host …: … is not the pinned …` (fleet, 502 `host_unreachable`) | The host presents another certificate than its record's `tls_fingerprint`: reinstalled (pin the new one), or not the host |
 | `write registry …` (fleet, 500 `registry`) | The fleet's `state_dir` is full or not writable; nothing is recorded until it is |
+| `registry backup` (fleet, `error`), 503 `backup` on `/v1/hosts/key` | The registry could not be written to `backup.store`: credentials, endpoint, the bucket. Hosts whose key the store holds are served; new keys wait for the store |
 | `read the registry …` (the fleet does not start) | `registry.json` does not parse: restore the file (fields a fleet does not know are kept, not refused). Never remove it: every host's pool key is in it (ADR 0026) |
 | `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
@@ -323,9 +324,39 @@ Each host's pool key is in its record (ADR 0026): made at the host's first `POST
 /v1/hosts/key` (its bootstrap creating the pool), served to that host alone (its token, at its
 address, as a heartbeat), never listed, gone when the host is retired or forgotten. **Losing the
 registry loses every key**: a host keeps running while its key is loaded, and cannot read its
-pool after its next reboot. Keep the registry backed up (and the backup encrypted) before a
-host holds anything that matters; a host still up can be re-keyed with `zfs change-key`. The
-fleet's `state_dir` must be on an encrypted disk: it opens every pool.
+pool after its next reboot. Back the registry up before a host holds anything that matters
+(below); a host still up can be re-keyed with `zfs change-key`. The fleet's `state_dir` must be
+on an encrypted disk: it opens every pool.
+
+### The registry's backup (ADR 0032)
+
+On your own machine, once: `briqyard-fleet keygen --out fleet-backup.key` prints the recipient
+(`age1…`); keep the file off the fleet's host (two copies: a password manager and paper). In
+the fleet's config:
+
+```yaml
+backup:
+  store: s3://briqyard-backups/fleet     # or file:///path, development
+  endpoint: https://s3.gra.io.cloud.ovh.net
+  region: gra
+  recipient: age1…                       # what keygen printed
+```
+
+with `BRIQYARD_S3_ACCESS_KEY` and `BRIQYARD_S3_SECRET_KEY` in the fleet's environment. The fleet
+writes `fleet/registry.json.age` once a minute when the registry changed, and
+`fleet/registry-<day>.json.age` with the last of each day; a host's pool key is served only once
+the store holds it (503 `backup` otherwise). A failed write is `registry backup` at `error`.
+
+To restore, on the fleet's host: stop the fleet, move `registry.json` aside if there is one,
+copy the identity there for the moment, then
+
+```bash
+briqyard-fleet restore --identity fleet-backup.key        # --from fleet/registry-2026-10-21.json.age for a day's
+```
+
+which writes the registry (`0600`) and refuses to write over one. Start the fleet, remove the
+identity from the host. Placements made since the backup come back from the hosts' heartbeats.
+`age -d -i fleet-backup.key registry.json.age` reads a backup without us.
 
 Where the fleet terminates the connection (its `tls`, or plain on loopback), a host's
 heartbeat and key request must come from the address in its `url`: a host is listed by its

@@ -194,7 +194,7 @@ nothing reads it, so nothing a guest prints can set its exit.
 
 ### Backups
 
-A backup is a ZFS snapshot of each disk streamed to an object store (`objstore.rs`: S3 or a
+A backup is a ZFS snapshot of each disk streamed to an object store (`briqyard-objstore`: S3 or a
 directory), incremental after the first; the record beside it holds the machine's spec, so a
 restore is a create that receives the chain of streams into fresh datasets on any host that
 reaches the store. Local snapshots stay only as the base of the next incremental send.
@@ -311,7 +311,9 @@ of machines or endpoints is never partial (a tenant's listing asks its host alon
 is down or does not answer fails the listing), since a control plane reads a machine missing
 from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host. The registry
 (hosts, tenant → host, machine → host, endpoint → host) is one JSON file; a write that fails
-fails the request that needed it.
+fails the request that needed it. It is written to the object store once a minute when it
+changed, encrypted with age to a key kept off the fleet's host, and before any pool key is
+served; `briqyard-fleet restore` brings it back (ADR 0032).
 
 Provisioners add and release hosts through a cloud API: `hetzner-robot` (dedicated servers,
 monthly), `scaleway` (Elastic Metal, hourly), `static` (none). `POST /v1/hosts/order` orders

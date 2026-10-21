@@ -1,4 +1,4 @@
-//! Where backups go: an S3 bucket (any provider that speaks the API: Scaleway, OVH, Hetzner,
+//! Where backups go, the machines' and the fleet's registry's: an S3 bucket (any provider that speaks the API: Scaleway, OVH, Hetzner,
 //! AWS, MinIO) or a directory, for development and for a host that backs up to its own second
 //! disk. Streams in and out, so a disk of any size passes without landing on the host's disk.
 

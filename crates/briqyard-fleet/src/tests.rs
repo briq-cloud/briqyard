@@ -578,6 +578,7 @@ fn fleet_at(
     state_path: PathBuf,
 ) -> Fleet {
     cfg.state_dir = dir.path().to_path_buf();
+    let backup = backup::Backup::open(&cfg.backup).unwrap();
     let mut reg = Registry::default();
     let now = Utc::now();
     for h in &cfg.hosts {
@@ -594,6 +595,7 @@ fn fleet_at(
         http: reqwest::Client::new(),
         pinned: Mutex::new(HashMap::new()),
         prov,
+        backup,
     });
     Fleet { st, _dir: dir }
 }
@@ -985,6 +987,56 @@ async fn a_host_gets_its_own_pool_key_and_no_other() {
     assert!(!std::fs::read_to_string(&f.st.state_path)
         .unwrap()
         .contains(&key));
+}
+
+/// With a backup, a pool key is handed out only once the store holds it (ADR 0032): a store
+/// that refuses the write refuses the key, and the backup read back holds the key served.
+#[tokio::test]
+async fn a_pool_key_is_in_the_backup_before_it_is_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = dir.path().join("backup.key");
+    let recipient = backup::keygen(&identity).unwrap();
+    let store = dir.path().join("store");
+    let f = fleet(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "s1-token".into(),
+                ..Default::default()
+            }],
+            backup: config::Backup {
+                store: format!("file://{}", store.display()),
+                recipient,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let ask = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask.clone()).await;
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if s != StatusCode::OK {
+        // Root writes through a read-only directory: the refusal is checked where it can be.
+        assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(json(&body)["code"], "backup");
+        assert!(
+            !body.contains("\"key\""),
+            "no key without its backup: {body}"
+        );
+    }
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let key = json(&body)["key"].as_str().unwrap().to_string();
+    let b = f.st.backup.as_ref().unwrap();
+    let back = b
+        .fetch(backup::LATEST, &backup::identity(&identity).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(back.hosts["s1"].pool_key.expose(), key);
 }
 
 /// Where the fleet terminates the connection (its TLS, or plain on loopback), a host's call

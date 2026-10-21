@@ -2,6 +2,7 @@
 //! fleet places new tenants, forwards every machine request to the right daemon, keeps the
 //! registry of hosts from their heartbeats, and adds or releases hosts through a provisioner.
 
+mod backup;
 mod bootstrap;
 mod config;
 mod provision;
@@ -16,7 +17,7 @@ use axum::routing::{any, get, post, put};
 use axum::{Json, Router};
 use briqyard_api as api;
 use chrono::{Duration, Utc};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use registry::{url_host, HostRec, Policy, Registry, ScalePolicy};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,6 +28,28 @@ use std::sync::{Arc, Mutex};
 struct Args {
     #[arg(long, default_value = "/etc/briqyard/fleet.yaml")]
     config: PathBuf,
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Make an age identity for the registry's backup (ADR 0032): written to OUT (0600), its
+    /// recipient printed, for `backup.recipient`. Keep OUT off the fleet's host.
+    Keygen {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write the registry from its backup in `backup.store`, decrypted with the identity, when
+    /// the fleet has none (stop it first). Never over an existing registry.
+    Restore {
+        /// The age identity file of `backup.recipient`.
+        #[arg(long)]
+        identity: PathBuf,
+        /// The object to restore: the newest, or a day's (`fleet/registry-2026-10-21.json.age`).
+        #[arg(long, default_value = backup::LATEST)]
+        from: String,
+    },
 }
 
 struct AppState {
@@ -40,6 +63,31 @@ struct AppState {
     pinned: Mutex<HashMap<String, reqwest::Client>>,
     state_path: PathBuf,
     prov: Box<dyn provision::Provisioner>,
+    /// The registry's backup, when `backup.store` is set (ADR 0032).
+    backup: Option<backup::Backup>,
+}
+
+/// Writes a registry file, the fleet's alone (`0600`: it holds every host's token and pool
+/// key): a temp file made afresh, synced, renamed over the old one, the directory synced.
+fn write_registry(path: &std::path::Path, reg: &Registry) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("json.tmp");
+    // A leftover keeps its own mode through `open`: made afresh, it is 0600.
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(&backup::encode(reg))?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path)?;
+    // The rename itself reaches the disk with the directory.
+    std::fs::File::open(path.parent().unwrap_or(std::path::Path::new(".")))?.sync_all()
 }
 
 /// A host that does not even accept the connection is given five seconds. No deadline for
@@ -69,39 +117,9 @@ impl AppState {
 
     /// Writes the registry. A failure is logged at `error` and returned: a request answers
     /// 500 with it, a background task has nothing more to do with it.
-    /// The file is the fleet's alone (`0600`): it holds every host's token and pool key.
     fn save(&self) -> Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         let reg = self.reg.lock().unwrap().clone();
-        let tmp = self.state_path.with_extension("json.tmp");
-        let written = serde_json::to_vec_pretty(&reg)
-            .map_err(std::io::Error::other)
-            .and_then(|data| {
-                // A leftover keeps its own mode through `open`: made afresh, it is 0600.
-                match std::fs::remove_file(&tmp) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-                    _ => {}
-                }
-                let mut f = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&tmp)?;
-                f.write_all(&data)?;
-                f.sync_all()
-            })
-            .and_then(|_| std::fs::rename(&tmp, &self.state_path))
-            // The rename itself reaches the disk with the directory.
-            .and_then(|_| {
-                std::fs::File::open(
-                    self.state_path
-                        .parent()
-                        .unwrap_or(std::path::Path::new(".")),
-                )?
-                .sync_all()
-            });
+        let written = write_registry(&self.state_path, &reg);
         if let Err(e) = &written {
             tracing::error!(path = %self.state_path.display(), err = %e, "write the registry");
         }
@@ -173,6 +191,17 @@ async fn run(args: Args) -> Result<()> {
         return Err(anyhow!("config {} not found", args.config.display()));
     };
     let cfg = config::Config::load(path)?;
+    let state_path = cfg.state_dir.join("registry.json");
+    match args.cmd {
+        Some(Cmd::Keygen { out }) => {
+            println!("{}", backup::keygen(&out)?);
+            return Ok(());
+        }
+        Some(Cmd::Restore { identity, from }) => {
+            return restore(&cfg, &state_path, &identity, &from).await
+        }
+        None => {}
+    }
     // The registry holds every host's token and pool key: the fleet's alone.
     {
         use std::os::unix::fs::PermissionsExt;
@@ -180,7 +209,6 @@ async fn run(args: Args) -> Result<()> {
         std::fs::set_permissions(&cfg.state_dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("mode of {}", cfg.state_dir.display()))?;
     }
-    let state_path = cfg.state_dir.join("registry.json");
     let mut reg = Registry::load(&state_path)?;
     let now = Utc::now();
     for h in &cfg.hosts {
@@ -200,7 +228,9 @@ async fn run(args: Args) -> Result<()> {
         pinned: Mutex::new(HashMap::new()),
         state_path,
         prov: provision::build(&cfg.provisioner),
+        backup: backup::Backup::open(&cfg.backup)?,
     });
+    tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));
     tokio::spawn(scaler(state.clone()));
     tokio::spawn(bootstrap::run(state.clone()));
@@ -231,6 +261,43 @@ async fn run(args: Args) -> Result<()> {
         }
         config::Tls::Unset | config::Tls::Off => axum_server::from_tcp(listener).serve(app).await?,
     }
+    Ok(())
+}
+
+/// `briqyard-fleet restore`: the registry from its backup, written where the fleet keeps it,
+/// only when there is none: a restore never replaces what a fleet wrote.
+async fn restore(
+    cfg: &config::Config,
+    state_path: &std::path::Path,
+    identity: &std::path::Path,
+    from: &str,
+) -> Result<()> {
+    let Some(b) = backup::Backup::open(&cfg.backup)? else {
+        return Err(anyhow!(
+            "backup.store is not set: there is nothing to restore from"
+        ));
+    };
+    if state_path.exists() {
+        return Err(anyhow!(
+            "{} exists: stop the fleet and move it aside first; a restore never writes over a registry",
+            state_path.display()
+        ));
+    }
+    let reg = b.fetch(from, &backup::identity(identity)?).await?;
+    std::fs::create_dir_all(&cfg.state_dir)?;
+    write_registry(state_path, &reg).with_context(|| format!("write {}", state_path.display()))?;
+    let keys = reg
+        .hosts
+        .values()
+        .filter(|h| !h.pool_key.is_empty())
+        .count();
+    println!(
+        "restored {} hosts ({keys} pool keys) and {} tenants from {} {from} into {}",
+        reg.hosts.len(),
+        reg.tenants.len(),
+        b.describe(),
+        state_path.display()
+    );
     Ok(())
 }
 
@@ -490,6 +557,24 @@ async fn host_key(
     };
     if made {
         st.save().map_err(registry_error)?;
+    }
+    // A key in use is in the backup: written now when the store does not hold it yet.
+    if let Some(b) = &st.backup {
+        if !b.holds(&id, &key).await {
+            let reg = st.reg.lock().unwrap().clone();
+            if let Err(e) = b.push(&reg).await {
+                tracing::error!(
+                    host = id,
+                    err = format!("{e:#}"),
+                    "registry backup before a pool key"
+                );
+                return Err(err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "backup",
+                    format!("the registry's backup could not be written, and no key is handed out before it is: {e:#}"),
+                ));
+            }
+        }
     }
     let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
     tracing::info!(host = id, made, peer, "pool key served");

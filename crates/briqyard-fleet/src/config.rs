@@ -20,6 +20,22 @@ pub struct Config {
     pub hosts: Vec<StaticHost>,
     pub placement: Placement,
     pub provisioner: Provisioner,
+    /// The registry's backup (ADR 0032): off until `store` is set.
+    pub backup: Backup,
+}
+
+/// Where the registry's backup goes, encrypted to whom (ADR 0032).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Backup {
+    /// `s3://bucket/prefix` or `file:///path`; empty turns the backup off. S3 credentials come
+    /// from `BRIQYARD_S3_ACCESS_KEY` and `BRIQYARD_S3_SECRET_KEY`, as a host's.
+    pub store: String,
+    pub endpoint: String,
+    pub region: String,
+    /// The age recipient (`age1…`) the backup is encrypted to. Its identity (the private key)
+    /// is kept off the fleet's host: `briqyard-fleet keygen` makes a pair.
+    pub recipient: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -233,6 +249,7 @@ impl Default for Config {
             hosts: vec![],
             placement: Placement::default(),
             provisioner: Provisioner::default(),
+            backup: Backup::default(),
         }
     }
 }
@@ -271,6 +288,19 @@ impl Config {
     }
 
     fn validate(&mut self) -> Result<()> {
+        match (
+            self.backup.store.is_empty(),
+            self.backup.recipient.is_empty(),
+        ) {
+            (true, true) => {}
+            (false, false) => {
+                crate::backup::recipient(&self.backup.recipient)?;
+            }
+            (false, true) => {
+                bail!("backup.store needs backup.recipient: the registry is backed up encrypted")
+            }
+            (true, false) => bail!("backup.recipient needs backup.store"),
+        }
         let listen: SocketAddr = self
             .listen
             .parse()

@@ -24,7 +24,7 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 | 10 | Usage and costs | usage buckets (ADR 0017, built) | collection, cost model, billing of disk and network | billing them |
 | 11 | Image pulls at scale | a registry mirror per region | nothing | many hosts |
 | 12 | CI and staging on real hardware | e2e on a KVM runner | the deploy smoke test against briqyard | staging |
-| 13 | Fleet availability | state beyond one JSON file | nothing | production |
+| 13 | Fleet availability | the registry backed up, encrypted, and restored (built: ADR 0032); state beyond one JSON file | nothing | production |
 | 14 | Legal | nothing | subprocessors, DPA, claims | production |
 | 15 | Fly-only code | nothing | remove the hidden gateway briq, `fly-replay`, the Fly adapter | Fly gone |
 
@@ -127,7 +127,7 @@ On briqyard: the suites run on the Mac; CI runs unit tests only.
 
 ## 13. Fleet availability
 
-On briqyard: one fleet process, one JSON file. Its loss stops placement and forwarding, not machines. Before production: a second process with shared state (Postgres), or a fleet that can be rebuilt from the hosts' heartbeats alone.
+On briqyard: one fleet process, one JSON file, backed up encrypted to the object store and restored with `briqyard-fleet restore` (ADR 0032). Its loss stops placement and forwarding, not machines. Before production: a second process with shared state (Postgres), or a fleet that can be rebuilt from the hosts' heartbeats alone.
 
 ## 14. Legal
 
