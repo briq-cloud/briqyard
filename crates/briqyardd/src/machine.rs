@@ -562,6 +562,30 @@ impl Entry {
         }
     }
 
+    /// `lock_for_start`, once a stop under way (the sleeper's, a caller's) has settled: a
+    /// start or a wake arriving meanwhile starts the machine after it rather than failing
+    /// on `stopping`. A stop that does not settle within a minute is the start's to refuse.
+    async fn lock_once_stopped(
+        &self,
+    ) -> (
+        Option<tokio::sync::OwnedMutexGuard<()>>,
+        tokio::sync::MutexGuard<'_, ()>,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let turns = self.lock_for_start().await;
+            if self.snapshot().state != state::STOPPING || tokio::time::Instant::now() > deadline {
+                return turns;
+            }
+            // Registered before the lock goes: the settle that follows wakes it.
+            let settled = self.changed.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            drop(turns);
+            let _ = tokio::time::timeout_at(deadline, settled).await;
+        }
+    }
+
     /// Marks a use now. In memory only: the sleeper reads it here, and the record on disk
     /// catches up with the next write or the sleeper's tick, so a busy machine does not
     /// rewrite its record on every connection.
@@ -2595,7 +2619,7 @@ impl Manager {
 
     pub async fn start(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _turns = e.lock_for_start().await;
+        let _turns = e.lock_once_stopped().await;
         self.check_version(&e, at)?;
         if e.snapshot().state != state::RUNNING {
             self.start_entry(&e, true).await?;
@@ -2607,7 +2631,7 @@ impl Manager {
     /// one stopped on purpose stays stopped.
     pub async fn wake(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _turns = e.lock_for_start().await;
+        let _turns = e.lock_once_stopped().await;
         self.check_version(&e, at)?;
         let r = e.snapshot();
         match r.state.as_str() {
@@ -6527,6 +6551,30 @@ mod tests {
         drop(_settling);
         let waited = second.await.unwrap();
         assert!(waited < Duration::from_secs(1), "{waited:?}");
+    }
+
+    #[tokio::test]
+    async fn a_wake_during_a_sleep_waits_for_the_stop_then_starts() {
+        // Found by the e2e suite: an exec waking a machine the sleeper was stopping got
+        // `bad_state: stopping`.
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("db")).await.unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.host.stops_take(Duration::from_millis(300));
+        let (m2, e2) = (h.m.clone(), e.clone());
+        let sleep = tokio::spawn(async move {
+            m2.stop_entry(&e2, stop::IDLE, Duration::from_secs(1), false, None)
+                .await
+                .unwrap()
+        });
+        while e.snapshot().state != state::STOPPING {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let woken = h.m.wake(&m.id, None).await.unwrap();
+        assert_eq!(woken.state, state::RUNNING);
+        sleep.await.unwrap();
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
     }
 
     #[tokio::test]

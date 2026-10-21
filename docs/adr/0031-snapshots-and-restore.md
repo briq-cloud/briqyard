@@ -50,4 +50,5 @@ Rejected, one line each:
 - A memory snapshot costs the machine's memory in disk, per snapshot, and pauses the machine while it is written (most of the 0.8 s above for 256 MB). In-flight execs over vsock end with it (Firecracker resets vsock connections at a snapshot). Like a suspend's, it resumes only on this host's Firecracker; backups and forks never carry it.
 - `s_*` snapshots made before this ADR are not in any record: the first `tidy` (the daemon's start) removes them. No host with real workload has any.
 - A destroyed source's snapshots move to a fork promoted over it, as before; the fork's `tidy` (run after the destroy, under its lock) removes the ones it does not name.
+- Found by the e2e suite on the way, and fixed with its unit test: a wake (an exec's, a connection's) or a start arriving while the sleeper stopped the machine answered `bad_state: stopping`; it now waits for the stop to settle, then starts (`lock_once_stopped`).
 - Not built: a fork from a named snapshot (`ForkSpec.snapshot`), a cap on snapshots per machine (quotas count volumes, not snapshots), the restore of a machine's spec with its disks.
