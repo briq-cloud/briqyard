@@ -214,9 +214,21 @@ capacity; `disk_pressure`, the pool's free space under `disk_free_pct`. A change
 `host_condition` event; `/v1/status` and the heartbeat carry them. Under disk pressure the tick
 removes unused images (no clone, no record naming them), oldest first, counting what each took
 as freed, until the pool is back over the threshold. The console is written by the daemon's
-`console::Writer`, line by line under one lock, and rotated past `console_max_mb` to
-`console.<offset>.log`, named after where it starts: a `/logs` cursor is an offset in the whole
-console and reads across both files.
+`console::Writer`, line by line under one lock, each line flushed, and rotated past
+`console_max_mb` to `console.<offset>.log`, named after where it starts: a `/logs` cursor is an
+offset in the whole console and reads across both files. `?follow=true` keeps the read open
+(ADR 0025): the follower waits on the console's notifier (`console::grown`, one per run dir,
+woken by the writer after each line), reads from its cursor, and ends at the machine's
+`destroyed` event or the daemon's shutdown, with `{}` every 30 s meanwhile.
+
+### Labels and quotas
+
+A machine's `metadata` is its labels: `GET /v1/machines?label=k=v&label=k` keeps the machines
+every selector matches (`api::Label`, equality and existence, ADR 0025). A tenant's quota
+(`TenantRec.quota`, `PUT /v1/tenants/{id}/quota`) limits its machines and the volumes' sizes,
+checked in `add_machine` under the map's lock (a create, a fork, a restore, the gateway), and
+its machines' memory and vCPUs, checked in `reserve` with the host's own memory, so two starts
+cannot pass it together. A refusal is 403 `quota` and a `quota_exceeded` event.
 
 ### Sleep
 
@@ -239,14 +251,16 @@ each machine a quarter-second wake on its next use.
 `briqyard-fleet` offers the same machine API as a daemon and forwards each request to the host
 that runs the machine. It places each tenant on one host: a tenant's machines share a host, so
 its private network needs no overlay. Placement picks, among ready hosts under the fill
-ceiling and with no condition true, the one with the most free memory; a fork lands where its
-source is, and a tenant's host or a fork's source's with a condition true answers 503 `capacity`
-before it is asked. What a placement
+ceiling, with no condition true and of the create's `region` when it names one, the one with the
+most free memory; a fork lands where its source is, and a tenant's host or a fork's source's
+with a condition true answers 503 `capacity` before it is asked. A tenant's region is its host's:
+a create naming another answers 400 (ADR 0025). What a placement
 puts on a host is counted as used there until the host's next heartbeat, so a burst of creates
 spreads; a host that answers `capacity` for a tenant's first machine loses the pin, so the
 retry is placed afresh. A tenant's gateway goes to the tenant's host (`GET /v1/tenants/{id}`
 and `/gateway` are forwarded there); a PUT for a tenant with no host places it as a first machine
-would, the gateway's size as the need. `POST /v1/tenants/{id}/unpin` releases a tenant by hand (ADR 0013).
+would, the gateway's size as the need, in `?region=`; a quota PUT does the same with no need.
+A logs follow is streamed through as an events watch is. `POST /v1/tenants/{id}/unpin` releases a tenant by hand (ADR 0013).
 
 Hosts report their capacity and tenants (`POST /v1/hosts/register`, every 15 s, from the
 daemon's `fleet:` configuration) or are listed in the fleet's configuration and polled. A host

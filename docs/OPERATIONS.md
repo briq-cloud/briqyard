@@ -184,7 +184,11 @@ backup until sent elsewhere.
 - Logs: one JSON line per event on stderr (journald under systemd): `journalctl -u briqyardd
   -o cat | jq`. Level with `BRIQYARD_LOG=debug` (or any `tracing` filter).
 - A machine: `briqyard machine get <id>` (state, why it stopped, its process's exit), `briqyard
-  machine logs <id>` (its console; `-f` follows).
+  machine logs <id>` (its console; `-f` streams each new line until the machine is destroyed).
+  `briqyard machine ls -l app=web -l tier` selects by labels (its `metadata`; `run -l K=V` sets them).
+- Quotas (ADR 0025): `briqyard tenant quota <tenant>` shows a tenant's limits and use;
+  `--machines N --memory-mb N --vcpus N --disk-gb N` puts exactly those (briq sets them from the
+  plan). A refusal is a `quota_exceeded` warning in `briqyard events --tenant <tenant>`.
 - `briqyard machine stats <id>`: CPU time, memory and disk it uses now, from its cgroup and its
   datasets. `briqyard machine set-sleep <id> 3h|never` changes the window without a restart.
 - `briqyard usage --from <hour> --to <hour> [--tenant T] [--json]`: what each machine used
@@ -205,6 +209,9 @@ backup until sent elsewhere.
 | `startup_failed` then `error` | The startup probe did not pass within `failure_threshold` × `period_sec` of a start: the boot failed, as `boot_failed` does. On a restart it is a crash instead, restarted by the policy |
 | `the guest did not come up` | The kernel booted but the init did not answer on vsock within `boot_timeout_sec`: console log, then the kernel (`kernel`) and init (`init`) paths |
 | `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk, conditions. `used` counts what placement reserved until the next heartbeat |
+| `no host in region … has room` (fleet) | No ready host of that region under the ceiling: `briqyard host ls`, the `REGION` column; order or add one there |
+| `tenant … is in region …, not …` (fleet, 400) | The tenant lives on a host of another region. A team that changes region moves: backups, destroy, `tenant unpin`, restores with the new region |
+| 403 `quota` | The tenant is at a limit of its quota: `briqyard tenant quota <tenant>` shows the limit and the use |
 | `host h_… is under disk_pressure` (fleet, 503 `capacity`) | The tenant's host takes nothing new until the condition clears. Disk: `zfs list -o space byard`; unused images go by themselves, then backups and destroys of what is left. Memory: stop machines, or move the tenant (below) |
 | `host h_… is down` (fleet, 503) | The host missed its heartbeats for `placement.down_after_sec`: its machines answer again once it is back. `briqyard host ls`, then the host's `journalctl -u briqyardd` |
 | `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just ordered gets this until its bootstrap has pinned it |
@@ -232,8 +239,11 @@ hosts:
     url: https://10.0.0.5:7420
     token: <the host's token>
     tls_fingerprint: <what the bootstrap script printed>
-    region: fsn
+    region: gra
 ```
+
+`region` is what a create's `region` names: a new tenant goes to a host of it, and stays in it
+(ADR 0025). A host ordered by the fleet takes the region its daemon's `fleet.region` reports.
 
 The fleet polls it every 15 s and accepts its heartbeats; without a `token` it is polled only.
 An `https://` URL needs its `tls_fingerprint` and a fingerprint needs `https://` (refused at
