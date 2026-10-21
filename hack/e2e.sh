@@ -118,6 +118,29 @@ briqyard machine set-limits "$L" --bandwidth 2 >/dev/null
 check "2 Mbit/s: a download capped" 'capped'
 briqyard machine rm "$L" >/dev/null
 
+echo "== disk limits: the host's for the size under its own, a slow disk, changed live and at a resume"
+DK=$(briqyard machine run --image alpine:3.20 --name disk --tenant "$T" --memory 256 --vcpus 2 --volume 1G:/data --disk-bw 4 --disk-burst 0 -- sleep 3600 | jq -r .id)
+dk() { briqyard machine get "$DK" | jq -c "$1"; }
+# Whole seconds for `dd` in the machine, with O_DIRECT so the guest's page cache takes none of it.
+took() {
+  s=$(date +%s.%N)
+  briqyard machine exec "$DK" -- dd bs=1M "$@" 2>/dev/null
+  awk -v s="$s" -v e="$(date +%s.%N)" 'BEGIN { printf "%d", e - s }'
+}
+# A bucket holds a second at the rate and Firecracker's limiter runs a little ahead of it:
+# 32 MiB at 4 MB/s is 7 s nominal, checked at 5; 16 MiB, 3 s nominal, at 2.
+check "disk limits: its own over the host's for 2 vCPUs" '[ "$(dk .disk_limits)" = "{\"bandwidth_mb\":4,\"iops\":8000,\"burst_sec\":0}" ]'
+check "4 MB/s: the volume writes 32 MiB in 5 s or more" '[ "$(took if=/dev/zero of=/data/f count=32 oflag=direct)" -ge 5 ]'
+check "4 MB/s: the root disk reads 16 MiB in 2 s or more" '[ "$(took if=/dev/vda of=/dev/null count=16 iflag=direct)" -ge 2 ]'
+check "cgroup: CPU weight by size"   '[ "$(sudo -n cat /sys/fs/cgroup/firecracker/${DK//_/-}/cpu.weight)" = 200 ]'
+briqyard machine set-disk-limits "$DK" --disk-bw 0 >/dev/null
+check "lifted at once: 32 MiB read in under 3 s" '[ "$(took if=/dev/vdc of=/dev/null count=32 iflag=direct)" -lt 3 ]'
+briqyard machine stop --suspend "$DK" >/dev/null
+briqyard machine set-disk-limits "$DK" --disk-bw 4 >/dev/null
+briqyard machine start "$DK" >/dev/null
+check "resumed with the limit set while it slept" '[ "$(briqyard events --machine "$DK" | awk "\$4 == \"resumed\"" | wc -l)" = 1 ] && [ "$(took if=/dev/zero of=/data/f count=32 oflag=direct)" -ge 5 ]'
+# Kept until the metrics section: Firecracker writes its metrics a line a minute.
+
 echo "== tenant gateway: started by what needs it, stopped once nothing does"
 GT="$T-gw"
 # A forward proxy: CONNECT host:port, then bytes both ways. On the image the egress section
@@ -421,6 +444,11 @@ check "top lists it"                      'briqyard top --tenant "$T" | grep -q 
 windowed() { briqyard top --tenant "$T" --json | jq -e ".[] | select(.machine_id == \"$M\") | .window_sec > 0" >/dev/null; }
 for i in $(seq 1 25); do windowed && break; sleep 2; done
 check "top: rates over the last window"   'windowed'
+# The slow writes above, held back by the disk limit: in the next line Firecracker writes.
+throttled() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics" | awk -v m="machine=\"$DK\"" 'index($0, "briqyard_machine_disk_throttled_total{") == 1 && index($0, m) && $2 > 0' | grep -q .; }
+for i in $(seq 1 35); do throttled && break; sleep 2; done
+check "metrics: the disk's throttling counted" 'throttled'
+briqyard machine rm "$DK" >/dev/null
 check "status: no condition true"         'briqyard status | jq -e "(.conditions | map(.type) | sort) == [\"disk_pressure\", \"memory_pressure\"] and all(.conditions[]; .status == false)" >/dev/null'
 briqyard machine rm "$M" >/dev/null
 

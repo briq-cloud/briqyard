@@ -130,7 +130,11 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   words), labels, quotas and logs follow (a listing by labels, the quota at create, fork,
   start and the gateway with its message and event, its use; a follow from the start and
   from a cursor, across rotations, ending at the destroy, its heartbeat and shutdown;
-  placement by region and the cross-region refusal through stub hosts in two regions), upgrades
+  placement by region and the cross-region refusal through stub hosts in two regions), disk
+  limits (the host's per vCPU under a machine's own at boot, a new size's at the next boot, a
+  live change and a refused one, a stopped machine's at its start, the drive and metrics
+  requests Firecracker gets, metrics lines added per machine across boots, the jail's
+  `cpu.weight`), upgrades
   (the init's and the VMM's versions recorded at boot, a snapshot of another VMM booted cold, a
   hand-over that touches no machine and the adoption after it, the daemon's start booting again
   what the host stopped within its window, old and new wire shapes decoding, the fleet's
@@ -156,9 +160,12 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
   new image: Python 3.13, the volume's file kept), labels, a quota and a follow (`ls -l` selecting one machine, a
   refused selector, a second create refused 403 `quota` with its use and event, `logs -f`
-  receiving a line printed after it began and ending at the destroy), versions and a hand-over
-  (status and the init say the build, `vmm_version` the host's; SIGUSR2 then a start: still
-  running, adopted, no second boot; a stop then a start: running again unasked, resumed). 141 checks.
+  receiving a line printed after it began and ending at the destroy), disk limits (a machine's
+  own over the host's for 2 vCPUs; at 4 MB/s, 32 MiB written to the volume in 5 s or more and
+  16 MiB read from the root disk in 2 s or more, with O_DIRECT; `cpu.weight` 200; lifted live;
+  set while suspended and in force after the resume; throttling on `/metrics`), versions and a hand-over (status and the init say the build,
+  `vmm_version` the host's; SIGUSR2 then a start: still running, adopted, no second boot; a stop
+  then a start: running again unasked, resumed). 148 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire), drain and undrain, and a
   `host upgrade` of the VM's own host to this build with a machine running (back `ready`, a new
