@@ -216,6 +216,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/machines", get(list_machines).post(create_machine))
         .route("/v1/endpoints", get(list_endpoints))
         .route("/v1/usage", get(usage))
+        .route("/v1/backups", get(all_backups))
         .route("/v1/top", get(top))
         .route("/v1/events", get(events))
         .route("/v1/tenants", get(list_tenants))
@@ -954,11 +955,15 @@ fn first_refused(st: &AppState, tenant: &str, first: bool, answer: &[u8]) -> Res
 /// Lists machines. A listing is the truth for whoever reads it (the control plane marks a
 /// machine missing from it as gone), so it is never partial: a tenant's listing asks the
 /// tenant's host alone, and a host that is down or does not answer fails the whole listing.
-async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
-    let tenant = uri
-        .query()
+/// The `tenant` of a query.
+fn query_tenant(uri: &Uri) -> Option<String> {
+    uri.query()
         .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("tenant=")))
-        .map(|t| t.to_string());
+        .map(|t| t.to_string())
+}
+
+async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
+    let tenant = query_tenant(&uri);
     let hosts: Vec<HostRec> = {
         let reg = st.reg.lock().unwrap();
         match tenant.as_deref().and_then(|t| reg.host_of_tenant(t)) {
@@ -1029,6 +1034,35 @@ async fn list_endpoints(State(st): S, headers: HeaderMap) -> Response {
                 }
                 all.extend(eps);
             }
+            Err(e) => return unreadable(&h, e),
+        }
+    }
+    Json(all).into_response()
+}
+
+/// The backups of the hosts' machines, destroyed ones' included (ADR 0023): with a tenant,
+/// its host's; else every host's, never partial.
+async fn all_backups(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
+    let hosts: Vec<HostRec> = {
+        let reg = st.reg.lock().unwrap();
+        match query_tenant(&uri).and_then(|t| reg.host_of_tenant(&t).cloned()) {
+            Some(h) => vec![h],
+            None => reg.listed(),
+        }
+    };
+    let path = match uri.query() {
+        Some(q) => format!("/v1/backups?{q}"),
+        None => "/v1/backups".into(),
+    };
+    let mut all: Vec<api::Backup> = Vec::new();
+    for h in hosts {
+        let resp = forward(&st, &h, Method::GET, &path, &headers, Bytes::new()).await;
+        if !resp.status().is_success() {
+            return resp;
+        }
+        let (_, data) = read(resp).await;
+        match serde_json::from_slice::<Vec<api::Backup>>(&data) {
+            Ok(bs) => all.extend(bs),
             Err(e) => return unreadable(&h, e),
         }
     }
@@ -1465,9 +1499,13 @@ async fn by_machine(
         .find(|(k, _)| k == "id")
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
-    let host = locate(&st, Indexed::Machine, &id)
-        .await
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "machine not found"))?;
+    // A destroyed machine (its backups' holder, ADR 0023) is found through its tenant.
+    let host = match locate(&st, Indexed::Machine, &id).await {
+        Some(h) => h,
+        None => query_tenant(&uri)
+            .and_then(|t| st.reg.lock().unwrap().host_of_tenant(&t).cloned())
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "machine not found"))?,
+    };
     let path = uri
         .path_and_query()
         .map(|p| p.as_str().to_string())

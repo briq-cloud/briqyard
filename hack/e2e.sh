@@ -243,7 +243,7 @@ check "a new image: the volume kept"   '[ "$(briqyard machine exec "$AP" -- cat 
 briqyard machine rm "$AP" >/dev/null
 
 echo "== postgres with a volume, endpoint, wake on connect"
-P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m | jq -r .id)
+P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m --readiness "exec:pg_isready -h 127.0.0.1 -U postgres" | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "postgres ready" 'briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres | grep -q accepting'
 check "volume mounted" 'briqyard machine exec "$P" -- sh -c "mount | grep -q /var/lib/postgresql/data"'
@@ -278,6 +278,8 @@ F=$(briqyard machine fork "$P" --name pgfork | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$F" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "fork has data"  '[ "$(briqyard machine exec "$F" -- psql -U postgres -tAc "select x from t")" = 42 ]'
 briqyard machine exec "$F" -- psql -U postgres -c "insert into t values (43)" >/dev/null
+# The source has slept by now (its window is a minute); the exec wakes it and runs once its
+# readiness probe says Postgres accepts (ADR 0022).
 check "fork is apart"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select count(*) from t")" = 1 ]'
 # The fork outlives its source: the clone is promoted, the source's disks go.
 briqyard machine destroy "$P" >/dev/null
@@ -301,6 +303,28 @@ R1=$(briqyard machine restore --from "$F" --backup "$B1" --tenant "$T" --name re
 for i in $(seq 1 60); do briqyard machine exec "$R1" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "restored the first backup" '[ "$(briqyard machine exec "$R1" -- psql -U postgres -tAc "select sum(x) from t")" = 85 ]'
 briqyard machine destroy "$R1" >/dev/null
+
+echo "== backups on a schedule: retention, delete, a destroyed machine's"
+# The schedule's own backups are an hour apart: the API's make the points, and retention
+# is the same after either.
+SB=$(briqyard machine run --image alpine:3.20 --name sched --tenant "$T" --memory 128 --backup-every 1h --backup-keep 2 -- sleep 3600 | jq -r .id)
+check "schedule shown" '[ "$(briqyard machine get "$SB" | jq -c "[.backup, (.next_backup_at != null)]")" = "[{\"every\":\"1h\",\"keep\":2},true]" ]'
+point() { briqyard machine exec "$SB" -- sh -c "echo $1 > /root/n; sync" >/dev/null && briqyard machine backup "$SB" | jq -r .id; }
+S1=$(point 1); S2=$(point 2); S3=$(point 3)
+kinds=$(briqyard machine backups "$SB" | jq -r '[.[] | "\(.id):\(.incremental)"] | join(",")')
+# keep 2: the third is whole, and the second (kept) needs the first.
+check "every 2nd whole, a kept one's base kept" '[ "$kinds" = "$S1:false,$S2:true,$S3:false" ]'
+check "a base is not deleted alone" '! briqyard backup rm "$SB" "$S1" >/dev/null 2>&1'
+RS=$(briqyard machine restore --from "$SB" --backup "$S2" --tenant "$T" --name sched-r | jq -r .id)
+for i in $(seq 1 30); do briqyard machine exec "$RS" -- true >/dev/null 2>&1 && break; sleep 1; done
+check "the oldest kept restores from its chain" '[ "$(briqyard machine exec "$RS" -- cat /root/n)" = 2 ]'
+briqyard machine destroy "$RS" >/dev/null
+S4=$(point 4)
+check "retention leaves 2 restorable" '[ "$(briqyard machine backups "$SB" | jq -r "[.[].id] | join(\",\")")" = "$S3,$S4" ]'
+check "retention is an event" 'briqyard events --tenant "$T" --machine "$SB" 2>/dev/null | grep -q backup_deleted'
+briqyard machine destroy "$SB" >/dev/null
+check "a destroyed machine's backups listed" '[ "$(briqyard backups --tenant "$T" | jq "[.[] | select(.machine_id == \"$SB\" and .deletes_at != null)] | length")" = 2 ]'
+check "deleted with what continues from it" 'briqyard backup rm "$SB" "$S3" --chain && [ "$(briqyard machine backups "$SB" | jq length)" = 0 ]'
 
 
 echo "== tenants made together get bridges of their own"

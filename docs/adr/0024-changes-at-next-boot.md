@@ -28,7 +28,7 @@ A machine's image, command, env, files and size were fixed at create; PATCH took
 
 **A new size is reserved at the start**, by the one-step reservation: past the host's memory it is 503 `capacity` like any start, the change still pending. Through the fleet, placement reserves per create (ADR 0013); a start answering `capacity` is what the provider already retries. A tenant pinned to a full host cannot grow there: the fleet's `unpin`, after backups, is the operator's way to move it.
 
-**Events** (ADR 0019's closed list, now 30): `updated` at the PATCH with `{fields, pending: true}`, the fields whose pending value moved (a change in the same PATCH that applies at once has its own event); `applied` (normal) at the start that applies it, with `fields`, logged before that start's `starting`.
+**Events** (ADR 0019's closed list, now 32 with ADR 0023's): `updated` at the PATCH with `{fields, pending: true}`, the fields whose pending value moved (a change in the same PATCH that applies at once has its own event); `applied` (normal) at the start that applies it, with `fields`, logged before that start's `starting`.
 
 ## Consequences
 

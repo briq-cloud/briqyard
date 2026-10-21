@@ -1,6 +1,6 @@
 # ADR 0017: briqyard reports usage, never costs
 
-Date: 2026-10-20 · Status: accepted (Sylvain, 2026-10-20); amended with the implementation the same day (marked *Built*), and by ADR 0018 (`egress_dropped_packets`)
+Date: 2026-10-20 · Status: accepted (Sylvain, 2026-10-20); amended with the implementation the same day (marked *Built*), by ADR 0018 (`egress_dropped_packets`), and by ADR 0023 (a destroyed machine's backups)
 
 ## Context
 
@@ -34,3 +34,4 @@ Intra-tenant traffic is not counted: it is bridged, never routed, and costs noth
 - briq's metering of running time stays the source of what a customer is billed until the two are reconciled; the usage feed is what makes disk, storage and network billable later.
 - The host's own overhead (the daemon, unused capacity) is not a machine: briq derives it as the server's price minus what machines used.
 - *Built:* a destroyed machine's backups stay in the store, and no bucket reports them after its last hour; and a host released by `retire` takes its stored hours with it. briq collects before both, or a later change reports them.
+- *Amended by ADR 0023:* a destroyed machine's backups go on in its own buckets (`backup_gb_hours` only) until they are deleted.

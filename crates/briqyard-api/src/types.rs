@@ -69,6 +69,44 @@ impl Default for RestartPolicy {
     }
 }
 
+/// A machine's backup schedule (ADR 0023): a backup every `every`, the newest `keep` kept with
+/// what they continue from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupPolicy {
+    /// "6h", "1d": at least an hour.
+    pub every: String,
+    /// At least 1.
+    pub keep: u32,
+}
+
+impl BackupPolicy {
+    /// The shortest `every`.
+    pub const MIN_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// `every` as a duration, checked with `keep`; the message names the field under `backup`.
+    pub fn check(&self) -> Result<std::time::Duration, String> {
+        let every =
+            duration(self.every.trim(), r#"want "6h", "1d""#).map_err(|e| format!("every {e}"))?;
+        if every < Self::MIN_EVERY {
+            return Err(format!("every {:?}: at least 1h", self.every));
+        }
+        if self.keep < 1 {
+            return Err("keep: at least 1".into());
+        }
+        Ok(every)
+    }
+}
+
+/// A field that is there, `null` included, as `Some`: with `#[serde(default)]`, absent is
+/// `None` and `null` is `Some(None)`. For a field where `null` removes what absent keeps.
+fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
+}
+
 /// A check the daemon runs on a running machine (ADR 0022): exactly one of `exec`, `tcp` and
 /// `http`, every `period_sec`, from `initial_delay_sec` after it may start.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,6 +443,13 @@ pub struct CreateMachineRequest {
     /// Limits on its internet traffic, over the host's defaults (a restore takes the backup's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<EgressLimits>,
+    /// Its backup schedule: absent is the host's default (none unless configured), `null` none.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub backup: Option<Option<BackupPolicy>>,
     /// Startup, readiness and liveness checks (ADR 0022); a restore takes the backup's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probes: Option<Probes>,
@@ -548,6 +593,14 @@ pub struct Machine {
     /// Stopped with a memory snapshot: the next start resumes where it was.
     #[serde(default)]
     pub suspended: bool,
+    /// Its backup schedule (ADR 0023); absent: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<BackupPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_backup_at: Option<DateTime<Utc>>,
+    /// When the daemon backs it up next, with a schedule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_backup_at: Option<DateTime<Utc>>,
     /// The seq of the last event about it (ADR 0019): what `If-Match` compares.
     #[serde(default)]
     pub version: u64,
@@ -667,7 +720,7 @@ pub struct RestoreSpec {
 /// A backup of a machine's disks in the object store.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Backup {
-    /// A timestamp, `20261019T231500Z`; later ids sort later.
+    /// A timestamp to the millisecond, `20261019T231500.123Z`; later ids sort later.
     pub id: String,
     pub machine_id: String,
     pub tenant: String,
@@ -681,6 +734,9 @@ pub struct Backup {
     /// The machine as it was: what a restore makes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<serde_json::Value>,
+    /// For a destroyed machine's backup: when the host deletes it (ADR 0023). Not stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletes_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -850,6 +906,13 @@ pub struct UpdateMachineRequest {
     /// The limits it names, applied at once; the others stay as they are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<EgressLimits>,
+    /// A new backup schedule; `null` removes it, absent keeps it.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub backup: Option<Option<BackupPolicy>>,
     /// Replaces the probes; a running machine's start over at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probes: Option<Probes>,
@@ -1070,6 +1133,8 @@ pub mod reason {
     pub const APPLIED: &str = "applied";
     pub const EGRESS_CHANGED: &str = "egress_changed";
     pub const BACKED_UP: &str = "backed_up";
+    pub const BACKUP_FAILED: &str = "backup_failed";
+    pub const BACKUP_DELETED: &str = "backup_deleted";
     pub const DESTROYED: &str = "destroyed";
     pub const GATEWAY_STARTED: &str = "gateway_started";
     pub const GATEWAY_STOPPED: &str = "gateway_stopped";
@@ -1102,6 +1167,8 @@ pub mod reason {
         APPLIED,
         EGRESS_CHANGED,
         BACKED_UP,
+        BACKUP_FAILED,
+        BACKUP_DELETED,
         DESTROYED,
         GATEWAY_STARTED,
         GATEWAY_STOPPED,
@@ -1335,7 +1402,16 @@ pub fn parse_sleep(s: &str) -> Result<Option<std::time::Duration>, String> {
     if s.is_empty() || s == "never" {
         return Ok(None);
     }
-    let bad = || format!("sleep {s:?}: want \"30m\", \"2h\", \"7d\" or \"never\"");
+    duration(s, r#"want "30m", "2h", "7d" or "never""#)
+        .map(Some)
+        .map_err(|e| format!("sleep {e}"))
+}
+
+/// A duration as the API writes one: a positive count and a unit, `s`, `m`, `h` or `d`. The
+/// error starts with the value, for the caller to put its field before; `want` says what a
+/// malformed one should look like.
+fn duration(s: &str, want: &str) -> Result<std::time::Duration, String> {
+    let bad = || format!("{s:?}: {want}");
     // The unit is the last character, not the last byte: splitting inside a multi-byte
     // character would panic.
     let (num, unit) = match s.char_indices().last() {
@@ -1344,7 +1420,7 @@ pub fn parse_sleep(s: &str) -> Result<Option<std::time::Duration>, String> {
     };
     let n: u64 = num.parse().map_err(|_| bad())?;
     if n == 0 {
-        return Err(format!("sleep {s:?}: must be positive"));
+        return Err(format!("{s:?}: must be positive"));
     }
     let per_unit = match unit {
         "s" => 1,
@@ -1355,8 +1431,8 @@ pub fn parse_sleep(s: &str) -> Result<Option<std::time::Duration>, String> {
     };
     let secs = n
         .checked_mul(per_unit)
-        .ok_or_else(|| format!("sleep {s:?}: too long"))?;
-    Ok(Some(std::time::Duration::from_secs(secs)))
+        .ok_or_else(|| format!("{s:?}: too long"))?;
+    Ok(std::time::Duration::from_secs(secs))
 }
 
 /// An id the API takes from a caller (a tenant, a machine id in a path or a restore): a-z,
@@ -1613,7 +1689,9 @@ mod tests {
             "state_changed_at": "2026-01-02T03:04:05Z",
             "started_at": "2026-01-02T03:04:05Z", "stopped_at": "2026-01-02T03:04:05Z",
             "last_used_at": "2026-01-02T03:04:05Z", "sleeps_at": "2026-01-02T03:34:05Z",
-            "suspended": true, "version": 812, "host": "h1",
+            "suspended": true, "backup": {"every": "6h", "keep": 4},
+            "last_backup_at": "2026-01-02T03:04:05Z", "next_backup_at": "2026-01-02T09:04:05Z",
+            "version": 812, "host": "h1",
             "restarts": 2, "restarting_at": "2026-01-02T03:04:25Z", "ready": false
         });
         let mut input = input;
@@ -1632,6 +1710,13 @@ mod tests {
             (3, Some("postgres:18"))
         );
         assert_eq!(m.pending_since, Some(ts()));
+        assert_eq!(m.backup.as_ref().map(|b| b.keep), Some(4));
+        assert_eq!(
+            m.next_backup_at
+                .zip(m.last_backup_at)
+                .map(|(n, l)| (n - l).num_hours()),
+            Some(6)
+        );
         assert_eq!(m.restarts, 2);
         assert_eq!(
             m.probes_status.readiness.as_ref().map(|s| s.failures),
@@ -2367,7 +2452,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), reason::ALL.len());
-        assert_eq!(all.len(), 30);
+        assert_eq!(all.len(), 32);
         assert!(all
             .iter()
             .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));
@@ -2405,6 +2490,89 @@ mod tests {
             [stop::USER, stop::IDLE, stop::EXIT, stop::HOST],
             ["user", "idle", "exit", "host"]
         );
+    }
+
+    #[test]
+    fn backup_policies() {
+        let p: BackupPolicy = same(json!({"every": "6h", "keep": 4}));
+        assert_eq!(p.check(), Ok(std::time::Duration::from_secs(6 * 3600)));
+        let every = |e: &str| BackupPolicy {
+            every: e.into(),
+            keep: 1,
+        };
+        assert_eq!(every("1d").check().unwrap().as_secs(), 86400);
+        assert_eq!(every(" 1h ").check().unwrap().as_secs(), 3600);
+        // Each refusal names its field, for the caller to put `backup.` before.
+        assert_eq!(
+            every("59m").check().unwrap_err(),
+            r#"every "59m": at least 1h"#
+        );
+        assert_eq!(
+            every("never").check().unwrap_err(),
+            r#"every "never": want "6h", "1d""#
+        );
+        assert_eq!(
+            every("0h").check().unwrap_err(),
+            r#"every "0h": must be positive"#
+        );
+        assert!(every("").check().unwrap_err().starts_with("every "));
+        let none = BackupPolicy {
+            every: "6h".into(),
+            keep: 0,
+        };
+        assert_eq!(none.check().unwrap_err(), "keep: at least 1");
+        // Both fields are required.
+        assert!(serde_json::from_value::<BackupPolicy>(json!({"every": "6h"})).is_err());
+    }
+
+    #[test]
+    fn a_backup_policy_absent_is_kept_and_null_removes_it() {
+        let c: CreateMachineRequest = serde_json::from_value(json!({
+            "tenant": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}
+        }))
+        .unwrap();
+        assert_eq!(c.backup, None, "absent: the host's default");
+        let c: CreateMachineRequest = serde_json::from_value(json!({
+            "tenant": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}, "backup": null
+        }))
+        .unwrap();
+        assert_eq!(c.backup, Some(None), "null: none");
+        assert_eq!(serde_json::to_value(&c).unwrap()["backup"], Value::Null);
+        let u: UpdateMachineRequest = same(json!({"backup": {"every": "1d", "keep": 5}}));
+        assert_eq!(u.backup.flatten().map(|p| p.keep), Some(5));
+        let u: UpdateMachineRequest = same(json!({"backup": null}));
+        assert_eq!(u.backup, Some(None));
+        let u: UpdateMachineRequest = same(json!({}));
+        assert_eq!(u.backup, None);
+    }
+
+    #[test]
+    fn backups() {
+        let b: Backup = same(json!({
+            "id": "20261021T101500.123Z", "machine_id": "m1", "tenant": "t1", "name": "db",
+            "created_at": "2026-01-02T03:04:05Z", "bytes": 30, "incremental": true,
+            "disks": [
+                {"disk": "root", "key": "backups/m1/root/20261021T101500.123Z.zfs", "bytes": 10,
+                 "from": "20261021T091500.001Z"},
+                {"disk": "data", "key": "backups/m1/data/20261021T101500.123Z.zfs", "bytes": 20}
+            ],
+            "deletes_at": "2026-01-02T03:04:05Z"
+        }));
+        assert_eq!(b.disks[0].from.as_deref(), Some("20261021T091500.001Z"));
+        assert_eq!(b.disks[1].from, None);
+        assert_eq!(b.deletes_at, Some(ts()));
+        // A stored record carries the machine and no deletion time.
+        let r: Backup = same(json!({
+            "id": "a", "machine_id": "m1", "tenant": "t1", "name": "db",
+            "created_at": "2026-01-02T03:04:05Z", "bytes": 0, "incremental": false,
+            "disks": [], "machine": {"id": "m1"}
+        }));
+        assert_eq!(r.deletes_at, None);
+        let rs: RestoreSpec = round_trip(
+            json!({"machine_id": "m1"}),
+            json!({"machine_id": "m1", "backup": ""}),
+        );
+        assert_eq!(rs.backup, "");
     }
 
     #[test]

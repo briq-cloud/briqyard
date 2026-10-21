@@ -51,6 +51,14 @@ enum Cmd {
     /// Hosts, when talking to a fleet
     #[command(subcommand)]
     Host(HostCmd),
+    /// Backups in the store: delete one
+    #[command(subcommand)]
+    Backup(BackupCmd),
+    /// Every backup of the host's machines, destroyed ones' included: briqyard backups [--tenant T]
+    Backups {
+        #[arg(long)]
+        tenant: Option<String>,
+    },
     /// What each machine used, per hour: briqyard usage --from 2026-10-20T14:00:00Z --to 2026-10-20T15:00:00Z
     Usage {
         /// The first hour, RFC 3339
@@ -208,6 +216,17 @@ enum MachineCmd {
     },
     /// Change what it runs, at its next start (restart to apply now): briqyard machine set ID --image python:3.13-alpine -e V=2 -- cmd...
     Set(Box<SetArgs>),
+    /// Change the backup schedule: briqyard machine set-backup ID --every 6h --keep 4, or --off
+    SetBackup {
+        id: String,
+        #[arg(long, requires = "keep", conflicts_with = "off")]
+        every: Option<String>,
+        #[arg(long, requires = "every")]
+        keep: Option<u32>,
+        /// No schedule; the backups made stay
+        #[arg(long, required_unless_present = "every")]
+        off: bool,
+    },
     /// Change the sleep window: briqyard machine set-sleep ID 30m|never
     SetSleep {
         id: String,
@@ -280,6 +299,8 @@ struct RunArgs {
     egress: Option<api::Egress>,
     #[command(flatten)]
     limits: LimitArgs,
+    #[command(flatten)]
+    backup: BackupArgs,
     /// Checked before readiness and liveness run; failing, the boot fails: http:PORT[/PATH], tcp:PORT, exec:CMD ARGS
     #[arg(long, value_parser = probe_arg)]
     startup: Option<api::Probe>,
@@ -380,6 +401,59 @@ impl SetArgs {
             ..Default::default()
         })
     }
+}
+
+#[derive(Subcommand)]
+enum BackupCmd {
+    /// Delete a backup; --chain also the backups that continue from it
+    Rm {
+        machine: String,
+        backup: String,
+        #[arg(long)]
+        chain: bool,
+        /// The machine's tenant, for a destroyed machine's backup through a fleet
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+}
+
+/// A backup schedule on a run: both or neither, checked as the daemon checks them.
+#[derive(Args)]
+struct BackupArgs {
+    /// Back it up this often: 6h, 1d (at least 1h)
+    #[arg(long, requires = "backup_keep")]
+    backup_every: Option<String>,
+    /// Backups kept, with what they continue from
+    #[arg(long, requires = "backup_every")]
+    backup_keep: Option<u32>,
+    /// No schedule, whatever the host's default
+    #[arg(long, conflicts_with = "backup_every")]
+    no_backup: bool,
+}
+
+impl BackupArgs {
+    /// The request's `backup`: absent for the host's default.
+    fn request(&self) -> Result<Option<Option<api::BackupPolicy>>> {
+        if self.no_backup {
+            return Ok(Some(None));
+        }
+        policy(self.backup_every.as_deref(), self.backup_keep)
+    }
+}
+
+/// `--every` and `--keep` as a policy, checked here before the request leaves.
+fn policy(every: Option<&str>, keep: Option<u32>) -> Result<Option<Option<api::BackupPolicy>>> {
+    let (Some(every), Some(keep)) = (every, keep) else {
+        return Ok(None);
+    };
+    let p = api::BackupPolicy {
+        every: every.to_string(),
+        keep,
+    };
+    if let Err(e) = p.check() {
+        bail!("backup.{e}");
+    }
+    Ok(Some(Some(p)))
 }
 
 #[derive(Subcommand)]
@@ -724,6 +798,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     metadata: BTreeMap::new(),
                     egress: a.egress.clone(),
                     limits: a.limits.request()?,
+                    backup: a.backup.request()?,
                     probes: Some(api::Probes {
                         startup: a.startup.clone(),
                         readiness: a.readiness.clone(),
@@ -931,6 +1006,28 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     .await?,
                 )
             }
+            MachineCmd::SetBackup {
+                id,
+                every,
+                keep,
+                off,
+            } => {
+                let req = api::UpdateMachineRequest {
+                    backup: match off {
+                        true => Some(None),
+                        false => policy(every.as_deref(), keep)?,
+                    },
+                    ..Default::default()
+                };
+                print_json(
+                    &c.call::<api::Machine>(
+                        reqwest::Method::PATCH,
+                        &format!("/v1/machines/{id}"),
+                        Some(&req),
+                    )
+                    .await?,
+                )
+            }
             MachineCmd::SetEgress { id, egress } => {
                 let req = api::UpdateMachineRequest {
                     egress: Some(egress),
@@ -1094,6 +1191,26 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     .await?;
             }
         },
+        Cmd::Backup(BackupCmd::Rm {
+            machine,
+            backup,
+            chain,
+            tenant,
+        }) => {
+            c.raw(
+                DELETE,
+                &backup_rm_path(&machine, &backup, chain, tenant.as_deref()),
+                NONE,
+            )
+            .await?;
+        }
+        Cmd::Backups { tenant } => {
+            let path = match tenant {
+                Some(t) => format!("/v1/backups?tenant={t}"),
+                None => "/v1/backups".into(),
+            };
+            print_json(&c.call::<Vec<api::Backup>>(GET, &path, NONE).await?)
+        }
         Cmd::Doctor => doctor(),
         Cmd::Events {
             tenant,
@@ -1175,6 +1292,22 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
         },
     }
     Ok(())
+}
+
+/// `backup rm`'s request.
+fn backup_rm_path(machine: &str, backup: &str, chain: bool, tenant: Option<&str>) -> String {
+    let mut q = Vec::new();
+    if chain {
+        q.push("chain=true".to_string());
+    }
+    if let Some(t) = tenant {
+        q.push(format!("tenant={t}"));
+    }
+    let path = format!("/v1/machines/{machine}/backups/{backup}");
+    match q.is_empty() {
+        true => path,
+        false => format!("{path}?{}", q.join("&")),
+    }
 }
 
 /// `-e K=V` flags as an env map; a value may hold `=`.
@@ -1355,12 +1488,20 @@ fn limits_label(l: &api::EgressLimits) -> String {
     }
 }
 
+/// A backup schedule in a table: `6h/4` (every, keep), `-` for none.
+fn backup_label(p: Option<&api::BackupPolicy>) -> String {
+    match p {
+        Some(p) => format!("{}/{}", p.every, p.keep),
+        None => "-".into(),
+    }
+}
+
 // --- tables ---
 
 /// `machine ls`.
 fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<12} HOST\n",
+        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<8} {:<12} HOST\n",
         "ID",
         "TENANT",
         "NAME",
@@ -1372,6 +1513,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
         "SLEEP",
         "EGRESS",
         "LIMITS",
+        "BACKUP",
         "PENDING"
     );
     for m in ms {
@@ -1385,7 +1527,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             None => "-".into(),
         };
         out.push_str(&format!(
-            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<12} {}\n",
+            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<8} {:<12} {}\n",
             m.id,
             m.tenant,
             m.name,
@@ -1397,6 +1539,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             m.sleep,
             egress_label(&m.egress),
             limits_label(&m.limits),
+            backup_label(m.backup.as_ref()),
             pending,
             m.host
         ));
@@ -1657,6 +1800,22 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
         None => m.sleep.clone(),
     };
     lines.push(("Sleep", sleep));
+    let at = |t: Option<chrono::DateTime<chrono::Utc>>| match t {
+        Some(t) => t.format("%Y-%m-%d %H:%M:%S").to_string(),
+        None => "none".into(),
+    };
+    let backup = match (&m.backup, m.last_backup_at) {
+        (Some(p), last) => format!(
+            "every {}, keep {}; last {}, next {}",
+            p.every,
+            p.keep,
+            at(last),
+            at(m.next_backup_at)
+        ),
+        (None, Some(last)) => format!("none; last {}", at(Some(last))),
+        (None, None) => "none".into(),
+    };
+    lines.push(("Backup", backup));
     if let Some(p) = &m.pending {
         // Each field, with its new value when the view shows one.
         let changes: Vec<String> = p
