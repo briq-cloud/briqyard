@@ -522,6 +522,13 @@ components:
         blocked_ports: { type: array, items: { type: integer, minimum: 1, maximum: 65535 }, description: "destination ports refused, TCP (reset) and UDP (ICMP port unreachable); `[]` refuses none. Host default: [25]" }
         new_connections_per_minute: { type: integer, minimum: 0, description: "new connections a minute, as many at once; over it, dropped. 0: no limit" }
         bandwidth_mbit: { type: integer, minimum: 0, maximum: 100000, description: "Mbit/s, in and out together; over it, dropped. 0: no limit" }
+    DiskLimits:
+      type: object
+      description: "limits on each of the machine's disks, the root disk and the volume, by Firecracker's rate limiter (ADR 0030); over them the guest's requests wait. In a request an absent field keeps the machine's value (on create, the host's `disk_limits` for its size: a rate per vCPU); in a machine, every field is there: the values in force"
+      properties:
+        bandwidth_mb: { type: integer, minimum: 0, maximum: 100000, description: "MB (2^20 bytes) a second, reads and writes together. 0: no limit. Host default: 32 per vCPU" }
+        iops: { type: integer, minimum: 0, maximum: 10000000, description: "requests a second (reads, writes, flushes). 0: no limit. Host default: 4000 per vCPU" }
+        burst_sec: { type: integer, minimum: 0, maximum: 3600, description: "what each limit lets through at full speed once after a start, a wake or a change, in seconds at its rate. Host default: 10" }
     EgressDrops:
       type: object
       description: packets the machine's limits dropped since it started (or the daemon did), read every 15 s
@@ -549,6 +556,7 @@ components:
         region: { type: string, description: "fleet: a new tenant is placed on a host of this region (a host's `region`); a tenant's machines stay in its host's (ADR 0025). Absent: any. A daemon ignores it" }
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent: open, or for a restore the backup's" }
         limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "over the host's, field by field; absent: the host's, or for a restore the backup's" }
+        disk_limits: { allOf: [{ $ref: "#/components/schemas/DiskLimits" }], description: "over the host's for its size, field by field; absent: the host's, or for a restore the backup's" }
         backup: { oneOf: [{ $ref: "#/components/schemas/BackupPolicy" }, { type: "null" }], description: "absent: the host's `backup.default_every` and `default_keep` (none unless configured); null: none. A restore or a fork takes this, not its source's" }
         probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "absent: none, or for a restore the backup's" }
         start: { type: boolean, default: true, description: "the answer comes at `running`, not `ready`: `/wait` for that" }
@@ -589,6 +597,7 @@ components:
         egress: { $ref: "#/components/schemas/Egress" }
         limits: { $ref: "#/components/schemas/EgressLimits" }
         egress_drops: { $ref: "#/components/schemas/EgressDrops" }
+        disk_limits: { $ref: "#/components/schemas/DiskLimits" }
         metadata: { type: object, additionalProperties: { type: string } }
         endpoints: { type: array, items: { $ref: "#/components/schemas/Endpoint" } }
         created_at: { type: string, format: date-time }
@@ -669,6 +678,7 @@ components:
         metadata: { type: object, additionalProperties: { type: string } }
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent keeps the current one" }
         limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "the fields it names change, the others stay" }
+        disk_limits: { allOf: [{ $ref: "#/components/schemas/DiskLimits" }], description: "the fields it names change, the others stay; a running machine's disks take them at once (their buckets full again)" }
         backup: { oneOf: [{ $ref: "#/components/schemas/BackupPolicy" }, { type: "null" }], description: "absent keeps it, null removes it; the next time is `every` after the last backup" }
         probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "replaces them all; a running machine's start over at once, `ready` as at a boot" }
         image: { type: string, description: "at the next start: pulled and built then (a failure is `boot_failed`, the change still pending), the root disk made again from it, the data volume kept" }
