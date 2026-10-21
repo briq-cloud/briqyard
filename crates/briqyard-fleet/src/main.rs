@@ -78,6 +78,11 @@ impl AppState {
         let written = serde_json::to_vec_pretty(&reg)
             .map_err(std::io::Error::other)
             .and_then(|data| {
+                // A leftover keeps its own mode through `open`: made afresh, it is 0600.
+                match std::fs::remove_file(&tmp) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
                 let mut f = std::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
@@ -87,7 +92,16 @@ impl AppState {
                 f.write_all(&data)?;
                 f.sync_all()
             })
-            .and_then(|_| std::fs::rename(&tmp, &self.state_path));
+            .and_then(|_| std::fs::rename(&tmp, &self.state_path))
+            // The rename itself reaches the disk with the directory.
+            .and_then(|_| {
+                std::fs::File::open(
+                    self.state_path
+                        .parent()
+                        .unwrap_or(std::path::Path::new(".")),
+                )?
+                .sync_all()
+            });
         if let Err(e) = &written {
             tracing::error!(path = %self.state_path.display(), err = %e, "write the registry");
         }
@@ -145,7 +159,8 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         note: String::new(),
         bootstrap_attempts: 0,
         conditions: vec![],
-        pool_key: String::new(),
+        pool_key: Default::default(),
+        unknown: Default::default(),
     }
 }
 
@@ -189,7 +204,8 @@ async fn run(args: Args) -> Result<()> {
     tokio::spawn(poll_static_hosts(state.clone()));
     tokio::spawn(scaler(state.clone()));
     tokio::spawn(bootstrap::run(state.clone()));
-    let app = app(state).into_make_service();
+    // The peer address is what a host's own calls are checked against (`the_host`).
+    let app = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     let listener = std::net::TcpListener::bind(&cfg.listen)
         .with_context(|| format!("listen {}", cfg.listen))?;
     listener.set_nonblocking(true)?;
@@ -363,18 +379,38 @@ async fn list_hosts(State(st): S) -> Json<Vec<api::Host>> {
     Json(hosts)
 }
 
+/// Who made a host's call, as the fleet sees it: the connection's peer, and whether the fleet
+/// terminates the connection itself (its own TLS, or plain on loopback) so that the peer is the
+/// host's. Behind `tls: off` the peer is whatever is in front, so it proves nothing.
+#[derive(Clone, Copy, Debug)]
+struct Caller {
+    peer: Option<std::net::IpAddr>,
+    checked: bool,
+}
+
+impl Caller {
+    fn of(st: &AppState, info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>) -> Caller {
+        Caller {
+            peer: info.map(|i| i.0.ip().to_canonical()),
+            checked: !matches!(st.cfg.tls, config::Tls::Off),
+        }
+    }
+}
+
 /// The record a host's own call belongs to: the one host at the address it advertises, when
-/// the call presents that host's token. Nothing else passes, so no host can speak for another.
-/// `daemon` is what the caller calls itself, for the log.
+/// the call presents that host's token and, where the fleet terminates the connection, comes
+/// from that address (ADR 0026: a token on a disk that left our hands is not enough). Nothing
+/// else passes, so no host can speak for another. `call` names the call for the log.
 fn the_host<'a>(
     reg: &'a Registry,
     url: &str,
     headers: &HeaderMap,
-    daemon: &str,
+    caller: Caller,
+    call: &str,
 ) -> Result<&'a HostRec, Refusal> {
     let Some(rec) = reg.expecting(url) else {
         tracing::warn!(
-            daemon,
+            call,
             url,
             "host call refused: no host expected at this address"
         );
@@ -390,7 +426,7 @@ fn the_host<'a>(
     if rec.token.is_empty() || !api::constant_eq(bearer(headers).as_bytes(), rec.token.as_bytes()) {
         tracing::warn!(
             host = rec.id,
-            daemon,
+            call,
             "host call refused: not the host's token"
         );
         return Err(err(
@@ -398,6 +434,38 @@ fn the_host<'a>(
             "unauthorized",
             "the host's own token is required",
         ));
+    }
+    if caller.checked {
+        let want = url_host(&rec.url)
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .map(|ip| ip.to_canonical());
+        if want.is_none() || want != caller.peer {
+            let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
+            tracing::warn!(
+                host = rec.id,
+                call,
+                peer,
+                "host call refused: not from the host's address"
+            );
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "unknown_host",
+                match want {
+                    None => format!(
+                        "host {} is known by the name in {}: the fleet checks a host's calls by its address, so its url must be one",
+                        rec.id, rec.url
+                    ),
+                    Some(want) => format!(
+                        "host {}'s calls come from {want}, not {}",
+                        rec.id,
+                        if peer.is_empty() { "an unknown address" } else { &peer }
+                    ),
+                },
+            ));
+        }
     }
     Ok(rec)
 }
@@ -407,18 +475,28 @@ fn the_host<'a>(
 /// and written to the registry before it is answered.
 async fn host_key(
     State(st): S,
+    info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     Json(req): Json<api::HostKeyRequest>,
 ) -> Result<Response, Refusal> {
-    let (id, key) = {
+    let caller = Caller::of(&st, info);
+    let (id, key, made) = {
         let mut reg = st.reg.lock().unwrap();
-        let id = the_host(&reg, &req.url, &headers, "")?.id.clone();
-        let key = reg.pool_key(&id).expect("the record was just found");
-        (id, key)
+        let id = the_host(&reg, &req.url, &headers, caller, "pool key")?
+            .id
+            .clone();
+        let (key, made) = reg.pool_key(&id).expect("the record was just found");
+        (id, key, made)
     };
-    st.save().map_err(registry_error)?;
-    tracing::info!(host = id, "pool key served");
-    Ok(Json(api::HostKey { key }).into_response())
+    if made {
+        st.save().map_err(registry_error)?;
+    }
+    let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
+    tracing::info!(host = id, made, peer, "pool key served");
+    Ok(Json(api::HostKey {
+        key: key.expose().to_string(),
+    })
+    .into_response())
 }
 
 /// A daemon's heartbeat. It is taken for the one host record at its address, when it presents
@@ -426,13 +504,16 @@ async fn host_key(
 /// Nothing else may register, so no host can speak for another.
 async fn register_host(
     State(st): S,
+    info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     Json(req): Json<api::RegisterHostRequest>,
 ) -> Result<Response, Refusal> {
     let now = Utc::now();
+    let caller = Caller::of(&st, info);
     {
         let mut reg = st.reg.lock().unwrap();
-        let rec = the_host(&reg, &req.url, &headers, &req.id)?;
+        let call = format!("heartbeat of {}", req.id);
+        let rec = the_host(&reg, &req.url, &headers, caller, &call)?;
         if let Err(why) =
             registry::tls_matches(&rec.tls_fingerprint, &req.tls_fingerprint, &req.url)
         {
@@ -470,7 +551,8 @@ async fn register_host(
                 note: String::new(),
                 bootstrap_attempts: 0,
                 conditions: req.conditions,
-                pool_key: String::new(),
+                pool_key: Default::default(),
+                unknown: Default::default(),
             },
             now,
         );
@@ -565,7 +647,8 @@ fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
         note: server.note,
         bootstrap_attempts: 0,
         conditions: vec![],
-        pool_key: String::new(),
+        pool_key: Default::default(),
+        unknown: Default::default(),
     };
     st.reg.lock().unwrap().hosts.insert(id, h.clone());
     st.save()?;

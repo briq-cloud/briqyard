@@ -4,13 +4,48 @@
 use briqyard_api::{self as api, Capacity, Condition, Host};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-/// A host as the fleet keeps it. A field the fleet does not know is refused, never dropped:
-/// a fleet older than its registry would lose what it cannot read (a host's pool key) at its
-/// next write.
+/// What a registry or host record holds that this fleet does not know, kept as it was and
+/// written back: a fleet older than its registry (a rollback) loses nothing at its next write.
+pub type Unknown = BTreeMap<String, serde_json::Value>;
+
+/// A host's pool key (ADR 0026): 32 random bytes as 64 hex digits, ZFS's `hex` key format.
+/// Never printed: its `Debug` shows nothing of it.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PoolKey(String);
+
+impl PoolKey {
+    fn random() -> PoolKey {
+        use rand::RngCore;
+        let mut b = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut b);
+        PoolKey(b.iter().map(|x| format!("{x:02x}")).collect())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The key itself, for the one answer that carries it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PoolKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() {
+            "PoolKey(none)"
+        } else {
+            "PoolKey(..)"
+        })
+    }
+}
+
+/// A host as the fleet keeps it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HostRec {
     pub id: String,
     pub url: String,
@@ -60,8 +95,11 @@ pub struct HostRec {
     pub conditions: Vec<Condition>,
     /// The key of the host's pool (ADR 0026), made the first time the host asks for it and
     /// served to that host alone; never in `to_api`, gone with the record.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub pool_key: String,
+    #[serde(default, skip_serializing_if = "PoolKey::is_empty")]
+    pub pool_key: PoolKey,
+    /// Fields this fleet does not know, written back as they were.
+    #[serde(flatten)]
+    pub unknown: Unknown,
 }
 
 /// The host part of a URL (`http://10.0.0.5:7420` → `10.0.0.5`).
@@ -182,7 +220,6 @@ impl Default for Policy {
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Registry {
     pub hosts: HashMap<String, HostRec>,
     /// tenant → host id. A tenant's machines share a host, so its network needs no overlay.
@@ -195,12 +232,15 @@ pub struct Registry {
     /// When each tenant was pinned by a placement (not by a heartbeat).
     #[serde(default)]
     pub pinned_at: HashMap<String, DateTime<Utc>>,
+    /// Fields this fleet does not know, written back as they were.
+    #[serde(flatten)]
+    pub unknown: Unknown,
 }
 
 impl Registry {
     /// The registry in `path`; none yet is an empty one. A file that cannot be read or parsed
     /// is an error, never an empty registry: the next write would replace every host's token
-    /// and pool key with nothing (ADR 0026).
+    /// and pool key with nothing (ADR 0026). Fields it does not know are kept (`unknown`).
     pub fn load(path: &std::path::Path) -> anyhow::Result<Registry> {
         use anyhow::Context;
         match std::fs::read(path) {
@@ -274,18 +314,15 @@ impl Registry {
         self.pinned_at.retain(|t, _| self.tenants.contains_key(t));
     }
 
-    /// The pool key of a host, made now when it has none: 32 random bytes as 64 hex digits,
-    /// ZFS's `hex` key format. The caller writes the registry before it hands the key out, so
-    /// a key in use is never one only memory held.
-    pub fn pool_key(&mut self, id: &str) -> Option<String> {
+    /// The pool key of a host, made now when it has none (`true` then): the caller writes the
+    /// registry before it hands a new key out, so a key in use is never one only memory held.
+    pub fn pool_key(&mut self, id: &str) -> Option<(PoolKey, bool)> {
         let h = self.hosts.get_mut(id)?;
-        if h.pool_key.is_empty() {
-            use rand::RngCore;
-            let mut b = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut b);
-            h.pool_key = b.iter().map(|x| format!("{x:02x}")).collect();
+        let made = h.pool_key.is_empty();
+        if made {
+            h.pool_key = PoolKey::random();
         }
-        Some(h.pool_key.clone())
+        Some((h.pool_key.clone(), made))
     }
 
     /// Drops a host and everything indexed to it.
@@ -492,36 +529,40 @@ mod tests {
             note: String::new(),
             bootstrap_attempts: 0,
             conditions: vec![],
-            pool_key: String::new(),
+            pool_key: PoolKey::default(),
+            unknown: Unknown::new(),
         }
     }
 
-    /// None yet is empty; anything else that does not read is an error, a field it does not
-    /// know included: an empty registry written over it would lose every host's pool key.
+    /// None yet is empty; a file that does not parse is an error, never an empty registry;
+    /// what this fleet does not know is kept and written back, so a rollback loses nothing.
     #[test]
-    fn a_registry_that_does_not_read_is_an_error() {
+    fn a_registry_keeps_what_it_does_not_know_and_refuses_what_does_not_parse() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry.json");
         assert!(Registry::load(&path).unwrap().hosts.is_empty());
         let mut reg = Registry::default();
         reg.hosts.insert("h1".into(), host("h1", 1000, 0, 0));
-        reg.pool_key("h1");
-        std::fs::write(&path, serde_json::to_vec(&reg).unwrap()).unwrap();
-        let back = Registry::load(&path).unwrap();
-        assert_eq!(back.hosts["h1"].pool_key, reg.hosts["h1"].pool_key);
-        for bad in [
-            "{",
-            "{\"hosts\": {}, \"tenants\": {}, \"machines\": {}, \"later\": 1}",
-        ] {
-            std::fs::write(&path, bad).unwrap();
-            let err = Registry::load(&path).unwrap_err();
-            assert!(format!("{err:#}").contains("read the registry"), "{err:#}");
-        }
+        let (key, made) = reg.pool_key("h1").unwrap();
+        assert!(made);
+        assert_eq!(reg.pool_key("h1").unwrap(), (key.clone(), false));
+        assert_eq!(format!("{key:?}"), "PoolKey(..)", "never printed");
+        assert!(!format!("{:?}", reg.hosts["h1"]).contains(key.expose()));
         let mut v = serde_json::to_value(&reg).unwrap();
         v["hosts"]["h1"]["later"] = 1.into();
+        v["later_too"] = serde_json::json!({"a": [1]});
         std::fs::write(&path, v.to_string()).unwrap();
+        let back = Registry::load(&path).unwrap();
+        assert_eq!(back.hosts["h1"].pool_key, key);
+        let written = serde_json::to_value(&back).unwrap();
+        assert_eq!(
+            written["hosts"]["h1"]["later"], 1,
+            "written back: {written}"
+        );
+        assert_eq!(written["later_too"], serde_json::json!({"a": [1]}));
+        std::fs::write(&path, "{").unwrap();
         let err = Registry::load(&path).unwrap_err();
-        assert!(format!("{err:#}").contains("later"), "{err:#}");
+        assert!(format!("{err:#}").contains("read the registry"), "{err:#}");
     }
 
     /// A condition of the host's, true or not.

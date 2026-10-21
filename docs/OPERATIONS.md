@@ -109,7 +109,7 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `ingress.advertise` | the host's primary address | The address endpoints are reported at (`address` on an endpoint): what a router on another machine dials, a private address when the host has one |
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
 | `capacity.memory_mb`, `capacity.vcpus` | host memory − 2 GB, threads × 4 | What the host hands out; shared vCPUs oversubscribe |
-| `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start |
+| `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start. An `http://` `url` must be a loopback or private address (ADR 0026) |
 
 ## Where things live
 
@@ -276,10 +276,11 @@ backup until sent elsewhere.
 | `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just ordered gets this until its bootstrap has pinned it |
 | `host …: … is not the pinned …` (fleet, 502 `host_unreachable`) | The host presents another certificate than its record's `tls_fingerprint`: reinstalled (pin the new one), or not the host |
 | `write registry …` (fleet, 500 `registry`) | The fleet's `state_dir` is full or not writable; nothing is recorded until it is |
-| `read the registry …` (the fleet does not start) | `registry.json` does not parse, or holds a field this fleet does not know (a fleet older than the registry): run the fleet that wrote it, or restore the file. Never remove it: every host's pool key is in it (ADR 0026) |
+| `read the registry …` (the fleet does not start) | `registry.json` does not parse: restore the file (fields a fleet does not know are kept, not refused). Never remove it: every host's pool key is in it (ADR 0026) |
 | `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
 | `dataset is busy` | A zvol a Firecracker just released; the daemon retries for ten seconds |
+| `host call refused: not from the host's address` (fleet), `unknown_host` `…'s calls come from …` | The host's heartbeat or key request reached the fleet from another address than its `url` (NAT, another route): list the host by the address it calls from, or put the fleet behind a proxy with `tls: off` |
 | `pool locked: its key could not be loaded` | The daemon waits for the pool's key (ADR 0026), `err` says why: the fleet unreachable or refusing (`unknown_host`, `unauthorized`: as for a heartbeat), the key file missing, `Incorrect key provided` (the fleet's registry lost or restored from before the host: the pool cannot be read with another key) |
 | `pool … is not encrypted` | A pool made before ADR 0026 or by hand: move what it holds, destroy it, run the bootstrap again |
 | `… holds files and byard/… is not mounted there` | The daemon's directories hold files on `/` (a host from before ADR 0026): stop the daemon, move the contents onto the dataset (mount it elsewhere, copy, empty the directory) |
@@ -323,7 +324,16 @@ Each host's pool key is in its record (ADR 0026): made at the host's first `POST
 address, as a heartbeat), never listed, gone when the host is retired or forgotten. **Losing the
 registry loses every key**: a host keeps running while its key is loaded, and cannot read its
 pool after its next reboot. Keep the registry backed up (and the backup encrypted) before a
-host holds anything that matters; a host still up can be re-keyed with `zfs change-key`.
+host holds anything that matters; a host still up can be re-keyed with `zfs change-key`. The
+fleet's `state_dir` must be on an encrypted disk: it opens every pool.
+
+Where the fleet terminates the connection (its `tls`, or plain on loopback), a host's
+heartbeat and key request must come from the address in its `url`: a host is listed by its
+address, not a name. Behind `tls: off` only the token is checked. **Retire or forget a host
+before its server or a disk leaves our hands.** A disk the provider swaps while the host stays
+carries the host's token: rotate it (a static host: a new `token` in its `hosts:` entry and in
+its `/etc/briqyard/config.yaml`, then restart the fleet and the daemon; an ordered host: no
+route yet, the same edit in `registry.json` with the fleet stopped).
 
 The fleet's own listener serves TLS with a certificate of yours: `tls: { cert, key }`, PEM
 files, a chain for the fleet's name (Let's Encrypt in production: `certbot certonly

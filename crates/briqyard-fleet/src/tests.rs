@@ -663,6 +663,9 @@ async fn fleet_in_regions(regions: &[&str]) -> (Fleet, Vec<Running>) {
 }
 
 /// One request through the router. The body comes back as text.
+/// A call as a client makes it. A host's own call (a body with a `url`) comes from that url's
+/// address, as it does through a fleet that terminates its connections; anything else from
+/// loopback.
 async fn call(
     st: &Arc<AppState>,
     method: &str,
@@ -670,7 +673,29 @@ async fn call(
     token: &str,
     body: Option<serde_json::Value>,
 ) -> (StatusCode, HeaderMap, String) {
-    let mut req = axum::http::Request::builder().method(method).uri(path);
+    let peer = body
+        .as_ref()
+        .and_then(|b| b["url"].as_str())
+        .and_then(|u| url_host(u).parse().ok())
+        .unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]));
+    call_from(st, peer, method, path, token, body).await
+}
+
+/// `call` from the peer address given.
+async fn call_from(
+    st: &Arc<AppState>,
+    peer: std::net::IpAddr,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, HeaderMap, String) {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+            peer, 40000,
+        )));
     if !token.is_empty() {
         req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -941,7 +966,7 @@ async fn a_host_gets_its_own_pool_key_and_no_other() {
         key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
         "ZFS's hex format: {key}"
     );
-    assert_eq!(saved(&f.st).hosts["s1"].pool_key, key, "written");
+    assert_eq!(saved(&f.st).hosts["s1"].pool_key.expose(), key, "written");
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(&f.st.state_path)
         .unwrap()
@@ -960,6 +985,93 @@ async fn a_host_gets_its_own_pool_key_and_no_other() {
     assert!(!std::fs::read_to_string(&f.st.state_path)
         .unwrap()
         .contains(&key));
+}
+
+/// Where the fleet terminates the connection (its TLS, or plain on loopback), a host's call
+/// must come from the host's address: its token alone, read off a disk that left our hands, is
+/// not enough (ADR 0026). Behind `tls: off` the peer is the proxy in front: not checked.
+#[tokio::test]
+async fn a_host_call_must_come_from_the_host() {
+    let hosts = vec![
+        config::StaticHost {
+            id: "s1".into(),
+            url: "http://10.0.0.1:7420".into(),
+            token: "s1-token".into(),
+            ..Default::default()
+        },
+        config::StaticHost {
+            id: "named".into(),
+            url: "http://host.example:7420".into(),
+            token: "named-token".into(),
+            ..Default::default()
+        },
+    ];
+    let f = fleet(
+        config::Config {
+            hosts: hosts.clone(),
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let ask = |u: &str| Some(serde_json::json!({ "url": u }));
+    let elsewhere = std::net::IpAddr::from([203, 0, 113, 7]);
+    for path in ["/v1/hosts/key", "/v1/hosts/register"] {
+        let body = if path.ends_with("key") {
+            ask("http://10.0.0.1:7420")
+        } else {
+            Some(heartbeat("http://10.0.0.1:7420", 1000, &[]))
+        };
+        let (s, _, text) = call_from(&f.st, elsewhere, "POST", path, "s1-token", body).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{path}: {text}");
+        assert!(
+            text.contains("come from 10.0.0.1, not 203.0.113.7"),
+            "{text}"
+        );
+    }
+    assert!(f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty());
+    // A host known by a name cannot be checked by address: refused, saying so.
+    let (s, _, text) = call_from(
+        &f.st,
+        elsewhere,
+        "POST",
+        "/v1/hosts/key",
+        "named-token",
+        ask("http://host.example:7420"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{text}");
+    assert!(text.contains("its url must be one"), "{text}");
+    // An IPv4 peer seen as IPv6-mapped is the same address.
+    let mapped: std::net::IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+    let (s, _, text) = call_from(
+        &f.st,
+        mapped,
+        "POST",
+        "/v1/hosts/key",
+        "s1-token",
+        ask("http://10.0.0.1:7420"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{text}");
+
+    let behind = fleet(
+        config::Config {
+            hosts,
+            tls: config::Tls::Off,
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let (s, _, text) = call_from(
+        &behind.st,
+        elsewhere,
+        "POST",
+        "/v1/hosts/key",
+        "s1-token",
+        ask("http://10.0.0.1:7420"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "tls: off checks the token alone: {text}");
 }
 
 #[tokio::test]

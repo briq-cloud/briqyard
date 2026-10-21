@@ -5,7 +5,7 @@
 
 use crate::config::{Config, KeySource};
 use crate::zfs::{Key, Zfs};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use briqyard_api as api;
 use std::future::Future;
 use std::path::Path;
@@ -26,13 +26,13 @@ pub async fn unlock(zfs: &Zfs, cfg: &Config, stop: impl Future<Output = ()>) -> 
     };
     let source = cfg.key_source()?;
     let from = match &source {
-        KeySource::Fleet => "fleet".to_string(),
+        KeySource::Fleet { .. } => "fleet".to_string(),
         KeySource::File(p) => p.display().to_string(),
     };
     tokio::pin!(stop);
     let mut wait = Duration::from_secs(5);
     loop {
-        match load(zfs, cfg, &source, &root).await {
+        match load(zfs, &source, &root).await {
             Ok(()) => {
                 tracing::info!(pool, root, from, "pool key loaded");
                 return Ok(true);
@@ -54,9 +54,13 @@ pub async fn unlock(zfs: &Zfs, cfg: &Config, stop: impl Future<Output = ()>) -> 
 }
 
 /// One try: the key from its source, checked, loaded on the encryption root.
-async fn load(zfs: &Zfs, cfg: &Config, source: &KeySource, root: &str) -> Result<()> {
+async fn load(zfs: &Zfs, source: &KeySource, root: &str) -> Result<()> {
     let key = match source {
-        KeySource::Fleet => from_fleet(cfg).await?,
+        KeySource::Fleet {
+            url,
+            advertise,
+            token,
+        } => from_fleet(url, advertise, token).await?,
         KeySource::File(p) => from_file(p)?,
     };
     check(&key)?;
@@ -82,17 +86,13 @@ fn from_file(path: &Path) -> Result<String> {
 
 /// `POST /v1/hosts/key` on the fleet, with the host's token, for the record at its address:
 /// the fleet serves a host its own key and nobody else's.
-async fn from_fleet(cfg: &Config) -> Result<String> {
-    let f = cfg
-        .fleet
-        .as_ref()
-        .ok_or_else(|| anyhow!("storage.key: fleet needs fleet.url"))?;
-    let url = format!("{}/v1/hosts/key", f.url.trim_end_matches('/'));
+async fn from_fleet(fleet: &str, advertise: &str, token: &str) -> Result<String> {
+    let url = format!("{}/v1/hosts/key", fleet.trim_end_matches('/'));
     let resp = crate::heartbeat::client()
         .post(&url)
-        .bearer_auth(&cfg.token)
+        .bearer_auth(token)
         .json(&api::HostKeyRequest {
-            url: f.advertise.clone(),
+            url: advertise.to_string(),
         })
         .send()
         .await
@@ -214,26 +214,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pool.key");
         let source = KeySource::File(path.clone());
-        let err = load(&zfs, &Config::default(), &source, "byard")
-            .await
-            .unwrap_err();
+        let err = load(&zfs, &source, "byard").await.unwrap_err();
         assert!(
             format!("{err:#}").contains(&format!("read {}", path.display())),
             "{err:#}"
         );
         std::fs::write(&path, "not-a-key-but-a-secret").unwrap();
-        let err = load(&zfs, &Config::default(), &source, "byard")
-            .await
-            .unwrap_err();
+        let err = load(&zfs, &source, "byard").await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("not 64 hex digits") && !msg.contains("secret"),
             "{msg}"
         );
         std::fs::write(&path, "f".repeat(64)).unwrap();
-        let err = load(&zfs, &Config::default(), &source, "byard")
-            .await
-            .unwrap_err();
+        let err = load(&zfs, &source, "byard").await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("Incorrect key") && !msg.contains(&"f".repeat(64)),
@@ -255,14 +249,8 @@ mod tests {
     async fn the_key_is_asked_of_the_fleet_as_the_host() {
         let url = fleet().await;
         let (_s, zfs) = locked().await;
-        let err = load(
-            &zfs,
-            &with_fleet(&url, "another-token"),
-            &KeySource::Fleet,
-            "byard",
-        )
-        .await
-        .unwrap_err();
+        let source = with_fleet(&url, "another-token").key_source().unwrap();
+        let err = load(&zfs, &source, "byard").await.unwrap_err();
         assert!(format!("{err:#}").contains("401"), "{err:#}");
         assert!(unlock(
             &zfs,

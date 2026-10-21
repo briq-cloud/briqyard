@@ -78,6 +78,14 @@ fi
 scheme=https
 case "$bind" in 127.*) scheme=http ;; esac
 advertise=${ADVERTISE:-$scheme://$(hostname -I | awk '{print $1}'):7420}
+# The token and the pool's key cross the link to the fleet (ADR 0026): plain HTTP only to a
+# loopback or private address, as the daemon checks.
+case "$FLEET_URL" in
+  http://*)
+    fleet_host=${FLEET_URL#http://}; fleet_host=${fleet_host%%/*}; fleet_host=${fleet_host%:*}
+    private "$fleet_host" || { echo "FLEET_URL=$FLEET_URL is plain HTTP to an address the internet could reach: write https://, or a private address"; exit 1; }
+    ;;
+esac
 
 # Downloads a file and checks its digest against the pin before it lands anywhere.
 fetch() {
@@ -103,7 +111,21 @@ for unit in $(systemctl list-units --type swap --all --plain --no-legend | awk '
   systemctl mask "$unit" >/dev/null
 done
 
-# The pool's key on stdout: the fleet's for this host, or the key file's, made when missing.
+echo "== no crash dumps"
+# A kernel crash dump is the whole memory, guests' included, written to /var/crash in clear.
+if dpkg -s kdump-tools >/dev/null 2>&1; then
+  apt-get purge -y -qq kdump-tools >/dev/null
+fi
+if [ "$(cat /sys/kernel/kexec_crash_loaded 2>/dev/null || echo 0)" = 1 ]; then
+  kexec -p -u 2>/dev/null || true
+  if [ "$(cat /sys/kernel/kexec_crash_loaded)" = 1 ]; then
+    echo "   a crash kernel is loaded (kdump) and could not be unloaded: its dump would hold guest memory in clear"
+    exit 1
+  fi
+fi
+
+# The pool's key on stdout: the fleet's for this host, or the key file's. `pool_key make`
+# makes the file when it is missing (a pool about to be created), never otherwise.
 pool_key() {
   if [ -n "$FLEET_URL" ]; then
     # The token goes in on stdin, off the command line.
@@ -111,7 +133,7 @@ pool_key() {
       curl -fsS --max-time 20 -H @- -H 'Content-Type: application/json' \
         -d "{\"url\": \"$advertise\"}" "${FLEET_URL%/}/v1/hosts/key" | jq -er .key
   else
-    if [ ! -f "$KEY_FILE" ]; then
+    if [ ! -f "$KEY_FILE" ] && [ "${1:-}" = make ]; then
       (umask 077; mkdir -p "$(dirname "$KEY_FILE")"; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$KEY_FILE")
       echo "   key made in $KEY_FILE: keep a copy off this host, the pool is unreadable without it" >&2
     fi
@@ -121,7 +143,7 @@ pool_key() {
 
 echo "== pool $POOL, encrypted"
 if ! zpool list "$POOL" >/dev/null 2>&1; then
-  key=$(pool_key) || { echo "   no key for the pool (${FLEET_URL:-$KEY_FILE})"; exit 1; }
+  key=$(pool_key make) || { echo "   no key for the pool (${FLEET_URL:-$KEY_FILE})"; exit 1; }
   [ "${#key}" = 64 ] || { echo "   the pool's key is not 64 hex digits"; exit 1; }
   if [ -n "$POOL_DEVICE" ]; then
     vdev=$POOL_DEVICE
@@ -140,6 +162,19 @@ if [ "$(zfs get -H -o value encryption "$POOL")" = off ]; then
   echo "   pool $POOL is not encrypted (ADR 0026): ZFS cannot encrypt a pool after its creation."
   echo "   Move what it holds elsewhere, destroy it, and run this script again."
   exit 1
+fi
+# A pool that exists, locked (a reboot): its key from the same source, checked now rather
+# than at the daemon's start.
+if [ "$(zfs get -H -o value keystatus "$POOL")" = unavailable ]; then
+  root=$(zfs get -H -o value encryptionroot "$POOL")
+  key=$(pool_key) || { echo "   pool $POOL is locked and its key could not be read (${FLEET_URL:-$KEY_FILE})"; exit 1; }
+  if ! out=$(printf '%s\n' "$key" | zfs load-key -L prompt "$root" 2>&1); then
+    echo "   pool $POOL is locked and its key (${FLEET_URL:-$KEY_FILE}) does not open it: $out"
+    echo "   The pool was made with another key: the fleet's registry lost or replaced, or another key file."
+    exit 1
+  fi
+  unset key
+  echo "   key loaded"
 fi
 
 echo "== firecracker $FIRECRACKER_VERSION and a guest kernel"

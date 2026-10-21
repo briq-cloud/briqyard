@@ -121,7 +121,12 @@ pub struct Storage {
 /// Where the pool's key comes from (`storage.key`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeySource {
-    Fleet,
+    /// Asked of the fleet at `url` as the host at `advertise`, presenting `token`.
+    Fleet {
+        url: String,
+        advertise: String,
+        token: String,
+    },
     File(PathBuf),
 }
 
@@ -482,8 +487,34 @@ impl Config {
             bail!("disk_limits: for 32 vCPUs, {e}");
         }
         self.backup.check()?;
+        self.check_fleet_url()?;
         self.check_exposure()?;
         self.check_advertise()
+    }
+
+    /// The host's token goes to `fleet.url` with every heartbeat, and the pool's key comes back
+    /// from it (ADR 0026): plain HTTP only to a loopback or private address.
+    fn check_fleet_url(&self) -> Result<()> {
+        let Some(url) = self.fleet.as_ref().map(|f| f.url.as_str()) else {
+            return Ok(());
+        };
+        let Some(rest) = url.strip_prefix("http://") else {
+            return Ok(());
+        };
+        let host = rest.split(['/', '?']).next().unwrap_or("");
+        let host = match host.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => host,
+        };
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        match host.parse::<IpAddr>() {
+            Ok(ip) if netw::is_private(ip) => Ok(()),
+            _ => bail!(
+                "fleet.url: {url} is plain HTTP to an address the internet could reach: the \
+                 host's token and its pool's key would cross it in clear. Write https://, or a \
+                 loopback or private address"
+            ),
+        }
     }
 
     /// The fleet dials `fleet.advertise` as written: its scheme must be the API's.
@@ -532,7 +563,13 @@ impl Config {
                 Some(_) if self.token.is_empty() => {
                     bail!("storage.key: fleet needs token, the host's own, which the fleet checks")
                 }
-                Some(_) => return Ok(KeySource::Fleet),
+                Some(f) => {
+                    return Ok(KeySource::Fleet {
+                        url: f.url.clone(),
+                        advertise: f.advertise.clone(),
+                        token: self.token.clone(),
+                    })
+                }
             }
         }
         match key.strip_prefix("file:").map(PathBuf::from) {
@@ -718,19 +755,19 @@ mod tests {
     #[test]
     fn the_key_source_is_checked() {
         let fleet =
-            "token: t\nfleet:\n  url: http://fleet:7430\n  advertise: http://10.0.0.5:7420\n";
+            "token: t\nfleet:\n  url: http://10.0.0.2:7430\n  advertise: http://10.0.0.5:7420\n";
         let c = load(&format!("{fleet}storage:\n  key: fleet\n")).unwrap();
-        assert_eq!(c.key_source().unwrap(), KeySource::Fleet);
+        assert!(matches!(c.key_source().unwrap(), KeySource::Fleet { .. }));
         let c = load("storage:\n  key: file:/root/k\n").unwrap();
         assert_eq!(c.key_source().unwrap(), KeySource::File("/root/k".into()));
         for (yaml, why) in [
             ("storage:\n  key: fleet\n", "fleet needs fleet.url"),
             (
-                "token: t\nfleet:\n  url: http://fleet:7430\nstorage:\n  key: fleet\n",
+                "token: t\nfleet:\n  url: http://10.0.0.2:7430\nstorage:\n  key: fleet\n",
                 "fleet needs fleet.advertise",
             ),
             (
-                "fleet:\n  url: http://fleet:7430\n  advertise: http://10.0.0.5:7420\nstorage:\n  key: fleet\n",
+                "fleet:\n  url: http://10.0.0.2:7430\n  advertise: http://10.0.0.5:7420\nstorage:\n  key: fleet\n",
                 "fleet needs token",
             ),
             ("storage:\n  key: file:k\n", "want fleet or file:<absolute path>"),
@@ -739,6 +776,31 @@ mod tests {
         ] {
             let err = load(yaml).unwrap_err();
             assert!(format!("{err:#}").contains(why), "{yaml}: {err:#}");
+        }
+    }
+
+    /// The token and the pool's key never cross the internet in clear (ADR 0026).
+    #[test]
+    fn a_plain_fleet_url_is_private_or_loopback() {
+        for ok in [
+            "https://fleet.example",
+            "http://127.0.0.1:7430",
+            "http://10.0.0.2:7430/",
+            "http://192.168.64.1:7430",
+            "http://[::1]:7430",
+        ] {
+            load(&format!("fleet:\n  url: {ok}\n")).unwrap_or_else(|e| panic!("{ok}: {e:#}"));
+        }
+        for bad in [
+            "http://203.0.113.5:7430",
+            "http://fleet.example",
+            "http://8.8.8.8",
+        ] {
+            let err = load(&format!("fleet:\n  url: {bad}\n")).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("plain HTTP to an address"),
+                "{bad}: {err:#}"
+            );
         }
     }
 
@@ -821,7 +883,7 @@ usage_keep_days: 30
 events_keep_days: 2
 suspend_on_sleep: true
 fleet:
-  url: http://fleet:7430
+  url: http://10.0.0.2:7430
   advertise: http://10.0.0.5:7420
   region: fsn1
 capacity:
@@ -847,7 +909,7 @@ console_max_mb: 16
         assert!(c.pci);
         assert_eq!(c.init, PathBuf::from("/opt/briqyard-init"));
         assert_eq!(c.storage.pool, "tank/byard");
-        assert_eq!(c.key_source().unwrap(), KeySource::Fleet);
+        assert!(matches!(c.key_source().unwrap(), KeySource::Fleet { .. }));
         assert_eq!(c.registries.len(), 1);
         assert_eq!(c.registries[0].host, "ghcr.io");
         assert_eq!(c.registries[0].username, "bot");
@@ -884,7 +946,7 @@ console_max_mb: 16
         assert_eq!(c.events_keep_days, 2);
         assert!(c.suspend_on_sleep);
         let f = c.fleet.unwrap();
-        assert_eq!(f.url, "http://fleet:7430");
+        assert_eq!(f.url, "http://10.0.0.2:7430");
         assert_eq!(f.advertise, "http://10.0.0.5:7420");
         assert_eq!(f.region, "fsn1");
         assert_eq!(c.capacity.memory_mb, 65536);
