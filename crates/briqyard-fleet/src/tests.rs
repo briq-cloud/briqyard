@@ -2851,8 +2851,10 @@ fn fleet_with_key() -> Fleet {
 #[tokio::test]
 async fn an_upgrade_refuses_what_it_cannot_do() {
     let up = |r: &str| Some(serde_json::json!({ "release": r }));
-    // No SSH key: nothing can be installed.
-    let f = fleet(config::Config::default(), Box::new(provision::Static));
+    // No SSH key: nothing can be installed. Named, not the default: a dev VM has that one.
+    let mut cfg = config::Config::default();
+    cfg.provisioner.bootstrap.ssh_key = "/nonexistent/briqyard-fleet-key".into();
+    let f = fleet(cfg, Box::new(provision::Static));
     seed(&f.st, "h_a", 64_000, 0, 0, &[]);
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", up("0.2.0")).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
