@@ -244,8 +244,33 @@ for i in $(seq 1 10); do kill -0 "$FOLLOW" 2>/dev/null || break; sleep 1; done
 check "logs -f ends at the destroy"  '! kill -0 "$FOLLOW" 2>/dev/null && grep -q "was destroyed" /tmp/by-e2e-follow.txt'
 kill "$FOLLOW" 2>/dev/null || true; wait "$FOLLOW" 2>/dev/null || true
 
+echo "== changes at the next boot: env, files, then the image (ADR 0024)"
+# The program serves its boot file and the env it booted with; the volume holds a mark.
+printf v1 > /tmp/by-e2e-page.txt
+AP=$(briqyard machine run --image python:3.12-alpine --name apply --tenant "$T" --memory 256 --volume 1G:/data -e V=1 --file /srv/page.txt=/tmp/by-e2e-page.txt -- sh -c 'cd /srv && echo "$V" > v.txt && exec python3 -m http.server 8080' | jq -r .id)
+page() { briqyard machine exec "$AP" -- wget -qO- -T 2 "http://127.0.0.1:8080/$1" 2>/dev/null; }
+serving() { for i in $(seq 1 30); do page v.txt >/dev/null && return 0; sleep 1; done; return 1; }
+serving || true
+check "serves V=1 and its file"        '[ "$(page v.txt)" = 1 ] && [ "$(page page.txt)" = v1 ]'
+briqyard machine exec "$AP" -- sh -c 'echo kept > /data/mark' >/dev/null
+printf v2 > /tmp/by-e2e-page.txt
+briqyard machine set "$AP" -e V=2 --file /srv/page.txt=/tmp/by-e2e-page.txt >/dev/null
+check "set: pending shown"             '[ "$(briqyard machine get "$AP" | jq -r ".state, (.pending.fields | join(\",\"))" | paste -sd " " -)" = "running env,files" ]'
+check "set: still the old values"      '[ "$(page v.txt)" = 1 ] && [ "$(page page.txt)" = v1 ]'
+briqyard machine restart "$AP" >/dev/null
+serving || true
+check "restart: the new values"        '[ "$(page v.txt)" = 2 ] && [ "$(page page.txt)" = v2 ]'
+check "restart: nothing pending"       '[ "$(briqyard machine get "$AP" | jq -r .pending)" = null ]'
+check "the applied event"              'briqyard events --machine "$AP" | awk "\$4 == \"applied\"" | grep -q .'
+briqyard machine set "$AP" --image python:3.13-alpine >/dev/null
+briqyard machine restart "$AP" >/dev/null
+serving || true
+check "a new image: python 3.13"       'briqyard machine exec "$AP" -- python3 --version | grep -q "^Python 3\.13\."'
+check "a new image: the volume kept"   '[ "$(briqyard machine exec "$AP" -- cat /data/mark)" = kept ]'
+briqyard machine rm "$AP" >/dev/null
+
 echo "== postgres with a volume, endpoint, wake on connect"
-P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m | jq -r .id)
+P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m --readiness "exec:pg_isready -h 127.0.0.1 -U postgres" | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "postgres ready" 'briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres | grep -q accepting'
 check "volume mounted" 'briqyard machine exec "$P" -- sh -c "mount | grep -q /var/lib/postgresql/data"'
@@ -280,6 +305,8 @@ F=$(briqyard machine fork "$P" --name pgfork | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$F" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "fork has data"  '[ "$(briqyard machine exec "$F" -- psql -U postgres -tAc "select x from t")" = 42 ]'
 briqyard machine exec "$F" -- psql -U postgres -c "insert into t values (43)" >/dev/null
+# The source has slept by now (its window is a minute); the exec wakes it and runs once its
+# readiness probe says Postgres accepts (ADR 0022).
 check "fork is apart"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select count(*) from t")" = 1 ]'
 # The fork outlives its source: the clone is promoted, the source's disks go.
 briqyard machine destroy "$P" >/dev/null
@@ -303,6 +330,28 @@ R1=$(briqyard machine restore --from "$F" --backup "$B1" --tenant "$T" --name re
 for i in $(seq 1 60); do briqyard machine exec "$R1" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "restored the first backup" '[ "$(briqyard machine exec "$R1" -- psql -U postgres -tAc "select sum(x) from t")" = 85 ]'
 briqyard machine destroy "$R1" >/dev/null
+
+echo "== backups on a schedule: retention, delete, a destroyed machine's"
+# The schedule's own backups are an hour apart: the API's make the points, and retention
+# is the same after either.
+SB=$(briqyard machine run --image alpine:3.20 --name sched --tenant "$T" --memory 128 --backup-every 1h --backup-keep 2 -- sleep 3600 | jq -r .id)
+check "schedule shown" '[ "$(briqyard machine get "$SB" | jq -c "[.backup, (.next_backup_at != null)]")" = "[{\"every\":\"1h\",\"keep\":2},true]" ]'
+point() { briqyard machine exec "$SB" -- sh -c "echo $1 > /root/n; sync" >/dev/null && briqyard machine backup "$SB" | jq -r .id; }
+S1=$(point 1); S2=$(point 2); S3=$(point 3)
+kinds=$(briqyard machine backups "$SB" | jq -r '[.[] | "\(.id):\(.incremental)"] | join(",")')
+# keep 2: the third is whole, and the second (kept) needs the first.
+check "every 2nd whole, a kept one's base kept" '[ "$kinds" = "$S1:false,$S2:true,$S3:false" ]'
+check "a base is not deleted alone" '! briqyard backup rm "$SB" "$S1" >/dev/null 2>&1'
+RS=$(briqyard machine restore --from "$SB" --backup "$S2" --tenant "$T" --name sched-r | jq -r .id)
+for i in $(seq 1 30); do briqyard machine exec "$RS" -- true >/dev/null 2>&1 && break; sleep 1; done
+check "the oldest kept restores from its chain" '[ "$(briqyard machine exec "$RS" -- cat /root/n)" = 2 ]'
+briqyard machine destroy "$RS" >/dev/null
+S4=$(point 4)
+check "retention leaves 2 restorable" '[ "$(briqyard machine backups "$SB" | jq -r "[.[].id] | join(\",\")")" = "$S3,$S4" ]'
+check "retention is an event" 'briqyard events --tenant "$T" --machine "$SB" 2>/dev/null | grep -q backup_deleted'
+briqyard machine destroy "$SB" >/dev/null
+check "a destroyed machine's backups listed" '[ "$(briqyard backups --tenant "$T" | jq "[.[] | select(.machine_id == \"$SB\" and .deletes_at != null)] | length")" = 2 ]'
+check "deleted with what continues from it" 'briqyard backup rm "$SB" "$S3" --chain && [ "$(briqyard machine backups "$SB" | jq length)" = 0 ]'
 
 
 echo "== tenants made together get bridges of their own"

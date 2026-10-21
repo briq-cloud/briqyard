@@ -58,6 +58,17 @@ a start takes the host's memory and moves to `starting` in one step under the ma
 lock, so starts that race never oversubscribe it; a destroy holds the machine's lock from the
 state check to the record's removal and, when it fails, is tried again every 15 s.
 
+A PATCH of what a machine runs (`image`, `entrypoint`, `cmd`, `env`, `files`, `size`, `ports`,
+`restart`; ADR 0024), checked by the same `SpecChange::check` as a create, is kept as `pending`
+and applied at the next start, never to a running process: a start or wake after a stop, a
+restart by the policy, or `POST /restart`. A new image is pulled and built before anything
+moves (a failure is `boot_failed`, the change kept); the change goes onto the record in the
+step that reserves the memory, so a new size is reserved there (`capacity` past the host);
+then a new image's root disk is cloned again from its `@base` (forks of the old one promoted,
+as at a destroy) and the boot reads the record. The data volume is never touched. A change to
+anything a memory snapshot holds (all but `ports` and `restart`) makes that start cold.
+`updated` (`pending: true`) marks the PATCH, `applied` the start.
+
 ### Probes and restarts
 
 A machine may have a startup, a readiness and a liveness probe (ADR 0022, `machine/probes.rs`),
@@ -170,6 +181,15 @@ directory), incremental after the first; the record beside it holds the machine'
 restore is a create that receives the chain of streams into fresh datasets on any host that
 reaches the store. Local snapshots stay only as the base of the next incremental send.
 
+A machine's `backup: {every, keep}` is run by the daemon (ADR 0023, `machine/backups.rs`):
+the tick starts each due backup detached, through a semaphore (`backup.at_once`), and every
+backup or deletion of a machine's backups takes the machine's turn, so one runs at a time. A
+backup is whole every `keep`-th, else from the last one's snapshot when that backup is in the
+store; after it, retention deletes whole chains: whatever is neither among the newest `keep`
+nor a base of one. A destroy hands the backups and the turn to a holder (`state/holders/`),
+which lists them, meters them into the machine's usage buckets, and deletes them
+`keep_destroyed_days` later.
+
 ### Usage
 
 The daemon measures what each machine uses, per UTC hour, and never prices it (ADR 0017,
@@ -178,7 +198,8 @@ every tick, split at the hour (running is `starting` to `stopping`; suspended is
 memory snapshot); the tick (15 s) adds what its counters grew by, a smaller value counting as
 a counter begun again. The sources: the cgroup's `cpu.stat`; one `zfs list` of the pool for
 allocated sizes, used bytes and snapshots, plus the memory snapshot files; the record's
-`backup_bytes`, added at each backup; two counter sets in the inet table (`internet_out`,
+`backup_bytes`, what its backups in the store take, set at each backup and deletion (a
+destroyed machine's holder carries it on); two counter sets in the inet table (`internet_out`,
 `internet_in`, an element per machine address for the machine's life, matched in the forward
 chain on the egress interface); and the ingress proxy, which adds the bytes it passes as they
 pass. The open hours live in memory, written to `state/usage/<hour>.json` once a minute and at
@@ -195,7 +216,7 @@ log's last line and every record's version. A state change says what happened th
 `Entry::set_state`, whose closure returns the event; the other facts (a create, a restart, a
 PATCH, a backup, a destroy, the gateway serving or put to sleep, an image pull, the daemon's
 start, an adoption) are logged where they happen. The seq of the last event about a machine is
-its `version`; `PATCH`, `DELETE`, `start`, `stop` and `wake` take `If-Match` and answer 409
+its `version`; `PATCH`, `DELETE`, `start`, `stop`, `wake` and `restart` take `If-Match` and answer 409
 `conflict` with the machine when it moved. `GET /v1/events` reads from a cursor (`since`, 410
 `gone` when it is pruned or past the log); `watch=true` subscribes, sends the backlog, then each
 new event as NDJSON with `{}` every 30 s, and closes a watcher that falls 1,024 events behind.

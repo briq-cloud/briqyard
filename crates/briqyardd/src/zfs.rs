@@ -480,6 +480,24 @@ impl Zfs {
         space_lines(&out, &format!("{}/", self.pool))
     }
 
+    /// What was written to a dataset since one of its snapshots (`written@<snap>`), in bytes.
+    pub async fn written_since(&self, name: &str, snap: &str) -> Result<u64> {
+        let out = self
+            .run(&[
+                "get",
+                "-H",
+                "-p",
+                "-o",
+                "value",
+                &format!("written@{snap}"),
+                &self.ds(name),
+            ])
+            .await?;
+        out.trim()
+            .parse()
+            .map_err(|_| anyhow!("zfs written@{snap} of {name}: {:?}", out.trim()))
+    }
+
     pub async fn used(&self, name: &str) -> Result<u64> {
         let out = self
             .run(&["get", "-H", "-p", "-o", "value", "used", &self.ds(name)])
@@ -579,11 +597,15 @@ pub(crate) mod fake {
 
     /// A stand-in for `zfs`, with the fake device root as its state: a directory per parent
     /// dataset, a file per volume or snapshot, and `<clone>.origin` naming the snapshot a
-    /// clone was made from (`promote` moves that snapshot to the clone and makes the source
-    /// the clone's clone, as ZFS does). Every call is appended to `calls`, one line each;
+    /// clone was made from (`promote` moves that snapshot and the source's older ones, in the
+    /// order `snapshots.order` keeps, to the clone and makes the source the clone's clone, as
+    /// ZFS does). Every call is appended to `calls`, one line each;
     /// `get` answers come from `answer.<property>` files when there is one, else `origin` and
     /// `clones` from the `.origin` files, and `list -p` (space) from `answer.space`; `busy` holds how many destroys still answer
-    /// "dataset is busy". Error texts are the real ones, since the code matches on them.
+    /// "dataset is busy". A stream is one line naming its snapshot and its base, sent once no
+    /// `hold.send` file is there; a receive makes the dataset and the snapshot, and refuses
+    /// an increment whose base the dataset lacks, as ZFS does. Error texts are the real ones,
+    /// since the code matches on them.
     const FAKE: &str = r#"#!/bin/sh
 DEV="__DEV__"
 printf '%s\n' "$*" >> "__LOG__"
@@ -616,12 +638,20 @@ case "$1" in
     mkdir -p "$(dirname "$DEV/$3")"; : > "$DEV/$3"; echo "$2" > "$DEV/$3.origin"; exit 0;;
   snapshot)
     if [ -e "$DEV/$2" ]; then echo "cannot create snapshot '$2': dataset already exists" >&2; exit 1; fi
-    : > "$DEV/$2"; exit 0;;
+    : > "$DEV/$2"; echo "$2" >> "$DEV/snapshots.order"; exit 0;;
   promote)
     [ -e "$DEV/$2" ] || missing "$2"
     if [ -f "$DEV/$2.origin" ]; then
       o=$(cat "$DEV/$2.origin"); src="${o%@*}"; snap="${o#*@}"
-      mv "$DEV/$o" "$DEV/$2@$snap"; echo "$2@$snap" > "$DEV/$src.origin"; rm "$DEV/$2.origin"
+      # The origin snapshot and every snapshot of the source made before it move to the
+      # clone, as in ZFS; clones of those follow them.
+      for s in $(grep "^$src@" "$DEV/snapshots.order" 2>/dev/null); do
+        [ -e "$DEV/$s" ] || continue
+        mv "$DEV/$s" "$DEV/$2@${s#*@}"
+        find "$DEV" -name '*.origin' -exec grep -lx "$s" {} + | while read -r c; do echo "$2@${s#*@}" > "$c"; done
+        [ "$s" = "$o" ] && break
+      done
+      echo "$2@$snap" > "$DEV/$src.origin"; rm -f "$DEV/$2.origin"
     fi
     exit 0;;
   destroy)
@@ -632,6 +662,17 @@ case "$1" in
     case "$last" in *boom*) echo "cannot destroy '$last': permission denied" >&2; exit 1;; esac
     [ -e "$DEV/$last" ] || missing "$last"
     rm -rf "${DEV:?}/${last:?}" "$DEV/$last.origin"; exit 0;;
+  send)
+    while [ -f "$DEV/hold.send" ]; do sleep 0.02; done
+    base=-; [ "$3" = "-i" ] && base="${4#@}"
+    echo "stream ${last#*@} $base"; exit 0;;
+  receive)
+    read -r _ snap base
+    if [ "$base" != - ] && [ ! -e "$DEV/$last@$base" ]; then
+      echo "cannot receive incremental stream: most recent snapshot of $last does not match incremental source" >&2; exit 1
+    fi
+    mkdir -p "$(dirname "$DEV/$last")"; : > "$DEV/$last"; : > "$DEV/$last@$snap"
+    echo "$last@$snap" >> "$DEV/snapshots.order"; exit 0;;
   get)
     for a in "$@"; do prop="$last_but_one"; last_but_one="$a"; done
     if [ -f "$DEV/answer.$prop" ]; then cat "$DEV/answer.$prop"; exit 0; fi
@@ -1091,6 +1132,23 @@ mod tests {
             f.calls().last().unwrap(),
             "get -H -p -o value clones byard/images/abc@base"
         );
+    }
+
+    #[tokio::test]
+    async fn written_since_a_snapshot_is_a_count_or_an_error() {
+        let f = Fake::open("byard").await.unwrap();
+        f.answer("written@bk-1", "0\n");
+        f.calls();
+        assert_eq!(f.zfs.written_since("m/x/root", "bk-1").await.unwrap(), 0);
+        assert_eq!(
+            f.calls(),
+            vec!["get -H -p -o value written@bk-1 byard/m/x/root"]
+        );
+        f.answer("written@bk-1", "8192\n");
+        assert_eq!(f.zfs.written_since("m/x/root", "bk-1").await.unwrap(), 8192);
+        // Unreadable is not "nothing written": the caller backs up rather than skip.
+        f.answer("written@bk-1", "-\n");
+        assert!(f.zfs.written_since("m/x/root", "bk-1").await.is_err());
     }
 
     #[tokio::test]

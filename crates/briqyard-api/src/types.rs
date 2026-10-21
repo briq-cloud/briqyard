@@ -11,6 +11,19 @@ pub struct Size {
     pub memory_mb: u32,
 }
 
+impl Size {
+    /// What a host can boot: 1 to 32 vCPUs, 128 MB to 256 GB.
+    pub fn check(&self) -> Result<(), String> {
+        if !(1..=32).contains(&self.vcpus) {
+            return Err("size.vcpus must be 1..32".into());
+        }
+        if !(128..=262144).contains(&self.memory_mb) {
+            return Err("size.memory_mb must be 128..262144".into());
+        }
+        Ok(())
+    }
+}
+
 /// A data volume mounted in the machine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeSpec {
@@ -19,7 +32,7 @@ pub struct VolumeSpec {
 }
 
 /// A boot file: written before the process starts, and again at every cold start.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct File {
     pub path: String,
     pub base64: String,
@@ -54,6 +67,44 @@ impl Default for RestartPolicy {
             max_retries: default_max_retries(),
         }
     }
+}
+
+/// A machine's backup schedule (ADR 0023): a backup every `every`, the newest `keep` kept with
+/// what they continue from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupPolicy {
+    /// "6h", "1d": at least an hour.
+    pub every: String,
+    /// At least 1.
+    pub keep: u32,
+}
+
+impl BackupPolicy {
+    /// The shortest `every`.
+    pub const MIN_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// `every` as a duration, checked with `keep`; the message names the field under `backup`.
+    pub fn check(&self) -> Result<std::time::Duration, String> {
+        let every =
+            duration(self.every.trim(), r#"want "6h", "1d""#).map_err(|e| format!("every {e}"))?;
+        if every < Self::MIN_EVERY {
+            return Err(format!("every {:?}: at least 1h", self.every));
+        }
+        if self.keep < 1 {
+            return Err("keep: at least 1".into());
+        }
+        Ok(every)
+    }
+}
+
+/// A field that is there, `null` included, as `Some`: with `#[serde(default)]`, absent is
+/// `None` and `null` is `Some(None)`. For a field where `null` removes what absent keeps.
+fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 /// A check the daemon runs on a running machine (ADR 0022): exactly one of `exec`, `tcp` and
@@ -396,6 +447,13 @@ pub struct CreateMachineRequest {
     /// Limits on its internet traffic, over the host's defaults (a restore takes the backup's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<EgressLimits>,
+    /// Its backup schedule: absent is the host's default (none unless configured), `null` none.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub backup: Option<Option<BackupPolicy>>,
     /// Startup, readiness and liveness checks (ADR 0022); a restore takes the backup's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probes: Option<Probes>,
@@ -410,6 +468,22 @@ pub struct CreateMachineRequest {
     /// the request sets them. The backup may come from another host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<RestoreSpec>,
+}
+
+impl CreateMachineRequest {
+    /// What it runs, as `SpecChange::check` reads it: the image when it names one.
+    pub fn spec(&self) -> SpecChange {
+        SpecChange {
+            image: (!self.image.is_empty()).then(|| self.image.clone()),
+            entrypoint: self.entrypoint.clone(),
+            cmd: self.cmd.clone(),
+            env: Some(self.env.clone()),
+            files: Some(self.files.clone()),
+            size: Some(self.size),
+            ports: Some(self.ports.clone()),
+            restart: self.restart.clone(),
+        }
+    }
 }
 
 /// The source of a fork.
@@ -523,9 +597,22 @@ pub struct Machine {
     /// Stopped with a memory snapshot: the next start resumes where it was.
     #[serde(default)]
     pub suspended: bool,
+    /// Its backup schedule (ADR 0023); absent: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<BackupPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_backup_at: Option<DateTime<Utc>>,
+    /// When the daemon backs it up next, with a schedule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_backup_at: Option<DateTime<Utc>>,
     /// The seq of the last event about it (ADR 0019): what `If-Match` compares.
     #[serde(default)]
     pub version: u64,
+    /// What a PATCH changes at its next start (ADR 0024).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<Pending>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_since: Option<DateTime<Utc>>,
     /// The briqyardd that runs it (set by the fleet).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
@@ -637,7 +724,7 @@ pub struct RestoreSpec {
 /// A backup of a machine's disks in the object store.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Backup {
-    /// A timestamp, `20261019T231500Z`; later ids sort later.
+    /// A timestamp to the millisecond, `20261019T231500.123Z`; later ids sort later.
     pub id: String,
     pub machine_id: String,
     pub tenant: String,
@@ -651,6 +738,9 @@ pub struct Backup {
     /// The machine as it was: what a restore makes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<serde_json::Value>,
+    /// For a destroyed machine's backup: when the host deletes it (ADR 0023). Not stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletes_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -665,7 +755,147 @@ pub struct BackupDisk {
     pub from: Option<String>,
 }
 
-/// Changes what can change on a live machine without a restart.
+/// What a machine runs, as a PATCH changes it (ADR 0024): each field set replaces the whole
+/// value at the next start; absent keeps it. Create's fields of the same names, checked the
+/// same way.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecChange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmd: Option<Vec<String>>,
+    /// Write-only, as at create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
+    /// Write-only, as at create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<File>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<Size>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ports: Option<Vec<u16>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<RestartPolicy>,
+}
+
+impl SpecChange {
+    /// The one check of a spec, a create's or a PATCH's: the first field refused, named.
+    pub fn check(&self) -> Result<(), String> {
+        if self.image.as_deref() == Some("") {
+            return Err("image must not be empty".into());
+        }
+        for k in self.env.iter().flat_map(|env| env.keys()) {
+            if k.is_empty() || k.contains('=') {
+                return Err(format!("env {k:?}: a name is not empty and holds no \"=\""));
+            }
+        }
+        for f in self.files.iter().flatten() {
+            if !f.path.starts_with('/') {
+                return Err(format!("file {:?}: path must be absolute", f.path));
+            }
+            crate::guest::base64_decode(&f.base64)
+                .map_err(|e| format!("file {:?}: {e}", f.path))?;
+            if let Some(m) = f.mode.as_deref().filter(|m| !m.is_empty()) {
+                if u32::from_str_radix(m, 8).is_err() {
+                    return Err(format!("file {:?}: mode {m:?}: want octal digits", f.path));
+                }
+            }
+        }
+        if let Some(size) = &self.size {
+            size.check()?;
+        }
+        if self.ports.iter().flatten().any(|p| *p == 0) {
+            return Err("ports: 0 is not a port".into());
+        }
+        if let Some(r) = &self.restart {
+            if !["no", "on-failure", "always"].contains(&r.policy.as_str()) {
+                return Err("restart.policy must be no, on-failure or always".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Each field: its name, whether it is set here, and whether `other` has the same.
+    fn each(&self, other: &Self) -> [(&'static str, bool, bool); 8] {
+        [
+            ("image", self.image.is_some(), self.image == other.image),
+            (
+                "entrypoint",
+                self.entrypoint.is_some(),
+                self.entrypoint == other.entrypoint,
+            ),
+            ("cmd", self.cmd.is_some(), self.cmd == other.cmd),
+            ("env", self.env.is_some(), self.env == other.env),
+            ("files", self.files.is_some(), self.files == other.files),
+            ("size", self.size.is_some(), self.size == other.size),
+            ("ports", self.ports.is_some(), self.ports == other.ports),
+            (
+                "restart",
+                self.restart.is_some(),
+                self.restart == other.restart,
+            ),
+        ]
+    }
+
+    /// The fields it sets, in the order of the struct.
+    pub fn fields(&self) -> Vec<&'static str> {
+        self.each(self)
+            .into_iter()
+            .filter_map(|(f, set, _)| set.then_some(f))
+            .collect()
+    }
+
+    /// The fields whose value is not `was`'s, set or unset.
+    pub fn changed_from(&self, was: &Self) -> Vec<&'static str> {
+        self.each(was)
+            .into_iter()
+            .filter_map(|(f, _, same)| (!same).then_some(f))
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Whether a memory snapshot of the machine holds what it changes: everything but the
+    /// ports and the restart policy, which are the daemon's.
+    pub fn touches_snapshot(&self) -> bool {
+        self.fields()
+            .iter()
+            .any(|f| !matches!(*f, "ports" | "restart"))
+    }
+
+    /// As the machine's view shows it: every field by name, the values the view shows.
+    pub fn view(&self) -> Pending {
+        Pending {
+            fields: self.fields().into_iter().map(String::from).collect(),
+            image: self.image.clone(),
+            size: self.size,
+            ports: self.ports.clone(),
+            restart: self.restart.clone(),
+        }
+    }
+}
+
+/// A change a PATCH left for the next start (ADR 0024): the fields it changes, with the new
+/// values of those a machine's view shows (env, files, cmd and entrypoint by name only).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pending {
+    pub fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<Size>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ports: Option<Vec<u16>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<RestartPolicy>,
+}
+
+/// Changes a machine: the sleep window, metadata, egress, limits and probes at once; what it
+/// runs (`spec`) at its next start.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UpdateMachineRequest {
     /// A new sleep window ("30m", "never"); absent keeps the current one.
@@ -680,9 +910,19 @@ pub struct UpdateMachineRequest {
     /// The limits it names, applied at once; the others stay as they are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<EgressLimits>,
+    /// A new backup schedule; `null` removes it, absent keeps it.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub backup: Option<Option<BackupPolicy>>,
     /// Replaces the probes; a running machine's start over at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probes: Option<Probes>,
+    /// The image, command, env, files, size, ports and restart policy, at the next start.
+    #[serde(flatten)]
+    pub spec: SpecChange,
 }
 
 /// Stops a machine.
@@ -931,8 +1171,12 @@ pub mod reason {
     pub const BOOT_FAILED: &str = "boot_failed";
     pub const START_FAILED: &str = "start_failed";
     pub const UPDATED: &str = "updated";
+    /// A PATCH's pending change went onto the machine at its start (ADR 0024).
+    pub const APPLIED: &str = "applied";
     pub const EGRESS_CHANGED: &str = "egress_changed";
     pub const BACKED_UP: &str = "backed_up";
+    pub const BACKUP_FAILED: &str = "backup_failed";
+    pub const BACKUP_DELETED: &str = "backup_deleted";
     pub const DESTROYED: &str = "destroyed";
     pub const GATEWAY_STARTED: &str = "gateway_started";
     pub const GATEWAY_STOPPED: &str = "gateway_stopped";
@@ -964,8 +1208,11 @@ pub mod reason {
         BOOT_FAILED,
         START_FAILED,
         UPDATED,
+        APPLIED,
         EGRESS_CHANGED,
         BACKED_UP,
+        BACKUP_FAILED,
+        BACKUP_DELETED,
         DESTROYED,
         GATEWAY_STARTED,
         GATEWAY_STOPPED,
@@ -1200,7 +1447,16 @@ pub fn parse_sleep(s: &str) -> Result<Option<std::time::Duration>, String> {
     if s.is_empty() || s == "never" {
         return Ok(None);
     }
-    let bad = || format!("sleep {s:?}: want \"30m\", \"2h\", \"7d\" or \"never\"");
+    duration(s, r#"want "30m", "2h", "7d" or "never""#)
+        .map(Some)
+        .map_err(|e| format!("sleep {e}"))
+}
+
+/// A duration as the API writes one: a positive count and a unit, `s`, `m`, `h` or `d`. The
+/// error starts with the value, for the caller to put its field before; `want` says what a
+/// malformed one should look like.
+fn duration(s: &str, want: &str) -> Result<std::time::Duration, String> {
+    let bad = || format!("{s:?}: {want}");
     // The unit is the last character, not the last byte: splitting inside a multi-byte
     // character would panic.
     let (num, unit) = match s.char_indices().last() {
@@ -1209,7 +1465,7 @@ pub fn parse_sleep(s: &str) -> Result<Option<std::time::Duration>, String> {
     };
     let n: u64 = num.parse().map_err(|_| bad())?;
     if n == 0 {
-        return Err(format!("sleep {s:?}: must be positive"));
+        return Err(format!("{s:?}: must be positive"));
     }
     let per_unit = match unit {
         "s" => 1,
@@ -1220,8 +1476,8 @@ pub fn parse_sleep(s: &str) -> Result<Option<std::time::Duration>, String> {
     };
     let secs = n
         .checked_mul(per_unit)
-        .ok_or_else(|| format!("sleep {s:?}: too long"))?;
-    Ok(Some(std::time::Duration::from_secs(secs)))
+        .ok_or_else(|| format!("{s:?}: too long"))?;
+    Ok(std::time::Duration::from_secs(secs))
 }
 
 /// An id the API takes from a caller (a tenant, a machine id in a path or a restore): a-z,
@@ -1549,7 +1805,9 @@ mod tests {
             "state_changed_at": "2026-01-02T03:04:05Z",
             "started_at": "2026-01-02T03:04:05Z", "stopped_at": "2026-01-02T03:04:05Z",
             "last_used_at": "2026-01-02T03:04:05Z", "sleeps_at": "2026-01-02T03:34:05Z",
-            "suspended": true, "version": 812, "host": "h1",
+            "suspended": true, "backup": {"every": "6h", "keep": 4},
+            "last_backup_at": "2026-01-02T03:04:05Z", "next_backup_at": "2026-01-02T09:04:05Z",
+            "version": 812, "host": "h1",
             "restarts": 2, "restarting_at": "2026-01-02T03:04:25Z", "ready": false
         });
         let mut input = input;
@@ -1558,7 +1816,23 @@ mod tests {
             "initial_delay_sec": 0}});
         input["probes_status"] = json!({"readiness": {"passed": false, "message": "HTTP 503",
             "failures": 2, "at": "2026-01-02T03:04:05Z"}});
+        input["pending"] = json!({"fields": ["image", "env", "size"], "image": "postgres:18",
+            "size": {"vcpus": 2, "memory_mb": 1024}});
+        input["pending_since"] = json!("2026-01-02T03:04:05Z");
         let m: Machine = same(input);
+        let p = m.pending.as_ref().unwrap();
+        assert_eq!(
+            (p.fields.len(), p.image.as_deref()),
+            (3, Some("postgres:18"))
+        );
+        assert_eq!(m.pending_since, Some(ts()));
+        assert_eq!(m.backup.as_ref().map(|b| b.keep), Some(4));
+        assert_eq!(
+            m.next_backup_at
+                .zip(m.last_backup_at)
+                .map(|(n, l)| (n - l).num_hours()),
+            Some(6)
+        );
         assert_eq!(m.restarts, 2);
         assert_eq!(
             m.probes_status.readiness.as_ref().map(|s| s.failures),
@@ -1687,6 +1961,101 @@ mod tests {
                 ..Default::default()
             })
         );
+        assert!(u.spec.is_empty());
+        // What it runs sits beside the rest, under create's names.
+        let u: UpdateMachineRequest = same(json!({
+            "sleep": "1h", "image": "python:3.13-alpine", "entrypoint": ["/bin/sh"],
+            "cmd": ["-c", "x"], "env": {"V": "2"},
+            "files": [{"path": "/a", "base64": "aGk="}],
+            "size": {"vcpus": 2, "memory_mb": 1024}, "ports": [8080],
+            "restart": {"policy": "always", "max_retries": 3}
+        }));
+        assert_eq!(u.sleep.as_deref(), Some("1h"));
+        assert_eq!(
+            u.spec.fields(),
+            [
+                "image",
+                "entrypoint",
+                "cmd",
+                "env",
+                "files",
+                "size",
+                "ports",
+                "restart"
+            ]
+        );
+        assert_eq!(u.spec.ports, Some(vec![8080]));
+    }
+
+    #[test]
+    fn a_spec_change_and_its_check() {
+        let s = |v: Value| -> SpecChange { serde_json::from_value(v).unwrap() };
+        for (v, want) in [
+            (json!({"image": ""}), "image must not be empty"),
+            (
+                json!({"env": {"": "x"}}),
+                "env \"\": a name is not empty and holds no \"=\"",
+            ),
+            (
+                json!({"env": {"A=B": "x"}}),
+                "env \"A=B\": a name is not empty and holds no \"=\"",
+            ),
+            (
+                json!({"files": [{"path": "a", "base64": ""}]}),
+                "file \"a\": path must be absolute",
+            ),
+            (
+                json!({"files": [{"path": "/a", "base64": "", "mode": "08"}]}),
+                "file \"/a\": mode \"08\": want octal digits",
+            ),
+            (
+                json!({"size": {"vcpus": 33, "memory_mb": 512}}),
+                "size.vcpus must be 1..32",
+            ),
+            (
+                json!({"size": {"vcpus": 1, "memory_mb": 64}}),
+                "size.memory_mb must be 128..262144",
+            ),
+            (json!({"ports": [80, 0]}), "ports: 0 is not a port"),
+            (
+                json!({"restart": {"policy": "sometimes"}}),
+                "restart.policy must be no, on-failure or always",
+            ),
+        ] {
+            assert_eq!(s(v.clone()).check(), Err(want.to_string()), "{v}");
+        }
+        let bad_b64 = s(json!({"files": [{"path": "/a", "base64": "!!"}]})).check();
+        assert!(bad_b64.unwrap_err().starts_with("file \"/a\": "));
+        let fine = s(json!({"image": "x", "env": {"A": "a=b"}, "cmd": [],
+            "files": [{"path": "/a", "base64": "aGk=", "mode": "0755"}, {"path": "/b", "base64": "", "mode": ""}],
+            "size": {"vcpus": 1, "memory_mb": 128}, "ports": [1], "restart": {"policy": "no"}}));
+        assert_eq!(fine.check(), Ok(()));
+        // What changed from another, set or unset; what a memory snapshot holds.
+        let was = s(json!({"image": "x", "ports": [1]}));
+        let now = s(json!({"image": "x", "env": {}}));
+        assert_eq!(now.changed_from(&was), ["env", "ports"]);
+        assert!(now.touches_snapshot());
+        assert!(!s(json!({"ports": [1], "restart": {}})).touches_snapshot());
+        assert!(SpecChange::default().is_empty() && SpecChange::default().fields().is_empty());
+        // As the view shows it: env and files by name only.
+        let v = s(
+            json!({"image": "y", "env": {"SECRET": "s"}, "size": {"vcpus": 1, "memory_mb": 256}}),
+        )
+        .view();
+        assert_eq!(
+            serde_json::to_value(&v).unwrap(),
+            json!({"fields": ["image", "env", "size"], "image": "y", "size": {"vcpus": 1, "memory_mb": 256}})
+        );
+        // A create is checked as the same spec: its image only when it names one.
+        let c = CreateMachineRequest {
+            size: Size {
+                vcpus: 1,
+                memory_mb: 256,
+            },
+            ..Default::default()
+        };
+        assert_eq!(c.spec().image, None);
+        assert_eq!(c.spec().fields(), ["env", "files", "size", "ports"]);
     }
 
     #[test]
@@ -2265,7 +2634,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), reason::ALL.len());
-        assert_eq!(all.len(), 30);
+        assert_eq!(all.len(), 33);
         assert!(all
             .iter()
             .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));
@@ -2303,6 +2672,89 @@ mod tests {
             [stop::USER, stop::IDLE, stop::EXIT, stop::HOST],
             ["user", "idle", "exit", "host"]
         );
+    }
+
+    #[test]
+    fn backup_policies() {
+        let p: BackupPolicy = same(json!({"every": "6h", "keep": 4}));
+        assert_eq!(p.check(), Ok(std::time::Duration::from_secs(6 * 3600)));
+        let every = |e: &str| BackupPolicy {
+            every: e.into(),
+            keep: 1,
+        };
+        assert_eq!(every("1d").check().unwrap().as_secs(), 86400);
+        assert_eq!(every(" 1h ").check().unwrap().as_secs(), 3600);
+        // Each refusal names its field, for the caller to put `backup.` before.
+        assert_eq!(
+            every("59m").check().unwrap_err(),
+            r#"every "59m": at least 1h"#
+        );
+        assert_eq!(
+            every("never").check().unwrap_err(),
+            r#"every "never": want "6h", "1d""#
+        );
+        assert_eq!(
+            every("0h").check().unwrap_err(),
+            r#"every "0h": must be positive"#
+        );
+        assert!(every("").check().unwrap_err().starts_with("every "));
+        let none = BackupPolicy {
+            every: "6h".into(),
+            keep: 0,
+        };
+        assert_eq!(none.check().unwrap_err(), "keep: at least 1");
+        // Both fields are required.
+        assert!(serde_json::from_value::<BackupPolicy>(json!({"every": "6h"})).is_err());
+    }
+
+    #[test]
+    fn a_backup_policy_absent_is_kept_and_null_removes_it() {
+        let c: CreateMachineRequest = serde_json::from_value(json!({
+            "tenant": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}
+        }))
+        .unwrap();
+        assert_eq!(c.backup, None, "absent: the host's default");
+        let c: CreateMachineRequest = serde_json::from_value(json!({
+            "tenant": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}, "backup": null
+        }))
+        .unwrap();
+        assert_eq!(c.backup, Some(None), "null: none");
+        assert_eq!(serde_json::to_value(&c).unwrap()["backup"], Value::Null);
+        let u: UpdateMachineRequest = same(json!({"backup": {"every": "1d", "keep": 5}}));
+        assert_eq!(u.backup.flatten().map(|p| p.keep), Some(5));
+        let u: UpdateMachineRequest = same(json!({"backup": null}));
+        assert_eq!(u.backup, Some(None));
+        let u: UpdateMachineRequest = same(json!({}));
+        assert_eq!(u.backup, None);
+    }
+
+    #[test]
+    fn backups() {
+        let b: Backup = same(json!({
+            "id": "20261021T101500.123Z", "machine_id": "m1", "tenant": "t1", "name": "db",
+            "created_at": "2026-01-02T03:04:05Z", "bytes": 30, "incremental": true,
+            "disks": [
+                {"disk": "root", "key": "backups/m1/root/20261021T101500.123Z.zfs", "bytes": 10,
+                 "from": "20261021T091500.001Z"},
+                {"disk": "data", "key": "backups/m1/data/20261021T101500.123Z.zfs", "bytes": 20}
+            ],
+            "deletes_at": "2026-01-02T03:04:05Z"
+        }));
+        assert_eq!(b.disks[0].from.as_deref(), Some("20261021T091500.001Z"));
+        assert_eq!(b.disks[1].from, None);
+        assert_eq!(b.deletes_at, Some(ts()));
+        // A stored record carries the machine and no deletion time.
+        let r: Backup = same(json!({
+            "id": "a", "machine_id": "m1", "tenant": "t1", "name": "db",
+            "created_at": "2026-01-02T03:04:05Z", "bytes": 0, "incremental": false,
+            "disks": [], "machine": {"id": "m1"}
+        }));
+        assert_eq!(r.deletes_at, None);
+        let rs: RestoreSpec = round_trip(
+            json!({"machine_id": "m1"}),
+            json!({"machine_id": "m1", "backup": ""}),
+        );
+        assert_eq!(rs.backup, "");
     }
 
     #[test]

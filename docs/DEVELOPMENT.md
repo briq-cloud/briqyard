@@ -89,7 +89,10 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   harness over a temp directory, the same fake `zfs` and a mock host (`Vmm`, `Guest`,
   `Net`; ADR 0010): create to running, boot failures, start against destroy, starts past
   capacity, stop and suspend, a caller that hangs up, crash recovery, the orphan sweep,
-  the sleeper's tick, the init's exit report, fork snapshots freed, the tenant's gateway
+  the sleeper's tick, the init's exit report, fork snapshots freed, backups (the schedule due
+  and not before, at most `at_once`, one per machine, a machine with no process skipped while
+  unchanged, retention and its restores, delete and `chain`, a failure and its backoff, a
+  refused store leaving nothing, a destroyed machine's held, counted and expired), the tenant's gateway
   (booted once by what needs it, its failure named, slept by the tick, kept while in use),
   usage (hours split, counter resets, suspended and stopped machines, traffic on its machine,
   closed hours, a restart, retention, a destroyed machine, the route's range), egress limits
@@ -110,13 +113,19 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   one that is a crash, liveness under `on-failure` and `no`, the backoff, its reset and
   `crash_loop`, the ingress waiting for a woken machine, the host's turns, a PATCH on a running
   machine, the gateway waited for ready, an adopted machine; the HTTP client and the TCP
-  connect against loopback servers), labels, quotas and logs follow (a listing by labels,
-  the quota at create, fork, start and the gateway with its message and event, its use; a
-  follow from the start and from a cursor, across rotations, ending at the destroy, its
-  heartbeat and shutdown; placement by region and the cross-region refusal through stub
-  hosts in two regions). What still needs the host: a tenant's first create (its bridge and
-  the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, backups and their
-  event, an image pull and its event, the API handlers; those stay with the e2e suite).
+  connect against loopback servers), changes at the next boot (a PATCH on a running machine
+  left pending with its events and `If-Match`, applied by a restart into the config drive, a
+  new image's root disk cloned again with the volume untouched and a fork promoted, the root
+  made from the cache's image and only once no backup runs, a promoted fork backed up whole
+  despite its source's snapshots, a new size reserved at the start and refused past the host, a
+  memory snapshot dropped by what it holds and kept for ports, an image that cannot be pulled
+  failing the boot with the change kept, create and PATCH refusing a bad spec in the same
+  words), labels, quotas and logs follow (a listing by labels, the quota at create, fork,
+  start and the gateway with its message and event, its use; a follow from the start and
+  from a cursor, across rotations, ending at the destroy, its heartbeat and shutdown;
+  placement by region and the cross-region refusal through stub hosts in two regions). What still needs the host: a tenant's first create (its bridge and
+  the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
+  `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
@@ -130,9 +139,13 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   refused), metrics (a running machine's CPU and state series, `top` lists it with rates after
   two ticks, no condition true on a healthy host), probes (an HTTP readiness probe: not ready, then
   ready and its event, `wait`; an exec liveness probe that fails: `liveness_failed`, restarted,
-  running again), labels, a quota and a follow (`ls -l` selecting one machine, a refused
-  selector, a second create refused 403 `quota` with its use and event, `logs -f` receiving a
-  line printed after it began and ending at the destroy). 116 checks.
+  running again), backups on a schedule (every second backup whole and a kept one's base kept,
+  a base not deleted alone, the oldest kept restored from its chain, retention down to 2, its
+  event, a destroyed machine's backups listed then deleted with their chain), changes at the
+  next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
+  new image: Python 3.13, the volume's file kept), labels, a quota and a follow (`ls -l` selecting one machine, a
+  refused selector, a second create refused 403 `quota` with its use and event, `logs -f`
+  receiving a line printed after it began and ending at the destroy). 132 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,

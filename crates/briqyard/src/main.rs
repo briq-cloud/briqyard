@@ -52,6 +52,14 @@ enum Cmd {
     /// Hosts, when talking to a fleet
     #[command(subcommand)]
     Host(HostCmd),
+    /// Backups in the store: delete one
+    #[command(subcommand)]
+    Backup(BackupCmd),
+    /// Every backup of the host's machines, destroyed ones' included: briqyard backups [--tenant T]
+    Backups {
+        #[arg(long)]
+        tenant: Option<String>,
+    },
     /// What each machine used, per hour: briqyard usage --from 2026-10-20T14:00:00Z --to 2026-10-20T15:00:00Z
     Usage {
         /// The first hour, RFC 3339
@@ -118,6 +126,10 @@ enum MachineCmd {
     Stop {
         #[arg(long)]
         suspend: bool,
+        id: String,
+    },
+    /// Stop and start again: what `set` left pending applies now
+    Restart {
         id: String,
     },
     Wake {
@@ -206,6 +218,19 @@ enum MachineCmd {
         #[arg(long, default_value = "")]
         sleep: String,
     },
+    /// Change what it runs, at its next start (restart to apply now): briqyard machine set ID --image python:3.13-alpine -e V=2 -- cmd...
+    Set(Box<SetArgs>),
+    /// Change the backup schedule: briqyard machine set-backup ID --every 6h --keep 4, or --off
+    SetBackup {
+        id: String,
+        #[arg(long, requires = "keep", conflicts_with = "off")]
+        every: Option<String>,
+        #[arg(long, requires = "every")]
+        keep: Option<u32>,
+        /// No schedule; the backups made stay
+        #[arg(long, required_unless_present = "every")]
+        off: bool,
+    },
     /// Change the sleep window: briqyard machine set-sleep ID 30m|never
     SetSleep {
         id: String,
@@ -284,6 +309,8 @@ struct RunArgs {
     egress: Option<api::Egress>,
     #[command(flatten)]
     limits: LimitArgs,
+    #[command(flatten)]
+    backup: BackupArgs,
     /// Checked before readiness and liveness run; failing, the boot fails: http:PORT[/PATH], tcp:PORT, exec:CMD ARGS
     #[arg(long, value_parser = probe_arg)]
     startup: Option<api::Probe>,
@@ -313,6 +340,130 @@ struct RunArgs {
     /// The command, after --
     #[arg(last = true)]
     cmd: Vec<String>,
+}
+
+/// What `machine set` changes; each one left out stays as it is.
+#[derive(Args)]
+struct SetArgs {
+    id: String,
+    #[arg(long)]
+    image: Option<String>,
+    #[arg(long)]
+    vcpus: Option<u32>,
+    /// Memory in MB
+    #[arg(long)]
+    memory: Option<u32>,
+    /// K=V, repeatable: the whole env, what it had replaced
+    #[arg(long = "env", short = 'e')]
+    envs: Vec<String>,
+    /// /guest/path=local/path, repeatable: all the boot files, what it had replaced
+    #[arg(long = "file")]
+    files: Vec<String>,
+    /// A port the image listens on, repeatable: all of them
+    #[arg(long = "port", short = 'p')]
+    ports: Vec<u16>,
+    /// Entrypoint argv, repeatable
+    #[arg(long = "entrypoint")]
+    entrypoint: Vec<String>,
+    /// no, always, on-failure or on-failure:MAX_RETRIES
+    #[arg(long, value_parser = restart_arg)]
+    restart: Option<api::RestartPolicy>,
+    /// The command, after --
+    #[arg(last = true)]
+    cmd: Vec<String>,
+}
+
+impl SetArgs {
+    /// The PATCH, checked as the daemon checks it. `size_now` fills the half of the size the
+    /// flags leave out.
+    fn request(&self, size_now: Option<api::Size>) -> Result<api::UpdateMachineRequest> {
+        let size = match (self.vcpus, self.memory, size_now) {
+            (None, None, _) => None,
+            (Some(vcpus), Some(memory_mb), _) => Some(api::Size { vcpus, memory_mb }),
+            (vcpus, memory, Some(now)) => Some(api::Size {
+                vcpus: vcpus.unwrap_or(now.vcpus),
+                memory_mb: memory.unwrap_or(now.memory_mb),
+            }),
+            (_, _, None) => bail!("--vcpus or --memory alone needs the machine's size"),
+        };
+        let spec = api::SpecChange {
+            image: self.image.clone(),
+            entrypoint: (!self.entrypoint.is_empty()).then(|| self.entrypoint.clone()),
+            cmd: (!self.cmd.is_empty()).then(|| self.cmd.clone()),
+            env: (!self.envs.is_empty())
+                .then(|| env_args(&self.envs))
+                .transpose()?,
+            files: (!self.files.is_empty())
+                .then(|| file_args(&self.files))
+                .transpose()?,
+            size,
+            ports: (!self.ports.is_empty()).then(|| self.ports.clone()),
+            restart: self.restart.clone(),
+        };
+        if spec.is_empty() {
+            bail!("name a change: --image, --vcpus, --memory, -e, --file, -p, --entrypoint, --restart or a command after --");
+        }
+        if let Err(e) = spec.check() {
+            bail!("{e}");
+        }
+        Ok(api::UpdateMachineRequest {
+            spec,
+            ..Default::default()
+        })
+    }
+}
+
+#[derive(Subcommand)]
+enum BackupCmd {
+    /// Delete a backup; --chain also the backups that continue from it
+    Rm {
+        machine: String,
+        backup: String,
+        #[arg(long)]
+        chain: bool,
+        /// The machine's tenant, for a destroyed machine's backup through a fleet
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+}
+
+/// A backup schedule on a run: both or neither, checked as the daemon checks them.
+#[derive(Args)]
+struct BackupArgs {
+    /// Back it up this often: 6h, 1d (at least 1h)
+    #[arg(long, requires = "backup_keep")]
+    backup_every: Option<String>,
+    /// Backups kept, with what they continue from
+    #[arg(long, requires = "backup_every")]
+    backup_keep: Option<u32>,
+    /// No schedule, whatever the host's default
+    #[arg(long, conflicts_with = "backup_every")]
+    no_backup: bool,
+}
+
+impl BackupArgs {
+    /// The request's `backup`: absent for the host's default.
+    fn request(&self) -> Result<Option<Option<api::BackupPolicy>>> {
+        if self.no_backup {
+            return Ok(Some(None));
+        }
+        policy(self.backup_every.as_deref(), self.backup_keep)
+    }
+}
+
+/// `--every` and `--keep` as a policy, checked here before the request leaves.
+fn policy(every: Option<&str>, keep: Option<u32>) -> Result<Option<Option<api::BackupPolicy>>> {
+    let (Some(every), Some(keep)) = (every, keep) else {
+        return Ok(None);
+    };
+    let p = api::BackupPolicy {
+        every: every.to_string(),
+        keep,
+    };
+    if let Err(e) = p.check() {
+        bail!("backup.{e}");
+    }
+    Ok(Some(Some(p)))
 }
 
 #[derive(Subcommand)]
@@ -685,18 +836,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     format!("{base}-{}", suffix())
                 });
                 let env = env_args(&a.envs)?;
-                let mut files = Vec::new();
-                for f in &a.files {
-                    let (guest_path, local) = f
-                        .split_once('=')
-                        .ok_or_else(|| anyhow!("--file {f:?}: want /guest/path=local/path"))?;
-                    let data = std::fs::read(local).with_context(|| local.to_string())?;
-                    files.push(api::File {
-                        path: guest_path.to_string(),
-                        base64: api::guest::base64_encode(&data),
-                        mode: None,
-                    });
-                }
+                let files = file_args(&a.files)?;
                 let volume = match &a.volume {
                     Some(v) => {
                         let (size, mount) = v.split_once(':').ok_or_else(|| {
@@ -742,6 +882,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     region: a.region.clone(),
                     egress: a.egress.clone(),
                     limits: a.limits.request()?,
+                    backup: a.backup.request()?,
                     probes: Some(api::Probes {
                         startup: a.startup.clone(),
                         readiness: a.readiness.clone(),
@@ -784,6 +925,10 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                         .await?,
                 )
             }
+            MachineCmd::Restart { id } => print_json(
+                &c.call::<api::Machine>(POST, &format!("/v1/machines/{id}/restart"), NONE)
+                    .await?,
+            ),
             MachineCmd::Wake { id } => print_json(
                 &c.call::<api::Machine>(POST, &format!("/v1/machines/{id}/wake"), NONE)
                     .await?,
@@ -917,9 +1062,51 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 let data = api::guest::base64_decode(&res.base64).map_err(|e| anyhow!(e))?;
                 std::io::stdout().write_all(&data)?;
             }
+            MachineCmd::Set(a) => {
+                let half = a.vcpus.is_some() != a.memory.is_some();
+                let size_now = match half {
+                    true => {
+                        let m: api::Machine =
+                            c.call(GET, &format!("/v1/machines/{}", a.id), NONE).await?;
+                        Some(m.pending.and_then(|p| p.size).unwrap_or(m.size))
+                    }
+                    false => None,
+                };
+                let req = a.request(size_now)?;
+                print_json(
+                    &c.call::<api::Machine>(
+                        reqwest::Method::PATCH,
+                        &format!("/v1/machines/{}", a.id),
+                        Some(&req),
+                    )
+                    .await?,
+                )
+            }
             MachineCmd::SetSleep { id, sleep } => {
                 let req = api::UpdateMachineRequest {
                     sleep: Some(sleep),
+                    ..Default::default()
+                };
+                print_json(
+                    &c.call::<api::Machine>(
+                        reqwest::Method::PATCH,
+                        &format!("/v1/machines/{id}"),
+                        Some(&req),
+                    )
+                    .await?,
+                )
+            }
+            MachineCmd::SetBackup {
+                id,
+                every,
+                keep,
+                off,
+            } => {
+                let req = api::UpdateMachineRequest {
+                    backup: match off {
+                        true => Some(None),
+                        false => policy(every.as_deref(), keep)?,
+                    },
                     ..Default::default()
                 };
                 print_json(
@@ -1118,6 +1305,26 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 print_json(&shown)
             }
         },
+        Cmd::Backup(BackupCmd::Rm {
+            machine,
+            backup,
+            chain,
+            tenant,
+        }) => {
+            c.raw(
+                DELETE,
+                &backup_rm_path(&machine, &backup, chain, tenant.as_deref()),
+                NONE,
+            )
+            .await?;
+        }
+        Cmd::Backups { tenant } => {
+            let path = match tenant {
+                Some(t) => format!("/v1/backups?tenant={t}"),
+                None => "/v1/backups".into(),
+            };
+            print_json(&c.call::<Vec<api::Backup>>(GET, &path, NONE).await?)
+        }
         Cmd::Doctor => doctor(),
         Cmd::Events {
             tenant,
@@ -1201,6 +1408,22 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
     Ok(())
 }
 
+/// `backup rm`'s request.
+fn backup_rm_path(machine: &str, backup: &str, chain: bool, tenant: Option<&str>) -> String {
+    let mut q = Vec::new();
+    if chain {
+        q.push("chain=true".to_string());
+    }
+    if let Some(t) = tenant {
+        q.push(format!("tenant={t}"));
+    }
+    let path = format!("/v1/machines/{machine}/backups/{backup}");
+    match q.is_empty() {
+        true => path,
+        false => format!("{path}?{}", q.join("&")),
+    }
+}
+
 /// `-e K=V` flags as an env map; a value may hold `=`.
 fn env_args(kvs: &[String]) -> Result<BTreeMap<String, String>> {
     let mut env = BTreeMap::new();
@@ -1225,6 +1448,46 @@ fn label_args(kvs: &[String]) -> Result<BTreeMap<String, String>> {
             Err(e) => bail!("--label: {e}"),
         })
         .collect()
+}
+
+/// `--file /guest/path=local/path` flags as boot files, read now.
+fn file_args(specs: &[String]) -> Result<Vec<api::File>> {
+    let mut files = Vec::new();
+    for f in specs {
+        let (guest_path, local) = f
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--file {f:?}: want /guest/path=local/path"))?;
+        let data = std::fs::read(local).with_context(|| local.to_string())?;
+        files.push(api::File {
+            path: guest_path.to_string(),
+            base64: api::guest::base64_encode(&data),
+            mode: None,
+        });
+    }
+    Ok(files)
+}
+
+/// A restart policy, Docker's way: `no`, `always`, `on-failure`, `on-failure:N` (3 retries
+/// when no N is given, as the API's default).
+fn restart_arg(s: &str) -> Result<api::RestartPolicy, String> {
+    let (policy, retries) = match s.split_once(':') {
+        Some(("on-failure", n)) => (
+            "on-failure",
+            n.parse()
+                .map_err(|_| format!("{s:?}: want on-failure:MAX_RETRIES"))?,
+        ),
+        Some(_) => return Err(format!("{s:?}: only on-failure takes :MAX_RETRIES")),
+        None => (s, api::RestartPolicy::default().max_retries),
+    };
+    if !["no", "on-failure", "always"].contains(&policy) {
+        return Err(format!(
+            "{s:?}: want no, always, on-failure or on-failure:N"
+        ));
+    }
+    Ok(api::RestartPolicy {
+        policy: policy.into(),
+        max_retries: retries,
+    })
 }
 
 /// A sleep window as the daemon reads it, refused here before the request leaves.
@@ -1353,12 +1616,20 @@ fn limits_label(l: &api::EgressLimits) -> String {
     }
 }
 
+/// A backup schedule in a table: `6h/4` (every, keep), `-` for none.
+fn backup_label(p: Option<&api::BackupPolicy>) -> String {
+    match p {
+        Some(p) => format!("{}/{}", p.every, p.keep),
+        None => "-".into(),
+    }
+}
+
 // --- tables ---
 
 /// `machine ls`.
 fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} HOST\n",
+        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<8} {:<12} HOST\n",
         "ID",
         "TENANT",
         "NAME",
@@ -1369,7 +1640,9 @@ fn machine_table(ms: &[api::Machine]) -> String {
         "SIZE",
         "SLEEP",
         "EGRESS",
-        "LIMITS"
+        "LIMITS",
+        "BACKUP",
+        "PENDING"
     );
     for m in ms {
         let state = if m.stopped_reason.is_empty() {
@@ -1377,8 +1650,12 @@ fn machine_table(ms: &[api::Machine]) -> String {
         } else {
             format!("{} ({})", m.state, m.stopped_reason)
         };
+        let pending = match &m.pending {
+            Some(p) => p.fields.join(","),
+            None => "-".into(),
+        };
         out.push_str(&format!(
-            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {}\n",
+            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<8} {:<12} {}\n",
             m.id,
             m.tenant,
             m.name,
@@ -1390,6 +1667,8 @@ fn machine_table(ms: &[api::Machine]) -> String {
             m.sleep,
             egress_label(&m.egress),
             limits_label(&m.limits),
+            backup_label(m.backup.as_ref()),
+            pending,
             m.host
         ));
     }
@@ -1650,6 +1929,39 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
         None => m.sleep.clone(),
     };
     lines.push(("Sleep", sleep));
+    let at = |t: Option<chrono::DateTime<chrono::Utc>>| match t {
+        Some(t) => t.format("%Y-%m-%d %H:%M:%S").to_string(),
+        None => "none".into(),
+    };
+    let backup = match (&m.backup, m.last_backup_at) {
+        (Some(p), last) => format!(
+            "every {}, keep {}; last {}, next {}",
+            p.every,
+            p.keep,
+            at(last),
+            at(m.next_backup_at)
+        ),
+        (None, Some(last)) => format!("none; last {}", at(Some(last))),
+        (None, None) => "none".into(),
+    };
+    lines.push(("Backup", backup));
+    if let Some(p) = &m.pending {
+        // Each field, with its new value when the view shows one.
+        let changes: Vec<String> = p
+            .fields
+            .iter()
+            .map(|f| match (f.as_str(), &p.image, p.size) {
+                ("image", Some(image), _) => format!("image {image}"),
+                ("size", _, Some(s)) => format!("size {} vCPU, {} MB", s.vcpus, s.memory_mb),
+                _ => f.clone(),
+            })
+            .collect();
+        let mut pending = format!("{}, at the next start", changes.join(", "));
+        if let Some(t) = m.pending_since {
+            pending.push_str(&format!(" (since {})", t.format("%Y-%m-%d %H:%M:%S")));
+        }
+        lines.push(("Pending", pending));
+    }
     lines.push(("Version", m.version.to_string()));
     lines.push((
         "Created",

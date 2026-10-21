@@ -89,6 +89,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/wake", post(wake_machine))
         .route("/v1/machines/:id/stop", post(stop_machine))
+        .route("/v1/machines/:id/restart", post(restart_machine))
         .route("/v1/machines/:id/touch", post(touch_machine))
         .route("/v1/machines/:id/wait", post(wait_machine))
         .route("/v1/machines/:id/exec", post(exec))
@@ -99,6 +100,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/machines/:id/backups",
             get(list_backups).post(make_backup),
         )
+        .route(
+            "/v1/machines/:id/backups/:backup",
+            axum::routing::delete(delete_backup),
+        )
+        .route("/v1/backups", get(all_backups))
         .route("/v1/machines/:id/snapshots", get(snapshots).post(snapshot))
         .route(
             "/v1/machines/:id/snapshots/:snap",
@@ -141,7 +147,7 @@ pub struct AppError {
 /// "not in that state" answers; `capacity` stays a 503, which the control plane retries later.
 fn status_of(e: &MError) -> (StatusCode, &'static str) {
     match e {
-        MError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+        MError::NotFound | MError::NoBackup(_) => (StatusCode::NOT_FOUND, "not_found"),
         MError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
         MError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
         MError::NotRunning(_) => (StatusCode::CONFLICT, "not_running"),
@@ -418,6 +424,18 @@ async fn stop_machine(
     ))
 }
 
+async fn restart_machine(
+    State(st): S,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<api::Machine>, AppError> {
+    let at = if_match(&headers)?;
+    let m = st.mgr.clone();
+    Ok(Json(
+        detached(async move { m.restart(&id, at).await }).await?,
+    ))
+}
+
 async fn touch_machine(State(st): S, Path(id): Path<String>) -> Result<StatusCode, AppError> {
     st.mgr.touch(&id)?;
     Ok(StatusCode::NO_CONTENT)
@@ -545,6 +563,32 @@ async fn list_backups(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<api::Backup>>, AppError> {
     Ok(Json(st.mgr.backups(&id).await?))
+}
+
+#[derive(Deserialize)]
+struct DeleteBackupQuery {
+    #[serde(default)]
+    chain: bool,
+}
+
+/// Deletes a backup of a machine of this host or of one destroyed here; with `chain`, the
+/// backups that continue from it too.
+async fn delete_backup(
+    State(st): S,
+    Path((id, backup)): Path<(String, String)>,
+    Query(q): Query<DeleteBackupQuery>,
+) -> Result<StatusCode, AppError> {
+    let m = st.mgr.clone();
+    detached(async move { m.delete_backup(&id, &backup, q.chain).await }).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Every backup of the host's machines, destroyed ones' included, of a tenant or all.
+async fn all_backups(
+    State(st): S,
+    Query(q): Query<ListQuery>,
+) -> Result<Json<Vec<api::Backup>>, AppError> {
+    Ok(Json(st.mgr.all_backups(q.tenant.as_deref()).await?))
 }
 
 async fn stats(State(st): S, Path(id): Path<String>) -> Result<Json<api::MachineStats>, AppError> {
@@ -875,6 +919,9 @@ mod tests {
             (e.status, e.code, e.oldest),
             (StatusCode::GONE, "gone", Some(40))
         );
+        let e = AppError::from(MError::NoBackup("m_1/20261021T101500.123Z".into()));
+        assert_eq!((e.status, e.code), (StatusCode::NOT_FOUND, "not_found"));
+        assert_eq!(e.error, "backup m_1/20261021T101500.123Z not found");
         // A `/wait` that ran out on a running machine its probes do not pass: the machine.
         let running = api::Machine {
             id: "m_1".into(),

@@ -32,7 +32,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | REST resources, OpenAPI | ✓ `api/openapi.yaml`, served | | |
-| `resourceVersion`, optimistic concurrency (409 on a stale write) | ✓ a machine's `version`, `If-Match` on PATCH, DELETE, start, stop, wake (ADR 0019) | | |
+| `resourceVersion`, optimistic concurrency (409 on a stale write) | ✓ a machine's `version`, `If-Match` on PATCH, DELETE, start, stop, wake, restart (ADR 0019) | | |
 | watch (list + watch, informers) | ✓ `GET /v1/events?watch=true` from a cursor; per host, or a tenant or a machine through the fleet | | |
 | Events (`kubectl get events`, `describe`) | ✓ an event log per host, a closed list of reasons, `briqyard events` | events of endpoints and tenants | yard, later |
 | Labels and selectors (`-l app=web`) | ✓ metadata as labels, `?label=k=v&label=k` on machine listings, `machine ls -l` (ADR 0025) | `!=` and set-based selectors; selectors on events, top, usage | yard, later |
@@ -50,7 +50,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | Pod | ✓ machine | | |
-| Change image, env, command, size (`kubectl apply`, `set image`, in-place resize) | ✗ PATCH takes sleep, metadata, egress | a PATCH applied at the next cold boot | yard |
+| Change image, env, command, size (`kubectl apply`, `set image`, in-place resize) | ✓ PATCH of image, entrypoint, cmd, env, files, size, ports, restart, `pending` until the next start, `POST /restart`; the root disk follows the image, the volume stays (ADR 0024) | a change to a running process (memory hot-plug) | |
 | `kubectl exec -it`, attach | ◐ exec with stdin and streamed output, no TTY | a TTY | yard, later |
 | `kubectl cp` | ✓ `/files` | | |
 | Pod phases and conditions | ✓ states, `stopped_reason`, exit code, `ready` (ADR 0022) | | |
@@ -113,7 +113,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | PV, PVC, StorageClass | ✓ a volume per machine | | |
 | Volume expansion | ✗ | grow the zvol and the filesystem at boot | yard, later |
 | VolumeSnapshot, restore | ◐ local snapshots (list, delete), fork, backups and restore anywhere | rollback to a named local snapshot | yard, later |
-| Scheduled backups and retention (Velero) | ✗ on demand only | `backup: { every, keep }`, delete | yard (values from briq) |
+| Scheduled backups and retention (Velero) | ✓ `backup: { every, keep }` run by the daemon, whole chains pruned, delete, a destroyed machine's kept `keep_destroyed_days` (ADR 0023) | | yard (values from briq) |
 | Encryption at rest (CSI, etcd secrets) | ✗ records, config drives and disks in clear (0600) | the pool encrypted at bootstrap, one key per host held by the fleet, handed over TLS at start, never on the host's disk | yard, before the first real host |
 | emptyDir, tmpfs | ✓ `/tmp` | | |
 
@@ -173,9 +173,9 @@ Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit 
 2. **Events, watch, versions**, and `describe` from them.
 3. **Metrics**: per machine series and machine states on `/metrics`, host conditions, image GC and log rotation under them, `top`.
 4. **Probes**: exec, TCP, HTTP; `ready`, which the ingress and `/wait` follow; restart on liveness; a capped backoff with a `crash_loop` reason. Built: ADR 0022.
-5. **Backups on a schedule**, retention, delete (closes ADR 0017's storage hole).
+5. **Backups on a schedule**, retention, delete (closes ADR 0017's storage hole). Built: ADR 0023.
 6. **TLS between the fleet and the hosts**, the certificate pinned at bootstrap. Built: ADR 0020.
-7. **Changes at the next cold boot**: image, env, command, size by PATCH.
+7. **Changes at the next cold boot**: image, env, command, size by PATCH. Built: ADR 0024.
 8. **Scheduling**: placement by region, hosts under pressure refused, labels on listings; quotas per tenant; logs follow. Built: ADR 0021 (pressure), ADR 0025.
 9. **The edge** (briq, in parallel): its servers, Cloudflare in front, client IPs, WebSockets. Built: up-lab/briq#277 (draft).
 
