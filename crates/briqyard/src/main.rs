@@ -1434,15 +1434,16 @@ fn image_table(ims: &[api::Image]) -> String {
 /// note when the provisioner or the bootstrap left one.
 fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
-        "{:<16} {:<28} {:<12} {:<14} {:<10} {:<9} {:<8} LAST SEEN\n",
-        "ID", "URL", "STATE", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS"
+        "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} LAST SEEN\n",
+        "ID", "URL", "STATE", "REGION", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS"
     );
     for h in hs {
         out.push_str(&format!(
-            "{:<16} {:<28} {:<12} {:<14} {:<10} {:<9} {:<8} {}\n",
+            "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {}\n",
             h.id,
             if h.url.is_empty() { "-" } else { &h.url },
             h.state,
+            if h.region.is_empty() { "-" } else { &h.region },
             format!("{}/{}", h.used.memory_mb, h.capacity.memory_mb),
             format!("{}/{}", h.used.vcpus, h.capacity.vcpus),
             h.machines,

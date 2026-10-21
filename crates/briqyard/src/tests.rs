@@ -919,6 +919,7 @@ fn the_host_table() {
             .into(),
         tls_fingerprint: String::new(),
         conditions: vec![],
+        region: String::new(),
         ..ready.clone()
     };
     let out = host_table(&[ready, ordered]);
@@ -930,11 +931,11 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[0],
-        "ID               URL                          STATE        MEMORY MB      VCPUS      MACHINES  TENANTS  LAST SEEN"
+        "ID               URL                          STATE        REGION   MEMORY MB      VCPUS      MACHINES  TENANTS  LAST SEEN"
     );
     assert_eq!(
         lines[1],
-        "h_byard-1        https://10.0.0.9:7420        ready        8192/64000     6/32       3         2        2026-10-19T08:30:00+00:00"
+        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6/32       3         2        2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[2],
@@ -947,8 +948,8 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[4],
-        "h_srv-9          -                            provisioning 0/0            0/0        0         0        2026-10-19T08:30:00+00:00",
-        "no address yet shows as -"
+        "h_srv-9          -                            provisioning -        0/0            0/0        0         0        2026-10-19T08:30:00+00:00",
+        "no address nor region yet shows as -"
     );
     assert_eq!(
         lines[5],
