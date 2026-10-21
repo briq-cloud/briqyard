@@ -354,6 +354,50 @@ check "a destroyed machine's backups listed" '[ "$(briqyard backups --tenant "$T
 check "deleted with what continues from it" 'briqyard backup rm "$SB" "$S3" --chain && [ "$(briqyard machine backups "$SB" | jq length)" = 0 ]'
 
 
+echo "== snapshots: restore in place, a fork and backups around it, memory (ADR 0031)"
+CK=$(briqyard machine run --image alpine:3.20 --name ckpt --tenant "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
+on() { briqyard machine exec "$CK" -- sh -c "$1"; }
+on 'echo v1 > /data/f; echo r1 > /root/r; sync' >/dev/null
+CB1=$(briqyard machine backup "$CK" | jq -r .id)
+briqyard machine snapshot create --name before "$CK" >/dev/null
+check "snapshot listed by name, both disks" '[ "$(briqyard machine snapshot ls "$CK" | awk "NR == 2 {print \$2, \$4, \$5}")" = "before root,data no" ]'
+FK=$(briqyard machine fork "$CK" --name ckfork | jq -r .id)
+on 'echo v2 > /data/f; rm /root/r; sync' >/dev/null
+S2=$(briqyard machine snapshot create "$CK" | jq -r .id)
+on 'rm /data/f; sync' >/dev/null
+briqyard machine snapshot restore "$CK" before >/dev/null
+check "restore of a running machine boots it again" '[ "$(briqyard machine get "$CK" | jq -r .state)" = running ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 2 ]'
+check "the volume's file back, its content too" '[ "$(on "cat /data/f")" = v1 ]'
+check "the root disk's file back"     '[ "$(on "cat /root/r")" = r1 ]'
+check "the restored event"            'briqyard events --machine "$CK" | awk "\$4 == \"restored\"" | grep -q .'
+check "a fork made after the snapshot still works" '[ "$(briqyard machine exec "$FK" -- cat /data/f)" = v1 ] && briqyard machine exec "$FK" -- sh -c "echo w > /data/g" >/dev/null'
+on 'echo v3 > /data/f; sync' >/dev/null
+CB2=$(briqyard machine backup "$CK" | jq -r .id)
+check "a backup after it continues from the one before the snapshot" '[ "$(briqyard machine backups "$CK" | jq -r ".[] | select(.id == \"$CB2\") | .disks[0].from")" = "$CB1" ]'
+RK=$(briqyard machine restore --from "$CK" --backup "$CB2" --tenant "$T" --name ckback | jq -r .id)
+check "and restores to what the machine had" '[ "$(briqyard machine exec "$RK" -- cat /data/f /root/r | paste -sd, -)" = v3,r1 ]'
+briqyard machine destroy "$RK" >/dev/null
+briqyard machine snapshot restore "$CK" "$S2" >/dev/null
+check "the newer snapshot kept, restored" '[ "$(on "cat /data/f")" = v2 ] && ! on "test -e /root/r"'
+CB3=$(briqyard machine backup "$CK" | jq -r .id)
+check "its base gone with the restore: whole" '[ "$(briqyard machine backups "$CK" | jq -r ".[] | select(.id == \"$CB3\") | .incremental")" = false ]'
+RK=$(briqyard machine restore --from "$CK" --backup "$CB3" --tenant "$T" --name ckback3 | jq -r .id)
+check "and restores to what the machine had"  '[ "$(briqyard machine exec "$RK" -- cat /data/f)" = v2 ]'
+briqyard machine destroy "$RK" >/dev/null
+# Memory: /tmp is a tmpfs, only in memory; a resume keeps it, a boot would not.
+on 'echo m1 > /tmp/mark; echo v4 > /data/f' >/dev/null
+up=$(on 'cut -d. -f1 /proc/uptime')
+briqyard machine snapshot create --name warm --memory "$CK" >/dev/null
+check "a snapshot with memory, the machine running on" '[ "$(briqyard machine get "$CK" | jq -r .state)" = running ] && [ "$(on "cat /tmp/mark")" = m1 ]'
+on 'echo m2 > /tmp/mark; echo v5 > /data/f; sync' >/dev/null
+briqyard machine snapshot restore "$CK" warm >/dev/null
+check "restored with memory: resumed, not booted" '[ "$(briqyard events --machine "$CK" | awk "{print \$4}" | tail -1)" = resumed ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 3 ]'
+check "memory and disks as they were"  '[ "$(on "cat /tmp/mark /data/f" | paste -sd, -)" = m1,v4 ] && [ "$(on "cut -d. -f1 /proc/uptime")" -ge "$up" ]'
+briqyard machine snapshot rm "$CK" before
+check "deleted by name" '! briqyard machine snapshot ls "$CK" | grep -q " before "'
+briqyard machine destroy "$FK" >/dev/null
+briqyard machine destroy "$CK" >/dev/null
+
 echo "== tenants made together get bridges of their own"
 for i in 1 2 3; do briqyard machine run --image alpine:3.20 --name par --tenant "$T-par$i" --memory 128 -- sleep 600 > /tmp/by-par$i.json & done; wait
 check "three tenants at once"  '[ "$(briqyard tenant ls | jq -r "[.[] | select(.id | startswith(\"$T-par\")) | .subnet] | unique | length")" = 3 ]'
