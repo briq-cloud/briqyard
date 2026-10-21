@@ -4595,12 +4595,11 @@ fn restart_delay(n: u32) -> Duration {
 }
 
 /// When a running machine goes to sleep: its last use plus its window. None while it was
-/// never used or never sleeps.
+/// never used or never sleeps, and for a window past every date there is (`"99999999d"`):
+/// a time that never comes.
 fn sleeps_at(last_used: Option<DateTime<Utc>>, window: Option<Duration>) -> Option<DateTime<Utc>> {
-    match (last_used, window) {
-        (Some(t), Some(w)) => Some(t + chrono::Duration::from_std(w).unwrap_or_default()),
-        _ => None,
-    }
+    let w = chrono::Duration::from_std(window?).ok()?;
+    last_used?.checked_add_signed(w)
 }
 
 /// Whether the sleep window has run out at `now`. A clock that went backwards (a last use
@@ -4877,6 +4876,14 @@ mod tests {
         // Never used, or never sleeps: no deadline.
         assert_eq!(sleeps_at(None, w), None);
         assert_eq!(sleeps_at(Some(t), None), None);
+        // A window past every date never comes, and does not panic the view.
+        let huge = api::parse_sleep("99999999d").unwrap();
+        assert_eq!(sleeps_at(Some(t), huge), None);
+        assert!(!idle_past(
+            Some(t),
+            huge,
+            t + chrono::Duration::days(365 * 1000)
+        ));
 
         let secs = |n: i64| t + chrono::Duration::seconds(n);
         assert!(!idle_past(Some(t), w, secs(0)));
