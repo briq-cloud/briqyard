@@ -16,7 +16,10 @@ bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 on_fleet()  { $FLEET_SH sh -c "$1"; }
 on_second() { $SECOND_HOST_SH sh -c "$1"; }
-hosts() { curl -fsS "$BRIQYARD_URL/v1/hosts"; }
+# The fleet restarts during the run; the dev VMs reach it through a port forward that comes
+# back a moment after its listener does: a refused connection is tried again.
+CURL="curl -fsS --retry 10 --retry-connrefused --retry-delay 1"
+hosts() { $CURL "$BRIQYARD_URL/v1/hosts"; }
 CFG=/etc/briqyard/fleet.yaml
 ID=/etc/briqyard/fleet-backup.key
 STORE=/var/lib/briqyard-fleet-backup
@@ -41,7 +44,7 @@ conf=$(on_second "cat /etc/briqyard/config.yaml")
 token=$(echo "$conf" | sed -n 's/^token: "\(.*\)"$/\1/p')
 advertise=$(echo "$conf" | sed -n 's/^  advertise: //p')
 host_key() {
-  curl -fsS -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+  $CURL -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
     -d "{\"url\": \"$advertise\"}" "$BRIQYARD_URL/v1/hosts/key" | jq -r .key
 }
 HOST=$(hosts | jq -r ".[] | select(.url == \"$advertise\") | .id")
