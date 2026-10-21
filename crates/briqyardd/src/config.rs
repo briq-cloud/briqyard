@@ -1,6 +1,6 @@
 //! The daemon's configuration file.
 
-use crate::netw;
+use crate::{fc, netw};
 use anyhow::{bail, Context, Result};
 use briqyard_api as api;
 use serde::Deserialize;
@@ -46,6 +46,9 @@ pub struct Config {
     /// The limits on every machine's internet traffic, unless the machine sets its own
     /// (ADR 0018).
     pub egress_limits: EgressLimits,
+    /// The limits on each disk of every machine, by its size, unless the machine sets its own
+    /// (ADR 0030).
+    pub disk_limits: DiskLimits,
     pub ingress: Ingress,
     /// The size of every root disk (thin: only written blocks take space).
     pub root_disk_gb: u32,
@@ -179,6 +182,49 @@ impl EgressLimits {
     }
 }
 
+/// The host's disk limits (ADR 0030): a rate per vCPU of a machine's size, so a machine's
+/// share of the disk follows its share of the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DiskLimits {
+    /// MB (2^20 bytes) a second per vCPU, on each disk; 0 is no limit.
+    pub bandwidth_mb_per_vcpu: u32,
+    /// Requests a second per vCPU, on each disk; 0 is no limit.
+    pub iops_per_vcpu: u32,
+    /// What each limit lets through at full speed once, after a start or a change, in
+    /// seconds at its rate.
+    pub burst_sec: u32,
+}
+
+impl Default for DiskLimits {
+    /// At the default capacity (4 vCPUs a hardware thread) a host's machines add up to about
+    /// a datacenter NVMe through ZFS: 1.5 GB/s and 200k requests a second for 48 vCPUs.
+    fn default() -> Self {
+        Self {
+            bandwidth_mb_per_vcpu: 32,
+            iops_per_vcpu: 4000,
+            burst_sec: 10,
+        }
+    }
+}
+
+impl DiskLimits {
+    /// What a machine of `vcpus` runs with: these for its size, its own values over them.
+    pub fn with(&self, vcpus: u32, own: &api::DiskLimits) -> fc::DiskRate {
+        let host = api::DiskLimits {
+            bandwidth_mb: Some(self.bandwidth_mb_per_vcpu.saturating_mul(vcpus)),
+            iops: Some(self.iops_per_vcpu.saturating_mul(vcpus)),
+            burst_sec: Some(self.burst_sec),
+        };
+        let l = own.over(&host);
+        fc::DiskRate {
+            bandwidth_mb: l.bandwidth_mb.unwrap_or(0),
+            iops: l.iops.unwrap_or(0),
+            burst_sec: l.burst_sec.unwrap_or(0),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ingress {
@@ -308,6 +354,7 @@ impl Default for Config {
             registries: vec![],
             network: Network::default(),
             egress_limits: EgressLimits::default(),
+            disk_limits: DiskLimits::default(),
             ingress: Ingress::default(),
             root_disk_gb: 8,
             image_keep_days: 14,
@@ -417,6 +464,11 @@ impl Config {
         }
         if let Err(e) = self.egress_limits.view().check() {
             bail!("egress_limits.{e}");
+        }
+        // The largest size's limits must be ones a machine could ask for.
+        let largest = self.disk_limits.with(32, &api::DiskLimits::default());
+        if let Err(e) = largest.view().check() {
+            bail!("disk_limits: for 32 vCPUs, {e}");
         }
         self.backup.check()?;
         self.check_exposure()?;
@@ -578,6 +630,7 @@ mod tests {
         assert_eq!(c.egress_limits.blocked_ports, vec![25]);
         assert_eq!(c.egress_limits.new_connections_per_minute, 0);
         assert_eq!(c.egress_limits.bandwidth_mbit, 0);
+        assert_eq!(c.disk_limits, DiskLimits::default());
         assert_eq!(c.ingress.tcp_ports, "20000-29999");
         assert!(c.ingress.http.is_empty());
         assert_eq!(c.ingress.domain, "byard.localhost");
@@ -651,6 +704,10 @@ egress_limits:
   blocked_ports: [25, 465, 587]
   new_connections_per_minute: 600
   bandwidth_mbit: 200
+disk_limits:
+  bandwidth_mb_per_vcpu: 50
+  iops_per_vcpu: 1000
+  burst_sec: 5
 ingress:
   tcp_ports: 30000-31000
   http: 0.0.0.0:8080
@@ -706,6 +763,14 @@ console_max_mb: 16
                 bandwidth_mbit: 200,
             }
         );
+        assert_eq!(
+            c.disk_limits,
+            DiskLimits {
+                bandwidth_mb_per_vcpu: 50,
+                iops_per_vcpu: 1000,
+                burst_sec: 5,
+            }
+        );
         assert_eq!(c.ingress.tcp_ports, "30000-31000");
         assert_eq!(c.ingress.http, "0.0.0.0:8080");
         assert_eq!(c.ingress.domain, "byard.example");
@@ -744,6 +809,36 @@ console_max_mb: 16
         let c = load("egress_limits:\n  new_connections_per_minute: 600\n").unwrap();
         assert_eq!(c.egress_limits.blocked_ports, vec![25]);
         assert_eq!(c.egress_limits.new_connections_per_minute, 600);
+    }
+
+    #[test]
+    fn disk_limits_follow_the_size_under_a_machine_s_own() {
+        let host = DiskLimits::default();
+        let none = api::DiskLimits::default();
+        let rate = |bandwidth_mb, iops, burst_sec| fc::DiskRate {
+            bandwidth_mb,
+            iops,
+            burst_sec,
+        };
+        assert_eq!(host.with(1, &none), rate(32, 4000, 10));
+        assert_eq!(host.with(4, &none), rate(128, 16000, 10));
+        // Its own values are absolute, whatever its size; 0 lifts a limit.
+        let own = api::DiskLimits {
+            bandwidth_mb: Some(8),
+            iops: Some(0),
+            burst_sec: None,
+        };
+        assert_eq!(host.with(4, &own), rate(8, 0, 10));
+        // A host with no limits limits nothing but what a machine asks for.
+        let off = load("disk_limits:\n  bandwidth_mb_per_vcpu: 0\n  iops_per_vcpu: 0\n").unwrap();
+        assert_eq!(off.disk_limits.burst_sec, 10, "the rest stays the default");
+        assert_eq!(off.disk_limits.with(8, &none), rate(0, 0, 10));
+        // The largest size's must be a value a machine could set.
+        let err = load("disk_limits:\n  bandwidth_mb_per_vcpu: 4000\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "disk_limits: for 32 vCPUs, bandwidth_mb: at most 100000"
+        );
     }
 
     #[test]
