@@ -462,7 +462,7 @@ windowed() { briqyard top --tenant "$T" --json | jq -e ".[] | select(.machine_id
 for i in $(seq 1 25); do windowed && break; sleep 2; done
 check "top: rates over the last window"   'windowed'
 # The slow writes above, held back by the disk limit: in the next line Firecracker writes.
-throttled() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics" | awk -v m="machine=\"$DK\"" 'index($0, "briqyard_machine_disk_throttled_total{") == 1 && index($0, m) && $2 > 0' | grep -q .; }
+throttled() { "${CURL[@]}" -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics" | awk -v m="machine=\"$DK\"" 'index($0, "briqyard_machine_disk_throttled_total{") == 1 && index($0, m) && $2 > 0' | grep -q .; }
 for i in $(seq 1 35); do throttled && break; sleep 2; done
 check "metrics: the disk's throttling counted" 'throttled'
 briqyard machine rm "$DK" >/dev/null
