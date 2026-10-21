@@ -3703,7 +3703,12 @@ impl Manager {
             };
             return Err(MError::NotRunning(s));
         }
+        // A command that woke the machine runs once it is ready, as traffic does (ADR 0022):
+        // a database woken by `psql` must be accepting by then. A machine already running
+        // and not ready still takes commands at once, as a pod does.
         self.wake_detached(id).await?;
+        let boot = Duration::from_secs(self.inner.cfg.boot_timeout_sec.max(10));
+        self.wait(id, Until::Ready, boot).await?;
         let live = e.live.lock().unwrap().clone();
         live.map(|l| l.vsock)
             .ok_or_else(|| MError::NotRunning("no process".into()))
@@ -9451,6 +9456,36 @@ mod tests {
             Err(MError::NotReady(_)) => {}
             other => panic!("{other:?}"),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_exec_that_wakes_a_machine_runs_once_it_is_ready() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m =
+            h.m.create(h.probed("db", readiness(http_probe(8080))))
+                .await
+                .unwrap();
+        eventually("ready", || h.m.get(&m.id).unwrap().ready).await;
+        let e = h.m.entry(&m.id).unwrap();
+        h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        // The command wakes it; its program is not serving yet: the command waits.
+        h.host.http(&m.ip, 8080, 503);
+        let mgr = h.m.clone();
+        let id = m.id.clone();
+        let run = tokio::spawn(async move { mgr.running_vsock(&id, true).await });
+        eventually("woken", || h.m.get(&m.id).unwrap().state == state::RUNNING).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!run.is_finished());
+        h.host.http(&m.ip, 8080, 200);
+        run.await.unwrap().unwrap();
+        assert!(h.m.get(&m.id).unwrap().ready);
+        // Running and not ready, no wake: the command runs at once, as in a pod.
+        h.host.http(&m.ip, 8080, 500);
+        eventually("not ready", || !h.m.get(&m.id).unwrap().ready).await;
+        h.m.running_vsock(&m.id, true).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]

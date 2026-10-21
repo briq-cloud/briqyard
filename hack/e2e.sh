@@ -218,7 +218,7 @@ check "running again"                '[ "$(briqyard machine get "$LV" | jq -r .s
 briqyard machine rm "$LV" >/dev/null
 
 echo "== postgres with a volume, endpoint, wake on connect"
-P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m | jq -r .id)
+P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m --readiness "exec:pg_isready -h 127.0.0.1 -U postgres" | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "postgres ready" 'briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres | grep -q accepting'
 check "volume mounted" 'briqyard machine exec "$P" -- sh -c "mount | grep -q /var/lib/postgresql/data"'
@@ -253,6 +253,8 @@ F=$(briqyard machine fork "$P" --name pgfork | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$F" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "fork has data"  '[ "$(briqyard machine exec "$F" -- psql -U postgres -tAc "select x from t")" = 42 ]'
 briqyard machine exec "$F" -- psql -U postgres -c "insert into t values (43)" >/dev/null
+# The source has slept by now (its window is a minute); the exec wakes it and runs once its
+# readiness probe says Postgres accepts (ADR 0022).
 check "fork is apart"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select count(*) from t")" = 1 ]'
 # The fork outlives its source: the clone is promoted, the source's disks go.
 briqyard machine destroy "$P" >/dev/null
