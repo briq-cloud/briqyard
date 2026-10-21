@@ -49,7 +49,7 @@ What a skew breaks, read from the code:
 3. `briqyardd --version` over SSH says what was installed;
 4. the fleet waits up to 5 minutes for a heartbeat (or a poll of a static host) from a new start (`started.at` moved) of that version;
 5. a start that stopped a machine instead of adopting it fails the upgrade;
-6. the host is back in its state (`ready` or `draining`), its note `upgraded to <version> at <time>: N machines handed over`.
+6. the host is back in its state (`ready` or `draining`), its note `upgraded to <version> at <time>; machines handed over: N`.
 
 A failure leaves the host `draining`, the reason in its note, for `host undrain` once fixed. The request waits for the upgrade, which runs in a task of its own (ADR 0011): a caller that hangs up never leaves a host half-moved. A fleet that restarts mid-upgrade finds the host `upgrading` and makes it `draining`. **`--all`** is the CLI's loop over the one-host call: every `ready` or `draining` host by id, one at a time, stopping at the first failure and naming the hosts left.
 
@@ -72,7 +72,7 @@ Rejected, one line each:
 
 - A daemon restart resets the connections through its ingress (the proxy is the daemon's): TCP endpoints and HTTP requests in flight, execs, log follows and watches. Clients reconnect; guests see nothing. A request still running 30 s after a stop or a hand-over is cut (the server waited for it without end before, until systemd killed the daemon); the next daemon takes up what its transitions left, as after a crash.
 - A machine whose process exits during the hand-over's gap (a second or two) has its exit report lost: the new daemon finds it gone, marks it stopped and boots it again, whatever its restart policy.
-- Machines suspended by a daemon from before this ADR carry no `vmm_version`: their next start is cold, once.
+- Machines suspended by a daemon from before this ADR carry no `vmm_version`: their next start is cold, once. A daemon from before this ADR does not catch SIGUSR2 and dies of it, which is a crash: the new daemon adopts its machines all the same (the last minute of usage and of last uses is lost, as in any crash).
 - A rollback is an upgrade to the older release (`host upgrade` refuses nothing older). The older daemon drops the newer fields of the records it rewrites, and refuses a configuration field it does not know: remove such fields first.
 - The fleet reaches every host it upgrades over SSH with `provisioner.bootstrap.ssh_key`; a static host's key is pinned at its first upgrade, as an ordered host's at its bootstrap.
 - After a roll, `provisioner.bootstrap.release` is what new hosts get: set it to the same release.

@@ -140,7 +140,7 @@ What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it i
 | Install | `hack/bootstrap-host.sh` over SSH with the release (`provisioner.bootstrap.ssh_key`, the pinned host key), as at a bootstrap: packages, Firecracker and kernel pins, the binaries put in place by a rename, the unit |
 | Hand-over | The script sends the running daemon SIGUSR2: it exits and leaves every machine running; `systemctl start` brings the new one, which adopts them |
 | Back | `briqyardd --version` over SSH, then a heartbeat from a new start of that version that stopped nothing, within 5 minutes |
-| Undrained | The host is back in its state; its note says `upgraded to <version> at <time>: N machines handed over` |
+| Undrained | The host is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
 
 A failure leaves the host `draining` with the reason in its note: fix it, then
 `briqyard host undrain <id>`. `--all` stops at the first failure and names the hosts left. One

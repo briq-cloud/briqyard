@@ -2962,7 +2962,7 @@ async fn an_upgrade_ends_in_the_hosts_state_or_drained() {
     let h = upgrade::finish(&f.st, &was, "file:///r", Ok(("0.2.0+b".into(), started))).unwrap();
     assert_eq!(h.state, "ready");
     assert!(h.note.starts_with("upgraded to 0.2.0+b at "), "{}", h.note);
-    assert!(h.note.ends_with(": 3 machines handed over"), "{}", h.note);
+    assert!(h.note.ends_with("; machines handed over: 3"), "{}", h.note);
     // A failure leaves it drained, the reason in its note, whatever it was before.
     set_state(&f.st, "h_a", "upgrading");
     let err = upgrade::finish(

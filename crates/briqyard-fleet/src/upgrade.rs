@@ -185,7 +185,7 @@ pub fn finish(
             Ok((version, started)) => {
                 h.state = was.state.clone();
                 h.note = format!(
-                    "upgraded to {version} at {when}: {} machines handed over",
+                    "upgraded to {version} at {when}; machines handed over: {}",
                     started.adopted
                 );
                 tracing::warn!(
