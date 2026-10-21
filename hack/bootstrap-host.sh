@@ -21,7 +21,8 @@
 # private network such as OVH's vRack), else 0.0.0.0:7420. A public address needs
 # ALLOWED_CLIENTS (comma-separated IPv4 CIDRs: the fleet's and the routers' networks) or
 # ALLOW_PUBLIC=1 (a firewall of your own); with neither, they bind loopback. With
-# PRIVATE_ADDRESS, the public interface takes SSH and PUBLIC_TCP_PORTS only.
+# PRIVATE_ADDRESS, the public interface takes SSH and PUBLIC_TCP_PORTS only. Machines reach
+# PUBLIC_TCP_PORTS on the host as the internet does (`network.host_ports`: an edge beside it).
 # Off loopback the API serves TLS with a certificate of its own (ADR 0020): the script prints
 # its fingerprint, which the fleet pins (`tls_fingerprint` in the host's `hosts:` entry).
 set -euo pipefail
@@ -300,8 +301,8 @@ storage:
   pool: $POOL
 network:
   range: 10.64.0.0/10
+${PUBLIC_TCP_PORTS:+  host_ports: [${PUBLIC_TCP_PORTS//,/, }]}
 ingress:
-  tcp_ports: 20000-29999
   bind: $bind
   http: $bind:8080
   domain: byard.localhost

@@ -125,6 +125,9 @@ pub struct Network {
     pub upstream_dns: Vec<String>,
     /// The host interface machines reach the internet through. Empty: the default route's.
     pub egress: String,
+    /// TCP ports of the host's own services (an edge beside the daemon, ADR 0028) that
+    /// machines with open egress reach at the host's addresses, as the internet does.
+    pub host_ports: Vec<u16>,
 }
 
 /// Limits on a machine's internet traffic, every field set: the host's defaults, and what a
@@ -327,11 +330,26 @@ pub struct FleetClient {
     pub region: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Capacity {
     pub memory_mb: u32,
     pub vcpus: u32,
+    /// Memory kept for the host and its other services when `memory_mb` is not set.
+    pub reserved_memory_mb: u32,
+    /// Hardware threads kept for them when `vcpus` is not set (ADR 0028).
+    pub reserved_threads: u32,
+}
+
+impl Default for Capacity {
+    fn default() -> Self {
+        Self {
+            memory_mb: 0,
+            vcpus: 0,
+            reserved_memory_mb: 2048,
+            reserved_threads: 0,
+        }
+    }
 }
 
 impl Default for Config {
@@ -388,6 +406,7 @@ impl Default for Network {
             range: "10.64.0.0/10".into(),
             upstream_dns: vec![],
             egress: String::new(),
+            host_ports: vec![],
         }
     }
 }
@@ -395,7 +414,10 @@ impl Default for Network {
 impl Default for Ingress {
     fn default() -> Self {
         Self {
-            tcp_ports: "20000-29999".into(),
+            // Kubernetes' NodePort range: no well-known service's port (an edge beside the
+            // daemon listens on MongoDB's 27017, ADR 0028), and under the kernel's ephemeral
+            // ports, which outgoing connections take.
+            tcp_ports: "30000-32767".into(),
             http: String::new(),
             domain: "byard.localhost".into(),
             bind: "127.0.0.1".into(),
@@ -462,6 +484,7 @@ impl Config {
         for c in &self.ingress.allowed_clients {
             netw::cidr(c).with_context(|| format!("ingress.allowed_clients {c:?}"))?;
         }
+        self.check_host_ports()?;
         if let Err(e) = self.egress_limits.view().check() {
             bail!("egress_limits.{e}");
         }
@@ -473,6 +496,29 @@ impl Config {
         self.backup.check()?;
         self.check_exposure()?;
         self.check_advertise()
+    }
+
+    /// A host port is a service of the host's own: never one of the daemon's, which machines
+    /// must not reach, nor the gateway's DNS, which they reach already.
+    fn check_host_ports(&self) -> Result<()> {
+        let daemon =
+            netw::nft::daemon_ports(&self.listen, &self.ingress.http, &self.ingress.tcp_ports)?;
+        let daemons = |p: u16| {
+            daemon.iter().any(|d| {
+                let (lo, hi) = d.split_once('-').unwrap_or((d, d));
+                (lo.parse().unwrap_or(0)..=hi.parse().unwrap_or(0)).contains(&p)
+            })
+        };
+        for &p in &self.network.host_ports {
+            let why = match p {
+                0 => "not a port",
+                53 => "the gateway's DNS",
+                _ if daemons(p) => "one of the daemon's",
+                _ => continue,
+            };
+            bail!("network.host_ports: {p} is {why}: list ports of the host's own services");
+        }
+        Ok(())
     }
 
     /// The fleet dials `fleet.advertise` as written: its scheme must be the API's.
@@ -631,7 +677,7 @@ mod tests {
         assert_eq!(c.egress_limits.new_connections_per_minute, 0);
         assert_eq!(c.egress_limits.bandwidth_mbit, 0);
         assert_eq!(c.disk_limits, DiskLimits::default());
-        assert_eq!(c.ingress.tcp_ports, "20000-29999");
+        assert_eq!(c.ingress.tcp_ports, "30000-32767");
         assert!(c.ingress.http.is_empty());
         assert_eq!(c.ingress.domain, "byard.localhost");
         assert_eq!(c.ingress.bind, "127.0.0.1");
@@ -646,6 +692,9 @@ mod tests {
         assert!(c.fleet.is_none());
         assert_eq!(c.capacity.memory_mb, 0);
         assert_eq!(c.capacity.vcpus, 0);
+        assert_eq!(c.capacity.reserved_memory_mb, 2048);
+        assert_eq!(c.capacity.reserved_threads, 0);
+        assert!(c.network.host_ports.is_empty());
         assert_eq!(
             c.conditions,
             Conditions {
@@ -700,6 +749,7 @@ network:
   range: 10.128.0.0/10
   upstream_dns: ["1.1.1.1", "9.9.9.9"]
   egress: eth0
+  host_ports: [80, 443, 5432]
 egress_limits:
   blocked_ports: [25, 465, 587]
   new_connections_per_minute: 600
@@ -728,6 +778,8 @@ fleet:
 capacity:
   memory_mb: 65536
   vcpus: 128
+  reserved_memory_mb: 3072
+  reserved_threads: 2
 conditions:
   memory_pct: 90
   disk_free_pct: 20
@@ -755,6 +807,7 @@ console_max_mb: 16
         assert_eq!(c.network.range, "10.128.0.0/10");
         assert_eq!(c.network.upstream_dns, vec!["1.1.1.1", "9.9.9.9"]);
         assert_eq!(c.network.egress, "eth0");
+        assert_eq!(c.network.host_ports, [80, 443, 5432]);
         assert_eq!(
             c.egress_limits,
             EgressLimits {
@@ -789,6 +842,8 @@ console_max_mb: 16
         assert_eq!(f.region, "fsn1");
         assert_eq!(c.capacity.memory_mb, 65536);
         assert_eq!(c.capacity.vcpus, 128);
+        assert_eq!(c.capacity.reserved_memory_mb, 3072);
+        assert_eq!(c.capacity.reserved_threads, 2);
         assert_eq!(
             c.conditions,
             Conditions {
@@ -803,7 +858,7 @@ console_max_mb: 16
     fn a_partial_section_keeps_the_other_defaults() {
         let c = load("ingress:\n  http: 127.0.0.1:8080\n").unwrap();
         assert_eq!(c.ingress.http, "127.0.0.1:8080");
-        assert_eq!(c.ingress.tcp_ports, "20000-29999");
+        assert_eq!(c.ingress.tcp_ports, "30000-32767");
         assert_eq!(c.ingress.domain, "byard.localhost");
         // A rate set for every machine keeps port 25 blocked.
         let c = load("egress_limits:\n  new_connections_per_minute: 600\n").unwrap();
@@ -973,6 +1028,41 @@ console_max_mb: 16
         }
         // The jailer may stay empty (no jail) and is not checked for an absolute path here.
         load("jailer: \"\"\n").unwrap();
+    }
+
+    #[test]
+    fn host_ports_are_never_the_daemons() {
+        for (yaml, why) in [
+            ("network:\n  host_ports: [0]\n", "0 is not a port"),
+            ("network:\n  host_ports: [53]\n", "53 is the gateway's DNS"),
+            (
+                "network:\n  host_ports: [443, 7420]\n",
+                "7420 is one of the daemon's",
+            ),
+            (
+                "ingress:\n  http: 127.0.0.1:8080\nnetwork:\n  host_ports: [8080]\n",
+                "8080 is one of the daemon's",
+            ),
+            (
+                "network:\n  host_ports: [31000]\n",
+                "31000 is one of the daemon's",
+            ),
+            // The endpoint range before ADR 0028 held MongoDB's port, an edge's listener.
+            (
+                "ingress:\n  tcp_ports: 20000-29999\nnetwork:\n  host_ports: [443, 27017]\n",
+                "27017 is one of the daemon's",
+            ),
+        ] {
+            let err = load(yaml).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                format!("network.host_ports: {why}: list ports of the host's own services"),
+                "{yaml:?}"
+            );
+        }
+        // 8080 is the HTTP ingress's only when it is on.
+        let c = load("network:\n  host_ports: [80, 443, 8080, 5432, 27017]\n").unwrap();
+        assert_eq!(c.network.host_ports, [80, 443, 8080, 5432, 27017]);
     }
 
     #[test]

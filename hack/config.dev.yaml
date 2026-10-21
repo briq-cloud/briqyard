@@ -17,6 +17,8 @@ storage:
   pool: byard
 network:
   range: 10.64.0.0/10
+  # A host port nothing listens on: e2e reads a refusal at once as reached, a drop as not.
+  host_ports: [9443]
 ingress:
   tcp_ports: 20000-29999
   http: 0.0.0.0:8080

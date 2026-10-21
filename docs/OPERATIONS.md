@@ -35,7 +35,7 @@ address (the host's `hosts:` entry, below).
 | `BRIQYARD_ARC_GB` | 10 % of memory, 1 to 16 | The ZFS cache's ceiling (`/etc/modprobe.d/briqyard-zfs.conf`); the daemon's default capacity leaves it out |
 | `PRIVATE_ADDRESS` | none | The host's address on a private network, with its prefix (`10.42.0.11/16`): `LISTEN`, the endpoints and `ADVERTISE` default to it, and the public interface takes SSH and `PUBLIC_TCP_PORTS` only (`nft list table inet briqyard_host`, loaded by `briqyard-firewall.service` at boot) |
 | `PRIVATE_INTERFACE` | none | Where `PRIVATE_ADDRESS` is put (netplan, `/etc/netplan/60-briqyard-private.yaml`) when no interface has it yet |
-| `PUBLIC_TCP_PORTS` | none | Ports the public interface takes besides SSH's own (read from `sshd -T`), comma-separated (the fleet's, 80 for certbot) |
+| `PUBLIC_TCP_PORTS` | none | Ports the public interface takes besides SSH's own (read from `sshd -T`), comma-separated: an edge's beside the daemon (80, 443, its TCP listeners). Written as `network.host_ports` too |
 | `LISTEN` | `PRIVATE_ADDRESS`'s, else `0.0.0.0:7420` | The API's address; TCP endpoints and the HTTP ingress bind the same address |
 | `ALLOWED_CLIENTS` | none | Comma-separated IPv4 CIDRs (a bare address is a `/32`) allowed to connect: the fleet's and the routers' networks. Written as `ingress.allowed_clients` |
 | `ALLOW_PUBLIC` | none | `1` writes `ingress.allow_public: true`: anyone can connect, a firewall of your own is in front |
@@ -98,19 +98,21 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `network.range` | `10.64.0.0/10` | Tenant subnets, one /24 each (16,384 tenants) |
 | `network.upstream_dns` | the host's, then `1.1.1.1` | Where the gateway forwards DNS |
 | `network.egress` | the default route's interface | Where machines reach the internet |
+| `network.host_ports` | none | TCP ports of the host's own services (an edge beside the daemon, ADR 0028) that machines with egress `open` reach at the host's addresses, as the internet does; never at a tenant's `.1`. Not the daemon's ports, nor 53 |
 | `egress_limits.blocked_ports` | `[25]` | Destination ports no machine reaches on the internet, TCP and UDP (ADR 0018). A machine's own `limits` override each field |
 | `egress_limits.new_connections_per_minute` | `0` (none) | New internet connections a machine may open a minute, as many at once |
 | `egress_limits.bandwidth_mbit` | `0` (none) | A machine's internet bandwidth, in and out together; at most 100000 |
 | `disk_limits.bandwidth_mb_per_vcpu` | `32` | MB a second on each disk of a machine (root and volume), per vCPU of its size (ADR 0030). A machine's own `disk_limits` override each field with an absolute value. `0`: none |
 | `disk_limits.iops_per_vcpu` | `4000` | Disk requests a second, per vCPU, on each disk. `0`: none |
 | `disk_limits.burst_sec` | `10` | Seconds at those rates let through at full speed once after a start, a wake or a change |
-| `ingress.tcp_ports` | `20000-29999` | Host ports handed to TCP endpoints |
+| `ingress.tcp_ports` | `30000-32767` | Host ports handed to TCP endpoints (2,768; Kubernetes' NodePort range: under the kernel's ephemeral ports, no well-known service's, ADR 0028). `network.host_ports` must be outside it |
 | `ingress.bind` | `127.0.0.1` | Where TCP endpoints listen. A public address is refused without `ingress.allowed_clients` or `ingress.allow_public` |
 | `ingress.allowed_clients` | none | The IPv4 networks (`a.b.c.d/n`) that may reach the API, the HTTP ingress and the TCP endpoints; rendered into the daemon's nftables table (`nft list table inet briqyard`). Loopback always may. Empty: anyone who can route to the address |
 | `ingress.allow_public` | `false` | Start on a public address with `allowed_clients` empty: a firewall of your own keeps the daemon's ports from the internet |
 | `ingress.advertise` | the host's primary address | The address endpoints are reported at (`address` on an endpoint): what a router on another machine dials, a private address when the host has one |
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
-| `capacity.memory_mb`, `capacity.vcpus` | host memory − 2 GB − the ZFS cache's ceiling (`zfs_arc_max`, when set), threads × 4 | What the host hands out; shared vCPUs oversubscribe |
+| `capacity.memory_mb`, `capacity.vcpus` | host memory − `reserved_memory_mb` − the ZFS cache's ceiling (`zfs_arc_max`, when set), (threads − `reserved_threads`) × 4 | What the host hands out; shared vCPUs oversubscribe |
+| `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the default capacity leaves to the host and its other services (an edge: 3072); unused when `memory_mb` or `vcpus` is set |
 | `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start |
 
 ## Where things live
@@ -423,20 +425,18 @@ The autoscaler (`provisioner.enabled: true`) orders a host when no ready host ha
 
 ## First OVH host
 
-One server, the fleet on it, the API and the endpoints on the vRack, the public interface
-closed to all but SSH and the fleet's port (ADR 0028). The values below (`10.42.0.0/16`,
-`10.42.0.11`, `enp3s0f1`, `fleet.stg.briq.cloud`) are examples: write yours.
-
-**Endpoints are not reachable from the internet** until briq's edge runs on our servers in the
-vRack (up-lab/briq#277): Fly's edge cannot reach the vRack. Until then the host takes machines,
-exec, files and backups, not public traffic.
+One server: the host, the fleet and briq's public edge on it (ADR 0028; briq's ADR 0017,
+amendment). The API and the endpoints on the vRack; the public interface takes SSH, 80, 443 and
+the edge's TCP listener ports; the fleet behind the edge's Caddy. The values below
+(`10.42.0.0/16`, `10.42.0.11`, `enp3s0f1`, `gra`, `fleet.stg.briq.cloud`, `edge-gra-1`) are
+examples: write yours. Steps marked *briq* run in a checkout of up-lab/briq.
 
 **1. Order** (OVH manager, Bare Metal Cloud, Dedicated servers):
 
 | | |
 |---|---|
 | Range | Rise or Advance: KVM on every dedicated server; the vRack on these (not on Kimsufi or So you Start) |
-| Memory | 64 GB or more: machines get memory − 2 GB − the ZFS cache's cap (10 %) |
+| Memory | 64 GB or more: machines get memory − 3 GB (the host and the edge) − the ZFS cache's cap (10 %) |
 | Disks | 2 × NVMe of one size |
 | Options | the vRack (private bandwidth) |
 | OS | Ubuntu Server 24.04 LTS |
@@ -464,8 +464,8 @@ raidLevel: 1, size: 102400}]}}]`, the provisioner's own body.
 the one whose MAC the manager shows as Private (server, Network interfaces): `ip -br link |
 grep -i <mac>` names it. Pick the range (`10.42.0.0/16`) and the server's address in it.
 
-**4. The fleet, on this server** (it runs nowhere else yet; the repository is private, so the
-binaries come from your Mac):
+**4. The fleet, on this server**, on loopback: the edge's Caddy serves its name (step 6). The
+repository is private, so the binaries come from your Mac:
 
 ```bash
 gh release download v0.1.0 -R briq-cloud/briqyard -p 'briqyard*-linux-x86_64' -p SHA256SUMS-x86_64 -D /tmp/byard
@@ -476,9 +476,9 @@ scp hack/briqyard-fleet.service root@<public ip>:/etc/systemd/system/
 ssh root@<public ip>
 chmod 0755 /usr/local/bin/briqyard /usr/local/bin/briqyard-fleet && mkdir -p /etc/briqyard
 ssh-keygen -q -t ed25519 -N '' -f /etc/briqyard/fleet_ssh_key && cat /etc/briqyard/fleet_ssh_key.pub >> /root/.ssh/authorized_keys
-apt-get install -y certbot && certbot certonly --standalone -d fleet.stg.briq.cloud --deploy-hook 'systemctl restart briqyard-fleet'   # its DNS record first
 install -m 0600 /dev/null /etc/briqyard/fleet.env && nano /etc/briqyard/fleet.env   # BRIQYARD_RELEASE_TOKEN=…
 install -m 0600 /dev/null /etc/briqyard/fleet.yaml && nano /etc/briqyard/fleet.yaml # below
+systemctl daemon-reload && systemctl enable --now briqyard-fleet
 ```
 
 The release token is a fine-grained GitHub token, read-only on `briq-cloud/briqyard`'s
@@ -488,8 +488,7 @@ shell's history).
 `/etc/briqyard/fleet.yaml`:
 
 ```yaml
-listen: 0.0.0.0:7430
-tls: { cert: /etc/letsencrypt/live/fleet.stg.briq.cloud/fullchain.pem, key: /etc/letsencrypt/live/fleet.stg.briq.cloud/privkey.pem }
+listen: 127.0.0.1:7430                     # plain HTTP: the edge's Caddy terminates TLS
 token: <openssl rand -hex 24: what briq and the CLI present>
 state_dir: /var/lib/briqyard-fleet
 provisioner:
@@ -499,73 +498,138 @@ provisioner:
     ssh_key: /etc/briqyard/fleet_ssh_key
     release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.0
     pool_device: /dev/nvme0n1,/dev/nvme1n1
-    fleet_url: https://fleet.stg.briq.cloud:7430
+    fleet_url: https://fleet.stg.briq.cloud
     private_network: 10.42.0.0/16
     private_interface: enp3s0f1
-    allowed_clients: [10.42.0.0/16]       # and the edge's addresses
-    public_tcp_ports: [7430, 80]          # briq reaches the fleet; certbot renews
+    allowed_clients: [10.42.0.0/16]
+    # The edge's: HTTP, HTTPS and its TCP listeners (briq's infra/edge/host/staging.env).
+    # Machines reach them at the host's address too (network.host_ports).
+    public_tcp_ports: [80, 443, 5432, 3306, 6379, 27017, 5671, 7687, 6334]
 ```
 
-`systemctl daemon-reload && systemctl enable --now briqyard-fleet`. The fleet's state
-(`/var/lib/briqyard-fleet`: the registry with every host's token, the pinned SSH keys) lives
-only there until the fleet backs itself up (ADR 0032): copy it off the server after each host
-change, `scp -r root@<public ip>:/var/lib/briqyard-fleet ~/briqyard-fleet-<date>`, and keep the
-copy as private as the fleet's config. briq's side: its control plane gets
-`BRIQYARD_URL=https://fleet.stg.briq.cloud:7430` and the fleet's `token` as `BRIQYARD_TOKEN`.
+The fleet's state (`/var/lib/briqyard-fleet`: the registry with every host's token, the pinned
+SSH keys) lives only there until the fleet backs itself up (ADR 0032): copy it off the server
+after each host change, `scp -r root@<public ip>:/var/lib/briqyard-fleet ~/briqyard-fleet-<date>`,
+and keep the copy as private as the fleet's config.
 
-**5. Add the server to the fleet**, from your Mac (`cargo build --release -p briqyard`), once
-the server's kernel has ZFS and KVM:
+**5. Add the server to the fleet**, on the server (the fleet has no public name yet), once its
+kernel has ZFS and KVM:
 
 ```bash
-ssh root@<public ip> 'modprobe zfs && ls /dev/kvm'
-export BRIQYARD_URL=https://fleet.stg.briq.cloud:7430 BRIQYARD_TOKEN=<the fleet's token>
+modprobe zfs && ls /dev/kvm
+export BRIQYARD_URL=http://127.0.0.1:7430 BRIQYARD_TOKEN=$(sed -n 's/^token: *//p' /etc/briqyard/fleet.yaml)
 briqyard host add <public ip> --address 10.42.0.11 --region gra
-briqyard host ls     # within two minutes: the note, then ready
+briqyard host ls     # within two minutes: the note, the keys pinned
+printf 'capacity:\n  reserved_memory_mb: 3072\n' >> /etc/briqyard/config.yaml && systemctl restart briqyardd
 ```
 
 Putting the vRack address on its interface runs `netplan apply`, which renews the public
 interface's DHCP lease too: a second's pause, SSH sessions survive. The note names the SSH key
-pinned (`SHA256:…`): compare it with `ssh-keygen -lf
-/etc/ssh/ssh_host_ed25519_key.pub` in your own session. Then the API certificate pinned, then
-`ready` at the first heartbeat. A failed attempt is in the note and tried again every two
-minutes; fix the cause, nothing to undo.
+pinned (`SHA256:…`): compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. Then
+the API certificate pinned. A failed attempt is in the note and tried again every two minutes;
+fix the cause, nothing to undo. The host turns `ready` at its first heartbeat, which goes to
+`fleet_url` through the edge: after step 7. The last line keeps 3 GB of memory for the host and
+the edge (`capacity.reserved_memory_mb`, 2048 by default; in the dev VM the idle edge took 29 MiB,
+Docker and containerd 555 MB with their page cache).
 
-**6. Smoke checks:**
+**6. The edge's bootstrap**, after briqyard's (it checks that briqyard's firewall opens its
+ports, and writes none of its own), from your Mac (*briq*):
+
+```bash
+ssh-keygen -q -t ed25519 -N '' -C briq-edge-ci -f ~/.ssh/briq-edge-ci
+gh secret set EDGE_SSH_KEY --env staging < ~/.ssh/briq-edge-ci && rm ~/.ssh/briq-edge-ci   # CI's half
+scp -r infra/edge/host root@<public ip>:briq-edge-host
+read -rs ROUTER_SECRET && read -rs CLOUDFLARE_API_TOKEN   # staging's router secret; a token editing briq.run's DNS only
+printf 'ROUTER_SECRET=%s\nCLOUDFLARE_API_TOKEN=%s\nBRIQ_API_URL=https://api.stg.briq.cloud\n' "$ROUTER_SECRET" "$CLOUDFLARE_API_TOKEN" |
+  ssh root@<public ip> sh briq-edge-host/bootstrap.sh staging "$(cat ~/.ssh/briq-edge-ci.pub)"
+ssh root@<public ip> 'cat > /etc/briq-edge/sites/fleet.caddy' <<'SITE'
+fleet.stg.briq.cloud {
+	tls {
+		issuer acme
+	}
+	reverse_proxy 127.0.0.1:7430 {
+		flush_interval -1
+	}
+}
+SITE
+```
+
+Railway seals `ROUTER_SECRET`: read it where you keep it, or rotate it (`gh secret set
+ROUTER_SECRET --env staging`, then `gh workflow run secrets.yml -f environment=staging`, which
+gives it to Railway and the Fly edge). The bootstrap prints the server's host key line. The
+fleet's site gets a certificate of its own from Let's Encrypt by HTTP-01 on port 80, which Caddy
+holds; its `tls` block keeps it off the DNS-01 issuer, whose token edits `briq.run` only.
+
+**7. DNS and the first deploy** (*briq*, one pull request; CI applies it on merge):
+`infra/edge/host/servers` gets `staging edge-gra-1 <public ip>`, `known_hosts` the line step 6
+printed (`<public ip> ssh-ed25519 …`), `deploy.yml` the `staging-edge-hosts` job (ADR 0017,
+"Wiring the deploy"), and `infra/dns/dnsconfig.js` two DNS-only records: `A('fleet.stg',
+'<public ip>')` in `briq.cloud`, `A('edge-gra-1.stg', '<public ip>')` in `briq.run`. Merged, the
+edge starts with its certificates (`*.stg.briq.run` and `*.tcp.stg.briq.run` by DNS-01, the
+fleet's by HTTP-01), and then:
+
+```bash
+export BRIQYARD_URL=https://fleet.stg.briq.cloud BRIQYARD_TOKEN=<the fleet's token>
+briqyard host ls                                       # ready
+curl -s https://edge-gra-1.stg.briq.run/__router/health
+```
+
+**8. Smoke checks:**
 
 ```bash
 ssh root@<public ip> briqyard doctor                   # every line ok
 ssh root@<public ip> zpool status byard                # mirror-0, both partitions ONLINE
-ssh root@<public ip> nft list table inet briqyard_host # tcp 22, 7430, 80, then drop
+ssh root@<public ip> nft list tables                   # briqyard_host and briqyard's two: no briq_edge, none of Docker's
+ssh root@<public ip> nft list table inet briqyard_host # tcp 22, 80, 443 and the listeners', then drop
 nc -vz -w 3 <public ip> 7420                            # from the Mac: times out
 scp hack/e2e.sh root@<public ip>:/root/ && ssh root@<public ip> 'apt-get install -y bc postgresql-client'
 ssh root@<public ip> 'export BRIQYARD_URL=https://10.42.0.11:7420 BRIQYARD_TOKEN=$(sed -n "s/^token: \"\(.*\)\"/\1/p" /etc/briqyard/config.yaml) BRIQYARD_TLS_FINGERPRINT=$(briqyardd --config /etc/briqyard/config.yaml tls-fingerprint); bash /root/e2e.sh'
-BRIQYARD_URL=https://fleet.stg.briq.cloud:7430 BRIQYARD_TOKEN=<the fleet's token> hack/fleet-smoke.sh
+BRIQYARD_URL=https://fleet.stg.briq.cloud BRIQYARD_TOKEN=<the fleet's token> hack/fleet-smoke.sh
 ```
 
 e2e runs on the host (endpoints are vRack addresses, and it needs GNU tools) and needs a
 `backup.store` in the host's config: the real bucket (its test backups go, destroyed machines'
-after `keep_destroyed_days`), or `file:///var/lib/briqyard/backups` for this run. The fleet
+after `keep_destroyed_days`), or `file:///var/lib/briqyard/backups` for this run. On the host
+it checks the host ports too (the edge's port 80 from a machine, the API dropped). The fleet
 smoke runs from anywhere that reaches the fleet and touches no real host.
 
-**7. The first day**, what to watch:
+**9. Staging onto briqyard** (briq's ADR 0017, "Rollover"; Fly's staging briqs are destroyed,
+not moved):
+
+1. Cloudflare, `briq.run`, SSL/TLS, Edge Certificates, Order an advanced certificate for
+   `stg.briq.run` and `*.stg.briq.run` ($10 a month): Universal SSL covers one level only.
+2. *briq*: `node infra/cloudflare/zone.mjs --apply`, with a token that has Zone Settings, Cache
+   Rules and Bot Management edit on `briq.run`.
+3. *briq*: `gh secret set BRIQYARD_TOKEN --env staging` (the fleet's token), then one pull
+   request: in `.railway/railway.ts`, staging's API gets `PROVIDER: 'briqyard'`,
+   `BRIQYARD_URL: 'https://fleet.stg.briq.cloud'`, `BRIQYARD_TOKEN: secret('BRIQYARD_TOKEN')` and
+   `ROUTER_URLS: 'https://edge-gra-1.stg.briq.run'` in place of `ROUTER_URL`; `secrets.yml`
+   passes `BRIQYARD_TOKEN`; `infra/dns/dnsconfig.js` gets ADR 0017's staging records with this
+   one server (`*.stg` proxied, `*.tcp.stg` DNS-only, the `_acme-challenge.stg` CNAME gone).
+4. Merged: `gh workflow run secrets.yml -f environment=staging`, then `gh run list -w deploy -L
+   1`, and the smoke test, full.
+
+**10. The first day**, what to watch:
 
 | What | Where |
 |---|---|
-| Errors | `journalctl -u briqyardd -u briqyard-fleet -o cat \| jq -c 'select(.level != "INFO")'` |
+| Errors | `journalctl -u briqyardd -u briqyard-fleet -o cat \| jq -c 'select(.level != "INFO")'`; the edge's, `journalctl -u briq-edge` |
 | The host | `briqyard host ls`: `ready`, conditions false, last seen within 15 s |
 | The disks | `zpool status -x` says all pools are healthy; `zpool list byard` |
-| Memory | `free -g`; `arc_summary \| head -30`: the ARC under its cap |
+| Memory | `free -g`; `arc_summary \| head -30`: the ARC under its cap; `docker stats --no-stream briq-edge` |
 | Machines | `briqyard top`, `briqyard events --watch` |
 | The kernel | `dmesg -T \| grep -iE 'kvm\|oom\|nvme\|mce'` |
 | The public interface | `nft list chain inet briqyard_host input`: the drop counter grows with the internet's scans |
 
-Never enable `nftables.service` or ufw: they flush every table, ours and the daemon's. After a
-kernel upgrade, check that `ip -br link` still names the public interface as
+Never enable `nftables.service` or ufw: they flush every table, ours and the daemon's. Never
+let Docker write rules (`/etc/docker/daemon.json`, written by the edge's bootstrap): at a boot
+where it starts before the daemon, it sets the forward policy to drop and machines lose the
+internet. After a kernel upgrade, check that `ip -br link` still names the public interface as
 `/etc/briqyard/firewall.nft` does: the rule `iifname != "<public>" accept` lets everything in
 once the interface is renamed (fix the name, `systemctl restart briqyard-firewall`).
 
-**8. Undo**: `briqyard host retire <id>` (drained, forgotten once it runs nothing). On the
-server: `systemctl disable --now briqyardd briqyard-firewall`, `nft delete table inet
+**11. Undo**: `briqyard host retire <id>` (drained, forgotten once it runs nothing). On the
+server: `systemctl disable --now briq-edge briqyardd briqyard-firewall`, `nft delete table inet
 briqyard_host`, `zpool destroy byard`, `sgdisk -d <n>` the `briqyard-pool` partition of each
 disk (`sgdisk -p`), `rm /etc/netplan/60-briqyard-private.yaml && netplan apply`. Or reinstall
 it from the OVH manager. Locked out of SSH: Netboot in rescue mode, mount the root RAID

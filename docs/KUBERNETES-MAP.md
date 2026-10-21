@@ -77,6 +77,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | Fit by resources | ✓ memory and disk, reserved at placement | | |
+| Node allocatable (`systemReserved`) | ✓ `capacity.reserved_memory_mb`, `reserved_threads`: what the host keeps for itself and a service beside the daemon (ADR 0028) | | |
 | Node selectors, node affinity, topology | ✓ a create's `region` places a new tenant on a host of it; a tenant never spans regions (ADR 0025) | autoscaling per region | yard, later |
 | Pod affinity | ◐ a tenant's machines share a host, forced | | — |
 | Cordon | ✓ drain | | |
@@ -99,6 +100,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Cluster DNS | ✓ `<name>.internal` | | |
 | Service, ClusterIP load balancing | ✗ | with groups | yard, later |
 | Ingress controller | ✓ L4 ingress per host, private to the edge | | |
+| Pods reaching a `hostNetwork` pod (an edge on the node) | ✓ `network.host_ports`, at the host's addresses, for machines with egress (ADR 0028) | | |
 | Ingress auth, TLS, hostnames | the router, Cloudflare in front | | briq |
 | NetworkPolicy, egress | ✓ `open`, `via`, `none` | | |
 | NetworkPolicy, by port and CIDR | ◐ blocked ports, a connection rate, a bandwidth cap per machine (ADR 0018) | allow-lists by CIDR | yard, later |

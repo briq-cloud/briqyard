@@ -132,8 +132,8 @@ pub struct Bootstrap {
     /// `PRIVATE_INTERFACE`: the interface given the host's private address when it has none
     /// yet (servers of one model share interface names).
     pub private_interface: String,
-    /// `PUBLIC_TCP_PORTS`: ports a private host's public interface takes besides SSH (the
-    /// fleet's own, on the host it runs on).
+    /// `PUBLIC_TCP_PORTS`: ports a private host's public interface takes besides SSH (an
+    /// edge's beside the daemon), which its machines reach too (`network.host_ports`).
     pub public_tcp_ports: Vec<u16>,
     /// `FLEET_URL`: this fleet, as the new host reaches it.
     pub fleet_url: String,

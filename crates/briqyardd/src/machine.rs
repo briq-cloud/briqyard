@@ -1196,6 +1196,7 @@ impl Manager {
                 .map(|c| netw::cidr(c))
                 .collect::<Result<_>>()?,
             ports: netw::nft::daemon_ports(&cfg.listen, &cfg.ingress.http, &cfg.ingress.tcp_ports)?,
+            host_ports: cfg.network.host_ports.clone(),
             pins,
             policies,
             counted,
@@ -2198,15 +2199,13 @@ impl Manager {
             memory_mb: if c.memory_mb > 0 {
                 c.memory_mb
             } else {
-                default_memory_mb(host_memory_mb(), arc_max_mb())
+                default_memory_mb(host_memory_mb(), c.reserved_memory_mb, arc_max_mb())
             },
             vcpus: if c.vcpus > 0 {
                 c.vcpus
             } else {
-                (std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(2)
-                    * 4) as u32
+                let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+                default_vcpus(threads as u32, c.reserved_threads)
             },
         }
     }
@@ -4598,13 +4597,20 @@ fn meminfo_total_mb(text: &str) -> Option<u32> {
         .map(|kb| (kb / 1024) as u32)
 }
 
-/// What the host hands out when the configuration does not say: its memory less 2 GB for
-/// itself and less the ZFS cache's ceiling when one is set (ADR 0028), at least 1 GB.
-fn default_memory_mb(host_mb: u32, arc_max_mb: u32) -> u32 {
+/// What the host hands out when the configuration does not say: its memory less what it
+/// keeps for itself and its other services (`capacity.reserved_memory_mb`, 2 GB) and less the
+/// ZFS cache's ceiling when one is set (ADR 0028), at least 1 GB.
+fn default_memory_mb(host_mb: u32, reserved_mb: u32, arc_max_mb: u32) -> u32 {
     host_mb
-        .saturating_sub(2048)
+        .saturating_sub(reserved_mb)
         .saturating_sub(arc_max_mb)
         .max(1024)
+}
+
+/// Four shared vCPUs a hardware thread, less the threads kept for the host's other services
+/// (`capacity.reserved_threads`), at least one thread's.
+fn default_vcpus(threads: u32, reserved: u32) -> u32 {
+    threads.saturating_sub(reserved).max(1) * 4
 }
 
 /// The ZFS cache's ceiling (`zfs_arc_max`, the bootstrap sets it), in MB; 0 when it is the
@@ -4943,9 +4949,17 @@ mod tests {
         assert_eq!(meminfo_total_mb("MemFree: 1 kB\n"), None);
         assert_eq!(meminfo_total_mb(""), None);
         // 64 GB, the ARC capped at 6 GB: 56 GB for machines; no cap, 2 GB kept only.
-        assert_eq!(default_memory_mb(65536, 6144), 57344);
-        assert_eq!(default_memory_mb(65536, 0), 63488);
-        assert_eq!(default_memory_mb(3072, 1024), 1024, "at least 1 GB");
+        assert_eq!(default_memory_mb(65536, 2048, 6144), 57344);
+        assert_eq!(default_memory_mb(65536, 2048, 0), 63488);
+        assert_eq!(
+            default_memory_mb(65536, 3072, 6144),
+            56320,
+            "an edge beside it"
+        );
+        assert_eq!(default_memory_mb(3072, 2048, 1024), 1024, "at least 1 GB");
+        assert_eq!(default_vcpus(16, 0), 64);
+        assert_eq!(default_vcpus(16, 2), 56);
+        assert_eq!(default_vcpus(2, 4), 4, "at least one thread's");
 
         let addr = "2: eth0    inet 192.168.64.3/24 brd 192.168.64.255 scope global dynamic eth0\\       valid_lft 86000sec preferred_lft 86000sec\n";
         assert_eq!(inet_of(addr), Some(Ipv4Addr::new(192, 168, 64, 3)));
@@ -5632,6 +5646,7 @@ mod tests {
             cfg.capacity = crate::config::Capacity {
                 memory_mb,
                 vcpus: 1000,
+                ..Default::default()
             };
             cfg.egress_limits = egress_limits;
         })

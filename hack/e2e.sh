@@ -98,6 +98,20 @@ check "via: gateway name resolves" 'lookup "$V" egw.internal | grep -q "10\.6[4-
 check "none reaches a sibling"    'reach "$N" http://eside.internal:8080/'
 check "none: no internet"         '! connects "$N" "$NET"'
 check "none: outside name refused" 'lookup "$N" example.com | grep -q NXDOMAIN'
+# The host's own services (network.host_ports, ADR 0028), checked where the suite runs on the
+# host and its config lists one: reached at the host's address by a machine with egress
+# (connected, or refused at once), dropped for none and via; the daemon's API dropped for all.
+HP=$(sudo -n awk '/^  host_ports:/ {gsub(/[^0-9,]/, ""); split($0, p, ","); print p[1]}' /etc/briqyard/config.yaml 2>/dev/null || true)
+if [ -n "$HP" ]; then
+  HOST=$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')
+  api_port=${BRIQYARD_URL##*:}; api_port=${api_port%%/*}
+  # "dropped" when the connect waits out its 3 s, "reached" when it ends sooner either way.
+  knock() { briqyard machine exec "$1" -- sh -c 's=$(date +%s); nc -z -w 3 "$1" "$2"; [ $(($(date +%s) - s)) -ge 3 ] && echo dropped || echo reached' _ "$HOST" "$2" 2>/dev/null; }
+  check "host port $HP reached"     '[ "$(knock "$SIB" "$HP")" = reached ]'
+  check "none: host port dropped"   '[ "$(knock "$N" "$HP")" = dropped ]'
+  check "via: host port dropped"    '[ "$(knock "$V" "$HP")" = dropped ]'
+  check "the API dropped"           '[ "$(knock "$SIB" "$api_port")" = dropped ]'
+fi
 briqyard machine set-egress "$N" open >/dev/null
 check "open again: internet"      'connects "$N" "$NET"'
 for m in "$V" "$N" "$SIB" "$G"; do briqyard machine rm "$m" >/dev/null; done

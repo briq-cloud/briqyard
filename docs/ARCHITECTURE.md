@@ -11,7 +11,7 @@ Status: v0, in development. The API is not stable yet.
 ## One server
 
 ```
-                 HTTP API (:7420)                     TCP / HTTP ingress (:20000-29999, :8080)
+                 HTTP API (:7420)                     TCP / HTTP ingress (:30000-32767, :8080)
                         │                                          │
  ┌──────────────────────┴──────────────────────────────────────────┴─────────────────────┐
  │ briqyardd (root)                                                                        │
