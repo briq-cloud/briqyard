@@ -91,7 +91,7 @@ cargo build --release -p briqyard   # the CLI, on the Mac
 PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   SECOND_HOST_STOP="limactl shell fc2 sudo systemctl stop briqyardd" \
   SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" \
-  SECOND_HOST_SH="limactl shell fc2 sudo" hack/fleet-two-hosts.sh
+  SECOND_HOST_SH="limactl shell fc2 sudo" bash hack/fleet-two-hosts.sh
 ```
 
 ## Tests
