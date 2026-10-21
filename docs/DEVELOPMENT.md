@@ -80,6 +80,32 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" hack/fleet-two-hosts.sh
 ```
 
+### fc2 as a real host
+
+fc2 has two interfaces (`lima0`, the default route, and `eth0`), so it stands in for an OVH
+server when a bootstrap change needs exercising (ADR 0028). Under the lock, fc2's own host
+parked first (`systemctl stop briqyardd`, `zpool export byard`, `/var/lib/briqyard` and
+`/etc/briqyard` moved aside), as root on fc2:
+
+```bash
+truncate -s 14G /srv/byt/disk0.img; truncate -s 12G /srv/byt/disk1.img
+D0=$(losetup -fP --show /srv/byt/disk0.img); D1=$(losetup -fP --show /srv/byt/disk1.img)
+sgdisk -n 1:0:+2G "$D0"; partx -u "$D0"; mkfs.ext4 -q "${D0}p1"; mount "${D0}p1" /mnt/byt-os   # the "OS"
+ip link add byvrack0 type dummy && ip link set byvrack0 up                                  # the "vRack"
+ssh-keygen -q -t ed25519 -N '' -f /etc/byt-fleet/key && cat /etc/byt-fleet/key.pub >> /root/.ssh/authorized_keys
+ln -sfn "$PWD/bin" /root/bin       # the binaries hack/vm.sh built, copied out of fc
+```
+
+A fleet on fc2 itself (`listen: 127.0.0.1:7431`, `provisioner.bootstrap`: `enabled`, `ssh_key:
+/etc/byt-fleet/key`, `pool_device: $D0,$D1`, `fleet_url: http://127.0.0.1:7431`,
+`private_network: 10.99.0.0/24`, `private_interface: byvrack0`, `allowed_clients`), then
+`briqyard host add 192.168.64.2 --address 10.99.0.2`: the fleet bootstraps fc2 over SSH as it
+would an OVH server (the free space of `$D0` mirrored with `$D1`, `10.99.0.2` on `byvrack0`,
+`lima0` closed but for SSH, both keys pinned), and `hack/e2e.sh` runs on fc2 against
+`https://10.99.0.2:7420` with the token and the fingerprint. Undo it all after (the firewall
+unit and table, the netplan file, the dummy, the pool, the loops, the ARC cap), and put fc2's
+host back (`zpool import -d /var/lib/briqyard byard`).
+
 ## Tests
 
 - `cargo test --workspace`: unit tests, which run anywhere (extraction and whiteouts, DNS
