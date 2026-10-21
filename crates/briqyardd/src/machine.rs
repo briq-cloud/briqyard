@@ -225,6 +225,11 @@ impl Record {
     pub fn data_dataset(&self) -> String {
         format!("m/{}/data", self.id)
     }
+    /// Whether its next start makes the root disk again: a new image pending, or one applied
+    /// whose root disk is not made yet (ADR 0024).
+    fn remakes_root(&self) -> bool {
+        self.root_key != self.image_key || self.pending.as_ref().is_some_and(|p| p.image.is_some())
+    }
     pub fn sleep_window(&self) -> Option<Duration> {
         api::parse_sleep(&self.sleep).ok().flatten()
     }
@@ -418,6 +423,28 @@ impl Entry {
 
     fn snapshot(&self) -> Record {
         self.rec.lock().unwrap().clone()
+    }
+
+    /// Its lock for a start, after its backup turn when that start makes the root disk again
+    /// (ADR 0024): a backup takes the turn then the lock, so this start does too, and no
+    /// backup sends a disk while it is replaced. Whether it will is read again under the
+    /// lock: a PATCH in between takes the turn on the next round.
+    async fn lock_for_start(
+        &self,
+    ) -> (
+        Option<tokio::sync::OwnedMutexGuard<()>>,
+        tokio::sync::MutexGuard<'_, ()>,
+    ) {
+        loop {
+            let turn = match self.snapshot().remakes_root() {
+                true => Some(self.backup_turn.clone().lock_owned().await),
+                false => None,
+            };
+            let guard = self.lock.lock().await;
+            if turn.is_some() || !self.snapshot().remakes_root() {
+                return (turn, guard);
+            }
+        }
     }
 
     /// Marks a use now. In memory only: the sleeper reads it here, and the record on disk
@@ -1535,7 +1562,7 @@ impl Manager {
     /// let go while it is waited for, since its probes take it to end a failed boot.
     async fn run_gateway(&self, gw: &Arc<Entry>) -> Result<(), MError> {
         let (started, live) = {
-            let _turn = gw.lock.lock().await;
+            let _turns = gw.lock_for_start().await;
             let started = gw.snapshot().state != state::RUNNING;
             if started {
                 self.start_boxed(gw, true).await?;
@@ -2386,7 +2413,7 @@ impl Manager {
 
     pub async fn start(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _guard = e.lock.lock().await;
+        let _turns = e.lock_for_start().await;
         self.check_version(&e, at)?;
         if e.snapshot().state != state::RUNNING {
             self.start_entry(&e, true).await?;
@@ -2398,7 +2425,7 @@ impl Manager {
     /// one stopped on purpose stays stopped.
     pub async fn wake(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _guard = e.lock.lock().await;
+        let _turns = e.lock_for_start().await;
         self.check_version(&e, at)?;
         let r = e.snapshot();
         match r.state.as_str() {
@@ -2829,7 +2856,7 @@ impl Manager {
         let (m, e) = (self.clone(), e.clone());
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let _guard = e.lock.lock().await;
+            let _turns = e.lock_for_start().await;
             let r = e.snapshot();
             if r.state != state::STOPPED || r.stopped_reason != stop::EXIT {
                 return;
@@ -3244,7 +3271,7 @@ impl Manager {
         let e = self.own_entry(id)?;
         self.stop_entry(&e, stop::USER, Duration::ZERO, false, at)
             .await?;
-        let _guard = e.lock.lock().await;
+        let _turns = e.lock_for_start().await;
         if e.snapshot().state != state::RUNNING {
             self.start_entry(&e, true).await?;
         }
@@ -10092,6 +10119,48 @@ mod tests {
         h.m.start("m_y", None).await.unwrap();
         let r = h.stored("m_y").unwrap();
         assert_eq!((r.image_key, r.root_key), (im.key.clone(), im.key));
+    }
+
+    #[tokio::test]
+    async fn a_root_disk_is_made_again_only_once_no_backup_runs() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        h.m.inner
+            .images
+            .seed(IMAGE2, ImageConfig::default())
+            .await
+            .unwrap();
+        let e = h.add("m_x", state::STOPPED, 256);
+        h.disks(&e).await;
+        // A backup under way holds the turn, as `backup_entry`'s callers do.
+        let backup = e.backup_turn.clone().lock_owned().await;
+        // A start with no root disk to make does not wait for it.
+        h.m.start("m_x", None).await.unwrap();
+        h.m.stop("m_x", Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        h.m.update("m_x", spec(|s| s.image = Some(IMAGE2.into())), None)
+            .await
+            .unwrap();
+        h.pool.calls();
+        let m = h.m.clone();
+        let mut start = tokio::spawn(async move { m.start("m_x", None).await });
+        let waited = tokio::time::timeout(Duration::from_millis(300), &mut start).await;
+        assert!(waited.is_err(), "the start waits for the backup");
+        let calls = h.pool.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("destroy ")),
+            "{calls:?}"
+        );
+        assert_eq!(h.m.get("m_x").unwrap().state, state::STOPPED);
+        drop(backup);
+        let up = start.await.unwrap().unwrap();
+        assert_eq!(
+            (up.state.as_str(), up.image.as_str()),
+            (state::RUNNING, IMAGE2)
+        );
+        let key = h.m.inner.images.ensure(IMAGE2).await.unwrap().key;
+        assert_eq!(h.stored("m_x").unwrap().root_key, key);
     }
 
     #[tokio::test]

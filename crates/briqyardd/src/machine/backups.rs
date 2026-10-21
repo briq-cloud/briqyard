@@ -1419,6 +1419,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_promoted_fork_backs_up_whole_from_its_own_snapshots_only() {
+        let h = harness(|_| {}).await;
+        let src = h.machine("src", Some(None), true).await;
+        let sb = h.m.backup(&src.id).await.unwrap();
+        let mut req = h.request("fork");
+        req.fork = Some(api::ForkSpec {
+            machine_id: src.id.clone(),
+            copy: String::new(),
+        });
+        let fork = h.m.create(req).await.unwrap();
+        // Destroyed under its fork: the fork's root disk takes the source's older snapshots
+        // over, its backup snapshot among them, as ZFS's promote does.
+        h.m.destroy(&src.id, None).await.unwrap();
+        let taken = h
+            .pool
+            .dev()
+            .join(format!("byard/m/{}/root@bk-{}", fork.id, sb.id));
+        assert!(taken.exists(), "{}", taken.display());
+        // That snapshot is not a backup of the fork: its first backup is whole.
+        let first = h.m.backup(&fork.id).await.unwrap();
+        assert!(!first.incremental, "{first:?}");
+        assert!(first.disks.iter().all(|d| d.from.is_none()));
+        let second = h.m.backup(&fork.id).await.unwrap();
+        assert_eq!(second.disks[0].from.as_deref(), Some(first.id.as_str()));
+        // And its chain restores.
+        let r =
+            h.m.create(api::CreateMachineRequest {
+                tenant: "t1".into(),
+                name: "back".into(),
+                restore: Some(api::RestoreSpec {
+                    machine_id: fork.id.clone(),
+                    backup: second.id.clone(),
+                }),
+                start: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(r.state, state::CREATED);
+    }
+
+    #[tokio::test]
     async fn a_base_is_deleted_only_with_what_continues_from_it() {
         let h = harness(|_| {}).await;
         let m = h.machine("db", Some(None), true).await;

@@ -116,7 +116,8 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   connect against loopback servers), changes at the next boot (a PATCH on a running machine
   left pending with its events and `If-Match`, applied by a restart into the config drive, a
   new image's root disk cloned again with the volume untouched and a fork promoted, the root
-  made from the cache's image, a new size reserved at the start and refused past the host, a
+  made from the cache's image and only once no backup runs, a promoted fork backed up whole
+  despite its source's snapshots, a new size reserved at the start and refused past the host, a
   memory snapshot dropped by what it holds and kept for ports, an image that cannot be pulled
   failing the boot with the change kept, create and PATCH refusing a bad spec in the same
   words). What still needs the host: a tenant's first create (its bridge and
