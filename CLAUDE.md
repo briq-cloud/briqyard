@@ -33,7 +33,7 @@ docs/                    architecture, operations, development, mesh design, adr
 - `cargo test --workspace` runs anywhere, but CI is Linux: run it in the VM too before pushing (`CARGO_TARGET_DIR=$HOME/target-ci`). macOS hides Linux behaviours tests trip on (a just-written script refused as "Text file busy", coarse file times). The init's tests are Linux-only.
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` are CI.
 - `hack/vm.sh install` builds in the VM, installs both units, restarts them. **Always after a config field change**: an old binary refuses a new field and systemd's start limit then needs `systemctl reset-failed`.
-- `hack/e2e.sh` (148 checks, one daemon), `hack/fleet-smoke.sh` (19, through the fleet), `hack/fleet-two-hosts.sh` (21, needs `fc2`), `hack/fleet-restore.sh` (10, needs `fc2`: the registry's backup and restore). Run the first two on every daemon change; the last two on every fleet change.
+- `hack/e2e.sh` (163 checks, one daemon), `hack/fleet-smoke.sh` (19, through the fleet), `hack/fleet-two-hosts.sh` (21, needs `fc2`), `hack/fleet-restore.sh` (10, needs `fc2`: the registry's backup and restore). Run the first two on every daemon change; the last two on every fleet change.
 - `hack/stress.py` with `hack/stress-invariants.sh`: many tenants through every feature, host invariants between phases. Run it after any change to the manager, the network or the store.
 - Coverage: `cargo llvm-cov` in the VM. Last measure in `docs/research/2026-10-19-stress-spike.md`.
 - `limactl stop fc fc2` when done.
@@ -55,7 +55,10 @@ docs/                    architecture, operations, development, mesh design, adr
 
 ## Git
 
-- Work on `main` in this checkout, small commits, CI green before the next batch (`gh run list -L 3`). A larger change: a branch and a worktree, merged with a merge commit.
+- **Every change goes through a PR.** Never commit or push to `main`. One branch per task (`feat/…`, `fix/…`, `docs/…`) in its own worktree: `git worktree add ../briqyard-<task> -b <branch> origin/main`. This checkout stays on `main`.
+- A PR body says what was built, the checks with their numbers (unit, clippy, e2e, fleet suites), the choices to review, and its merge order when it depends on another PR. A draft while still pushing.
+- An advisor agent (Fable) reviews every PR and approves before a merge; the founder delegated the review. Its findings are fixed on the branch and checked again. Merge with a merge commit once CI is green; a PR that conflicts with one merged before it is updated on its own branch, its checks run again.
+- Delete the worktree and the branch once merged.
 - The monorepo side (`BriqyardProvider`, PR up-lab/briq#250) lives in `/Users/uplab/projects/briq-briqyard-provider` and follows that repo's `CLAUDE.md`.
 - Never commit `target/`, `bin/`, `.env`, a token or a key.
 

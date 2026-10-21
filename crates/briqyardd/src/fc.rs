@@ -386,6 +386,16 @@ pub fn snapshot_files(dir: &Path, jail_base: Option<&Path>, id: &str) -> [PathBu
     ["snap.state", "snap.mem"].map(|n| outside_path(root.as_deref(), dir, n))
 }
 
+/// Where a machine's snapshots with memory are kept (ADR 0031): beside its jail's root, so on
+/// the pool and out of the jailer's reach, or in its run dir without the jailer. A file there
+/// is moved from, and linked back to, `snapshot_files`: one filesystem.
+pub fn memory_dir(dir: &Path, jail_base: Option<&Path>, id: &str) -> PathBuf {
+    match jail_base {
+        Some(b) => b.join("firecracker").join(fc_id(id)).join("snapshots"),
+        None => dir.join("snapshots"),
+    }
+}
+
 /// The jailer's command line for a machine: what to run, as whom, where, with what limits.
 fn jailer_args(j: &Jail, id: &str, binary: &Path) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec![
@@ -753,6 +763,9 @@ pub trait Vmm: Send + Sync {
     /// next boot to resume. An error means the VMM refused and the machine runs on.
     async fn snapshot(&self, vm: &Vm) -> Result<()>;
 
+    /// Lets a machine `snapshot` paused run on.
+    async fn resume(&self, vm: &Vm) -> Result<()>;
+
     /// SIGKILL to the process and to its group.
     fn kill(&self, pid: u32);
 
@@ -963,6 +976,10 @@ impl Vmm for Firecracker {
             return Err(err.context("snapshot (resumed)"));
         }
         Ok(())
+    }
+
+    async fn resume(&self, vm: &Vm) -> Result<()> {
+        Client::new(&vm.api).resume().await.context("resume")
     }
 
     fn kill(&self, pid: u32) {
@@ -1538,6 +1555,12 @@ mod tests {
         assert_eq!(
             snapshot_files(dir, Some(base), "m_abc123"),
             [root.join("snap.state"), root.join("snap.mem")]
+        );
+        // Snapshots with memory beside the chroot, out of the jailer's cleaning (ADR 0031).
+        assert_eq!(memory_dir(dir, None, "m_abc123"), dir.join("snapshots"));
+        assert_eq!(
+            memory_dir(dir, Some(base), "m_abc123"),
+            root.parent().unwrap().join("snapshots")
         );
         assert_eq!(
             paths(dir),

@@ -241,6 +241,10 @@ impl Manager {
         if rec.state == state::DESTROYING {
             return Err(MError::BadState(rec.state));
         }
+        // Its disks are half swapped: what a backup sent now would be neither (ADR 0031).
+        if let Some(snap) = &rec.restoring {
+            return Err(snapshots::unfinished(snap));
+        }
         let (b, mut all) = match self.send_backup(store, &rec).await {
             Ok(made) => made,
             Err(err) => {

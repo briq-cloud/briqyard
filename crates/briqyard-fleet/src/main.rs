@@ -65,6 +65,9 @@ struct AppState {
     prov: Box<dyn provision::Provisioner>,
     /// The registry's backup, when `backup.store` is set (ADR 0032).
     backup: Option<backup::Backup>,
+    /// Key requests take turns: a key just made is answered, to its host or any other ask,
+    /// only once it is written, and taken back when it could not be (ADR 0026).
+    key_turn: tokio::sync::Mutex<()>,
 }
 
 /// Writes a registry file, the fleet's alone (`0600`: it holds every host's token and pool
@@ -229,6 +232,7 @@ async fn run(args: Args) -> Result<()> {
         state_path,
         prov: provision::build(&cfg.provisioner),
         backup: backup::Backup::open(&cfg.backup)?,
+        key_turn: Default::default(),
     });
     tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));
@@ -587,6 +591,7 @@ async fn host_key(
     Json(req): Json<api::HostKeyRequest>,
 ) -> Result<Response, Refusal> {
     let caller = Caller::of(&st, info);
+    let _turn = st.key_turn.lock().await;
     let (id, key, made) = {
         let mut reg = st.reg.lock().unwrap();
         let id = the_host(&reg, &req.url, &headers, caller, "pool key")?
@@ -596,7 +601,13 @@ async fn host_key(
         (id, key, made)
     };
     if made {
-        st.save().map_err(registry_error)?;
+        if let Err(e) = st.save() {
+            // Never served, never kept: the next ask makes one again.
+            if let Some(h) = st.reg.lock().unwrap().hosts.get_mut(&id) {
+                h.pool_key = Default::default();
+            }
+            return Err(registry_error(e));
+        }
     }
     // A key in use is in the backup: written now when the store does not hold it yet.
     if let Some(b) = &st.backup {
@@ -827,8 +838,42 @@ async fn release_host(st: &AppState, h: &HostRec) -> Result<api::Host> {
     Ok(out)
 }
 
-async fn forget_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
-    st.reg.lock().unwrap().forget(&id);
+/// What a forget of a host that holds a pool key costs, said by its refusal and by `force`.
+const FORGET_KEYED: &str =
+    "its pool key goes with the record: the pool is unreadable at the host's next restart; retire it, or --force";
+
+#[derive(serde::Deserialize, Default)]
+struct ForgetQuery {
+    #[serde(default)]
+    force: bool,
+}
+
+/// Forgets a host. One whose record holds a pool key is refused unless `force`: the key goes
+/// with the record (ADR 0026), and a static host polled back gets a new one its pool does not
+/// open. Retiring a host forgets it once released, on purpose.
+async fn forget_host(
+    State(st): S,
+    Path(id): Path<String>,
+    Query(q): Query<ForgetQuery>,
+) -> Result<Response, Refusal> {
+    {
+        let mut reg = st.reg.lock().unwrap();
+        let keyed = reg.hosts.get(&id).is_some_and(|h| !h.pool_key.is_empty());
+        if keyed && !q.force {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "pool_key",
+                format!("host {id}: {FORGET_KEYED}"),
+            ));
+        }
+        if keyed {
+            tracing::warn!(
+                host = id,
+                "host forgotten with its pool key: {FORGET_KEYED}"
+            );
+        }
+        reg.forget(&id);
+    }
     st.save().map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
