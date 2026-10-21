@@ -116,6 +116,10 @@ enum MachineCmd {
         suspend: bool,
         id: String,
     },
+    /// Stop and start again: what `set` left pending applies now
+    Restart {
+        id: String,
+    },
     Wake {
         id: String,
     },
@@ -202,6 +206,8 @@ enum MachineCmd {
         #[arg(long, default_value = "")]
         sleep: String,
     },
+    /// Change what it runs, at its next start (restart to apply now): briqyard machine set ID --image python:3.13-alpine -e V=2 -- cmd...
+    Set(Box<SetArgs>),
     /// Change the sleep window: briqyard machine set-sleep ID 30m|never
     SetSleep {
         id: String,
@@ -303,6 +309,77 @@ struct RunArgs {
     /// The command, after --
     #[arg(last = true)]
     cmd: Vec<String>,
+}
+
+/// What `machine set` changes; each one left out stays as it is.
+#[derive(Args)]
+struct SetArgs {
+    id: String,
+    #[arg(long)]
+    image: Option<String>,
+    #[arg(long)]
+    vcpus: Option<u32>,
+    /// Memory in MB
+    #[arg(long)]
+    memory: Option<u32>,
+    /// K=V, repeatable: the whole env, what it had replaced
+    #[arg(long = "env", short = 'e')]
+    envs: Vec<String>,
+    /// /guest/path=local/path, repeatable: all the boot files, what it had replaced
+    #[arg(long = "file")]
+    files: Vec<String>,
+    /// A port the image listens on, repeatable: all of them
+    #[arg(long = "port", short = 'p')]
+    ports: Vec<u16>,
+    /// Entrypoint argv, repeatable
+    #[arg(long = "entrypoint")]
+    entrypoint: Vec<String>,
+    /// no, always, on-failure or on-failure:MAX_RETRIES
+    #[arg(long, value_parser = restart_arg)]
+    restart: Option<api::RestartPolicy>,
+    /// The command, after --
+    #[arg(last = true)]
+    cmd: Vec<String>,
+}
+
+impl SetArgs {
+    /// The PATCH, checked as the daemon checks it. `size_now` fills the half of the size the
+    /// flags leave out.
+    fn request(&self, size_now: Option<api::Size>) -> Result<api::UpdateMachineRequest> {
+        let size = match (self.vcpus, self.memory, size_now) {
+            (None, None, _) => None,
+            (Some(vcpus), Some(memory_mb), _) => Some(api::Size { vcpus, memory_mb }),
+            (vcpus, memory, Some(now)) => Some(api::Size {
+                vcpus: vcpus.unwrap_or(now.vcpus),
+                memory_mb: memory.unwrap_or(now.memory_mb),
+            }),
+            (_, _, None) => bail!("--vcpus or --memory alone needs the machine's size"),
+        };
+        let spec = api::SpecChange {
+            image: self.image.clone(),
+            entrypoint: (!self.entrypoint.is_empty()).then(|| self.entrypoint.clone()),
+            cmd: (!self.cmd.is_empty()).then(|| self.cmd.clone()),
+            env: (!self.envs.is_empty())
+                .then(|| env_args(&self.envs))
+                .transpose()?,
+            files: (!self.files.is_empty())
+                .then(|| file_args(&self.files))
+                .transpose()?,
+            size,
+            ports: (!self.ports.is_empty()).then(|| self.ports.clone()),
+            restart: self.restart.clone(),
+        };
+        if spec.is_empty() {
+            bail!("name a change: --image, --vcpus, --memory, -e, --file, -p, --entrypoint, --restart or a command after --");
+        }
+        if let Err(e) = spec.check() {
+            bail!("{e}");
+        }
+        Ok(api::UpdateMachineRequest {
+            spec,
+            ..Default::default()
+        })
+    }
 }
 
 #[derive(Subcommand)]
@@ -602,18 +679,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     format!("{base}-{}", suffix())
                 });
                 let env = env_args(&a.envs)?;
-                let mut files = Vec::new();
-                for f in &a.files {
-                    let (guest_path, local) = f
-                        .split_once('=')
-                        .ok_or_else(|| anyhow!("--file {f:?}: want /guest/path=local/path"))?;
-                    let data = std::fs::read(local).with_context(|| local.to_string())?;
-                    files.push(api::File {
-                        path: guest_path.to_string(),
-                        base64: api::guest::base64_encode(&data),
-                        mode: None,
-                    });
-                }
+                let files = file_args(&a.files)?;
                 let volume = match &a.volume {
                     Some(v) => {
                         let (size, mount) = v.split_once(':').ok_or_else(|| {
@@ -700,6 +766,10 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                         .await?,
                 )
             }
+            MachineCmd::Restart { id } => print_json(
+                &c.call::<api::Machine>(POST, &format!("/v1/machines/{id}/restart"), NONE)
+                    .await?,
+            ),
             MachineCmd::Wake { id } => print_json(
                 &c.call::<api::Machine>(POST, &format!("/v1/machines/{id}/wake"), NONE)
                     .await?,
@@ -826,6 +896,26 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     .await?;
                 let data = api::guest::base64_decode(&res.base64).map_err(|e| anyhow!(e))?;
                 std::io::stdout().write_all(&data)?;
+            }
+            MachineCmd::Set(a) => {
+                let half = a.vcpus.is_some() != a.memory.is_some();
+                let size_now = match half {
+                    true => {
+                        let m: api::Machine =
+                            c.call(GET, &format!("/v1/machines/{}", a.id), NONE).await?;
+                        Some(m.pending.and_then(|p| p.size).unwrap_or(m.size))
+                    }
+                    false => None,
+                };
+                let req = a.request(size_now)?;
+                print_json(
+                    &c.call::<api::Machine>(
+                        reqwest::Method::PATCH,
+                        &format!("/v1/machines/{}", a.id),
+                        Some(&req),
+                    )
+                    .await?,
+                )
             }
             MachineCmd::SetSleep { id, sleep } => {
                 let req = api::UpdateMachineRequest {
@@ -1099,6 +1189,46 @@ fn env_args(kvs: &[String]) -> Result<BTreeMap<String, String>> {
     Ok(env)
 }
 
+/// `--file /guest/path=local/path` flags as boot files, read now.
+fn file_args(specs: &[String]) -> Result<Vec<api::File>> {
+    let mut files = Vec::new();
+    for f in specs {
+        let (guest_path, local) = f
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--file {f:?}: want /guest/path=local/path"))?;
+        let data = std::fs::read(local).with_context(|| local.to_string())?;
+        files.push(api::File {
+            path: guest_path.to_string(),
+            base64: api::guest::base64_encode(&data),
+            mode: None,
+        });
+    }
+    Ok(files)
+}
+
+/// A restart policy, Docker's way: `no`, `always`, `on-failure`, `on-failure:N` (3 retries
+/// when no N is given, as the API's default).
+fn restart_arg(s: &str) -> Result<api::RestartPolicy, String> {
+    let (policy, retries) = match s.split_once(':') {
+        Some(("on-failure", n)) => (
+            "on-failure",
+            n.parse()
+                .map_err(|_| format!("{s:?}: want on-failure:MAX_RETRIES"))?,
+        ),
+        Some(_) => return Err(format!("{s:?}: only on-failure takes :MAX_RETRIES")),
+        None => (s, api::RestartPolicy::default().max_retries),
+    };
+    if !["no", "on-failure", "always"].contains(&policy) {
+        return Err(format!(
+            "{s:?}: want no, always, on-failure or on-failure:N"
+        ));
+    }
+    Ok(api::RestartPolicy {
+        policy: policy.into(),
+        max_retries: retries,
+    })
+}
+
 /// A sleep window as the daemon reads it, refused here before the request leaves.
 fn sleep_arg(s: &str) -> Result<String, String> {
     api::parse_sleep(s)?;
@@ -1230,7 +1360,7 @@ fn limits_label(l: &api::EgressLimits) -> String {
 /// `machine ls`.
 fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} HOST\n",
+        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<12} HOST\n",
         "ID",
         "TENANT",
         "NAME",
@@ -1241,7 +1371,8 @@ fn machine_table(ms: &[api::Machine]) -> String {
         "SIZE",
         "SLEEP",
         "EGRESS",
-        "LIMITS"
+        "LIMITS",
+        "PENDING"
     );
     for m in ms {
         let state = if m.stopped_reason.is_empty() {
@@ -1249,8 +1380,12 @@ fn machine_table(ms: &[api::Machine]) -> String {
         } else {
             format!("{} ({})", m.state, m.stopped_reason)
         };
+        let pending = match &m.pending {
+            Some(p) => p.fields.join(","),
+            None => "-".into(),
+        };
         out.push_str(&format!(
-            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {}\n",
+            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<12} {}\n",
             m.id,
             m.tenant,
             m.name,
@@ -1262,6 +1397,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             m.sleep,
             egress_label(&m.egress),
             limits_label(&m.limits),
+            pending,
             m.host
         ));
     }
@@ -1521,6 +1657,23 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
         None => m.sleep.clone(),
     };
     lines.push(("Sleep", sleep));
+    if let Some(p) = &m.pending {
+        // Each field, with its new value when the view shows one.
+        let changes: Vec<String> = p
+            .fields
+            .iter()
+            .map(|f| match (f.as_str(), &p.image, p.size) {
+                ("image", Some(image), _) => format!("image {image}"),
+                ("size", _, Some(s)) => format!("size {} vCPU, {} MB", s.vcpus, s.memory_mb),
+                _ => f.clone(),
+            })
+            .collect();
+        let mut pending = format!("{}, at the next start", changes.join(", "));
+        if let Some(t) = m.pending_since {
+            pending.push_str(&format!(" (since {})", t.format("%Y-%m-%d %H:%M:%S")));
+        }
+        lines.push(("Pending", pending));
+    }
     lines.push(("Version", m.version.to_string()));
     lines.push((
         "Created",

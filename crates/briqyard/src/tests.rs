@@ -360,6 +360,93 @@ fn machine_exec_takes_the_command_after_the_dashes() {
 }
 
 #[test]
+fn machine_set_changes_what_it_runs() {
+    let set = |args: &[&str]| match machine(parse(args)) {
+        MachineCmd::Set(a) => a,
+        _ => panic!("not a set"),
+    };
+    let a = set(&[
+        "machine",
+        "set",
+        "m1",
+        "--image",
+        "python:3.13-alpine",
+        "-e",
+        "V=2",
+        "-e",
+        "W=a=b",
+        "--memory",
+        "1024",
+        "--vcpus",
+        "2",
+        "-p",
+        "8080",
+        "--restart",
+        "on-failure:5",
+        "--",
+        "python3",
+        "-m",
+        "http.server",
+    ]);
+    assert_eq!(a.id, "m1");
+    let req = a.request(None).unwrap();
+    assert_eq!(
+        serde_json::to_value(&req).unwrap(),
+        serde_json::json!({
+            "image": "python:3.13-alpine",
+            "cmd": ["python3", "-m", "http.server"],
+            "env": {"V": "2", "W": "a=b"},
+            "size": {"vcpus": 2, "memory_mb": 1024},
+            "ports": [8080],
+            "restart": {"policy": "on-failure", "max_retries": 5}
+        }),
+        "only what was named; the size whole"
+    );
+    // Half a size takes the other half from the machine.
+    let half = set(&["m", "set", "m1", "--memory", "2048"]);
+    let now = api::Size {
+        vcpus: 4,
+        memory_mb: 512,
+    };
+    assert_eq!(
+        half.request(Some(now)).unwrap().spec.size,
+        Some(api::Size {
+            vcpus: 4,
+            memory_mb: 2048
+        })
+    );
+    assert!(half.request(None).is_err());
+    // Nothing named, or what the daemon would refuse, is refused before any request.
+    let err = set(&["m", "set", "m1"]).request(None).unwrap_err();
+    assert!(err.to_string().starts_with("name a change"), "{err}");
+    let err = set(&["m", "set", "m1", "--image", ""])
+        .request(None)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "image must not be empty");
+    let err = set(&["m", "set", "m1", "-p", "0"])
+        .request(None)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "ports: 0 is not a port");
+    // A restart policy, Docker's way.
+    assert_eq!(restart_arg("always").unwrap().policy, "always");
+    assert_eq!(restart_arg("on-failure").unwrap().max_retries, 3);
+    assert_eq!(
+        restart_arg("on-failure:0").unwrap(),
+        api::RestartPolicy {
+            policy: "on-failure".into(),
+            max_retries: 0
+        }
+    );
+    for bad in ["sometimes", "always:3", "on-failure:x"] {
+        assert!(restart_arg(bad).is_err(), "{bad}");
+    }
+    assert_eq!(
+        fails(&["m", "set", "m1", "--restart", "sometimes"]),
+        ErrorKind::ValueValidation
+    );
+}
+
+#[test]
 fn machine_lifecycle_commands() {
     match machine(parse(&["machine", "stop", "--suspend", "m1"])) {
         MachineCmd::Stop { suspend, id } => assert!(suspend && id == "m1"),
@@ -378,6 +465,7 @@ fn machine_lifecycle_commands() {
         (vec!["machine", "rm", "m1"], "rm"),
         (vec!["machine", "destroy", "m1"], "rm"),
         (vec!["machine", "stats", "m1"], "stats"),
+        (vec!["machine", "restart", "m1"], "restart"),
     ] {
         let got = match machine(parse(&args)) {
             MachineCmd::Get { id } if id == "m1" => "get",
@@ -387,6 +475,7 @@ fn machine_lifecycle_commands() {
             MachineCmd::Wait { id, until } if id == "m1" && until == "ready" => "wait",
             MachineCmd::Rm { id } if id == "m1" => "rm",
             MachineCmd::Stats { id } if id == "m1" => "stats",
+            MachineCmd::Restart { id } if id == "m1" => "restart",
             _ => "?",
         };
         assert_eq!(got, want, "{args:?}");
@@ -790,6 +879,11 @@ fn the_machine_table() {
         new_connections_per_minute: Some(600),
         bandwidth_mbit: Some(100),
     };
+    b.pending = Some(api::Pending {
+        fields: vec!["image".into(), "env".into()],
+        image: Some("nginx:1.28".into()),
+        ..Default::default()
+    });
     let mut long = a.clone();
     long.id = "m_03".into();
     long.name = "a-rather-long-name-indeed".into();
@@ -800,7 +894,7 @@ fn the_machine_table() {
     assert!(out.ends_with('\n'));
     assert_eq!(
         lines[0],
-        "ID               TENANT     NAME           IMAGE                    STATE              READY IP           SIZE      SLEEP  EGRESS             LIMITS                   HOST"
+        "ID               TENANT     NAME           IMAGE                    STATE              READY IP           SIZE      SLEEP  EGRESS             LIMITS                   PENDING      HOST"
     );
     // Every column starts where its header does.
     let cols = [
@@ -815,13 +909,14 @@ fn the_machine_table() {
         (116, 6),
         (123, 18),
         (142, 24),
+        (167, 12),
     ];
     let heads: Vec<String> = cols.iter().map(|(at, w)| col(lines[0], *at, *w)).collect();
     assert_eq!(
         heads,
         [
             "ID", "TENANT", "NAME", "IMAGE", "STATE", "READY", "IP", "SIZE", "SLEEP", "EGRESS",
-            "LIMITS"
+            "LIMITS", "PENDING"
         ]
     );
     let row: Vec<String> = cols.iter().map(|(at, w)| col(lines[2], *at, *w)).collect();
@@ -838,16 +933,18 @@ fn the_machine_table() {
             "2c/1024M",
             "never",
             "via:m_0123456789ab",
-            "25,465 600/min 100Mbit"
+            "25,465 600/min 100Mbit",
+            "image,env"
         ],
         "the stop reason is shown with the state; an empty ip is an empty column; \
-         a via policy in the form set-egress takes; the limits short"
+         a via policy in the form set-egress takes; the limits short; what changes at the next start"
     );
     assert_eq!(
         lines[2].len(),
-        142 + 24 + 1,
-        "no host: nothing after the limits"
+        167 + 12 + 1,
+        "no host: nothing after the pending fields"
     );
+    assert_eq!(col(lines[1], 167, 12), "-", "nothing pending");
     assert_eq!(col(lines[1], 87, 5), "yes");
     assert_eq!(col(lines[1], 123, 18), "open");
     assert_eq!(col(lines[1], 142, 24), "-", "nothing limited");
@@ -1509,6 +1606,16 @@ fn describe_shows_the_machine_then_its_events() {
         ],
         created_at: ts(),
         version: 12,
+        pending: Some(api::Pending {
+            fields: vec!["image".into(), "env".into(), "size".into()],
+            image: Some("nginx:1.28".into()),
+            size: Some(api::Size {
+                vcpus: 2,
+                memory_mb: 512,
+            }),
+            ..Default::default()
+        }),
+        pending_since: Some(ts()),
         host: "d1".into(),
         restarts: 2,
         restarting_at: Some(ts() + chrono::Duration::seconds(20)),
@@ -1574,6 +1681,7 @@ fn describe_shows_the_machine_then_its_events() {
             "Endpoints:     ep_1 http 80 -> http://web-ab12.byard.localhost",
             "               ep_2 tcp 5432 -> 10.0.0.5:20001",
             "Sleep:         30m",
+            "Pending:       image nginx:1.28, env, size 2 vCPU, 512 MB, at the next start (since 2026-10-19 08:30:00)",
             "Version:       12",
             "Created:       2026-10-19 08:30:00",
             "Events:",
@@ -1595,13 +1703,14 @@ fn describe_shows_the_machine_then_its_events() {
             restarts: 0,
             restarting_at: None,
             probes: api::Probes::default(),
+            pending: None,
             ..plain
         },
         &[],
     );
     assert!(out.contains("Endpoints:     none\n"), "{out}");
     assert!(out.ends_with("Events:\n  none\n"), "{out}");
-    for absent in ["Host:", "Exit:", "Restarts:", "Probes:"] {
+    for absent in ["Host:", "Exit:", "Restarts:", "Probes:", "Pending:"] {
         assert!(!out.contains(absent), "{absent} {out}");
     }
 }
