@@ -142,7 +142,18 @@ where
             code: 1000,
             reason: "".into(),
         }));
-        send(&mut to_client, close, gone_after).await;
+        if send(&mut to_client, close, gone_after).await {
+            // The closing handshake: the connection closes once the client closed it too (or
+            // went silent), so what it still writes meanwhile never resets what it has not read.
+            let closed = async {
+                while let Some(Ok(m)) = from_client.next().await {
+                    if matches!(m, Message::Close(_)) {
+                        break;
+                    }
+                }
+            };
+            let _ = tokio::time::timeout(gone_after, closed).await;
+        }
     }
     Ended::Command(end)
 }
@@ -271,6 +282,9 @@ mod tests {
         let end: SessionEnd = serde_json::from_slice(&end).unwrap();
         assert_eq!((end.exit_code, end.code.as_str()), (Some(3), ""));
         assert!(matches!(b.client_hears().await, Message::Close(Some(c)) if c.code == 1000));
+        b.client_tx
+            .unbounded_send(Ok(Message::Close(None)))
+            .unwrap();
         assert_eq!(
             b.ended.await.unwrap(),
             Ended::Command(SessionEnd {
@@ -278,6 +292,28 @@ mod tests {
                 ..Default::default()
             })
         );
+    }
+
+    #[tokio::test]
+    async fn the_end_waits_for_the_clients_close() {
+        // Closing the connection under a client still writing (stdin it sent as the command
+        // ended) resets it, and the reset can drop the exit it had not read yet (found by the
+        // e2e suite): the server closes once the client did, as RFC 6455 has it.
+        let mut b = bench(Duration::from_secs(30));
+        b.guest_says(Response::exit(4, false)).await;
+        assert_eq!(binary(b.client_hears().await).0, channel::EXIT);
+        assert!(matches!(b.client_hears().await, Message::Close(_)));
+        b.send(channel::STDIN, b"late input");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!b.ended.is_finished(), "closed before the client did");
+        b.client_tx
+            .unbounded_send(Ok(Message::Close(None)))
+            .unwrap();
+        let end = tokio::time::timeout(Duration::from_secs(5), b.ended)
+            .await
+            .expect("ends at the client's close")
+            .unwrap();
+        assert!(matches!(end, Ended::Command(e) if e.exit_code == Some(4)));
     }
 
     #[tokio::test]

@@ -136,7 +136,10 @@ where
                         return Ok(code);
                     }
                 };
-                ws.send(Message::Binary(m)).await.context("the session")?;
+                // The command may have ended under this input: its end is still to be read.
+                if ws.send(Message::Binary(m)).await.is_err() {
+                    local.close();
+                }
             }
         }
     }
