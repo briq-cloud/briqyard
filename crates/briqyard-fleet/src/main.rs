@@ -850,9 +850,14 @@ async fn read(resp: Response) -> (axum::http::response::Parts, Bytes) {
 
 /// Adds the host id to a machine JSON body.
 fn with_host(body: Bytes, host: &str) -> Bytes {
+    with_field(body, "host", host)
+}
+
+/// Sets a field of a JSON object body; any other body is sent on as it is.
+fn with_field(body: Bytes, key: &str, value: &str) -> Bytes {
     match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(mut v) if v.is_object() => {
-            v["host"] = serde_json::Value::String(host.into());
+            v[key] = serde_json::Value::String(value.into());
             Bytes::from(serde_json::to_vec(&v).unwrap_or_default())
         }
         _ => body,
@@ -1320,21 +1325,10 @@ async fn get_tenant(
     let resp = forward(&st, &host, Method::GET, &path, &headers, Bytes::new()).await;
     let (parts, data) = read(resp).await;
     let data = match parts.status.is_success() {
-        true => with_region(with_host(data, &host.id), &host.region),
+        true => with_field(with_host(data, &host.id), "region", &host.region),
         false => data,
     };
     Ok(Response::from_parts(parts, Body::from(data)))
-}
-
-/// Adds the host's region to a tenant JSON body.
-fn with_region(body: Bytes, region: &str) -> Bytes {
-    match serde_json::from_slice::<serde_json::Value>(&body) {
-        Ok(mut v) if v.is_object() && !region.is_empty() => {
-            v["region"] = serde_json::Value::String(region.into());
-            Bytes::from(serde_json::to_vec(&v).unwrap_or_default())
-        }
-        _ => body,
-    }
 }
 
 /// Where a PUT on a tenant with no host yet places it (ADR 0025).
