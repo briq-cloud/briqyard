@@ -819,7 +819,7 @@ components:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]
