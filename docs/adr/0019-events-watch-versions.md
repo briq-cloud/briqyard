@@ -1,6 +1,6 @@
 # ADR 0019: Events, a watch and versions: what makes an imperative API safe to drive
 
-Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`) and ADR 0022 (the probes' reasons, marked *0022*)
+Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`), ADR 0022 (the probes' reasons, marked *0022*), ADR 0023 (the backups' reasons), ADR 0024 (`applied`) and ADR 0025 (`quota_exceeded`)
 
 ## Context
 
@@ -41,6 +41,7 @@ briqyard is imperative; briq's reconciler is the declarative layer above it (`..
 | `boot_failed` | warning | the guest never came up or exited booting (ADR 0011); the console tail in `message` | |
 | `start_failed` | warning | the host failed the start (network, disk, Firecracker): ADR 0011's 500 | |
 | `updated` | normal | a PATCH changed its sleep, metadata or backup schedule (ADR 0023), a PUT the gateway's spec | `fields` |
+| `applied` | normal | *0024*: a start applied a pending change, logged before its `starting` | `fields` |
 | `egress_changed` | normal | a PATCH changed its egress policy or its limits (ADR 0018) | `fields`, `from`, `to`, `limits` |
 | `backed_up` | normal | a backup reached the store | `backup`, `bytes`, `incremental` |
 | `backup_failed` | warning | a backup did not reach the store (ADR 0023) | `error` |
@@ -53,6 +54,7 @@ briqyard is imperative; briq's reconciler is the declarative layer above it (`..
 | `adopted` | normal | a machine left running by a previous daemon was taken over | `pid` |
 | `host_condition` | warning when it turns true, normal when it clears | a host condition changed (ADR 0021) | `condition`, `status` |
 | `image_removed` | normal | an image was removed: under disk pressure, unused past `image_keep_days`, or on request (ADR 0021) | `image`, `digest`, `key`, `reason` |
+| `quota_exceeded` | warning | *0025*: a create or a start refused by the tenant's quota | `resource`, `limit`, `used`, `need` |
 
 `updated` and `start_failed` are two more than the first list: without `updated` a PATCH of the sleep window would not move the version, and a host's fault is not the image's (`boot_failed`). `destroying` has no event: the destroy is one critical section and `destroyed` ends it.
 

@@ -48,6 +48,9 @@ pub enum MError {
     BadState(String),
     #[error("the host is full: {0}")]
     Capacity(String),
+    /// Past a limit of the tenant's quota (ADR 0025).
+    #[error("{0}")]
+    Quota(String),
     #[error("the tenant still has machines")]
     TenantInUse,
     #[error("a machine of the tenant runs through its gateway")]
@@ -321,11 +324,97 @@ fn admit(used: u32, cap: u32, need: u32) -> Result<(), MError> {
     }
 }
 
+/// A limit of a tenant's quota that a create or a start would pass (ADR 0025).
+#[derive(Debug, PartialEq)]
+struct Exceeded {
+    tenant: String,
+    resource: &'static str,
+    limit: u32,
+    used: u32,
+    need: u32,
+}
+
+impl std::fmt::Display for Exceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tenant {}'s quota: {} {} of {} used, {} more asked",
+            self.tenant, self.resource, self.used, self.limit, self.need
+        )
+    }
+}
+
+impl Exceeded {
+    fn event(&self, message: String) -> Ev {
+        Ev::warning(reason::QUOTA_EXCEEDED, message).data(json!({
+            "resource": self.resource, "limit": self.limit, "used": self.used, "need": self.need,
+        }))
+    }
+}
+
+/// The first limit of `quota` that `need` more would pass next to `used`; a resource the
+/// request does not ask for is never refused, even past a limit lowered under the use.
+fn over_quota(
+    tenant: &str,
+    quota: &api::Quota,
+    used: &api::QuotaUse,
+    need: &api::QuotaUse,
+) -> Option<Exceeded> {
+    [
+        ("machines", quota.machines, used.machines, need.machines),
+        ("disk_gb", quota.disk_gb, used.disk_gb, need.disk_gb),
+        ("memory_mb", quota.memory_mb, used.memory_mb, need.memory_mb),
+        ("vcpus", quota.vcpus, used.vcpus, need.vcpus),
+    ]
+    .into_iter()
+    .find_map(|(resource, limit, used, need)| {
+        let limit = limit?;
+        (need > 0 && used.saturating_add(need) > limit).then(|| Exceeded {
+            tenant: tenant.into(),
+            resource,
+            limit,
+            used,
+            need,
+        })
+    })
+}
+
+/// What a machine of this record counts toward its tenant's quota: itself, its volume, and
+/// its size while it holds memory, or when `starting` it is about to.
+fn quota_need(r: &Record, starting: bool) -> api::QuotaUse {
+    let runs = starting || holds_memory(&r.state);
+    api::QuotaUse {
+        machines: 1,
+        memory_mb: if runs { r.size.memory_mb } else { 0 },
+        vcpus: if runs { r.size.vcpus } else { 0 },
+        disk_gb: r.volume.as_ref().map_or(0, |v| v.size_gb),
+    }
+}
+
+/// What a tenant's machines hold, its gateway included: its quota's use.
+fn tenant_use(machines: &HashMap<String, Arc<Entry>>, tenant: &str) -> api::QuotaUse {
+    let mut u = api::QuotaUse::default();
+    for e in machines.values() {
+        let r = e.rec.lock().unwrap();
+        if r.tenant == tenant {
+            let n = quota_need(&r, false);
+            u.machines += n.machines;
+            u.memory_mb += n.memory_mb;
+            u.vcpus += n.vcpus;
+            u.disk_gb += n.disk_gb;
+        }
+    }
+    u
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TenantRec {
     pub id: String,
     pub subnet_index: u32,
     pub created_at: DateTime<Utc>,
+    /// What the tenant may hold (ADR 0025); none set: no limit.
+    #[serde(default)]
+    pub quota: api::Quota,
 }
 
 /// A tenant as the manager holds it: its record and the subnet its index names, checked
@@ -1033,6 +1122,7 @@ impl Manager {
                     id: id.to_string(),
                     subnet_index: idx,
                     created_at: Utc::now(),
+                    quota: api::Quota::default(),
                 },
                 self.inner.range.subnet(idx)?,
             )
@@ -1343,6 +1433,7 @@ impl Manager {
             machines,
             created_at: t.rec.created_at,
             host: String::new(),
+            region: String::new(),
             gateway,
         }
     }
@@ -1373,6 +1464,37 @@ impl Manager {
         self.inner.tenants.lock().unwrap().remove(id);
         self.inner.store.delete("tenants", id)?;
         Ok(())
+    }
+
+    // --- quotas (ADR 0025) ---
+
+    /// The tenant's quota and what it holds.
+    pub fn quota(&self, tenant: &str) -> Result<api::TenantQuota, MError> {
+        let quota = self.tenant_of(tenant).ok_or(MError::NotFound)?.rec.quota;
+        let used = tenant_use(&self.inner.machines.lock().unwrap(), tenant);
+        Ok(api::TenantQuota {
+            tenant: tenant.into(),
+            quota,
+            used,
+        })
+    }
+
+    /// Puts the tenant's quota, the tenant made when it has nothing yet (as a gateway is), so
+    /// its first create is held to it. A quota under the use stops nothing: what comes next
+    /// is refused.
+    pub async fn set_quota(
+        &self,
+        tenant: &str,
+        quota: api::Quota,
+    ) -> Result<api::TenantQuota, MError> {
+        check_tenant_id(tenant)?;
+        let mut t = self.ensure_tenant(tenant).await?;
+        t.rec.quota = quota;
+        self.inner.store.put("tenants", tenant, &t.rec)?;
+        if let Some(kept) = self.inner.tenants.lock().unwrap().get_mut(tenant) {
+            kept.rec.quota = quota;
+        }
+        self.quota(tenant)
     }
 
     // --- the tenant's gateway (ADR 0016) ---
@@ -1770,7 +1892,9 @@ impl Manager {
         Ok(self.view(&e))
     }
 
-    pub fn list(&self, tenant: Option<&str>) -> Vec<api::Machine> {
+    /// The tenant's machines, or every tenant's, those whose labels (`metadata`) match every
+    /// selector (ADR 0025).
+    pub fn list(&self, tenant: Option<&str>, labels: &[api::Label]) -> Vec<api::Machine> {
         let entries: Vec<Arc<Entry>> = self
             .inner
             .machines
@@ -1783,7 +1907,9 @@ impl Manager {
             .iter()
             .filter(|e| {
                 let r = e.rec.lock().unwrap();
-                r.is_tenants() && tenant.map(|t| r.tenant == t).unwrap_or(true)
+                r.is_tenants()
+                    && tenant.map(|t| r.tenant == t).unwrap_or(true)
+                    && labels.iter().all(|l| l.matches(&r.metadata))
             })
             .map(|e| self.view(e))
             .collect();
@@ -1804,28 +1930,50 @@ impl Manager {
     }
 
     /// Takes the machine's memory from the host and moves it to `starting`, as one step
-    /// under the map's lock: two starts that read the same free memory cannot both take it.
-    /// A pending change goes onto the record in that step (ADR 0024), its size the one
-    /// reserved, with `image` its new image, resolved. Its events are logged once that lock is
-    /// let go: the log syncs to disk, and the map is every request's. Nothing else moves the
-    /// machine meanwhile: its own lock is held.
+    /// under the map's lock: two starts that read the same free memory cannot both take it,
+    /// nor pass their tenant's quota together (ADR 0025). A pending change goes onto the record
+    /// in that step (ADR 0024), its size the one reserved and counted, with `image` its new
+    /// image, resolved. Its events are logged once that lock is let go: the log syncs to disk,
+    /// and the map is every request's. Nothing else moves the machine meanwhile: its own lock
+    /// is held.
     fn reserve(&self, e: &Entry, image: Option<image::Image>) -> Result<(), MError> {
+        let tenant = e.rec.lock().unwrap().tenant.clone();
+        let quota = self
+            .tenant_of(&tenant)
+            .map(|t| t.rec.quota)
+            .unwrap_or_default();
         let mut applied = None;
-        {
+        let over = {
             let machines = self.inner.machines.lock().unwrap();
-            let (used, _) = committed(&machines);
-            let need = {
+            let size = {
                 let r = e.rec.lock().unwrap();
                 r.pending.as_ref().and_then(|p| p.size).unwrap_or(r.size)
             };
-            admit(used.memory_mb, self.capacity().memory_mb, need.memory_mb)?;
-            e.set_state(state::STARTING, |r| {
-                r.error.clear();
-                r.pid = 0;
-                r.restarting_at = None;
-                applied = apply_pending(r, image);
-                None
-            });
+            let need = api::QuotaUse {
+                memory_mb: size.memory_mb,
+                vcpus: size.vcpus,
+                ..Default::default()
+            };
+            match over_quota(&tenant, &quota, &tenant_use(&machines, &tenant), &need) {
+                Some(x) => Some(x),
+                None => {
+                    let (used, _) = committed(&machines);
+                    admit(used.memory_mb, self.capacity().memory_mb, size.memory_mb)?;
+                    e.set_state(state::STARTING, |r| {
+                        r.error.clear();
+                        r.pid = 0;
+                        r.restarting_at = None;
+                        applied = apply_pending(r, image);
+                        None
+                    });
+                    None
+                }
+            }
+        };
+        if let Some(x) = over {
+            e.note(x.event(format!("start refused: {x}")));
+            let _ = self.save(e);
+            return Err(MError::Quota(x.to_string()));
         }
         if let Some(fields) = applied {
             e.note(
@@ -2244,7 +2392,7 @@ impl Manager {
             rec.root_key = rec.image_key.clone();
         }
         let t = self.ensure_tenant(&req.tenant).await?;
-        let e = self.add_machine(rec, &t)?;
+        let e = self.add_machine(rec, &t, req.start.unwrap_or(true))?;
         let _guard = e.lock.lock().await;
         let ip = e.snapshot().ip;
         let made = match self.inner.net.count(&ip).await.context("usage counters") {
@@ -2291,8 +2439,15 @@ impl Manager {
         })
     }
 
-    /// Gives the machine an address and registers it. Nothing on disk yet.
-    fn add_machine(&self, mut rec: Record, t: &Tenant) -> Result<Arc<Entry>, MError> {
+    /// Gives the machine an address and registers it, within its tenant's quota (ADR 0025):
+    /// a machine and its volume, and its size when it is `starting` at once. Nothing on disk
+    /// yet.
+    fn add_machine(
+        &self,
+        mut rec: Record,
+        t: &Tenant,
+        starting: bool,
+    ) -> Result<Arc<Entry>, MError> {
         let mut machines = self.inner.machines.lock().unwrap();
         let mut used = Vec::new();
         for e in machines.values() {
@@ -2305,6 +2460,18 @@ impl Manager {
             if r.tenant == t.rec.id {
                 used.push(r.host_num as u32);
             }
+        }
+        let held = tenant_use(&machines, &rec.tenant);
+        if let Some(x) = over_quota(
+            &rec.tenant,
+            &t.rec.quota,
+            &held,
+            &quota_need(&rec, starting),
+        ) {
+            drop(machines);
+            let ev = x.event(format!("create of {} refused: {x}", rec.name));
+            self.inner.events.emit(ev.tenant(&rec.tenant));
+            return Err(MError::Quota(x.to_string()));
         }
         // The address a `via` policy in the tables names stays its gateway's, even once that
         // machine is gone: given to a new machine, it would be reachable through the policy.
@@ -3758,34 +3925,109 @@ impl Manager {
         } else {
             limit
         };
-        let offset: u64 = if since.is_empty() {
-            0
-        } else {
-            since
-                .parse()
-                .map_err(|_| invalid("since must be a cursor from a previous page"))?
-        };
         let dir = self.inner.cfg.run_dir().join(id);
-        let Some((mut pos, mut r)) =
-            console::read_from(&dir, offset).map_err(|e| MError::Other(e.into()))?
-        else {
-            return Ok(api::LogsResponse::default());
-        };
-        use std::io::BufRead;
-        let mut resp = api::LogsResponse::default();
-        while resp.lines.len() < limit {
-            let mut line = String::new();
-            let n = r
-                .read_line(&mut line)
-                .map_err(|e| MError::Other(e.into()))?;
-            if n == 0 || !line.ends_with('\n') {
-                break;
-            }
-            pos += n as u64;
-            resp.lines.push(parse_log_line(&line));
+        match console_page(&dir, log_cursor(since)?, limit).map_err(|e| MError::Other(e.into()))? {
+            None => Ok(api::LogsResponse::default()),
+            Some((lines, next)) => Ok(api::LogsResponse {
+                lines,
+                next: next.to_string(),
+            }),
         }
-        resp.next = pos.to_string();
-        Ok(resp)
+    }
+
+    /// Follows the console from `since` (ADR 0025): the lines after it, then each new one,
+    /// one JSON line each (`api::LogLine`), `{}` every `events::HEARTBEAT`, and a last error
+    /// line when the machine is destroyed or the daemon goes down. Checked before any line
+    /// goes out; ends when `tx` is dropped.
+    pub fn follow_logs(
+        &self,
+        id: &str,
+        since: &str,
+        tx: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<(), MError> {
+        // Subscribed before the machine is looked up: a destroy in between is seen.
+        let (logged, closing) = self.inner.events.subscribe();
+        self.entry(id)?;
+        let cursor = log_cursor(since)?;
+        let me = self.clone();
+        let id = id.to_string();
+        tokio::spawn(async move { me.follow(id, cursor, logged, closing, tx).await });
+        Ok(())
+    }
+
+    async fn follow(
+        &self,
+        id: String,
+        mut cursor: u64,
+        mut logged: broadcast::Receiver<api::Event>,
+        mut closing: tokio::sync::watch::Receiver<bool>,
+        tx: tokio::sync::mpsc::Sender<String>,
+    ) {
+        let dir = self.inner.cfg.run_dir().join(&id);
+        let grown = console::grown(&dir);
+        let start = tokio::time::Instant::now() + events::HEARTBEAT;
+        let mut beat = tokio::time::interval_at(start, events::HEARTBEAT);
+        loop {
+            // Enabled before the read: a line written after it wakes this one.
+            let woken = grown.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            loop {
+                let (lines, next) = match console_page(&dir, cursor, FOLLOW_PAGE) {
+                    Ok(Some(page)) => page,
+                    Ok(None) => break,
+                    Err(err) => {
+                        let why = format!("read the console: {err}");
+                        events::send(&tx, &mut closing, events::last_line("internal", &why)).await;
+                        return;
+                    }
+                };
+                cursor = next;
+                let full = lines.len() == FOLLOW_PAGE;
+                for l in lines {
+                    let line = serde_json::to_string(&l).unwrap_or_default() + "\n";
+                    if !events::send(&tx, &mut closing, line).await {
+                        return;
+                    }
+                }
+                if !full {
+                    break;
+                }
+            }
+            let destroyed = loop {
+                let beat_now = tokio::select! {
+                    _ = &mut woken => break false,
+                    e = logged.recv() => match e {
+                        Ok(e) if e.machine_id == id && e.reason == reason::DESTROYED => break true,
+                        Ok(_) => false,
+                        // Behind the host's log: the records say whether it is gone.
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            if !self.inner.machines.lock().unwrap().contains_key(&id) {
+                                break true;
+                            }
+                            false
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    },
+                    _ = beat.tick() => true,
+                    _ = closing.wait_for(|c| *c) => {
+                        // Only if there is room: a daemon going down waits for no reader.
+                        let why = format!("the daemon is going down: follow again from since={cursor}");
+                        let _ = tx.try_send(events::last_line("shutdown", &why));
+                        return;
+                    }
+                    _ = tx.closed() => return,
+                };
+                if beat_now && !events::send(&tx, &mut closing, "{}\n".into()).await {
+                    return;
+                }
+            };
+            if destroyed {
+                let why = format!("machine {id} was destroyed; its console went with it");
+                events::send(&tx, &mut closing, events::last_line("destroyed", &why)).await;
+                return;
+            }
+        }
     }
 
     // --- snapshots ---
@@ -4218,6 +4460,43 @@ fn check_limits(l: Option<&api::EgressLimits>) -> Result<(), MError> {
         Some(Err(e)) => Err(invalid(format!("limits.{e}"))),
         _ => Ok(()),
     }
+}
+
+/// Lines a follow reads at a time.
+const FOLLOW_PAGE: usize = 500;
+
+/// A `/logs` cursor: an offset in the whole console; empty is its start.
+fn log_cursor(since: &str) -> Result<u64, MError> {
+    match since {
+        "" => Ok(0),
+        s => s
+            .parse()
+            .map_err(|_| invalid("since must be a cursor from a previous page")),
+    }
+}
+
+/// Up to `limit` whole lines of the console in `dir` from `from`, and the cursor after the
+/// last; `None` when the machine has no console yet.
+fn console_page(
+    dir: &Path,
+    from: u64,
+    limit: usize,
+) -> std::io::Result<Option<(Vec<api::LogLine>, u64)>> {
+    use std::io::BufRead;
+    let Some((mut pos, mut r)) = console::read_from(dir, from)? else {
+        return Ok(None);
+    };
+    let mut lines = Vec::new();
+    while lines.len() < limit {
+        let mut line = String::new();
+        let n = r.read_line(&mut line)?;
+        if n == 0 || !line.ends_with('\n') {
+            break;
+        }
+        pos += n as u64;
+        lines.push(parse_log_line(&line));
+    }
+    Ok(Some((lines, pos)))
 }
 
 fn parse_log_line(line: &str) -> api::LogLine {
@@ -5347,6 +5626,7 @@ mod tests {
                     id: id.into(),
                     subnet_index: idx,
                     created_at: Utc::now(),
+                    quota: api::Quota::default(),
                 },
                 self.m.inner.range.subnet(idx).unwrap(),
             );
@@ -5672,6 +5952,7 @@ mod tests {
             id: "t1".into(),
             subnet_index: 4,
             created_at: Utc::now(),
+            quota: api::Quota::default(),
         };
         h.m.inner.store.put("tenants", "t1", &t).unwrap();
         let err = h.m.load().unwrap_err();
@@ -6003,7 +6284,7 @@ mod tests {
         assert_eq!(h.host.alive(), vec![1000]);
         let (used, up, total) = h.m.usage();
         assert_eq!((used.memory_mb, up, total), (256, 1, 1));
-        assert_eq!(h.m.list(Some("t1"))[0].id, m.id);
+        assert_eq!(h.m.list(Some("t1"), &[])[0].id, m.id);
         // A second machine of that name is refused before anything is made.
         assert!(matches!(
             h.m.create(h.request("web")).await,
@@ -6161,7 +6442,7 @@ mod tests {
                 .count(),
             1
         );
-        let states: Vec<String> = h.m.list(None).into_iter().map(|m| m.state).collect();
+        let states: Vec<String> = h.m.list(None, &[]).into_iter().map(|m| m.state).collect();
         assert!(states.contains(&state::STOPPED.to_string()), "{states:?}");
     }
 
@@ -6240,7 +6521,7 @@ mod tests {
         // The client hangs up once the machine is registered: its disks and its boot are
         // still to come.
         let id = loop {
-            match h.m.list(Some("t1")).pop() {
+            match h.m.list(Some("t1"), &[]).pop() {
                 Some(m) => break m.id,
                 None => tokio::task::yield_now().await,
             }
@@ -6570,7 +6851,7 @@ mod tests {
             took >= Duration::from_secs(3) && took < Duration::from_secs(6),
             "{took:?}"
         );
-        for m in h.m.list(None) {
+        for m in h.m.list(None, &[]) {
             assert_eq!(
                 (m.state.as_str(), m.stopped_reason.as_str()),
                 (state::STOPPED, stop::IDLE),
@@ -6897,7 +7178,7 @@ mod tests {
         assert!(h.host.calls().is_empty());
         let zfs = h.pool.calls();
         assert!(zfs.is_empty(), "{zfs:?}");
-        assert!(h.m.list(None).iter().all(|x| x.name != "sbx2"));
+        assert!(h.m.list(None, &[]).iter().all(|x| x.name != "sbx2"));
         assert_eq!(h.stored(&m.id).unwrap().egress, api::Egress::default());
         // Its own tenant's machine is a gateway.
         h.m.update(&m.id, set_egress("via", Some(&gw.id)), None)
@@ -7477,7 +7758,7 @@ mod tests {
             ("never", api::Egress::default(), "always")
         );
         // Not one of the tenant's machines: not listed, not counted, its console readable.
-        assert!(h.m.list(None).is_empty() && h.m.list(Some("t1")).is_empty());
+        assert!(h.m.list(None, &[]).is_empty() && h.m.list(Some("t1"), &[]).is_empty());
         assert_eq!(h.m.usage().2, 0);
         assert!(h.m.logs(&gw.machine_id, "", 10).is_ok());
         // The name is taken in the tenant, like any machine's.
@@ -7836,7 +8117,7 @@ mod tests {
         );
         assert_eq!(h.m.get(&gw).unwrap().image, IMAGE2);
         // Asleep with a memory snapshot, then replaced: the next start boots it cold.
-        let sbx = h.m.list(None)[0].id.clone();
+        let sbx = h.m.list(None, &[])[0].id.clone();
         h.m.stop(&sbx, Duration::from_secs(1), false, None)
             .await
             .unwrap();
@@ -7949,7 +8230,7 @@ mod tests {
         // Untouched: not started, not destroyed, no other machine made, no snapshot taken.
         assert_eq!(h.gateway_view().state, state::CREATED);
         assert!(h.host.calls().is_empty());
-        assert!(h.m.list(None).is_empty());
+        assert!(h.m.list(None, &[]).is_empty());
         assert!(h.pool.calls().is_empty());
     }
 
@@ -8585,7 +8866,7 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(err, MError::Other(_)), "{err:?}");
         let id =
-            h.m.list(Some("t1"))
+            h.m.list(Some("t1"), &[])
                 .into_iter()
                 .find(|x| x.name == "walled")
                 .unwrap()
@@ -8713,7 +8994,7 @@ mod tests {
         assert_eq!(h.reasons(&gw).len(), 4);
         for id in [
             c.id.clone(),
-            h.m.list(Some("t1"))
+            h.m.list(Some("t1"), &[])
                 .into_iter()
                 .find(|m| m.name == "d")
                 .unwrap()
@@ -9895,6 +10176,306 @@ mod tests {
         assert_eq!(h.m.logs("m_a", &mid, 10).unwrap().lines.len(), 1);
         let after = h.m.logs("m_a", &end.to_string(), 10).unwrap();
         assert_eq!((after.lines.len(), after.next), (0, end.to_string()));
+    }
+
+    // --- labels, quotas and logs follow (ADR 0025) ---
+
+    #[tokio::test]
+    async fn a_listing_selects_by_labels_all_of_them() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let labelled = |name: &str, labels: &[(&str, &str)]| {
+            let mut req = h.request(name);
+            req.start = Some(false);
+            req.metadata = labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            req
+        };
+        let web =
+            h.m.create(labelled("web", &[("app", "web"), ("tier", "front")]))
+                .await
+                .unwrap();
+        let db = h.m.create(labelled("db", &[("app", "db")])).await.unwrap();
+        h.m.create(labelled("bare", &[])).await.unwrap();
+        let ids = |tenant: Option<&str>, sel: &[&str]| -> Vec<String> {
+            let sel: Vec<api::Label> = sel.iter().map(|s| api::Label::parse(s).unwrap()).collect();
+            h.m.list(tenant, &sel).into_iter().map(|m| m.id).collect()
+        };
+        assert_eq!(ids(None, &["app=web"]), [web.id.as_str()]);
+        assert_eq!(ids(Some("t1"), &["app"]), [web.id.clone(), db.id.clone()]);
+        assert_eq!(ids(None, &["app=web", "tier=front"]), [web.id.as_str()]);
+        assert!(
+            ids(None, &["app=db", "tier"]).is_empty(),
+            "every one must match"
+        );
+        assert!(ids(Some("t2"), &["app"]).is_empty());
+        assert_eq!(ids(None, &[]).len(), 3);
+    }
+
+    #[test]
+    fn a_quota_refuses_the_first_limit_a_request_passes() {
+        let q = api::Quota {
+            machines: Some(2),
+            memory_mb: Some(512),
+            disk_gb: Some(10),
+            vcpus: None,
+        };
+        let used = api::QuotaUse {
+            machines: 1,
+            memory_mb: 256,
+            vcpus: 1,
+            disk_gb: 10,
+        };
+        let need = |machines, memory_mb, disk_gb| api::QuotaUse {
+            machines,
+            memory_mb,
+            vcpus: 64,
+            disk_gb,
+        };
+        assert_eq!(
+            over_quota("t1", &q, &used, &need(1, 256, 0)),
+            None,
+            "up to the limit"
+        );
+        let x = over_quota("t1", &q, &used, &need(1, 512, 0)).unwrap();
+        assert_eq!(
+            x.to_string(),
+            "tenant t1's quota: memory_mb 256 of 512 used, 512 more asked"
+        );
+        // Disk is used up: a machine with no volume still fits, one with a volume does not.
+        assert_eq!(over_quota("t1", &q, &used, &need(1, 0, 0)), None);
+        let x = over_quota("t1", &q, &used, &need(1, 0, 1)).unwrap();
+        assert_eq!(
+            (x.resource, x.limit, x.used, x.need),
+            ("disk_gb", 10, 10, 1)
+        );
+        // Machines are checked first; no limit is none.
+        let x = over_quota("t1", &q, &used, &need(2, 9999, 9)).unwrap();
+        assert_eq!(x.resource, "machines");
+        assert_eq!(
+            over_quota("t1", &api::Quota::default(), &used, &need(99, 99_999, 999)),
+            None
+        );
+        let none = api::Quota {
+            machines: Some(0),
+            ..Default::default()
+        };
+        assert!(over_quota("t1", &none, &api::QuotaUse::default(), &need(1, 0, 0)).is_some());
+    }
+
+    #[tokio::test]
+    async fn quotas_hold_a_tenant_at_create_fork_and_start() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        assert!(matches!(h.m.quota("t9"), Err(MError::NotFound)));
+        let set = |machines, memory_mb| api::Quota {
+            machines: Some(machines),
+            memory_mb: Some(memory_mb),
+            disk_gb: Some(5),
+            vcpus: None,
+        };
+        // Put before any machine (the tenant is made, as `ensure_tenant` makes one; the
+        // network needs the host, so known here).
+        h.tenant("t2");
+        let q = h.m.set_quota("t2", set(1, 384)).await.unwrap();
+        assert_eq!((q.quota, q.used), (set(1, 384), api::QuotaUse::default()));
+        assert_eq!(h.m.tenant("t2").unwrap().machines, 0);
+        let stored: TenantRec = h.m.inner.store.get("tenants", "t2").unwrap().unwrap();
+        assert_eq!(stored.quota, set(1, 384), "kept across a restart");
+        h.m.set_quota("t1", set(2, 384)).await.unwrap();
+        let a = h.m.create(h.request("a")).await.unwrap();
+        let mut b = h.request("b");
+        b.start = Some(false);
+        let b = h.m.create(b).await.unwrap();
+        // The use, as the quota counts it: two machines, one of them running.
+        let used = |t| h.m.quota(t).unwrap().used;
+        assert_eq!(
+            used("t1"),
+            api::QuotaUse {
+                machines: 2,
+                memory_mb: 256,
+                vcpus: 1,
+                disk_gb: 0
+            }
+        );
+        // A start past memory: refused, the machine as it was, an event about it.
+        let err = h.m.start(&b.id, None).await.unwrap_err();
+        assert!(matches!(err, MError::Quota(_)), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "tenant t1's quota: memory_mb 256 of 384 used, 256 more asked"
+        );
+        assert_eq!(h.m.get(&b.id).unwrap().state, state::CREATED);
+        let ev = h.events_of(&b.id).pop().unwrap();
+        assert_eq!(
+            (ev.reason.as_str(), ev.kind.as_str()),
+            ("quota_exceeded", "warning")
+        );
+        assert_eq!(ev.message, format!("start refused: {err}"));
+        assert_eq!(
+            ev.data.unwrap(),
+            json!({"resource": "memory_mb", "limit": 384, "used": 256, "need": 256})
+        );
+        assert_eq!(h.m.get(&b.id).unwrap().version, ev.seq, "an event about it");
+        // A fork past the machines: refused before anything is made, an event of the tenant.
+        let mut fork = h.request("f");
+        fork.image.clear();
+        fork.fork = Some(api::ForkSpec {
+            machine_id: a.id.clone(),
+            copy: String::new(),
+        });
+        let err = h.m.create(fork).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "tenant t1's quota: machines 2 of 2 used, 1 more asked"
+        );
+        assert_eq!(h.m.list(Some("t1"), &[]).len(), 2);
+        let f = events::Filter {
+            tenant: Some("t1".into()),
+            ..Default::default()
+        };
+        let last =
+            h.m.inner
+                .events
+                .read(0, &f, 5000)
+                .unwrap()
+                .events
+                .pop()
+                .unwrap();
+        assert_eq!(
+            (
+                last.reason.as_str(),
+                last.machine_id.as_str(),
+                last.tenant.as_str()
+            ),
+            ("quota_exceeded", "", "t1")
+        );
+        assert_eq!(last.message, format!("create of f refused: {err}"));
+        // The gateway counts as a machine.
+        let err = h.m.set_gateway("t1", gateway_spec(3128)).await.unwrap_err();
+        assert!(err.to_string().contains("machines 2 of 2"), "{err}");
+        // With room for machines: a create that starts is held to memory before it is made,
+        // and one with a volume to disk.
+        h.m.set_quota("t1", set(5, 384)).await.unwrap();
+        let err = h.m.create(h.request("c")).await.unwrap_err();
+        assert!(err.to_string().contains("memory_mb 256 of 384"), "{err}");
+        let mut v = h.request("v");
+        v.volume = Some(api::VolumeSpec {
+            size_gb: 6,
+            mount: "/data".into(),
+        });
+        let err = h.m.create(v).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "tenant t1's quota: disk_gb 0 of 5 used, 6 more asked"
+        );
+        assert_eq!(h.m.list(Some("t1"), &[]).len(), 2, "nothing made");
+        // Once a stops, b starts: memory is what runs.
+        h.m.stop(&a.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        assert_eq!(used("t1").memory_mb, 0);
+        assert_eq!(h.m.start(&b.id, None).await.unwrap().state, state::RUNNING);
+        // A quota lowered under the use stops nothing.
+        h.m.set_quota("t1", set(1, 0)).await.unwrap();
+        assert_eq!(h.m.get(&b.id).unwrap().state, state::RUNNING);
+        assert_eq!(used("t1").machines, 2);
+    }
+
+    /// The next line of a follow, as JSON, within five seconds.
+    async fn followed(rx: &mut tokio::sync::mpsc::Receiver<String>) -> serde_json::Value {
+        let line = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a line in time")
+            .expect("the follow is open");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn logs_follow_sends_what_is_there_then_each_line_across_a_rotation_until_destroyed() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let dir = h.m.inner.cfg.run_dir().join(&m.id);
+        // The daemon's writer of the console, rotating every two lines.
+        let mut w = console::Writer::open(&dir, 64).await.unwrap();
+        let ts = "2026-10-21T10:00:00.000000Z";
+        w.line(ts, b"before").await.unwrap();
+        let from = h.m.logs(&m.id, "", 500).unwrap();
+        assert!(matches!(
+            h.m.follow_logs("m_nope", "", tokio::sync::mpsc::channel(1).0),
+            Err(MError::NotFound)
+        ));
+        assert!(matches!(
+            h.m.follow_logs(&m.id, "x", tokio::sync::mpsc::channel(1).0),
+            Err(MError::Invalid(_))
+        ));
+        // From the start: the lines there, the last one written before the follow.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        h.m.follow_logs(&m.id, "", tx).unwrap();
+        let mut got = vec![];
+        for _ in 0..from.lines.len() {
+            got.push(
+                followed(&mut rx).await["line"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        assert_eq!(got.last().map(String::as_str), Some("before"));
+        // From a cursor: only what comes after it, each line as the writer writes it, in the
+        // paged answer's shape, across the rotations.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        h.m.follow_logs(&m.id, &from.next, tx).unwrap();
+        for i in 0..5 {
+            w.line(ts, format!("line {i}").as_bytes()).await.unwrap();
+            let l = followed(&mut rx).await;
+            assert_eq!(
+                l,
+                json!({"ts": "2026-10-21T10:00:00Z", "line": format!("line {i}")})
+            );
+        }
+        let rotated = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_name().to_string_lossy().starts_with("console.")
+                    && e.file_name() != "console.log"
+            });
+        assert!(rotated, "the console rotated under the follow");
+        // Destroyed: a last line says so, and the stream ends.
+        drop(w);
+        h.m.destroy(&m.id, None).await.unwrap();
+        let last = followed(&mut rx).await;
+        assert_eq!(last["code"], "destroyed");
+        assert_eq!(
+            last["error"],
+            format!("machine {} was destroyed; its console went with it", m.id)
+        );
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_quiet_follow_sends_a_heartbeat_and_ends_with_the_daemon() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.add("m_a", state::CREATED, 256);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        // No console yet: nothing to send until a line is written.
+        h.m.follow_logs("m_a", "", tx).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        tokio::time::advance(events::HEARTBEAT + Duration::from_secs(1)).await;
+        assert_eq!(followed(&mut rx).await, json!({}));
+        h.m.inner.events.close();
+        let last = followed(&mut rx).await;
+        assert_eq!(last["code"], "shutdown");
+        assert!(last["error"]
+            .as_str()
+            .unwrap()
+            .ends_with("follow again from since=0"));
+        assert!(rx.recv().await.is_none());
     }
 
     // --- changes at the next boot (ADR 0024) ---

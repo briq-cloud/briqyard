@@ -18,7 +18,7 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 | 4 | Observability and alerts | `/metrics`, JSON logs, host conditions (done) | scraping, log shipping, alerts in the monitor | staging |
 | 5 | Host operations: real orders, upgrades, patching | rolling upgrade, real provisioner runs | runbooks, capacity decisions | production |
 | 6 | Host loss | evacuate a host from its backups | the briqs' state while it happens | production |
-| 7 | Regions | region-aware placement | the team's region to the provider (done) | a second region |
+| 7 | Regions | region-aware placement (done) | the team's region to the briqyard adapter | a second region |
 | 8 | A team across hosts | WireGuard mesh or vRack (`MESH.md`) | nothing | a team outgrows a host |
 | 9 | Encryption at rest | ZFS native encryption per tenant | key policy | production |
 | 10 | Usage and costs | usage buckets (ADR 0017, built) | collection, cost model, billing of disk and network | billing them |
@@ -87,10 +87,10 @@ On briqyard: the fleet marks the host down and refuses its calls; restoring is p
 
 Fly today: Paris, Virginia, Singapore, the team's region chosen at signup.
 
-On briqyard: hosts carry a region; placement ignores it.
+On briqyard (ADR 0025, built): a create's `region` places a new tenant on a host of that region and a tenant never spans regions (400); no host there is 503 `capacity` naming it. The gateway and quota PUTs take `?region=` for a tenant with no host yet.
 
-- briqyard: placement within the request's region; a tenant never spans regions.
-- briq: passes the region (the region table already has OVH codes); the edge per region (item 1).
+- briq: the region table gets a `briqyard` column (the hosts' region codes; OVH's `gra`, `vin`, `sgp` if hosts are named after their datacenter), and the adapter sends `region` on each create and `?region=` on the gateway and quota PUTs; the edge per region (item 1).
+- briqyard, later: the autoscaler orders in its provisioner's one region; scaling per region once a second region has hosts.
 
 ## 8. A team across hosts
 

@@ -120,7 +120,10 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   despite its source's snapshots, a new size reserved at the start and refused past the host, a
   memory snapshot dropped by what it holds and kept for ports, an image that cannot be pulled
   failing the boot with the change kept, create and PATCH refusing a bad spec in the same
-  words). What still needs the host: a tenant's first create (its bridge and
+  words), labels, quotas and logs follow (a listing by labels, the quota at create, fork,
+  start and the gateway with its message and event, its use; a follow from the start and
+  from a cursor, across rotations, ending at the destroy, its heartbeat and shutdown;
+  placement by region and the cross-region refusal through stub hosts in two regions). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
@@ -140,7 +143,9 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   a base not deleted alone, the oldest kept restored from its chain, retention down to 2, its
   event, a destroyed machine's backups listed then deleted with their chain), changes at the
   next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
-  new image: Python 3.13, the volume's file kept). 124 checks.
+  new image: Python 3.13, the volume's file kept), labels, a quota and a follow (`ls -l` selecting one machine, a
+  refused selector, a second create refused 403 `quota` with its use and event, `logs -f`
+  receiving a line printed after it began and ending at the destroy). 132 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,

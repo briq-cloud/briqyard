@@ -539,11 +539,14 @@ fn machine_lifecycle_commands() {
         assert_eq!(fails(&args), ErrorKind::MissingRequiredArgument, "{args:?}");
     }
     match machine(parse(&["machine", "ls", "--tenant", "t1"])) {
-        MachineCmd::Ls { tenant } => assert_eq!(tenant.as_deref(), Some("t1")),
+        MachineCmd::Ls { tenant, labels } => {
+            assert_eq!(tenant.as_deref(), Some("t1"));
+            assert!(labels.is_empty());
+        }
         _ => panic!("not an ls"),
     }
     match machine(parse(&["m", "ls"])) {
-        MachineCmd::Ls { tenant } => assert_eq!(tenant, None),
+        MachineCmd::Ls { tenant, .. } => assert_eq!(tenant, None),
         _ => panic!("not an ls"),
     }
     match machine(parse(&[
@@ -682,6 +685,7 @@ fn endpoint_tenant_and_image_commands() {
     {
         Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set {
             tenant,
+            region,
             start,
             image,
             port,
@@ -695,6 +699,7 @@ fn endpoint_tenant_and_image_commands() {
             );
             assert!(readiness.is_none(), "its port, unless a probe is named");
             assert!(!start, "made, not started, unless asked");
+            assert!(region.is_none());
             assert_eq!(env_args(&envs).unwrap()["TOKEN"], "a=b");
             assert_eq!(cmd, ["proxy", "-v"]);
         }
@@ -1143,6 +1148,7 @@ fn the_host_table() {
             .into(),
         tls_fingerprint: String::new(),
         conditions: vec![],
+        region: String::new(),
         ..ready.clone()
     };
     let out = host_table(&[ready, ordered]);
@@ -1154,11 +1160,11 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[0],
-        "ID               URL                          STATE        MEMORY MB      VCPUS      MACHINES  TENANTS  LAST SEEN"
+        "ID               URL                          STATE        REGION   MEMORY MB      VCPUS      MACHINES  TENANTS  LAST SEEN"
     );
     assert_eq!(
         lines[1],
-        "h_byard-1        https://10.0.0.9:7420        ready        8192/64000     6/32       3         2        2026-10-19T08:30:00+00:00"
+        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6/32       3         2        2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[2],
@@ -1171,8 +1177,8 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[4],
-        "h_srv-9          -                            provisioning 0/0            0/0        0         0        2026-10-19T08:30:00+00:00",
-        "no address yet shows as -"
+        "h_srv-9          -                            provisioning -        0/0            0/0        0         0        2026-10-19T08:30:00+00:00",
+        "no address nor region yet shows as -"
     );
     assert_eq!(
         lines[5],
@@ -1922,4 +1928,148 @@ async fn events_are_read_page_after_page_and_a_watch_line_by_line() {
         .unwrap_err();
     assert_eq!(got, ["stopping", "stopped"]);
     assert!(err.to_string().ends_with("(shutdown)"), "{err}");
+}
+
+// --- labels, regions, quotas, logs follow (ADR 0025) ---
+
+#[test]
+fn labels_regions_and_quotas_from_the_command_line() {
+    match machine(parse(&[
+        "machine", "ls", "--tenant", "t1", "-l", "app=web", "--label", "tier",
+    ])) {
+        MachineCmd::Ls { tenant, labels } => {
+            assert_eq!(tenant.as_deref(), Some("t1"));
+            assert_eq!(labels, ["app=web", "tier"]);
+            assert_eq!(
+                machines_path(tenant.as_deref(), &labels),
+                "/v1/machines?tenant=t1&label=app%3Dweb&label=tier"
+            );
+        }
+        _ => panic!("not a ls"),
+    }
+    assert_eq!(machines_path(None, &[]), "/v1/machines");
+    let MachineCmd::Run(a) = machine(parse(&[
+        "m", "run", "--image", "x", "--region", "gra", "-l", "app=web", "-l", "tier=",
+    ])) else {
+        panic!("not a run")
+    };
+    assert_eq!(a.region, "gra");
+    let labels = label_args(&a.labels).unwrap();
+    assert_eq!(labels["app"], "web");
+    assert_eq!(labels["tier"], "");
+    let MachineCmd::Run(a) = machine(parse(&["m", "run", "--image", "x"])) else {
+        panic!("not a run")
+    };
+    assert_eq!(a.region, "", "any region");
+    let err = label_args(&["app".into()]).unwrap_err();
+    assert_eq!(err.to_string(), "--label \"app\": want K=V");
+    assert!(label_args(&["-app=x".into()]).is_err());
+    match machine(parse(&["machine", "logs", "-f", "m1"])) {
+        MachineCmd::Logs { follow, id, .. } => assert!(follow && id == "m1"),
+        _ => panic!("not logs"),
+    }
+    match parse(&[
+        "tenant",
+        "quota",
+        "t1",
+        "--machines",
+        "1",
+        "--memory-mb",
+        "2048",
+        "--region",
+        "vin",
+    ])
+    .cmd
+    {
+        Cmd::Tenant(TenantCmd::Quota {
+            id,
+            machines,
+            memory_mb,
+            vcpus,
+            disk_gb,
+            region,
+        }) => {
+            assert_eq!(id, "t1");
+            assert_eq!(
+                (machines, memory_mb, vcpus, disk_gb),
+                (Some(1), Some(2048), None, None)
+            );
+            assert_eq!(
+                tenant_put_path(&id, "quota", region.as_deref()),
+                "/v1/tenants/t1/quota?region=vin"
+            );
+        }
+        _ => panic!("not a quota"),
+    }
+    assert_eq!(
+        fails(&["tenant", "quota", "t1", "--machines", "-1"]),
+        ErrorKind::UnknownArgument
+    );
+    match parse(&[
+        "tenant", "gateway", "set", "t1", "--image", "i", "--port", "1", "--region", "gra",
+    ])
+    .cmd
+    {
+        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set { region, .. })) => {
+            assert_eq!(region.as_deref(), Some("gra"))
+        }
+        _ => panic!("not a gateway set"),
+    }
+    assert_eq!(
+        tenant_put_path("t1", "gateway", None),
+        "/v1/tenants/t1/gateway"
+    );
+}
+
+#[test]
+fn a_follow_line_is_a_console_line_a_heartbeat_or_the_end() {
+    let l = follow_line(r#"{"ts":"2026-10-21T10:00:00Z","line":"hello"}"#).unwrap();
+    assert!(matches!(l, ControlFlow::Continue(Some(ref l)) if l.line == "hello"));
+    assert!(matches!(
+        follow_line("{}\n").unwrap(),
+        ControlFlow::Continue(None)
+    ));
+    // A destroyed machine ends it, not as an error.
+    let end = follow_line(r#"{"error":"machine m1 was destroyed","code":"destroyed"}"#).unwrap();
+    assert!(matches!(end, ControlFlow::Break(ref why) if why == "machine m1 was destroyed"));
+    let err = follow_line(r#"{"error":"the daemon is going down","code":"shutdown"}"#).unwrap_err();
+    assert_eq!(err.to_string(), "the daemon is going down (shutdown)");
+    assert!(follow_line("not json").is_err());
+}
+
+#[tokio::test]
+async fn a_follow_prints_until_the_machine_is_destroyed() {
+    let ndjson = concat!(
+        r#"{"ts":"2026-10-21T10:00:00Z","line":"one"}"#,
+        "\n",
+        "{}\n",
+        r#"{"ts":"2026-10-21T10:00:01Z","line":"two"}"#,
+        "\n",
+        r#"{"error":"machine m1 was destroyed","code":"destroyed"}"#,
+        "\n",
+    );
+    let (url, stub) = stub(vec![(
+        StatusCode::OK,
+        vec![("content-type", "application/x-ndjson")],
+        ndjson,
+    )])
+    .await;
+    let c = client(&url, None);
+    let mut got = vec![];
+    c.stream("/v1/machines/m1/logs?since=&follow=true", |line| {
+        Ok(match follow_line(line)? {
+            ControlFlow::Continue(l) => {
+                got.extend(l.map(|l| l.line));
+                ControlFlow::Continue(())
+            }
+            ControlFlow::Break(_) => ControlFlow::Break(()),
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(got, ["one", "two"]);
+    assert_eq!(
+        stub.seen.lock().unwrap()[0].path,
+        "/v1/machines/m1/logs?since=&follow=true"
+    );
 }

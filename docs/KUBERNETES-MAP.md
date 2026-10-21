@@ -35,7 +35,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | `resourceVersion`, optimistic concurrency (409 on a stale write) | ✓ a machine's `version`, `If-Match` on PATCH, DELETE, start, stop, wake, restart (ADR 0019) | | |
 | watch (list + watch, informers) | ✓ `GET /v1/events?watch=true` from a cursor; per host, or a tenant or a machine through the fleet | | |
 | Events (`kubectl get events`, `describe`) | ✓ an event log per host, a closed list of reasons, `briqyard events` | events of endpoints and tenants | yard, later |
-| Labels and selectors (`-l app=web`) | ◐ metadata, no selection | `?label=k=v` on listings | yard |
+| Labels and selectors (`-l app=web`) | ✓ metadata as labels, `?label=k=v&label=k` on machine listings, `machine ls -l` (ADR 0025) | `!=` and set-based selectors; selectors on events, top, usage | yard, later |
 | Annotations | ✓ metadata | | |
 | Namespaces | ✓ tenants | | |
 | Finalizers, owner references, garbage collection | ◐ a tenant takes its gateway; forks are independent | | — |
@@ -76,7 +76,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | Fit by resources | ✓ memory and disk, reserved at placement | | |
-| Node selectors, node affinity, topology | ◐ hosts carry a region, placement ignores it | placement within the asked region | yard |
+| Node selectors, node affinity, topology | ✓ a create's `region` places a new tenant on a host of it; a tenant never spans regions (ADR 0025) | autoscaling per region | yard, later |
 | Pod affinity | ◐ a tenant's machines share a host, forced | | — |
 | Cordon | ✓ drain | | |
 | Taints, tolerations | ✗ | | — |
@@ -133,7 +133,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | `kubectl logs`, timestamps | ✓ (`since` is a page cursor, not a time) | | |
-| `kubectl logs -f` | ✗ | follow | yard |
+| `kubectl logs -f` | ✓ `/logs?follow=true` as NDJSON across rotations, `machine logs -f`, through the fleet (ADR 0025) | | |
 | `kubectl describe` | ✓ `briqyard machine describe` | | |
 | Events | ✓ (API machinery) | | |
 | kubelet `/metrics`, cAdvisor (per pod CPU, memory, disk, network) | ✓ per-machine series on `/metrics` from the tick's measure (ADR 0021) | | |
@@ -148,7 +148,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | RuntimeClass (gVisor, Kata) | ★ every machine is a microVM under the jailer | | |
 | Pod security, seccomp | ★ Firecracker's own seccomp; the guest is root in its VM only | | |
-| ResourceQuota, LimitRange per namespace | ✗ | quotas per tenant (machines, memory, disk) | yard (values from briq) |
+| ResourceQuota, LimitRange per namespace | ◐ a quota per tenant: machines, memory, vCPUs, disk, set by briq (ADR 0025) | LimitRange (a size per machine): briq's plan check | yard (values from briq) |
 | Plans, what a plan allows | | | briq |
 | Egress abuse (outside core) | ✗ | (Networking) | yard; the response to abuse is briq's |
 | Private endpoints, tokens | | | briq |
@@ -163,7 +163,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | etcd backup | ✗ | the registry file copied to the object store on each write | yard |
 | Cluster provisioning | ✓ bootstrap script, provisioners | | |
 | Version skew, upgrades | ✗ | `host upgrade` | yard |
-| Multi-cluster | ◐ regions on hosts | placement by region | yard |
+| Multi-cluster | ◐ regions on hosts, placement by region (ADR 0025) | a fleet per region, or one across | yard, later |
 
 ## Order of work
 
@@ -176,7 +176,7 @@ Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit 
 5. **Backups on a schedule**, retention, delete (closes ADR 0017's storage hole). Built: ADR 0023.
 6. **TLS between the fleet and the hosts**, the certificate pinned at bootstrap. Built: ADR 0020.
 7. **Changes at the next cold boot**: image, env, command, size by PATCH. Built: ADR 0024.
-8. **Scheduling**: placement by region, hosts under pressure refused, labels on listings; quotas per tenant; logs follow.
+8. **Scheduling**: placement by region, hosts under pressure refused, labels on listings; quotas per tenant; logs follow. Built: ADR 0021 (pressure), ADR 0025.
 9. **The edge** (briq, in parallel): its servers, Cloudflare in front, client IPs, WebSockets. Built: up-lab/briq#277 (draft).
 
 Decided for the founder (advisor, 2026-10-20): the daemon runs scheduled backups from a policy briq sets; the pool is encrypted with one key per host held by the fleet, built before the first real host (after TLS); events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and briq's healthcheck moves onto them.

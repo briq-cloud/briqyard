@@ -2,13 +2,16 @@
 //! by the daemon and rotated by size while the machine runs. The previous file is kept as
 //! `console.<start>.log`, named after the offset it starts at in the whole console: a cursor
 //! is an offset in the whole console, so a read goes across both files, and what was rotated
-//! away twice is gone.
+//! away twice is gone. A follower (ADR 0025) waits on the console's `grown` notifier, which
+//! the writer wakes after each line.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Notify;
 
 const CURRENT: &str = "console.log";
 
@@ -16,6 +19,22 @@ const CURRENT: &str = "console.log";
 /// takes one file's start for another's. One for the daemon: a rotation is a rename, an
 /// unlink and an open.
 static LAYOUT: RwLock<()> = RwLock::new(());
+
+/// The notifier of each console a writer or a follower holds, by its dir.
+static GROWN: Mutex<BTreeMap<PathBuf, Weak<Notify>>> = Mutex::new(BTreeMap::new());
+
+/// What the console in `dir` wakes after each line it is given: the same for the writer and
+/// every follower while one of them holds it.
+pub fn grown(dir: &Path) -> Arc<Notify> {
+    let mut all = GROWN.lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|_, n| n.strong_count() > 0);
+    if let Some(n) = all.get(dir).and_then(Weak::upgrade) {
+        return n;
+    }
+    let n = Arc::new(Notify::new());
+    all.insert(dir.to_path_buf(), Arc::downgrade(&n));
+    n
+}
 
 /// The previous files in `dir`, by the offset each starts at; a missing dir has none.
 fn previous(dir: &Path) -> std::io::Result<Vec<(u64, PathBuf)>> {
@@ -114,6 +133,7 @@ pub fn read_from(dir: &Path, from: u64) -> std::io::Result<Option<(u64, impl Buf
 pub struct Writer {
     dir: PathBuf,
     max: u64,
+    grown: Arc<Notify>,
     file: tokio::fs::File,
     /// The current file's length.
     len: u64,
@@ -138,6 +158,7 @@ impl Writer {
         let mut w = Self {
             dir: dir.to_path_buf(),
             max,
+            grown: grown(dir),
             file: tokio::fs::File::from_std(file),
             len,
             start,
@@ -148,7 +169,9 @@ impl Writer {
         Ok(w)
     }
 
-    /// Writes one line as `<ts> <line>\n`, then rotates when the file passed the size.
+    /// Writes one line as `<ts> <line>\n`, then rotates when the file passed the size. The
+    /// line is in the file when this returns (a tokio file hands a write to a thread, and
+    /// only a flush waits for it), and the followers are woken.
     pub async fn line(&mut self, ts: &str, line: &[u8]) -> std::io::Result<()> {
         let mut buf = Vec::with_capacity(ts.len() + line.len() + 2);
         buf.extend_from_slice(ts.as_bytes());
@@ -158,10 +181,12 @@ impl Writer {
             buf.push(b'\n');
         }
         self.file.write_all(&buf).await?;
+        self.file.flush().await?;
         self.len += buf.len() as u64;
         if self.len >= self.max {
             self.rotate().await?;
         }
+        self.grown.notify_waiters();
         Ok(())
     }
 
@@ -264,6 +289,30 @@ mod tests {
         w.line("ts", b"line6").await.unwrap();
         w.flush().await.unwrap();
         assert_eq!(lines(d, 54), (vec!["line6".into()], 63));
+    }
+
+    #[tokio::test]
+    async fn a_line_is_in_the_file_and_wakes_the_followers_once_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let follower = grown(d);
+        let mut w = Writer::open(d, 1 << 20).await.unwrap();
+        assert!(Arc::ptr_eq(&follower, &w.grown), "one notifier per console");
+        {
+            let woken = follower.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            w.line("ts", b"one").await.unwrap();
+            // No flush: the line is there for a page or a follower as soon as it is written.
+            assert_eq!(lines(d, 0), (vec!["one".into()], 7));
+            tokio::time::timeout(std::time::Duration::from_secs(1), woken)
+                .await
+                .expect("the follower is woken");
+        }
+        // Held by nobody, a console's notifier goes.
+        drop((w, follower));
+        let _ = grown(&d.join("other"));
+        assert!(!GROWN.lock().unwrap().contains_key(d));
     }
 
     #[tokio::test]
