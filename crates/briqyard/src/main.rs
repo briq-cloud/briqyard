@@ -5,6 +5,7 @@ use briqyard_api as api;
 use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -92,10 +93,13 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum MachineCmd {
-    /// List machines
+    /// List machines: briqyard machine ls [--tenant T] [-l app=web] [-l tier]
     Ls {
         #[arg(long)]
         tenant: Option<String>,
+        /// A label selector, repeatable, all ANDed: KEY=VALUE or KEY (has it)
+        #[arg(short = 'l', long = "label")]
+        labels: Vec<String>,
     },
     /// Create and start a machine
     Run(Box<RunArgs>),
@@ -147,7 +151,7 @@ enum MachineCmd {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
-    /// The serial console
+    /// The serial console; with -f, stay connected and print each new line
     Logs {
         #[arg(long)]
         since: Option<String>,
@@ -261,6 +265,12 @@ struct RunArgs {
     name: Option<String>,
     #[arg(long, default_value = "default")]
     tenant: String,
+    /// Through a fleet: place a new tenant on a host of this region
+    #[arg(long, default_value = "")]
+    region: String,
+    /// K=V, repeatable: its metadata, what `machine ls -l` selects on
+    #[arg(short = 'l', long = "label")]
+    labels: Vec<String>,
     #[arg(long, default_value_t = 1)]
     vcpus: u32,
     /// Memory in MB
@@ -351,6 +361,22 @@ enum TenantCmd {
     Unpin {
         id: String,
     },
+    /// Show the tenant's quota and use; with a limit, put the quota, exactly those limits:
+    /// briqyard tenant quota T [--machines N] [--memory-mb N] [--vcpus N] [--disk-gb N]
+    Quota {
+        id: String,
+        #[arg(long)]
+        machines: Option<u32>,
+        #[arg(long)]
+        memory_mb: Option<u32>,
+        #[arg(long)]
+        vcpus: Option<u32>,
+        #[arg(long)]
+        disk_gb: Option<u32>,
+        /// Through a fleet: where to place a tenant that has no host yet
+        #[arg(long)]
+        region: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -358,6 +384,9 @@ enum GatewayCmd {
     /// Make or replace it: briqyard tenant gateway set TENANT --image I --port P [-e K=V] [--start] [-- cmd...]
     Set {
         tenant: String,
+        /// Through a fleet: where to place a tenant that has no host yet
+        #[arg(long)]
+        region: Option<String>,
         /// Start it now and wait for its port (a running one is left as is)
         #[arg(long)]
         start: bool,
@@ -500,6 +529,22 @@ impl Client {
 
     /// A watch: each event as it comes, until the server ends it (with the reason, an error).
     async fn watch(&self, path: &str, mut each: impl FnMut(&api::Event)) -> Result<()> {
+        self.stream(path, |line| {
+            if let Some(e) = watch_line(line)? {
+                each(&e);
+            }
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+    }
+
+    /// An NDJSON stream (a watch, a logs follow): each line as it comes, until `each` breaks
+    /// or fails, or the server ends it.
+    async fn stream(
+        &self,
+        path: &str,
+        mut each: impl FnMut(&str) -> Result<ControlFlow<()>>,
+    ) -> Result<()> {
         let mut resp = self.send(reqwest::Method::GET, path, NONE, None).await?;
         let mut buf = Vec::new();
         loop {
@@ -507,16 +552,57 @@ impl Client {
                 .await
                 .map_err(|_| anyhow!("no word from {} in {WATCH_SILENCE:?}", self.base))??;
             let Some(chunk) = chunk else {
-                bail!("the watch ended");
+                bail!("the stream ended");
             };
             buf.extend_from_slice(&chunk);
             while let Some(i) = buf.iter().position(|b| *b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=i).collect();
-                if let Some(e) = watch_line(&String::from_utf8_lossy(&line))? {
-                    each(&e);
+                if each(&String::from_utf8_lossy(&line))?.is_break() {
+                    return Ok(());
                 }
             }
         }
+    }
+}
+
+/// A line of a logs follow: a console line, a heartbeat (`{}`: nothing), or the end: a
+/// destroyed machine ends it (`Break`), anything else is the error that ends it.
+fn follow_line(line: &str) -> Result<ControlFlow<String, Option<api::LogLine>>> {
+    let v: serde_json::Value =
+        serde_json::from_str(line).with_context(|| format!("follow line {:?}", line.trim()))?;
+    if v.get("ts").is_some() {
+        return Ok(ControlFlow::Continue(Some(serde_json::from_value(v)?)));
+    }
+    match serde_json::from_value::<api::ApiError>(v) {
+        Ok(e) if e.code == "destroyed" => Ok(ControlFlow::Break(e.error)),
+        Ok(e) => bail!("{} ({})", e.error, e.code),
+        Err(_) => Ok(ControlFlow::Continue(None)),
+    }
+}
+
+/// `GET /v1/machines` for a tenant or every one, with label selectors.
+fn machines_path(tenant: Option<&str>, labels: &[String]) -> String {
+    let mut u = reqwest::Url::parse("http://briqyard/v1/machines").expect("a URL");
+    {
+        let mut q = u.query_pairs_mut();
+        if let Some(t) = tenant {
+            q.append_pair("tenant", t);
+        }
+        for l in labels {
+            q.append_pair("label", l);
+        }
+    }
+    match u.query() {
+        Some(q) if !q.is_empty() => format!("/v1/machines?{q}"),
+        _ => "/v1/machines".into(),
+    }
+}
+
+/// A tenant's PUT route, with where a fleet places a tenant that has no host yet.
+fn tenant_put_path(tenant: &str, what: &str, region: Option<&str>) -> String {
+    match region {
+        Some(r) => format!("/v1/tenants/{tenant}/{what}?region={r}"),
+        None => format!("/v1/tenants/{tenant}/{what}"),
     }
 }
 
@@ -587,11 +673,8 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
         Cmd::Status => print_json(&c.call::<api::Status>(GET, "/v1/status", NONE).await?),
         Cmd::Openapi => print!("{}", c.raw(GET, "/v1/openapi.yaml", NONE).await?),
         Cmd::Machine(m) => match *m {
-            MachineCmd::Ls { tenant } => {
-                let path = match tenant {
-                    Some(t) => format!("/v1/machines?tenant={t}"),
-                    None => "/v1/machines".into(),
-                };
+            MachineCmd::Ls { tenant, labels } => {
+                let path = machines_path(tenant.as_deref(), &labels);
                 let ms: Vec<api::Machine> = c.call(GET, &path, NONE).await?;
                 print!("{}", machine_table(&ms));
             }
@@ -655,7 +738,8 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     ports: a.ports.clone(),
                     sleep: a.sleep.clone(),
                     restart: None,
-                    metadata: BTreeMap::new(),
+                    metadata: label_args(&a.labels)?,
+                    region: a.region.clone(),
                     egress: a.egress.clone(),
                     limits: a.limits.request()?,
                     probes: Some(api::Probes {
@@ -756,28 +840,34 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 follow,
                 id,
             } => {
-                let mut cursor = since.unwrap_or_default();
-                loop {
+                let since = since.unwrap_or_default();
+                let print =
+                    |l: &api::LogLine| println!("{} {}", l.ts.format("%H:%M:%S%.3f"), l.line);
+                if follow {
+                    let path = format!("/v1/machines/{id}/logs?since={since}&follow=true");
+                    c.stream(&path, |line| match follow_line(line)? {
+                        ControlFlow::Continue(l) => {
+                            l.iter().for_each(print);
+                            Ok(ControlFlow::Continue(()))
+                        }
+                        ControlFlow::Break(why) => {
+                            eprintln!("({why})");
+                            Ok(ControlFlow::Break(()))
+                        }
+                    })
+                    .await?;
+                } else {
                     let res: api::LogsResponse = c
                         .call(
                             GET,
-                            &format!("/v1/machines/{id}/logs?since={cursor}&limit={limit}"),
+                            &format!("/v1/machines/{id}/logs?since={since}&limit={limit}"),
                             NONE,
                         )
                         .await?;
-                    for l in &res.lines {
-                        println!("{} {}", l.ts.format("%H:%M:%S%.3f"), l.line);
-                    }
-                    if !follow {
-                        if !res.next.is_empty() {
-                            eprintln!("(next: --since {})", res.next);
-                        }
-                        break;
-                    }
+                    res.lines.iter().for_each(print);
                     if !res.next.is_empty() {
-                        cursor = res.next;
+                        eprintln!("(next: --since {})", res.next);
                     }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
             MachineCmd::Fork { name, id } => {
@@ -967,6 +1057,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             }
             TenantCmd::Gateway(GatewayCmd::Set {
                 tenant,
+                region,
                 start,
                 image,
                 port,
@@ -989,7 +1080,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 print_json(
                     &c.call::<api::Tenant>(
                         PUT,
-                        &format!("/v1/tenants/{tenant}/gateway"),
+                        &tenant_put_path(&tenant, "gateway", region.as_deref()),
                         Some(&spec),
                     )
                     .await?,
@@ -1002,6 +1093,29 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             TenantCmd::Unpin { id } => {
                 c.raw(POST, &format!("/v1/tenants/{id}/unpin"), NONE)
                     .await?;
+            }
+            TenantCmd::Quota {
+                id,
+                machines,
+                memory_mb,
+                vcpus,
+                disk_gb,
+                region,
+            } => {
+                let q = api::Quota {
+                    machines,
+                    memory_mb,
+                    vcpus,
+                    disk_gb,
+                };
+                let shown: api::TenantQuota = if q == api::Quota::default() {
+                    c.call(GET, &format!("/v1/tenants/{id}/quota"), NONE)
+                        .await?
+                } else {
+                    let path = tenant_put_path(&id, "quota", region.as_deref());
+                    c.call(PUT, &path, Some(&q)).await?
+                };
+                print_json(&shown)
             }
         },
         Cmd::Doctor => doctor(),
@@ -1097,6 +1211,20 @@ fn env_args(kvs: &[String]) -> Result<BTreeMap<String, String>> {
         env.insert(k.to_string(), v.to_string());
     }
     Ok(env)
+}
+
+/// `--label K=V`: metadata that `machine ls -l` selects on, so checked as a label is.
+fn label_args(kvs: &[String]) -> Result<BTreeMap<String, String>> {
+    kvs.iter()
+        .map(|kv| match api::Label::parse(kv) {
+            Ok(api::Label {
+                key,
+                value: Some(v),
+            }) => Ok((key, v)),
+            Ok(_) => bail!("--label {kv:?}: want K=V"),
+            Err(e) => bail!("--label: {e}"),
+        })
+        .collect()
 }
 
 /// A sleep window as the daemon reads it, refused here before the request leaves.

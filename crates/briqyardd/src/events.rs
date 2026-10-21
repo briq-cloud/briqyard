@@ -57,6 +57,12 @@ impl Ev {
         self
     }
 
+    /// About a tenant, no machine of it: a create refused before it made one.
+    pub fn tenant(mut self, tenant: &str) -> Self {
+        tenant.clone_into(&mut self.tenant);
+        self
+    }
+
     /// About a machine of a tenant.
     pub fn of(mut self, machine_id: &str, tenant: &str) -> Self {
         machine_id.clone_into(&mut self.machine_id);
@@ -392,6 +398,12 @@ impl Events {
         self.inner.closing.send_replace(true);
     }
 
+    /// Each event from now on, as watchers get them, and whether the daemon is going down:
+    /// what a stream that is not an event watch (a logs follow) ends on.
+    pub fn subscribe(&self) -> (broadcast::Receiver<api::Event>, watch::Receiver<bool>) {
+        (self.inner.tx.subscribe(), self.inner.closing.subscribe())
+    }
+
     /// A watch from `since`: checked and its first page read now, so a cursor the log cannot
     /// answer is refused before any line goes out; then the lines, one per event (the page,
     /// the pages after it, then each new event), `{}` every `HEARTBEAT`, and a last error
@@ -478,7 +490,7 @@ impl Events {
 }
 
 /// Sends a line, unless the watcher went away or the daemon is going down.
-async fn send(
+pub async fn send(
     tx: &mpsc::Sender<String>,
     closing: &mut watch::Receiver<bool>,
     line: String,
@@ -490,7 +502,7 @@ async fn send(
 }
 
 /// The line a watch ends with: an error body, as the API's.
-fn last_line(code: &str, why: &str) -> String {
+pub fn last_line(code: &str, why: &str) -> String {
     let e = api::ApiError {
         error: why.into(),
         code: code.into(),

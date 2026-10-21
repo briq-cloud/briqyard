@@ -101,6 +101,17 @@ impl HostRec {
             .map(|c| format!("host {} is under {}: {}", self.id, c.kind, c.message))
     }
 
+    /// Why a machine asked in `region` cannot join `tenant` on this host: a tenant never spans
+    /// regions (ADR 0025). No region asked: any.
+    pub fn outside(&self, tenant: &str, region: &str) -> Option<String> {
+        (!region.is_empty() && self.region != region).then(|| {
+            format!(
+                "tenant {tenant} is in region {:?} (host {}), not {region:?}: a tenant never spans regions",
+                self.region, self.id
+            )
+        })
+    }
+
     /// Whether a new tenant may be placed here: ready, under the ceiling, no pressure.
     fn takes_new_tenants(&self, policy: &Policy) -> bool {
         self.state == "ready" && self.fill() < policy.fill_ceiling && self.pressure().is_none()
@@ -269,15 +280,17 @@ impl Registry {
         }
     }
 
-    /// The host of a tenant, or the best host for a new one: the readiest with the most free
-    /// memory under the ceiling and no pressure, with room for `need_mb` of memory and
-    /// `need_disk_mb` of disk (a host that reports no disk figure is not held to it). What the
-    /// machine needs is reserved on the host until its next heartbeat, so a burst of creates
-    /// does not all land on the host the last heartbeat showed emptiest. A pinned tenant's
-    /// host under pressure is the caller's to refuse (`HostRec::pressure`).
+    /// The host of a tenant, or the best host for a new one: of `region` when one is asked
+    /// (ADR 0025), the readiest with the most free memory under the ceiling and no pressure,
+    /// with room for `need_mb` of memory and `need_disk_mb` of disk (a host that reports no
+    /// disk figure is not held to it). What the machine needs is reserved on the host until
+    /// its next heartbeat, so a burst of creates does not all land on the host the last
+    /// heartbeat showed emptiest. A pinned tenant's host under pressure or in another region
+    /// is the caller's to refuse (`HostRec::pressure`, `other_region`).
     pub fn place(
         &mut self,
         tenant: &str,
+        region: &str,
         need_mb: u32,
         need_disk_mb: u64,
         policy: &Policy,
@@ -290,6 +303,7 @@ impl Registry {
                     .values()
                     .filter(|h| {
                         h.takes_new_tenants(policy)
+                            && (region.is_empty() || h.region == region)
                             && h.free_memory_mb() >= need_mb
                             && (h.disk_free_mb == 0 || h.disk_free_mb >= need_disk_mb)
                     })
@@ -321,6 +335,11 @@ impl Registry {
 
     pub fn host_of_tenant(&self, tenant: &str) -> Option<&HostRec> {
         self.tenants.get(tenant).and_then(|id| self.hosts.get(id))
+    }
+
+    /// A tenant's region: its host's. No second record of it, so the two cannot disagree.
+    pub fn region_of(&self, tenant: &str) -> Option<&str> {
+        self.host_of_tenant(tenant).map(|h| h.region.as_str())
     }
 
     pub fn host_of_machine(&self, machine: &str) -> Option<&HostRec> {
@@ -464,7 +483,7 @@ mod tests {
         reg.heartbeat(host("b", 100_000, 50_000, 5), now);
         let p = Policy::default();
         // The emptiest host is under pressure: the new tenant goes to the other one.
-        assert_eq!(reg.place("t1", 512, 0, &p).as_deref(), Some("b"));
+        assert_eq!(reg.place("t1", "", 512, 0, &p).as_deref(), Some("b"));
         assert_eq!(
             reg.hosts["a"].pressure().as_deref(),
             Some("host a is under disk_pressure: pool 4.0 GB free of 100.0 (4%), under 10%")
@@ -476,7 +495,49 @@ mod tests {
         let mut cleared = host("a", 100_000, 0, 1);
         cleared.conditions = vec![condition(api::condition::DISK_PRESSURE, false)];
         reg.heartbeat(cleared, now);
-        assert_eq!(reg.place("t2", 512, 0, &p).as_deref(), Some("a"));
+        assert_eq!(reg.place("t2", "", 512, 0, &p).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_new_tenant_is_placed_in_its_region_and_its_region_is_its_hosts() {
+        let now = Utc::now();
+        let mut reg = Registry::default();
+        let mut gra = host("gra1", 100_000, 50_000, 1);
+        gra.region = "gra".into();
+        let mut vin = host("vin1", 100_000, 0, 0);
+        vin.region = "vin".into();
+        reg.heartbeat(gra, now);
+        reg.heartbeat(vin.clone(), now);
+        let p = Policy::default();
+        // vin1 is the emptiest; t1 asks for gra.
+        assert_eq!(reg.place("t1", "gra", 512, 0, &p).as_deref(), Some("gra1"));
+        assert_eq!(reg.region_of("t1"), Some("gra"));
+        assert_eq!(
+            reg.place("t2", "", 512, 0, &p).as_deref(),
+            Some("vin1"),
+            "any"
+        );
+        assert_eq!(reg.place("t3", "sgp", 512, 0, &p), None, "no host there");
+        assert_eq!(
+            reg.place("t4", "gra", 60_000, 0, &p),
+            None,
+            "the region is full, whatever the others have"
+        );
+        assert_eq!(reg.region_of("t4"), None, "nothing pinned");
+        // Pinned, a tenant's machines go to its host whatever is asked: the caller refuses
+        // another region.
+        assert_eq!(reg.place("t1", "vin", 512, 0, &p).as_deref(), Some("gra1"));
+        let h = reg.host_of_tenant("t1").unwrap();
+        assert_eq!(h.outside("t1", "gra"), None);
+        assert_eq!(h.outside("t1", ""), None, "no region asked");
+        assert_eq!(
+            h.outside("t1", "vin").as_deref(),
+            Some("tenant t1 is in region \"gra\" (host gra1), not \"vin\": a tenant never spans regions")
+        );
+        // A tenant a heartbeat pins is in its host's region.
+        vin.tenants = vec!["t9".into()];
+        reg.heartbeat(vin, now);
+        assert_eq!(reg.region_of("t9"), Some("vin"));
     }
 
     #[test]
@@ -559,7 +620,7 @@ mod tests {
         reg.tenants.insert("tb".into(), "b".into());
         // A placement just pinned t3 to a (the emptier host); a does not list it yet: the pin stays.
         assert_eq!(
-            reg.place("t3", 10, 0, &Policy::default()).as_deref(),
+            reg.place("t3", "", 10, 0, &Policy::default()).as_deref(),
             Some("a")
         );
         let mut a = host("a", 1000, 0, 1);
@@ -606,7 +667,7 @@ mod tests {
         );
         assert_eq!(reg.retirable().len(), 1);
         assert_eq!(
-            reg.place("t2", 10, 0, &Policy::default()),
+            reg.place("t2", "", 10, 0, &Policy::default()),
             None,
             "no placement on a draining host"
         );
@@ -620,23 +681,23 @@ mod tests {
         reg.heartbeat(host("b", 100_000, 20_000, 2), now);
         reg.heartbeat(host("c", 100_000, 50_000, 5), now);
         let p = Policy::default();
-        assert_eq!(reg.place("t1", 512, 0, &p).as_deref(), Some("b"));
+        assert_eq!(reg.place("t1", "", 512, 0, &p).as_deref(), Some("b"));
         assert_eq!(
-            reg.place("t1", 512, 0, &p).as_deref(),
+            reg.place("t1", "", 512, 0, &p).as_deref(),
             Some("b"),
             "a tenant stays where it is"
         );
         // c is next; a is over the ceiling.
         reg.hosts.get_mut("b").unwrap().used.memory_mb = 99_000;
-        assert_eq!(reg.place("t2", 512, 0, &p).as_deref(), Some("c"));
-        assert_eq!(reg.place("t3", 60_000, 0, &p), None, "nothing has room");
+        assert_eq!(reg.place("t2", "", 512, 0, &p).as_deref(), Some("c"));
+        assert_eq!(reg.place("t3", "", 60_000, 0, &p), None, "nothing has room");
         reg.hosts.get_mut("c").unwrap().disk_free_mb = 1000;
         assert_eq!(
-            reg.place("t4", 512, 5000, &p),
+            reg.place("t4", "", 512, 5000, &p),
             None,
             "c has memory but no disk"
         );
-        assert_eq!(reg.place("t5", 512, 500, &p).as_deref(), Some("c"));
+        assert_eq!(reg.place("t5", "", 512, 500, &p).as_deref(), Some("c"));
     }
 
     #[test]
@@ -647,12 +708,12 @@ mod tests {
         reg.heartbeat(host("b", 100_000, 10_000, 1), now);
         let p = Policy::default();
         // A burst: the second tenant sees the first one's memory taken on a.
-        assert_eq!(reg.place("t1", 60_000, 3000, &p).as_deref(), Some("a"));
+        assert_eq!(reg.place("t1", "", 60_000, 3000, &p).as_deref(), Some("a"));
         assert_eq!(reg.hosts["a"].used.memory_mb, 60_000);
-        assert_eq!(reg.place("t2", 50_000, 0, &p).as_deref(), Some("b"));
+        assert_eq!(reg.place("t2", "", 50_000, 0, &p).as_deref(), Some("b"));
         // A pinned tenant's machine counts too, and the reservation is memory and disk.
         reg.hosts.get_mut("a").unwrap().disk_free_mb = 10_000;
-        assert_eq!(reg.place("t1", 10_000, 4000, &p).as_deref(), Some("a"));
+        assert_eq!(reg.place("t1", "", 10_000, 4000, &p).as_deref(), Some("a"));
         assert_eq!(reg.hosts["a"].used.memory_mb, 70_000);
         assert_eq!(reg.hosts["a"].disk_free_mb, 6000);
         assert_eq!(
@@ -667,7 +728,7 @@ mod tests {
         // The host's report replaces the reservation: the create failed, nothing is used.
         reg.heartbeat(host("a", 100_000, 0, 0), now);
         assert_eq!(reg.hosts["a"].used.memory_mb, 0);
-        assert_eq!(reg.place("t3", 90_000, 0, &p).as_deref(), Some("a"));
+        assert_eq!(reg.place("t3", "", 90_000, 0, &p).as_deref(), Some("a"));
     }
 
     #[test]
@@ -677,13 +738,13 @@ mod tests {
         reg.heartbeat(host("a", 100_000, 0, 0), now);
         reg.heartbeat(host("b", 100_000, 0, 0), now);
         let p = Policy::default();
-        let first = reg.place("t1", 60_000, 0, &p).unwrap();
+        let first = reg.place("t1", "", 60_000, 0, &p).unwrap();
         assert!(reg.pinned_at.contains_key("t1"));
         reg.unpin("t1");
         assert_eq!(reg.tenants.get("t1"), None);
         assert!(!reg.pinned_at.contains_key("t1"));
         assert_ne!(
-            reg.place("t1", 10_000, 0, &p).unwrap(),
+            reg.place("t1", "", 10_000, 0, &p).unwrap(),
             first,
             "placed afresh, on the host with the most room"
         );

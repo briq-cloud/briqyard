@@ -32,6 +32,8 @@ struct Daemon {
     tls_fingerprint: String,
     /// What its status reports (ADR 0021).
     conditions: Mutex<Vec<api::Condition>>,
+    /// Tenants' quotas (ADR 0025).
+    quotas: Mutex<Vec<(String, api::Quota)>>,
 }
 
 impl Daemon {
@@ -142,6 +144,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             .map(|c| api::tls::fingerprint(c.cert.der()))
             .unwrap_or_default(),
         conditions: Mutex::new(vec![]),
+        quotas: Mutex::new(vec![]),
     });
     type D = State<Arc<Daemon>>;
     async fn status(State(d): D) -> Json<api::Status> {
@@ -178,6 +181,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
                     machines: 1,
                     created_at: Utc::now(),
                     host: String::new(),
+                    region: String::new(),
                     gateway: None,
                 })
                 .collect(),
@@ -194,6 +198,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             machines: n,
             created_at: Utc::now(),
             host: String::new(),
+            region: String::new(),
             gateway: gateway.then(|| api::GatewayView {
                 state: api::state::CREATED.into(),
                 ip: "10.1.0.2".into(),
@@ -241,18 +246,65 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         d.machines.lock().unwrap().retain(|m| m.tenant != id);
         StatusCode::NO_CONTENT.into_response()
     }
+    /// Like the daemon: a tenant's or every machine, those every `label` selects.
     async fn list(State(d): D, uri: Uri) -> Json<Vec<api::Machine>> {
-        let tenant = uri
-            .query()
-            .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("tenant=")))
-            .map(|t| t.to_string());
+        let url = reqwest::Url::parse(&format!("http://stub{uri}")).unwrap();
+        let mut tenant = None;
+        let mut labels = vec![];
+        for (k, v) in url.query_pairs() {
+            match k.as_ref() {
+                "tenant" => tenant = Some(v.into_owned()),
+                "label" => labels.push(api::Label::parse(&v).unwrap()),
+                _ => {}
+            }
+        }
         let ms = d.machines.lock().unwrap();
         Json(
             ms.iter()
                 .filter(|m| tenant.as_deref().map(|t| t == m.tenant).unwrap_or(true))
+                .filter(|m| labels.iter().all(|l| l.matches(&m.metadata)))
                 .cloned()
                 .collect(),
         )
+    }
+    async fn put_quota(
+        State(d): D,
+        Path(id): Path<String>,
+        Json(q): Json<api::Quota>,
+    ) -> Json<api::TenantQuota> {
+        d.quotas.lock().unwrap().push((id.clone(), q));
+        Json(api::TenantQuota {
+            tenant: id,
+            quota: q,
+            used: Default::default(),
+        })
+    }
+    async fn get_quota(State(d): D, Path(id): Path<String>) -> Response {
+        let qs = d.quotas.lock().unwrap();
+        match qs.iter().rev().find(|(t, _)| *t == id) {
+            Some((t, q)) => Json(api::TenantQuota {
+                tenant: t.clone(),
+                quota: *q,
+                used: Default::default(),
+            })
+            .into_response(),
+            None => err(StatusCode::NOT_FOUND, "not_found", "tenant not found").into_response(),
+        }
+    }
+    /// A follow (ADR 0025): NDJSON kept open, what the test sends through `watcher`.
+    async fn logs(State(d): D) -> Response {
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+        *d.watcher.lock().unwrap() = Some(tx);
+        let lines = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv()
+                .await
+                .map(|l| (Ok::<_, std::convert::Infallible>(l), rx))
+        });
+        (
+            [(header::CONTENT_TYPE, "application/x-ndjson")],
+            Body::from_stream(lines),
+        )
+            .into_response()
     }
     /// Like the daemon: a bad name is refused, and a machine that does not fit in what the
     /// host has left.
@@ -451,6 +503,8 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         .route("/v1/machines", get(list).post(create))
         .route("/v1/machines/:id", get(get_machine).delete(delete_machine))
         .route("/v1/machines/:id/start", post(start_machine))
+        .route("/v1/machines/:id/logs", get(logs))
+        .route("/v1/tenants/:id/quota", get(get_quota).put(put_quota))
         .route("/v1/machines/:id/backups", get(backups))
         .route("/v1/machines/:id/endpoints", post(add_endpoint))
         .route("/v1/endpoints", get(endpoints))
@@ -565,18 +619,23 @@ fn set_state(st: &AppState, id: &str, state: &str) {
 
 /// A fleet in front of `n` stub daemons, polled once so their capacity is known.
 async fn fleet_with_daemons(n: usize) -> (Fleet, Vec<Running>) {
+    fleet_in_regions(&vec!["fsn"; n]).await
+}
+
+/// A fleet in front of a stub daemon in each region given, `d1` in the first.
+async fn fleet_in_regions(regions: &[&str]) -> (Fleet, Vec<Running>) {
     let mut daemons = Vec::new();
     let mut cfg = config::Config {
         token: "api".into(),
         ..Default::default()
     };
-    for i in 1..=n {
+    for (i, region) in (1..).zip(regions) {
         let d = start_daemon(&format!("d{i}"), &format!("tok-{i}")).await;
         cfg.hosts.push(config::StaticHost {
             id: format!("d{i}"),
             url: d.url.clone(),
             token: format!("tok-{i}"),
-            region: "fsn".into(),
+            region: region.to_string(),
             ..Default::default()
         });
         daemons.push(d);
@@ -1203,7 +1262,7 @@ async fn drain_and_forget() {
         f.st.reg
             .lock()
             .unwrap()
-            .place("t3", 512, 0, &f.st.policy)
+            .place("t3", "", 512, 0, &f.st.policy)
             .as_deref(),
         Some("h_b")
     );
@@ -2447,4 +2506,229 @@ async fn a_host_presenting_another_certificate_is_not_forwarded_to() {
     poll_static_hosts_once(&f.st).await;
     assert_eq!(hosts(&f.st)[0].capacity.memory_mb, 0);
     assert!(d.stub.calls().is_empty());
+}
+
+// --- placement by region, labels, quotas, logs follow (ADR 0025) ---
+
+fn in_region(tenant: &str, name: &str, region: &str) -> serde_json::Value {
+    let mut b = create_body(tenant, name, 512);
+    b["region"] = region.into();
+    b
+}
+
+#[tokio::test]
+async fn a_tenant_is_placed_in_its_region_and_never_leaves_it() {
+    let (f, ds) = fleet_in_regions(&["gra", "vin"]).await;
+    // d1 is fuller: by memory alone, t1 would go to d2.
+    ds[0].stub.add("t0", "big", 10_000);
+    poll_static_hosts_once(&f.st).await;
+    let create = |body| call(&f.st, "POST", "/v1/machines", "api", Some(body));
+    let (s, headers, body) = create(in_region("t1", "a", "gra")).await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d1");
+    assert_eq!(f.st.reg.lock().unwrap().region_of("t1"), Some("gra"));
+    // Its next machine in another region: refused before any host is asked.
+    let before: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
+    let (s, _, body) = create(in_region("t1", "b", "vin")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(json(&body)["code"], "invalid");
+    assert_eq!(
+        json(&body)["error"],
+        "tenant t1 is in region \"gra\" (host d1), not \"vin\": a tenant never spans regions"
+    );
+    // A fork is bound to its source's host, so to its region.
+    let src = json(&create(in_region("t1", "c", "")).await.2)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut fork = in_region("t1", "f", "vin");
+    fork["fork"] = serde_json::json!({ "machine_id": src });
+    let (s, _, body) = create(fork).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    let after: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
+    assert_eq!(after[1], before[1], "d2 was never asked");
+    // No region: any, and a pinned tenant stays.
+    let (s, headers, _) = create(in_region("t2", "a", "")).await;
+    assert_eq!(
+        (s, &headers["x-briqyard-host"]),
+        (StatusCode::CREATED, &HeaderValue::from_static("d2"))
+    );
+    // A region with no host: 503, naming it.
+    let (s, _, body) = create(in_region("t3", "a", "sgp")).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "capacity");
+    assert_eq!(
+        json(&body)["error"],
+        "no host in region sgp has room for this machine"
+    );
+    assert_eq!(pinned(&f.st, "t3"), None);
+    // The tenants say where they are.
+    let (_, _, body) = call(&f.st, "GET", "/v1/tenants", "api", None).await;
+    let ts: Vec<api::Tenant> = serde_json::from_str(&body).unwrap();
+    let t1 = ts.iter().find(|t| t.id == "t1").unwrap();
+    assert_eq!((t1.host.as_str(), t1.region.as_str()), ("d1", "gra"));
+    let (_, _, body) = call(&f.st, "GET", "/v1/tenants/t1", "api", None).await;
+    assert_eq!(json(&body)["region"], "gra");
+    // A gateway places a new tenant in the region its query names.
+    let (s, headers, body) = call(
+        &f.st,
+        "PUT",
+        "/v1/tenants/t4/gateway?region=vin",
+        "api",
+        Some(gateway_body()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d2");
+    assert_eq!(
+        ds[1].stub.calls().last().unwrap(),
+        "PUT /v1/tenants/t4/gateway",
+        "where to place is the fleet's: the host gets the spec"
+    );
+}
+
+#[tokio::test]
+async fn a_quota_goes_to_the_tenants_host_and_places_a_new_one() {
+    let (f, ds) = fleet_in_regions(&["gra", "vin"]).await;
+    let quota = serde_json::json!({"machines": 3, "memory_mb": 2048});
+    // No host yet: placed in the region asked, with no need, and forwarded there.
+    let (s, headers, body) = call(
+        &f.st,
+        "PUT",
+        "/v1/tenants/t1/quota?region=vin",
+        "api",
+        Some(quota.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d2");
+    assert_eq!(pinned(&f.st, "t1").as_deref(), Some("d2"));
+    assert_eq!(
+        saved(&f.st).tenants.get("t1").map(String::as_str),
+        Some("d2")
+    );
+    assert_eq!(f.st.reg.lock().unwrap().hosts["d2"].used.memory_mb, 0);
+    let (s, _, body) = call(&f.st, "GET", "/v1/tenants/t1/quota", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let q: api::TenantQuota = serde_json::from_str(&body).unwrap();
+    assert_eq!((q.quota.machines, q.quota.memory_mb), (Some(3), Some(2048)));
+    assert_eq!(
+        ds[1].stub.calls().last().unwrap(),
+        "GET /v1/tenants/t1/quota"
+    );
+    // Pinned: the next put goes to its host, and another region is refused.
+    let (s, _, _) = call(
+        &f.st,
+        "PUT",
+        "/v1/tenants/t1/quota",
+        "api",
+        Some(quota.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(ds[1].stub.quotas.lock().unwrap().len(), 2);
+    let (s, _, body) = call(
+        &f.st,
+        "PUT",
+        "/v1/tenants/t1/quota?region=gra",
+        "api",
+        Some(quota),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    // A body that is not a quota is refused before anything is placed; a tenant with no host
+    // has no quota to read.
+    let (s, _, _) = call(
+        &f.st,
+        "PUT",
+        "/v1/tenants/t2/quota",
+        "api",
+        Some(serde_json::json!({"machines": -1})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(pinned(&f.st, "t2"), None);
+    let (s, _, _) = call(&f.st, "GET", "/v1/tenants/t2/quota", "api", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(ds[0].stub.quotas.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn labels_are_passed_to_the_hosts_and_a_listing_stays_whole() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    let label = |d: &Running, tenant: &str, name: &str, app: &str| {
+        let mut m = d.stub.add(tenant, name, 256);
+        m.metadata.insert("app".into(), app.into());
+        let mut ms = d.stub.machines.lock().unwrap();
+        *ms.iter_mut().find(|x| x.id == m.id).unwrap() = m.clone();
+        m
+    };
+    let web1 = label(&ds[0], "t1", "web", "web");
+    label(&ds[0], "t1", "db", "db");
+    let web2 = label(&ds[1], "t2", "web", "web");
+    poll_static_hosts_once(&f.st).await;
+    let ids = |body: &str| -> Vec<String> {
+        let ms: Vec<api::Machine> = serde_json::from_str(body).unwrap();
+        ms.into_iter().map(|m| m.id).collect()
+    };
+    // Every host, the query as it came.
+    let (s, _, body) = call(&f.st, "GET", "/v1/machines?label=app%3Dweb", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), [web1.id.as_str(), web2.id.as_str()]);
+    for d in &ds {
+        assert_eq!(
+            d.stub.calls().last().unwrap(),
+            "GET /v1/machines?label=app%3Dweb"
+        );
+    }
+    // A tenant's: its host alone.
+    let before = ds[1].stub.calls().len();
+    let (_, _, body) = call(
+        &f.st,
+        "GET",
+        "/v1/machines?tenant=t1&label=app=web&label=app",
+        "api",
+        None,
+    )
+    .await;
+    assert_eq!(ids(&body), [web1.id.as_str()]);
+    assert_eq!(ds[1].stub.calls().len(), before);
+    // One host down: the selection fails whole, as any listing.
+    set_state(&f.st, "d2", "down");
+    let (s, _, body) = call(&f.st, "GET", "/v1/machines?label=app", "api", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "host_down");
+}
+
+#[tokio::test]
+async fn a_logs_follow_is_streamed_through_as_it_comes() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let m = ds[0].stub.add("t1", "web", 512);
+    let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", ln.local_addr().unwrap());
+    let app = app(f.st.clone());
+    tokio::spawn(async move { axum::serve(ln, app).await.unwrap() });
+    let mut w = reqwest::Client::new()
+        .get(format!(
+            "{url}/v1/machines/{}/logs?since=12&follow=true",
+            m.id
+        ))
+        .bearer_auth("api")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(w.status(), StatusCode::OK);
+    assert_eq!(w.headers()["content-type"], "application/x-ndjson");
+    assert_eq!(w.headers()["x-briqyard-host"], "d1");
+    assert_eq!(
+        ds[0].stub.calls().last().unwrap(),
+        &format!("GET /v1/machines/{}/logs?since=12&follow=true", m.id)
+    );
+    // Each line the host sends reaches the client while the stream stays open.
+    let tx = ds[0].stub.watcher.lock().unwrap().clone().unwrap();
+    for line in ["one", "two"] {
+        let l = serde_json::json!({"ts": "2026-10-21T10:00:00Z", "line": line});
+        tx.send(l.to_string() + "\n").await.unwrap();
+        assert_eq!(chunk(&mut w).await["line"], line);
+    }
 }

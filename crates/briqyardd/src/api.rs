@@ -3,7 +3,7 @@
 use crate::events::Filter;
 use crate::machine::{detached, MError, Manager, Until};
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Path, Query, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -121,6 +121,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/tenants/:id/gateway",
             put(set_gateway).delete(delete_gateway),
         )
+        .route("/v1/tenants/:id/quota", get(get_quota).put(set_quota))
         .layer(middleware::from_fn_with_state(state.clone(), auth_and_log))
         .with_state(state)
 }
@@ -150,6 +151,7 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::NotReady(_) => (StatusCode::CONFLICT, "not_ready"),
         MError::Gone { .. } => (StatusCode::GONE, "gone"),
         MError::Capacity(_) => (StatusCode::SERVICE_UNAVAILABLE, "capacity"),
+        MError::Quota(_) => (StatusCode::FORBIDDEN, "quota"),
         MError::TenantInUse => (StatusCode::CONFLICT, "tenant_in_use"),
         MError::GatewayInUse => (StatusCode::CONFLICT, "gateway_in_use"),
         MError::Gateway(_) => (StatusCode::CONFLICT, "gateway"),
@@ -300,8 +302,25 @@ struct ListQuery {
     tenant: Option<String>,
 }
 
-async fn list_machines(State(st): S, Query(q): Query<ListQuery>) -> Json<Vec<api::Machine>> {
-    Json(st.mgr.list(q.tenant.as_deref()))
+/// A listing's query: the tenant, and the label selectors, each `label=` one (ADR 0025).
+fn list_query(query: Option<&str>) -> Result<(Option<String>, Vec<api::Label>), MError> {
+    let (mut tenant, mut labels) = (None, Vec::new());
+    for (k, v) in url::form_urlencoded::parse(query.unwrap_or("").as_bytes()) {
+        match k.as_ref() {
+            "tenant" => tenant = Some(v.into_owned()),
+            "label" => labels.push(api::Label::parse(&v).map_err(MError::Invalid)?),
+            _ => {}
+        }
+    }
+    Ok((tenant, labels))
+}
+
+async fn list_machines(
+    State(st): S,
+    RawQuery(query): RawQuery,
+) -> Result<Json<Vec<api::Machine>>, AppError> {
+    let (tenant, labels) = list_query(query.as_deref())?;
+    Ok(Json(st.mgr.list(tenant.as_deref(), &labels)))
 }
 
 // Every transition runs through `detached`: axum drops a handler's future when the client
@@ -476,18 +495,38 @@ async fn get_file(
 struct LogsQuery {
     since: Option<String>,
     limit: Option<usize>,
+    #[serde(default)]
+    follow: bool,
 }
 
+/// A page of the console; with `follow=true`, the lines and each new one as NDJSON, kept open
+/// (ADR 0025).
 async fn logs(
     State(st): S,
     Path(id): Path<String>,
     Query(q): Query<LogsQuery>,
-) -> Result<Json<api::LogsResponse>, AppError> {
-    Ok(Json(st.mgr.logs(
-        &id,
-        q.since.as_deref().unwrap_or(""),
-        log_limit(q.limit),
-    )?))
+) -> Result<Response, AppError> {
+    let since = q.since.as_deref().unwrap_or("");
+    if !q.follow {
+        return Ok(Json(st.mgr.logs(&id, since, log_limit(q.limit))?).into_response());
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(16);
+    st.mgr.follow_logs(&id, since, tx)?;
+    Ok(ndjson(rx))
+}
+
+/// A stream of lines as `application/x-ndjson`, until the sender is dropped.
+fn ndjson(rx: tokio::sync::mpsc::Receiver<String>) -> Response {
+    let lines = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|l| (Ok::<_, std::convert::Infallible>(l), rx))
+    });
+    (
+        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        Body::from_stream(lines),
+    )
+        .into_response()
 }
 
 async fn make_backup(
@@ -654,16 +693,7 @@ async fn events(State(st): S, Query(q): Query<EventsQuery>) -> Result<Response, 
         .watch(since, f, tx)
         .await
         .map_err(crate::machine::gone)?;
-    let lines = futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv()
-            .await
-            .map(|l| (Ok::<_, std::convert::Infallible>(l), rx))
-    });
-    Ok((
-        [(header::CONTENT_TYPE, "application/x-ndjson")],
-        Body::from_stream(lines),
-    )
-        .into_response())
+    Ok(ndjson(rx))
 }
 
 async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {
@@ -695,6 +725,24 @@ async fn delete_gateway(State(st): S, Path(id): Path<String>) -> Result<StatusCo
     let m = st.mgr.clone();
     detached(async move { m.delete_gateway(&id).await }).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_quota(
+    State(st): S,
+    Path(id): Path<String>,
+) -> Result<Json<api::TenantQuota>, AppError> {
+    Ok(Json(st.mgr.quota(&id)?))
+}
+
+async fn set_quota(
+    State(st): S,
+    Path(id): Path<String>,
+    Json(q): Json<api::Quota>,
+) -> Result<Json<api::TenantQuota>, AppError> {
+    let m = st.mgr.clone();
+    Ok(Json(
+        detached(async move { m.set_quota(&id, q).await }).await?,
+    ))
 }
 
 #[cfg(test)]
@@ -734,6 +782,26 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(listed, api::reason::ALL);
+    }
+
+    #[test]
+    fn a_listing_reads_its_tenant_and_every_label() {
+        assert_eq!(list_query(None).unwrap(), (None, vec![]));
+        let (tenant, labels) =
+            list_query(Some("tenant=t1&label=app%3Dweb&label=tier&other=x")).unwrap();
+        assert_eq!(tenant.as_deref(), Some("t1"));
+        assert_eq!(
+            labels,
+            [
+                api::Label::parse("app=web").unwrap(),
+                api::Label::parse("tier").unwrap()
+            ]
+        );
+        // Unencoded, as a person types it.
+        assert_eq!(list_query(Some("label=app=web")).unwrap().1.len(), 1);
+        let e = AppError::from(list_query(Some("label=app!%3Dweb")).unwrap_err());
+        assert_eq!((e.status, e.code), (StatusCode::BAD_REQUEST, "invalid"));
+        assert!(e.error.contains("no !="), "{}", e.error);
     }
 
     #[test]
@@ -829,6 +897,14 @@ mod tests {
             "machine m_1 is running, not ready: readiness: HTTP 503"
         );
         assert_eq!(e.machine.map(|m| m.state), Some("running".to_string()));
+        let e = AppError::from(MError::Quota(
+            "tenant t1's quota: machines 1 of 1 used, 1 more asked".into(),
+        ));
+        assert_eq!((e.status, e.code), (StatusCode::FORBIDDEN, "quota"));
+        assert_eq!(
+            e.error,
+            "tenant t1's quota: machines 1 of 1 used, 1 more asked"
+        );
         let e = AppError::from(MError::GatewayInUse);
         assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway_in_use"));
         let e = AppError::from(MError::Gateway("t1".into()));

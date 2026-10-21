@@ -224,6 +224,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/tenants/:id/gateway",
             put(set_gateway).delete(delete_gateway),
         )
+        .route("/v1/tenants/:id/quota", get(get_quota).put(set_quota))
         .route("/v1/tenants/:id/unpin", post(unpin_tenant))
         .route("/v1/machines/:id", any(by_machine))
         // Backups live in a store every host shares: the listing goes to any host, even for
@@ -880,28 +881,28 @@ async fn create_machine(
             .fork
             .as_ref()
             .and_then(|f| reg.host_of_machine(&f.machine_id).map(|h| h.id.clone()));
-        refuse_under_pressure(
-            &reg,
-            source
-                .as_deref()
-                .or(reg.tenants.get(&req.tenant).map(|h| h.as_str())),
-        )?;
+        // The host the request is bound to: a fork's source's, else the tenant's.
+        let bound = source
+            .clone()
+            .or_else(|| reg.tenants.get(&req.tenant).cloned());
+        refuse_outside(&reg, bound.as_deref(), &req.tenant, &req.region)?;
+        refuse_under_pressure(&reg, bound.as_deref())?;
         let chosen = match source {
             Some(id) => {
                 reg.reserve(&id, req.size.memory_mb, disk);
                 Some(id)
             }
-            None => reg.place(&req.tenant, req.size.memory_mb, disk, &st.policy),
+            None => reg.place(
+                &req.tenant,
+                &req.region,
+                req.size.memory_mb,
+                disk,
+                &st.policy,
+            ),
         };
         (chosen.and_then(|id| reg.hosts.get(&id).cloned()), first)
     };
-    let host = host.ok_or_else(|| {
-        err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "capacity",
-            "no host has room for this machine",
-        )
-    })?;
+    let host = host.ok_or_else(|| no_room(&req.region, "this machine"))?;
     st.save().map_err(registry_error)?;
     let resp = forward(&st, &host, Method::POST, "/v1/machines", &headers, body).await;
     let (parts, data) = read(resp).await;
@@ -921,6 +922,37 @@ async fn create_machine(
     }
     first_refused(&st, &req.tenant, first, &data)?;
     Ok(Response::from_parts(parts, Body::from(data)))
+}
+
+/// A create bound to a host of another region than it asks: 400, a tenant never spans
+/// regions (ADR 0025).
+fn refuse_outside(
+    reg: &Registry,
+    host: Option<&str>,
+    tenant: &str,
+    region: &str,
+) -> Result<(), Refusal> {
+    match host
+        .and_then(|id| reg.hosts.get(id))
+        .and_then(|h| h.outside(tenant, region))
+    {
+        Some(why) => Err(err(StatusCode::BAD_REQUEST, "invalid", why)),
+        None => Ok(()),
+    }
+}
+
+/// No host (of the region asked) with room for `what`: 503 `capacity`, which a caller tries
+/// again later.
+fn no_room(region: &str, what: &str) -> Refusal {
+    let hosts = match region {
+        "" => "no host".to_string(),
+        r => format!("no host in region {r}"),
+    };
+    err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "capacity",
+        format!("{hosts} has room for {what}"),
+    )
 }
 
 /// A create on a host that takes nothing new while a condition is true (ADR 0021): a pinned
@@ -1242,6 +1274,7 @@ async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {
             machines: 0,
             created_at: Utc::now(),
             host: h.clone(),
+            region: reg.region_of(t).unwrap_or_default().into(),
             gateway: None,
         })
         .collect();
@@ -1275,7 +1308,7 @@ async fn delete_tenant(
     Ok(resp)
 }
 
-/// A tenant, from its host, with that host.
+/// A tenant, from its host, with that host and its region.
 async fn get_tenant(
     State(st): S,
     Path(id): Path<String>,
@@ -1287,23 +1320,43 @@ async fn get_tenant(
     let resp = forward(&st, &host, Method::GET, &path, &headers, Bytes::new()).await;
     let (parts, data) = read(resp).await;
     let data = match parts.status.is_success() {
-        true => with_host(data, &host.id),
+        true => with_region(with_host(data, &host.id), &host.region),
         false => data,
     };
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
-/// Puts a tenant's gateway on the tenant's host; a tenant with none yet is placed as its first
-/// machine would be, the gateway's size as the need.
-async fn set_gateway(
-    State(st): S,
-    Path(id): Path<String>,
-    headers: HeaderMap,
+/// Adds the host's region to a tenant JSON body.
+fn with_region(body: Bytes, region: &str) -> Bytes {
+    match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(mut v) if v.is_object() && !region.is_empty() => {
+            v["region"] = serde_json::Value::String(region.into());
+            Bytes::from(serde_json::to_vec(&v).unwrap_or_default())
+        }
+        _ => body,
+    }
+}
+
+/// Where a PUT on a tenant with no host yet places it (ADR 0025).
+#[derive(serde::Deserialize, Default)]
+struct PlaceQuery {
+    #[serde(default)]
+    region: String,
+}
+
+/// A PUT on a tenant that the tenant's host answers: one with no host yet is placed as its
+/// first machine would be, in `region`, with `need_mb` and `need_disk_mb` as the need. The
+/// host's answer, with the host.
+async fn put_on_tenant(
+    st: &AppState,
+    id: &str,
+    what: &str,
+    region: &str,
+    (need_mb, need_disk_mb): (u32, u64),
+    headers: &HeaderMap,
     body: Bytes,
 ) -> Result<Response, Refusal> {
-    let spec: api::GatewaySpec = serde_json::from_slice(&body)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-    if !api::valid_id(&id) {
+    if !api::valid_id(id) {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "invalid",
@@ -1312,22 +1365,17 @@ async fn set_gateway(
     }
     let (host, first) = {
         let mut reg = st.reg.lock().unwrap();
-        let first = !reg.tenants.contains_key(&id);
-        refuse_under_pressure(&reg, reg.tenants.get(&id).map(|h| h.as_str()))?;
-        let need = disk_need(spec.volume_gb);
-        let chosen = reg.place(&id, spec.size().memory_mb, need, &st.policy);
+        let first = !reg.tenants.contains_key(id);
+        let bound = reg.tenants.get(id).cloned();
+        refuse_outside(&reg, bound.as_deref(), id, region)?;
+        refuse_under_pressure(&reg, bound.as_deref())?;
+        let chosen = reg.place(id, region, need_mb, need_disk_mb, &st.policy);
         (chosen.and_then(|h| reg.hosts.get(&h).cloned()), first)
     };
-    let host = host.ok_or_else(|| {
-        err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "capacity",
-            "no host has room for this gateway",
-        )
-    })?;
+    let host = host.ok_or_else(|| no_room(region, &format!("this {what}")))?;
     st.save().map_err(registry_error)?;
-    let path = format!("/v1/tenants/{id}/gateway");
-    let resp = forward(&st, &host, Method::PUT, &path, &headers, body).await;
+    let path = format!("/v1/tenants/{id}/{what}");
+    let resp = forward(st, &host, Method::PUT, &path, headers, body).await;
     let (parts, data) = read(resp).await;
     if parts.status.is_success() {
         return Ok(Response::from_parts(
@@ -1335,8 +1383,49 @@ async fn set_gateway(
             Body::from(with_host(data, &host.id)),
         ));
     }
-    first_refused(&st, &id, first, &data)?;
+    first_refused(st, id, first, &data)?;
     Ok(Response::from_parts(parts, Body::from(data)))
+}
+
+/// Puts a tenant's gateway on the tenant's host; a tenant with none yet is placed as its first
+/// machine would be, the gateway's size as the need.
+async fn set_gateway(
+    State(st): S,
+    Path(id): Path<String>,
+    Query(q): Query<PlaceQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Refusal> {
+    let spec: api::GatewaySpec = serde_json::from_slice(&body)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
+    let need = (spec.size().memory_mb, disk_need(spec.volume_gb));
+    put_on_tenant(&st, &id, "gateway", &q.region, need, &headers, body).await
+}
+
+/// Puts a tenant's quota on the tenant's host (ADR 0025); a tenant with none yet is placed,
+/// with no need: the quota is what its machines will be held to there.
+async fn set_quota(
+    State(st): S,
+    Path(id): Path<String>,
+    Query(q): Query<PlaceQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Refusal> {
+    serde_json::from_slice::<api::Quota>(&body)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
+    put_on_tenant(&st, &id, "quota", &q.region, (0, 0), &headers, body).await
+}
+
+/// A tenant's quota and use, from its host.
+async fn get_quota(
+    State(st): S,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Refusal> {
+    let host = st.reg.lock().unwrap().host_of_tenant(&id).cloned();
+    let host = host.ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "tenant not found"))?;
+    let path = format!("/v1/tenants/{id}/quota");
+    Ok(forward(&st, &host, Method::GET, &path, &headers, Bytes::new()).await)
 }
 
 /// Removes a tenant's gateway on its host; a tenant the fleet never placed has none.
@@ -1476,6 +1565,15 @@ async fn by_machine(
     let is_delete = method == Method::DELETE && path == own;
     let plain_get = method == Method::GET && path == own;
     let adds_endpoint = method == Method::POST && path == format!("{own}/endpoints");
+    // A logs follow (ADR 0025) is streamed through, as a watch is.
+    let follows = method == Method::GET
+        && uri.path() == format!("{own}/logs")
+        && uri
+            .query()
+            .is_some_and(|q| q.split('&').any(|kv| kv == "follow=true"));
+    if follows {
+        return Ok(forward_watch(&st, &host, &path, &headers).await);
+    }
     let resp = forward(&st, &host, method, &path, &headers, body).await;
     if !resp.status().is_success() {
         return Ok(resp);

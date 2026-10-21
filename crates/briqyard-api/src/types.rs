@@ -383,9 +383,13 @@ pub struct CreateMachineRequest {
     pub sleep: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<RestartPolicy>,
-    /// Kept and returned as is (a briq id, a stack name).
+    /// Kept and returned as is (a briq id, a stack name); the labels `?label=` selects on.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// Through a fleet: a new tenant is placed on a host of this region, and a tenant's
+    /// machines stay in its host's (ADR 0025). Empty: any region. A daemon ignores it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub region: String,
     /// Where its traffic may go; absent is `open` (a restore takes the backup's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<Egress>,
@@ -716,8 +720,46 @@ pub struct Tenant {
     /// The host the tenant lives on (fleet).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
+    /// Its host's region: the tenant's (fleet, ADR 0025).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub region: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayView>,
+}
+
+/// `PUT /v1/tenants/{id}/quota` (ADR 0025): what the tenant may hold. A limit left out is no
+/// limit; set by the control plane from the team's plan, the daemon has no defaults.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Quota {
+    /// Machines, its gateway included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machines: Option<u32>,
+    /// Memory of the machines starting, running or stopping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u32>,
+    /// vCPUs of the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcpus: Option<u32>,
+    /// The volumes' sizes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gb: Option<u32>,
+}
+
+/// What a tenant holds now, counted as its quota counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaUse {
+    pub machines: u32,
+    pub memory_mb: u32,
+    pub vcpus: u32,
+    pub disk_gb: u32,
+}
+
+/// `GET /v1/tenants/{id}/quota`: the limits and the use.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantQuota {
+    pub tenant: String,
+    pub quota: Quota,
+    pub used: QuotaUse,
 }
 
 /// `PUT /v1/tenants/{id}/gateway`: the tenant's gateway, a machine the daemon runs while a
@@ -900,6 +942,8 @@ pub mod reason {
     /// A host condition changed (ADR 0021).
     pub const HOST_CONDITION: &str = "host_condition";
     pub const IMAGE_REMOVED: &str = "image_removed";
+    /// A create or a start refused by the tenant's quota (ADR 0025).
+    pub const QUOTA_EXCEEDED: &str = "quota_exceeded";
     pub const ALL: &[&str] = &[
         CREATED,
         FORKED,
@@ -930,6 +974,7 @@ pub mod reason {
         ADOPTED,
         HOST_CONDITION,
         IMAGE_REMOVED,
+        QUOTA_EXCEEDED,
     ];
 }
 
@@ -1199,6 +1244,76 @@ pub fn valid_name(s: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 
+/// One requirement of a label selector, `?label=` on a listing (ADR 0025): `key=value` (equal)
+/// or `key` (present). A machine's labels are its `metadata`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Label {
+    pub key: String,
+    pub value: Option<String>,
+}
+
+impl Label {
+    /// Reads `k=v` or `k`, checked as Kubernetes checks labels. `!=`, `!k` and set-based
+    /// selectors are refused by name.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        if s.contains('!') || s.contains(['(', ' ']) {
+            return Err(format!(
+                "label {s:?}: only key=value and key are supported (no !=, !key, in or notin)"
+            ));
+        }
+        let (key, value) = match s.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (s, None),
+        };
+        if !label_key(key) {
+            return Err(format!(
+                "label {s:?}: the key is an optional DNS prefix and \"/\", then at most 63 of a-z, A-Z, 0-9, -, _, ., alphanumeric at both ends"
+            ));
+        }
+        if let Some(v) = value {
+            if !v.is_empty() && !label_name(v) {
+                return Err(format!(
+                    "label {s:?}: the value is empty or at most 63 of a-z, A-Z, 0-9, -, _, ., alphanumeric at both ends"
+                ));
+            }
+        }
+        Ok(Self {
+            key: key.into(),
+            value: value.map(String::from),
+        })
+    }
+
+    pub fn matches(&self, labels: &BTreeMap<String, String>) -> bool {
+        match (labels.get(&self.key), &self.value) {
+            (Some(have), Some(want)) => have == want,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+}
+
+/// A label's name, or a value that is not empty: 1 to 63 characters, alphanumeric at both
+/// ends, `-`, `_` and `.` inside.
+fn label_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 63
+        && b[0].is_ascii_alphanumeric()
+        && b[b.len() - 1].is_ascii_alphanumeric()
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+}
+
+/// `[prefix/]name`, the prefix a DNS subdomain of at most 253 characters.
+fn label_key(s: &str) -> bool {
+    match s.rsplit_once('/') {
+        None => label_name(s),
+        Some((prefix, name)) => {
+            prefix.len() <= 253 && prefix.split('.').all(valid_name) && label_name(name)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1351,7 +1466,7 @@ mod tests {
             "volume": {"size_gb": 5, "mount": "/data"},
             "ports": [80, 443], "sleep": "30m",
             "restart": {"policy": "always", "max_retries": 0},
-            "metadata": {"briq": "bq_1"}, "egress": {"mode": "via", "via": "m_gw"},
+            "metadata": {"briq": "bq_1"}, "region": "gra", "egress": {"mode": "via", "via": "m_gw"},
             "limits": {"blocked_ports": [25, 465], "new_connections_per_minute": 600},
             "start": false,
             "fork": {"machine_id": "m0", "copy": "disk"}
@@ -1373,6 +1488,7 @@ mod tests {
         assert_eq!(r.ports, vec![80, 443]);
         assert_eq!(r.start, Some(false));
         assert_eq!(r.fork.as_ref().map(|f| f.machine_id.as_str()), Some("m0"));
+        assert_eq!(r.region, "gra");
     }
 
     #[test]
@@ -1779,16 +1895,82 @@ mod tests {
         assert!(t.gateway.is_none(), "no gateway: none on the wire");
         let t: Tenant = same(json!({
             "id": "t1", "subnet": "10.64.1.0/24", "router": "10.64.1.1", "machines": 2,
-            "created_at": "2026-01-02T03:04:05Z", "host": "h1",
+            "created_at": "2026-01-02T03:04:05Z", "host": "h1", "region": "gra",
             "gateway": {"state": "running", "ip": "10.64.1.2", "port": 3128, "machine_id": "m_1"}
         }));
         assert_eq!(t.machines, 2);
+        assert_eq!(t.region, "gra");
         assert_eq!(t.gateway.as_ref().map(|g| g.port), Some(3128));
         let g: GatewayView = same(json!({
             "state": "error", "ip": "10.64.1.2", "port": 3128, "machine_id": "m_1",
             "error": "port 3128 did not answer"
         }));
         assert_eq!(g.error, "port 3128 did not answer");
+    }
+
+    #[test]
+    fn quota() {
+        // A limit left out is no limit, and stays out on the wire.
+        let q: Quota = same(json!({}));
+        assert_eq!(q, Quota::default());
+        let q: Quota = same(json!({"machines": 1, "memory_mb": 2048, "vcpus": 4, "disk_gb": 20}));
+        assert_eq!((q.machines, q.disk_gb), (Some(1), Some(20)));
+        let q: Quota = same(json!({"memory_mb": 0}));
+        assert_eq!(q.memory_mb, Some(0), "zero is a limit, nothing allowed");
+        let t: TenantQuota = same(json!({
+            "tenant": "t1", "quota": {"machines": 2},
+            "used": {"machines": 1, "memory_mb": 512, "vcpus": 1, "disk_gb": 0}
+        }));
+        assert_eq!(t.used.memory_mb, 512);
+        assert!(serde_json::from_value::<Quota>(json!({"machines": -1})).is_err());
+    }
+
+    #[test]
+    fn label_selectors() {
+        let l = |s: &str| Label::parse(s).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            l("app=web"),
+            Label {
+                key: "app".into(),
+                value: Some("web".into())
+            }
+        );
+        assert_eq!(l("app").value, None, "present");
+        assert_eq!(l("app=").value.as_deref(), Some(""), "equal to empty");
+        assert_eq!(l("briq_id=bq_1").key, "briq_id");
+        assert_eq!(l("briq.cloud/stack=main").key, "briq.cloud/stack");
+        assert_eq!(l("a.b-c_d=V.1-x").value.as_deref(), Some("V.1-x"));
+        let refused = |s: &str| Label::parse(s).unwrap_err();
+        for s in ["app!=web", "!app", "app in (a,b)", "app notin (a)"] {
+            assert!(refused(s).contains("only key=value and key"), "{s}");
+        }
+        for s in [
+            "",
+            "=web",
+            "-app=x",
+            "app-=x",
+            "Prefix.Upper/app",
+            "/app",
+            &"k".repeat(64),
+        ] {
+            assert!(refused(s).contains("the key is"), "{s:?}");
+        }
+        for s in [
+            "app=-x",
+            "app=a=b",
+            "app=a/b",
+            &format!("app={}", "v".repeat(64)),
+        ] {
+            assert!(refused(s).contains("the value is"), "{s:?}");
+        }
+        let labels: BTreeMap<String, String> = [("app", "web"), ("tier", "")]
+            .map(|(k, v)| (k.into(), v.into()))
+            .into();
+        assert!(l("app=web").matches(&labels));
+        assert!(!l("app=db").matches(&labels));
+        assert!(l("app").matches(&labels));
+        assert!(l("tier=").matches(&labels));
+        assert!(!l("zone").matches(&labels));
     }
 
     #[test]
@@ -2083,7 +2265,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), reason::ALL.len());
-        assert_eq!(all.len(), 29);
+        assert_eq!(all.len(), 30);
         assert!(all
             .iter()
             .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));
