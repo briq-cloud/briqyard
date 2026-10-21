@@ -111,15 +111,18 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `<data_dir>/state/events/<hour>.ndjson` | The host's events of that hour, one JSON line each, appended and synced (ADR 0019) |
 | `<data_dir>/run/<machine>/` | `console.log` (the guest's serial console, timestamped), `console.<offset>.log` (the previous file, rotated at `console_max_mb`, named after where it starts in the console), `config.tar` (the config drive, `0600`), sockets when not jailed |
 | `<jail_dir>/firecracker/<machine>/root/` | The chroot, on `byard/jail`: kernel, config drive (`0400`, the jail's user), device nodes, sockets, `snap.state` and `snap.mem` while suspended |
+| `<jail_dir>/firecracker/<machine>/snapshots/` | `<snap>.state` and `<snap>.mem` of each snapshot taken with memory (ADR 0031); `<data_dir>/run/<machine>/snapshots/` without the jailer |
 | `<data_dir>/images/meta/*.json` | What each image is |
 | `byard/jail` | A filesystem mounted at `jail_dir`: `zfs list byard/jail` is what the jails and the suspended machines hold |
 | `byard/images/<key>` | A root disk per image, with its `@base` snapshot |
 | `byard/m/<machine>/root`, `.../data` | A machine's disks |
+| `byard/m/<machine>/root.r_<n>`, `.../data.r_<n>` | Disks a restore retired, kept while a newer snapshot or a fork needs them (ADR 0031) |
 
 Every disk is a ZFS zvol: `zfs list -t all -r byard` shows them, `zfs get used,referenced` what
 they take. A machine's `fork-*` and `s_*` snapshots on its disks are its forks' and its own: a
-`fork-*` goes with the last machine cloned from it (the sweep at start catches what a failed
-destroy left), an `s_*` with `briqyard machine snapshot rm <id> <snap>`.
+`fork-*` goes with the last machine cloned from it, an `s_*` with `briqyard machine snapshot rm
+<id> <snap>` (or what a retired disk still needs, with that disk); the daemon's start removes
+what a failed destroy or a crash left. A `.next` dataset is a restore under way.
 
 ## Upgrade
 
@@ -183,7 +186,9 @@ millisecond, `20261021T101500.123Z`. A deletion removes the streams first, then 
 The state itself (`state/`) is small and lives only on the host; a lost host loses the records
 of machines that were never backed up, and their disks. A machine's own `POST
 /v1/machines/{id}/snapshots` is a local snapshot of its disks: instant, copy-on-write, not a
-backup until sent elsewhere.
+backup until sent elsewhere. A restore to one (`briqyard machine snapshot restore <id> <snap>`)
+keeps the backup chain correct: the next backup continues from the newest backup made before the
+snapshot, or is whole.
 
 ## Watch
 
@@ -201,7 +206,7 @@ backup until sent elsewhere.
   | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_tenants`, `briqyard_endpoints` | | counts |
   | `briqyard_machine_cpu_seconds_total` | `machine`, `tenant`, `name`, `role` (a gateway's) | its cgroup's CPU time |
   | `briqyard_machine_memory_bytes`, `_memory_limit_bytes` | same | its cgroup's memory, its size |
-  | `briqyard_machine_disk_used_bytes` | same | its disks, snapshots and memory snapshot |
+  | `briqyard_machine_disk_used_bytes` | same | its disks, snapshots (retired disks included) and memory snapshots |
   | `briqyard_machine_{internet,ingress}_{in,out}_bytes_total`, `_egress_dropped_packets_total` | same | its traffic |
   | `briqyard_machine_restarts_total` | same | restarts by its policy |
   | `briqyard_machine_state` | same, `state` | 1, one series per machine |

@@ -123,7 +123,15 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   words), labels, quotas and logs follow (a listing by labels, the quota at create, fork,
   start and the gateway with its message and event, its use; a follow from the start and
   from a cursor, across rotations, ending at the destroy, its heartbeat and shutdown;
-  placement by region and the cross-region refusal through stub hosts in two regions). What still needs the host: a tenant's first create (its bridge and
+  placement by region and the cross-region refusal through stub hosts in two regions),
+  snapshots and restore (ADR 0031: named, both disks at one instant, deleted by name; a restore
+  that swaps the disk, a newer snapshot and a fork kept on the retired disk, and back again with
+  nothing retired left; a deleted snapshot a retired disk hangs from freed with it; a fork's
+  destroy freeing the retired disk it held; a source destroyed under a fork of its retired disk;
+  a backup after a restore continuing from an ancestor, or whole, and restorable; `If-Match` and
+  a stopped machine left stopped; a restore cut short finished by the daemon and by a start; a
+  snapshot with memory resumed while the spec is the same, cold after a change; a new image
+  dropping the snapshots' root halves). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
@@ -145,7 +153,11 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
   new image: Python 3.13, the volume's file kept), labels, a quota and a follow (`ls -l` selecting one machine, a
   refused selector, a second create refused 403 `quota` with its use and event, `logs -f`
-  receiving a line printed after it began and ending at the destroy). 132 checks.
+  receiving a line printed after it began and ending at the destroy), snapshots (files on the
+  volume and the root disk back after a restore, a running machine booted again, a fork made
+  after the snapshot still working, a backup after the restore continuing from the one before the
+  snapshot and restoring to the machine's content, the newer snapshot restored and the next
+  backup whole, a snapshot with memory resumed with `/tmp` and the uptime kept). 147 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,

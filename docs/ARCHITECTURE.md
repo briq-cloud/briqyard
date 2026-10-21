@@ -92,17 +92,34 @@ Every disk is a ZFS zvol in one pool (`byard` by default):
 | `byard/images/<digest>` | A root disk built from an image, with a `@base` snapshot |
 | `byard/m/<id>/root` | The machine's root disk, a clone of `@base` |
 | `byard/m/<id>/data` | The machine's data volume, when it has one |
+| `byard/m/<id>/root.<n>`, `data.<n>` | A disk a restore retired, while a newer snapshot or a fork needs it |
 | `byard/jail` | A filesystem mounted at `jail_dir`: the chroots and the memory snapshots, on the pool, not on `/` |
 
 The root disk outlives restarts and stops, as on Fly. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
 attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches the host's disk:
-a database on it is as safe as the host's drive. A snapshot is `zfs snapshot`; a fork is a clone
-of a snapshot of both disks, taken while the source runs (crash-consistent for the data volume).
-That snapshot (`@fork-<id>` on the source) pins every block the source has since rewritten, so
-it goes with the last machine cloned from it: a destroy frees the snapshot its disks came from
-once nothing clones it, and the sweep at start removes any `@fork-*` left with no clone. A
-snapshot made with `POST /machines/{id}/snapshots` stays until `DELETE /machines/{id}/snapshots/{snap}`.
+a database on it is as safe as the host's drive. A fork is a clone of a snapshot of both disks,
+taken while the source runs (crash-consistent for the data volume). That snapshot (`@fork-<id>`
+on the source) pins every block the source has since rewritten, so it goes with the last machine
+cloned from it.
+
+### Snapshots and restore
+
+`POST /machines/{id}/snapshots` snapshots both disks in one `zfs snapshot` (ADR 0031); the record
+lists it, with an optional name (`before-migration`) that finds it again. `POST
+.../snapshots/{snap}/restore` takes the disks back to it: under the machine's backup turn and
+lock, a running machine is stopped, then each disk is swapped for a clone of its snapshot
+(`clone`, the disk renamed aside to `<disk>.<n>`, the clone renamed into place, `promote` until
+its origin is outside the machine), and the machine boots again; any other stays as it is. The
+disk in use owns its whole history, so the next backup's base (its newest `bk-*`) is always an
+ancestor of what it holds. The disk it replaced is retired: it keeps the snapshots newer than the
+one restored and whatever clones them (a fork), and `tidy` (after a restore, a deletion, a fork's
+destroy, a new root disk, the daemon's start) removes it once neither is left, with any snapshot
+nothing names or clones. `memory: true` also keeps a running machine's memory (paused, written by
+Firecracker, the disks flushed and snapshotted, resumed): a restore of it resumes the processes
+where they were, while the machine's spec is the one it was taken with. A restore writes its
+intent first; one cut short is finished by the next restore, start or daemon start. A new image's
+root disk (ADR 0024) is the same swap, from the image's `@base`.
 
 The root disk is not mounted by the host, ever: the host writes nothing into guest filesystems.
 Image extraction happens once per image into a directory the host controls: layers in manifest

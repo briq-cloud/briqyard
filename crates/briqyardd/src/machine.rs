@@ -951,34 +951,9 @@ impl Manager {
                 }
             }
         }
-        // A restore cut short goes on; then each machine's snapshots are tidied (ADR 0031): a
+        // A restore cut short goes on; a snapshot or a retired disk nothing needs goes: a
         // fork's that outlived the fork, one taken when the daemon died before its record.
-        let entries: Vec<Arc<Entry>> = self
-            .inner
-            .machines
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect();
-        let mut parents = Vec::new();
-        for e in entries {
-            let id = e.snapshot().id;
-            if e.snapshot().restoring.is_some() {
-                match self.finish_restore(&e).await {
-                    Ok(more) => parents.extend(more),
-                    Err(err) => {
-                        tracing::warn!(machine = id, err = %err, "restore cut short, still unfinished")
-                    }
-                }
-                continue;
-            }
-            match self.tidy(&e).await {
-                Ok(more) => parents.extend(more),
-                Err(err) => tracing::warn!(machine = id, err = %err, "snapshots not tidied"),
-            }
-        }
-        self.tidy_machines(parents).await;
+        swept += self.tidy_at_start().await;
         if swept > 0 {
             tracing::info!(swept, "orphans swept at start");
         }

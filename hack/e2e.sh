@@ -365,8 +365,10 @@ FK=$(briqyard machine fork "$CK" --name ckfork | jq -r .id)
 on 'echo v2 > /data/f; rm /root/r; sync' >/dev/null
 S2=$(briqyard machine snapshot create "$CK" | jq -r .id)
 on 'rm /data/f; sync' >/dev/null
+t0=$(date +%s.%N)
 briqyard machine snapshot restore "$CK" before >/dev/null
-check "restore of a running machine boots it again" '[ "$(briqyard machine get "$CK" | jq -r .state)" = running ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 2 ]'
+took=$(echo "$(date +%s.%N) - $t0" | bc)
+check "restore of a running machine boots it again (${took}s)" '[ "$(briqyard machine get "$CK" | jq -r .state)" = running ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 2 ]'
 check "the volume's file back, its content too" '[ "$(on "cat /data/f")" = v1 ]'
 check "the root disk's file back"     '[ "$(on "cat /root/r")" = r1 ]'
 check "the restored event"            'briqyard events --machine "$CK" | awk "\$4 == \"restored\"" | grep -q .'
@@ -387,11 +389,15 @@ briqyard machine destroy "$RK" >/dev/null
 # Memory: /tmp is a tmpfs, only in memory; a resume keeps it, a boot would not.
 on 'echo m1 > /tmp/mark; echo v4 > /data/f' >/dev/null
 up=$(on 'cut -d. -f1 /proc/uptime')
+t0=$(date +%s.%N)
 briqyard machine snapshot create --name warm --memory "$CK" >/dev/null
-check "a snapshot with memory, the machine running on" '[ "$(briqyard machine get "$CK" | jq -r .state)" = running ] && [ "$(on "cat /tmp/mark")" = m1 ]'
+took=$(echo "$(date +%s.%N) - $t0" | bc)
+check "a snapshot with memory (${took}s), the machine running on" '[ "$(briqyard machine get "$CK" | jq -r .state)" = running ] && [ "$(on "cat /tmp/mark")" = m1 ]'
 on 'echo m2 > /tmp/mark; echo v5 > /data/f; sync' >/dev/null
+t0=$(date +%s.%N)
 briqyard machine snapshot restore "$CK" warm >/dev/null
-check "restored with memory: resumed, not booted" '[ "$(briqyard events --machine "$CK" | awk "{print \$4}" | tail -1)" = resumed ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 3 ]'
+took=$(echo "$(date +%s.%N) - $t0" | bc)
+check "restored with memory (${took}s): resumed, not booted" '[ "$(briqyard events --machine "$CK" | awk "{print \$4}" | tail -1)" = resumed ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 3 ]'
 check "memory and disks as they were"  '[ "$(on "cat /tmp/mark /data/f" | paste -sd, -)" = m1,v4 ] && [ "$(on "cut -d. -f1 /proc/uptime")" -ge "$up" ]'
 briqyard machine snapshot rm "$CK" before
 check "deleted by name" '! briqyard machine snapshot ls "$CK" | grep -q " before "'

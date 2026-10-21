@@ -61,6 +61,29 @@ fn lineage(r: &Record, ds: &str) -> Option<(&'static str, bool)> {
     })
 }
 
+/// The snapshots the record names, per disk.
+fn named(r: &Record) -> HashSet<(&str, &str)> {
+    r.snapshots
+        .iter()
+        .flat_map(|s| s.disks.iter().map(|d| (d.as_str(), s.id.as_str())))
+        .collect()
+}
+
+/// Whether `tidy` removes a snapshot of the machine: nothing clones it, and it is an `s_` the
+/// record does not name for that disk, a fork's, or anything on a retired disk but a named one.
+fn unwanted(r: &Record, named: &HashSet<(&str, &str)>, s: &crate::zfs::SnapshotOf) -> bool {
+    let Some((disk, live)) = lineage(r, &s.dataset) else {
+        return false;
+    };
+    if !s.clones.is_empty() {
+        return false;
+    }
+    match s.snap.starts_with("s_") {
+        true => !named.contains(&(disk, s.snap.as_str())),
+        false => s.snap.starts_with("fork-") || !live,
+    }
+}
+
 /// The machine a dataset belongs to (`m/<id>/…`).
 pub(super) fn machine_of(ds: &str) -> Option<&str> {
     ds.strip_prefix("m/")?.split('/').next()
@@ -500,11 +523,7 @@ impl Manager {
             return Ok(Vec::new());
         }
         let z = &self.inner.zfs;
-        let named: HashSet<(&str, &str)> = r
-            .snapshots
-            .iter()
-            .flat_map(|s| s.disks.iter().map(|d| (d.as_str(), s.id.as_str())))
-            .collect();
+        let named = named(&r);
         let mut parents = Vec::new();
         loop {
             if !z.exists(&r.dataset()).await? {
@@ -512,19 +531,9 @@ impl Manager {
             }
             let tree = z.snapshot_tree(&r.dataset()).await?;
             let mut gone = 0;
-            for s in tree.iter().filter(|s| s.clones.is_empty()) {
-                let Some((disk, live)) = lineage(&r, &s.dataset) else {
-                    continue;
-                };
-                let free = if s.snap.starts_with("s_") {
-                    !named.contains(&(disk, s.snap.as_str()))
-                } else {
-                    s.snap.starts_with("fork-") || !live
-                };
-                if free {
-                    z.destroy_snapshot(&s.dataset, &s.snap).await?;
-                    gone += 1;
-                }
+            for s in tree.iter().filter(|s| unwanted(&r, &named, s)) {
+                z.destroy_snapshot(&s.dataset, &s.snap).await?;
+                gone += 1;
             }
             if gone > 0 {
                 continue;
@@ -556,6 +565,56 @@ impl Manager {
                 return Ok(parents);
             }
         }
+    }
+
+    /// At the daemon's start: each restore cut short is finished, and each machine with
+    /// something to tidy is tidied, found in one listing of the pool. How many machines it
+    /// changed.
+    pub(super) async fn tidy_at_start(&self) -> usize {
+        let z = &self.inner.zfs;
+        let (tree, volumes) = match (z.snapshot_tree("m").await, z.volumes_under("m").await) {
+            (Ok(t), Ok(v)) => (t, v),
+            (Err(err), _) | (_, Err(err)) => {
+                tracing::warn!(err = %err, "snapshots not tidied at start");
+                return 0;
+            }
+        };
+        let entries: Vec<Arc<Entry>> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        let (mut parents, mut changed) = (Vec::new(), 0);
+        for e in entries {
+            let r = e.snapshot();
+            let named = named(&r);
+            let untidy = r.restoring.is_some()
+                || tree.iter().any(|s| unwanted(&r, &named, s))
+                || volumes
+                    .iter()
+                    .any(|v| matches!(lineage(&r, v), Some((_, false))));
+            if !untidy {
+                continue;
+            }
+            let done = match r.restoring.is_some() {
+                true => self.finish_restore(&e).await,
+                false => self.tidy(&e).await.map_err(MError::from),
+            };
+            match done {
+                Ok(more) => {
+                    parents.extend(more);
+                    changed += 1;
+                }
+                Err(err) => {
+                    tracing::warn!(machine = r.id, err = %err, "snapshots not tidied at start")
+                }
+            }
+        }
+        self.tidy_machines(parents).await;
+        changed
     }
 
     /// Tidies each machine named, under its lock, and those their tidying names in turn. A
