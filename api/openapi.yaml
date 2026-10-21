@@ -381,6 +381,17 @@ paths:
       summary: Hosts (fleet only)
       responses:
         "200": { description: hosts, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Host" } } } } }
+    post:
+      summary: "Add a server bought by hand (fleet only, ADR 0028): recorded `provisioning` with a fresh token, then bootstrapped over SSH and pinned (SSH key, API certificate) as an ordered server is"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddHostRequest" }
+      responses:
+        "202": { description: added, bootstrapped within two minutes, content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "400": { description: "`invalid`: an SSH address that is not one, an API address that is not an IPv4 address, or apart from the SSH address but outside `provisioner.bootstrap.private_network`" }
+        "409": { description: "`conflict`: a host has that id or address; `bootstrap_off`: `provisioner.bootstrap.enabled` is false" }
   /v1/hosts/register:
     post:
       summary: A daemon's heartbeat (fleet only), with the host's own API token as the bearer, taken for the one host record that expects that token at the daemon's address
@@ -900,6 +911,7 @@ components:
       properties:
         id: { type: string }
         url: { type: string }
+        ssh: { type: string, description: "where the fleet reaches the server over SSH, when not at the API's address (its API on the private network); absent otherwise" }
         region: { type: string }
         provider: { type: string }
         state: { type: string, enum: [ready, draining, down, provisioning, bootstrapped, failed, dry-run, released] }
@@ -912,6 +924,14 @@ components:
         note: { type: string, description: What the provisioner or the bootstrap last said }
         tls_fingerprint: { type: string, description: "SHA-256 of the host's API certificate, pinned by the fleet; empty on plain HTTP" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" }, description: from its last heartbeat }
+    AddHostRequest:
+      type: object
+      required: [ssh]
+      properties:
+        ssh: { type: string, description: "the server's SSH address (its public one)" }
+        address: { type: string, description: "the API's IPv4 address, on the fleet's private network when it has one (the vRack address); default: `ssh`" }
+        region: { type: string }
+        id: { type: string, description: "default: `h_` and the address, dots as dashes" }
     OrderHostRequest:
       type: object
       properties:

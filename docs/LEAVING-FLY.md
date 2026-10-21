@@ -12,18 +12,18 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 
 | # | Gap | briqyard | briq | Before |
 |---|---|---|---|---|
-| 1 | Public edge: hosting, IPs, certificates, DDoS | the hosts' ingress, private to the edge (done) | the router, edge servers, Cloudflare in front, WebSockets (built: up-lab/briq#277, draft) | staging |
+| 1 | Public edge: hosting, IPs, certificates, DDoS | the hosts' ingress on the vRack, the public interface closed (done, ADR 0028) | the router, edge servers, Cloudflare in front, WebSockets (built: up-lab/briq#277, draft) | staging |
 | 2 | Volume durability: Fly's daily snapshots | scheduled backups, retention, delete (done); a run against a real bucket | the schedule and retention per plan | staging |
 | 3 | Egress abuse: our servers' IPs and the provider's abuse desk | blocked ports, rate and bandwidth limits per machine (done) | the limits per plan, abuse response | public traffic |
 | 4 | Observability and alerts | `/metrics`, JSON logs, host conditions (done) | scraping, log shipping, alerts in the monitor | staging |
-| 5 | Host operations: real orders, upgrades, patching | rolling upgrade, real provisioner runs | runbooks, capacity decisions | production |
+| 5 | Host operations: real orders, upgrades, patching | `host add`, the first-host runbook (done, ADR 0028); rolling upgrade, real provisioner runs | runbooks, capacity decisions | production |
 | 6 | Host loss | evacuate a host from its backups | the briqs' state while it happens | production |
 | 7 | Regions | region-aware placement (done) | the team's region to the briqyard adapter (done, #250) | a second region |
 | 8 | A team across hosts | WireGuard mesh or vRack (`MESH.md`) | nothing | a team outgrows a host |
 | 9 | Encryption at rest | the pool encrypted, one key per host held by the fleet, over TLS (decided; TLS built: ADR 0020) | nothing | the first real host |
 | 10 | Usage and costs | usage buckets (ADR 0017, built) | collection, cost model, billing of disk and network | billing them |
 | 11 | Image pulls at scale | a registry mirror per region | nothing | many hosts |
-| 12 | CI and staging on real hardware | e2e on a KVM runner | the deploy smoke test against briqyard | staging |
+| 12 | CI and staging on real hardware | e2e on a KVM runner (steps written: `OPERATIONS.md`) | the deploy smoke test against briqyard | staging |
 | 13 | Fleet availability | state beyond one JSON file | nothing | production |
 | 14 | Legal | nothing | subprocessors, DPA, claims | production |
 | 15 | Fly-only code | nothing | remove the hidden gateway briq, `fly-replay`, the Fly adapter | Fly gone |
@@ -71,7 +71,7 @@ Fly today: hardware, kernels, the hypervisor, capacity: all Fly's.
 
 On briqyard: provisioners for OVH, Scaleway, Hetzner, stub-tested only; upgrades by hand.
 
-- briqyard: `host upgrade` across the fleet (drain, upgrade, undrain, one at a time; suspend makes it a quarter-second pause per machine); a first real order through each provisioner.
+- briqyard: `host upgrade` across the fleet (drain, upgrade, undrain, one at a time; suspend makes it a quarter-second pause per machine); a first real order through each provisioner. Built (ADR 0028): `host add` for a server bought by hand, the OVH install layout, the vRack, and the runbook (`OPERATIONS.md`, "First OVH host").
 - briq (ops): runbooks, when to order, kernel and Firecracker version bumps through the pinned bootstrap (ADR 0007).
 
 ## 6. Host loss
@@ -122,7 +122,7 @@ Fly today: the deploy's smoke test runs a real Fly lifecycle.
 
 On briqyard: the suites run on the Mac; CI runs unit tests only.
 
-- briqyard: e2e on a CI runner with KVM (check whether Ubicloud's runners expose `/dev/kvm`; else a small dedicated runner).
+- briqyard: e2e on a CI runner with KVM (check whether Ubicloud's runners expose `/dev/kvm`; else a small dedicated runner: the steps and the rule for public pull requests are in `OPERATIONS.md`, "A KVM runner for the suites"). The suites already run against a remote host (ADR 0028).
 - briq: a staging environment on briqyard and the smoke test against it.
 
 ## 13. Fleet availability

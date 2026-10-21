@@ -2188,7 +2188,7 @@ impl Manager {
             memory_mb: if c.memory_mb > 0 {
                 c.memory_mb
             } else {
-                host_memory_mb().saturating_sub(2048).max(1024)
+                default_memory_mb(host_memory_mb(), arc_max_mb())
             },
             vcpus: if c.vcpus > 0 {
                 c.vcpus
@@ -4545,6 +4545,25 @@ fn meminfo_total_mb(text: &str) -> Option<u32> {
         .map(|kb| (kb / 1024) as u32)
 }
 
+/// What the host hands out when the configuration does not say: its memory less 2 GB for
+/// itself and less the ZFS cache's ceiling when one is set (ADR 0028), at least 1 GB.
+fn default_memory_mb(host_mb: u32, arc_max_mb: u32) -> u32 {
+    host_mb
+        .saturating_sub(2048)
+        .saturating_sub(arc_max_mb)
+        .max(1024)
+}
+
+/// The ZFS cache's ceiling (`zfs_arc_max`, the bootstrap sets it), in MB; 0 when it is the
+/// module's default, which the cache gives back under pressure.
+fn arc_max_mb() -> u32 {
+    std::fs::read_to_string("/sys/module/zfs/parameters/zfs_arc_max")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|b| (b >> 20) as u32)
+        .unwrap_or(0)
+}
+
 /// The first IPv4 address in `ip -4 -o addr show` output.
 fn inet_of(text: &str) -> Option<Ipv4Addr> {
     let f: Vec<&str> = text.split_whitespace().collect();
@@ -4870,6 +4889,10 @@ mod tests {
         assert_eq!(meminfo_total_mb(meminfo), Some(15935));
         assert_eq!(meminfo_total_mb("MemFree: 1 kB\n"), None);
         assert_eq!(meminfo_total_mb(""), None);
+        // 64 GB, the ARC capped at 6 GB: 56 GB for machines; no cap, 2 GB kept only.
+        assert_eq!(default_memory_mb(65536, 6144), 57344);
+        assert_eq!(default_memory_mb(65536, 0), 63488);
+        assert_eq!(default_memory_mb(3072, 1024), 1024, "at least 1 GB");
 
         let addr = "2: eth0    inet 192.168.64.3/24 brd 192.168.64.255 scope global dynamic eth0\\       valid_lft 86000sec preferred_lft 86000sec\n";
         assert_eq!(inet_of(addr), Some(Ipv4Addr::new(192, 168, 64, 3)));

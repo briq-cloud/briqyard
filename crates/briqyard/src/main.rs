@@ -572,6 +572,20 @@ enum ImageCmd {
 #[derive(Subcommand)]
 enum HostCmd {
     Ls,
+    /// Add a server bought by hand; the fleet bootstraps it over SSH and pins its keys:
+    /// briqyard host add 51.68.1.2 --address 10.42.0.11 --region gra
+    Add {
+        /// The server's SSH address (its public one)
+        ssh: String,
+        /// The API's IPv4 address, on the fleet's private network (its vRack address); default: the SSH address
+        #[arg(long, default_value = "")]
+        address: String,
+        #[arg(long, default_value = "")]
+        region: String,
+        /// The host's id; default: h_ and the address
+        #[arg(long, default_value = "")]
+        id: String,
+    },
     /// Order a host from the fleet's provisioner now (dry-run unless the fleet says otherwise)
     Order {
         #[arg(long, default_value = "")]
@@ -1386,6 +1400,20 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 let hs: Vec<api::Host> = c.call(GET, "/v1/hosts", NONE).await?;
                 print!("{}", host_table(&hs));
             }
+            HostCmd::Add {
+                ssh,
+                address,
+                region,
+                id,
+            } => {
+                let req = api::AddHostRequest {
+                    ssh,
+                    address,
+                    region,
+                    id,
+                };
+                print_json(&c.call::<api::Host>(POST, "/v1/hosts", Some(&req)).await?)
+            }
             HostCmd::Order { reason } => {
                 let req = api::OrderHostRequest { reason };
                 print_json(
@@ -1709,8 +1737,8 @@ fn image_table(ims: &[api::Image]) -> String {
     out
 }
 
-/// `host ls`: a line per host, and under it its pin, each condition that is true and its
-/// note when the provisioner or the bootstrap left one.
+/// `host ls`: a line per host, and under it its SSH address when it is not the API's, its pin,
+/// each condition that is true and its note when the provisioner or the bootstrap left one.
 fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
         "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} LAST SEEN\n",
@@ -1729,6 +1757,9 @@ fn host_table(hs: &[api::Host]) -> String {
             h.tenants.len(),
             h.last_seen.to_rfc3339()
         ));
+        if !h.ssh.is_empty() {
+            out.push_str(&format!("{:<16} ssh: {}\n", "", h.ssh));
+        }
         if !h.tls_fingerprint.is_empty() {
             out.push_str(&format!("{:<16} tls: {}\n", "", h.tls_fingerprint));
         }

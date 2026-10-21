@@ -768,7 +768,30 @@ fn host_commands() {
         Cmd::Host(HostCmd::Rm { id }) => assert_eq!(id, "h_1"),
         _ => panic!("not a rm"),
     }
-    for sub in ["retire", "drain", "rm"] {
+    match parse(&[
+        "host",
+        "add",
+        "51.68.1.2",
+        "--address",
+        "10.42.0.11",
+        "--region",
+        "gra",
+    ])
+    .cmd
+    {
+        Cmd::Host(HostCmd::Add {
+            ssh,
+            address,
+            region,
+            id,
+        }) => assert_eq!(
+            (ssh.as_str(), address.as_str(), region.as_str(), id.as_str()),
+            ("51.68.1.2", "10.42.0.11", "gra", ""),
+            "the fleet names it"
+        ),
+        _ => panic!("not an add"),
+    }
+    for sub in ["add", "retire", "drain", "rm"] {
         assert_eq!(
             fails(&["host", sub]),
             ErrorKind::MissingRequiredArgument,
@@ -1104,6 +1127,7 @@ fn the_host_table() {
     let ready = api::Host {
         id: "h_byard-1".into(),
         url: "https://10.0.0.9:7420".into(),
+        ssh: String::new(),
         region: "par".into(),
         provider: "scaleway".into(),
         state: "ready".into(),
@@ -1151,12 +1175,20 @@ fn the_host_table() {
         region: String::new(),
         ..ready.clone()
     };
-    let out = host_table(&[ready, ordered]);
+    let added = api::Host {
+        id: "h_10-42-0-11".into(),
+        url: "https://10.42.0.11:7420".into(),
+        ssh: "51.68.1.2".into(),
+        region: "gra".into(),
+        note: String::new(),
+        ..ordered.clone()
+    };
+    let out = host_table(&[ready, ordered, added]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines.len(),
-        6,
-        "a pin, a true condition and a note take a line each"
+        8,
+        "an SSH address, a pin, a true condition and a note take a line each"
     );
     assert_eq!(
         lines[0],
@@ -1183,6 +1215,14 @@ fn the_host_table() {
     assert_eq!(
         lines[5],
         "                 note: bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
+    );
+    assert_eq!(
+        lines[6],
+        "h_10-42-0-11     https://10.42.0.11:7420      provisioning gra      0/0            0/0        0         0        2026-10-19T08:30:00+00:00"
+    );
+    assert_eq!(
+        lines[7], "                 ssh: 51.68.1.2",
+        "the SSH address when it is not the API's"
     );
     assert!(out.ends_with('\n'));
 }

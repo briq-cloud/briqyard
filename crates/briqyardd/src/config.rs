@@ -69,7 +69,8 @@ pub struct Config {
     pub fleet: Option<FleetClient>,
     pub backup: Backup,
     /// What the daemon advertises: memory it may hand to machines (default: the host's memory
-    /// minus 2 GB) and vCPUs (default: hardware threads times 4).
+    /// minus 2 GB and the ZFS cache's ceiling when set) and vCPUs (default: hardware threads
+    /// times 4).
     pub capacity: Capacity,
     /// When the host is under pressure (ADR 0021).
     pub conditions: Conditions,

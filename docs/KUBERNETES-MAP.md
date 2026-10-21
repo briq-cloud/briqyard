@@ -82,6 +82,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Taints, tolerations | ✗ | | — |
 | Drain with eviction | ◐ drain stops placement; machines stay | evacuate a host from backups | yard |
 | Node object, heartbeats | ✓ heartbeat every 15 s, `down` after a minute | | |
+| Joining a node (`kubeadm join`) | ✓ `host add`: a server bought by hand, bootstrapped over SSH as an ordered one, its SSH key and certificate pinned; its API on the private network (ADR 0028) | | |
 | Node conditions (MemoryPressure, DiskPressure) | ✓ `memory_pressure`, `disk_pressure` in status and the heartbeat, `host_condition` events; the fleet places nothing new on a host under pressure (ADR 0021) | | |
 | Node-pressure eviction | ◐ thresholds and events; unused images removed under disk pressure | stopping machines to free memory or disk | yard |
 | Cluster autoscaler | ◐ provisioner autoscaler, stub-tested, dry run by default | a first real order | yard |
@@ -161,7 +162,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | Control plane HA (etcd quorum) | ✗ one fleet process, one file | state the fleet can rebuild from the hosts | yard, later |
 | etcd backup | ✗ | the registry file copied to the object store on each write | yard |
-| Cluster provisioning | ✓ bootstrap script, provisioners | | |
+| Cluster provisioning | ✓ bootstrap script, provisioners, `host add`; the pool a mirror, the public interface closed to all but SSH (ADR 0028) | a first real order | yard |
 | Version skew, upgrades | ✗ | `host upgrade` | yard |
 | Multi-cluster | ◐ regions on hosts, placement by region (ADR 0025) | a fleet per region, or one across | yard, later |
 

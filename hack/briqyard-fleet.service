@@ -8,6 +8,8 @@ ExecStart=/usr/local/bin/briqyard-fleet --config /etc/briqyard/fleet.yaml
 Restart=on-failure
 RestartSec=2
 Environment=BRIQYARD_LOG=info
+# Credentials (OVH_*, SCW_SECRET_KEY, BRIQYARD_RELEASE_TOKEN), root's alone, when there is one.
+EnvironmentFile=-/etc/briqyard/fleet.env
 
 [Install]
 WantedBy=multi-user.target

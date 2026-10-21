@@ -85,7 +85,8 @@ in a row is a `crash_loop` event. Probes are not use: they never keep a machine 
 
 ### Disks
 
-Every disk is a ZFS zvol in one pool (`byard` by default):
+Every disk is a ZFS zvol in one pool (`byard` by default; on a real host a mirror of the free
+space of its two NVMe disks, the OS on a small RAID 1 beside it, ADR 0028):
 
 | Dataset | What |
 |---|---|
@@ -306,7 +307,11 @@ stays in `dry_run` unless told otherwise.
 A server becomes a host in three steps: the fleet polls the provider for its address, runs
 `hack/bootstrap-host.sh` on it over SSH (the script on stdin, the fleet's URL and a fresh API
 token in the environment) until it succeeds, and the host turns `ready` on its first heartbeat,
-taken for the record made at the order. No provider's API returns the server's SSH host key:
+taken for the record made at the order. A server bought by hand is added (`POST /v1/hosts`,
+`briqyard host add`, its SSH and API addresses) and goes through the last two steps alike. A
+host's API may live on a private network (OVH's vRack, the fleet's `private_network`) while SSH
+reaches its public address: the script binds the API and the endpoints to the private address
+and closes the public interface to all but SSH (ADR 0028). No provider's API returns the server's SSH host key:
 the key seen at the first successful bootstrap is pinned in `<state_dir>/known_hosts`, its
 fingerprint in the host's note, and later connects are strict against it.
 
@@ -316,7 +321,7 @@ SHA-256 alone, pinned in the host record: read by the bootstrap over the pinned 
 or written in `hosts:` by the operator. Every forwarded call verifies the pin; a heartbeat
 reporting another fingerprint, or reporting one for a host with none pinned, is refused. The
 CLI pins a daemon the same way (`--tls-fingerprint`, the same verifier in `briqyard-api`). The
-ingress and TCP endpoints are not covered: they need a private network (`LEAVING-FLY.md` item 1).
+ingress and TCP endpoints are not covered by TLS: they ride the private network (ADR 0028).
 
 A WireGuard mesh between hosts, so a tenant can span several, is the next step after that: `MESH.md` is its design.
 

@@ -11,6 +11,10 @@ use std::collections::HashMap;
 pub struct HostRec {
     pub id: String,
     pub url: String,
+    /// The address the bootstrap reaches the server at over SSH, when it is not the API's
+    /// (a host added with its API on a private network, ADR 0028); empty: the API's.
+    #[serde(default)]
+    pub ssh: String,
     /// The host's API token: what the fleet forwards with, and what the host's heartbeats
     /// present. Set at the order (the bootstrap writes it into the host) or by `hosts:`.
     #[serde(default)]
@@ -80,6 +84,7 @@ impl HostRec {
         Host {
             id: self.id.clone(),
             url: self.url.clone(),
+            ssh: self.ssh.clone(),
             region: self.region.clone(),
             provider: self.provider.clone(),
             state: self.state.clone(),
@@ -434,6 +439,7 @@ mod tests {
         HostRec {
             id: id.into(),
             url: format!("http://{id}:7420"),
+            ssh: String::new(),
             token: String::new(),
             tls_fingerprint: String::new(),
             region: "fsn".into(),
