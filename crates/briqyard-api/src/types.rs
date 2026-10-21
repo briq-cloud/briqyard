@@ -393,6 +393,57 @@ impl EgressLimits {
     }
 }
 
+/// Limits on each of a machine's disks, its root disk and its volume, by Firecracker's rate
+/// limiter (ADR 0030). In a request an absent field keeps what the machine has (on create: the
+/// host's default for its size); in a machine's view every field is there, the values in force.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskLimits {
+    /// MB (2^20 bytes) a second, reads and writes together; 0 is no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_mb: Option<u32>,
+    /// Requests a second (reads, writes, flushes); 0 is no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iops: Option<u32>,
+    /// What each limit lets through at full speed once, after a start or a change, in seconds
+    /// at its rate; 0 is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_sec: Option<u32>,
+}
+
+impl DiskLimits {
+    pub const MAX_MB: u32 = 100_000;
+    pub const MAX_IOPS: u32 = 10_000_000;
+    pub const MAX_BURST_SEC: u32 = 3600;
+
+    /// Every field within its bound; the message names the field under `disk_limits`.
+    pub fn check(&self) -> Result<(), String> {
+        for (name, v, max) in [
+            ("bandwidth_mb", self.bandwidth_mb, Self::MAX_MB),
+            ("iops", self.iops, Self::MAX_IOPS),
+            ("burst_sec", self.burst_sec, Self::MAX_BURST_SEC),
+        ] {
+            if v.unwrap_or(0) > max {
+                return Err(format!("{name}: at most {max}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// No field named.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// This one's fields, and `under`'s where this one has none.
+    pub fn over(&self, under: &DiskLimits) -> DiskLimits {
+        DiskLimits {
+            bandwidth_mb: self.bandwidth_mb.or(under.bandwidth_mb),
+            iops: self.iops.or(under.iops),
+            burst_sec: self.burst_sec.or(under.burst_sec),
+        }
+    }
+}
+
 /// Packets a machine's egress limits dropped since it started, by limit (ADR 0018).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressDrops {
@@ -447,6 +498,10 @@ pub struct CreateMachineRequest {
     /// Limits on its internet traffic, over the host's defaults (a restore takes the backup's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<EgressLimits>,
+    /// Limits on each of its disks, over the host's defaults for its size (a restore takes
+    /// the backup's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_limits: Option<DiskLimits>,
     /// Its backup schedule: absent is the host's default (none unless configured), `null` none.
     #[serde(
         default,
@@ -576,6 +631,9 @@ pub struct Machine {
     pub limits: EgressLimits,
     #[serde(default)]
     pub egress_drops: EgressDrops,
+    /// The limits on each of its disks in force: its own values over the host's for its size.
+    #[serde(default, skip_serializing_if = "DiskLimits::is_empty")]
+    pub disk_limits: DiskLimits,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
     #[serde(default)]
@@ -894,8 +952,8 @@ pub struct Pending {
     pub restart: Option<RestartPolicy>,
 }
 
-/// Changes a machine: the sleep window, metadata, egress, limits and probes at once; what it
-/// runs (`spec`) at its next start.
+/// Changes a machine: the sleep window, metadata, egress, limits, disk limits and probes at
+/// once; what it runs (`spec`) at its next start.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct UpdateMachineRequest {
     /// A new sleep window ("30m", "never"); absent keeps the current one.
@@ -910,6 +968,9 @@ pub struct UpdateMachineRequest {
     /// The limits it names, applied at once; the others stay as they are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<EgressLimits>,
+    /// The disk limits it names, applied at once to a running machine; the others stay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_limits: Option<DiskLimits>,
     /// A new backup schedule; `null` removes it, absent keeps it.
     #[serde(
         default,
@@ -2130,6 +2191,40 @@ mod tests {
         assert!(serde_json::from_value::<EgressLimits>(json!({"blocked_ports": [70000]})).is_err());
         let d: EgressDrops = same(json!({"blocked_port": 1, "rate": 2, "bandwidth": 3}));
         assert_eq!(d.total(), 6);
+    }
+
+    #[test]
+    fn disk_limits() {
+        let l: DiskLimits = same(json!({}));
+        assert_eq!(l, DiskLimits::default());
+        let own: DiskLimits = same(json!({"bandwidth_mb": 0, "iops": 500}));
+        let host: DiskLimits = same(json!({"bandwidth_mb": 64, "iops": 4000, "burst_sec": 10}));
+        // Its own fields over the host's, one by one; 0 is a value (no limit).
+        assert_eq!(
+            own.over(&host),
+            DiskLimits {
+                bandwidth_mb: Some(0),
+                iops: Some(500),
+                burst_sec: Some(10),
+            }
+        );
+        let bad = |v: serde_json::Value| serde_json::from_value::<DiskLimits>(v).unwrap().check();
+        assert_eq!(
+            bad(json!({"bandwidth_mb": 100_000, "iops": 10_000_000})),
+            Ok(())
+        );
+        assert_eq!(
+            bad(json!({"bandwidth_mb": 100_001})).unwrap_err(),
+            "bandwidth_mb: at most 100000"
+        );
+        assert_eq!(
+            bad(json!({"iops": 10_000_001})).unwrap_err(),
+            "iops: at most 10000000"
+        );
+        assert_eq!(
+            bad(json!({"burst_sec": 3601})).unwrap_err(),
+            "burst_sec: at most 3600"
+        );
     }
 
     #[test]
