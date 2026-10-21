@@ -103,7 +103,7 @@ pool_device() {
   dev=$(readlink -f "$1")
   [ -b "$dev" ] || fail "$1 is not a block device"
   label=$(lsblk -dno PARTLABEL "$dev")
-  if [ "$(lsblk -dno TYPE "$dev")" != part ] && lsblk -nro TYPE "$dev" | grep -qx part; then
+  if [ "$(lsblk -dno TYPE "$dev")" != part ] && [ -n "$(lsblk -nro TYPE "$dev" | awk '$1 == "part"')" ]; then
     if [ -z "$(pool_partition "$dev")" ]; then
       [ "$(blkid -p -o value -s PTTYPE "$dev")" = gpt ] || fail "$1 has partitions but no GPT: name a partition for the pool"
       start=$(sgdisk -F "$dev"); end=$(sgdisk -E "$dev"); sector=$(blockdev --getss "$dev")
@@ -158,7 +158,7 @@ fi
 if [ -n "$PRIVATE_ADDRESS" ]; then
   echo "== private network $PRIVATE_ADDRESS"
   case "$PRIVATE_ADDRESS" in */*) ;; *) fail "PRIVATE_ADDRESS=$PRIVATE_ADDRESS: with its prefix, as 10.42.0.11/16" ;; esac
-  has_address() { ip -4 -o addr show | awk '{print $4}' | grep -qx "$PRIVATE_ADDRESS"; }
+  has_address() { ip -4 -o addr show | awk -v a="$PRIVATE_ADDRESS" '$4 == a {found = 1} END {exit !found}'; }
   if ! has_address; then
     [ -n "$PRIVATE_INTERFACE" ] || fail "no interface has $PRIVATE_ADDRESS: set PRIVATE_INTERFACE (the private network's, by its MAC in the provider's console)"
     ip link show "$PRIVATE_INTERFACE" >/dev/null || fail "no interface $PRIVATE_INTERFACE"

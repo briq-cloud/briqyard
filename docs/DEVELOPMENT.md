@@ -145,9 +145,14 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
   new image: Python 3.13, the volume's file kept), labels, a quota and a follow (`ls -l` selecting one machine, a
   refused selector, a second create refused 403 `quota` with its use and event, `logs -f`
-  receiving a line printed after it began and ending at the destroy). 132 checks.
+  receiving a line printed after it began and ending at the destroy). 132 checks. Against a
+  real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl calls pin
+  the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address, port 8080),
+  run on the host (`OPERATIONS.md`, "First OVH host", step 6).
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
-  daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
+  daemon in the VM, a dry-run provisioner for order and retire). 19 checks. With
+  `BRIQYARD_TOKEN` against a real fleet: it orders only through a dry-run provisioner and
+  drains only a host of `hosts:`, so it leaves real hosts alone (13 checks then).
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases
