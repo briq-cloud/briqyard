@@ -1,6 +1,6 @@
 # ADR 0024: Changes at the next boot: a PATCH of the image, command, env, files, size, ports and restart
 
-Date: 2026-10-21 · Status: accepted; amends ADR 0019 (`applied`, `updated` with `pending`)
+Date: 2026-10-21 · Status: accepted; amends ADR 0019 (`applied`, `updated` with `pending`); amended by ADR 0031 (the root disk swapped, forks keep the old one)
 
 ## Context
 

@@ -93,8 +93,9 @@ the host's key (ADR 0026), and everything the daemon writes about a machine is o
 | `byard/images/<digest>` | A root disk built from an image, with a `@base` snapshot |
 | `byard/m/<id>/root` | The machine's root disk, a clone of `@base` |
 | `byard/m/<id>/data` | The machine's data volume, when it has one |
-| `byard/images` | A filesystem mounted at `<data_dir>/images`: the images' metadata and extraction scratch |
+| `byard/m/<id>/root.<n>`, `data.<n>` | A disk a restore retired, while a newer snapshot or a fork needs it |
 | `byard/jail` | A filesystem mounted at `jail_dir`: the chroots and the memory snapshots |
+| `byard/images` | A filesystem mounted at `<data_dir>/images`: the images' metadata and extraction scratch |
 | `byard/state`, `byard/run` | Filesystems mounted at `<data_dir>/state` (records, events, usage) and `<data_dir>/run` (config drives, consoles) |
 
 After a reboot the pool's key is not loaded: the daemon loads it (`zfs load-key`, the key on
@@ -106,12 +107,28 @@ over files. Hosts run without swap, and a Firecracker never dumps core.
 The root disk outlives restarts and stops, as on Fly. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
 attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches the host's disk:
-a database on it is as safe as the host's drive. A snapshot is `zfs snapshot`; a fork is a clone
-of a snapshot of both disks, taken while the source runs (crash-consistent for the data volume).
-That snapshot (`@fork-<id>` on the source) pins every block the source has since rewritten, so
-it goes with the last machine cloned from it: a destroy frees the snapshot its disks came from
-once nothing clones it, and the sweep at start removes any `@fork-*` left with no clone. A
-snapshot made with `POST /machines/{id}/snapshots` stays until `DELETE /machines/{id}/snapshots/{snap}`.
+a database on it is as safe as the host's drive. A fork is a clone of a snapshot of both disks,
+taken while the source runs (crash-consistent for the data volume). That snapshot (`@fork-<id>`
+on the source) pins every block the source has since rewritten, so it goes with the last machine
+cloned from it.
+
+### Snapshots and restore
+
+`POST /machines/{id}/snapshots` snapshots both disks in one `zfs snapshot` (ADR 0031); the record
+lists it, with an optional name (`before-migration`) that finds it again. `POST
+.../snapshots/{snap}/restore` takes the disks back to it: under the machine's backup turn and
+lock, a running machine is stopped, then each disk is swapped for a clone of its snapshot
+(`clone`, the disk renamed aside to `<disk>.<n>`, the clone renamed into place, `promote` until
+its origin is outside the machine), and the machine boots again; any other stays as it is. The
+disk in use owns its whole history, so the next backup's base (its newest `bk-*`) is always an
+ancestor of what it holds. The disk it replaced is retired: it keeps the snapshots newer than the
+one restored and whatever clones them (a fork), and `tidy` (after a restore, a deletion, a fork's
+destroy, a new root disk, the daemon's start) removes it once neither is left, with any snapshot
+nothing names or clones. `memory: true` also keeps a running machine's memory (paused, written by
+Firecracker, the disks flushed and snapshotted, resumed): a restore of it resumes the processes
+where they were, while the machine's spec is the one it was taken with. A restore writes its
+intent first; one cut short is finished by the next restore, start or daemon start. A new image's
+root disk (ADR 0024) is the same swap, from the image's `@base`.
 
 Each disk the guest writes (the root disk and the volume) has Firecracker's rate limiter
 (ADR 0030): MB a second and requests a second, by default a rate per vCPU of the machine's size
@@ -274,7 +291,8 @@ cannot pass it together. A refusal is 403 `quota` and a `quota_exceeded` event.
 Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the
 machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`; idle machines
 are stopped together, a few at a time, never one after another). A start, an
-ingress connection or an exec on an idle machine wakes it. `sleep: "never"` keeps it on. `PATCH
+ingress connection or an exec on an idle machine wakes it; one that arrives while the machine is
+being stopped waits for the stop, then starts it. `sleep: "never"` keeps it on. `PATCH
 /machines/{id} {"sleep": "3h"}` changes the window in any state, without a restart.
 
 A stop can keep a memory snapshot instead (`POST /machines/{id}/stop {"suspend": true}`, or

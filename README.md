@@ -13,7 +13,8 @@ the AGPL-3.0.
 - **Any image.** `postgres:16`, `redis:7`, your app: pulled from a registry, turned into a root
   disk once, cloned per machine in milliseconds.
 - **A real disk.** A data volume per machine on ZFS, attached with write-back caching so `fsync`
-  means what it says. Snapshots and forks are copy-on-write clones.
+  means what it says. Snapshots and forks are copy-on-write clones; a machine goes back to a
+  snapshot in place, its memory too when the snapshot kept it.
 - **A private network per tenant.** Machines of one tenant reach each other by name; nothing else
   reaches them. No machine has a public address.
 - **Sleep and wake.** A machine unused for its sleep window stops and keeps its disks. A
