@@ -64,7 +64,7 @@ paths:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "404": { $ref: "#/components/responses/Error" }
     patch:
-      summary: Change the sleep window, the metadata, the egress policy, the limits or the probes, in any state; a running machine's policy and limits change at once, and its probes start over as at a boot. A change is an event (`egress_changed` for the policy or the limits, else `updated`) and moves `version`; a request that changes nothing does neither
+      summary: Change the sleep window, the metadata, the egress policy, the limits or the probes, in any state; a running machine's policy and limits change at once, and its probes start over as at a boot. The image, entrypoint, command, env, files, size, ports and restart policy change at the next start (ADR 0024), `pending` until then, a running machine running on unchanged; `/restart` applies them now. A change is an event (`egress_changed` for the policy or the limits, else `updated`, with `pending` for what waits for the next start) and moves `version`; a request that changes nothing does neither
       parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       requestBody:
         required: true
@@ -73,7 +73,7 @@ paths:
             schema: { $ref: "#/components/schemas/UpdateMachineRequest" }
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
-        "400": { description: "`invalid`: a bad sleep window, an `egress` the machine cannot take, bad `limits` or `probes` (the field named), or an `If-Match` that is not a number" }
+        "400": { description: "`invalid`: a bad sleep window, an `egress` the machine cannot take, bad `limits` or `probes` (the field named), a spec field a create would refuse (same message), or an `If-Match` that is not a number" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Moved" }
     delete:
@@ -112,6 +112,15 @@ paths:
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "409": { $ref: "#/components/responses/Moved" }
+  /v1/machines/{id}/restart:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Stop the machine and start it again, applying what a PATCH left `pending` (ADR 0024); one that is not running is started. `If-Match` is checked by the stop
+      parameters: [{ $ref: "#/components/parameters/ifMatch" }]
+      responses:
+        "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "409": { description: "`bad_state`: destroying; `boot_failed`: the new spec did not boot, or its image could not be pulled (the change still pending), the body's `machine` is it, in state `error`; `conflict`: a stale `If-Match`" }
+        "503": { description: "`capacity`: the host has no room for its size; the change stays pending" }
   /v1/machines/{id}/touch:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
@@ -529,6 +538,8 @@ components:
         last_used_at: { type: string, format: date-time }
         sleeps_at: { type: string, format: date-time, description: when it stops if nothing uses it }
         version: { type: integer, description: "the seq of the last event about it: every event moves it, its last use does not; what `If-Match` compares" }
+        pending: { $ref: "#/components/schemas/Pending" }
+        pending_since: { type: string, format: date-time, description: "when the oldest change still pending was made" }
         host: { type: string, description: the host that runs it (fleet) }
     Endpoint:
       type: object
@@ -595,6 +606,23 @@ components:
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent keeps the current one" }
         limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "the fields it names change, the others stay" }
         probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "replaces them all; a running machine's start over at once, `ready` as at a boot" }
+        image: { type: string, description: "at the next start: pulled and built then (a failure is `boot_failed`, the change still pending), the root disk made again from it, the data volume kept" }
+        entrypoint: { type: array, items: { type: string }, description: at the next start }
+        cmd: { type: array, items: { type: string }, description: at the next start }
+        env: { type: object, additionalProperties: { type: string }, description: "the whole env, at the next start; write-only" }
+        files: { type: array, items: { $ref: "#/components/schemas/File" }, description: "all the boot files, at the next start; write-only" }
+        size: { allOf: [{ $ref: "#/components/schemas/Size" }], description: "at the next start, reserved then: 503 `capacity` past the host's memory" }
+        ports: { type: array, items: { type: integer }, description: at the next start }
+        restart: { allOf: [{ $ref: "#/components/schemas/RestartPolicy" }], description: at the next start }
+    Pending:
+      type: object
+      description: "what the next start applies (ADR 0024); a change to the image, entrypoint, command, env, files or size also makes that start cold, its memory snapshot dropped"
+      properties:
+        fields: { type: array, items: { type: string, enum: [image, entrypoint, cmd, env, files, size, ports, restart] } }
+        image: { type: string }
+        size: { $ref: "#/components/schemas/Size" }
+        ports: { type: array, items: { type: integer } }
+        restart: { $ref: "#/components/schemas/RestartPolicy" }
     Probe:
       type: object
       description: "a check the daemon runs on a running machine (ADR 0022): exactly one of `exec`, `tcp` and `http`. Not a use: it never postpones sleep"
@@ -730,7 +758,7 @@ components:
         seq: { type: integer, description: one more per event on its host, never reused }
         at: { type: string, format: date-time }
         type: { type: string, enum: [normal, warning] }
-        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, egress_changed, backed_up, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`" }
+        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0024's for `applied`" }
         message: { type: string, description: for a person; at most 1 KB }
         machine_id: { type: string }
         tenant: { type: string }
