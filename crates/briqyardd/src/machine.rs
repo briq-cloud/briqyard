@@ -505,6 +505,8 @@ struct Entry {
     events: Events,
     /// Held by each backup and deletion of its backups.
     backup_turn: Turn,
+    /// While a stop that released the lock is under way: by when it has settled (ADR 0031).
+    stop_deadline: Mutex<Option<tokio::time::Instant>>,
     /// What its probes found in the current run (ADR 0022); locked before `rec`, never after.
     probe: Mutex<probes::Run>,
     /// The task running its probes, while one runs.
@@ -525,6 +527,7 @@ impl Entry {
             disk_io: Arc::default(),
             events,
             backup_turn: Turn::default(),
+            stop_deadline: Mutex::new(None),
             probe: Mutex::default(),
             prober: Mutex::new(None),
         })
@@ -568,19 +571,31 @@ impl Entry {
         }
     }
 
-    /// `lock_for_start`, once a stop under way (the sleeper's, a caller's) has settled: a
-    /// start or a wake arriving meanwhile starts the machine after it rather than failing
-    /// on `stopping`. A stop that does not settle within a minute is the start's to refuse.
+    /// `lock_for_start` (with the turn always when `turn`, as a restore takes it), once a
+    /// stop under way (the sleeper's, a caller's) has settled: a start, a wake or a restore
+    /// arriving meanwhile goes on after it rather than failing on `stopping`. A stop that has
+    /// not settled by the deadline it set is the caller's to refuse.
     async fn lock_once_stopped(
         &self,
+        turn: bool,
     ) -> (
         Option<tokio::sync::OwnedMutexGuard<()>>,
         tokio::sync::MutexGuard<'_, ()>,
     ) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
-            let turns = self.lock_for_start().await;
-            if self.snapshot().state != state::STOPPING || tokio::time::Instant::now() > deadline {
+            let turns = match turn {
+                true => {
+                    let (t, g) = self.lock_with_turn().await;
+                    (Some(t), g)
+                }
+                false => self.lock_for_start().await,
+            };
+            let deadline = *self.stop_deadline.lock().unwrap();
+            let deadline = match deadline {
+                Some(d) if self.snapshot().state == state::STOPPING => d,
+                _ => return turns,
+            };
+            if tokio::time::Instant::now() > deadline {
                 return turns;
             }
             // Registered before the lock goes: the settle that follows wakes it.
@@ -2634,7 +2649,7 @@ impl Manager {
 
     pub async fn start(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _turns = e.lock_once_stopped().await;
+        let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;
         if e.snapshot().state != state::RUNNING {
             self.start_entry(&e, true).await?;
@@ -2646,7 +2661,7 @@ impl Manager {
     /// one stopped on purpose stays stopped.
     pub async fn wake(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _turns = e.lock_once_stopped().await;
+        let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;
         let r = e.snapshot();
         match r.state.as_str() {
@@ -2730,17 +2745,19 @@ impl Manager {
         };
         // A restore cut short first (ADR 0031), then a new image's root disk (ADR 0024).
         let rec = e.snapshot();
+        // The machines they free a snapshot of are tidied apart, once the caller's lock
+        // is released (ADR 0031): never another machine's lock under this one's.
         if rec.restoring.is_some() {
             let parents = self
                 .finish_restore(e)
                 .await
                 .map_err(|err| fail(anyhow!("{err:#}")))?;
-            self.tidy_machines(parents).await;
+            self.tidy_later(parents);
         }
         let rec = e.snapshot();
         if rec.root_key != rec.image_key {
             let parents = self.remake_root(e).await.map_err(fail)?;
-            self.tidy_machines(parents).await;
+            self.tidy_later(parents);
         }
         // What this boot runs: the record, the change it applied on it.
         let rec = e.snapshot();
@@ -2941,7 +2958,7 @@ impl Manager {
             self.remove_memory(&r, &snap);
         }
         self.save(e)?;
-        self.tidy(e).await
+        Ok(self.tidy_or_warn(e).await)
     }
 
     /// The jail of a machine, when the daemon runs Firecracker under the jailer: one uid per
@@ -3002,18 +3019,30 @@ impl Manager {
             self.exited(e, code, oom, code != 0);
             return;
         }
-        let now = Utc::now();
-        e.set_state(state::STOPPED, |r| {
-            r.pid = 0;
-            r.stopped_at = Some(now);
-            let Some(why) = stop_req else {
+        let Some(why) = stop_req else {
+            e.set_state(state::STOPPED, |r| {
+                r.pid = 0;
+                r.stopped_at = Some(Utc::now());
                 r.stopped_reason = stop::USER.into();
-                return Some(
+                Some(
                     Ev::normal(reason::STOPPED, "stopped on request")
                         .data(json!({ "reason": stop::USER })),
-                );
-            };
-            r.stopped_reason = why.clone();
+                )
+            });
+            let _ = self.save(e);
+            return;
+        };
+        self.settle_stopped(e, &why);
+    }
+
+    /// A stop asked for `why` is done, its process gone: `stopped` with that reason, or
+    /// `suspended` when it kept a memory snapshot.
+    fn settle_stopped(&self, e: &Entry, why: &str) {
+        *e.stop_deadline.lock().unwrap() = None;
+        e.set_state(state::STOPPED, |r| {
+            r.pid = 0;
+            r.stopped_at = Some(Utc::now());
+            r.stopped_reason = why.into();
             tracing::info!(machine = r.id, reason = why, "machine stopped");
             let ev = match r.suspended {
                 true => Ev::normal(
@@ -3247,6 +3276,9 @@ impl Manager {
                 None => return Err(MError::NotRunning("no process".into())),
             };
             *e.stop_req.lock().unwrap() = Some(why.to_string());
+            // What this call waits at most below, the lock released: a start waits as long.
+            *e.stop_deadline.lock().unwrap() =
+                Some(tokio::time::Instant::now() + timeout + Duration::from_secs(20));
             e.set_state(state::STOPPING, |_| {
                 Some(
                     Ev::normal(reason::STOPPING, format!("stopping ({why})"))
@@ -5787,6 +5819,11 @@ mod tests {
                 .await
                 .unwrap();
             self.pool.calls();
+        }
+
+        /// Each stop takes this long on the host from now on.
+        pub(super) fn stops_take(&self, d: Duration) {
+            self.host.stops_take(d);
         }
 
         /// The host's calls so far (boots, snapshots, kills), then forgets them.

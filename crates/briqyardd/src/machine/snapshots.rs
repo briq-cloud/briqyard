@@ -228,6 +228,11 @@ impl Manager {
         let z = &self.inner.zfs;
         let jail = self.jail_for(r).map(|j| j.base);
         let written = fc::snapshot_files(&live.dir, jail.as_deref(), &r.id);
+        // A link a memory restore left there names a kept snapshot's files: Firecracker would
+        // write through it.
+        for f in &written {
+            let _ = std::fs::remove_file(f);
+        }
         self.inner
             .vmm
             .snapshot(&live)
@@ -278,7 +283,8 @@ impl Manager {
     pub async fn delete_snapshot(&self, id: &str, snap: &str) -> Result<(), MError> {
         let e = self.own_entry(id)?;
         let parents = {
-            let _lock = e.lock.lock().await;
+            // The turn too, as a restore takes it: no backup sends while a retired disk goes.
+            let _turns = e.lock_with_turn().await;
             let r = e.snapshot();
             if let Some(s) = &r.restoring {
                 return Err(unfinished(s));
@@ -300,6 +306,7 @@ impl Manager {
             self.remove_memory(&r, &s.id);
             self.tidy(&e).await?
         };
+        // Other machines after this one's lock is released, as everywhere.
         self.tidy_machines(parents).await;
         Ok(())
     }
@@ -316,7 +323,7 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _turns = e.lock_with_turn().await;
+        let turns = e.lock_once_stopped(true).await;
         self.check_version(&e, at)?;
         let r = e.snapshot();
         let s = r
@@ -342,10 +349,13 @@ impl Manager {
         }
         self.save(&e)?;
         let parents = self.finish_restore(&e).await?;
+        let started = match was_running {
+            true => self.start_entry(&e, true).await,
+            false => Ok(()),
+        };
+        drop(turns);
         self.tidy_machines(parents).await;
-        if was_running {
-            self.start_entry(&e, true).await?;
-        }
+        started?;
         Ok(self.view(&e))
     }
 
@@ -363,16 +373,7 @@ impl Manager {
         if let Some(live) = live {
             self.end_process(e, &live, Duration::from_secs(10)).await;
         }
-        e.set_state(state::STOPPED, |r| {
-            r.pid = 0;
-            r.stopped_at = Some(Utc::now());
-            r.stopped_reason = stop::USER.into();
-            Some(
-                Ev::normal(reason::STOPPED, format!("stopped ({why})"))
-                    .data(json!({ "reason": stop::USER })),
-            )
-        });
-        let _ = self.save(e);
+        self.settle_stopped(e, stop::USER);
     }
 
     /// The restore the record's intent names, its lock (and turn) held: each disk swapped for
@@ -441,7 +442,7 @@ impl Manager {
             memory = resume,
             "restored to a snapshot"
         );
-        Ok(self.tidy(e).await?)
+        Ok(self.tidy_or_warn(e).await)
     }
 
     /// The dataset of a disk's lineage (the disk, or one it retired) holding `snap`.
@@ -532,6 +533,13 @@ impl Manager {
             let mut gone = 0;
             for s in tree.iter().filter(|s| unwanted(&r, &named, s)) {
                 z.destroy_snapshot(&s.dataset, &s.snap).await?;
+                tracing::info!(
+                    machine = r.id,
+                    dataset = s.dataset,
+                    snapshot = s.snap,
+                    why = "named by nothing, cloned by nothing",
+                    "snapshot destroyed"
+                );
                 gone += 1;
             }
             if gone > 0 {
@@ -558,6 +566,12 @@ impl Manager {
                     }
                 }
                 z.destroy(&ds).await?;
+                tracing::info!(
+                    machine = r.id,
+                    dataset = ds,
+                    why = "no named snapshot, nothing cloned",
+                    "retired disk destroyed"
+                );
                 gone += 1;
             }
             if gone == 0 {
@@ -598,9 +612,13 @@ impl Manager {
             if !untidy {
                 continue;
             }
-            let done = match r.restoring.is_some() {
-                true => self.finish_restore(&e).await,
-                false => self.tidy(&e).await.map_err(MError::from),
+            // Uncontended before the API serves, taken all the same: what these assume.
+            let done = {
+                let _turns = e.lock_with_turn().await;
+                match r.restoring.is_some() {
+                    true => self.finish_restore(&e).await,
+                    false => self.tidy(&e).await.map_err(MError::from),
+                }
             };
             match done {
                 Ok(more) => {
@@ -614,6 +632,25 @@ impl Manager {
         }
         self.tidy_machines(parents).await;
         changed
+    }
+
+    /// `tidy` where its work is done already (a disk swapped): a failure is a warning, and
+    /// the next tidy or the daemon's start does it.
+    pub(super) async fn tidy_or_warn(&self, e: &Entry) -> Vec<String> {
+        self.tidy(e).await.unwrap_or_else(|err| {
+            tracing::warn!(machine = e.snapshot().id, err = %err, "snapshots not tidied");
+            Vec::new()
+        })
+    }
+
+    /// `tidy_machines` from under a machine's lock: in a task of its own, which takes each
+    /// lock once the caller has released its own.
+    pub(super) fn tidy_later(&self, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        let m = self.clone();
+        tokio::spawn(async move { m.tidy_machines(ids).await });
     }
 
     /// Tidies each machine named, under its lock, and those their tidying names in turn. A
@@ -995,6 +1032,68 @@ mod tests {
         let tail: Vec<String> = h.reasons(&m.id).into_iter().rev().take(3).rev().collect();
         assert_eq!(tail, ["starting", "restored", "started"]);
         assert_eq!(h.datasets(&m.id).await, [root]);
+    }
+
+    #[tokio::test]
+    async fn a_tidy_that_fails_after_the_swap_does_not_fail_the_restore() {
+        let h = harness().await;
+        let m = h.m.create(h.request("m")).await.unwrap();
+        let s =
+            h.m.snapshot(&m.id, api::SnapshotRequest::default())
+                .await
+                .unwrap();
+        // Newer than the one restored and named by nothing: the tidy tries to destroy it,
+        // and this `zfs` refuses.
+        let root = format!("m/{}/root", m.id);
+        h.pool.zfs.snapshot(&root, "s_boom").await.unwrap();
+        let r = h.m.restore_snapshot(&m.id, &s.id, None).await.unwrap();
+        assert_eq!(r.state, state::RUNNING);
+        assert_eq!(h.restored_data(&m.id)["snapshot"], s.id.as_str());
+        assert!(h.snapshot_exists(&root, &s.id));
+    }
+
+    #[tokio::test]
+    async fn a_restore_during_a_stop_waits_for_it() {
+        let h = harness().await;
+        let m = h.m.create(h.request("m")).await.unwrap();
+        let s =
+            h.m.snapshot(&m.id, api::SnapshotRequest::default())
+                .await
+                .unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.stops_take(Duration::from_millis(300));
+        let (m2, e2) = (h.m.clone(), e.clone());
+        let sleep = tokio::spawn(async move {
+            m2.stop_entry(&e2, stop::IDLE, Duration::from_secs(1), false, None)
+                .await
+                .unwrap()
+        });
+        while e.snapshot().state != state::STOPPING {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Stopped by then: restored, and left stopped.
+        let r = h.m.restore_snapshot(&m.id, &s.id, None).await.unwrap();
+        assert_eq!(
+            (r.state.as_str(), r.stopped_reason.as_str()),
+            (state::STOPPED, stop::IDLE)
+        );
+        sleep.await.unwrap();
+        assert_eq!(h.reasons(&m.id).last().unwrap(), "restored");
+    }
+
+    #[tokio::test]
+    async fn a_memory_snapshot_never_writes_through_a_link_left_in_the_jail() {
+        let h = harness().await;
+        let m = h.m.create(h.request("m")).await.unwrap();
+        let s1 = h.m.snapshot(&m.id, with_memory()).await.unwrap();
+        let rec = h.stored(&m.id).unwrap();
+        let kept = h.m.memory_files(&rec, &s1.id)[1].clone();
+        std::fs::write(&kept, b"the first one").unwrap();
+        // A restore's link, where Firecracker writes the next memory snapshot.
+        let dir = h.m.inner.cfg.run_dir().join(&m.id);
+        std::fs::hard_link(&kept, dir.join("snap.mem")).unwrap();
+        h.m.snapshot(&m.id, with_memory()).await.unwrap();
+        assert_eq!(std::fs::read(&kept).unwrap(), b"the first one");
     }
 
     #[tokio::test]

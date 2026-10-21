@@ -1252,9 +1252,6 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             ),
             MachineCmd::Snapshot(s) => match s {
                 SnapshotCmd::Create { name, memory, id } => {
-                    if let Some(n) = &name {
-                        api::check_snapshot_name(n).map_err(|e| anyhow!("--{e}"))?;
-                    }
                     let req = api::SnapshotRequest { name, memory };
                     print_json(
                         &c.call::<api::Snapshot>(

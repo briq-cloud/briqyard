@@ -329,7 +329,7 @@ impl Zfs {
                 "-o",
                 "name",
                 "-s",
-                "creation",
+                "createtxg",
                 "-r",
                 &self.ds(name),
             ])
@@ -371,7 +371,7 @@ impl Zfs {
                 "-o",
                 "name,clones",
                 "-s",
-                "creation",
+                "createtxg",
                 "-r",
                 &self.ds(name),
             ])
@@ -1062,7 +1062,7 @@ mod tests {
         );
         assert_eq!(
             f.calls().last().unwrap(),
-            "list -H -t snapshot -o name -s creation -r byard/m/x/root"
+            "list -H -t snapshot -o name -s createtxg -r byard/m/x/root"
         );
     }
 
@@ -1288,7 +1288,7 @@ mod tests {
         );
         assert_eq!(
             f.calls().last().unwrap(),
-            "list -H -t snapshot -o name,clones -s creation -r byard/m"
+            "list -H -t snapshot -o name,clones -s createtxg -r byard/m"
         );
         let err = f.zfs.origin("m/nope/root").await.unwrap_err();
         assert!(err.to_string().contains("does not exist"), "{err}");
