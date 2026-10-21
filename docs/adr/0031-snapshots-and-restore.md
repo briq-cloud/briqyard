@@ -45,9 +45,9 @@ Rejected, one line each:
 
 ## Consequences
 
-- An agent can checkpoint, go wrong, and go back in a second or two (a stop, five `zfs` calls, a boot), or a quarter second more than a resume with memory; forks and backups carry on.
+- An agent can checkpoint, go wrong, and go back, forks and backups carrying on. Measured in the e2e suite on the Mac (nested virtualization, a 256 MB machine with a volume): a restore of a running machine 7.5 s (the guest's stop, the swap, a cold boot), a snapshot with memory 0.8 s, a restore with memory 1.0 s, resumed rather than booted.
 - A retired disk costs what it holds: the blocks of the snapshots newer than the one restored. `zfs list -t all -r byard/m/<machine>` shows them (`root.r_…`, `data.r_…`); usage counts them in the machine's snapshot bytes.
-- A memory snapshot costs the machine's memory in disk, per snapshot, and pauses the machine while it is written (about a second per GB on NVMe). In-flight execs over vsock end with it (Firecracker resets vsock connections at a snapshot). Like a suspend's, it resumes only on this host's Firecracker; backups and forks never carry it.
+- A memory snapshot costs the machine's memory in disk, per snapshot, and pauses the machine while it is written (most of the 0.8 s above for 256 MB). In-flight execs over vsock end with it (Firecracker resets vsock connections at a snapshot). Like a suspend's, it resumes only on this host's Firecracker; backups and forks never carry it.
 - `s_*` snapshots made before this ADR are not in any record: the first `tidy` (the daemon's start) removes them. No host with real workload has any.
 - A destroyed source's snapshots move to a fork promoted over it, as before; the fork's `tidy` (run after the destroy, under its lock) removes the ones it does not name.
 - Not built: a fork from a named snapshot (`ForkSpec.snapshot`), a cap on snapshots per machine (quotas count volumes, not snapshots), the restore of a machine's spec with its disks.

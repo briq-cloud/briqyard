@@ -360,7 +360,7 @@ on() { briqyard machine exec "$CK" -- sh -c "$1"; }
 on 'echo v1 > /data/f; echo r1 > /root/r; sync' >/dev/null
 CB1=$(briqyard machine backup "$CK" | jq -r .id)
 briqyard machine snapshot create --name before "$CK" >/dev/null
-check "snapshot listed by name, both disks" '[ "$(briqyard machine snapshot ls "$CK" | awk "NR == 2 {print \$2, \$4, \$5}")" = "before root,data no" ]'
+check "snapshot listed by name, both disks" '[ "$(briqyard machine snapshot ls "$CK" | awk "NR == 2 {print \$2, \$5, \$6}")" = "before root,data no" ]'
 FK=$(briqyard machine fork "$CK" --name ckfork | jq -r .id)
 on 'echo v2 > /data/f; rm /root/r; sync' >/dev/null
 S2=$(briqyard machine snapshot create "$CK" | jq -r .id)
