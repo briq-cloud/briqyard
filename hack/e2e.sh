@@ -385,6 +385,8 @@ CB1=$(briqyard machine backup "$CK" | jq -r .id)
 briqyard machine snapshot create --name before "$CK" >/dev/null
 check "snapshot listed by name, both disks" '[ "$(briqyard machine snapshot ls "$CK" | awk "NR == 2 {print \$2, \$5, \$6}")" = "before root,data no" ]'
 FK=$(briqyard machine fork "$CK" --name ckfork | jq -r .id)
+# A fork takes the disks, not the command: alpine's own (`sh`) would end at once.
+briqyard machine set "$FK" -- sleep 3600 >/dev/null && briqyard machine restart "$FK" >/dev/null
 on 'echo v2 > /data/f; rm /root/r; sync' >/dev/null
 S2=$(briqyard machine snapshot create "$CK" | jq -r .id)
 on 'rm /data/f; sync' >/dev/null
