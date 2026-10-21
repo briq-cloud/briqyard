@@ -2911,38 +2911,46 @@ async fn an_upgrade_waits_for_a_new_start_of_the_version_installed() {
     let f = fleet_with_key();
     seed(&f.st, "h_a", 64_000, 0, 1, &["t1"]);
     let before = Utc::now() - Duration::minutes(5);
-    let beat = |version: &str, at: chrono::DateTime<Utc>, adopted: usize, stopped: usize| {
+    let beat = |version: &str, started: Option<api::DaemonStart>| {
         let mut h = f.st.reg.lock().unwrap().hosts["h_a"].clone();
         h.version = version.into();
-        h.started = api::DaemonStart {
+        h.started = started;
+        f.st.reg.lock().unwrap().heartbeat(h, Utc::now());
+    };
+    let start = |at, adopted, stopped, gone| {
+        Some(api::DaemonStart {
             at,
             adopted,
             stopped,
-        };
-        f.st.reg.lock().unwrap().heartbeat(h, Utc::now());
+            gone,
+        })
     };
     let wait = |ms| {
         upgrade::come_back(
             &f.st,
             "h_a",
-            before,
+            Some(before),
             "0.2.0+b",
             std::time::Duration::from_millis(ms),
         )
     };
     // The old daemon still answering, or a new one of another build: not yet.
-    beat("0.1.0+a", before, 0, 0);
+    beat("0.1.0+a", start(before, 0, 0, 0));
     let err = wait(600).await.unwrap_err();
     assert_eq!(err, "no heartbeat from a new start of 0.2.0+b within 0 s");
-    beat("0.2.0+b", before, 0, 0);
+    beat("0.2.0+b", start(before, 0, 0, 0));
     assert!(wait(600).await.is_err(), "the same start is not a new one");
-    // The new start, which adopted the machine.
+    // A daemon older than ADR 0027 reports no start: never the one installed.
+    beat("0.2.0+b", None);
+    assert!(wait(600).await.is_err(), "no start is not a new one");
+    // The new start, which adopted the machine; one whose process had exited meanwhile is gone,
+    // not a failure.
     let now = Utc::now();
-    beat("0.2.0+b", now, 1, 0);
+    beat("0.2.0+b", start(now, 1, 0, 1));
     let started = wait(600).await.unwrap();
-    assert_eq!((started.at, started.adopted), (now, 1));
+    assert_eq!((started.at, started.adopted, started.gone), (now, 1, 1));
     // One that stopped a machine it could not take over fails the upgrade.
-    beat("0.2.0+b", now, 1, 2);
+    beat("0.2.0+b", start(now, 1, 2, 0));
     let err = wait(600).await.unwrap_err();
     assert_eq!(
         err,
@@ -2960,6 +2968,7 @@ async fn an_upgrade_ends_in_the_hosts_state_or_drained() {
         at: Utc::now(),
         adopted: 3,
         stopped: 0,
+        gone: 0,
     };
     let h = upgrade::finish(&f.st, &was, "file:///r", Ok(("0.2.0+b".into(), started))).unwrap();
     assert_eq!(h.state, "ready");
@@ -3012,11 +3021,12 @@ async fn a_heartbeat_carries_the_daemons_start() {
         },
         Utc::now(),
     );
-    h.started = api::DaemonStart {
+    h.started = Some(api::DaemonStart {
         at: Utc::now(),
         adopted: 4,
         stopped: 1,
-    };
+        gone: 2,
+    });
     f.st.reg.lock().unwrap().heartbeat(h.clone(), Utc::now());
     assert_eq!(hosts(&f.st)[0].started, h.started);
 }

@@ -1839,8 +1839,6 @@ fn image_table(ims: &[api::Image]) -> String {
     out
 }
 
-/// `host ls`: a line per host, and under it its pin, each condition that is true and its
-/// note when the provisioner or the bootstrap left one.
 /// What `host upgrade --all` upgrades, in order: the ready and draining hosts by id; and the
 /// others, with their state, which it leaves.
 fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, String)>) {
@@ -1857,6 +1855,8 @@ fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, String)>) {
     )
 }
 
+/// `host ls`: a line per host, and under it its pin, each condition that is true and its
+/// note when the provisioner or the bootstrap left one.
 fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
         "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {:<20} LAST SEEN\n",

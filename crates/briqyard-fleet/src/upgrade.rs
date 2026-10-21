@@ -106,13 +106,13 @@ async fn run(
     release: &str,
 ) -> Result<(String, api::DaemonStart), String> {
     let ip = url_host(&was.url).to_string();
-    tracing::warn!(host = was.id, release, "host upgrade");
+    tracing::info!(host = was.id, release, "host upgrade");
     let installed = bootstrap::install(st, &was.id, &ip, &was.url, &was.token, release)
         .await
         .map_err(|e| format!("install: {e:#}"))?;
     // What the install says of the SSH host key: pinned now (a static host's first upgrade),
     // or already.
-    tracing::warn!(host = was.id, note = installed, "host upgrade installed");
+    tracing::info!(host = was.id, note = installed, "host upgrade installed");
     let version = bootstrap::installed_version(st, &ip)
         .await
         .map_err(|e| format!("{e:#}"))?;
@@ -122,17 +122,19 @@ async fn run(
             api::VERSION
         ));
     }
-    let started = come_back(st, &was.id, was.started.at, &version, COME_BACK).await?;
+    let before = was.started.map(|s| s.at);
+    let started = come_back(st, &was.id, before, &version, COME_BACK).await?;
     Ok((version, started))
 }
 
-/// Waits for the host's record to show a start other than `before` of `version`, and answers
-/// it; an error when that start stopped machines it could not take over, or when none came
-/// `within`.
+/// Waits for the host's record to show a start of `version` other than `before`, and answers
+/// it; an error when that start stopped machines it could not take over (one whose process
+/// had exited meanwhile is `gone`, not a failure), or when none came `within`. A daemon that
+/// reports no start is older than ADR 0027: not the one installed.
 pub async fn come_back(
     st: &AppState,
     id: &str,
-    before: chrono::DateTime<Utc>,
+    before: Option<chrono::DateTime<Utc>>,
     version: &str,
     within: Duration,
 ) -> Result<api::DaemonStart, String> {
@@ -146,7 +148,7 @@ pub async fn come_back(
             .get(id)
             .map(|h| (h.version.clone(), h.started));
         match seen {
-            Some((v, started)) if v == version && started.at != before => {
+            Some((v, Some(started))) if v == version && Some(started.at) != before => {
                 return match started.stopped {
                     0 => Ok(started),
                     n => Err(format!(

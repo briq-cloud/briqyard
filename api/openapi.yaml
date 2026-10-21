@@ -909,11 +909,12 @@ components:
         vmm_version: { type: string, description: "what a machine booted now runs under: Firecracker's version and the host kernel's release" }
     DaemonStart:
       type: object
-      description: "When the daemon started and what it did with the machines the previous one left running (ADR 0027)"
+      description: "When the daemon started and what it did with the machines the previous one left running (ADR 0027); absent from a daemon older than that"
       properties:
         at: { type: string, format: date-time }
         adopted: { type: integer, description: left running and taken over }
-        stopped: { type: integer, description: "left running and found gone or not answering: marked stopped, booted again when its sleep window had not run out" }
+        stopped: { type: integer, description: "left running, its process still there but not taken over: ended, marked stopped, booted again when its sleep window had not run out; what fails an upgrade" }
+        gone: { type: integer, description: "left running, its process ended while no daemon ran: marked stopped, booted again the same way" }
     UpgradeHostRequest:
       type: object
       required: [release]

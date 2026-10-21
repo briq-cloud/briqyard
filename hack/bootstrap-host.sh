@@ -167,8 +167,11 @@ EOF
 fi
 
 echo "== api certificate"
-# Made here, before the daemon starts, so it is there to read; kept across runs.
-fingerprint=$(/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml tls-fingerprint)
+# Made here, before the daemon starts, so it is there to read; kept across runs. It is also the
+# new binary reading the configuration: one it refuses stops here, before any hand-over, and the
+# running daemon goes on (ADR 0027).
+fingerprint=$(/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml tls-fingerprint) || {
+  echo "   the new briqyardd refuses /etc/briqyard/config.yaml: nothing handed over"; exit 1; }
 if [ -n "$fingerprint" ]; then
   echo "   sha256 $fingerprint: the fleet pins it (tls_fingerprint)"
 else

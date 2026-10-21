@@ -212,6 +212,10 @@ pub struct Record {
     /// What ran the last boot (`Vmm::version`): a memory snapshot resumes only under it.
     #[serde(default)]
     pub vmm_version: String,
+    /// What a newer daemon wrote and this one does not know: kept as it is, so a rollback that
+    /// rewrites the record does not drop it (ADR 0027).
+    #[serde(flatten)]
+    pub rest: BTreeMap<String, serde_json::Value>,
 }
 
 impl Record {
@@ -477,8 +481,8 @@ pub fn new_id(prefix: &str) -> String {
 }
 
 struct Entry {
-    /// Serializes lifecycle operations on one machine.
-    lock: tokio::sync::Mutex<()>,
+    /// Serializes lifecycle operations on one machine; owned by a hand-over (ADR 0027).
+    lock: Arc<tokio::sync::Mutex<()>>,
     rec: Mutex<Record>,
     live: Mutex<Option<fc::Vm>>,
     /// The reason set before asking the guest to stop; `None` when it ends on its own.
@@ -506,7 +510,7 @@ struct Entry {
 impl Entry {
     fn new(rec: Record, events: Events) -> Arc<Self> {
         Arc::new(Self {
-            lock: tokio::sync::Mutex::new(()),
+            lock: Default::default(),
             rec: Mutex::new(rec),
             live: Mutex::new(None),
             stop_req: Mutex::new(None),
@@ -545,6 +549,23 @@ impl Entry {
             if turn.is_some() || !self.snapshot().remakes_root() {
                 return (turn, guard);
             }
+        }
+    }
+
+    /// Its lock, once no stop is under way: a stop holds the lock to begin, then leaves it to
+    /// the watcher, which settles the state under it once the guest has ended (ADR 0027's
+    /// hand-over waits for that).
+    async fn settled_lock(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        loop {
+            let guard = self.lock.clone().lock_owned().await;
+            if self.snapshot().state != state::STOPPING {
+                return guard;
+            }
+            let settled = self.changed.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            drop(guard);
+            settled.await;
         }
     }
 
@@ -741,22 +762,24 @@ impl Manager {
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
-        let (adopted, stopped) = m.recover().await;
+        let (adopted, stopped, gone) = m.recover().await;
         let swept = m.sweep_orphans().await;
         let machines = m.inner.machines.lock().unwrap().len();
         *m.inner.started.lock().unwrap() = api::DaemonStart {
             at: Utc::now(),
             adopted,
             stopped,
+            gone,
         };
         m.inner.events.emit(
             Ev::normal(
                 reason::HOST_STARTED,
-                format!("daemon started: {adopted} machines adopted, {stopped} marked stopped, {swept} leftovers swept"),
+                format!("daemon started: {adopted} machines adopted, {stopped} not handed over and {gone} gone marked stopped, {swept} leftovers swept"),
             )
             .data(json!({
                 "version": api::VERSION, "vmm_version": m.inner.vmm.version(),
-                "machines": machines, "adopted": adopted, "stopped": stopped, "swept": swept,
+                "machines": machines, "adopted": adopted, "stopped": stopped, "gone": gone,
+                "swept": swept,
             })),
         );
         m.start_stopped_by_host();
@@ -812,7 +835,7 @@ impl Manager {
     /// killed: after a reboot the pid is someone else's) and marked stopped by the host, so
     /// the next use wakes them. Destroys cut short are resumed by the sleeper's tick. How many
     /// were adopted, and how many marked stopped.
-    async fn recover(&self) -> (usize, usize) {
+    async fn recover(&self) -> (usize, usize, usize) {
         let entries: Vec<Arc<Entry>> = self
             .inner
             .machines
@@ -821,7 +844,7 @@ impl Manager {
             .values()
             .cloned()
             .collect();
-        let (mut adopted, mut stopped) = (0, 0);
+        let (mut adopted, mut stopped, mut gone) = (0, 0, 0);
         for e in entries {
             let rec = e.snapshot();
             if !matches!(
@@ -834,22 +857,27 @@ impl Manager {
                 adopted += 1;
                 continue;
             }
-            stopped += 1;
-            if rec.pid > 0 && self.inner.vmm.machine_of(rec.pid).as_deref() == Some(&rec.id) {
-                self.inner.vmm.kill(rec.pid);
-            }
+            // Its process still there but not answering for it (not handed over), or gone: it
+            // exited while no daemon ran.
+            let alive =
+                rec.pid > 0 && self.inner.vmm.machine_of(rec.pid).as_deref() == Some(&rec.id);
+            let why = match alive {
+                true => {
+                    stopped += 1;
+                    self.inner.vmm.kill(rec.pid);
+                    "left running by a previous daemon that could not hand it over: stopped"
+                }
+                false => {
+                    gone += 1;
+                    "its process ended while no daemon ran: stopped"
+                }
+            };
             self.unplug(&rec.id, &rec.ip).await;
             e.set_state(state::STOPPED, |r| {
                 r.stopped_reason = stop::HOST.into();
                 r.pid = 0;
                 r.stopped_at = Some(Utc::now());
-                Some(
-                    Ev::warning(
-                        reason::STOPPED,
-                        "left running by a previous daemon that could not hand it over: stopped",
-                    )
-                    .data(json!({"reason": stop::HOST})),
-                )
+                Some(Ev::warning(reason::STOPPED, why).data(json!({"reason": stop::HOST})))
             });
             tracing::warn!(
                 machine = rec.id,
@@ -867,7 +895,7 @@ impl Manager {
                 }
             });
         }
-        (adopted, stopped)
+        (adopted, stopped, gone)
     }
 
     /// Resources a previous daemon left with no record to own them: a crash between a resource
@@ -1048,6 +1076,11 @@ impl Manager {
         let Ok(_turn) = e.lock.try_lock() else {
             return Ok(());
         };
+        self.write_use(e)
+    }
+
+    /// [`Self::flush_use`]'s write, for a caller that holds the machine's lock.
+    fn write_use(&self, e: &Arc<Entry>) -> Result<()> {
         if !self.holds(e) {
             return Ok(());
         }
@@ -1106,12 +1139,35 @@ impl Manager {
         self.write_down().await;
     }
 
-    /// Leaves every machine as it is for the next daemon to adopt (ADR 0027: an upgrade):
-    /// writes the last uses the records lack and the usage up to now, and nothing else.
-    pub async fn hand_over(&self) {
+    /// Leaves every machine as it is for the next daemon to adopt (ADR 0027: an upgrade).
+    /// Takes each machine's lock first, once a stop under way has settled, the tenants'
+    /// machines before the gateways (a start holds its machine's, then its gateway's): a
+    /// transition under way ends before, and none begins while the caller holds what this
+    /// answers, until the process ends. Then the last
+    /// uses the records lack and the usage up to now are written, and nothing else.
+    pub async fn hand_over(&self) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+        let mut entries: Vec<Arc<Entry>> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        entries.sort_by_key(|e| e.rec.lock().unwrap().is_gateway());
+        let mut held = Vec::with_capacity(entries.len());
+        for e in &entries {
+            held.push(e.settled_lock().await);
+        }
         let running = self.usage().1;
         tracing::info!(running, "handing the machines over to the next daemon");
-        self.write_down().await;
+        for e in entries.iter().filter(|e| e.unsaved_use.load(Relaxed)) {
+            if let Err(err) = self.write_use(e) {
+                tracing::warn!(machine = e.snapshot().id, err = %err, "last use not written");
+            }
+        }
+        self.write_usage().await;
+        held
     }
 
     /// What the next daemon goes on from: the last uses not on the records yet, and the
@@ -1131,6 +1187,11 @@ impl Manager {
                 tracing::warn!(machine = e.snapshot().id, err = %err, "last use not written");
             }
         }
+        self.write_usage().await;
+    }
+
+    /// The usage measured up to now, written.
+    async fn write_usage(&self) {
         let now = Utc::now();
         self.measure(now).await;
         if let Err(err) = self
@@ -2420,6 +2481,7 @@ impl Manager {
             pending_since: None,
             init_version: String::new(),
             vmm_version: String::new(),
+            rest: Default::default(),
         };
         self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
         let mut src: Option<Arc<Entry>> = None;
@@ -4028,7 +4090,7 @@ impl Manager {
             if err.downcast_ref::<guestc::Closed>().is_some() {
                 MError::NotRunning("the machine went down during the command".into())
             } else {
-                MError::Other(err)
+                MError::Other(self.init_named(id, err))
             }
         })?;
         let _ = self.touch(id);
@@ -4038,6 +4100,16 @@ impl Manager {
             exit_code: out.code,
             timed_out: out.timed_out,
         })
+    }
+
+    /// A guest call's error with the machine's init named when it did not know the op (ADR
+    /// 0027): what an exec, a put, a get, and any op added later go through.
+    fn init_named(&self, id: &str, err: anyhow::Error) -> anyhow::Error {
+        let init = self
+            .entry(id)
+            .map(|e| e.snapshot().init_version)
+            .unwrap_or_default();
+        guestc::with_init(err, &init)
     }
 
     pub async fn put_file(&self, id: &str, req: api::PutFileRequest) -> Result<(), MError> {
@@ -4055,7 +4127,8 @@ impl Manager {
             self.inner.guest.put(&sock, &req.path, mode, data),
         )
         .await
-        .map_err(|_| MError::NotRunning("timeout".into()))??;
+        .map_err(|_| MError::NotRunning("timeout".into()))?
+        .map_err(|err| self.init_named(id, err))?;
         let _ = self.touch(id);
         Ok(())
     }
@@ -4064,7 +4137,8 @@ impl Manager {
         let sock = self.running_vsock(id, false).await?;
         let data = tokio::time::timeout(Duration::from_secs(60), self.inner.guest.get(&sock, path))
             .await
-            .map_err(|_| MError::NotRunning("timeout".into()))??;
+            .map_err(|_| MError::NotRunning("timeout".into()))?
+            .map_err(|err| self.init_named(id, err))?;
         let _ = self.touch(id);
         Ok(data)
     }
@@ -5117,6 +5191,7 @@ mod tests {
             pending_since: None,
             init_version: String::new(),
             vmm_version: String::new(),
+            rest: Default::default(),
         }
     }
 
@@ -9556,8 +9631,25 @@ mod tests {
             r.pid = pid;
             None
         });
+        // Its process gone: it exited while no daemon ran.
         h.add("m_lost", state::STARTING, 256);
-        assert_eq!(h.m.recover().await, (1, 1));
+        // Its process there, but mid-start: not one to take over, ended (what fails an upgrade).
+        let cut = h.add("m_cut", state::STARTING, 256);
+        let cut_pid = h
+            .host
+            .left_running("m_cut", &h.m.inner.cfg.run_dir().join("m_cut"));
+        cut.set_state(state::STARTING, |r| {
+            r.pid = cut_pid;
+            None
+        });
+        h.host.calls();
+        assert_eq!(h.m.recover().await, (1, 1, 1));
+        assert!(h.host.calls().contains(&format!("kill {cut_pid}")));
+        let cut = h.events_of("m_cut").pop().unwrap();
+        assert_eq!(
+            cut.message,
+            "left running by a previous daemon that could not hand it over: stopped"
+        );
         let adopted = h.events_of("m_ours").pop().unwrap();
         assert_eq!(adopted.reason, "adopted");
         assert_eq!(adopted.data, Some(json!({"pid": pid})));
@@ -9568,6 +9660,10 @@ mod tests {
             ("stopped", "warning")
         );
         assert_eq!(lost.data, Some(json!({"reason": "host"})));
+        assert_eq!(
+            lost.message,
+            "its process ended while no daemon ran: stopped"
+        );
     }
 
     /// The next line of a streamed answer, as JSON, within five seconds.
@@ -10249,7 +10345,7 @@ mod tests {
             None
         });
         h.host.http("10.64.1.2", 8080, 503);
-        assert_eq!(h.m.recover().await, (1, 0));
+        assert_eq!(h.m.recover().await, (1, 0, 0));
         // Not ready until its readiness probe passes again: results are not kept.
         let m = h.m.get("m_ours").unwrap();
         assert_eq!((m.state.as_str(), m.ready), (state::RUNNING, false));
@@ -11409,7 +11505,7 @@ mod tests {
         let m = h.m.create(h.request("web")).await.unwrap();
         h.m.touch(&m.id).unwrap();
         h.host.calls();
-        h.m.hand_over().await;
+        let _held = h.m.hand_over().await;
         assert_eq!(
             h.host.calls(),
             Vec::<String>::new(),
@@ -11425,7 +11521,52 @@ mod tests {
             "the last use is on the record"
         );
         // What the next daemon's start finds: the machine, still running, adopted.
-        assert_eq!(h.m.recover().await, (1, 0));
+        assert_eq!(h.m.recover().await, (1, 0, 0));
+    }
+
+    #[test]
+    fn a_record_keeps_what_a_newer_daemon_wrote() {
+        // A record with a field this daemon does not know (a newer one's, before a rollback).
+        let mut v = serde_json::to_value(record()).unwrap();
+        v["checkpoint"] = json!({"name": "before-migration", "vmm": "v1.18.0/x"});
+        let r: Record = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(r.rest.keys().collect::<Vec<_>>(), ["checkpoint"]);
+        // Rewritten as it came: the field is kept, nothing else moves.
+        assert_eq!(serde_json::to_value(&r).unwrap(), v);
+        // A record of this daemon's carries nothing more.
+        let mine = serde_json::to_value(record()).unwrap();
+        let back: Record = serde_json::from_value(mine.clone()).unwrap();
+        assert!(back.rest.is_empty());
+        assert_eq!(serde_json::to_value(&back).unwrap(), mine);
+    }
+
+    #[tokio::test]
+    async fn a_hand_over_waits_for_a_transition_and_lets_none_begin() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let a = h.m.create(h.request("a")).await.unwrap();
+        let b = h.m.create(h.request("b")).await.unwrap();
+        // A stop under way when the hand-over is asked: its guest takes a while to end.
+        *h.host.stops.lock().unwrap() = Duration::from_millis(300);
+        let m = h.m.clone();
+        let id = a.id.clone();
+        let stop =
+            tokio::spawn(async move { m.stop(&id, Duration::from_secs(5), false, None).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let held = h.m.hand_over().await;
+        // The stop finished before the hand-over wrote anything: its record says so.
+        assert_eq!(h.stored(&a.id).unwrap().state, state::STOPPED);
+        assert!(stop.await.unwrap().is_ok());
+        // While the hand-over's locks are held, a stop asked now does not begin.
+        let m = h.m.clone();
+        let id = b.id.clone();
+        let late =
+            tokio::spawn(async move { m.stop(&id, Duration::from_secs(5), false, None).await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!late.is_finished());
+        assert_eq!(h.stored(&b.id).unwrap().state, state::RUNNING);
+        drop(held);
+        late.await.unwrap().unwrap();
     }
 
     /// The machine's process as the manager holds it.

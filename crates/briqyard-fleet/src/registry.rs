@@ -58,7 +58,7 @@ pub struct HostRec {
     pub conditions: Vec<Condition>,
     /// The daemon's last start, from the last heartbeat (ADR 0027).
     #[serde(default)]
-    pub started: DaemonStart,
+    pub started: Option<DaemonStart>,
 }
 
 /// Whether a host in this state serves its machines. Placement takes only `ready`; a host

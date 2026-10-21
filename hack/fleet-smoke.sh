@@ -69,7 +69,6 @@ if sudo -n test -d "$REL" 2>/dev/null; then
   for h in $OTHERS; do briqyard host drain "$h"; done
   U=$(briqyard machine run --image alpine:3.20 --name up --tenant "$T-up" --memory 128 -- sleep 3600 | jq -r .id)
   for h in $OTHERS; do briqyard host undrain "$h"; done
-  for i in $(seq 1 20); do [ "$(host_field "$UP" .started.at)" != null ] && break; sleep 1; done
   before=$(host_field "$UP" .started.at)
   build=$(briqyard --version | awk '{print $2}')
   out=$(briqyard host upgrade "$UP" --release "file://$REL" 2>&1) || true

@@ -300,7 +300,7 @@ async fn status(State(st): S) -> Json<api::Status> {
         disk_free_mb: st.mgr.disk_free_mb().await,
         tls_fingerprint: st.tls_fingerprint.clone(),
         conditions: st.mgr.conditions(),
-        started: st.mgr.started(),
+        started: Some(st.mgr.started()),
         vmm_version: st.mgr.vmm_version(),
     })
 }

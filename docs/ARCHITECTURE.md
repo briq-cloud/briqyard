@@ -282,7 +282,8 @@ Every binary says its version, the release and the commit (`0.1.0+fdad892eeefa`,
 `/v1/status`, the heartbeat, `host ls`; the init in its `pong`, kept as the machine's
 `init_version`. The wire between versions is additive: a field added has a default, nothing is
 renamed or removed, unknown fields and values are ignored. The daemon's stop (SIGTERM) suspends
-every running machine, and its next start boots each one again; SIGUSR2 hands them over instead:
+every running machine, and its next start boots each one again; SIGUSR2 hands them over instead,
+once every transition under way has ended:
 the daemon exits and leaves them running, and the next one adopts them. `host upgrade` through
 the fleet (`upgrade.rs`) marks the host `upgrading`, runs the bootstrap script on it again with
 the release (whose last step is that hand-over), waits for a heartbeat from a new start of the

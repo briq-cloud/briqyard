@@ -222,13 +222,23 @@ async fn run(args: Args) -> Result<()> {
     }
     let down = async {
         match hand_over.load(std::sync::atomic::Ordering::SeqCst) {
-            true => mgr.hand_over().await,
-            false => mgr.close().await,
+            true => Some(mgr.hand_over().await),
+            false => {
+                mgr.close().await;
+                None
+            }
         }
     };
-    tokio::time::timeout(std::time::Duration::from_secs(60), down)
+    let held = tokio::time::timeout(std::time::Duration::from_secs(60), down)
         .await
-        .ok();
+        .ok()
+        .flatten();
+    if held.is_some() {
+        // A hand-over ends the process here, every machine's lock held: no transition begins
+        // in what is left of it (ADR 0027).
+        tracing::info!("handed over");
+        std::process::exit(0);
+    }
     Ok(())
 }
 

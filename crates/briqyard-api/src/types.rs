@@ -1436,22 +1436,27 @@ pub struct Host {
     /// What its last heartbeat said (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
-    /// Its daemon's last start, from its heartbeat (ADR 0027).
-    #[serde(default)]
-    pub started: DaemonStart,
+    /// Its daemon's last start, from its heartbeat; absent from a daemon older than ADR 0027.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<DaemonStart>,
 }
 
 /// When a daemon started and what it did with the machines the previous one left running
 /// (ADR 0027): an upgrade waits for a start after its install, and fails one that stopped a
-/// machine instead of handing it over.
+/// machine instead of taking it over. Each one stopped is booted again when its sleep window
+/// had not run out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonStart {
     pub at: DateTime<Utc>,
     /// Left running and taken over.
     pub adopted: usize,
-    /// Left running and found gone or not answering: marked stopped, and booted again when
-    /// its sleep window had not run out.
+    /// Left running, its process still there but not answering for it: ended and marked
+    /// stopped. What an upgrade fails on.
     pub stopped: usize,
+    /// Left running and found without its process (it exited while no daemon ran): marked
+    /// stopped.
+    #[serde(default)]
+    pub gone: usize,
 }
 
 /// POST /v1/hosts/{id}/upgrade (fleet only, ADR 0027).
@@ -1495,9 +1500,9 @@ pub struct RegisterHostRequest {
     /// The host's conditions (ADR 0021): the fleet places nothing new while one is true.
     #[serde(default)]
     pub conditions: Vec<Condition>,
-    /// The daemon's start (ADR 0027).
-    #[serde(default)]
-    pub started: DaemonStart,
+    /// The daemon's start; absent from a daemon older than ADR 0027.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<DaemonStart>,
 }
 
 /// GET /v1/status.
@@ -1518,9 +1523,9 @@ pub struct Status {
     /// Memory and disk pressure, as the tick last found them (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
-    /// The daemon's start (ADR 0027).
-    #[serde(default)]
-    pub started: DaemonStart,
+    /// The daemon's start; absent from a daemon older than ADR 0027.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<DaemonStart>,
     /// What a machine booted now runs under: Firecracker's version and the host kernel's
     /// release (ADR 0027).
     #[serde(default)]
@@ -2550,7 +2555,6 @@ mod tests {
         expected["version"] = json!("");
         expected["tls_fingerprint"] = json!("");
         expected["conditions"] = json!([]);
-        expected["started"] = json!({"at": "1970-01-01T00:00:00Z", "adopted": 0, "stopped": 0});
         let h: Host = round_trip(input, expected);
         assert_eq!(h.note, "");
         let h: Host = same(json!({
@@ -2561,10 +2565,10 @@ mod tests {
             "tls_fingerprint": "ab01",
             "conditions": [{"type": "disk_pressure", "status": true,
                 "since": "2026-01-02T03:04:05Z", "message": "pool 4% free"}],
-            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0}
+            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0, "gone": 1}
         }));
         assert_eq!(h.tenants, vec!["t1", "t2"]);
-        assert_eq!(h.started.adopted, 2);
+        assert_eq!(h.started.map(|s| (s.adopted, s.gone)), Some((2, 1)));
         assert_eq!(
             under_pressure(&h.conditions).map(|c| c.kind.as_str()),
             Some(condition::DISK_PRESSURE)
@@ -2585,7 +2589,7 @@ mod tests {
                 "id": "h1", "url": "http://10.0.0.5:7420", "region": "",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
                 "machines": 0, "tenants": [], "version": "", "disk_free_mb": 0,
-                "tls_fingerprint": "", "conditions": [], "started": {"at": "1970-01-01T00:00:00Z", "adopted": 0, "stopped": 0}
+                "tls_fingerprint": "", "conditions": []
             }),
         );
         assert_eq!(r.region, "");
@@ -2596,7 +2600,7 @@ mod tests {
             "tls_fingerprint": "ab01",
             "conditions": [{"type": "memory_pressure", "status": false,
                 "since": "2026-01-02T03:04:05Z", "message": "512 MB of 65536 committed (0%)"}],
-            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0}
+            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0, "gone": 1}
         }));
         assert_eq!(r.disk_free_mb, 100000);
         assert_eq!(r.tls_fingerprint, "ab01");
@@ -2615,7 +2619,7 @@ mod tests {
                 "version": "0.1.0", "host_id": "h1",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
                 "machines": 3, "running": 1, "disk_free_mb": 0, "tls_fingerprint": "",
-                "conditions": [], "started": {"at": "1970-01-01T00:00:00Z", "adopted": 0, "stopped": 0}, "vmm_version": ""
+                "conditions": [], "vmm_version": ""
             }),
         );
         assert_eq!(s.running, 1);
@@ -2629,7 +2633,7 @@ mod tests {
                 {"type": "disk_pressure", "status": false, "since": "2026-01-02T03:04:05Z",
                  "message": "pool 50% free"}
             ],
-            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0}, "vmm_version": "v1.17.0/6.8.0-45-generic"
+            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0, "gone": 1}, "vmm_version": "v1.17.0/6.8.0-45-generic"
         }));
         assert_eq!(
             under_pressure(&s.conditions).map(|c| c.kind.as_str()),

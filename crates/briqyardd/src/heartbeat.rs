@@ -30,7 +30,7 @@ pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, m
             disk_free_mb: mgr.disk_free_mb().await,
             tls_fingerprint: tls_fingerprint.clone(),
             conditions: mgr.conditions(),
-            started: mgr.started(),
+            started: Some(mgr.started()),
         };
         let r = client
             .post(format!(
