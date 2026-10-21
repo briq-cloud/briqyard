@@ -505,7 +505,9 @@ briqyard host add <public ip> --address 10.42.0.11 --region gra
 briqyard host ls     # within two minutes: the note, then ready
 ```
 
-The note names the SSH key pinned (`SHA256:…`): compare it with `ssh-keygen -lf
+Putting the vRack address on its interface runs `netplan apply`, which renews the public
+interface's DHCP lease too: a second's pause, SSH sessions survive. The note names the SSH key
+pinned (`SHA256:…`): compare it with `ssh-keygen -lf
 /etc/ssh/ssh_host_ed25519_key.pub` in your own session. Then the API certificate pinned, then
 `ready` at the first heartbeat. A failed attempt is in the note and tried again every two
 minutes; fix the cause, nothing to undo.

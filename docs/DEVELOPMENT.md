@@ -84,7 +84,8 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
 
 fc2 has two interfaces (`lima0`, the default route, and `eth0`), so it stands in for an OVH
 server when a bootstrap change needs exercising (ADR 0028). Under the lock, fc2's own host
-parked first (`systemctl stop briqyardd`, `zpool export byard`, `/var/lib/briqyard` and
+parked first (`systemctl stop briqyardd`, `zpool export byard`, its empty mountpoints under
+`/byard` removed, which `zpool create` will not mount over, `/var/lib/briqyard` and
 `/etc/briqyard` moved aside), as root on fc2:
 
 ```bash
@@ -102,7 +103,8 @@ A fleet on fc2 itself (`listen: 127.0.0.1:7431`, `provisioner.bootstrap`: `enabl
 `briqyard host add 192.168.64.2 --address 10.99.0.2`: the fleet bootstraps fc2 over SSH as it
 would an OVH server (the free space of `$D0` mirrored with `$D1`, `10.99.0.2` on `byvrack0`,
 `lima0` closed but for SSH, both keys pinned), and `hack/e2e.sh` runs on fc2 against
-`https://10.99.0.2:7420` with the token and the fingerprint. Undo it all after (the firewall
+`https://10.99.0.2:7420` with the token and the fingerprint, with `backup.store` and at most
+`capacity.memory_mb: 4096` added (fc2 has 6 GB and no swap: more overcommit hangs it). Undo it all after (the firewall
 unit and table, the netplan file, the dummy, the pool, the loops, the ARC cap), and put fc2's
 host back (`zpool import -d /var/lib/briqyard byard`).
 
