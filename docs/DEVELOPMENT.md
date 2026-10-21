@@ -127,7 +127,15 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   limits (the host's per vCPU under a machine's own at boot, a new size's at the next boot, a
   live change and a refused one, a stopped machine's at its start, the drive and metrics
   requests Firecracker gets, metrics lines added per machine across boots, the jail's
-  `cpu.weight`). What still needs the host: a tenant's first create (its bridge and
+  `cpu.weight`), snapshots and restore (ADR 0031: named, both disks at one instant, deleted by
+  name; a restore that swaps the disk, a newer snapshot and a fork kept on the retired disk, and
+  back again with nothing retired left; a deleted snapshot a retired disk hangs from freed with
+  it; a fork's destroy freeing the retired disk it held; a source destroyed under a fork of its
+  retired disk; a backup after a restore continuing from an ancestor, or whole, and restorable;
+  `If-Match` and a stopped machine left stopped; a restore cut short finished by the daemon and
+  by a start; a snapshot with memory resumed while the spec is the same, cold after a change; a
+  new image dropping the snapshots' root halves; a wake during a stop). What still needs the
+  host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
@@ -152,11 +160,15 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   receiving a line printed after it began and ending at the destroy), disk limits (a machine's
   own over the host's for 2 vCPUs; at 4 MB/s, 32 MiB written to the volume in 5 s or more and
   16 MiB read from the root disk in 2 s or more, with O_DIRECT; `cpu.weight` 200; lifted live;
-  set while suspended and in force after the resume; throttling on `/metrics`), exec sessions (`-i`
-  streaming stdin, stderr apart and the code; `-it` driven by `hack/exec-tty.py`: a terminal of
-  the size sent, a resize followed, the exit code; the client's close hanging up a tty command
-  and killing a piped one; the `session_opened` event; a machine with a session open kept awake
-  past its window, asleep once it closed). 151 checks.
+  set while suspended and in force after the resume; throttling on `/metrics`), snapshots (files on the volume and the root disk back after a
+  restore, a running machine booted again, a fork made after the snapshot still working, a backup
+  after the restore continuing from the one before the snapshot and restoring to the machine's
+  content, the newer snapshot restored and the next backup whole, a snapshot with memory resumed
+  with `/tmp` and the uptime kept), exec sessions (`-i` streaming stdin, stderr apart and the
+  code; `-it` driven by `hack/exec-tty.py`: a terminal of the size sent, a resize followed, the
+  exit code; the client's close hanging up a tty command and killing a piped one; the
+  `session_opened` event; a machine with a session open kept awake past its window, asleep once
+  it closed). 166 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
   relayed. 21 checks.
