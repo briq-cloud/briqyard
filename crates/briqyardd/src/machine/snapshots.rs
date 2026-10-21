@@ -399,19 +399,18 @@ impl Manager {
                 .ok_or_else(|| anyhow!("snapshot {} of the {disk} disk is gone", s.id))?;
             self.swap(&r, disk, &from, &s.id).await?;
         }
-        let resume = s.memory.as_deref() == Some(memory_spec(&r).as_str());
+        let kept = self.memory_files(&r, &s.id);
+        let resume = s.memory.as_deref() == Some(memory_spec(&r).as_str())
+            && kept.iter().all(|f| f.exists());
         if resume {
             let jail = self.jail_for(&r).map(|j| j.base);
             let dir = self.inner.cfg.run_dir().join(&r.id);
-            for (from, to) in self.memory_files(&r, &s.id).iter().zip(fc::snapshot_files(
-                &dir,
-                jail.as_deref(),
-                &r.id,
-            )) {
+            for (from, to) in kept
+                .iter()
+                .zip(fc::snapshot_files(&dir, jail.as_deref(), &r.id))
+            {
                 let _ = std::fs::remove_file(&to);
-                if from.exists() {
-                    std::fs::hard_link(from, &to).context("the memory snapshot")?;
-                }
+                std::fs::hard_link(from, &to).context("the memory snapshot")?;
             }
         }
         {

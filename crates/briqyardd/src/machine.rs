@@ -5220,6 +5220,7 @@ mod tests {
             let snapshot = b.dir.join("snap.mem");
             let resumed = b.resume && snapshot.exists();
             let _ = std::fs::remove_file(&snapshot);
+            let _ = std::fs::remove_file(b.dir.join("snap.state"));
             let pid = self
                 .next_pid
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -5276,6 +5277,7 @@ mod tests {
 
         async fn snapshot(&self, vm: &fc::Vm) -> Result<()> {
             self.record(format!("snapshot {}", vm.pid));
+            std::fs::write(vm.dir.join("snap.state"), b"state")?;
             std::fs::write(vm.dir.join("snap.mem"), b"memory")?;
             Ok(())
         }
