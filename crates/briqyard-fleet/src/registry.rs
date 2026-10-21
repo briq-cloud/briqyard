@@ -55,6 +55,10 @@ pub struct HostRec {
     /// Memory and disk pressure, from the last heartbeat (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    /// The key of the host's pool (ADR 0026), made the first time the host asks for it and
+    /// served to that host alone; never in `to_api`, gone with the record.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pool_key: String,
 }
 
 /// The host part of a URL (`http://10.0.0.5:7420` → `10.0.0.5`).
@@ -251,6 +255,20 @@ impl Registry {
             self.tenants.entry(t).or_insert_with(|| id.clone());
         }
         self.pinned_at.retain(|t, _| self.tenants.contains_key(t));
+    }
+
+    /// The pool key of a host, made now when it has none: 32 random bytes as 64 hex digits,
+    /// ZFS's `hex` key format. The caller writes the registry before it hands the key out, so
+    /// a key in use is never one only memory held.
+    pub fn pool_key(&mut self, id: &str) -> Option<String> {
+        let h = self.hosts.get_mut(id)?;
+        if h.pool_key.is_empty() {
+            use rand::RngCore;
+            let mut b = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut b);
+            h.pool_key = b.iter().map(|x| format!("{x:02x}")).collect();
+        }
+        Some(h.pool_key.clone())
     }
 
     /// Drops a host and everything indexed to it.
@@ -457,6 +475,7 @@ mod tests {
             note: String::new(),
             bootstrap_attempts: 0,
             conditions: vec![],
+            pool_key: String::new(),
         }
     }
 

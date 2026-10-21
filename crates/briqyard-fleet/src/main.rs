@@ -69,12 +69,24 @@ impl AppState {
 
     /// Writes the registry. A failure is logged at `error` and returned: a request answers
     /// 500 with it, a background task has nothing more to do with it.
+    /// The file is the fleet's alone (`0600`): it holds every host's token and pool key.
     fn save(&self) -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
         let reg = self.reg.lock().unwrap().clone();
         let tmp = self.state_path.with_extension("json.tmp");
         let written = serde_json::to_vec_pretty(&reg)
             .map_err(std::io::Error::other)
-            .and_then(|data| std::fs::write(&tmp, data))
+            .and_then(|data| {
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&tmp)?;
+                f.write_all(&data)?;
+                f.sync_all()
+            })
             .and_then(|_| std::fs::rename(&tmp, &self.state_path));
         if let Err(e) = &written {
             tracing::error!(path = %self.state_path.display(), err = %e, "write the registry");
@@ -133,6 +145,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         note: String::new(),
         bootstrap_attempts: 0,
         conditions: vec![],
+        pool_key: String::new(),
     }
 }
 
@@ -145,7 +158,13 @@ async fn run(args: Args) -> Result<()> {
         return Err(anyhow!("config {} not found", args.config.display()));
     };
     let cfg = config::Config::load(path)?;
-    std::fs::create_dir_all(&cfg.state_dir)?;
+    // The registry holds every host's token and pool key: the fleet's alone.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(&cfg.state_dir)?;
+        std::fs::set_permissions(&cfg.state_dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("mode of {}", cfg.state_dir.display()))?;
+    }
     let state_path = cfg.state_dir.join("registry.json");
     let mut reg: Registry = std::fs::read(&state_path)
         .ok()
@@ -209,6 +228,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/hosts", get(list_hosts))
         .route("/v1/hosts/register", post(register_host))
+        .route("/v1/hosts/key", post(host_key))
         .route("/v1/hosts/order", post(order_host))
         .route("/v1/hosts/:id/drain", post(drain_host))
         .route("/v1/hosts/:id/retire", post(retire_host))
@@ -290,8 +310,9 @@ fn bearer(headers: &HeaderMap) -> &str {
 
 async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Response {
     let path = req.uri().path().to_string();
-    // A heartbeat presents the host's own token, checked against its record by the handler.
-    let open = path == "/healthz" || path == "/v1/hosts/register";
+    // A heartbeat and a key request present the host's own token, checked against its record
+    // by the handler.
+    let open = path == "/healthz" || path == "/v1/hosts/register" || path == "/v1/hosts/key";
     if !open
         && !st.cfg.token.is_empty()
         && !api::constant_eq(bearer(req.headers()).as_bytes(), st.cfg.token.as_bytes())
@@ -345,6 +366,64 @@ async fn list_hosts(State(st): S) -> Json<Vec<api::Host>> {
     Json(hosts)
 }
 
+/// The record a host's own call belongs to: the one host at the address it advertises, when
+/// the call presents that host's token. Nothing else passes, so no host can speak for another.
+/// `daemon` is what the caller calls itself, for the log.
+fn the_host<'a>(
+    reg: &'a Registry,
+    url: &str,
+    headers: &HeaderMap,
+    daemon: &str,
+) -> Result<&'a HostRec, Refusal> {
+    let Some(rec) = reg.expecting(url) else {
+        tracing::warn!(
+            daemon,
+            url,
+            "host call refused: no host expected at this address"
+        );
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "unknown_host",
+            format!(
+                "no host is expected at {}: order one, or list it under hosts: with its token",
+                url_host(url)
+            ),
+        ));
+    };
+    if rec.token.is_empty() || !api::constant_eq(bearer(headers).as_bytes(), rec.token.as_bytes()) {
+        tracing::warn!(
+            host = rec.id,
+            daemon,
+            "host call refused: not the host's token"
+        );
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "the host's own token is required",
+        ));
+    }
+    Ok(rec)
+}
+
+/// A host's pool key (ADR 0026), for the host alone: asked by its bootstrap to create the
+/// pool, and by its daemon at a start that finds the key not loaded. Made at the first ask
+/// and written to the registry before it is answered.
+async fn host_key(
+    State(st): S,
+    headers: HeaderMap,
+    Json(req): Json<api::HostKeyRequest>,
+) -> Result<Response, Refusal> {
+    let (id, key) = {
+        let mut reg = st.reg.lock().unwrap();
+        let id = the_host(&reg, &req.url, &headers, "")?.id.clone();
+        let key = reg.pool_key(&id).expect("the record was just found");
+        (id, key)
+    };
+    st.save().map_err(registry_error)?;
+    tracing::info!(host = id, "pool key served");
+    Ok(Json(api::HostKey { key }).into_response())
+}
+
 /// A daemon's heartbeat. It is taken for the one host record at its address, when it presents
 /// that host's token: the one the bootstrap gave an ordered host, or the one `hosts:` lists.
 /// Nothing else may register, so no host can speak for another.
@@ -356,38 +435,7 @@ async fn register_host(
     let now = Utc::now();
     {
         let mut reg = st.reg.lock().unwrap();
-        let rec = match reg.expecting(&req.url) {
-            Some(r) => r,
-            None => {
-                tracing::warn!(
-                    daemon = req.id,
-                    url = req.url,
-                    "registration refused: no host expected at this address"
-                );
-                return Err(err(
-                    StatusCode::FORBIDDEN,
-                    "unknown_host",
-                    format!(
-                        "no host is expected at {}: order one, or list it under hosts: with its token",
-                        url_host(&req.url)
-                    ),
-                ));
-            }
-        };
-        if rec.token.is_empty()
-            || !api::constant_eq(bearer(&headers).as_bytes(), rec.token.as_bytes())
-        {
-            tracing::warn!(
-                host = rec.id,
-                daemon = req.id,
-                "registration refused: not the host's token"
-            );
-            return Err(err(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "the host's own token is required",
-            ));
-        }
+        let rec = the_host(&reg, &req.url, &headers, &req.id)?;
         if let Err(why) =
             registry::tls_matches(&rec.tls_fingerprint, &req.tls_fingerprint, &req.url)
         {
@@ -425,6 +473,7 @@ async fn register_host(
                 note: String::new(),
                 bootstrap_attempts: 0,
                 conditions: req.conditions,
+                pool_key: String::new(),
             },
             now,
         );
@@ -519,6 +568,7 @@ fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
         note: server.note,
         bootstrap_attempts: 0,
         conditions: vec![],
+        pool_key: String::new(),
     };
     st.reg.lock().unwrap().hosts.insert(id, h.clone());
     st.save()?;

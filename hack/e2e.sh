@@ -11,6 +11,11 @@ bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 cleanup() {
   echo "cleanup"
+  # The encryption section moves the pool's key away for a moment: put it back first.
+  if [ -n "${KEY_FILE:-}" ] && sudo test -f "$KEY_FILE.e2e"; then
+    sudo mv "$KEY_FILE.e2e" "$KEY_FILE"
+    for i in $(seq 1 60); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  fi
   for t in "$T" "$T-eg" "$T-gw" "$T-q"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
@@ -439,6 +444,39 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   check "one boot"         '[ "$(briqyard machine logs "$K" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
   briqyard machine stop "$K" >/dev/null
   check "stop after crash" '[ "$(briqyard machine get "$K" | jq -r .state)" = stopped ]'
+
+  echo "== encryption at rest: the pool, the daemon's files on it, its key loaded at start"
+  cfg() { sudo sed -n "s/^$1//p" /etc/briqyard/config.yaml; }
+  POOL=$(cfg '  pool: '); POOL=${POOL:-byard}
+  DATA=$(cfg 'data_dir: '); DATA=${DATA:-/var/lib/briqyard}
+  KEY_FILE=$(cfg '  key: file:'); KEY_FILE=${KEY_FILE:-/etc/briqyard/pool.key}
+  key=$(sudo tr -d ' \n' < "$KEY_FILE")
+  zget() { sudo zfs get -H -o value "$@"; }
+  check "the pool is encrypted"          '[ "$(zget encryption "$POOL")" = aes-256-gcm ] && [ "$(zget encryptionroot "$POOL")" = "$POOL" ]'
+  check "every dataset under it is"      '! zget -r -t filesystem,volume encryption "$POOL" | grep -qvx aes-256-gcm'
+  on_pool() { for d in state run images jail; do [ "$(findmnt -n -o SOURCE --target "$DATA/$d")" = "$POOL/$d" ] || return 1; done; }
+  check "records, runs, images, jails on the pool" 'on_pool'
+  check "the key in none of the daemon's files"    '! sudo grep -rqsF -D skip "$key" "$DATA" --exclude=pool.img'
+  check "nor in its log"                 '! sudo journalctl -u briqyardd -b -o cat | grep -qF "$key"'
+  # A reboot, as the pool sees it: the daemon stopped, the pool's filesystems unmounted and
+  # its key unloaded. The key file away, the daemon waits and says why; back, it starts.
+  lock() {
+    sudo systemctl stop briqyardd &&
+      sudo zfs list -H -o name,mounted -t filesystem -r "$POOL" | awk '$2 == "yes" { print $1 }' | tac | xargs -r -n1 sudo zfs unmount &&
+      sudo zfs unload-key "$POOL"
+  }
+  check "stopped and locked"             'lock && [ "$(zget keystatus "$POOL")" = unavailable ]'
+  sudo mv "$KEY_FILE" "$KEY_FILE.e2e"
+  since=$(date +%s)
+  sudo systemctl start briqyardd
+  for i in $(seq 1 20); do sudo journalctl -u briqyardd --since "@$since" -o cat | grep -q "pool locked" && break; sleep 1; done
+  check "without its key: no API, the reason logged" '! briqyard status >/dev/null 2>&1 && sudo journalctl -u briqyardd --since "@$since" -o cat | grep "pool locked" | grep -qF "$KEY_FILE"'
+  sudo mv "$KEY_FILE.e2e" "$KEY_FILE"
+  for i in $(seq 1 60); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  check "the key back: unlocked, started" 'briqyard status >/dev/null && [ "$(zget keystatus "$POOL")" = available ]'
+  briqyard machine start "$K" >/dev/null
+  check "a machine of before runs again" '[ "$(briqyard machine exec "$K" -- hostname)" = survivor ]'
+  briqyard machine stop "$K" >/dev/null
 fi
 
 echo

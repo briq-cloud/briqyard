@@ -52,19 +52,27 @@ pub struct Zfs {
     dev_root: PathBuf,
 }
 
-/// The filesystem dataset the jails live on (ADR 0014).
-const JAIL_DATASET: &str = "jail";
+/// Whether the pool is encrypted and its key loaded (ADR 0026).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Key {
+    /// Not encrypted: refused, every host's pool is.
+    None,
+    Loaded,
+    /// Encrypted, the key not loaded yet: `load_key` on `root`, the encryption root.
+    Locked {
+        root: String,
+    },
+}
 
 impl Zfs {
-    /// Opens the pool, makes the parent datasets the layout needs, and mounts `<pool>/jail`
-    /// at `jail_dir`: every chroot and memory snapshot then lands on the pool, not on `/`.
-    pub async fn new(pool: &str, jail_dir: &Path) -> Result<Self> {
+    /// Opens the pool. Nothing is made or mounted: its key may not be loaded yet (`key`,
+    /// `load_key`, then `layout`).
+    pub async fn new(pool: &str) -> Result<Self> {
         Self::with_paths(
             pool,
             &Tool::program("zfs"),
             &Tool::program("udevadm"),
             Path::new("/dev/zvol"),
-            jail_dir,
         )
         .await
     }
@@ -76,7 +84,6 @@ impl Zfs {
         binary: &Tool,
         udevadm: &Tool,
         dev_root: &Path,
-        jail_dir: &Path,
     ) -> Result<Self> {
         let z = Self {
             pool: pool.to_string(),
@@ -87,34 +94,91 @@ impl Zfs {
         z.run(&["list", "-H", "-o", "name", pool])
             .await
             .with_context(|| format!("zfs pool {pool}"))?;
-        for d in ["images", "m"] {
-            z.run(&["create", "-p", &z.ds(d)]).await?;
-        }
-        z.mount(JAIL_DATASET, jail_dir).await?;
         Ok(z)
     }
 
+    /// Makes the datasets the disks go under and mounts each filesystem of `mounts` (a name
+    /// under the pool, a directory) there: everything the daemon writes about its machines
+    /// lands on the pool, not on `/` (ADR 0014, 0026). Needs the key loaded.
+    pub async fn layout(&self, mounts: &[(&str, &Path)]) -> Result<()> {
+        self.run(&["create", "-p", &self.ds("m")]).await?;
+        for (name, dir) in mounts {
+            self.mount(name, dir).await?;
+        }
+        Ok(())
+    }
+
+    /// The pool's encryption: none, its key loaded, or locked with the root to unlock.
+    pub async fn key(&self) -> Result<Key> {
+        let status = self.get_ds(&self.pool, "keystatus").await?;
+        match status.as_str() {
+            "-" => Ok(Key::None),
+            "available" => Ok(Key::Loaded),
+            "unavailable" => Ok(Key::Locked {
+                root: self.get_ds(&self.pool, "encryptionroot").await?,
+            }),
+            other => Err(anyhow!("zfs keystatus of {}: {other:?}", self.pool)),
+        }
+    }
+
+    /// Loads the key of an encryption root (`Key::Locked`), given on stdin: never on a
+    /// command line, never in a file.
+    pub async fn load_key(&self, root: &str, key: &str) -> Result<()> {
+        self.run_input(
+            &["load-key", "-L", "prompt", root],
+            format!("{key}\n").as_bytes(),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Makes `name` a filesystem mounted at `dir`, whatever it was before: made, moved or
-    /// mounted as needed, nothing when it is already there.
+    /// mounted as needed, nothing when it is already there. Never over files: a directory
+    /// that holds some while the dataset is not mounted there is refused, since mounting
+    /// would hide them (records, a machine's files) from the daemon.
     async fn mount(&self, name: &str, dir: &Path) -> Result<()> {
         let ds = self.ds(name);
         let want = format!("mountpoint={}", dir.display());
-        if !self.exists(name).await? {
+        let exists = self.exists(name).await?;
+        let (at, mounted) = if exists {
+            (
+                self.get(name, "mountpoint").await? == dir.display().to_string(),
+                self.get(name, "mounted").await? == "yes",
+            )
+        } else {
+            (false, false)
+        };
+        if at && mounted {
+            return Ok(());
+        }
+        if std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some()) {
+            return Err(anyhow!(
+                "{} holds files and {ds} is not mounted there: they would be hidden. Move them \
+                 onto {ds} (mount it elsewhere, copy, empty the directory) or remove them",
+                dir.display()
+            ));
+        }
+        if !exists {
             self.run(&["create", "-o", &want, &ds]).await?;
             return Ok(());
         }
-        if self.get(name, "mountpoint").await? != dir.display().to_string() {
+        // Setting the mountpoint of a mounted filesystem moves it there.
+        if !at {
             self.run(&["set", &want, &ds]).await?;
         }
-        if self.get(name, "mounted").await? != "yes" {
+        if !mounted {
             self.run(&["mount", &ds]).await?;
         }
         Ok(())
     }
 
     async fn get(&self, name: &str, property: &str) -> Result<String> {
+        self.get_ds(&self.ds(name), property).await
+    }
+
+    async fn get_ds(&self, ds: &str, property: &str) -> Result<String> {
         let out = self
-            .run(&["get", "-H", "-o", "value", property, &self.ds(name)])
+            .run(&["get", "-H", "-o", "value", property, ds])
             .await?;
         Ok(out.trim().to_string())
     }
@@ -135,6 +199,30 @@ impl Zfs {
             .output()
             .await
             .context("run zfs")?;
+        Self::answer(args, out)
+    }
+
+    /// `run` with `input` on the command's stdin.
+    async fn run_input(&self, args: &[&str], input: &[u8]) -> Result<String> {
+        use tokio::io::AsyncWriteExt;
+        let mut child = self
+            .binary
+            .command()
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("run zfs")?;
+        let mut stdin = child.stdin.take().expect("piped");
+        // A command that exits without reading its input is answered by its status.
+        let _ = stdin.write_all(input).await;
+        drop(stdin);
+        let out = child.wait_with_output().await.context("run zfs")?;
+        Self::answer(args, out)
+    }
+
+    fn answer(args: &[&str], out: std::process::Output) -> Result<String> {
         if !out.status.success() {
             let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
             return Err(anyhow!(
@@ -597,14 +685,16 @@ pub(crate) mod fake {
 
     /// A stand-in for `zfs`, with the fake device root as its state: a directory per parent
     /// dataset, a file per volume or snapshot, and `<clone>.origin` naming the snapshot a
-    /// clone was made from (`promote` moves that snapshot and the source's older ones, in the
+    /// clone was made from (a filesystem, made with a mountpoint, is a directory; `promote` moves that snapshot and the source's older ones, in the
     /// order `snapshots.order` keeps, to the clone and makes the source the clone's clone, as
     /// ZFS does). Every call is appended to `calls`, one line each;
     /// `get` answers come from `answer.<property>` files when there is one, else `origin` and
     /// `clones` from the `.origin` files, and `list -p` (space) from `answer.space`; `busy` holds how many destroys still answer
     /// "dataset is busy". A stream is one line naming its snapshot and its base, sent once no
     /// `hold.send` file is there; a receive makes the dataset and the snapshot, and refuses
-    /// an increment whose base the dataset lacks, as ZFS does. Error texts are the real ones,
+    /// an increment whose base the dataset lacks, as ZFS does; `load-key` takes the line on its
+    /// stdin when it is the `key` file's and answers `keystatus` `available` from then on.
+    /// Error texts are the real ones,
     /// since the code matches on them.
     const FAKE: &str = r#"#!/bin/sh
 DEV="__DEV__"
@@ -631,6 +721,7 @@ case "$1" in
     if [ "$last" = "__POOL__" ] || [ -e "$DEV/$last" ]; then echo "$last"; exit 0; fi
     missing "$last";;
   create)
+    case "$*" in *mountpoint=*) mkdir -p "$DEV/$last"; exit 0;; esac
     if [ "$2" = "-p" ]; then mkdir -p "$DEV/$last"; exit 0; fi
     mkdir -p "$(dirname "$DEV/$last")"; : > "$DEV/$last"; exit 0;;
   clone)
@@ -673,6 +764,12 @@ case "$1" in
     fi
     mkdir -p "$(dirname "$DEV/$last")"; : > "$DEV/$last"; : > "$DEV/$last@$snap"
     echo "$last@$snap" >> "$DEV/snapshots.order"; exit 0;;
+  load-key)
+    read -r key
+    if [ "$key" != "$(cat "$DEV/key" 2>/dev/null)" ]; then
+      echo "Key load error: Incorrect key provided for '$last'." >&2; exit 255
+    fi
+    echo available > "$DEV/answer.keystatus"; exit 0;;
   get)
     for a in "$@"; do prop="$last_but_one"; last_but_one="$a"; done
     if [ -f "$DEV/answer.$prop" ]; then cat "$DEV/answer.$prop"; exit 0; fi
@@ -732,16 +829,26 @@ exit 0
             }
         }
 
+        /// The pool opened, its layout made: the image and jail filesystems in the temp dir.
         pub(crate) async fn open(self, pool: &str) -> Result<Fake> {
-            let zfs = Zfs::with_paths(
+            let zfs = self.pool(pool).await?;
+            zfs.layout(&[
+                ("images", &self.dir.path().join("images")),
+                ("jail", &self.jail),
+            ])
+            .await?;
+            Ok(Fake { dir: self.dir, zfs })
+        }
+
+        /// The pool opened, nothing made.
+        pub(crate) async fn pool(&self, pool: &str) -> Result<Zfs> {
+            Zfs::with_paths(
                 pool,
                 &Tool::script(&self.zfs),
                 &Tool::script(&self.udevadm),
                 &self.dev,
-                &self.jail,
             )
-            .await?;
-            Ok(Fake { dir: self.dir, zfs })
+            .await
         }
 
         pub(crate) fn answer(&self, prop: &str, value: &str) {
@@ -760,6 +867,10 @@ exit 0
 
         pub(crate) fn jail(&self) -> String {
             self.dir.path().join("jail").display().to_string()
+        }
+
+        pub(crate) fn images(&self) -> String {
+            self.dir.path().join("images").display().to_string()
         }
 
         /// The calls so far, then forgets them.
@@ -790,8 +901,9 @@ mod tests {
             f.calls(),
             vec![
                 "list -H -o name byard".to_string(),
-                "create -p byard/images".to_string(),
                 "create -p byard/m".to_string(),
+                "list -H -o name byard/images".to_string(),
+                format!("create -o mountpoint={} byard/images", f.images()),
                 "list -H -o name byard/jail".to_string(),
                 format!("create -o mountpoint={} byard/jail", f.jail()),
             ]
@@ -809,15 +921,18 @@ mod tests {
     /// when the config changed, mounted when it is not.
     #[tokio::test]
     async fn the_jail_dataset_follows_the_config() {
+        let jail = |s: &Scripts| {
+            std::fs::create_dir_all(s.dev.join("byard")).unwrap();
+            std::fs::create_dir_all(s.dev.join("byard/jail")).unwrap();
+        };
         let s = Scripts::new();
-        std::fs::create_dir_all(s.dev.join("byard")).unwrap();
-        std::fs::write(s.dev.join("byard/jail"), b"").unwrap();
+        jail(&s);
         s.answer("mountpoint", &format!("{}\n", s.jail.display()));
         s.answer("mounted", "yes\n");
         let f = s.open("byard").await.unwrap();
         let calls = f.calls();
         assert_eq!(
-            &calls[3..],
+            &calls[calls.len() - 3..],
             [
                 "list -H -o name byard/jail",
                 "get -H -o value mountpoint byard/jail",
@@ -826,22 +941,84 @@ mod tests {
         );
 
         let s = Scripts::new();
-        std::fs::create_dir_all(s.dev.join("byard")).unwrap();
-        std::fs::write(s.dev.join("byard/jail"), b"").unwrap();
+        jail(&s);
         s.answer("mountpoint", "/var/lib/briqyard/jail\n");
         s.answer("mounted", "no\n");
         let f = s.open("byard").await.unwrap();
         let calls = f.calls();
         assert_eq!(
-            &calls[3..],
+            &calls[calls.len() - 5..],
             [
                 "list -H -o name byard/jail".to_string(),
                 "get -H -o value mountpoint byard/jail".to_string(),
-                format!("set mountpoint={} byard/jail", f.jail()),
                 "get -H -o value mounted byard/jail".to_string(),
+                format!("set mountpoint={} byard/jail", f.jail()),
                 "mount byard/jail".to_string(),
             ]
         );
+    }
+
+    /// A filesystem is never mounted over files (ADR 0026): the records of a host whose state
+    /// is still on `/` would vanish under an empty dataset, and the daemon would read every
+    /// machine as gone. Where it is already mounted, what it holds is its own.
+    #[tokio::test]
+    async fn a_filesystem_is_never_mounted_over_files() {
+        let s = Scripts::new();
+        let state = s.jail.with_file_name("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("machines"), b"").unwrap();
+        let zfs = s.pool("byard").await.unwrap();
+        let err = zfs.layout(&[("state", &state)]).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&format!("{} holds files", state.display()))
+                && msg.contains("byard/state"),
+            "{msg}"
+        );
+        assert!(!s.dev.join("byard/state").exists(), "nothing was made");
+
+        // Mounted there already: nothing to do, whatever it holds.
+        std::fs::create_dir_all(s.dev.join("byard/state")).unwrap();
+        s.answer("mountpoint", &format!("{}\n", state.display()));
+        s.answer("mounted", "yes\n");
+        zfs.layout(&[("state", &state)]).await.unwrap();
+    }
+
+    /// The pool's key status, read from `keystatus` and, when locked, `encryptionroot`; the
+    /// key goes on stdin and a wrong one is the error ZFS gives.
+    #[tokio::test]
+    async fn the_key_is_read_and_loaded() {
+        let s = Scripts::new();
+        let zfs = s.pool("byard").await.unwrap();
+        s.answer("keystatus", "-\n");
+        assert_eq!(zfs.key().await.unwrap(), Key::None);
+        s.answer("keystatus", "available\n");
+        assert_eq!(zfs.key().await.unwrap(), Key::Loaded);
+        s.answer("keystatus", "unavailable\n");
+        s.answer("encryptionroot", "byard\n");
+        assert_eq!(
+            zfs.key().await.unwrap(),
+            Key::Locked {
+                root: "byard".into()
+            }
+        );
+        s.answer("keystatus", "\n");
+        assert!(zfs.key().await.is_err(), "an answer it cannot read");
+
+        s.answer("keystatus", "unavailable\n");
+        let good = "ab".repeat(32);
+        std::fs::write(s.dev.join("key"), &good).unwrap();
+        let err = zfs.load_key("byard", &"cd".repeat(32)).await.unwrap_err();
+        assert!(format!("{err:#}").contains("Incorrect key"), "{err:#}");
+        assert!(
+            !format!("{err:#}").contains(&"cd".repeat(32)),
+            "the key is not in the error"
+        );
+        zfs.load_key("byard", &good).await.unwrap();
+        assert_eq!(zfs.key().await.unwrap(), Key::Loaded);
+        let log = std::fs::read_to_string(s.dev.parent().unwrap().join("calls")).unwrap();
+        assert!(log.contains("load-key -L prompt byard"), "{log}");
+        assert!(!log.contains(&good), "never on a command line: {log}");
     }
 
     #[tokio::test]
@@ -1237,7 +1414,6 @@ mod tests {
             &Tool::program("/nonexistent/zfs"),
             &Tool::program("/nonexistent/udevadm"),
             Path::new("/dev/zvol"),
-            Path::new("/var/lib/briqyard/jail"),
         )
         .await
         .err()

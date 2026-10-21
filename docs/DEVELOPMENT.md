@@ -15,12 +15,25 @@ publishes both; `hack/bootstrap-host.sh` downloads the pinned release and kernel
 against their digests) into `/usr/local/bin/firecracker` and `/var/lib/briqyard/vmlinux` (and
 does everything else a host needs: run it on a fresh server).
 
-A ZFS pool for the disks. For development, a file-backed one:
+A ZFS pool for the disks, encrypted as on every host (ADR 0026; the daemon refuses one that is
+not). For development, a file-backed one with its key in a file, what `hack/config.dev.yaml`
+names (`storage.key: file:/etc/briqyard/pool.key`):
 
 ```bash
+mkdir -p -m 0700 /etc/briqyard
+(umask 077; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > /etc/briqyard/pool.key)
 truncate -s 30G /var/lib/briqyard/pool.img
-zpool create -o ashift=12 -O compression=lz4 -O atime=off byard /var/lib/briqyard/pool.img
+zpool create -o ashift=12 -O compression=lz4 -O atime=off -O encryption=aes-256-gcm \
+  -O keyformat=hex -O keylocation=prompt byard /var/lib/briqyard/pool.img < /etc/briqyard/pool.key
 ```
+
+A pool made before ADR 0026 is not encrypted and cannot be made so: on a dev VM, destroy every
+machine (`briqyard machine ls`, `machine rm`), stop the daemon, `zpool destroy byard`, remove
+`pool.img` and `/var/lib/briqyard/{state,run,images,jail,backups}` (the daemon never mounts
+its datasets over files), then make the pool as above. `fc2` is made again by the bootstrap
+(below) with its key from the fleet: remove its `/etc/briqyard/config.yaml` too, so the script
+writes `storage.key: fleet`. The dev VMs are aarch64, where OpenZFS's AES-GCM has no
+accelerated code: their disks are about 3.5 times slower encrypted (ADR 0026).
 
 Then `sudo briqyardd --config hack/config.dev.yaml`, and `briqyard status`.
 
@@ -77,7 +90,8 @@ limactl shell fc2 sudo bash -c 'cd /Users/uplab/projects/briqyard && BRIQYARD_PO
 cargo build --release -p briqyard   # the CLI, on the Mac
 PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   SECOND_HOST_STOP="limactl shell fc2 sudo systemctl stop briqyardd" \
-  SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" hack/fleet-two-hosts.sh
+  SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" \
+  SECOND_HOST_SH="limactl shell fc2 sudo" hack/fleet-two-hosts.sh
 ```
 
 ## Tests
@@ -123,7 +137,12 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   words), labels, quotas and logs follow (a listing by labels, the quota at create, fork,
   start and the gateway with its message and event, its use; a follow from the start and
   from a cursor, across rotations, ending at the destroy, its heartbeat and shutdown;
-  placement by region and the cross-region refusal through stub hosts in two regions). What still needs the host: a tenant's first create (its bridge and
+  placement by region and the cross-region refusal through stub hosts in two regions), the
+  pool's key (an unencrypted pool refused, a loaded key left alone, loaded from a file and from
+  a stub fleet as the host, each failed try saying why without the key, the wait ended by a
+  stop; `load-key` with the key on stdin; a filesystem never mounted over files; the fleet's
+  key route: made at the first ask, the same after, one per host, refused to any other token
+  or address, written `0600` before it is answered, in no listing, gone with the host). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
@@ -145,7 +164,11 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
   new image: Python 3.13, the volume's file kept), labels, a quota and a follow (`ls -l` selecting one machine, a
   refused selector, a second create refused 403 `quota` with its use and event, `logs -f`
-  receiving a line printed after it began and ending at the destroy). 132 checks.
+  receiving a line printed after it began and ending at the destroy), encryption at rest
+  (the pool and every dataset under it encrypted, records, runs, images and jails on it, the
+  key in none of the daemon's files nor its log; the daemon stopped and the pool locked as a
+  reboot leaves it: without its key file no API and the reason logged, the file back and it
+  starts, a machine of before runs again). 141 checks.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire). 19 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
@@ -154,7 +177,9 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   (ADR 0010). `--tenants 6 --per-tenant 4 --rounds 2 --crash`.
 - `hack/fleet-two-hosts.sh`: a fleet with two hosts: tenants placed on different hosts, calls
   forwarded to each, a host that stops answering marked down with its tenant's calls refused
-  (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back. 16 checks.
+  (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back;
+  with `SECOND_HOST_SH`, its pool locked while it is down and back encrypted and unlocked with
+  the fleet's key, the key on none of its files, in its log or in the fleet's host list. 21 checks.
 
 ## Layout
 

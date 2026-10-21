@@ -85,14 +85,23 @@ in a row is a `crash_loop` event. Probes are not use: they never keep a machine 
 
 ### Disks
 
-Every disk is a ZFS zvol in one pool (`byard` by default):
+Every disk is a ZFS zvol in one pool (`byard` by default), encrypted from its creation with
+the host's key (ADR 0026), and everything the daemon writes about a machine is on it:
 
 | Dataset | What |
 |---|---|
 | `byard/images/<digest>` | A root disk built from an image, with a `@base` snapshot |
 | `byard/m/<id>/root` | The machine's root disk, a clone of `@base` |
 | `byard/m/<id>/data` | The machine's data volume, when it has one |
-| `byard/jail` | A filesystem mounted at `jail_dir`: the chroots and the memory snapshots, on the pool, not on `/` |
+| `byard/images` | A filesystem mounted at `<data_dir>/images`: the images' metadata and extraction scratch |
+| `byard/jail` | A filesystem mounted at `jail_dir`: the chroots and the memory snapshots |
+| `byard/state`, `byard/run` | Filesystems mounted at `<data_dir>/state` (records, events, usage) and `<data_dir>/run` (config drives, consoles) |
+
+After a reboot the pool's key is not loaded: the daemon loads it (`zfs load-key`, the key on
+stdin) before it reads or mounts anything, from `storage.key`: the fleet, which keeps one key
+per host in its registry and serves it to that host alone, or a file on a single host. Until it
+has the key the daemon serves nothing and says why in its log. A dataset is never mounted
+over files. Hosts run without swap, and a Firecracker never dumps core.
 
 The root disk outlives restarts and stops, as on Fly. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
@@ -330,7 +339,10 @@ uid and gid of its own (`jail_uid_base` plus its place in the tenant's network, 
 machines share one); a new pid namespace; a cgroup v2 of its own; and Firecracker's seccomp
 filters. The daemon never mounts a guest filesystem. Guests reach only their tenant's bridge,
 the gateway's DNS, and the internet through NAT; nothing reaches a guest but the ingress.
-Secrets reach the guest on its config drive and never through the API's responses.
+Secrets reach the guest on its config drive and never through the API's responses. At rest
+everything of a machine (disks, records, config drives, consoles, memory snapshots) is on the
+encrypted pool: a disk or a server that leaves our hands is unreadable once the fleet forgets
+the host (ADR 0026).
 
 The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API and its
 endpoints listen on loopback unless told otherwise; on an address the internet could reach it

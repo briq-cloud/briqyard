@@ -20,7 +20,7 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 | 6 | Host loss | evacuate a host from its backups | the briqs' state while it happens | production |
 | 7 | Regions | region-aware placement (done) | the team's region to the briqyard adapter (done, #250) | a second region |
 | 8 | A team across hosts | WireGuard mesh or vRack (`MESH.md`) | nothing | a team outgrows a host |
-| 9 | Encryption at rest | the pool encrypted, one key per host held by the fleet, over TLS (decided; TLS built: ADR 0020) | nothing | the first real host |
+| 9 | Encryption at rest | the pool encrypted, one key per host held by the fleet (built: ADR 0026); the registry's backup, which holds every key | nothing | the first real host |
 | 10 | Usage and costs | usage buckets (ADR 0017, built) | collection, cost model, billing of disk and network | billing them |
 | 11 | Image pulls at scale | a registry mirror per region | nothing | many hosts |
 | 12 | CI and staging on real hardware | e2e on a KVM runner | the deploy smoke test against briqyard | staging |
@@ -102,7 +102,7 @@ On briqyard: a tenant lives on one host. `MESH.md` is the design (WireGuard, fle
 
 Fly today: volumes are encrypted at rest.
 
-On briqyard: datasets are plain. ZFS native encryption per tenant dataset is the mechanism; the open question is where keys live (on the host, unlocked at boot from the fleet, or per tenant from briq). Decide before production data.
+On briqyard (built, ADR 0026): the pool is encrypted at its creation, one key per host made and kept by the fleet, loaded by the daemon at start; everything of a machine is on the pool, and hosts run without swap. Missing: the fleet registry's backup (losing it loses every key, item 13), and backups leave the host decrypted (encrypt the bucket).
 
 ## 10. Usage and costs
 

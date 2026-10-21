@@ -1404,6 +1404,26 @@ pub struct RegisterHostRequest {
     pub conditions: Vec<Condition>,
 }
 
+/// `POST /v1/hosts/key` (fleet only): a host asks for its pool's key, with its own API token
+/// as the bearer, for the record at the address it advertises (ADR 0026).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostKeyRequest {
+    pub url: String,
+}
+
+/// The answer: the key of the host's pool, 64 hex digits (ZFS's `hex` key format).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct HostKey {
+    pub key: String,
+}
+
+/// Never printed: a `{:?}` of it would put the key in a log.
+impl std::fmt::Debug for HostKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostKey { .. }")
+    }
+}
+
 /// GET /v1/status.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {

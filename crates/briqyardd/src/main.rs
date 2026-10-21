@@ -14,6 +14,7 @@ mod machine;
 mod metrics;
 mod netw;
 mod objstore;
+mod poolkey;
 mod store;
 mod tls;
 mod usage;
@@ -113,11 +114,25 @@ async fn run(args: Args) -> Result<()> {
         None
     };
     let fingerprint = tls.as_ref().map(|(f, _)| f.clone()).unwrap_or_default();
-    let store = store::Store::open(&cfg.state_dir())?;
-    let zfs = zfs::Zfs::new(&cfg.storage.pool, &cfg.jail_base()).await?;
-    for d in [cfg.jail_base(), cfg.run_dir()] {
-        store::private_dir(&d)?;
+    // The pool is encrypted (ADR 0026) and everything of the machines is on it: its key is
+    // loaded before anything of it is read, and until it is, nothing starts.
+    let zfs = zfs::Zfs::new(&cfg.storage.pool).await?;
+    if !poolkey::unlock(&zfs, &cfg, terminated()).await? {
+        tracing::info!("stopped before the pool's key was loaded");
+        return Ok(());
     }
+    let mounts = cfg.pool_mounts();
+    zfs.layout(
+        &mounts
+            .iter()
+            .map(|(n, d)| (*n, d.as_path()))
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    for (_, d) in &mounts {
+        store::private_dir(d)?;
+    }
+    let store = store::Store::open(&cfg.state_dir())?;
     let mut images = image::Builder::new(
         zfs.clone(),
         cfg.image_dir(),
@@ -186,13 +201,7 @@ async fn run(args: Args) -> Result<()> {
         let handle = handle.clone();
         let watches = mgr.events().clone();
         tokio::spawn(async move {
-            let mut term =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("signal");
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = term.recv() => {}
-            }
+            terminated().await;
             tracing::info!("shutting down");
             // A watch never ends on its own: the server would wait for it.
             watches.close();
@@ -219,6 +228,16 @@ async fn run(args: Args) -> Result<()> {
         .await
         .ok();
     Ok(())
+}
+
+/// Resolves at SIGINT or SIGTERM.
+async fn terminated() {
+    let mut term =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
 }
 
 /// The API's certificate, made on the first call, and its fingerprint.

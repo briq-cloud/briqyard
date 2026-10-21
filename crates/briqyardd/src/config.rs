@@ -108,8 +108,18 @@ pub struct Registry {
 #[serde(default, deny_unknown_fields)]
 pub struct Storage {
     pub backend: String,
-    /// The ZFS pool (or dataset) that holds every disk.
+    /// The ZFS pool (or dataset) that holds every disk. Encrypted (ADR 0026).
     pub pool: String,
+    /// Where the pool's key comes from when it is not loaded (ADR 0026): `fleet` (asked of
+    /// `fleet.url` with the host's token) or `file:<absolute path>` (a single host).
+    pub key: String,
+}
+
+/// Where the pool's key comes from (`storage.key`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeySource {
+    Fleet,
+    File(PathBuf),
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -330,6 +340,7 @@ impl Default for Storage {
         Self {
             backend: "zfs".into(),
             pool: "byard".into(),
+            key: "file:/etc/briqyard/pool.key".into(),
         }
     }
 }
@@ -384,6 +395,7 @@ impl Config {
         if self.storage.pool.is_empty() {
             bail!("storage.pool is required");
         }
+        self.key_source()?;
         if self.root_disk_gb < 1 {
             bail!("root_disk_gb must be at least 1");
         }
@@ -452,6 +464,40 @@ impl Config {
             .map(|a| a.ip().is_loopback())
             .unwrap_or(false);
         self.api_tls && !loopback
+    }
+
+    /// Where the pool's key comes from, checked: the fleet needs a fleet to ask, as the host
+    /// it has a record for (its address and token); a file, an absolute path.
+    pub fn key_source(&self) -> Result<KeySource> {
+        let key = &self.storage.key;
+        if key == "fleet" {
+            let fleet = self.fleet.as_ref().filter(|f| !f.url.is_empty());
+            match fleet {
+                None => bail!("storage.key: fleet needs fleet.url"),
+                Some(f) if f.advertise.is_empty() => {
+                    bail!("storage.key: fleet needs fleet.advertise, the address the fleet knows the host at")
+                }
+                Some(_) if self.token.is_empty() => {
+                    bail!("storage.key: fleet needs token, the host's own, which the fleet checks")
+                }
+                Some(_) => return Ok(KeySource::Fleet),
+            }
+        }
+        match key.strip_prefix("file:").map(PathBuf::from) {
+            Some(p) if p.is_absolute() => Ok(KeySource::File(p)),
+            _ => bail!("storage.key: {key:?}: want fleet or file:<absolute path>"),
+        }
+    }
+
+    /// The filesystems of the pool the daemon's own files live on, and where each is mounted
+    /// (ADR 0014, 0026): nothing it writes about a machine stays on `/`.
+    pub fn pool_mounts(&self) -> [(&'static str, PathBuf); 4] {
+        [
+            ("images", self.image_dir()),
+            ("jail", self.jail_base()),
+            ("state", self.state_dir()),
+            ("run", self.run_dir()),
+        ]
     }
 
     /// The API certificate and its key (ADR 0020).
@@ -570,6 +616,10 @@ mod tests {
         assert_eq!(c.init, PathBuf::from("/usr/local/bin/briqyard-init"));
         assert_eq!(c.storage.backend, "zfs");
         assert_eq!(c.storage.pool, "byard");
+        assert_eq!(
+            c.key_source().unwrap(),
+            KeySource::File("/etc/briqyard/pool.key".into())
+        );
         assert!(c.registries.is_empty());
         assert_eq!(c.network.range, "10.64.0.0/10");
         assert!(c.network.upstream_dns.is_empty());
@@ -610,6 +660,55 @@ mod tests {
         assert_eq!(c.storage.pool, "byard");
     }
 
+    /// The pool's key comes from the fleet, as the host the fleet has a record for, or from
+    /// a file named by an absolute path; anything else is refused at load (ADR 0026).
+    #[test]
+    fn the_key_source_is_checked() {
+        let fleet =
+            "token: t\nfleet:\n  url: http://fleet:7430\n  advertise: http://10.0.0.5:7420\n";
+        let c = load(&format!("{fleet}storage:\n  key: fleet\n")).unwrap();
+        assert_eq!(c.key_source().unwrap(), KeySource::Fleet);
+        let c = load("storage:\n  key: file:/root/k\n").unwrap();
+        assert_eq!(c.key_source().unwrap(), KeySource::File("/root/k".into()));
+        for (yaml, why) in [
+            ("storage:\n  key: fleet\n", "fleet needs fleet.url"),
+            (
+                "token: t\nfleet:\n  url: http://fleet:7430\nstorage:\n  key: fleet\n",
+                "fleet needs fleet.advertise",
+            ),
+            (
+                "fleet:\n  url: http://fleet:7430\n  advertise: http://10.0.0.5:7420\nstorage:\n  key: fleet\n",
+                "fleet needs token",
+            ),
+            ("storage:\n  key: file:k\n", "want fleet or file:<absolute path>"),
+            ("storage:\n  key: /root/k\n", "want fleet or file:<absolute path>"),
+            ("storage:\n  key: \"\"\n", "want fleet or file:<absolute path>"),
+        ] {
+            let err = load(yaml).unwrap_err();
+            assert!(format!("{err:#}").contains(why), "{yaml}: {err:#}");
+        }
+    }
+
+    /// Everything the daemon writes about machines is on a filesystem of the pool.
+    #[test]
+    fn the_daemon_files_are_on_the_pool() {
+        let c = load("data_dir: /data\n").unwrap();
+        let mounts: Vec<(&str, String)> = c
+            .pool_mounts()
+            .iter()
+            .map(|(n, d)| (*n, d.display().to_string()))
+            .collect();
+        assert_eq!(
+            mounts,
+            [
+                ("images", "/data/images".to_string()),
+                ("jail", "/data/jail".to_string()),
+                ("state", "/data/state".to_string()),
+                ("run", "/data/run".to_string()),
+            ]
+        );
+    }
+
     #[test]
     fn a_missing_file_is_an_error_naming_it() {
         let err = Config::load(Some(Path::new("/nonexistent/briqyard.yaml"))).unwrap_err();
@@ -638,6 +737,7 @@ init: /opt/briqyard-init
 storage:
   backend: zfs
   pool: tank/byard
+  key: fleet
 registries:
   - host: ghcr.io
     username: bot
@@ -690,6 +790,7 @@ console_max_mb: 16
         assert!(c.pci);
         assert_eq!(c.init, PathBuf::from("/opt/briqyard-init"));
         assert_eq!(c.storage.pool, "tank/byard");
+        assert_eq!(c.key_source().unwrap(), KeySource::Fleet);
         assert_eq!(c.registries.len(), 1);
         assert_eq!(c.registries[0].host, "ghcr.io");
         assert_eq!(c.registries[0].username, "bot");

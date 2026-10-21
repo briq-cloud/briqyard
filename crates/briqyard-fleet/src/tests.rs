@@ -902,6 +902,66 @@ async fn a_registration_is_taken_only_for_the_host_that_expects_it() {
     );
 }
 
+/// A host's pool key (ADR 0026): made at its first ask and the same after, served to the host
+/// at its address with its own token and to nobody else, written (`0600`) before it is
+/// answered, in no listing, and gone with the record.
+#[tokio::test]
+async fn a_host_gets_its_own_pool_key_and_no_other() {
+    let host = |id: &str, n: u8| config::StaticHost {
+        id: id.into(),
+        url: format!("http://10.0.0.{n}:7420"),
+        token: format!("{id}-token"),
+        ..Default::default()
+    };
+    let f = fleet(
+        config::Config {
+            token: "api".into(),
+            hosts: vec![host("s1", 1), host("s2", 2)],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let ask = |n: u8| Some(serde_json::json!({ "url": format!("http://10.0.0.{n}:7420") }));
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(9)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(json(&body)["code"], "unknown_host");
+    for token in ["", "api", "s2-token"] {
+        let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", token, ask(1)).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "token {token:?}: {body}");
+    }
+    assert!(
+        f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty(),
+        "nothing made for a refused ask"
+    );
+
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(1)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let key = json(&body)["key"].as_str().unwrap().to_string();
+    assert!(
+        key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
+        "ZFS's hex format: {key}"
+    );
+    assert_eq!(saved(&f.st).hosts["s1"].pool_key, key, "written");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&f.st.state_path)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "the registry is the fleet's alone");
+    let (_, _, again) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(1)).await;
+    assert_eq!(json(&again)["key"], key.as_str(), "the same key every time");
+    let (_, _, other) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2)).await;
+    assert_ne!(json(&other)["key"], key.as_str(), "one key per host");
+
+    let (_, _, listed) = call(&f.st, "GET", "/v1/hosts", "api", None).await;
+    assert!(!listed.contains(&key), "never listed: {listed}");
+    let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/s1", "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(!std::fs::read_to_string(&f.st.state_path)
+        .unwrap()
+        .contains(&key));
+}
+
 #[tokio::test]
 async fn a_heartbeat_lands_on_the_record_ordered_for_its_address() {
     let f = fleet(config::Config::default(), dry_scaleway());

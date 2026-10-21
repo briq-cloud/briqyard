@@ -1,0 +1,47 @@
+# ADR 0026: The pool is encrypted at its creation, one key per host held by the fleet, loaded at the daemon's start
+
+Date: 2026-10-21 · Status: accepted; completes ADR 0014 (the image cache's scratch leaves `/`)
+
+## Context
+
+Records (a machine's `env`, secrets included), config drives, consoles and every disk were in clear on the host, protected by file modes alone (`0600`, ADR 0014). What that does not cover is a disk or a server leaving our hands: a drive replaced, a server released to its provider at retire and handed to the next customer, a copy of a disk. The founder decided (`../KUBERNETES-MAP.md`, "Decided for the founder"): the pool encrypted at bootstrap, one key per host, held by the fleet, handed to the host over TLS (ADR 0020) at start, never written on the host's disk. ZFS cannot encrypt a pool after its creation, so this lands before the first real host.
+
+## Decisions
+
+**ZFS native encryption on the pool's root dataset, at `zpool create`**: `encryption=aes-256-gcm`, `keyformat=hex` (32 random bytes), `keylocation=prompt` (the key comes on stdin, from no file). Every dataset under it inherits it; ZFS refuses an unencrypted child of an encrypted parent. `hack/bootstrap-host.sh` creates it so, and stops on an existing pool that is not encrypted. The daemon refuses to start on one.
+
+| Rejected | Why |
+|---|---|
+| A key per tenant (an encryption root per tenant, keys from briq) | a root disk is a clone of the image's `@base`, shared by every tenant, and ZFS clones only within one encryption root; a key per create for no threat the host key leaves open |
+| LUKS under the pool | a second layer to set up and unlock, and the dev VM's file-backed pool would take another path than production |
+| A key file on the host (`keylocation=file://`) | on the same server: a server that leaves our hands unlocks itself. Kept for a single host with no fleet, by choice |
+| A TPM or the provider's KMS | not on every server we order (OVH Eco); reopen when one is |
+
+**Everything the daemon writes about a machine is on the pool.** Four filesystems, mounted by the daemon where the config says:
+
+| Dataset | Mounted at | Holds |
+|---|---|---|
+| `<pool>/images` | `<data_dir>/images` | the image metadata and the extraction scratch (layers and trees, ADR 0014's leftover on `/`); the images' disks are its children as before |
+| `<pool>/jail` | `jail_dir` | chroots, config drive copies, memory snapshots (ADR 0014) |
+| `<pool>/state` | `<data_dir>/state` | records, tenants, endpoints, events, usage, backup holders |
+| `<pool>/run` | `<data_dir>/run` | config drives, consoles, sockets |
+
+A filesystem is never mounted over files: a directory that holds some while its dataset is not mounted there is refused, naming both, since the records would vanish under an empty dataset and the daemon would read every machine as gone. What stays on `/`, and why: the config (the host's own token and registry credentials, `0600`, a host secret and not a tenant's), the API certificate and its key (the host's identity, read before the pool by `tls-fingerprint`), the kernel and the binaries, the journal (no secret is logged, by rule), and a file-backed pool's own file (the encrypted pool itself).
+
+**The key's source is one field, `storage.key`: `fleet`, or `file:<absolute path>`** (default `file:/etc/briqyard/pool.key`, what the bootstrap makes on a host with no fleet). At start, after the TLS certificate and before anything of the pool, the daemon reads the pool's `keystatus`: `available` (a daemon restart, not a reboot) needs nothing; `unavailable` asks the source, runs `zfs load-key -L prompt <encryptionroot>` with the key on stdin, then mounts the four filesystems. One path for both sources: the file is read where the fleet would be asked. The key is in the daemon's memory for that call, in no log, no record, no answer of its API, and on no disk of the host when it comes from the fleet. `-L prompt` reads stdin whatever `keylocation` says, so a pool made by hand with a `file://` location takes the same path.
+
+**The fleet makes a host's key at the host's first ask and keeps it in the host's record.** `POST /v1/hosts/key {url}` with the host's own token, checked as a heartbeat is (the one record at that address, its token, ADR 0013): a host gets its key and nobody else's. 32 bytes from the OS's generator, as 64 hex digits. The registry is written before the key is answered, so a key in use is never one only memory held; the registry file is now `0600` and its directory `0700` (they were `0644` and `0755` under the default umask, with every host's token in them). The key is in no listing (`to_api` does not carry it) and goes with the record: a retired or forgotten host's disks cannot be read again. The bootstrap asks the same route to create the pool, so an ordered host and one bootstrapped by hand take one path; the token goes to `curl` on stdin. Rejected: the fleet passing the key in the SSH bootstrap's environment (a second path, a command line, and a hand bootstrap still needs the route); a key made at the order (static hosts have no order, and the first ask covers both).
+
+**A daemon without its key waits, whole.** No API, no heartbeat, no ingress, nothing of the pool read: one `error` line per try, `pool locked: its key could not be loaded, and nothing starts until it is`, with the source and why (the fleet unreachable or refusing, the file missing, a malformed key, `Incorrect key provided`), tried again after 5 s, doubling to a minute. SIGTERM ends the wait (exit 0). The fleet sees no heartbeat: an ordered host stays `bootstrapped`, a known one goes `down` after a minute, so nothing is placed or forwarded there. Rejected: an API that answers 503 with a `pool_locked` condition while it waits. Everything the API serves is on the locked pool; it would be a second daemon mode for what the log line already says.
+
+**No swap on a host: the bootstrap turns it off**, for good (`swapoff -a`, the fstab lines commented out, the swap units masked): guest memory paged out would land on a disk in clear. Turned off rather than refused: providers' images ship a swap partition, and a refusal would need a person on every new server. The daemon does not police it at start: an encrypted swap is legitimate and not the daemon's to recognise. And `LimitCORE=0` on the daemon's unit, inherited by every Firecracker: a core dump of one is its guest's memory on `/`.
+
+## Consequences
+
+- **Losing the fleet's registry loses every host's key.** A host keeps running while its key is loaded (a daemon restart keeps it; a reboot does not). A host still up can be re-keyed: `zfs change-key` with a key the fleet then records (by hand, no route yet). A host that reboots after the loss cannot read its pool: its machines are gone, recoverable only from their backups in the store (ADR 0023). So the fleet's state backup (the next wave, `../KUBERNETES-MAP.md` "etcd backup") is a dependency of this ADR, in this order: this ADR before the first real host (a pool cannot be encrypted later), the registry's backup before customer data on it. That backup holds every key: it is encrypted or kept where only the fleet reads it.
+- What it covers: a disk or a server that leaves our hands. Not root on a running host (the key is loaded), and not someone holding the whole server while its record lives: the host's token is on its root disk, and the fleet serves the key to whoever presents that token for that address (a URL in the request, not the connection's source address, which a proxy in front of the fleet would hide). A lost or stolen server is retired or forgotten at once: its key goes with its record.
+- Backups leave the host decrypted: `zfs send` without `--raw`. The object store holds tenant data as the store keeps it (S3 server-side encryption on the bucket). Raw sends would keep a backup under the host's key, and a restore on another host would then need that key: a decision of its own.
+- Throughput, measured on the dev VM (aarch64 under nested virtualization, 2 vCPUs, a file-backed pool, 512 MiB of direct 1 MiB I/O to a zvol): writes 25 → 6.9 MB/s, reads 42 → 9.5 MB/s. OpenZFS accelerates AES-GCM on x86_64 (AES-NI, PCLMULQDQ, AVX) and has only its generic code on aarch64 (`icp_gcm_impl`: `generic`), so this is the worst case and the dev loop's disk is slower. Measure on the first OVH host (x86_64) before relying on a number.
+- No key rotation: `zfs change-key` rewraps the master key in a second, without rewriting data; a route when it is needed. Moving a host from a file key to the fleet is the same command with the fleet's key.
+- A host whose state is still on `/` refuses to start (never mounted over files) until its directories are moved onto the datasets. No host predates this but the dev VMs, recreated (`../DEVELOPMENT.md`).
+- The dev VMs run the production path: `fc` with a file key, `fc2` with its key from the fleet. `hack/e2e.sh` checks the pool, the four mounts, the key in none of the daemon's files or its log, and a locked pool loaded at start (the key file away: no API and the reason logged; back: started); `hack/fleet-two-hosts.sh` locks `fc2`'s pool while it is down and checks it back with the fleet's key, found on none of its files.
