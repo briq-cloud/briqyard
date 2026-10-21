@@ -166,10 +166,7 @@ async fn run(args: Args) -> Result<()> {
             .with_context(|| format!("mode of {}", cfg.state_dir.display()))?;
     }
     let state_path = cfg.state_dir.join("registry.json");
-    let mut reg: Registry = std::fs::read(&state_path)
-        .ok()
-        .and_then(|d| serde_json::from_slice(&d).ok())
-        .unwrap_or_default();
+    let mut reg = Registry::load(&state_path)?;
     let now = Utc::now();
     for h in &cfg.hosts {
         reg.heartbeat(static_host(h, now), now);

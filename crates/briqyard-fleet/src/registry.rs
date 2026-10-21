@@ -6,8 +6,11 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// A host as the fleet keeps it.
+/// A host as the fleet keeps it. A field the fleet does not know is refused, never dropped:
+/// a fleet older than its registry would lose what it cannot read (a host's pool key) at its
+/// next write.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostRec {
     pub id: String,
     pub url: String,
@@ -179,6 +182,7 @@ impl Default for Policy {
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Registry {
     pub hosts: HashMap<String, HostRec>,
     /// tenant → host id. A tenant's machines share a host, so its network needs no overlay.
@@ -194,6 +198,19 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// The registry in `path`; none yet is an empty one. A file that cannot be read or parsed
+    /// is an error, never an empty registry: the next write would replace every host's token
+    /// and pool key with nothing (ADR 0026).
+    pub fn load(path: &std::path::Path) -> anyhow::Result<Registry> {
+        use anyhow::Context;
+        match std::fs::read(path) {
+            Ok(data) => serde_json::from_slice(&data)
+                .with_context(|| format!("read the registry {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
+            Err(e) => Err(e).with_context(|| format!("read the registry {}", path.display())),
+        }
+    }
+
     /// The record a heartbeat from `url` belongs to: the one host at that address.
     pub fn expecting(&self, url: &str) -> Option<&HostRec> {
         self.hosts
@@ -477,6 +494,34 @@ mod tests {
             conditions: vec![],
             pool_key: String::new(),
         }
+    }
+
+    /// None yet is empty; anything else that does not read is an error, a field it does not
+    /// know included: an empty registry written over it would lose every host's pool key.
+    #[test]
+    fn a_registry_that_does_not_read_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        assert!(Registry::load(&path).unwrap().hosts.is_empty());
+        let mut reg = Registry::default();
+        reg.hosts.insert("h1".into(), host("h1", 1000, 0, 0));
+        reg.pool_key("h1");
+        std::fs::write(&path, serde_json::to_vec(&reg).unwrap()).unwrap();
+        let back = Registry::load(&path).unwrap();
+        assert_eq!(back.hosts["h1"].pool_key, reg.hosts["h1"].pool_key);
+        for bad in [
+            "{",
+            "{\"hosts\": {}, \"tenants\": {}, \"machines\": {}, \"later\": 1}",
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            let err = Registry::load(&path).unwrap_err();
+            assert!(format!("{err:#}").contains("read the registry"), "{err:#}");
+        }
+        let mut v = serde_json::to_value(&reg).unwrap();
+        v["hosts"]["h1"]["later"] = 1.into();
+        std::fs::write(&path, v.to_string()).unwrap();
+        let err = Registry::load(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("later"), "{err:#}");
     }
 
     /// A condition of the host's, true or not.

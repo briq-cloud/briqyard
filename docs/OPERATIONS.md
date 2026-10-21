@@ -276,6 +276,7 @@ backup until sent elsewhere.
 | `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just ordered gets this until its bootstrap has pinned it |
 | `host …: … is not the pinned …` (fleet, 502 `host_unreachable`) | The host presents another certificate than its record's `tls_fingerprint`: reinstalled (pin the new one), or not the host |
 | `write registry …` (fleet, 500 `registry`) | The fleet's `state_dir` is full or not writable; nothing is recorded until it is |
+| `read the registry …` (the fleet does not start) | `registry.json` does not parse, or holds a field this fleet does not know (a fleet older than the registry): run the fleet that wrote it, or restore the file. Never remove it: every host's pool key is in it (ADR 0026) |
 | `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
 | `dataset is busy` | A zvol a Firecracker just released; the daemon retries for ten seconds |

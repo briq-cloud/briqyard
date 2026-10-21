@@ -68,13 +68,14 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
     on_second() { $SECOND_HOST_SH sh -c "$1"; }
     on_second 'zfs list -H -o name,mounted -t filesystem -r byard | awk '"'"'$2 == "yes" { print $1 }'"'"' | tac | xargs -r -n1 zfs unmount && zfs unload-key byard'
     check "its pool locked"       '[ "$(on_second "zfs get -H -o value keystatus byard")" = unavailable ]'
+    started=$(on_second "date +%s")
   fi
   eval "$SECOND_HOST_START"
   for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
   check "host back"             '[ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ]'
   if [ -n "${SECOND_HOST_SH:-}" ]; then
     check "with its pool encrypted and unlocked" '[ "$(on_second "zfs get -H -o value encryption,keystatus byard" | tr "\n" " ")" = "aes-256-gcm available " ]'
-    check "by the fleet's key"    'on_second "journalctl -u briqyardd -b -o cat" | grep "pool key loaded" | tail -1 | grep -q "\"from\":\"fleet\""'
+    check "by the fleet's key"    'on_second "journalctl -u briqyardd --since @$started -o cat" | grep "pool key loaded" | grep -q "\"from\":\"fleet\""'
     # The key, asked of the fleet as the host does; it must be nowhere on the host's disk or
     # in its log, and in none of the fleet's answers but this one.
     conf=$(on_second "cat /etc/briqyard/config.yaml")
