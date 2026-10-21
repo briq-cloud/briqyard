@@ -146,7 +146,8 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   a stub fleet as the host, each failed try saying why without the key, the wait ended by a
   stop; `load-key` with the key on stdin; a filesystem never mounted over files; the fleet's
   key route: made at the first ask, the same after, one per host, refused to any other token
-  or address, written `0600` before it is answered, in no listing, gone with the host). What still needs the host: a tenant's first create (its bridge and
+  or address, written `0600` before it is answered, in no listing, gone with the host; a
+  registry that does not parse or holds an unknown field refused, never read as empty). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
