@@ -107,7 +107,7 @@ async fn run(
 ) -> Result<(String, api::DaemonStart), String> {
     let ip = url_host(&was.url).to_string();
     tracing::info!(host = was.id, release, "host upgrade");
-    let installed = bootstrap::install(st, &was.id, &ip, &was.url, &was.token, release)
+    let installed = bootstrap::install(st, &was.id, &ip, &bootstrap::upgrade_env(release))
         .await
         .map_err(|e| format!("install: {e:#}"))?;
     // What the install says of the SSH host key: pinned now (a static host's first upgrade),
