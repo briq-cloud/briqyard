@@ -57,7 +57,9 @@ esac
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 [ -e /dev/kvm ] || { echo "/dev/kvm is missing: this server has no KVM"; exit 1; }
 [ -n "$KERNEL_SHA256" ] || { echo "KERNEL_SHA256 is not pinned for $ARCH: set it to the sha256sum of $KERNEL_URL"; exit 1; }
-[ -z "$FLEET_URL" ] || [ -n "$API_TOKEN" ] || { echo "FLEET_URL needs BRIQYARD_TOKEN: the host's own, which the fleet expects"; exit 1; }
+# The token goes into a configuration written now, and asks the fleet for the pool's key; an
+# upgrade (a configuration there, the pool open) needs neither (ADR 0027).
+[ -z "$FLEET_URL" ] || [ -n "$API_TOKEN" ] || [ -f /etc/briqyard/config.yaml ] || { echo "FLEET_URL needs BRIQYARD_TOKEN: the host's own, which the fleet expects"; exit 1; }
 
 # Loopback or RFC 1918: reachable from this host or its private network only.
 private() {
@@ -138,6 +140,7 @@ fi
 # makes the file when it is missing (a pool about to be created), never otherwise.
 pool_key() {
   if [ -n "$FLEET_URL" ]; then
+    [ -n "$API_TOKEN" ] || { echo "   the fleet's key needs BRIQYARD_TOKEN: the host's own" >&2; return 1; }
     # The token goes in on stdin, off the command line.
     printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
       curl -fsS --max-time 20 -H @- -H 'Content-Type: application/json' \
