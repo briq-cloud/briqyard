@@ -11,6 +11,8 @@ KillMode=process
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536
+# A core dump of a Firecracker would be its guest's memory, on / in clear (ADR 0026).
+LimitCORE=0
 Environment=BRIQYARD_LOG=info
 
 [Install]

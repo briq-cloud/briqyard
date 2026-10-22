@@ -594,6 +594,7 @@ fn fleet_at(
         http: reqwest::Client::new(),
         pinned: Mutex::new(HashMap::new()),
         prov,
+        key_turn: Default::default(),
     });
     Fleet { st, _dir: dir }
 }
@@ -663,6 +664,9 @@ async fn fleet_in_regions(regions: &[&str]) -> (Fleet, Vec<Running>) {
 }
 
 /// One request through the router. The body comes back as text.
+/// A call as a client makes it. A host's own call (a body with a `url`) comes from that url's
+/// address, as it does through a fleet that terminates its connections; anything else from
+/// loopback.
 async fn call(
     st: &Arc<AppState>,
     method: &str,
@@ -670,7 +674,45 @@ async fn call(
     token: &str,
     body: Option<serde_json::Value>,
 ) -> (StatusCode, HeaderMap, String) {
-    let mut req = axum::http::Request::builder().method(method).uri(path);
+    let peer = body
+        .as_ref()
+        .and_then(|b| b["url"].as_str())
+        .and_then(|u| url_host(u).parse().ok())
+        .unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]));
+    call_from(st, peer, method, path, token, body).await
+}
+
+/// `call` from the peer address given.
+async fn call_from(
+    st: &Arc<AppState>,
+    peer: std::net::IpAddr,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, HeaderMap, String) {
+    call_with(st, peer, &[], method, path, token, body).await
+}
+
+/// `call_from` with request headers of its own (a proxy's `X-Forwarded-For`).
+async fn call_with(
+    st: &Arc<AppState>,
+    peer: std::net::IpAddr,
+    extra: &[(&str, &str)],
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, HeaderMap, String) {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+            peer, 40000,
+        )));
+    for (k, v) in extra {
+        req = req.header(*k, *v);
+    }
     if !token.is_empty() {
         req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -902,6 +944,194 @@ async fn a_registration_is_taken_only_for_the_host_that_expects_it() {
     );
 }
 
+/// A host's pool key (ADR 0026): made at its first ask and the same after, served to the host
+/// at its address with its own token and to nobody else, written (`0600`) before it is
+/// answered, in no listing, and gone with the record.
+#[tokio::test]
+async fn a_host_gets_its_own_pool_key_and_no_other() {
+    let host = |id: &str, n: u8| config::StaticHost {
+        id: id.into(),
+        url: format!("http://10.0.0.{n}:7420"),
+        token: format!("{id}-token"),
+        ..Default::default()
+    };
+    let f = fleet(
+        config::Config {
+            token: "api".into(),
+            hosts: vec![host("s1", 1), host("s2", 2)],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let ask = |n: u8| Some(serde_json::json!({ "url": format!("http://10.0.0.{n}:7420") }));
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(9)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(json(&body)["code"], "unknown_host");
+    for token in ["", "api", "s2-token"] {
+        let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", token, ask(1)).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "token {token:?}: {body}");
+    }
+    assert!(
+        f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty(),
+        "nothing made for a refused ask"
+    );
+
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(1)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let key = json(&body)["key"].as_str().unwrap().to_string();
+    assert!(
+        key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
+        "ZFS's hex format: {key}"
+    );
+    assert_eq!(saved(&f.st).hosts["s1"].pool_key.expose(), key, "written");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&f.st.state_path)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "the registry is the fleet's alone");
+    let (_, _, again) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(1)).await;
+    assert_eq!(json(&again)["key"], key.as_str(), "the same key every time");
+    let (_, _, other) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2)).await;
+    assert_ne!(json(&other)["key"], key.as_str(), "one key per host");
+
+    let (_, _, listed) = call(&f.st, "GET", "/v1/hosts", "api", None).await;
+    assert!(!listed.contains(&key), "never listed: {listed}");
+    let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/s1?force=true", "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(!std::fs::read_to_string(&f.st.state_path)
+        .unwrap()
+        .contains(&key));
+}
+
+/// Where the fleet terminates the connection (its TLS, or plain on loopback), a host's call
+/// must come from the host's address: its token alone, read off a disk that left our hands, is
+/// not enough (ADR 0026). Behind `tls: off` the peer is the proxy in front: not checked.
+#[tokio::test]
+async fn a_host_call_must_come_from_the_host() {
+    let hosts = vec![
+        config::StaticHost {
+            id: "s1".into(),
+            url: "http://10.0.0.1:7420".into(),
+            token: "s1-token".into(),
+            ..Default::default()
+        },
+        config::StaticHost {
+            id: "named".into(),
+            url: "http://host.example:7420".into(),
+            token: "named-token".into(),
+            ..Default::default()
+        },
+    ];
+    let f = fleet(
+        config::Config {
+            hosts: hosts.clone(),
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let ask = |u: &str| Some(serde_json::json!({ "url": u }));
+    let elsewhere = std::net::IpAddr::from([203, 0, 113, 7]);
+    for path in ["/v1/hosts/key", "/v1/hosts/register"] {
+        let body = if path.ends_with("key") {
+            ask("http://10.0.0.1:7420")
+        } else {
+            Some(heartbeat("http://10.0.0.1:7420", 1000, &[]))
+        };
+        let (s, _, text) = call_from(&f.st, elsewhere, "POST", path, "s1-token", body).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{path}: {text}");
+        assert!(
+            text.contains("come from 10.0.0.1, not 203.0.113.7"),
+            "{text}"
+        );
+    }
+    assert!(f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty());
+    // A host known by a name cannot be checked by address: refused, saying so.
+    let (s, _, text) = call_from(
+        &f.st,
+        elsewhere,
+        "POST",
+        "/v1/hosts/key",
+        "named-token",
+        ask("http://host.example:7420"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{text}");
+    assert!(text.contains("its url must be one"), "{text}");
+    // An IPv4 peer seen as IPv6-mapped is the same address.
+    let mapped: std::net::IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+    let (s, _, text) = call_from(
+        &f.st,
+        mapped,
+        "POST",
+        "/v1/hosts/key",
+        "s1-token",
+        ask("http://10.0.0.1:7420"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{text}");
+
+    // tls: off on a public address: whatever is in front is unknown, the token alone.
+    let behind = fleet(
+        config::Config {
+            hosts: hosts.clone(),
+            listen: "0.0.0.0:7430".into(),
+            tls: config::Tls::Off,
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let (s, _, text) = call_from(
+        &behind.st,
+        elsewhere,
+        "POST",
+        "/v1/hosts/key",
+        "s1-token",
+        ask("http://10.0.0.1:7420"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "tls: off checks the token alone: {text}");
+
+    // tls: off on loopback: a proxy of ours in front; its last X-Forwarded-For is the caller.
+    let local = fleet(
+        config::Config {
+            hosts,
+            listen: "127.0.0.1:7430".into(),
+            tls: config::Tls::Off,
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let proxy = std::net::IpAddr::from([127, 0, 0, 1]);
+    let key = |xff: &'static [(&'static str, &'static str)]| {
+        let st = local.st.clone();
+        async move {
+            call_with(
+                &st,
+                proxy,
+                xff,
+                "POST",
+                "/v1/hosts/key",
+                "s1-token",
+                ask("http://10.0.0.1:7420"),
+            )
+            .await
+        }
+    };
+    let (s, _, text) = key(&[("x-forwarded-for", "203.0.113.7, 10.0.0.1")]).await;
+    assert_eq!(s, StatusCode::OK, "the proxy's own value, the last: {text}");
+    let (s, _, text) = key(&[("x-forwarded-for", "10.0.0.1, 203.0.113.7")]).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "a forged first value counts for nothing: {text}"
+    );
+    assert!(text.contains("not 203.0.113.7"), "{text}");
+    let (s, _, text) = key(&[]).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "no header, no address: {text}");
+    assert!(text.contains("not an unknown address"), "{text}");
+}
+
 #[tokio::test]
 async fn a_heartbeat_lands_on_the_record_ordered_for_its_address() {
     let f = fleet(config::Config::default(), dry_scaleway());
@@ -993,6 +1223,87 @@ async fn status_sums_the_ready_hosts_and_hosts_are_sorted() {
     let states: Vec<&str> = hs.iter().map(|h| h.state.as_str()).collect();
     assert_eq!(states, ["down", "ready", "draining"]);
     assert_eq!(hs[1].tenants, ["t1", "t2"]);
+}
+
+/// Forgetting a host that holds a pool key is refused unless forced: the key goes with the
+/// record, and a static host polled back would get a key its pool does not open.
+#[tokio::test]
+async fn a_keyed_host_is_forgotten_only_by_force() {
+    let f = fleet(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "s1-token".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    seed(&f.st, "plain", 64_000, 0, 0, &[]);
+    let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/plain", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "no key: forgotten as before");
+    let ask = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/hosts/s1", "", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert_eq!(json(&body)["code"], "pool_key");
+    assert!(
+        body.contains("the pool is unreadable at the host's next restart; retire it, or --force"),
+        "{body}"
+    );
+    assert!(f.st.reg.lock().unwrap().hosts.contains_key("s1"), "kept");
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/hosts/s1?force=true", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(
+        !saved(&f.st).hosts.contains_key("s1"),
+        "forgotten, its key with it"
+    );
+}
+
+/// A key the registry could not be written with is not kept: the next ask is refused the same
+/// way rather than served a key only memory holds (ADR 0026).
+#[tokio::test]
+async fn a_key_that_could_not_be_written_is_not_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let nowhere = dir.path().join("missing").join("registry.json");
+    let f = fleet_at(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "s1-token".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+        dir,
+        nowhere.clone(),
+    );
+    let ask = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
+    for attempt in 1..=2 {
+        let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask.clone()).await;
+        assert_eq!(
+            s,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "attempt {attempt}: {body}"
+        );
+        assert_eq!(json(&body)["code"], "registry");
+        assert!(
+            f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty(),
+            "attempt {attempt}"
+        );
+    }
+    std::fs::create_dir_all(nowhere.parent().unwrap()).unwrap();
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        saved(&f.st).hosts["s1"].pool_key.expose(),
+        json(&body)["key"].as_str().unwrap()
+    );
 }
 
 #[tokio::test]
