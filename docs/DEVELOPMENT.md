@@ -207,14 +207,19 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   (the pool and every dataset under it encrypted, records, runs, images and jails on it, the
   key in none of the daemon's files nor its log; the daemon stopped and the pool locked as a
   reboot leaves it: without its key file no API and the reason logged, the file back and it
-  starts, a machine of before runs again), versions and a hand-over (status and the init say the
-  build, `vmm_version` the host's; SIGUSR2 then a start: still running, adopted, no second boot;
-  a stop then a start: running again unasked, resumed). 172 checks.
+  starts, a machine of before runs again), exec sessions (`-i` streaming stdin, stderr apart and the
+  code; `-it` driven by `hack/exec-tty.py`: a terminal of the size sent, a resize followed, the
+  exit code; the client's close hanging up a tty command and killing a piped one; the
+  `session_opened` event; a machine with a session open kept awake past its window, asleep once
+  it closed), versions and a hand-over (status and the init say the build, `vmm_version` the
+  host's; SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start:
+  running again unasked, resumed). 184 checks.
 
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
-  daemon in the VM, a dry-run provisioner for order and retire), drain and undrain, and a
-  `host upgrade` of the VM's own host to this build with a machine running (back `ready`, a new
-  start of this version that adopted it, the machine answering, never booted again). 29 checks.
+  daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
+  relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
+  machine running (back `ready`, a new start of this version that adopted it, the machine
+  answering, never booted again). 31 checks.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases

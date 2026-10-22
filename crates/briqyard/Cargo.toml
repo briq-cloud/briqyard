@@ -16,6 +16,9 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 humantime = { workspace = true }
 chrono = { workspace = true }
+futures = { workspace = true }
+libc = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 [dev-dependencies]
-axum = { workspace = true }
+axum = { workspace = true, features = ["ws"] }

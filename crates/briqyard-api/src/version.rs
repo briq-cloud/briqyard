@@ -16,6 +16,18 @@ fn release(v: &str) -> Option<(u64, u64, u64)> {
     n.next().is_none().then_some(r)
 }
 
+/// The first release whose init runs exec sessions, input streamed and a terminal (ADR 0029).
+pub const SESSIONS: &str = "0.1.0";
+
+/// Whether `v` is of a release before `release`. A version that cannot be read (an init older
+/// than the version report says none) is before every release.
+pub fn before(v: &str, release_: &str) -> bool {
+    match (release(v), release(release_)) {
+        (Some(v), Some(r)) => v < r,
+        _ => true,
+    }
+}
+
 /// Whether `a` is a later release than `b`. Two builds of one release are not ordered (a
 /// commit says nothing of which came first), and neither is a version that cannot be read.
 pub fn newer(a: &str, b: &str) -> bool {
@@ -32,6 +44,16 @@ mod tests {
         assert_eq!(rel, env!("CARGO_PKG_VERSION"));
         assert!(!commit.is_empty());
         assert!(release(VERSION).is_some());
+    }
+
+    #[test]
+    fn a_version_before_a_release() {
+        assert!(before("0.0.9+a", SESSIONS));
+        assert!(!before("0.1.0+a", SESSIONS), "the release itself");
+        assert!(!before("0.2.0", SESSIONS));
+        assert!(before("", SESSIONS), "no version: older than the report");
+        assert!(before("garbage", SESSIONS));
+        assert!(!before(VERSION, SESSIONS), "this build runs sessions");
     }
 
     #[test]

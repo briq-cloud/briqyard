@@ -386,6 +386,8 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/machines/:id/backups",
             get(list_backups).post(by_machine),
         )
+        // A session (ADR 0029) is a WebSocket: relayed as bytes once both sides upgraded.
+        .route("/v1/machines/:id/exec", get(exec_session).post(by_machine))
         .route("/v1/machines/:id/*rest", any(by_machine))
         .route("/v1/endpoints/:id", any(by_endpoint))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))
@@ -1145,32 +1147,125 @@ async fn forward(
         Err(refused) => return refused.into_response(),
     };
     match req.send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
-            let rid = resp.headers().get("x-request-id").cloned();
-            let data = resp.bytes().await.unwrap_or_default();
-            let mut out = Response::new(Body::from(data));
-            *out.status_mut() = status;
-            if let Some(ct) = ct {
-                out.headers_mut().insert(header::CONTENT_TYPE, ct);
-            }
-            if let Some(rid) = rid {
-                out.headers_mut().insert("x-request-id", rid);
-            }
-            out.headers_mut().insert(
-                "x-briqyard-host",
-                HeaderValue::from_str(&host.id).unwrap_or(HeaderValue::from_static("?")),
-            );
-            out
-        }
-        Err(e) => err(
-            StatusCode::BAD_GATEWAY,
-            "host_unreachable",
-            format!("host {}: {}", host.id, causes(&e)),
-        )
-        .into_response(),
+        Ok(resp) => relay(resp, host).await,
+        Err(e) => unreachable_host(host, e),
     }
+}
+
+/// A host's answer as the fleet's: its status, body, content type and request id, and the
+/// host's id.
+async fn relay(resp: reqwest::Response, host: &HostRec) -> Response {
+    let status = resp.status();
+    let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
+    let rid = resp.headers().get("x-request-id").cloned();
+    let data = resp.bytes().await.unwrap_or_default();
+    let mut out = Response::new(Body::from(data));
+    *out.status_mut() = status;
+    if let Some(ct) = ct {
+        out.headers_mut().insert(header::CONTENT_TYPE, ct);
+    }
+    if let Some(rid) = rid {
+        out.headers_mut().insert("x-request-id", rid);
+    }
+    out.headers_mut()
+        .insert("x-briqyard-host", host_header(host));
+    out
+}
+
+fn host_header(host: &HostRec) -> HeaderValue {
+    HeaderValue::from_str(&host.id).unwrap_or(HeaderValue::from_static("?"))
+}
+
+/// A host that did not answer: its id and why, never the URL (a session's query holds its env).
+fn unreachable_host(host: &HostRec, e: reqwest::Error) -> Response {
+    err(
+        StatusCode::BAD_GATEWAY,
+        "host_unreachable",
+        format!("host {}: {}", host.id, causes(&e.without_url())),
+    )
+    .into_response()
+}
+
+/// The headers of a WebSocket handshake, passed through both ways as they are.
+const UPGRADE_HEADERS: [header::HeaderName; 7] = [
+    header::CONNECTION,
+    header::UPGRADE,
+    header::SEC_WEBSOCKET_KEY,
+    header::SEC_WEBSOCKET_VERSION,
+    header::SEC_WEBSOCKET_PROTOCOL,
+    header::SEC_WEBSOCKET_EXTENSIONS,
+    header::SEC_WEBSOCKET_ACCEPT,
+];
+
+/// An exec session (ADR 0029) forwarded unchanged: the client's handshake goes to the
+/// machine's host with the host's token; the host's `101` comes back, and from then on the
+/// bytes are copied both ways until either side closes. Any other answer is relayed as it is.
+async fn exec_session(
+    State(st): S,
+    Path(id): Path<String>,
+    mut req: Request,
+) -> Result<Response, Refusal> {
+    let client = req
+        .extensions_mut()
+        .remove::<hyper::upgrade::OnUpgrade>()
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "invalid",
+                format!("a session is a WebSocket upgrade of GET /v1/machines/{id}/exec"),
+            )
+        })?;
+    let host = locate(&st, Indexed::Machine, &id)
+        .await
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "machine not found"))?;
+    if let Some(refused) = down(&host) {
+        return Ok(refused);
+    }
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_default();
+    let mut to = to_host(&st, &host, Method::GET, &path, req.headers())?;
+    for h in &UPGRADE_HEADERS {
+        if let Some(v) = req.headers().get(h) {
+            to = to.header(h, v);
+        }
+    }
+    let resp = match to.send().await {
+        Ok(r) => r,
+        Err(e) => return Ok(unreachable_host(&host, e)),
+    };
+    if resp.status() != StatusCode::SWITCHING_PROTOCOLS {
+        return Ok(relay(resp, &host).await);
+    }
+    let mut out = Response::new(Body::empty());
+    *out.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    for h in &UPGRADE_HEADERS {
+        if let Some(v) = resp.headers().get(h) {
+            out.headers_mut().insert(h, v.clone());
+        }
+    }
+    out.headers_mut()
+        .insert("x-briqyard-host", host_header(&host));
+    let machine = id.clone();
+    tokio::spawn(async move {
+        let (client, upstream) = match (client.await, resp.upgrade().await) {
+            (Ok(c), Ok(u)) => (c, u),
+            (c, u) => {
+                let why = c
+                    .err()
+                    .map(|e| e.to_string())
+                    .or(u.err().map(|e| causes(&e.without_url())));
+                tracing::warn!(machine, err = why.unwrap_or_default(), "session upgrade");
+                return;
+            }
+        };
+        let mut client = hyper_util::rt::TokioIo::new(client);
+        let mut upstream = upstream;
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    });
+    Ok(out)
 }
 
 /// A watch forwarded: the host's answer streamed through as it comes, with no deadline (its
@@ -1192,18 +1287,11 @@ async fn forward_watch(st: &AppState, host: &HostRec, path: &str, headers: &Head
             if let Some(ct) = ct {
                 out.headers_mut().insert(header::CONTENT_TYPE, ct);
             }
-            out.headers_mut().insert(
-                "x-briqyard-host",
-                HeaderValue::from_str(&host.id).unwrap_or(HeaderValue::from_static("?")),
-            );
+            out.headers_mut()
+                .insert("x-briqyard-host", host_header(host));
             out
         }
-        Err(e) => err(
-            StatusCode::BAD_GATEWAY,
-            "host_unreachable",
-            format!("host {}: {}", host.id, causes(&e)),
-        )
-        .into_response(),
+        Err(e) => unreachable_host(host, e),
     }
 }
 

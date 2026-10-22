@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod guest;
+pub mod session;
 #[cfg(feature = "tls")]
 pub mod tls;
 pub mod types;

@@ -4,9 +4,11 @@ use anyhow::{anyhow, bail, Context, Result};
 use briqyard_api as api;
 use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::ops::ControlFlow;
 use std::time::Duration;
+
+mod session;
 
 #[derive(Parser)]
 #[command(name = "briqyard", version = api::VERSION, about = "Machines in Firecracker microVMs")]
@@ -149,16 +151,20 @@ enum MachineCmd {
     Rm {
         id: String,
     },
-    /// Run a command inside: briqyard machine exec ID -- cmd... (wakes a sleeping machine)
+    /// Run a command inside: briqyard machine exec [-it] ID -- cmd... (wakes a sleeping machine)
     Exec {
         /// Fail when the machine is not running instead of waking it
         #[arg(long)]
         no_wake: bool,
-        #[arg(long, default_value = "5m")]
-        timeout: humantime::Duration,
-        /// Send stdin to the command
+        /// The command's deadline: 5m by default, none for a session (-i, -t)
         #[arg(long)]
-        stdin: bool,
+        timeout: Option<humantime::Duration>,
+        /// A session: stdin streamed to the command as it comes
+        #[arg(short, long)]
+        interactive: bool,
+        /// A session on a terminal: the local one raw, its size followed
+        #[arg(short, long)]
+        tty: bool,
         id: String,
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
@@ -717,18 +723,10 @@ impl Client {
             .send()
             .await
             .with_context(|| format!("request {}", self.base))?;
-        let status = resp.status();
-        if status.is_success() {
+        if resp.status().is_success() {
             return Ok(resp);
         }
-        let text = resp.text().await?;
-        if let Ok(e) = serde_json::from_str::<api::ApiError>(&text) {
-            if e.request_id.is_empty() {
-                bail!("{} ({})", e.error, e.code);
-            }
-            bail!("{} ({}, request {})", e.error, e.code, e.request_id);
-        }
-        bail!("{status}: {}", text.trim());
+        Err(refusal(resp).await)
     }
 
     /// Every event of a read, page after page, and the cursor after the last.
@@ -782,6 +780,20 @@ impl Client {
                 }
             }
         }
+    }
+}
+
+/// The error an answer that is not a success carries: its `ApiError`, else its status and body.
+async fn refusal(resp: reqwest::Response) -> anyhow::Error {
+    let status = resp.status();
+    let text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => return e.into(),
+    };
+    match serde_json::from_str::<api::ApiError>(&text) {
+        Ok(e) if e.request_id.is_empty() => anyhow!("{} ({})", e.error, e.code),
+        Ok(e) => anyhow!("{} ({}, request {})", e.error, e.code, e.request_id),
+        Err(_) => anyhow!("{status}: {}", text.trim()),
     }
 }
 
@@ -1021,21 +1033,33 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::Exec {
                 no_wake,
                 timeout,
-                stdin,
+                interactive,
+                tty,
                 id,
                 cmd,
             } => {
-                let mut req = api::ExecRequest {
+                // 0 is the daemon's default: 5 minutes for a command, none for a session.
+                let timeout_ms = timeout.map_or(0, |t| t.as_millis() as u64);
+                if interactive || tty {
+                    let req = api::session::ExecSession {
+                        cmd,
+                        wake: !no_wake,
+                        timeout_ms,
+                        tty,
+                        ..Default::default()
+                    };
+                    let code = session::run(c, &id, req, interactive).await?;
+                    if code != 0 {
+                        std::process::exit(code);
+                    }
+                    return Ok(());
+                }
+                let req = api::ExecRequest {
                     cmd,
                     wake: !no_wake,
-                    timeout_ms: timeout.as_millis() as u64,
+                    timeout_ms,
                     ..Default::default()
                 };
-                if stdin {
-                    let mut s = String::new();
-                    std::io::stdin().read_to_string(&mut s)?;
-                    req.stdin = s;
-                }
                 let res: api::ExecResult = c
                     .call(POST, &format!("/v1/machines/{id}/exec"), Some(&req))
                     .await?;

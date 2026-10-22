@@ -13,7 +13,7 @@ VMHOME=$(limactl shell "$VM" sh -c 'echo $HOME' | tr -d '\r')
 build() {
   cargo generate-lockfile --offline 2>/dev/null || cargo generate-lockfile >/dev/null
   # The init must be static: the guest has no shared libraries of ours. musl gives that.
-  limactl shell "$VM" bash -lc "export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR=\$HOME/target; cd '$SRC' && cargo build --release --workspace --exclude briqyard-init 2>&1 | tail -3 && cargo build --release -p briqyard-init --target \$(uname -m)-unknown-linux-musl 2>&1 | tail -3"
+  limactl shell "$VM" bash -lc "set -o pipefail; export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR=\$HOME/target; cd '$SRC' && cargo build --release --workspace --exclude briqyard-init 2>&1 | tail -3 && cargo build --release -p briqyard-init --target \$(uname -m)-unknown-linux-musl 2>&1 | tail -3"
 }
 
 install() {

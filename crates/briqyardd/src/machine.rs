@@ -22,7 +22,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
@@ -505,6 +505,9 @@ struct Entry {
     changed: Notify,
     /// A use since the record was last written; read and written under `rec`'s lock.
     unsaved_use: AtomicBool,
+    /// Commands running in it for a caller, exec sessions included (ADR 0029): in use, it does
+    /// not go to sleep.
+    in_flight: AtomicUsize,
     /// Its usage since the tick last took it (ADR 0017); locked after `rec`, never before.
     meter: Mutex<Meter>,
     /// Bytes through its endpoints, added by the ingress as they pass.
@@ -532,6 +535,7 @@ impl Entry {
             stop_req: Mutex::new(None),
             changed: Notify::new(),
             unsaved_use: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
             meter: Mutex::new(Meter::new(Utc::now())),
             traffic: Arc::default(),
             disk_io: Arc::default(),
@@ -677,6 +681,33 @@ impl Entry {
 
     fn note_locked(&self, r: &mut Record, ev: Ev) {
         r.version = self.events.emit(ev.of(&r.id, &r.tenant));
+    }
+}
+
+/// An open exec session (ADR 0029): the command's connection to the init, which ends the
+/// command when it closes, and the machine held in use.
+pub struct Session {
+    pub conn: Box<dyn guestc::Conn>,
+    pub machine: String,
+    pub in_use: InUse,
+}
+
+/// A machine in use while this lives: it does not go to sleep, and its last use is when this
+/// began and when it ended.
+pub struct InUse(Arc<Entry>);
+
+impl InUse {
+    fn new(e: Arc<Entry>) -> Self {
+        e.in_flight.fetch_add(1, Relaxed);
+        e.touch();
+        Self(e)
+    }
+}
+
+impl Drop for InUse {
+    fn drop(&mut self) {
+        self.0.touch();
+        self.0.in_flight.fetch_sub(1, Relaxed);
     }
 }
 
@@ -2014,7 +2045,7 @@ impl Manager {
     fn view(&self, e: &Entry) -> api::Machine {
         let r = e.snapshot();
         let running = r.state == state::RUNNING;
-        let sleeps_at = if running {
+        let sleeps_at = if running && e.in_flight.load(Relaxed) == 0 {
             sleeps_at(r.last_used_at, r.sleep_window())
         } else {
             None
@@ -3808,7 +3839,9 @@ impl Manager {
                 .values()
                 .filter(|e| {
                     let r = e.rec.lock().unwrap();
-                    r.state == state::RUNNING && idle_past(r.last_used_at, r.sleep_window(), now)
+                    r.state == state::RUNNING
+                        && e.in_flight.load(Relaxed) == 0
+                        && idle_past(r.last_used_at, r.sleep_window(), now)
                 })
                 .cloned()
                 .collect();
@@ -4174,12 +4207,9 @@ impl Manager {
         detached(async move { m.wake(&id, None).await }).await
     }
 
+    /// Runs a command to its end (the JSON exec): a session whose stdin is the request's,
+    /// read to its exit (ADR 0029). The machine is in use while it runs.
     pub async fn exec(&self, id: &str, req: api::ExecRequest) -> Result<api::ExecResult, MError> {
-        self.inner
-            .stats
-            .execs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let sock = self.running_vsock(id, req.wake).await?;
         let timeout_ms = if req.timeout_ms == 0 {
             300_000
         } else {
@@ -4194,9 +4224,10 @@ impl Manager {
             timeout_ms,
             ..Default::default()
         };
+        let (mut conn, _in_use) = self.start_command(id, req.wake, greq).await?;
         let out = tokio::time::timeout(
             Duration::from_millis(timeout_ms + 10_000),
-            self.inner.guest.exec(&sock, greq),
+            guestc::collect(&mut conn),
         )
         .await
         .map_err(|_| MError::NotRunning("the command did not finish".into()))?
@@ -4207,7 +4238,6 @@ impl Manager {
                 MError::Other(self.init_named(id, err))
             }
         })?;
-        let _ = self.touch(id);
         Ok(api::ExecResult {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -4224,6 +4254,82 @@ impl Manager {
             .map(|e| e.snapshot().init_version)
             .unwrap_or_default();
         guestc::with_init(err, &init)
+    }
+
+    /// Starts an exec session (ADR 0029): the command runs once the guest takes it, and the
+    /// machine is in use until the session is dropped. Wakes the machine as an exec does.
+    pub async fn open_session(
+        &self,
+        id: &str,
+        req: api::session::ExecSession,
+    ) -> Result<Session, MError> {
+        if req.cmd.is_empty() {
+            return Err(invalid("cmd is required"));
+        }
+        let program = req.cmd[0].clone();
+        let greq = guest::Request {
+            op: "exec".into(),
+            cmd: req.cmd,
+            env: req.env,
+            cwd: req.cwd,
+            timeout_ms: req.timeout_ms,
+            interactive: true,
+            tty: req.tty,
+            cols: req.cols,
+            rows: req.rows,
+            ..Default::default()
+        };
+        let (conn, in_use) = self.start_command(id, req.wake, greq).await?;
+        let (machine, tenant) = {
+            let r = in_use.0.rec.lock().unwrap();
+            (r.id.clone(), r.tenant.clone())
+        };
+        // A use, not a change: the machine's version does not move (ADR 0019).
+        let tty = if req.tty { " on a terminal" } else { "" };
+        self.inner.events.emit(
+            Ev::normal(reason::SESSION_OPENED, format!("{program}{tty}"))
+                .of(&machine, &tenant)
+                .data(json!({ "command": program, "tty": req.tty })),
+        );
+        Ok(Session {
+            conn,
+            machine,
+            in_use,
+        })
+    }
+
+    /// The one way a command starts in a machine for a caller: woken when asked, the guest's
+    /// connection once it took the command, and the machine in use while `InUse` lives.
+    async fn start_command(
+        &self,
+        id: &str,
+        wake: bool,
+        req: guest::Request,
+    ) -> Result<(Box<dyn guestc::Conn>, InUse), MError> {
+        self.inner
+            .stats
+            .execs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let e = self.own_entry(id)?;
+        let sock = self.running_vsock(id, wake).await?;
+        // An init older than sessions takes the request as a plain exec, its input and terminal
+        // ignored (ADR 0027): refused, the init named, before the guest is asked.
+        let init = e.snapshot().init_version;
+        if req.interactive && api::version::before(&init, api::version::SESSIONS) {
+            let old = guestc::UnknownOp {
+                op: "session".into(),
+                init,
+            };
+            return Err(MError::Conflict(old.to_string()));
+        }
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.inner.guest.session(&sock, req),
+        )
+        .await
+        .map_err(|_| MError::NotRunning("the guest did not take the command".into()))?
+        .map_err(MError::Other)?;
+        Ok((conn, InUse::new(e)))
     }
 
     pub async fn put_file(&self, id: &str, req: api::PutFileRequest) -> Result<(), MError> {
@@ -5311,7 +5417,7 @@ mod tests {
         exec_codes: Mutex<HashMap<String, i32>>,
         /// How long an exec takes, and how many run at once now and at most.
         exec_takes: Mutex<Duration>,
-        execs_now: std::sync::atomic::AtomicUsize,
+        execs_now: Arc<std::sync::atomic::AtomicUsize>,
         execs_most: std::sync::atomic::AtomicUsize,
         /// The ports of an address a TCP probe finds closed; every other one accepts.
         closed: Mutex<std::collections::HashSet<(Ipv4Addr, u16)>>,
@@ -5682,33 +5788,64 @@ mod tests {
             Ok(())
         }
 
-        async fn exec(&self, vsock: &Path, req: guest::Request) -> Result<guestc::ExecOutput> {
+        /// The init, reduced. A command (not `interactive`): `ok` on stdout (`no` on stderr too
+        /// when it fails) after `exec_takes`, its code from `exec_codes`. A session: each
+        /// `stdin` frame back as stdout, a `resize` as a `COLSxROWS` line, its code at
+        /// `close_stdin`.
+        async fn session(
+            &self,
+            vsock: &Path,
+            req: guest::Request,
+        ) -> Result<Box<dyn guestc::Conn>> {
+            use std::sync::atomic::Ordering::SeqCst;
+            use tokio::io::AsyncWriteExt;
             let (pid, _, _) = self.proc_at(vsock)?;
             let cmd = req.cmd.join(" ");
-            self.record(format!("exec {pid} {cmd}"));
-            use std::sync::atomic::Ordering::SeqCst;
-            let now = self.execs_now.fetch_add(1, SeqCst) + 1;
-            self.execs_most.fetch_max(now, SeqCst);
-            let takes = *self.exec_takes.lock().unwrap();
-            tokio::time::sleep(takes).await;
-            self.execs_now.fetch_sub(1, SeqCst);
-            let code = self
-                .exec_codes
-                .lock()
-                .unwrap()
-                .get(&cmd)
-                .copied()
-                .unwrap_or(0);
-            Ok(guestc::ExecOutput {
-                stdout: b"ok\n".to_vec(),
-                stderr: if code == 0 {
-                    Vec::new()
-                } else {
-                    b"no\n".to_vec()
-                },
-                code,
-                timed_out: false,
-            })
+            let code = self.exec_codes.lock().unwrap().get(&cmd).copied();
+            let (ours, theirs) = tokio::io::duplex(1 << 16);
+            if !req.interactive {
+                self.record(format!("exec {pid} {cmd}"));
+                let now = self.execs_now.fetch_add(1, SeqCst) + 1;
+                self.execs_most.fetch_max(now, SeqCst);
+                let takes = *self.exec_takes.lock().unwrap();
+                let running = self.execs_now.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(takes).await;
+                    running.fetch_sub(1, SeqCst);
+                    let code = code.unwrap_or(0);
+                    let mut out = vec![guest::Response::chunk("stdout", b"ok\n".to_vec())];
+                    if code != 0 {
+                        out.push(guest::Response::chunk("stderr", b"no\n".to_vec()));
+                    }
+                    out.push(guest::Response::exit(code, false));
+                    let mut theirs = theirs;
+                    for r in out {
+                        let _ = theirs.write_all(&guest::encode_frame(&r).unwrap()).await;
+                    }
+                });
+                return Ok(Box::new(ours));
+            }
+            self.record(format!("session {pid} {cmd} tty={}", req.tty));
+            tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(theirs);
+                while let Ok(f) = guestc::read_frame::<_, guest::Request>(&mut rd).await {
+                    let out = match f.op.as_str() {
+                        "stdin" => guest::Response::chunk("stdout", f.data),
+                        "resize" => guest::Response::chunk(
+                            "stdout",
+                            format!("{}x{}\n", f.cols, f.rows).into_bytes(),
+                        ),
+                        "close_stdin" => guest::Response::exit(code.unwrap_or(0), false),
+                        _ => continue,
+                    };
+                    let last = out.kind == "exit";
+                    let frame = guest::encode_frame(&out).unwrap();
+                    if wr.write_all(&frame).await.is_err() || last {
+                        break;
+                    }
+                }
+            });
+            Ok(Box::new(ours))
         }
 
         async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()> {
@@ -10237,6 +10374,227 @@ mod tests {
         );
         let r = h.stored(&m.id).unwrap();
         assert_eq!((r.restarts, r.recent_restarts), (5, 1));
+    }
+
+    // --- exec sessions (ADR 0029) ---
+
+    fn session_req(cmd: &[&str], tty: bool) -> api::session::ExecSession {
+        api::session::ExecSession {
+            cmd: cmd.iter().map(|c| c.to_string()).collect(),
+            tty,
+            cols: 100,
+            rows: 30,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_streams_both_ways_and_is_an_event_not_a_version() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("sbx")).await.unwrap();
+        h.host.answers("sh", 3);
+        let mut s =
+            h.m.open_session(&m.id, session_req(&["sh"], true))
+                .await
+                .unwrap();
+        assert_eq!(s.machine, m.id);
+        let pid = h
+            .host
+            .calls()
+            .into_iter()
+            .find(|c| c.starts_with("session "))
+            .unwrap();
+        assert!(pid.ends_with(" sh tty=true"), "{pid}");
+        // Input goes in, the command's answer comes back, the code ends it.
+        for f in [
+            guest::Request {
+                op: "stdin".into(),
+                data: b"ls\n".to_vec(),
+                ..Default::default()
+            },
+            guest::Request {
+                op: "resize".into(),
+                cols: 120,
+                rows: 40,
+                ..Default::default()
+            },
+            guest::Request {
+                op: "close_stdin".into(),
+                ..Default::default()
+            },
+        ] {
+            guestc::write_request(&mut s.conn, &f).await.unwrap();
+        }
+        let out = guestc::collect(&mut s.conn).await.unwrap();
+        assert_eq!(out.stdout, b"ls\n120x40\n");
+        assert_eq!(out.code, 3);
+        // An event says someone came in; the machine's version did not move.
+        let ev =
+            h.m.inner
+                .events
+                .read(0, &events::Filter::default(), 1000)
+                .unwrap();
+        let opened = ev
+            .events
+            .iter()
+            .find(|e| e.reason == reason::SESSION_OPENED)
+            .unwrap();
+        assert_eq!(
+            (opened.machine_id.as_str(), opened.message.as_str()),
+            (m.id.as_str(), "sh on a terminal")
+        );
+        assert_eq!(opened.data, Some(json!({"command": "sh", "tty": true})));
+        assert_eq!(h.m.get(&m.id).unwrap().version, m.version);
+    }
+
+    #[tokio::test]
+    async fn an_open_session_keeps_the_machine_awake() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("sbx")).await.unwrap();
+        let s =
+            h.m.open_session(&m.id, session_req(&["sh"], true))
+                .await
+                .unwrap();
+        let long_ago = Some(Utc::now() - chrono::Duration::hours(1));
+        let idle = || h.m.entry(&m.id).unwrap().rec.lock().unwrap().last_used_at = long_ago;
+        idle();
+        assert_eq!(
+            h.m.get(&m.id).unwrap().sleeps_at,
+            None,
+            "no sleep while in use"
+        );
+        h.m.tick().await;
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
+        // The session's end is a use: the window starts again from it.
+        drop(s);
+        let after = h.m.get(&m.id).unwrap();
+        assert!(after.last_used_at > long_ago);
+        assert!(after.sleeps_at.is_some());
+        h.m.tick().await;
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
+        idle();
+        h.m.tick().await;
+        let slept = h.m.get(&m.id).unwrap();
+        assert_eq!(
+            (slept.state.as_str(), slept.stopped_reason.as_str()),
+            (state::STOPPED, stop::IDLE)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_in_flight_keeps_the_machine_awake() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("job")).await.unwrap();
+        *h.host.exec_takes.lock().unwrap() = Duration::from_secs(3);
+        let mgr = h.m.clone();
+        let id = m.id.clone();
+        let job = tokio::spawn(async move {
+            mgr.exec(
+                &id,
+                api::ExecRequest {
+                    cmd: vec!["migrate".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+        eventually("the command runs", || {
+            h.host.execs_now.load(std::sync::atomic::Ordering::SeqCst) == 1
+        })
+        .await;
+        // Its window ran out while it runs: it is in use, it does not sleep under it.
+        h.m.entry(&m.id).unwrap().rec.lock().unwrap().last_used_at =
+            Some(Utc::now() - chrono::Duration::hours(1));
+        h.m.tick().await;
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
+        let out = job.await.unwrap().unwrap();
+        assert_eq!((out.exit_code, out.stdout.as_str()), (0, "ok\n"));
+        assert!(
+            h.m.get(&m.id).unwrap().last_used_at > Some(Utc::now() - chrono::Duration::minutes(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_wakes_a_sleeping_machine_or_says_why_not() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("sbx")).await.unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        let mut asleep = session_req(&["sh"], false);
+        asleep.wake = false;
+        match h.m.open_session(&m.id, asleep).await {
+            Err(MError::NotRunning(why)) => assert_eq!(why, "stopped (idle)"),
+            other => panic!("{:?}", other.err()),
+        }
+        assert!(matches!(
+            h.m.open_session(&m.id, session_req(&[], false)).await.err(),
+            Some(MError::Invalid(_))
+        ));
+        let s =
+            h.m.open_session(&m.id, session_req(&["sh"], false))
+                .await
+                .unwrap();
+        assert_eq!(h.m.get(&s.machine).unwrap().state, state::RUNNING);
+        assert!(matches!(
+            h.m.open_session("m_none", session_req(&["sh"], false))
+                .await
+                .err(),
+            Some(MError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_session_on_an_init_older_than_sessions_is_refused_naming_it() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        // An init older than the version report: it would run the command as a plain exec,
+        // no input, no terminal.
+        *h.host.init_version.lock().unwrap() = String::new();
+        let m = h.m.create(h.request("old")).await.unwrap();
+        h.host.calls();
+        match h.m.open_session(&m.id, session_req(&["sh"], true)).await {
+            Err(MError::Conflict(why)) => assert_eq!(
+                why,
+                "the machine's init (older than the version report) does not know `session`: it is older than this daemon; the machine gets this daemon's init when its root disk is made again (an image change)"
+            ),
+            other => panic!("{:?}", other.err()),
+        }
+        assert!(
+            !h.host.calls().iter().any(|c| c.starts_with("session ")),
+            "nothing reached the guest"
+        );
+        // An exec is the old way in: it runs.
+        let exec = api::ExecRequest {
+            cmd: vec!["true".into()],
+            wake: true,
+            ..Default::default()
+        };
+        let out = h.m.exec(&m.id, exec).await.unwrap();
+        assert_eq!(out.exit_code, 0);
+        // One of a release before sessions, named.
+        *h.host.init_version.lock().unwrap() = "0.0.9+a".into();
+        let m = h.m.create(h.request("older")).await.unwrap();
+        match h.m.open_session(&m.id, session_req(&["sh"], false)).await {
+            Err(MError::Conflict(why)) => assert!(
+                why.starts_with("the machine's init (0.0.9+a) does not know `session`"),
+                "{why}"
+            ),
+            other => panic!("{:?}", other.err()),
+        }
+        // This release's: a session.
+        *h.host.init_version.lock().unwrap() = api::VERSION.into();
+        let m = h.m.create(h.request("new")).await.unwrap();
+        assert!(h
+            .m
+            .open_session(&m.id, session_req(&["sh"], false))
+            .await
+            .is_ok());
     }
 
     /// Moves the current run's start back, as if it had run that long.

@@ -200,7 +200,9 @@ volume (`/dev/vdc`) at its mount path (a fresh one gets the image directory's ow
 and loses `lost+found`, so a database accepts it), writes the boot files, sets the hostname,
 `/etc/hosts` and `/etc/resolv.conf`, configures `eth0` over netlink, then runs the image's
 entrypoint and command with its environment and user. It listens on vsock port 7421 for the
-host: `exec` (a command with stdin, streamed stdout and stderr, exit code, timeout), `put` and
+host: `exec` (a command with stdin, streamed stdout and stderr, exit code, timeout; on a
+terminal of its own with `tty`, its input as frames after the request, the host's close ending
+it, ADR 0029), `put` and
 `get` (files), `ping`, `shutdown`. PID 1 inherits every orphan on the system; the init reaps
 them with `waitid(WNOWAIT)` and leaves alone the children it waits for itself, so a command's
 exit status is never stolen. When the main process exits, the init connects out to the host
@@ -278,6 +280,14 @@ offset in the whole console and reads across both files. `?follow=true` keeps th
 woken by the writer after each line), reads from its cursor, and ends at the machine's
 `destroyed` event or the daemon's shutdown, with `{}` every 30 s meanwhile.
 
+An exec session (`GET /v1/machines/{id}/exec` upgraded to a WebSocket, ADR 0029) is the same
+guest connection as a JSON exec, kept open: the client's messages (a channel byte, as
+Kubernetes') become the init's `stdin`, `resize` and `close_stdin` frames, its `stdout`,
+`stderr` and `exit` become messages (`session.rs`). With `tty` the init runs the command on a
+pseudo-terminal of its own as the leader of a new session. The host's close ends any exec's
+command (SIGKILL to its group; SIGHUP first on a terminal); the daemon pings the client every
+30 s and drops one silent for 90 s. A machine with a session open is in use and does not sleep.
+
 ### Labels and quotas
 
 A machine's `metadata` is its labels: `GET /v1/machines?label=k=v&label=k` keeps the machines
@@ -289,7 +299,8 @@ cannot pass it together. A refusal is 403 `quota` and a `quota_exceeded` event.
 
 ### Sleep
 
-Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the
+Use is an exec or an exec session for as long as it runs (ADR 0029), an ingress connection, or
+an explicit `POST /machines/{id}/touch`. After the
 machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`; idle machines
 are stopped together, a few at a time, never one after another). A start, an
 ingress connection or an exec on an idle machine wakes it; one that arrives while the machine is
@@ -330,7 +341,8 @@ spreads; a host that answers `capacity` for a tenant's first machine loses the p
 retry is placed afresh. A tenant's gateway goes to the tenant's host (`GET /v1/tenants/{id}`
 and `/gateway` are forwarded there); a PUT for a tenant with no host places it as a first machine
 would, the gateway's size as the need, in `?region=`; a quota PUT does the same with no need.
-A logs follow is streamed through as an events watch is. `POST /v1/tenants/{id}/unpin` releases a tenant by hand (ADR 0013).
+A logs follow is streamed through as an events watch is; an exec session's WebSocket is
+relayed as bytes once the host answered its upgrade (ADR 0029). `POST /v1/tenants/{id}/unpin` releases a tenant by hand (ADR 0013).
 
 Hosts report their capacity and tenants (`POST /v1/hosts/register`, every 15 s, from the
 daemon's `fleet:` configuration) or are listed in the fleet's configuration and polled. A host

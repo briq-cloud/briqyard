@@ -30,6 +30,8 @@ M=$(briqyard machine run --image alpine:3.20 --name viafleet --tenant "$T" --mem
 check "created, placed" '[ -n "$(briqyard machine get "$M" | jq -r .host)" ]'
 check "running"         '[ "$(briqyard machine get "$M" | jq -r .state)" = running ]'
 check "exec forwarded"  '[ "$(briqyard machine exec "$M" -- hostname)" = viafleet ]'
+check "session forwarded" '[ "$(echo hi | briqyard machine exec -i "$M" -- cat)" = hi ]'
+check "tty forwarded"   'python3 "$(dirname "$0")/exec-tty.py" 30x100 "send:stty size; exit 3\n" "expect:30 100" -- briqyard machine exec -it "$M" -- sh >/dev/null; [ $? = 3 ]'
 check "listed with host" 'briqyard machine ls | grep "$M" | grep -q "[a-z]"'
 EP=$(briqyard endpoint add "$M" 80 | jq -r .id)
 check "endpoint forwarded" 'briqyard endpoint ls | grep -q "$EP"'

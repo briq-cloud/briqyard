@@ -1,6 +1,6 @@
 # ADR 0004: The guest: a static init, a config drive, vsock for exec and files
 
-Date: 2026-10-18 · Status: accepted
+Date: 2026-10-18 · Status: accepted; amended by ADR 0029 (an exec's input frames, a terminal, the host's close ends the command)
 
 ## Context
 
