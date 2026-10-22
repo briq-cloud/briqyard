@@ -578,6 +578,7 @@ fn fleet_at(
     state_path: PathBuf,
 ) -> Fleet {
     cfg.state_dir = dir.path().to_path_buf();
+    let backup = backup::Backup::open(&cfg.backup).unwrap();
     let mut reg = Registry::default();
     let now = Utc::now();
     for h in &cfg.hosts {
@@ -594,6 +595,7 @@ fn fleet_at(
         http: reqwest::Client::new(),
         pinned: Mutex::new(HashMap::new()),
         prov,
+        backup,
         key_turn: Default::default(),
     });
     Fleet { st, _dir: dir }
@@ -1002,6 +1004,92 @@ async fn a_host_gets_its_own_pool_key_and_no_other() {
     assert!(!std::fs::read_to_string(&f.st.state_path)
         .unwrap()
         .contains(&key));
+}
+
+/// A restore says what the fleet will trust once started on it, never a token or a key.
+#[test]
+fn a_restore_says_what_the_fleet_will_trust() {
+    let mut reg = Registry::default();
+    let mut h = static_host(
+        &config::StaticHost {
+            id: "h1".into(),
+            url: "https://10.0.0.1:7420".into(),
+            token: "h1-token".into(),
+            ..Default::default()
+        },
+        Utc.with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap(),
+    );
+    h.tls_fingerprint = "ab".repeat(32);
+    reg.hosts.insert("h1".into(), h);
+    let (key, _) = reg.pool_key("h1").unwrap();
+    let out = restored(
+        &reg,
+        "file:///b fleet/registry.json.age",
+        std::path::Path::new("/s/registry.json"),
+    );
+    assert!(out.starts_with("restored 1 hosts (1 pool keys) and 0 tenants from file:///b fleet/registry.json.age into /s/registry.json\n"), "{out}");
+    assert!(
+        out.contains("newest heartbeat in it: 2026-10-21T12:00:00+00:00"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  h1  https://10.0.0.1:7420  pin abababababababab…  token  pool key\n"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("h1-token") && !out.contains(key.expose()),
+        "{out}"
+    );
+}
+
+/// With a backup, a pool key is handed out only once the store holds it (ADR 0032): a store
+/// that refuses the write refuses the key, and the backup read back holds the key served.
+#[tokio::test]
+async fn a_pool_key_is_in_the_backup_before_it_is_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = dir.path().join("backup.key");
+    let recipient = backup::keygen(&identity).unwrap();
+    let store = dir.path().join("store");
+    let f = fleet(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "s1-token".into(),
+                ..Default::default()
+            }],
+            backup: config::Backup {
+                store: format!("file://{}", store.display()),
+                recipient,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let ask = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
+    // The store's directory turned into a file: no write can make its `fleet/`, whoever runs.
+    let aside = dir.path().join("store.aside");
+    std::fs::rename(&store, &aside).unwrap();
+    std::fs::write(&store, b"").unwrap();
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask.clone()).await;
+    std::fs::remove_file(&store).unwrap();
+    std::fs::rename(&aside, &store).unwrap();
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "backup");
+    assert!(
+        !body.contains("\"key\"") && !body.contains("store"),
+        "no key, no details: {body}"
+    );
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let key = json(&body)["key"].as_str().unwrap().to_string();
+    let b = f.st.backup.as_ref().unwrap();
+    let back = b
+        .fetch(backup::LATEST, &backup::identity(&identity).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(back.hosts["s1"].pool_key.expose(), key);
 }
 
 /// Where the fleet terminates the connection (its TLS, or plain on loopback), a host's call

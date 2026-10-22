@@ -424,6 +424,7 @@ paths:
         "401": { description: not the token the fleet holds for the host at this address }
         "403": { description: no host is expected at this address (`unknown_host`) }
         "500": { description: the registry could not be written (`registry`); no key is handed out unwritten }
+        "503": { description: "the registry's backup could not be written (`backup`, ADR 0032); no key is handed out before the backup holds it" }
   /v1/hosts/order:
     post:
       summary: Order a host from the provisioner now (fleet only; dry-run unless configured otherwise)
@@ -1003,7 +1004,7 @@ components:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, backup, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]

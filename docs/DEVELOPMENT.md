@@ -156,6 +156,8 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   stop; `load-key` with the key on stdin; a filesystem never mounted over files; the fleet's
   key route: made at the first ask, the same after, one per host, refused to any other token
   or address, written `0600` before it is answered, in no listing, gone with the host; a
+  registry's backup: written sealed and only on a change, read back with its identity and no
+  other, a key served only once the store holds it; a
   registry that does not parse refused, never read as empty, and fields it does not know
   written back; a host call from another address than its record's refused unless behind
   `tls: off`; a key whose write failed taken back, never served; a keyed host forgotten only by
@@ -205,17 +207,24 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back;
   with `SECOND_HOST_SH`, its pool locked while it is down and back encrypted and unlocked with
   the fleet's key, the key on none of its files, in its log or in the fleet's host list. 21 checks.
+- `hack/fleet-restore.sh` (from the Mac, `FLEET_SH="limactl shell fc sudo" SECOND_HOST_SH="limactl
+  shell fc2 sudo"`): the dev fleet backed up to `file:///var/lib/briqyard-fleet-backup` for the
+  run (an identity in `/etc/briqyard/fleet-backup.key` on fc, development only), the backup
+  sealed (no key, no token in it), a restore refused over a registry, the registry lost and
+  restored `0600` with the same key for fc2, then fc2's pool locked and fc2 back with the key
+  of the restored registry; the config and the registry put back. 10 checks.
 
 ## Layout
 
 ```
-crates/briqyard-api     the API types and the host–guest protocol (shared by everything)
-crates/briqyardd        the daemon: config, state, zfs, netw (bridges, nft, dns), fc, image,
-                        guestc (vsock client), machine (the manager), ingress, api
-crates/briqyard-init    PID 1 inside the guest
-crates/briqyard         the CLI
-crates/briqyard-fleet   the orchestrator across hosts
-api/openapi.yaml        the API description, served at /v1/openapi.yaml
-hack/                   dev VM, systemd units, dev configs, the shell suites, the stress driver
-docs/adr                every technical decision; docs/research the numbers behind them
+crates/briqyard-api      the API types and the host–guest protocol (shared by everything)
+crates/briqyardd         the daemon: config, state, zfs, netw (bridges, nft, dns), fc, image,
+                         guestc (vsock client), machine (the manager), ingress, api
+crates/briqyard-init     PID 1 inside the guest
+crates/briqyard          the CLI
+crates/briqyard-fleet    the orchestrator across hosts
+crates/briqyard-objstore the object store (S3 or a directory), shared by the daemon and the fleet
+api/openapi.yaml         the API description, served at /v1/openapi.yaml
+hack/                    dev VM, systemd units, dev configs, the shell suites, the stress driver
+docs/adr                 every technical decision; docs/research the numbers behind them
 ```

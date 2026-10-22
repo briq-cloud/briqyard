@@ -13,7 +13,6 @@ mod ingress;
 mod machine;
 mod metrics;
 mod netw;
-mod objstore;
 mod poolkey;
 mod store;
 mod tls;
@@ -21,6 +20,7 @@ mod usage;
 mod zfs;
 
 use anyhow::{anyhow, Context, Result};
+use briqyard_objstore as objstore;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
