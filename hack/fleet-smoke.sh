@@ -45,7 +45,10 @@ H=$(briqyard host order --reason smoke | jq -r .id)
 check "ordered (dry-run)" '[ "$(curl -fsS "$BRIQYARD_URL/v1/hosts" | jq -r ".[] | select(.id == \"$H\") | .state")" = dry-run ]'
 check "retired at once"   '[ "$(briqyard host retire "$H" | jq -r .state)" = released ]'
 check "gone"              '! briqyard host ls | grep -q "$H"'
-LOCAL=$(briqyard host ls | awk 'NR>1 && $3=="ready"{print $1; exit}')
+# The fleet's own static host of hack/fleet.dev.yaml, never another: forgetting a host drops
+# its pool key with its record (ADR 0026); a second host (fc2) is refused, and drained it would
+# take no tenant.
+LOCAL=$(briqyard host ls | awk 'NR>1 && $1=="local" && $3=="ready"{print $1; exit}')
 briqyard host drain "$LOCAL"
 check "draining"          '[ "$(curl -fsS "$BRIQYARD_URL/v1/hosts" | jq -r ".[] | select(.id == \"$LOCAL\") | .state")" = draining ]'
 # One host: the create is refused. Several: it lands on another one. Never on the draining host.

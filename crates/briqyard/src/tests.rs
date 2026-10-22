@@ -845,7 +845,11 @@ fn host_commands() {
         _ => panic!("not a drain"),
     }
     match parse(&["host", "rm", "h_1"]).cmd {
-        Cmd::Host(HostCmd::Rm { id }) => assert_eq!(id, "h_1"),
+        Cmd::Host(HostCmd::Rm { id, force }) => assert!(id == "h_1" && !force),
+        _ => panic!("not a rm"),
+    }
+    match parse(&["host", "rm", "h_1", "--force"]).cmd {
+        Cmd::Host(HostCmd::Rm { force, .. }) => assert!(force),
         _ => panic!("not a rm"),
     }
     for sub in ["retire", "drain", "rm"] {

@@ -427,6 +427,20 @@ paths:
         "204": { description: recorded }
         "401": { description: not the token the fleet holds for the host at this address }
         "403": { description: no host is expected at this address (`unknown_host`) }
+  /v1/hosts/key:
+    post:
+      summary: "A host's pool key (fleet only, ADR 0026): with the host's own API token as the bearer, for the one host record at the address it advertises; made at the first ask, the same after"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostKeyRequest" }
+      responses:
+        "200": { description: the key, content: { application/json: { schema: { $ref: "#/components/schemas/HostKey" } } } }
+        "401": { description: not the token the fleet holds for the host at this address }
+        "403": { description: no host is expected at this address (`unknown_host`) }
+        "500": { description: the registry could not be written (`registry`); no key is handed out unwritten }
+        "503": { description: "the registry's backup could not be written (`backup`, ADR 0032); no key is handed out before the backup holds it" }
   /v1/hosts/order:
     post:
       summary: Order a host from the provisioner now (fleet only; dry-run unless configured otherwise)
@@ -453,9 +467,12 @@ paths:
   /v1/hosts/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     delete:
-      summary: Forget a host (fleet only)
+      summary: "Forget a host (fleet only). A host whose record holds a pool key is refused unless `force`: the key goes with the record (ADR 0026)"
+      parameters:
+        - { name: force, in: query, schema: { type: boolean, default: false }, description: "forget a host that holds a pool key: its pool is unreadable at its next restart" }
       responses:
         "204": { description: forgotten }
+        "409": { description: "the host holds a pool key (`pool_key`): retire it, or force" }
 components:
   parameters:
     id:
@@ -1003,11 +1020,21 @@ components:
         disk_free_mb: { type: integer }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate; a fingerprint other than the pinned one is refused (403 tls_mismatch)" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
+    HostKeyRequest:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, description: "The URL the host advertises (`fleet.advertise`): the fleet finds the host's record by its address" }
+    HostKey:
+      type: object
+      required: [key]
+      properties:
+        key: { type: string, description: "The pool's key: 32 bytes as 64 hex digits, ZFS's `hex` key format" }
     ApiError:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, backup, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]

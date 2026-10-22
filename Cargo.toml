@@ -6,6 +6,7 @@ members = [
     "crates/briqyard-init",
     "crates/briqyard",
     "crates/briqyard-fleet",
+    "crates/briqyard-objstore",
 ]
 
 [workspace.package]
@@ -17,6 +18,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 briqyard-api = { path = "crates/briqyard-api" }
+briqyard-objstore = { path = "crates/briqyard-objstore" }
 anyhow = "1"
 async-trait = "0.1"
 thiserror = "2"
@@ -37,6 +39,7 @@ zstd = "0.13"
 sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
+age = "0.12"
 base64 = "0.22"
 bytes = "1"
 axum = { version = "0.7", features = ["json", "http1"] }

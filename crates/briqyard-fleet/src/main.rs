@@ -2,6 +2,7 @@
 //! fleet places new tenants, forwards every machine request to the right daemon, keeps the
 //! registry of hosts from their heartbeats, and adds or releases hosts through a provisioner.
 
+mod backup;
 mod bootstrap;
 mod config;
 mod provision;
@@ -16,7 +17,7 @@ use axum::routing::{any, get, post, put};
 use axum::{Json, Router};
 use briqyard_api as api;
 use chrono::{Duration, Utc};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use registry::{url_host, HostRec, Policy, Registry, ScalePolicy};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,6 +28,28 @@ use std::sync::{Arc, Mutex};
 struct Args {
     #[arg(long, default_value = "/etc/briqyard/fleet.yaml")]
     config: PathBuf,
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Make an age identity for the registry's backup (ADR 0032): written to OUT (0600), its
+    /// recipient printed, for `backup.recipient`. Keep OUT off the fleet's host.
+    Keygen {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write the registry from its backup in `backup.store`, decrypted with the identity, when
+    /// the fleet has none (stop it first). Never over an existing registry.
+    Restore {
+        /// The age identity file of `backup.recipient`.
+        #[arg(long)]
+        identity: PathBuf,
+        /// The object to restore: the newest, or a day's (`fleet/registry-2026-10-21.json.age`).
+        #[arg(long, default_value = backup::LATEST)]
+        from: String,
+    },
 }
 
 struct AppState {
@@ -40,6 +63,34 @@ struct AppState {
     pinned: Mutex<HashMap<String, reqwest::Client>>,
     state_path: PathBuf,
     prov: Box<dyn provision::Provisioner>,
+    /// The registry's backup, when `backup.store` is set (ADR 0032).
+    backup: Option<backup::Backup>,
+    /// Key requests take turns: a key just made is answered, to its host or any other ask,
+    /// only once it is written, and taken back when it could not be (ADR 0026).
+    key_turn: tokio::sync::Mutex<()>,
+}
+
+/// Writes a registry file, the fleet's alone (`0600`: it holds every host's token and pool
+/// key): a temp file made afresh, synced, renamed over the old one, the directory synced.
+fn write_registry(path: &std::path::Path, reg: &Registry) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("json.tmp");
+    // A leftover keeps its own mode through `open`: made afresh, it is 0600.
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(&backup::encode(reg))?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path)?;
+    // The rename itself reaches the disk with the directory.
+    std::fs::File::open(path.parent().unwrap_or(std::path::Path::new(".")))?.sync_all()
 }
 
 /// A host that does not even accept the connection is given five seconds. No deadline for
@@ -71,11 +122,7 @@ impl AppState {
     /// 500 with it, a background task has nothing more to do with it.
     fn save(&self) -> Result<()> {
         let reg = self.reg.lock().unwrap().clone();
-        let tmp = self.state_path.with_extension("json.tmp");
-        let written = serde_json::to_vec_pretty(&reg)
-            .map_err(std::io::Error::other)
-            .and_then(|data| std::fs::write(&tmp, data))
-            .and_then(|_| std::fs::rename(&tmp, &self.state_path));
+        let written = write_registry(&self.state_path, &reg);
         if let Err(e) = &written {
             tracing::error!(path = %self.state_path.display(), err = %e, "write the registry");
         }
@@ -133,6 +180,8 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         note: String::new(),
         bootstrap_attempts: 0,
         conditions: vec![],
+        pool_key: Default::default(),
+        unknown: Default::default(),
     }
 }
 
@@ -145,12 +194,25 @@ async fn run(args: Args) -> Result<()> {
         return Err(anyhow!("config {} not found", args.config.display()));
     };
     let cfg = config::Config::load(path)?;
-    std::fs::create_dir_all(&cfg.state_dir)?;
     let state_path = cfg.state_dir.join("registry.json");
-    let mut reg: Registry = std::fs::read(&state_path)
-        .ok()
-        .and_then(|d| serde_json::from_slice(&d).ok())
-        .unwrap_or_default();
+    match args.cmd {
+        Some(Cmd::Keygen { out }) => {
+            println!("{}", backup::keygen(&out)?);
+            return Ok(());
+        }
+        Some(Cmd::Restore { identity, from }) => {
+            return restore(&cfg, &state_path, &identity, &from).await
+        }
+        None => {}
+    }
+    // The registry holds every host's token and pool key: the fleet's alone.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(&cfg.state_dir)?;
+        std::fs::set_permissions(&cfg.state_dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("mode of {}", cfg.state_dir.display()))?;
+    }
+    let mut reg = Registry::load(&state_path)?;
     let now = Utc::now();
     for h in &cfg.hosts {
         reg.heartbeat(static_host(h, now), now);
@@ -169,11 +231,15 @@ async fn run(args: Args) -> Result<()> {
         pinned: Mutex::new(HashMap::new()),
         state_path,
         prov: provision::build(&cfg.provisioner),
+        backup: backup::Backup::open(&cfg.backup)?,
+        key_turn: Default::default(),
     });
+    tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));
     tokio::spawn(scaler(state.clone()));
     tokio::spawn(bootstrap::run(state.clone()));
-    let app = app(state).into_make_service();
+    // The peer address is what a host's own calls are checked against (`the_host`).
+    let app = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     let listener = std::net::TcpListener::bind(&cfg.listen)
         .with_context(|| format!("listen {}", cfg.listen))?;
     listener.set_nonblocking(true)?;
@@ -202,6 +268,83 @@ async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// `briqyard-fleet restore`: the registry from its backup, written where the fleet keeps it,
+/// only when there is none: a restore never replaces what a fleet wrote.
+async fn restore(
+    cfg: &config::Config,
+    state_path: &std::path::Path,
+    identity: &std::path::Path,
+    from: &str,
+) -> Result<()> {
+    let Some(b) = backup::Backup::open(&cfg.backup)? else {
+        return Err(anyhow!(
+            "backup.store is not set: there is nothing to restore from"
+        ));
+    };
+    if state_path.exists() {
+        return Err(anyhow!(
+            "{} exists: stop the fleet and move it aside first; a restore never writes over a registry",
+            state_path.display()
+        ));
+    }
+    let reg = b.fetch(from, &backup::identity(identity)?).await?;
+    std::fs::create_dir_all(&cfg.state_dir)?;
+    write_registry(state_path, &reg).with_context(|| format!("write {}", state_path.display()))?;
+    print!(
+        "{}",
+        restored(&reg, &format!("{} {from}", b.describe()), state_path)
+    );
+    Ok(())
+}
+
+/// What a restore wrote, for the operator to check before starting the fleet on it: the
+/// fleet will trust each host by this address, token and pin.
+fn restored(reg: &Registry, from: &str, path: &std::path::Path) -> String {
+    let keys = reg
+        .hosts
+        .values()
+        .filter(|h| !h.pool_key.is_empty())
+        .count();
+    let mut out = format!(
+        "restored {} hosts ({keys} pool keys) and {} tenants from {from} into {}\n",
+        reg.hosts.len(),
+        reg.tenants.len(),
+        path.display()
+    );
+    if let Some(newest) = reg.hosts.values().map(|h| h.last_seen).max() {
+        out += &format!("newest heartbeat in it: {}\n", newest.to_rfc3339());
+    }
+    out += "the fleet will trust, once started:\n";
+    let mut hosts: Vec<&HostRec> = reg.hosts.values().collect();
+    hosts.sort_by(|a, b| a.id.cmp(&b.id));
+    for h in hosts {
+        let pin = if h.tls_fingerprint.is_empty() {
+            "no pin".to_string()
+        } else {
+            format!(
+                "pin {}…",
+                &h.tls_fingerprint[..h.tls_fingerprint.len().min(16)]
+            )
+        };
+        out += &format!(
+            "  {}  {}  {pin}  {}  {}\n",
+            h.id,
+            h.url,
+            if h.token.is_empty() {
+                "no token"
+            } else {
+                "token"
+            },
+            if h.pool_key.is_empty() {
+                "no pool key"
+            } else {
+                "pool key"
+            }
+        );
+    }
+    out
+}
+
 /// The HTTP API: every route, behind the bearer check.
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
@@ -209,6 +352,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/hosts", get(list_hosts))
         .route("/v1/hosts/register", post(register_host))
+        .route("/v1/hosts/key", post(host_key))
         .route("/v1/hosts/order", post(order_host))
         .route("/v1/hosts/:id/drain", post(drain_host))
         .route("/v1/hosts/:id/retire", post(retire_host))
@@ -292,8 +436,9 @@ fn bearer(headers: &HeaderMap) -> &str {
 
 async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Response {
     let path = req.uri().path().to_string();
-    // A heartbeat presents the host's own token, checked against its record by the handler.
-    let open = path == "/healthz" || path == "/v1/hosts/register";
+    // A heartbeat and a key request present the host's own token, checked against its record
+    // by the handler.
+    let open = path == "/healthz" || path == "/v1/hosts/register" || path == "/v1/hosts/key";
     if !open
         && !st.cfg.token.is_empty()
         && !api::constant_eq(bearer(req.headers()).as_bytes(), st.cfg.token.as_bytes())
@@ -347,49 +492,204 @@ async fn list_hosts(State(st): S) -> Json<Vec<api::Host>> {
     Json(hosts)
 }
 
+/// Who made a host's call, as the fleet sees it, and whether that is known.
+/// - The fleet terminates the connection (its own TLS, or plain on loopback): the peer.
+/// - `tls: off` on a loopback listener: a proxy of ours in front, by construction (nothing
+///   else reaches a loopback port), so the last `X-Forwarded-For` value, which the proxy
+///   writes; a call without one is from an unknown address.
+/// - `tls: off` on any other address: whatever is in front, unknown: the token alone.
+#[derive(Clone, Copy, Debug)]
+struct Caller {
+    peer: Option<std::net::IpAddr>,
+    checked: bool,
+}
+
+impl Caller {
+    fn of(
+        st: &AppState,
+        info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+        headers: &HeaderMap,
+    ) -> Caller {
+        let connection = info.map(|i| i.0.ip().to_canonical());
+        if !matches!(st.cfg.tls, config::Tls::Off) {
+            return Caller {
+                peer: connection,
+                checked: true,
+            };
+        }
+        let loopback = st
+            .cfg
+            .listen
+            .parse::<std::net::SocketAddr>()
+            .is_ok_and(|a| a.ip().is_loopback());
+        if !loopback {
+            return Caller {
+                peer: connection,
+                checked: false,
+            };
+        }
+        let forwarded = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .last()
+            .and_then(|v| {
+                v.trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .ok()
+            })
+            .map(|ip| ip.to_canonical());
+        Caller {
+            peer: forwarded,
+            checked: true,
+        }
+    }
+}
+
+/// The record a host's own call belongs to: the one host at the address it advertises, when
+/// the call presents that host's token and, where the fleet terminates the connection, comes
+/// from that address (ADR 0026: a token on a disk that left our hands is not enough). Nothing
+/// else passes, so no host can speak for another. `call` names the call for the log.
+fn the_host<'a>(
+    reg: &'a Registry,
+    url: &str,
+    headers: &HeaderMap,
+    caller: Caller,
+    call: &str,
+) -> Result<&'a HostRec, Refusal> {
+    let Some(rec) = reg.expecting(url) else {
+        tracing::warn!(
+            call,
+            url,
+            "host call refused: no host expected at this address"
+        );
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "unknown_host",
+            format!(
+                "no host is expected at {}: order one, or list it under hosts: with its token",
+                url_host(url)
+            ),
+        ));
+    };
+    if rec.token.is_empty() || !api::constant_eq(bearer(headers).as_bytes(), rec.token.as_bytes()) {
+        tracing::warn!(
+            host = rec.id,
+            call,
+            "host call refused: not the host's token"
+        );
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "the host's own token is required",
+        ));
+    }
+    if caller.checked {
+        let want = url_host(&rec.url)
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .map(|ip| ip.to_canonical());
+        if want.is_none() || want != caller.peer {
+            let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
+            tracing::warn!(
+                host = rec.id,
+                call,
+                peer,
+                "host call refused: not from the host's address"
+            );
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "unknown_host",
+                match want {
+                    None => format!(
+                        "host {} is known by the name in {}: the fleet checks a host's calls by its address, so its url must be one",
+                        rec.id, rec.url
+                    ),
+                    Some(want) => format!(
+                        "host {}'s calls come from {want}, not {}",
+                        rec.id,
+                        if peer.is_empty() { "an unknown address" } else { &peer }
+                    ),
+                },
+            ));
+        }
+    }
+    Ok(rec)
+}
+
+/// A host's pool key (ADR 0026), for the host alone: asked by its bootstrap to create the
+/// pool, and by its daemon at a start that finds the key not loaded. Made at the first ask
+/// and written to the registry before it is answered.
+async fn host_key(
+    State(st): S,
+    info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
+    Json(req): Json<api::HostKeyRequest>,
+) -> Result<Response, Refusal> {
+    let caller = Caller::of(&st, info, &headers);
+    let _turn = st.key_turn.lock().await;
+    let (id, key, made) = {
+        let mut reg = st.reg.lock().unwrap();
+        let id = the_host(&reg, &req.url, &headers, caller, "pool key")?
+            .id
+            .clone();
+        let (key, made) = reg.pool_key(&id).expect("the record was just found");
+        (id, key, made)
+    };
+    if made {
+        if let Err(e) = st.save() {
+            // Never served, never kept: the next ask makes one again.
+            if let Some(h) = st.reg.lock().unwrap().hosts.get_mut(&id) {
+                h.pool_key = Default::default();
+            }
+            return Err(registry_error(e));
+        }
+    }
+    // A key in use is in the backup: written now when the store does not hold it yet.
+    if let Some(b) = &st.backup {
+        if !b.holds(&id, &key).await {
+            if let Err(e) = b.push(&st.reg).await {
+                tracing::error!(
+                    host = id,
+                    err = format!("{e:#}"),
+                    "registry backup before a pool key"
+                );
+                return Err(err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "backup",
+                    "the registry's backup could not be written, and no key is handed out before it is: the fleet's log says why",
+                ));
+            }
+        }
+    }
+    let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
+    tracing::info!(host = id, made, peer, "pool key served");
+    Ok(Json(api::HostKey {
+        key: key.expose().to_string(),
+    })
+    .into_response())
+}
+
 /// A daemon's heartbeat. It is taken for the one host record at its address, when it presents
 /// that host's token: the one the bootstrap gave an ordered host, or the one `hosts:` lists.
 /// Nothing else may register, so no host can speak for another.
 async fn register_host(
     State(st): S,
+    info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     Json(req): Json<api::RegisterHostRequest>,
 ) -> Result<Response, Refusal> {
     let now = Utc::now();
+    let caller = Caller::of(&st, info, &headers);
     {
         let mut reg = st.reg.lock().unwrap();
-        let rec = match reg.expecting(&req.url) {
-            Some(r) => r,
-            None => {
-                tracing::warn!(
-                    daemon = req.id,
-                    url = req.url,
-                    "registration refused: no host expected at this address"
-                );
-                return Err(err(
-                    StatusCode::FORBIDDEN,
-                    "unknown_host",
-                    format!(
-                        "no host is expected at {}: order one, or list it under hosts: with its token",
-                        url_host(&req.url)
-                    ),
-                ));
-            }
-        };
-        if rec.token.is_empty()
-            || !api::constant_eq(bearer(&headers).as_bytes(), rec.token.as_bytes())
-        {
-            tracing::warn!(
-                host = rec.id,
-                daemon = req.id,
-                "registration refused: not the host's token"
-            );
-            return Err(err(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "the host's own token is required",
-            ));
-        }
+        let call = format!("heartbeat of {}", req.id);
+        let rec = the_host(&reg, &req.url, &headers, caller, &call)?;
         if let Err(why) =
             registry::tls_matches(&rec.tls_fingerprint, &req.tls_fingerprint, &req.url)
         {
@@ -427,6 +727,8 @@ async fn register_host(
                 note: String::new(),
                 bootstrap_attempts: 0,
                 conditions: req.conditions,
+                pool_key: Default::default(),
+                unknown: Default::default(),
             },
             now,
         );
@@ -521,6 +823,8 @@ fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
         note: server.note,
         bootstrap_attempts: 0,
         conditions: vec![],
+        pool_key: Default::default(),
+        unknown: Default::default(),
     };
     st.reg.lock().unwrap().hosts.insert(id, h.clone());
     st.save()?;
@@ -575,8 +879,42 @@ async fn release_host(st: &AppState, h: &HostRec) -> Result<api::Host> {
     Ok(out)
 }
 
-async fn forget_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
-    st.reg.lock().unwrap().forget(&id);
+/// What a forget of a host that holds a pool key costs, said by its refusal and by `force`.
+const FORGET_KEYED: &str =
+    "its pool key goes with the record: the pool is unreadable at the host's next restart; retire it, or --force";
+
+#[derive(serde::Deserialize, Default)]
+struct ForgetQuery {
+    #[serde(default)]
+    force: bool,
+}
+
+/// Forgets a host. One whose record holds a pool key is refused unless `force`: the key goes
+/// with the record (ADR 0026), and a static host polled back gets a new one its pool does not
+/// open. Retiring a host forgets it once released, on purpose.
+async fn forget_host(
+    State(st): S,
+    Path(id): Path<String>,
+    Query(q): Query<ForgetQuery>,
+) -> Result<Response, Refusal> {
+    {
+        let mut reg = st.reg.lock().unwrap();
+        let keyed = reg.hosts.get(&id).is_some_and(|h| !h.pool_key.is_empty());
+        if keyed && !q.force {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "pool_key",
+                format!("host {id}: {FORGET_KEYED}"),
+            ));
+        }
+        if keyed {
+            tracing::warn!(
+                host = id,
+                "host forgotten with its pool key: {FORGET_KEYED}"
+            );
+        }
+        reg.forget(&id);
+    }
     st.save().map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
