@@ -165,6 +165,8 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             disk_free_mb: 100_000,
             tls_fingerprint: d.tls_fingerprint.clone(),
             conditions: d.conditions.lock().unwrap().clone(),
+            started: Default::default(),
+            vmm_version: String::new(),
         })
     }
     async fn tenants(State(d): D) -> Json<Vec<api::Tenant>> {
@@ -633,6 +635,7 @@ fn fleet_at(
         http: reqwest::Client::new(),
         pinned: Mutex::new(HashMap::new()),
         prov,
+        upgrade: Default::default(),
         backup,
         key_turn: Default::default(),
     });
@@ -1659,7 +1662,7 @@ async fn retire_releases_an_empty_host_at_once() {
 }
 
 #[tokio::test]
-async fn retire_drains_a_busy_host_until_it_empties() {
+async fn retire_keeps_a_busy_host_until_it_empties() {
     let f = fleet(config::Config::default(), dry_scaleway());
     seed(&f.st, "h_b", 64_000, 4_000, 2, &["t1"]);
     {
@@ -1669,16 +1672,16 @@ async fn retire_drains_a_busy_host_until_it_empties() {
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_b/retire", "", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     let h: api::Host = serde_json::from_str(&body).unwrap();
-    assert_eq!(h.state, "draining");
+    assert_eq!(h.state, "retiring");
     assert_eq!(h.machines, 2);
     let listed = hosts(&f.st);
     assert_eq!(listed.len(), 1, "still here");
-    assert_eq!(listed[0].state, "draining");
+    assert_eq!(listed[0].state, "retiring");
     assert!(f.st.reg.lock().unwrap().retirable().is_empty());
-    // Asked again while busy: still draining, not released.
+    // Asked again while busy: still retiring, not released.
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_b/retire", "", None).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(json(&body)["state"], "draining");
+    assert_eq!(json(&body)["state"], "retiring");
     // Its last machine goes (a heartbeat says so): the scaler's pass would release it.
     {
         let mut reg = f.st.reg.lock().unwrap();
@@ -3238,6 +3241,231 @@ async fn a_logs_follow_is_streamed_through_as_it_comes() {
         tx.send(l.to_string() + "\n").await.unwrap();
         assert_eq!(chunk(&mut w).await["line"], line);
     }
+}
+
+// --- drain, undrain, upgrade (ADR 0027) ---
+
+#[tokio::test]
+async fn a_drained_host_is_never_released_and_undrains() {
+    let f = fleet(config::Config::default(), dry_scaleway());
+    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_a/drain", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(
+        f.st.reg.lock().unwrap().retirable().is_empty(),
+        "an empty drained host is kept: only a retire releases"
+    );
+    // A heartbeat keeps the drain.
+    let h = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+    f.st.reg.lock().unwrap().heartbeat(h, Utc::now());
+    assert_eq!(hosts(&f.st)[0].state, "draining");
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_a/undrain", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(hosts(&f.st)[0].state, "ready");
+    // Undrain of a ready host, or of one that is not there.
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/undrain", "", None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(json(&body)["error"], "host h_a is ready");
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_x/undrain", "", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // A retire is undone the same way, before the host empties.
+    seed(&f.st, "h_b", 64_000, 0, 1, &["t1"]);
+    call(&f.st, "POST", "/v1/hosts/h_b/retire", "", None).await;
+    assert_eq!(f.st.reg.lock().unwrap().hosts["h_b"].state, "retiring");
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_b/undrain", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(f.st.reg.lock().unwrap().hosts["h_b"].state, "ready");
+}
+
+/// A fleet whose SSH key is a file that exists, so an upgrade gets past its own checks (the
+/// key is only read by `ssh`).
+fn fleet_with_key() -> Fleet {
+    let mut cfg = config::Config::default();
+    cfg.provisioner.bootstrap.ssh_key = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into();
+    fleet(cfg, Box::new(provision::Static))
+}
+
+#[tokio::test]
+async fn an_upgrade_refuses_what_it_cannot_do() {
+    let up = |r: &str| Some(serde_json::json!({ "release": r }));
+    // No SSH key: nothing can be installed. Named, not the default: a dev VM has that one.
+    let mut cfg = config::Config::default();
+    cfg.provisioner.bootstrap.ssh_key = "/nonexistent/briqyard-fleet-key".into();
+    let f = fleet(cfg, Box::new(provision::Static));
+    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", up("0.2.0")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(
+        json(&body)["error"]
+            .as_str()
+            .unwrap()
+            .contains("provisioner.bootstrap.ssh_key"),
+        "{body}"
+    );
+    let f = fleet_with_key();
+    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", up("latest")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json(&body)["error"],
+        "release \"latest\": a URL, or a version such as 0.2.0"
+    );
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_x/upgrade", "", up("0.2.0")).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    for state in ["down", "retiring", "provisioning", "upgrading"] {
+        set_state(&f.st, "h_a", state);
+        let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", up("0.2.0")).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{state}");
+        assert!(
+            json(&body)["error"].as_str().unwrap().contains(state),
+            "{body}"
+        );
+    }
+    // One at a time: while another upgrade holds the turn, nothing moves.
+    set_state(&f.st, "h_a", "ready");
+    let _turn = f.st.upgrade.clone().try_lock_owned().unwrap();
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", up("0.2.0")).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(
+        json(&body)["error"],
+        "another host is upgrading: one at a time"
+    );
+    assert_eq!(hosts(&f.st)[0].state, "ready");
+    // An upgrading host's state is the upgrade's: no drain, undrain or retire meanwhile.
+    set_state(&f.st, "h_a", "upgrading");
+    for op in ["drain", "undrain", "retire"] {
+        let (s, _, _) = call(&f.st, "POST", &format!("/v1/hosts/h_a/{op}"), "", None).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{op}");
+    }
+    // And a heartbeat keeps it.
+    let h = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+    f.st.reg.lock().unwrap().heartbeat(h, Utc::now());
+    assert_eq!(hosts(&f.st)[0].state, "upgrading");
+}
+
+#[tokio::test]
+async fn an_upgrade_waits_for_a_new_start_of_the_version_installed() {
+    let f = fleet_with_key();
+    seed(&f.st, "h_a", 64_000, 0, 1, &["t1"]);
+    let before = Utc::now() - Duration::minutes(5);
+    let beat = |version: &str, started: Option<api::DaemonStart>| {
+        let mut h = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+        h.version = version.into();
+        h.started = started;
+        f.st.reg.lock().unwrap().heartbeat(h, Utc::now());
+    };
+    let start = |at, adopted, stopped, gone| {
+        Some(api::DaemonStart {
+            at,
+            adopted,
+            stopped,
+            gone,
+        })
+    };
+    let wait = |ms| {
+        upgrade::come_back(
+            &f.st,
+            "h_a",
+            Some(before),
+            "0.2.0+b",
+            std::time::Duration::from_millis(ms),
+        )
+    };
+    // The old daemon still answering, or a new one of another build: not yet.
+    beat("0.1.0+a", start(before, 0, 0, 0));
+    let err = wait(600).await.unwrap_err();
+    assert_eq!(err, "no heartbeat from a new start of 0.2.0+b within 0 s");
+    beat("0.2.0+b", start(before, 0, 0, 0));
+    assert!(wait(600).await.is_err(), "the same start is not a new one");
+    // A daemon older than ADR 0027 reports no start: never the one installed.
+    beat("0.2.0+b", None);
+    assert!(wait(600).await.is_err(), "no start is not a new one");
+    // The new start, which adopted the machine; one whose process had exited meanwhile is gone,
+    // not a failure.
+    let now = Utc::now();
+    beat("0.2.0+b", start(now, 1, 0, 1));
+    let started = wait(600).await.unwrap();
+    assert_eq!((started.at, started.adopted, started.gone), (now, 1, 1));
+    // One that stopped a machine it could not take over fails the upgrade.
+    beat("0.2.0+b", start(now, 1, 2, 0));
+    let err = wait(600).await.unwrap_err();
+    assert_eq!(
+        err,
+        "0.2.0+b started and stopped 2 machines it could not take over (1 adopted)"
+    );
+}
+
+#[tokio::test]
+async fn an_upgrade_ends_in_the_hosts_state_or_drained() {
+    let f = fleet_with_key();
+    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+    let was = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+    set_state(&f.st, "h_a", "upgrading");
+    let started = api::DaemonStart {
+        at: Utc::now(),
+        adopted: 3,
+        stopped: 0,
+        gone: 0,
+    };
+    let h = upgrade::finish(&f.st, &was, "file:///r", Ok(("0.2.0+b".into(), started))).unwrap();
+    assert_eq!(h.state, "ready");
+    assert!(h.note.starts_with("upgraded to 0.2.0+b at "), "{}", h.note);
+    assert!(h.note.ends_with("; machines handed over: 3"), "{}", h.note);
+    // A failure leaves it drained, the reason in its note, whatever it was before.
+    set_state(&f.st, "h_a", "upgrading");
+    let err = upgrade::finish(
+        &f.st,
+        &was,
+        "file:///r",
+        Err("install: ssh exited 255".into()),
+    )
+    .unwrap_err();
+    assert_eq!(err, "install: ssh exited 255");
+    let h = &hosts(&f.st)[0];
+    assert_eq!(h.state, "draining");
+    assert!(
+        h.note.starts_with("upgrade to file:///r failed at "),
+        "{}",
+        h.note
+    );
+    assert!(
+        h.note
+            .ends_with(": install: ssh exited 255; undrain once it is fixed"),
+        "{}",
+        h.note
+    );
+    // A fleet that stopped during an upgrade finds the host drained at its start.
+    set_state(&f.st, "h_a", "upgrading");
+    upgrade::interrupted(&mut f.st.reg.lock().unwrap());
+    let h = &hosts(&f.st)[0];
+    assert_eq!(h.state, "draining");
+    assert!(
+        h.note
+            .ends_with("interrupted by a fleet restart; undrain once checked"),
+        "{}",
+        h.note
+    );
+}
+
+#[tokio::test]
+async fn a_heartbeat_carries_the_daemons_start() {
+    let f = fleet(config::Config::default(), Box::new(provision::Static));
+    let mut h = static_host(
+        &config::StaticHost {
+            id: "h_a".into(),
+            url: "http://10.0.0.1:7420".into(),
+            ..Default::default()
+        },
+        Utc::now(),
+    );
+    h.started = Some(api::DaemonStart {
+        at: Utc::now(),
+        adopted: 4,
+        stopped: 1,
+        gone: 2,
+    });
+    f.st.reg.lock().unwrap().heartbeat(h.clone(), Utc::now());
+    assert_eq!(hosts(&f.st)[0].started, h.started);
 }
 
 // --- exec sessions (ADR 0029) ---

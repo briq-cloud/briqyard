@@ -1227,6 +1227,7 @@ fn the_host_table() {
                 message: "pool 4.0 GB free of 100.0 (4%), under 10%".into(),
             },
         ],
+        started: Default::default(),
     };
     let ordered = api::Host {
         id: "h_srv-9".into(),
@@ -1241,6 +1242,7 @@ fn the_host_table() {
         tls_fingerprint: String::new(),
         conditions: vec![],
         region: String::new(),
+        version: String::new(),
         ..ready.clone()
     };
     let out = host_table(&[ready, ordered]);
@@ -1252,11 +1254,11 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[0],
-        "ID               URL                          STATE        REGION   MEMORY MB      VCPUS      MACHINES  TENANTS  LAST SEEN"
+        "ID               URL                          STATE        REGION   MEMORY MB      VCPUS      MACHINES  TENANTS  VERSION              LAST SEEN"
     );
     assert_eq!(
         lines[1],
-        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6/32       3         2        2026-10-19T08:30:00+00:00"
+        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6/32       3         2        0.1.0                2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[2],
@@ -1269,14 +1271,78 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[4],
-        "h_srv-9          -                            provisioning -        0/0            0/0        0         0        2026-10-19T08:30:00+00:00",
-        "no address nor region yet shows as -"
+        "h_srv-9          -                            provisioning -        0/0            0/0        0         0        -                    2026-10-19T08:30:00+00:00",
+        "no address, region nor version yet shows as -"
     );
     assert_eq!(
         lines[5],
         "                 note: bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
     );
     assert!(out.ends_with('\n'));
+}
+
+#[test]
+fn host_upgrade_takes_a_host_or_all() {
+    match parse(&["host", "upgrade", "h_a", "--release", "0.2.0"]).cmd {
+        Cmd::Host(HostCmd::Upgrade { id, all, release }) => assert_eq!(
+            (id.as_deref(), all, release.as_str()),
+            (Some("h_a"), false, "0.2.0")
+        ),
+        _ => panic!("not an upgrade"),
+    }
+    assert!(matches!(
+        parse(&["host", "upgrade", "--all", "--release", "0.2.0"]).cmd,
+        Cmd::Host(HostCmd::Upgrade {
+            id: None,
+            all: true,
+            ..
+        })
+    ));
+    match parse(&["host", "undrain", "h_1"]).cmd {
+        Cmd::Host(HostCmd::Undrain { id }) => assert_eq!(id, "h_1"),
+        _ => panic!("not an undrain"),
+    }
+    // A host or --all, never both nor neither, and always a release.
+    fails(&["host", "upgrade", "--release", "0.2.0"]);
+    fails(&["host", "upgrade", "h_a", "--all", "--release", "0.2.0"]);
+    fails(&["host", "upgrade", "h_a"]);
+}
+
+#[test]
+fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
+    let host = |id: &str, state: &str| api::Host {
+        id: id.into(),
+        url: String::new(),
+        region: String::new(),
+        provider: String::new(),
+        state: state.into(),
+        capacity: api::Capacity::default(),
+        used: api::Capacity::default(),
+        machines: 0,
+        tenants: vec![],
+        last_seen: ts(),
+        version: String::new(),
+        note: String::new(),
+        tls_fingerprint: String::new(),
+        conditions: vec![],
+        started: Default::default(),
+    };
+    let hs = [
+        host("h_c", "ready"),
+        host("h_a", "draining"),
+        host("h_d", "down"),
+        host("h_b", "ready"),
+        host("h_e", "retiring"),
+    ];
+    let (up, left) = upgrade_order(&hs);
+    assert_eq!(up, ["h_a", "h_b", "h_c"]);
+    assert_eq!(
+        left,
+        [
+            ("h_d".to_string(), "down".to_string()),
+            ("h_e".to_string(), "retiring".to_string())
+        ]
+    );
 }
 
 #[test]
@@ -1884,6 +1950,7 @@ fn describe_shows_the_machine_then_its_events() {
             ..Default::default()
         }),
         pending_since: Some(ts()),
+        init_version: "0.1.0+fdad892eeefa".into(),
         host: "d1".into(),
         restarts: 2,
         restarting_at: Some(ts() + chrono::Duration::seconds(20)),
@@ -1952,6 +2019,7 @@ fn describe_shows_the_machine_then_its_events() {
             "Volume:        2 GB at /data",
             "Disk limits:   32MB/s 4000io each, 10s burst",
             "Egress:        via:gateway",
+            "Runs on:       init 0.1.0+fdad892eeefa, vmm unknown",
             "Endpoints:     ep_1 http 80 -> http://web-ab12.byard.localhost",
             "               ep_2 tcp 5432 -> 10.0.0.5:20001",
             "Sleep:         30m",
@@ -1981,6 +2049,7 @@ fn describe_shows_the_machine_then_its_events() {
             restarting_at: None,
             probes: api::Probes::default(),
             pending: None,
+            init_version: String::new(),
             ..plain
         },
         &[],
@@ -1988,7 +2057,14 @@ fn describe_shows_the_machine_then_its_events() {
     assert!(out.contains("Endpoints:     none\n"), "{out}");
     assert!(out.contains("Backup:        none\n"), "{out}");
     assert!(out.ends_with("Events:\n  none\n"), "{out}");
-    for absent in ["Host:", "Exit:", "Restarts:", "Probes:", "Pending:"] {
+    for absent in [
+        "Host:",
+        "Exit:",
+        "Restarts:",
+        "Probes:",
+        "Pending:",
+        "Runs on:",
+    ] {
         assert!(!out.contains(absent), "{absent} {out}");
     }
 }

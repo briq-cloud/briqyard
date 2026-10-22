@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Turns a fresh Ubuntu 24.04+ server with KVM into a briqyard host: packages, a ZFS pool on the
 # second drive (or a file), Firecracker and a guest kernel, the briqyard binaries, the config,
-# the systemd unit. Idempotent: run it again to upgrade.
+# the systemd unit. Idempotent: run again with another BRIQYARD_RELEASE, it is the upgrade (the
+# fleet's `host upgrade` does that, ADR 0027): a running daemon hands its machines over to the new
+# one, which adopts them; nothing stops.
 #
 #   BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.0 \
 #   BRIQYARD_POOL_DEVICE=/dev/nvme1n1 BRIQYARD_TOKEN=... FLEET_URL=https://fleet.example \
@@ -55,7 +57,9 @@ esac
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 [ -e /dev/kvm ] || { echo "/dev/kvm is missing: this server has no KVM"; exit 1; }
 [ -n "$KERNEL_SHA256" ] || { echo "KERNEL_SHA256 is not pinned for $ARCH: set it to the sha256sum of $KERNEL_URL"; exit 1; }
-[ -z "$FLEET_URL" ] || [ -n "$API_TOKEN" ] || { echo "FLEET_URL needs BRIQYARD_TOKEN: the host's own, which the fleet expects"; exit 1; }
+# The token goes into a configuration written now, and asks the fleet for the pool's key; an
+# upgrade (a configuration there, the pool open) needs neither (ADR 0027).
+[ -z "$FLEET_URL" ] || [ -n "$API_TOKEN" ] || [ -f /etc/briqyard/config.yaml ] || { echo "FLEET_URL needs BRIQYARD_TOKEN: the host's own, which the fleet expects"; exit 1; }
 
 # Loopback or RFC 1918: reachable from this host or its private network only.
 private() {
@@ -87,6 +91,13 @@ case "$FLEET_URL" in
     private "$fleet_host" || { echo "FLEET_URL=$FLEET_URL is plain HTTP to an address the internet could reach: write https://, or a private address"; exit 1; }
     ;;
 esac
+
+# Puts an executable in place by a rename: a running binary (the daemon, the fleet, Firecracker)
+# is replaced, never written into.
+put() {
+  install -m 0755 "$1" "$2.new"
+  mv -f "$2.new" "$2"
+}
 
 # Downloads a file and checks its digest against the pin before it lands anywhere.
 fetch() {
@@ -129,6 +140,7 @@ fi
 # makes the file when it is missing (a pool about to be created), never otherwise.
 pool_key() {
   if [ -n "$FLEET_URL" ]; then
+    [ -n "$API_TOKEN" ] || { echo "   the fleet's key needs BRIQYARD_TOKEN: the host's own" >&2; return 1; }
     # The token goes in on stdin, off the command line.
     printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
       curl -fsS --max-time 20 -H @- -H 'Content-Type: application/json' \
@@ -184,8 +196,8 @@ if [ "$(/usr/local/bin/firecracker --version 2>/dev/null | head -1)" != "Firecra
   fetch "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${ARCH}.tgz" "$FIRECRACKER_SHA256" /tmp/firecracker.tgz
   tar -xz -C /tmp -f /tmp/firecracker.tgz
   rm -f /tmp/firecracker.tgz
-  install -m 0755 "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}/firecracker-${FIRECRACKER_VERSION}-${ARCH}" /usr/local/bin/firecracker
-  install -m 0755 "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}/jailer-${FIRECRACKER_VERSION}-${ARCH}" /usr/local/bin/jailer
+  put "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}/firecracker-${FIRECRACKER_VERSION}-${ARCH}" /usr/local/bin/firecracker
+  put "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}/jailer-${FIRECRACKER_VERSION}-${ARCH}" /usr/local/bin/jailer
   rm -rf "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}"
 fi
 if ! echo "$KERNEL_SHA256  /var/lib/briqyard/vmlinux" | sha256sum -c --quiet - 2>/dev/null; then
@@ -194,17 +206,23 @@ if ! echo "$KERNEL_SHA256  /var/lib/briqyard/vmlinux" | sha256sum -c --quiet - 2
   echo "   kernel ${KERNEL_URL##*/}"
 fi
 
-echo "== binaries"
-if [ -n "$RELEASE" ]; then
-  for b in briqyardd briqyard-init briqyard briqyard-fleet; do
-    curl -fsSL -o "/usr/local/bin/$b" "$RELEASE/$b-linux-$ARCH"
-    chmod 0755 "/usr/local/bin/$b"
-  done
-else
-  for b in briqyardd briqyard-init briqyard briqyard-fleet; do
-    install -m 0755 "bin/$b" "/usr/local/bin/$b"
-  done
+echo "== binaries${RELEASE:+ from $RELEASE}"
+new=$(mktemp -d)
+for b in briqyardd briqyard-init briqyard briqyard-fleet; do
+  if [ -n "$RELEASE" ]; then
+    curl -fsSL -o "$new/$b" "$RELEASE/$b-linux-$ARCH"
+  else
+    cp "bin/$b" "$new/$b"
+  fi
+  chmod 0755 "$new/$b"
+done
+# The new daemon reads the configuration before any binary lands: one it refuses leaves the
+# host as it was, its daemon running (ADR 0027).
+if [ -f /etc/briqyard/config.yaml ] && ! "$new/briqyardd" --config /etc/briqyard/config.yaml tls-fingerprint >/dev/null; then
+  rm -rf "$new"; echo "   the new briqyardd refuses /etc/briqyard/config.yaml: nothing installed"; exit 1
 fi
+for b in briqyardd briqyard-init briqyard briqyard-fleet; do put "$new/$b" "/usr/local/bin/$b"; done
+rm -rf "$new"
 
 echo "== config"
 mkdir -p /etc/briqyard
@@ -246,8 +264,11 @@ fi
 chmod 0600 /etc/briqyard/config.yaml
 
 echo "== api certificate"
-# Made here, before the daemon starts, so it is there to read; kept across runs.
-fingerprint=$(/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml tls-fingerprint)
+# Made here, before the daemon starts, so it is there to read; kept across runs. It is also the
+# new binary reading the configuration: one it refuses stops here, before any hand-over, and the
+# running daemon goes on (ADR 0027).
+fingerprint=$(/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml tls-fingerprint) || {
+  echo "   the new briqyardd refuses /etc/briqyard/config.yaml: nothing handed over"; exit 1; }
 if [ -n "$fingerprint" ]; then
   echo "   sha256 $fingerprint: the fleet pins it (tls_fingerprint)"
 else
@@ -261,8 +282,9 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml
-# Only the daemon gets the signal: the machines (Firecracker processes in this cgroup) must
-# outlive a daemon crash, and a clean stop suspends them itself.
+# Only the daemon gets the signal: the machines (Firecracker processes in this cgroup) outlive
+# it. A stop (SIGTERM) suspends them, and the next start boots them again; SIGUSR2 (an upgrade)
+# leaves them running for the next daemon to adopt; a crash leaves them too (ADR 0027).
 KillMode=process
 Restart=on-failure
 RestartSec=2
@@ -276,7 +298,16 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable briqyardd >/dev/null
-systemctl restart briqyardd
+# A running daemon hands its machines over (SIGUSR2, ADR 0027) and exits; the new one adopts them.
+# `systemctl restart` would suspend every machine instead.
+pid=$(systemctl show -p MainPID --value briqyardd)
+if [ "${pid:-0}" != 0 ]; then
+  echo "== handing the machines over to the new daemon"
+  systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
+  for _ in $(seq 1 120); do [ "$(systemctl show -p MainPID --value briqyardd)" = "$pid" ] || break; sleep 1; done
+  [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] || { echo "   briqyardd (pid $pid) did not exit within 120 s"; exit 1; }
+fi
+systemctl start briqyardd
 sleep 1
 systemctl --no-pager --lines=2 status briqyardd | grep -E "Active|listening" || true
-echo "== done: briqyard status"
+echo "== done: $(/usr/local/bin/briqyardd --version)"

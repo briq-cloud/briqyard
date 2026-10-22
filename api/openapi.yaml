@@ -455,15 +455,39 @@ paths:
   /v1/hosts/{id}/retire:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Drain a host and release it at its provider once nothing runs on it (fleet only)
+      summary: Take no new tenant on a host and release it at its provider once nothing runs on it (fleet only)
       responses:
-        "200": { description: draining, or released when it was already empty, content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "200": { description: retiring, or released when it was already empty, content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "409": { description: the host is upgrading (`conflict`) }
   /v1/hosts/{id}/drain:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Take no new tenant on this host (fleet only)
+      summary: Take no new tenant on this host, and keep it (fleet only; Kubernetes's cordon)
       responses:
         "204": { description: draining }
+        "409": { description: the host is upgrading (`conflict`) }
+  /v1/hosts/{id}/undrain:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Take new tenants on a draining or retiring host again (fleet only)
+      responses:
+        "204": { description: ready }
+        "409": { description: "the host is neither draining nor retiring (`conflict`)" }
+  /v1/hosts/{id}/upgrade:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: "Install another release on a ready or draining host, its machines running (fleet only, ADR 0027): the host `upgrading`, `hack/bootstrap-host.sh` run over SSH with the release, the daemon handing its machines over to the new one, then a heartbeat from a new start of the installed version that stopped no machine; the host back in its state. Answers when it is done; one upgrade at a time"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpgradeHostRequest" }
+      responses:
+        "200": { description: "upgraded; the note says to what and how many machines were handed over", content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "400": { description: "a release that is neither a URL nor a version, or no SSH key (`provisioner.bootstrap.ssh_key`)" }
+        "404": { description: no such host }
+        "409": { description: "another upgrade under way, or the host is neither ready nor draining (`conflict`)" }
+        "502": { description: "the upgrade failed (`upgrade_failed`): the host is `draining`, the reason in its note" }
   /v1/hosts/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     delete:
@@ -670,6 +694,8 @@ components:
         version: { type: integer, description: "the seq of the last event about it: every event moves it, its last use does not; what `If-Match` compares" }
         pending: { $ref: "#/components/schemas/Pending" }
         pending_since: { type: string, format: date-time, description: "when the oldest change still pending was made" }
+        init_version: { type: string, description: "what the init in its root disk said at its last boot (ADR 0027); empty before it, or from an init older than the report" }
+        vmm_version: { type: string, description: "what ran its last boot: Firecracker's version and the host kernel's release, `v1.17.0/6.8.0-45-generic`; a memory snapshot resumes only under the same" }
         host: { type: string, description: the host that runs it (fleet) }
     Endpoint:
       type: object
@@ -949,7 +975,7 @@ components:
     Status:
       type: object
       properties:
-        version: { type: string }
+        version: { type: string, description: "this build: the release and its commit, `0.1.0+fdad892eeefa` (ADR 0027)" }
         host_id: { type: string }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
@@ -958,6 +984,21 @@ components:
         disk_free_mb: { type: integer }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate, 64 hex digits; empty on plain HTTP (ADR 0020)" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
+        started: { $ref: "#/components/schemas/DaemonStart" }
+        vmm_version: { type: string, description: "what a machine booted now runs under: Firecracker's version and the host kernel's release" }
+    DaemonStart:
+      type: object
+      description: "When the daemon started and what it did with the machines the previous one left running (ADR 0027); absent from a daemon older than that"
+      properties:
+        at: { type: string, format: date-time }
+        adopted: { type: integer, description: left running and taken over }
+        stopped: { type: integer, description: "left running, its process still there but not taken over: ended, marked stopped, booted again when its sleep window had not run out; what fails an upgrade" }
+        gone: { type: integer, description: "left running, its process ended while no daemon ran: marked stopped, booted again the same way" }
+    UpgradeHostRequest:
+      type: object
+      required: [release]
+      properties:
+        release: { type: string, description: "a URL where `<binary>-linux-<arch>` are, or a version of the project's releases (`0.2.0`, `v0.2.0`)" }
     Condition:
       type: object
       description: "A host condition (ADR 0021), decided by the daemon's tick. Each is a pressure: the fleet places nothing new on a host while one is true"
@@ -991,16 +1032,17 @@ components:
         url: { type: string }
         region: { type: string }
         provider: { type: string }
-        state: { type: string, enum: [ready, draining, down, provisioning, bootstrapped, failed, dry-run, released] }
+        state: { type: string, enum: [ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed, dry-run, released], description: "`draining` takes no new tenant; `retiring` neither, and is released once empty; `upgrading` while `host upgrade` runs" }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer }
         tenants: { type: array, items: { type: string } }
         last_seen: { type: string, format: date-time }
         version: { type: string }
-        note: { type: string, description: What the provisioner or the bootstrap last said }
+        note: { type: string, description: What the provisioner, the bootstrap or the last upgrade said }
         tls_fingerprint: { type: string, description: "SHA-256 of the host's API certificate, pinned by the fleet; empty on plain HTTP" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" }, description: from its last heartbeat }
+        started: { $ref: "#/components/schemas/DaemonStart" }
     OrderHostRequest:
       type: object
       properties:
@@ -1020,6 +1062,7 @@ components:
         disk_free_mb: { type: integer }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate; a fingerprint other than the pinned one is refused (403 tls_mismatch)" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
+        started: { $ref: "#/components/schemas/DaemonStart" }
     HostKeyRequest:
       type: object
       required: [url]

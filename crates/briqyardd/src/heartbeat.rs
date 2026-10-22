@@ -32,10 +32,11 @@ pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, m
             used,
             machines: total,
             tenants: mgr.tenants().into_iter().map(|t| t.id).collect(),
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: api::VERSION.into(),
             disk_free_mb: mgr.disk_free_mb().await,
             tls_fingerprint: tls_fingerprint.clone(),
             conditions: mgr.conditions(),
+            started: Some(mgr.started()),
         };
         let r = client
             .post(format!(

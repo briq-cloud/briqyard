@@ -42,7 +42,8 @@ mount path, the ports the image listens on, and the sleep window. The daemon:
 States: `created` → `starting` → `running` → `stopping` → `stopped` → (`starting` again) …
 → `destroying` → gone. A `stopped` machine keeps both disks. `stopped_reason` says why it
 stopped: `user`, `idle` (went to sleep), `exit` (its process ended; `exit` says how), `host`
-(the daemon stopped it: a shutdown, or a leftover of a crashed daemon; wakeable like `idle`).
+(the daemon stopped it: a shutdown, or a leftover of a crashed daemon; the next daemon start
+boots it again unless its sleep window ran out, and it is wakeable like `idle`).
 `state_changed_at` moves only with `state`; `updated_at` with every change to the machine (a
 state, a setting), never with a use: `last_used_at` is kept in memory and reaches the record
 with the next change or the sleeper's tick, so a busy machine does not rewrite its record on
@@ -310,9 +311,21 @@ A stop can keep a memory snapshot instead (`POST /machines/{id}/stop {"suspend":
 `suspend_on_sleep: true` for the sleeper): the machine is paused, Firecracker writes its memory
 and state into its jail (on the pool), and the next start loads them into a fresh Firecracker and
 resumes, in about a quarter of a second under nested virtualization, without a boot: processes,
-connections and uptime carry on. The snapshot is used once; if it cannot be loaded, the start is
-a cold boot. The daemon suspends every running machine when it shuts down, so an upgrade costs
-each machine a quarter-second wake on its next use.
+connections and uptime carry on. The snapshot is used once; if it cannot be loaded, or was taken
+under another Firecracker or host kernel (the machine's `vmm_version`), the start is a cold boot.
+
+### Versions and upgrades
+
+Every binary says its version, the release and the commit (`0.1.0+fdad892eeefa`, ADR 0027):
+`/v1/status`, the heartbeat, `host ls`; the init in its `pong`, kept as the machine's
+`init_version`. The wire between versions is additive: a field added has a default, nothing is
+renamed or removed, unknown fields and values are ignored. The daemon's stop (SIGTERM) suspends
+every running machine, and its next start boots each one again; SIGUSR2 hands them over instead,
+once every transition under way has ended:
+the daemon exits and leaves them running, and the next one adopts them. `host upgrade` through
+the fleet (`upgrade.rs`) marks the host `upgrading`, runs the bootstrap script on it again with
+the release (whose last step is that hand-over), waits for a heartbeat from a new start of the
+installed version that stopped no machine, and puts the host back; the fleet is upgraded first.
 
 ## Several servers
 
@@ -339,7 +352,8 @@ address (the record of an order, or a `hosts:` entry); any other is refused. A h
 a minute is `down`: its machines' calls answer 503 `host_down` until it is back, and a listing
 of machines or endpoints is never partial (a tenant's listing asks its host alone; a host that
 is down or does not answer fails the listing), since a control plane reads a machine missing
-from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host. The registry
+from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host (`draining`),
+`undrain` resumes it; a host `upgrading` or `retiring` takes nothing new either. The registry
 (hosts, tenant → host, machine → host, endpoint → host) is one JSON file; a write that fails
 fails the request that needed it. It is written to the object store once a minute when it
 changed, encrypted with age to a key kept off the fleet's host, and before any pool key is
@@ -347,7 +361,7 @@ served; `briqyard-fleet restore` brings it back (ADR 0032).
 
 Provisioners add and release hosts through a cloud API: `hetzner-robot` (dedicated servers,
 monthly), `scaleway` (Elastic Metal, hourly), `static` (none). `POST /v1/hosts/order` orders
-a server and `POST /v1/hosts/{id}/retire` drains a host and releases it once empty; the
+a server and `POST /v1/hosts/{id}/retire` makes a host `retiring` and releases it once empty; the
 autoscaler, when `provisioner.enabled` is set, does the same on its own (no slot of `slot_mb`
 left: order one; a provisioned host empty for `idle_grace` above `min_hosts`: release it),
 one change a minute, never past `max_hosts`. Adding a host costs money, so every provisioner
@@ -358,7 +372,8 @@ A server becomes a host in three steps: the fleet polls the provider for its add
 token in the environment) until it succeeds, and the host turns `ready` on its first heartbeat,
 taken for the record made at the order. No provider's API returns the server's SSH host key:
 the key seen at the first successful bootstrap is pinned in `<state_dir>/known_hosts`, its
-fingerprint in the host's note, and later connects are strict against it.
+fingerprint in the host's note, and later connects are strict against it. An upgrade runs the
+same script over the same connection with another release (ADR 0027).
 
 The control path is TLS (ADR 0020). Each daemon makes a self-signed certificate once and
 serves its API with it on any non-loopback address; the fleet trusts that certificate by its

@@ -42,10 +42,9 @@ address (the host's `hosts:` entry, below).
 A public `LISTEN` needs `ALLOWED_CLIENTS` or `ALLOW_PUBLIC`: with neither, the script binds
 the API and the endpoints to loopback (the daemon refuses to start on a public bind without
 one), and a host nobody reaches is the safe side. Every host runs the same
-Firecracker and kernel, so a memory snapshot resumes anywhere and two hosts never differ by
-the day they were installed; run the script again with new pins to upgrade them (stop
-suspended machines first: a snapshot resumes only under the Firecracker that wrote it). The
-kernel comes from Firecracker's CI bucket until we build and host it ourselves.
+Firecracker and kernel, so two hosts never differ by the day they were installed; new pins
+reach a host through an upgrade (below). The kernel comes from Firecracker's CI bucket until
+we build and host it ourselves.
 
 Then, from anywhere that reaches the host:
 
@@ -143,16 +142,62 @@ what a failed destroy or a crash left. A `.next` dataset is a restore under way.
 
 ## Upgrade
 
-Install the new binaries and `systemctl restart briqyardd`. The daemon suspends every running
-machine on the way down (a memory snapshot each) and marks it so; each one resumes on its next
-use, in about a quarter of a second. Nothing reboots. A daemon that crashes instead leaves its
-machines running (`KillMode=process`), and the next daemon adopts them. A host from before ADR
-0014 (jails on `/`): stop the daemon and empty `jail_dir` before the first start that mounts
-`byard/jail` there, or the old files stay hidden on `/` and the machines suspended then boot cold.
+Through the fleet, one host or every host, machines running (ADR 0027). The fleet first, then
+the hosts: a host is never newer than its fleet.
 
-The guest kernel and `briqyard-init` are baked into root disks: an image built with an older
-init keeps it until the image is rebuilt (a new init hash makes a new image key; the old disk is
-garbage-collected once no machine uses it).
+```bash
+briqyard-fleet --version                                  # on the fleet's server: upgrade it first
+briqyard host upgrade h_123456 --release 0.2.0            # or a release URL
+briqyard host upgrade --all --release 0.2.0               # every ready or draining host, by id, one at a time
+briqyard host ls                                          # VERSION, and each host's note
+```
+
+What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it is done):
+
+| Step | |
+|---|---|
+| `upgrading` | Placement stops; the host's machines are served |
+| Install | `hack/bootstrap-host.sh` over SSH with the release (`provisioner.bootstrap.ssh_key`, the pinned host key), as at a bootstrap: packages, Firecracker and kernel pins, the binaries put in place by a rename, the unit |
+| Hand-over | The script sends the running daemon SIGUSR2: it exits and leaves every machine running; `systemctl start` brings the new one, which adopts them |
+| Back | `briqyardd --version` over SSH, then a heartbeat from a new start of that version that stopped nothing, within 5 minutes |
+| Undrained | The host is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
+
+A failure leaves the host `draining` with the reason in its note: fix it, then
+`briqyard host undrain <id>`. `--all` stops at the first failure and names the hosts left. One
+upgrade at a time per fleet. A static host (`hosts:`) needs the fleet's SSH key in root's
+`authorized_keys`; its host key is pinned at its first upgrade. After a roll, set
+`provisioner.bootstrap.release` to the release, for the hosts ordered next.
+
+A release is a URL where `<binary>-linux-<arch>` are (`briqyardd`, `briqyard-init`, `briqyard`,
+`briqyard-fleet`), or a version of the project's releases. Without a fleet, on the host:
+`BRIQYARD_RELEASE=<url> bash bootstrap-host.sh` does the same install and hand-over.
+
+What the machines see:
+
+| | |
+|---|---|
+| Running | Nothing: no reboot, no pause. Connections through the ingress (TCP endpoints, HTTP) are reset; clients reconnect |
+| Suspended | Resumed at their next start when Firecracker and the host kernel are the same; booted cold otherwise (`starting` says so) |
+| Their init | The one in their root disk until it is made again (an image change); `init_version` on the machine |
+| Their Firecracker | The process they booted with until their next start; `vmm_version` on the machine, the host's in `briqyard status` |
+
+Each binary says what it is: `briqyardd --version`, `0.1.0+fdad892eeefa` (release and commit).
+The wire between versions is additive (ADR 0027): a newer daemon reads every init in use, a
+newer fleet every host one version behind. A caller uses a field new in a release once
+`host ls` shows every host on it: an older host ignores a field it does not know. A
+configuration field new in a release goes into the file after the upgrade (an older binary
+refuses it), and out of it before a rollback, which is an upgrade to the older release.
+
+**A reboot** (an OS or host kernel upgrade): `briqyard host drain <id>`, then on the host
+`systemctl stop briqyardd` (every machine suspended), the upgrade and the reboot; the daemon's
+start boots again each machine it stopped whose sleep window had not run out (cold, the kernel
+changed), and `briqyard host undrain <id>`. `systemctl restart briqyardd` by hand does the same
+without the reboot: a quarter-second pause per machine. A daemon that crashes leaves its
+machines running (`KillMode=process`), and the next one adopts them.
+
+A host from before ADR 0014 (jails on `/`): stop the daemon and empty `jail_dir` before the
+first start that mounts `byard/jail` there, or the old files stay hidden on `/` and the
+machines suspended then boot cold.
 
 ## Backups
 
@@ -270,7 +315,9 @@ snapshot, or is whole.
 | A create or start answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the last console lines. `briqyard machine logs`, then destroy it |
 | A start after `machine set --image` answers 409 `boot_failed`, `error: image …` | The new image could not be pulled or built; the change is still `pending`. `machine set` another image (or the one it runs, which drops the change) and start again |
 | A start after `machine set --memory` answers 503 `capacity` | The host has no room for the new size; the change is still `pending`. Through a fleet, the tenant stays on its host: move it (backups, `tenant unpin`, restores) |
-| A machine is `stopped (host)` | The daemon stopped it: a restart of `briqyardd` without a suspend, or a crashed daemon's leftover. The next use wakes it |
+| A machine is `stopped (host)` | The daemon stopped it: its stop, or a crashed daemon's leftover. The next start boots it again unless its sleep window had run out; else the next use wakes it |
+| `upgrade to … failed` in a host's note, the host `draining` | The step and the reason are in the note: SSH (the key, the pinned host key), the script's last lines, no heartbeat from the new version (`journalctl -u briqyardd` on the host), or a start that stopped machines it could not take over (`briqyard events --machine …`). Fix, then `briqyard host undrain` |
+| `the host now runs …, newer than this fleet` | Upgrade the fleet, then `host undrain` the host |
 | A machine stays `destroying` | Its disks could not be destroyed (`zfs destroy` in the log); the daemon tries again every 15 s |
 | The process exits at once (`stopped`, `exit.code`) | `briqyard machine logs`: the image's own output. `restart.policy: on-failure` tries three times, 10 s, 20 s, 40 s apart (`restarting_at`); `crash_loop` events from the third |
 | `/wait` answers 409 `not_ready`, or the ingress 502 after a wait | The program runs but its readiness or startup probe does not pass: `briqyard machine describe` shows each probe's last result. A TCP or HTTP probe needs the program on the machine's address, not only `127.0.0.1` |
@@ -336,7 +383,7 @@ Each host's pool key is in its record (ADR 0026): made at the host's first `POST
 address, as a heartbeat), never listed, gone when the host is retired or forgotten. `briqyard
 host rm` refuses a host that holds a key (409 `pool_key`) unless `--force`: its pool is
 unreadable at its next restart, and a static host polled back gets a key its pool does not open.
-A drained static host stays drained: only an ordered host is released once it is empty. **Losing the
+A drained host stays drained; a retiring host is released once empty. **Losing the
 registry loses every key**: a host keeps running while its key is loaded, and cannot read its
 pool after its next reboot. Back the registry up before a host holds anything that matters
 (below); a host still up can be re-keyed with `zfs change-key`. The fleet's `state_dir` must be
@@ -408,8 +455,9 @@ has shown the right product, location and count.
 ```bash
 briqyard host order --reason "launch week"   # POST /v1/hosts/order: a server, state provisioning
 briqyard host ls                             # its note says what the provider and the bootstrap last did
-briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: drain, then release once empty
-briqyard host drain h_123456                 # place no new tenant on it, keep it
+briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: retiring, released once empty
+briqyard host drain h_123456                 # draining: no new tenant on it, kept
+briqyard host undrain h_123456               # ready again, from draining or retiring
 briqyard host rm h_123456                    # forget it (its machines are not touched)
 ```
 
@@ -458,7 +506,7 @@ fingerprint into the host's note (`ssh host key SHA256:… ed25519 pinned at fir
 compare it with the provider's console. Every later connect is strict against that file. A
 server reinstalled by the provider has a new key: remove its line from the file.
 
-A retire drains the host first (no new tenant lands on it) and releases it at the provider
+A retire makes the host `retiring` (no new tenant lands on it) and releases it at the provider
 once it runs nothing: at once when it is already empty, else from the hourly pass as soon as
 its last machine is destroyed. A host from the `hosts:` list is retired by removing it from
 the configuration; forgotten through the API, it is back on the next poll.

@@ -777,6 +777,10 @@ pub trait Vmm: Send + Sync {
 
     /// What the machine's cgroup says; none without one (not jailed, or never booted).
     async fn cgroup(&self, id: &str) -> Option<CgroupUse>;
+
+    /// What a machine booted now runs under: the VMM's version and the host kernel's release
+    /// (ADR 0027). A memory snapshot resumes only under the one it was taken under.
+    fn version(&self) -> String;
 }
 
 /// The Firecracker on this host.
@@ -786,6 +790,33 @@ pub struct Firecracker {
     pub pci: bool,
     /// A console past this size is rotated while the machine runs (ADR 0021).
     pub console_max: u64,
+    /// [`vmm_version`] of `binary`, read once at the daemon's start.
+    pub version: String,
+}
+
+/// `<Firecracker's version>/<the host kernel's release>`, `v1.17.0/6.8.0-45-generic`: what a
+/// memory snapshot is tied to. Firecracker promises no snapshot across its versions, and
+/// calls one across host kernels unstable (ADR 0027).
+pub fn vmm_version(binary: &Path) -> Result<String> {
+    let out = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("{} --version", binary.display()))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    version_of(&text, &kernel)
+        .ok_or_else(|| anyhow!("{} --version said {text:?}", binary.display()))
+}
+
+/// The version on `firecracker --version`'s first line (`Firecracker v1.17.0`), and the
+/// kernel's release.
+fn version_of(firecracker: &str, kernel: &str) -> Option<String> {
+    let v = firecracker
+        .lines()
+        .next()?
+        .trim()
+        .strip_prefix("Firecracker ")?;
+    (!v.is_empty()).then(|| format!("{v}/{}", kernel.trim()))
 }
 
 #[async_trait]
@@ -993,6 +1024,10 @@ impl Vmm for Firecracker {
         machine_of(pid)
     }
 
+    fn version(&self) -> String {
+        self.version.clone()
+    }
+
     /// Read from `/proc`: what a sweep compares to the records.
     fn processes(&self) -> Vec<(u32, String)> {
         let mut out = Vec::new();
@@ -1154,6 +1189,18 @@ async fn stamp<R: tokio::io::AsyncRead + Unpin>(
 mod tests {
     use super::*;
     use tokio::net::UnixListener;
+
+    #[test]
+    fn the_vmm_version_is_firecrackers_and_the_kernels() {
+        let out = "Firecracker v1.17.0\n\nSupported snapshot data format versions: v8.0.0\n";
+        assert_eq!(
+            version_of(out, "6.8.0-45-generic\n"),
+            Some("v1.17.0/6.8.0-45-generic".into())
+        );
+        assert_eq!(version_of("jailer v1.17.0\n", "6.8.0"), None);
+        assert_eq!(version_of("", "6.8.0"), None);
+        assert_eq!(version_of("Firecracker \n", "6.8.0"), None);
+    }
 
     /// A stand-in for Firecracker's API socket: answers each connection with the next canned
     /// response and hands back the requests it read, in order.

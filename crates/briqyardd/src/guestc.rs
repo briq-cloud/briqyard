@@ -18,7 +18,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Conn for T {}
 /// on the host, a mock in the manager's tests.
 #[async_trait]
 pub trait Guest: Send + Sync {
-    async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<()>;
+    /// Waits for the init to answer; its version (ADR 0027), empty from an init older than
+    /// the report.
+    async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<String>;
     async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()>;
     /// Starts a command and hands its connection over: [`collect`] reads it to the exit.
     async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>>;
@@ -31,7 +33,7 @@ pub struct Vsock;
 
 #[async_trait]
 impl Guest for Vsock {
-    async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<()> {
+    async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<String> {
         wait_ready(vsock, timeout).await
     }
     async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()> {
@@ -105,6 +107,40 @@ pub const MAX_OUTPUT: usize = 4 << 20;
 #[error("the guest connection closed before the command ended")]
 pub struct Closed;
 
+/// An op the machine's init does not know: it is older than this daemon's use of it (ADR
+/// 0027). The init of a machine is the one its root disk was made with.
+#[derive(Debug, thiserror::Error)]
+#[error("the machine's init ({}) does not know `{op}`: it is older than this daemon; the machine gets this daemon's init when its root disk is made again (an image change)", if .init.is_empty() { "older than the version report" } else { .init.as_str() })]
+pub struct UnknownOp {
+    pub op: String,
+    /// The machine's `init_version`; empty until [`with_init`] names it.
+    pub init: String,
+}
+
+/// The error of an answer `error`: [`UnknownOp`] when the init does not know the op.
+fn answered(op: &str, message: &str) -> anyhow::Error {
+    match message == format!("unknown op {op}") {
+        true => UnknownOp {
+            op: op.into(),
+            init: String::new(),
+        }
+        .into(),
+        false => anyhow!("{message}"),
+    }
+}
+
+/// Names the machine's init in an [`UnknownOp`]; any other error as it is.
+pub fn with_init(err: anyhow::Error, init: &str) -> anyhow::Error {
+    match err.downcast::<UnknownOp>() {
+        Ok(u) => UnknownOp {
+            op: u.op,
+            init: init.into(),
+        }
+        .into(),
+        Err(err) => err,
+    }
+}
+
 /// Starts a command: the connection, its request sent, for the output to be read from and
 /// the input written to.
 pub async fn session(uds: &Path, mut req: Request) -> Result<UnixStream> {
@@ -143,7 +179,7 @@ pub async fn collect<R: AsyncRead + Unpin>(s: &mut R) -> Result<ExecOutput> {
                 out.timed_out = r.timed_out;
                 return Ok(out);
             }
-            "error" => return Err(anyhow!("{}", r.message)),
+            "error" => return Err(answered("exec", &r.message)),
             _ => {}
         }
     }
@@ -159,7 +195,7 @@ async fn round_trip(uds: &Path, req: Request) -> Result<Response> {
     write_request(&mut s, &req).await?;
     let r: Response = read_frame(&mut s).await?;
     if r.kind == "error" {
-        return Err(anyhow!("{}", r.message));
+        return Err(answered(&req.op, &r.message));
     }
     Ok(r)
 }
@@ -230,12 +266,12 @@ pub async fn shutdown(uds: &Path, grace: Duration) -> Result<()> {
     Ok(())
 }
 
-/// Polls `ping` until the init answers or the timeout passes.
-pub async fn wait_ready(uds: &Path, timeout: Duration) -> Result<()> {
+/// Polls `ping` until the init answers or the timeout passes; the version its `pong` says.
+pub async fn wait_ready(uds: &Path, timeout: Duration) -> Result<String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let last = match tokio::time::timeout(Duration::from_secs(2), ping(uds)).await {
-            Ok(Ok(_)) => return Ok(()),
+            Ok(Ok(pong)) => return Ok(pong.version),
             Ok(Err(e)) => e.to_string(),
             Err(_) => "timeout".to_string(),
         };
@@ -545,7 +581,48 @@ mod tests {
         assert!(msg.contains("did not answer within"), "{msg}");
         assert!(msg.contains("last: vsock"), "{msg}");
 
+        // An init older than the version report answers none: an empty version.
         let _server = serve(&path, OK, vec![frame(&Response::new("pong"))]);
-        wait_ready(&path, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(wait_ready(&path, Duration::from_secs(5)).await.unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn an_op_an_old_init_does_not_know_is_named_with_its_version() {
+        let (_dir, path) = socket();
+        // What every init answers an op it does not know.
+        let _server = serve(&path, OK, vec![frame(&Response::error("unknown op get"))]);
+        let err = get(&path, "/etc/hostname").await.unwrap_err();
+        assert!(err.downcast_ref::<UnknownOp>().is_some());
+        assert_eq!(
+            with_init(err, "0.1.0+fdad892eeefa").to_string(),
+            "the machine's init (0.1.0+fdad892eeefa) does not know `get`: it is older than this daemon; the machine gets this daemon's init when its root disk is made again (an image change)"
+        );
+        let unnamed = UnknownOp {
+            op: "resize".into(),
+            init: String::new(),
+        };
+        assert!(unnamed.to_string().starts_with(
+            "the machine's init (older than the version report) does not know `resize`"
+        ));
+        // Any other error is the init's own message, untouched.
+        let (_dir, path) = socket();
+        let _server = serve(&path, OK, vec![frame(&Response::error("no such file"))]);
+        let err = with_init(get(&path, "/x").await.unwrap_err(), "0.1.0+a");
+        assert_eq!(err.to_string(), "no such file");
+    }
+
+    #[tokio::test]
+    async fn wait_ready_answers_the_inits_version() {
+        let (_dir, path) = socket();
+        let pong = Response {
+            kind: "pong".into(),
+            version: "0.1.0+fdad892eeefa".into(),
+            ..Default::default()
+        };
+        let _server = serve(&path, OK, vec![frame(&pong)]);
+        assert_eq!(
+            wait_ready(&path, Duration::from_secs(5)).await.unwrap(),
+            "0.1.0+fdad892eeefa"
+        );
     }
 }

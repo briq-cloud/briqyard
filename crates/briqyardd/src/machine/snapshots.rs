@@ -23,6 +23,11 @@ pub struct SnapshotRec {
     /// restore resumes them only into the same spec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+    /// With the memory: what ran the machine when it was taken (`Record::vmm_version`). A
+    /// restore puts it on the record with the memory, so the start loads the memory only under
+    /// the same Firecracker and host kernel (ADR 0027).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vmm_version: String,
 }
 
 impl SnapshotRec {
@@ -167,14 +172,14 @@ impl Manager {
         };
         let datasets: Vec<String> = disks.iter().map(|d| r.disk_dataset(d)).collect();
         let snap = new_id("s");
-        let memory = match req.memory {
+        let (memory, vmm_version) = match req.memory {
             true => {
                 self.snapshot_with_memory(&e, &r, &datasets, &snap).await?;
-                Some(memory_spec(&r))
+                (Some(memory_spec(&r)), r.vmm_version.clone())
             }
             false => {
                 self.inner.zfs.snapshot_all(&datasets, &snap).await?;
-                None
+                (None, String::new())
             }
         };
         let s = SnapshotRec {
@@ -183,6 +188,7 @@ impl Manager {
             created_at: Utc::now(),
             disks: disks.iter().map(|d| d.to_string()).collect(),
             memory,
+            vmm_version,
         };
         {
             let mut rec = e.rec.lock().unwrap();
@@ -418,6 +424,10 @@ impl Manager {
             let mut rec = e.rec.lock().unwrap();
             rec.restoring = None;
             rec.suspended = resume;
+            if resume {
+                // What took the memory: the start resumes it only under the same (ADR 0027).
+                rec.vmm_version = s.vmm_version.clone();
+            }
             let named = s
                 .name
                 .as_deref()
@@ -1094,6 +1104,34 @@ mod tests {
         std::fs::hard_link(&kept, dir.join("snap.mem")).unwrap();
         h.m.snapshot(&m.id, with_memory()).await.unwrap();
         assert_eq!(std::fs::read(&kept).unwrap(), b"the first one");
+    }
+
+    #[tokio::test]
+    async fn a_snapshots_memory_resumes_only_under_the_vmm_that_took_it() {
+        let h = harness().await;
+        let m = h.m.create(h.request("m")).await.unwrap();
+        let s = h.m.snapshot(&m.id, with_memory()).await.unwrap();
+        let taken = h.stored(&m.id).unwrap();
+        assert_eq!(taken.snapshots[0].vmm_version, "v1.17.0/test");
+        // The same Firecracker and kernel: resumed.
+        h.m.restore_snapshot(&m.id, &s.id, None).await.unwrap();
+        assert_eq!(h.reasons(&m.id).last().unwrap(), "resumed");
+        // Another (an upgrade since): the memory is put back, then not loaded; the boot is cold
+        // and says why.
+        h.set_vmm_version("v1.18.0/test");
+        h.m.restore_snapshot(&m.id, &s.id, None).await.unwrap();
+        assert_eq!(h.reasons(&m.id).last().unwrap(), "started");
+        let starting = h
+            .events_of(&m.id)
+            .into_iter()
+            .rev()
+            .find(|e| e.reason == "starting")
+            .unwrap();
+        assert_eq!(
+            starting.data,
+            Some(json!({"resume": false, "snapshot_vmm": "v1.17.0/test"}))
+        );
+        assert_eq!(h.m.get(&m.id).unwrap().vmm_version, "v1.18.0/test");
     }
 
     #[tokio::test]

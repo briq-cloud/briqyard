@@ -903,6 +903,7 @@ where
                     kind: "pong".into(),
                     uptime,
                     main_pid,
+                    version: briqyard_api::VERSION.into(),
                     ..Default::default()
                 },
             )
@@ -2179,6 +2180,7 @@ mod tests {
         assert_eq!(f[0].kind, "pong");
         assert_eq!(f[0].main_pid, 42);
         assert!(f[0].uptime > 0.0, "read from /proc/uptime");
+        assert_eq!(f[0].version, briqyard_api::VERSION);
     }
 
     #[tokio::test]

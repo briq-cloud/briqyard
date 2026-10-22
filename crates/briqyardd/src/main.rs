@@ -31,7 +31,7 @@ const OPENAPI: &str = include_str!("../../../api/openapi.yaml");
 #[derive(Parser)]
 #[command(
     name = "briqyardd",
-    version,
+    version = briqyard_api::VERSION,
     about = "briqyard host daemon: machines in Firecracker microVMs"
 )]
 struct Args {
@@ -192,21 +192,32 @@ async fn run(args: Args) -> Result<()> {
     tracing::info!(
         addr = cfg.listen,
         tls_fingerprint = fingerprint,
-        version = env!("CARGO_PKG_VERSION"),
+        version = briqyard_api::VERSION,
         host_id = mgr.host_id(),
         pool = cfg.storage.pool,
         "briqyardd listening"
     );
     let handle = axum_server::Handle::new();
+    // SIGTERM (a stop, a reboot) suspends the machines; SIGUSR2 (an upgrade) leaves them
+    // running for the next daemon to adopt (ADR 0027).
+    let hand_over = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
-        let handle = handle.clone();
+        let (handle, hand_over) = (handle.clone(), hand_over.clone());
         let watches = mgr.events().clone();
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate())?;
+        let mut usr2 = signal(SignalKind::user_defined2())?;
         tokio::spawn(async move {
-            terminated().await;
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+                _ = usr2.recv() => hand_over.store(true, std::sync::atomic::Ordering::SeqCst),
+            }
             tracing::info!("shutting down");
-            // A watch never ends on its own: the server would wait for it.
+            // A watch never ends on its own: the server would wait for it. A request still
+            // running after the grace (a long exec) is cut: the machines come first.
             watches.close();
-            handle.graceful_shutdown(None);
+            handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
         });
     }
     let app = api::router(state).into_make_service();
@@ -225,9 +236,33 @@ async fn run(args: Args) -> Result<()> {
                 .await?
         }
     }
-    tokio::time::timeout(std::time::Duration::from_secs(60), mgr.close())
-        .await
-        .ok();
+    let down = async {
+        match hand_over.load(std::sync::atomic::Ordering::SeqCst) {
+            true => Some(mgr.hand_over().await),
+            false => {
+                mgr.close().await;
+                None
+            }
+        }
+    };
+    let held = match tokio::time::timeout(std::time::Duration::from_secs(60), down).await {
+        Ok(held) => held,
+        Err(_) => {
+            // What was not done by then: the next daemon finds those machines as a crash
+            // leaves them.
+            tracing::warn!(
+                hand_over = hand_over.load(std::sync::atomic::Ordering::SeqCst),
+                "the shutdown ran past 60 s: ending without it"
+            );
+            None
+        }
+    };
+    if held.is_some() {
+        // A hand-over ends the process here, every machine's lock held: no transition begins
+        // in what is left of it (ADR 0027).
+        tracing::info!("handed over");
+        std::process::exit(0);
+    }
     Ok(())
 }
 
