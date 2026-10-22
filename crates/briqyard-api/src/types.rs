@@ -1282,6 +1282,8 @@ pub mod reason {
     pub const IMAGE_REMOVED: &str = "image_removed";
     /// A create or a start refused by the tenant's quota (ADR 0025).
     pub const QUOTA_EXCEEDED: &str = "quota_exceeded";
+    /// An exec session began (ADR 0029): someone is in the machine. A use: no new version.
+    pub const SESSION_OPENED: &str = "session_opened";
     pub const ALL: &[&str] = &[
         CREATED,
         FORKED,
@@ -1318,6 +1320,7 @@ pub mod reason {
         HOST_CONDITION,
         IMAGE_REMOVED,
         QUOTA_EXCEEDED,
+        SESSION_OPENED,
     ];
 }
 
@@ -2803,7 +2806,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), reason::ALL.len());
-        assert_eq!(all.len(), 35);
+        assert_eq!(all.len(), 36);
         assert!(all
             .iter()
             .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));

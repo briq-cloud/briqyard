@@ -40,7 +40,7 @@ check "alpine running (${boot}s)" '[ "$state" = running ]'
 check "uname"        'briqyard machine exec "$A" -- uname -r | grep -q "^6\."'
 check "hostname"     '[ "$(briqyard machine exec "$A" -- hostname)" = alp ]'
 check "exit code"    'briqyard machine exec "$A" -- sh -c "exit 3"; [ $? = 3 ]'
-check "stdin"        '[ "$(echo hello | briqyard machine exec --stdin "$A" -- cat)" = hello ]'
+check "stdin"        '[ "$(echo hello | briqyard machine exec -i "$A" -- cat)" = hello ]'
 check "stderr"       '[ "$(briqyard machine exec "$A" -- sh -c "echo e >&2" 2>&1 >/dev/null)" = e ]'
 check "timeout"      'out=$(briqyard machine exec --timeout 2s "$A" -- sleep 30 2>&1 || true); echo "$out" | grep -q "timed out"'
 echo hello-file > /tmp/by-e2e.txt
@@ -48,6 +48,29 @@ check "put/get file" 'briqyard machine put "$A" /tmp/by-e2e.txt /root/f.txt && [
 check "own name"     'briqyard machine exec "$A" -- nslookup alp.internal 2>&1 | grep -q "10\.6[4-9]\."'
 check "egress"       'briqyard machine exec "$A" -- wget -qO- -T 10 https://example.com | grep -qi "example domain"'
 check "logs"         'briqyard machine logs "$A" --limit 5000 | grep -q "\[briqyard\] started"'
+
+echo "== exec sessions: stdin streamed, a terminal, the client's close (ADR 0029)"
+TTY="python3 $(dirname "$0")/exec-tty.py"
+running() { briqyard machine exec "$A" -- pgrep -f "$1" >/dev/null 2>&1; }
+ended() { for i in $(seq 1 20); do running "$1" || return 0; sleep 0.5; done; return 1; }
+check "session: stdin streams"          '[ "$(printf "one\ntwo\n" | briqyard machine exec -i "$A" -- cat)" = "$(printf "one\ntwo")" ]'
+check "session: stderr apart, the code" 'err=$(echo | briqyard machine exec -i "$A" -- sh -c "echo e >&2; exit 4" 2>&1 >/dev/null); [ $? = 4 ] && [ "$err" = e ]'
+check "tty: a terminal of the size sent" '$TTY 30x100 "send:tty; stty size\n" "expect:/dev/pts/[0-9]+" "expect:30 100" "send:exit\n" -- briqyard machine exec -it "$A" -- sh >/dev/null'
+check "tty: a resize follows"           '$TTY 30x100 "send:stty size\n" "expect:30 100" "resize:40x120" "ask:stty size\n=>40 120" "send:exit\n" -- briqyard machine exec -it "$A" -- sh >/dev/null'
+check "tty: the exit code comes back"   '$TTY 24x80 "send:exit 7\n" -- briqyard machine exec -it "$A" -- sh >/dev/null; [ $? = 7 ]'
+$TTY 24x80 "send:exec sleep 6061\n" "expect:never printed" -- briqyard machine exec -it "$A" -- sh >/dev/null 2>&1 &
+held=$!
+for i in $(seq 1 40); do running "sleep 6061" && break; sleep 0.5; done
+check "tty: the command runs"           'running "sleep 6061"'
+pkill -9 -f "machine exec -it $A -- sh" || true
+check "tty: the client's close hangs it up" 'ended "sleep 6061"'
+wait "$held" 2>/dev/null || true
+sleep 600 | briqyard machine exec -i "$A" -- sleep 6062 >/dev/null 2>&1 &
+for i in $(seq 1 40); do running "sleep 6062" && break; sleep 0.5; done
+check "session: the command runs"       'running "sleep 6062"'
+pkill -9 -f "machine exec -i $A -- sleep 6062" || true
+check "session: the client's close kills it" 'ended "sleep 6062"'
+check "session: an event"               'briqyard events --machine "$A" | awk "\$4 == \"session_opened\"" | grep -q .'
 
 echo "== second machine reaches the first by name"
 B=$(briqyard machine run --image alpine:3.20 --name alp2 --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
@@ -316,10 +339,18 @@ for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -
 check "data survived"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select x from t")" = 42 ]'
 
 echo "== sleep on idle, wake on connect"
+# A machine with a session open is in use: it stays up while the sleeper below goes down.
+W=$(briqyard machine run --image alpine:3.20 --name awake --tenant "$T" --memory 128 --sleep 20s -- sleep 3600 | jq -r .id)
+sleep 600 | briqyard machine exec -i "$W" -- cat >/dev/null 2>&1 &
 S=$(briqyard machine run --image postgres:16-alpine --name sleeper --tenant "$T" --memory 512 --volume 1G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 20s | jq -r .id)
 SEP=$(briqyard endpoint add "$S" 5432 | jq -r .address)
 for i in $(seq 1 90); do [ "$(briqyard machine get "$S" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "slept when idle" '[ "$(briqyard machine get "$S" | jq -r .stopped_reason)" = idle ]'
+check "awake while a session is open" '[ "$(briqyard machine get "$W" | jq -r .state)" = running ]'
+pkill -9 -f "machine exec -i $W -- cat" || true
+for i in $(seq 1 45); do [ "$(briqyard machine get "$W" | jq -r .state)" = stopped ] && break; sleep 2; done
+check "asleep once it closed" '[ "$(briqyard machine get "$W" | jq -r .stopped_reason)" = idle ]'
+briqyard machine rm "$W" >/dev/null
 check "set-sleep while stopped" '[ "$(briqyard machine set-sleep "$S" 45s | jq -r .sleep)" = 45s ]'
 check "set-sleep refuses a number" '! briqyard machine set-sleep "$S" 30 >/dev/null 2>&1'
 if command -v psql >/dev/null; then

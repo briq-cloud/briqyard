@@ -3,6 +3,8 @@
 use crate::events::Filter;
 use crate::machine::{detached, MError, Manager, Until};
 use axum::body::Body;
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -92,7 +94,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/machines/:id/restart", post(restart_machine))
         .route("/v1/machines/:id/touch", post(touch_machine))
         .route("/v1/machines/:id/wait", post(wait_machine))
-        .route("/v1/machines/:id/exec", post(exec))
+        .route("/v1/machines/:id/exec", get(exec_session).post(exec))
         .route("/v1/machines/:id/files", get(get_file).put(put_file))
         .route("/v1/machines/:id/logs", get(logs))
         .route("/v1/machines/:id/stats", get(stats))
@@ -487,6 +489,33 @@ async fn exec(
     }
     req.timeout_ms = exec_timeout_ms(req.timeout_ms);
     Ok(Json(st.mgr.exec(&id, req).await?))
+}
+
+/// The largest message a session takes: its stdin frame, base64 in JSON, stays under the
+/// guest protocol's largest frame.
+const MAX_SESSION_MESSAGE: usize = 1 << 20;
+
+/// An exec session (ADR 0029): the command starts, the machine woken first when asked, then
+/// the upgrade; every refusal before it is an HTTP answer like any other.
+async fn exec_session(
+    State(st): S,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<Response, AppError> {
+    let ws = ws.map_err(|e| {
+        MError::Invalid(format!(
+            "a session is a WebSocket upgrade of GET /v1/machines/{id}/exec: {e}"
+        ))
+    })?;
+    let pairs = url::form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes());
+    let mut req = api::session::ExecSession::from_query(pairs).map_err(MError::Invalid)?;
+    req.timeout_ms = exec_timeout_ms(req.timeout_ms);
+    let session = st.mgr.open_session(&id, req).await?;
+    Ok(ws
+        .max_message_size(MAX_SESSION_MESSAGE)
+        .max_frame_size(MAX_SESSION_MESSAGE)
+        .on_upgrade(move |socket| crate::session::serve(socket, session)))
 }
 
 async fn put_file(

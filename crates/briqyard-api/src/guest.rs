@@ -3,7 +3,8 @@
 //!
 //! Every message is one frame: a 4-byte big-endian length, then JSON. One request per
 //! connection; a request gets one response, except `exec`, which streams `stdout`/`stderr`
-//! frames and ends with `exit`.
+//! frames and ends with `exit`. After an `exec` the host may send more frames on the same
+//! connection (`stdin`, `resize`, `close_stdin`), and its close ends the command (ADR 0029).
 //!
 //! One connection goes the other way: when the main process ends, the init connects to the
 //! host on [`EXIT_PORT`] and sends one [`ExitReport`] frame, then waits for the host to close
@@ -66,10 +67,11 @@ pub struct FileMeta {
     pub mode: u32,
 }
 
-/// One operation over one connection.
+/// One operation over one connection; after an `exec`, its input: `stdin` (`data`), `resize`
+/// (`cols`, `rows`), `close_stdin`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Request {
-    /// exec, put, get, ping, shutdown
+    /// exec, put, get, ping, shutdown; then stdin, resize, close_stdin
     pub op: String,
     #[serde(default)]
     pub cmd: Vec<String>,
@@ -77,10 +79,22 @@ pub struct Request {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub cwd: String,
+    /// Written to the command first; without `interactive` its stdin then ends.
     #[serde(default, with = "b64")]
     pub stdin: Vec<u8>,
+    /// The command's deadline; 0 is none.
     #[serde(default)]
     pub timeout_ms: u64,
+    /// Stdin stays open for `stdin` frames until `close_stdin`.
+    #[serde(default)]
+    pub interactive: bool,
+    /// Run the command on a pseudo-terminal of `cols` by `rows` (0: 80 by 24).
+    #[serde(default)]
+    pub tty: bool,
+    #[serde(default)]
+    pub cols: u16,
+    #[serde(default)]
+    pub rows: u16,
     #[serde(default)]
     pub path: String,
     #[serde(default)]
@@ -341,6 +355,7 @@ mod tests {
             json!({"op": "ping"}),
             json!({
                 "op": "ping", "cmd": [], "env": {}, "cwd": "", "stdin": "", "timeout_ms": 0,
+                "interactive": false, "tty": false, "cols": 0, "rows": 0,
                 "path": "", "mode": 0, "data": "", "grace_sec": 0
             }),
         );
@@ -352,8 +367,11 @@ mod tests {
     fn request_binary_fields() {
         let r: Request = same(json!({
             "op": "exec", "cmd": ["cat"], "env": {"A": "1"}, "cwd": "/tmp", "stdin": "aGk=",
-            "timeout_ms": 100, "path": "/etc/x", "mode": 420, "data": "AP8=", "grace_sec": 5
+            "timeout_ms": 100, "interactive": true, "tty": true, "cols": 100, "rows": 30,
+            "path": "/etc/x", "mode": 420, "data": "AP8=", "grace_sec": 5
         }));
+        assert!(r.interactive && r.tty);
+        assert_eq!((r.cols, r.rows), (100, 30));
         assert_eq!(r.stdin, b"hi");
         assert_eq!(r.data, [0u8, 0xff]);
         assert_eq!(r.mode, 0o644);

@@ -1,6 +1,6 @@
 # ADR 0019: Events, a watch and versions: what makes an imperative API safe to drive
 
-Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`), ADR 0022 (the probes' reasons, marked *0022*), ADR 0023 (the backups' reasons), ADR 0024 (`applied`), ADR 0025 (`quota_exceeded`) and ADR 0031 (`snapshot_taken`, `snapshot_deleted`, `restored` for a snapshot)
+Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`), ADR 0022 (the probes' reasons, marked *0022*), ADR 0023 (the backups' reasons), ADR 0024 (`applied`), ADR 0025 (`quota_exceeded`), ADR 0029 (`session_opened`, which moves no version) and ADR 0031 (`snapshot_taken`, `snapshot_deleted`, `restored` for a snapshot)
 
 ## Context
 
@@ -55,6 +55,7 @@ briqyard is imperative; briq's reconciler is the declarative layer above it (`..
 | `host_condition` | warning when it turns true, normal when it clears | a host condition changed (ADR 0021) | `condition`, `status` |
 | `image_removed` | normal | an image was removed: under disk pressure, unused past `image_keep_days`, or on request (ADR 0021) | `image`, `digest`, `key`, `reason` |
 | `quota_exceeded` | warning | *0025*: a create or a start refused by the tenant's quota | `resource`, `limit`, `used`, `need` |
+| `session_opened` | normal | *0029*: an exec session began; a use, so the version does not move | `command`, `tty` |
 
 `updated` and `start_failed` are two more than the first list: without `updated` a PATCH of the sleep window would not move the version, and a host's fault is not the image's (`boot_failed`). `destroying` has no event: the destroy is one critical section and `destroyed` ends it.
 
