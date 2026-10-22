@@ -215,6 +215,15 @@ async fn ssh(
         .map_err(Into::into)
 }
 
+/// What a failed run said last: its stderr's last lines, else its stdout's (the bootstrap
+/// script says why it stops on its stdout).
+fn said(out: &std::process::Output) -> String {
+    match tail(&out.stderr) {
+        e if e.trim().is_empty() => tail(&out.stdout),
+        e => e,
+    }
+}
+
 /// The last three lines of an output, on one line.
 fn tail(b: &[u8]) -> String {
     let s = String::from_utf8_lossy(b);
@@ -284,7 +293,7 @@ pub async fn install(
         return Err(anyhow::anyhow!(
             "ssh exited {}: {}{seen}",
             out.status.code().unwrap_or(-1),
-            tail(&out.stderr)
+            said(&out)
         ));
     }
     tracing::info!(host, ip, out = tail(&out.stdout), "bootstrap output");
@@ -576,6 +585,24 @@ mod tests {
         args.push(VERSION_CMD.into());
         assert_eq!(args[5], "StrictHostKeyChecking=yes");
         assert_eq!(args[13], "briqyardd --version");
+    }
+
+    #[test]
+    fn a_failed_run_says_its_stderr_else_its_stdout() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |stdout: &[u8], stderr: &[u8]| std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        };
+        assert_eq!(
+            said(&out(b"== binaries\n   refused\n", b"ssh: oops\n")),
+            "ssh: oops"
+        );
+        assert_eq!(
+            said(&out(b"== binaries\n   refused\n", b"")),
+            "== binaries |    refused"
+        );
     }
 
     #[test]
