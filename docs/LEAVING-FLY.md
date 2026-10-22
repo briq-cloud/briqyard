@@ -20,11 +20,11 @@ Not affected: the control plane (Railway), the monitor (Cloudflare Workers), DNS
 | 6 | Host loss | evacuate a host from its backups | the briqs' state while it happens | production |
 | 7 | Regions | region-aware placement (done) | the team's region to the briqyard adapter (done, #250) | a second region |
 | 8 | A team across hosts | WireGuard mesh or vRack (`MESH.md`) | nothing | a team outgrows a host |
-| 9 | Encryption at rest | the pool encrypted, one key per host held by the fleet, over TLS (decided; TLS built: ADR 0020) | nothing | the first real host |
+| 9 | Encryption at rest | the pool encrypted, one key per host held by the fleet (built: ADR 0026); the registry's backup, which holds every key | nothing | the first real host |
 | 10 | Usage and costs | usage buckets (ADR 0017, built) | collection, cost model, billing of disk and network | billing them |
 | 11 | Image pulls at scale | a registry mirror per region | nothing | many hosts |
 | 12 | CI and staging on real hardware | e2e on a KVM runner | the deploy smoke test against briqyard | staging |
-| 13 | Fleet availability | state beyond one JSON file | nothing | production |
+| 13 | Fleet availability | the registry backed up, encrypted, and restored (built: ADR 0032); state beyond one JSON file | nothing | production |
 | 14 | Legal | nothing | subprocessors, DPA, claims | production |
 | 15 | Fly-only code | nothing | remove the hidden gateway briq, `fly-replay`, the Fly adapter | Fly gone |
 
@@ -102,7 +102,7 @@ On briqyard: a tenant lives on one host. `MESH.md` is the design (WireGuard, fle
 
 Fly today: volumes are encrypted at rest.
 
-On briqyard: datasets are plain. ZFS native encryption per tenant dataset is the mechanism; the open question is where keys live (on the host, unlocked at boot from the fleet, or per tenant from briq). Decide before production data.
+On briqyard (built, ADR 0026): the pool is encrypted at its creation, one key per host made and kept by the fleet, loaded by the daemon at start; everything of a machine is on the pool, and hosts run without swap. Missing: the fleet registry's backup (losing it loses every key, item 13), and backups leave the host decrypted (encrypt the bucket).
 
 ## 10. Usage and costs
 
@@ -127,7 +127,7 @@ On briqyard: the suites run on the Mac; CI runs unit tests only.
 
 ## 13. Fleet availability
 
-On briqyard: one fleet process, one JSON file. Its loss stops placement and forwarding, not machines. Before production: a second process with shared state (Postgres), or a fleet that can be rebuilt from the hosts' heartbeats alone.
+On briqyard: one fleet process, one JSON file, backed up encrypted to the object store and restored with `briqyard-fleet restore` (ADR 0032). Its loss stops placement and forwarding, not machines. Before production: a second process with shared state (Postgres), or a fleet that can be rebuilt from the hosts' heartbeats alone.
 
 ## 14. Legal
 

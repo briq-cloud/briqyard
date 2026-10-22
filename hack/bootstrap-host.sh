@@ -18,6 +18,11 @@
 # networks) or ALLOW_PUBLIC=1 (a firewall of your own); with neither, they bind loopback.
 # Off loopback the API serves TLS with a certificate of its own (ADR 0020): the script prints
 # its fingerprint, which the fleet pins (`tls_fingerprint` in the host's `hosts:` entry).
+#
+# The pool is encrypted at its creation (ADR 0026), with the host's key: with FLEET_URL the
+# fleet's, asked with BRIQYARD_TOKEN and never written here; without, a key made into
+# BRIQYARD_KEY_FILE (/etc/briqyard/pool.key, 0600). Swap is turned off for good: guest memory
+# paged out would reach a disk in clear.
 set -euo pipefail
 POOL=${BRIQYARD_POOL:-byard}
 POOL_DEVICE=${BRIQYARD_POOL_DEVICE:-}
@@ -29,6 +34,7 @@ API_TOKEN=${BRIQYARD_TOKEN:-}
 LISTEN=${LISTEN:-0.0.0.0:7420}
 ALLOWED_CLIENTS=${ALLOWED_CLIENTS:-}
 ALLOW_PUBLIC=${ALLOW_PUBLIC:-}
+KEY_FILE=${BRIQYARD_KEY_FILE:-/etc/briqyard/pool.key}
 ARCH=$(uname -m)
 
 # Every host runs the same Firecracker and guest kernel: a memory snapshot only resumes under
@@ -51,6 +57,38 @@ esac
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 [ -e /dev/kvm ] || { echo "/dev/kvm is missing: this server has no KVM"; exit 1; }
 [ -n "$KERNEL_SHA256" ] || { echo "KERNEL_SHA256 is not pinned for $ARCH: set it to the sha256sum of $KERNEL_URL"; exit 1; }
+[ -z "$FLEET_URL" ] || [ -n "$API_TOKEN" ] || { echo "FLEET_URL needs BRIQYARD_TOKEN: the host's own, which the fleet expects"; exit 1; }
+
+# Loopback or RFC 1918: reachable from this host or its private network only.
+private() {
+  case "${1#[}" in 127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|::1]*|::1|f[cd]*:*|fe80:*) return 0 ;; esac
+  return 1
+}
+# Where the API and the endpoints listen, who may reach them, and the URL the fleet knows the
+# host at, with the scheme the API serves (TLS off loopback).
+bind=${LISTEN%:*}
+clients=""
+if [ -n "$ALLOWED_CLIENTS" ]; then
+  clients="  allowed_clients: [${ALLOWED_CLIENTS//,/, }]"
+elif [ "$ALLOW_PUBLIC" = 1 ]; then
+  clients="  allow_public: true"
+elif ! private "$bind"; then
+  # A host nobody can reach over a public bind, until the operator says who may.
+  echo "   LISTEN=$LISTEN is public and neither ALLOWED_CLIENTS nor ALLOW_PUBLIC is set: binding loopback"
+  bind=127.0.0.1
+fi
+scheme=https
+case "$bind" in 127.*) scheme=http ;; esac
+advertise=${ADVERTISE:-$scheme://$(hostname -I | awk '{print $1}'):7420}
+# The token and the pool's key cross the link to the fleet (ADR 0026): plain HTTP only to a
+# loopback or private address, as the daemon checks.
+case "$FLEET_URL" in
+  http://*)
+    fleet_host=${FLEET_URL#http://}; fleet_host=${fleet_host%%/*}
+    case "$fleet_host" in \[*) fleet_host=${fleet_host%%]*}] ;; *) fleet_host=${fleet_host%:*} ;; esac
+    private "$fleet_host" || { echo "FLEET_URL=$FLEET_URL is plain HTTP to an address the internet could reach: write https://, or a private address"; exit 1; }
+    ;;
+esac
 
 # Puts an executable in place by a rename: a running binary (the daemon, the fleet, Firecracker)
 # is replaced, never written into.
@@ -74,16 +112,79 @@ apt-get update -qq
 apt-get install -y -qq zfsutils-linux nftables e2fsprogs curl jq ca-certificates >/dev/null
 modprobe zfs
 
-echo "== pool $POOL"
+echo "== no swap"
+# Guest memory the kernel pages out would land on a disk in clear (ADR 0026): swap goes, and
+# stays gone across reboots (fstab lines commented out, swap units masked).
+swapoff -a
+sed -i -E 's|^([^#].*[[:space:]]swap[[:space:]].*)$|# briqyard, no swap: \1|' /etc/fstab
+for unit in $(systemctl list-units --type swap --all --plain --no-legend | awk '{print $1}'); do
+  systemctl mask "$unit" >/dev/null
+done
+
+echo "== no crash dumps"
+# A kernel crash dump is the whole memory, guests' included, written to /var/crash in clear.
+if dpkg -s kdump-tools >/dev/null 2>&1; then
+  apt-get purge -y -qq kdump-tools >/dev/null
+fi
+if [ "$(cat /sys/kernel/kexec_crash_loaded 2>/dev/null || echo 0)" = 1 ]; then
+  kexec -p -u 2>/dev/null || true
+  if [ "$(cat /sys/kernel/kexec_crash_loaded)" = 1 ]; then
+    echo "   a crash kernel is loaded (kdump) and could not be unloaded: its dump would hold guest memory in clear"
+    exit 1
+  fi
+fi
+
+# The pool's key on stdout: the fleet's for this host, or the key file's. `pool_key make`
+# makes the file when it is missing (a pool about to be created), never otherwise.
+pool_key() {
+  if [ -n "$FLEET_URL" ]; then
+    # The token goes in on stdin, off the command line.
+    printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
+      curl -fsS --max-time 20 -H @- -H 'Content-Type: application/json' \
+        -d "{\"url\": \"$advertise\"}" "${FLEET_URL%/}/v1/hosts/key" | jq -er .key
+  else
+    if [ ! -f "$KEY_FILE" ] && [ "${1:-}" = make ]; then
+      (umask 077; mkdir -p "$(dirname "$KEY_FILE")"; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$KEY_FILE")
+      echo "   key made in $KEY_FILE: keep a copy off this host, the pool is unreadable without it" >&2
+    fi
+    tr -d ' \n' < "$KEY_FILE"
+  fi
+}
+
+echo "== pool $POOL, encrypted"
 if ! zpool list "$POOL" >/dev/null 2>&1; then
+  key=$(pool_key make) || { echo "   no key for the pool (${FLEET_URL:-$KEY_FILE})"; exit 1; }
+  [ "${#key}" = 64 ] || { echo "   the pool's key is not 64 hex digits"; exit 1; }
   if [ -n "$POOL_DEVICE" ]; then
-    zpool create -f -o ashift=12 -O compression=lz4 -O atime=off "$POOL" "$POOL_DEVICE"
+    vdev=$POOL_DEVICE
   else
     mkdir -p /var/lib/briqyard
     truncate -s "${POOL_FILE_GB}G" /var/lib/briqyard/pool.img
-    zpool create -f -o ashift=12 -O compression=lz4 -O atime=off "$POOL" /var/lib/briqyard/pool.img
+    vdev=/var/lib/briqyard/pool.img
     echo "   (a file-backed pool: fine for a trial, not for production)"
   fi
+  # The key on stdin: in no file, on no command line.
+  printf '%s\n' "$key" | zpool create -f -o ashift=12 -O compression=lz4 -O atime=off \
+    -O encryption=aes-256-gcm -O keyformat=hex -O keylocation=prompt "$POOL" "$vdev"
+  unset key
+fi
+if [ "$(zfs get -H -o value encryption "$POOL")" = off ]; then
+  echo "   pool $POOL is not encrypted (ADR 0026): ZFS cannot encrypt a pool after its creation."
+  echo "   Move what it holds elsewhere, destroy it, and run this script again."
+  exit 1
+fi
+# A pool that exists, locked (a reboot): its key from the same source, checked now rather
+# than at the daemon's start.
+if [ "$(zfs get -H -o value keystatus "$POOL")" = unavailable ]; then
+  root=$(zfs get -H -o value encryptionroot "$POOL")
+  key=$(pool_key) || { echo "   pool $POOL is locked and its key could not be read (${FLEET_URL:-$KEY_FILE})"; exit 1; }
+  if ! out=$(printf '%s\n' "$key" | zfs load-key -L prompt "$root" 2>&1); then
+    echo "   pool $POOL is locked and its key (${FLEET_URL:-$KEY_FILE}) does not open it: $out"
+    echo "   The pool was made with another key: the fleet's registry lost or replaced, or another key file."
+    exit 1
+  fi
+  unset key
+  echo "   key loaded"
 fi
 
 echo "== firecracker $FIRECRACKER_VERSION and a guest kernel"
@@ -103,36 +204,29 @@ if ! echo "$KERNEL_SHA256  /var/lib/briqyard/vmlinux" | sha256sum -c --quiet - 2
 fi
 
 echo "== binaries${RELEASE:+ from $RELEASE}"
+new=$(mktemp -d)
 for b in briqyardd briqyard-init briqyard briqyard-fleet; do
   if [ -n "$RELEASE" ]; then
-    tmp=$(mktemp)
-    curl -fsSL -o "$tmp" "$RELEASE/$b-linux-$ARCH"
-    put "$tmp" "/usr/local/bin/$b"
-    rm -f "$tmp"
+    curl -fsSL -o "$new/$b" "$RELEASE/$b-linux-$ARCH"
   else
-    put "bin/$b" "/usr/local/bin/$b"
+    cp "bin/$b" "$new/$b"
   fi
+  chmod 0755 "$new/$b"
 done
+# The new daemon reads the configuration before any binary lands: one it refuses leaves the
+# host as it was, its daemon running (ADR 0027).
+if [ -f /etc/briqyard/config.yaml ] && ! "$new/briqyardd" --config /etc/briqyard/config.yaml tls-fingerprint >/dev/null; then
+  rm -rf "$new"; echo "   the new briqyardd refuses /etc/briqyard/config.yaml: nothing installed"; exit 1
+fi
+for b in briqyardd briqyard-init briqyard briqyard-fleet; do put "$new/$b" "/usr/local/bin/$b"; done
+rm -rf "$new"
 
 echo "== config"
 mkdir -p /etc/briqyard
-# Loopback or RFC 1918: reachable from this host or its private network only.
-private() {
-  case "$1" in 127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;; esac
-  return 1
-}
+chmod 0700 /etc/briqyard
 if [ ! -f /etc/briqyard/config.yaml ]; then
-  bind=${LISTEN%:*}
-  clients=""
-  if [ -n "$ALLOWED_CLIENTS" ]; then
-    clients="  allowed_clients: [${ALLOWED_CLIENTS//,/, }]"
-  elif [ "$ALLOW_PUBLIC" = 1 ]; then
-    clients="  allow_public: true"
-  elif ! private "$bind"; then
-    # A host nobody can reach over a public bind, until the operator says who may.
-    echo "   LISTEN=$LISTEN is public and neither ALLOWED_CLIENTS nor ALLOW_PUBLIC is set: binding loopback"
-    bind=127.0.0.1
-  fi
+  key_source=fleet
+  [ -n "$FLEET_URL" ] || key_source="file:$KEY_FILE"
   cat > /etc/briqyard/config.yaml <<EOF
 listen: $bind:${LISTEN##*:}
 token: "$API_TOKEN"
@@ -145,6 +239,7 @@ root_disk_gb: 8
 storage:
   backend: zfs
   pool: $POOL
+  key: $key_source
 network:
   range: 10.64.0.0/10
 ingress:
@@ -155,16 +250,15 @@ ingress:
 EOF
   [ -z "$clients" ] || echo "$clients" >> /etc/briqyard/config.yaml
   if [ -n "$FLEET_URL" ]; then
-    # The API serves TLS off loopback: advertised with the scheme it serves.
-    scheme=https
-    case "$bind" in 127.*) scheme=http ;; esac
     cat >> /etc/briqyard/config.yaml <<EOF
 fleet:
   url: $FLEET_URL
-  advertise: ${ADVERTISE:-$scheme://$(hostname -I | awk '{print $1}'):7420}
+  advertise: $advertise
 EOF
   fi
 fi
+# The host's token is in it.
+chmod 0600 /etc/briqyard/config.yaml
 
 echo "== api certificate"
 # Made here, before the daemon starts, so it is there to read; kept across runs. It is also the
@@ -192,6 +286,8 @@ KillMode=process
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536
+# A core dump of a Firecracker would be its guest's memory, on / in clear (ADR 0026).
+LimitCORE=0
 Environment=BRIQYARD_LOG=info
 
 [Install]

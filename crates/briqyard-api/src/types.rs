@@ -1005,12 +1005,42 @@ pub struct StopRequest {
     pub timeout_sec: u64,
 }
 
-/// A point-in-time copy of a machine's disks.
+/// A snapshot to take now (ADR 0031).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SnapshotRequest {
+    /// A name to find it by again (`before-migration`), unique among the machine's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its memory too, on a running machine: a restore resumes its processes where they were.
+    #[serde(default)]
+    pub memory: bool,
+}
+
+/// A point-in-time copy of a machine's disks, and of its memory when taken with it (ADR 0031).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub id: String,
     pub machine_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// The disks it holds: `root`, and `data` on a machine with a volume. A new image drops
+    /// `root`: the root disk follows the image (ADR 0024).
+    #[serde(default)]
+    pub disks: Vec<String>,
+    #[serde(default)]
+    pub memory: bool,
+}
+
+/// A snapshot's name: an id's characters, and not the shape of a snapshot id (`s_…`), so a
+/// path segment names one snapshot whichever it is.
+pub fn check_snapshot_name(name: &str) -> Result<(), String> {
+    if !valid_id(name) || name.starts_with("s_") {
+        return Err(format!(
+            "name {name:?}: a-z, 0-9, _ and -, at most 64, not starting with s_"
+        ));
+    }
+    Ok(())
 }
 
 /// A tenant's network on a host.
@@ -1246,6 +1276,9 @@ pub mod reason {
     pub const BACKED_UP: &str = "backed_up";
     pub const BACKUP_FAILED: &str = "backup_failed";
     pub const BACKUP_DELETED: &str = "backup_deleted";
+    /// A snapshot of its disks taken, or deleted (ADR 0031).
+    pub const SNAPSHOT_TAKEN: &str = "snapshot_taken";
+    pub const SNAPSHOT_DELETED: &str = "snapshot_deleted";
     pub const DESTROYED: &str = "destroyed";
     pub const GATEWAY_STARTED: &str = "gateway_started";
     pub const GATEWAY_STOPPED: &str = "gateway_stopped";
@@ -1282,6 +1315,8 @@ pub mod reason {
         BACKED_UP,
         BACKUP_FAILED,
         BACKUP_DELETED,
+        SNAPSHOT_TAKEN,
+        SNAPSHOT_DELETED,
         DESTROYED,
         GATEWAY_STARTED,
         GATEWAY_STOPPED,
@@ -1503,6 +1538,26 @@ pub struct RegisterHostRequest {
     /// The daemon's start; absent from a daemon older than ADR 0027.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<DaemonStart>,
+}
+
+/// `POST /v1/hosts/key` (fleet only): a host asks for its pool's key, with its own API token
+/// as the bearer, for the record at the address it advertises (ADR 0026).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostKeyRequest {
+    pub url: String,
+}
+
+/// The answer: the key of the host's pool, 64 hex digits (ZFS's `hex` key format).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct HostKey {
+    pub key: String,
+}
+
+/// Never printed: a `{:?}` of it would put the key in a log.
+impl std::fmt::Debug for HostKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostKey { .. }")
+    }
 }
 
 /// GET /v1/status.
@@ -2394,10 +2449,29 @@ mod tests {
 
     #[test]
     fn snapshot_and_tenant() {
-        let s: Snapshot = same(json!({
-            "id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z"
-        }));
+        let s: Snapshot = round_trip(
+            json!({"id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z"}),
+            json!({
+                "id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z",
+                "disks": [], "memory": false
+            }),
+        );
         assert_eq!(s.machine_id, "m1");
+        let s: Snapshot = same(json!({
+            "id": "s_1", "machine_id": "m1", "name": "before-migration",
+            "created_at": "2026-01-02T03:04:05Z", "disks": ["root", "data"], "memory": true
+        }));
+        assert_eq!(s.name.as_deref(), Some("before-migration"));
+        let r: SnapshotRequest = round_trip(json!({}), json!({"memory": false}));
+        assert!(r.name.is_none() && !r.memory);
+        let r: SnapshotRequest = same(json!({"name": "x", "memory": true}));
+        assert!(r.memory);
+        for ok in ["before-migration", "a", "s1", "snap_2"] {
+            assert!(check_snapshot_name(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "s_abc", "Before", "a/b", "..", &"x".repeat(65)] {
+            assert!(check_snapshot_name(bad).is_err(), "{bad}");
+        }
         let t: Tenant = round_trip(
             json!({"id": "t1", "created_at": "2026-01-02T03:04:05Z"}),
             json!({
@@ -2790,7 +2864,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), reason::ALL.len());
-        assert_eq!(all.len(), 33);
+        assert_eq!(all.len(), 35);
         assert!(all
             .iter()
             .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));

@@ -13,13 +13,14 @@ mod ingress;
 mod machine;
 mod metrics;
 mod netw;
-mod objstore;
+mod poolkey;
 mod store;
 mod tls;
 mod usage;
 mod zfs;
 
 use anyhow::{anyhow, Context, Result};
+use briqyard_objstore as objstore;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -113,11 +114,25 @@ async fn run(args: Args) -> Result<()> {
         None
     };
     let fingerprint = tls.as_ref().map(|(f, _)| f.clone()).unwrap_or_default();
-    let store = store::Store::open(&cfg.state_dir())?;
-    let zfs = zfs::Zfs::new(&cfg.storage.pool, &cfg.jail_base()).await?;
-    for d in [cfg.jail_base(), cfg.run_dir()] {
-        store::private_dir(&d)?;
+    // The pool is encrypted (ADR 0026) and everything of the machines is on it: its key is
+    // loaded before anything of it is read, and until it is, nothing starts.
+    let zfs = zfs::Zfs::new(&cfg.storage.pool).await?;
+    if !poolkey::unlock(&zfs, &cfg, terminated()).await? {
+        tracing::info!("stopped before the pool's key was loaded");
+        return Ok(());
     }
+    let mounts = cfg.pool_mounts();
+    zfs.layout(
+        &mounts
+            .iter()
+            .map(|(n, d)| (*n, d.as_path()))
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    for (_, d) in &mounts {
+        store::private_dir(d)?;
+    }
+    let store = store::Store::open(&cfg.state_dir())?;
     let mut images = image::Builder::new(
         zfs.clone(),
         cfg.image_dir(),
@@ -229,10 +244,18 @@ async fn run(args: Args) -> Result<()> {
             }
         }
     };
-    let held = tokio::time::timeout(std::time::Duration::from_secs(60), down)
-        .await
-        .ok()
-        .flatten();
+    let held = match tokio::time::timeout(std::time::Duration::from_secs(60), down).await {
+        Ok(held) => held,
+        Err(_) => {
+            // What was not done by then: the next daemon finds those machines as a crash
+            // leaves them.
+            tracing::warn!(
+                hand_over = hand_over.load(std::sync::atomic::Ordering::SeqCst),
+                "the shutdown ran past 60 s: ending without it"
+            );
+            None
+        }
+    };
     if held.is_some() {
         // A hand-over ends the process here, every machine's lock held: no transition begins
         // in what is left of it (ADR 0027).
@@ -240,6 +263,16 @@ async fn run(args: Args) -> Result<()> {
         std::process::exit(0);
     }
     Ok(())
+}
+
+/// Resolves at SIGINT or SIGTERM.
+async fn terminated() {
+    let mut term =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
 }
 
 /// The API's certificate, made on the first call, and its fingerprint.

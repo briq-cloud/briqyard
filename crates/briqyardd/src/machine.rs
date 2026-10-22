@@ -30,6 +30,8 @@ use tokio::sync::{broadcast, Notify};
 mod backups;
 use backups::{Backups, Schedule, Turn};
 mod probes;
+mod snapshots;
+use snapshots::SnapshotRec;
 
 /// What the API maps to statuses.
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +40,8 @@ pub enum MError {
     NotFound,
     #[error("backup {0} not found")]
     NoBackup(String),
+    #[error("snapshot {0} not found")]
+    NoSnapshot(String),
     #[error("invalid request: {0}")]
     Invalid(String),
     #[error("{0}")]
@@ -206,6 +210,12 @@ pub struct Record {
     pub pending: Option<api::SpecChange>,
     #[serde(default)]
     pub pending_since: Option<DateTime<Utc>>,
+    /// Its snapshots, oldest first (ADR 0031).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshots: Vec<SnapshotRec>,
+    /// The snapshot its disks are going back to, until the restore is done (ADR 0031).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restoring: Option<String>,
     /// What the init said at the last boot (ADR 0027).
     #[serde(default)]
     pub init_version: String,
@@ -240,6 +250,10 @@ impl Record {
     }
     pub fn data_dataset(&self) -> String {
         format!("m/{}/data", self.id)
+    }
+    /// The dataset of a disk in use: `root` or `data`.
+    pub fn disk_dataset(&self, disk: &str) -> String {
+        format!("m/{}/{disk}", self.id)
     }
     /// Whether its next start makes the root disk again: a new image pending, or one applied
     /// whose root disk is not made yet (ADR 0024).
@@ -501,6 +515,8 @@ struct Entry {
     events: Events,
     /// Held by each backup and deletion of its backups.
     backup_turn: Turn,
+    /// While a stop that released the lock is under way: by when it has settled (ADR 0031).
+    stop_deadline: Mutex<Option<tokio::time::Instant>>,
     /// What its probes found in the current run (ADR 0022); locked before `rec`, never after.
     probe: Mutex<probes::Run>,
     /// The task running its probes, while one runs.
@@ -521,6 +537,7 @@ impl Entry {
             disk_io: Arc::default(),
             events,
             backup_turn: Turn::default(),
+            stop_deadline: Mutex::new(None),
             probe: Mutex::default(),
             prober: Mutex::new(None),
         })
@@ -530,25 +547,73 @@ impl Entry {
         self.rec.lock().unwrap().clone()
     }
 
-    /// Its lock for a start, after its backup turn when that start makes the root disk again
-    /// (ADR 0024): a backup takes the turn then the lock, so this start does too, and no
-    /// backup sends a disk while it is replaced. Whether it will is read again under the
-    /// lock: a PATCH in between takes the turn on the next round.
+    /// Its backup turn, then its lock: what anything that replaces a disk holds, in the
+    /// order a backup takes them, so no backup sends a disk while it is replaced.
+    async fn lock_with_turn(
+        &self,
+    ) -> (
+        tokio::sync::OwnedMutexGuard<()>,
+        tokio::sync::MutexGuard<'_, ()>,
+    ) {
+        let turn = self.backup_turn.clone().lock_owned().await;
+        (turn, self.lock.lock().await)
+    }
+
+    /// Its lock for a start, with its backup turn when that start replaces a disk: a new
+    /// image's root disk (ADR 0024), or a restore to finish (ADR 0031). Whether it will is
+    /// read again under the lock: a change in between takes the turn on the next round.
     async fn lock_for_start(
         &self,
     ) -> (
         Option<tokio::sync::OwnedMutexGuard<()>>,
         tokio::sync::MutexGuard<'_, ()>,
     ) {
+        let swaps = |r: Record| r.remakes_root() || r.restoring.is_some();
         loop {
-            let turn = match self.snapshot().remakes_root() {
-                true => Some(self.backup_turn.clone().lock_owned().await),
-                false => None,
-            };
-            let guard = self.lock.lock().await;
-            if turn.is_some() || !self.snapshot().remakes_root() {
-                return (turn, guard);
+            if swaps(self.snapshot()) {
+                let (turn, guard) = self.lock_with_turn().await;
+                return (Some(turn), guard);
             }
+            let guard = self.lock.lock().await;
+            if !swaps(self.snapshot()) {
+                return (None, guard);
+            }
+        }
+    }
+
+    /// `lock_for_start` (with the turn always when `turn`, as a restore takes it), once a
+    /// stop under way (the sleeper's, a caller's) has settled: a start, a wake or a restore
+    /// arriving meanwhile goes on after it rather than failing on `stopping`. A stop that has
+    /// not settled by the deadline it set is the caller's to refuse.
+    async fn lock_once_stopped(
+        &self,
+        turn: bool,
+    ) -> (
+        Option<tokio::sync::OwnedMutexGuard<()>>,
+        tokio::sync::MutexGuard<'_, ()>,
+    ) {
+        loop {
+            let turns = match turn {
+                true => {
+                    let (t, g) = self.lock_with_turn().await;
+                    (Some(t), g)
+                }
+                false => self.lock_for_start().await,
+            };
+            let deadline = *self.stop_deadline.lock().unwrap();
+            let deadline = match deadline {
+                Some(d) if self.snapshot().state == state::STOPPING => d,
+                _ => return turns,
+            };
+            if tokio::time::Instant::now() > deadline {
+                return turns;
+            }
+            // Registered before the lock goes: the settle that follows wakes it.
+            let settled = self.changed.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            drop(turns);
+            let _ = tokio::time::timeout_at(deadline, settled).await;
         }
     }
 
@@ -975,39 +1040,13 @@ impl Manager {
                 }
             }
         }
-        // A fork's snapshot on its source outlives a destroy that failed to free it.
-        if let Ok(snaps) = self.inner.zfs.snapshots_under("m").await {
-            for s in snaps {
-                if let Some((ds, snap)) = s.split_once('@') {
-                    if self.free_fork_snapshot(ds, snap).await {
-                        tracing::warn!(snapshot = s, "fork snapshot with no clone, destroyed");
-                        swept += 1;
-                    }
-                }
-            }
-        }
+        // A restore cut short goes on; a snapshot or a retired disk nothing needs goes: a
+        // fork's that outlived the fork, one taken when the daemon died before its record.
+        swept += self.tidy_at_start().await;
         if swept > 0 {
             tracing::info!(swept, "orphans swept at start");
         }
         swept
-    }
-
-    /// Removes a `fork-*` snapshot nothing clones any more: `true` when it did. Kept, with a
-    /// warning, when ZFS cannot say or refuses; the sweep at start tries again.
-    async fn free_fork_snapshot(&self, ds: &str, snap: &str) -> bool {
-        if !snap.starts_with("fork-") {
-            return false;
-        }
-        let z = &self.inner.zfs;
-        let freed = match z.clones(ds, snap).await {
-            Ok(clones) if clones.is_empty() => z.destroy_snapshot(ds, snap).await.map(|_| true),
-            Ok(_) => Ok(false),
-            Err(err) => Err(err),
-        };
-        freed.unwrap_or_else(|err| {
-            tracing::warn!(dataset = ds, snapshot = snap, err = %err, "fork snapshot kept");
-            false
-        })
     }
 
     /// Takes over a VMM a previous daemon left running (it crashed; a shutdown suspends
@@ -2482,6 +2521,8 @@ impl Manager {
             init_version: String::new(),
             vmm_version: String::new(),
             rest: Default::default(),
+            snapshots: Vec::new(),
+            restoring: None,
         };
         self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
         let mut src: Option<Arc<Entry>> = None;
@@ -2704,7 +2745,20 @@ impl Manager {
                 .map(|f| f.copy.is_empty() || f.copy == "disk")
                 .unwrap_or(false);
         if copy_disks {
-            let s = src.unwrap().snapshot();
+            // Under the source's lock: a restore swaps its disks under that lock (ADR 0031),
+            // and a tidy removes a fork snapshot nothing clones yet.
+            let src = src.unwrap();
+            let _src_lock = src.lock.lock().await;
+            let s = src.snapshot();
+            if s.state == state::DESTROYING {
+                return Err(anyhow!("fork source {} is being destroyed", s.id));
+            }
+            if let Some(snap) = &s.restoring {
+                return Err(anyhow!(
+                    "fork source {}: a restore to {snap} is unfinished",
+                    s.id
+                ));
+            }
             let snap = format!("fork-{}", r.id);
             z.snapshot(&s.root_dataset(), &snap).await?;
             z.clone_snapshot(&s.root_dataset(), &snap, &r.root_dataset())
@@ -2764,7 +2818,7 @@ impl Manager {
 
     pub async fn start(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _turns = e.lock_for_start().await;
+        let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;
         if e.snapshot().state != state::RUNNING {
             self.start_entry(&e, true).await?;
@@ -2776,7 +2830,7 @@ impl Manager {
     /// one stopped on purpose stays stopped.
     pub async fn wake(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _turns = e.lock_for_start().await;
+        let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;
         let r = e.snapshot();
         match r.state.as_str() {
@@ -2858,10 +2912,21 @@ impl Manager {
             let _ = self.save(e);
             MError::Other(err)
         };
-        // A new image's root disk first (ADR 0024).
+        // A restore cut short first (ADR 0031), then a new image's root disk (ADR 0024).
+        let rec = e.snapshot();
+        // The machines they free a snapshot of are tidied apart, once the caller's lock
+        // is released (ADR 0031): never another machine's lock under this one's.
+        if rec.restoring.is_some() {
+            let parents = self
+                .finish_restore(e)
+                .await
+                .map_err(|err| fail(anyhow!("{err:#}")))?;
+            self.tidy_later(parents);
+        }
         let rec = e.snapshot();
         if rec.root_key != rec.image_key {
-            self.remake_root(e).await.map_err(fail)?;
+            let parents = self.remake_root(e).await.map_err(fail)?;
+            self.tidy_later(parents);
         }
         // What this boot runs: the record, the change it applied on it.
         let rec = e.snapshot();
@@ -3024,11 +3089,13 @@ impl Manager {
         MError::BootFailed(Box::new(self.view(e)))
     }
 
-    /// Makes the root disk again from the record's image, before a boot (ADR 0024): forks of
-    /// the old one take its snapshots over and the fork snapshot it came from goes once
-    /// nothing clones it, as at a destroy; the data volume is not touched. The image comes
-    /// from the cache, pulled again when the host removed it since the start resolved it.
-    async fn remake_root(&self, e: &Entry) -> Result<()> {
+    /// Makes the root disk again from the record's image, before a boot (ADR 0024): the root
+    /// disk is swapped for a clone of the image (ADR 0031), the old one retired and kept only
+    /// while forks clone it; the snapshots' root halves and memory go, since the root disk
+    /// follows the image; the data volume is not touched. The image comes from the cache,
+    /// pulled again when the host removed it since the start resolved it. Returns the
+    /// machines whose snapshots the old root disk was cloned from, to tidy.
+    async fn remake_root(&self, e: &Entry) -> Result<Vec<String>> {
         let im = self.inner.images.ensure(&e.snapshot().image).await?;
         let base = im.dataset();
         {
@@ -3038,23 +3105,33 @@ impl Manager {
             r.image_config = im.config;
         }
         let r = e.snapshot();
-        let (z, root) = (&self.inner.zfs, r.root_dataset());
-        let mut origin = None;
-        if z.exists(&root).await.context("root disk")? {
-            z.release_clones(&root)
-                .await
-                .context("forks of the root disk")?;
-            origin = z.origin(&root).await.context("origin of the root disk")?;
-            z.destroy(&root).await.context("the previous root disk")?;
-        }
-        if let Some((ds, snap)) = origin {
-            self.free_fork_snapshot(&ds, &snap).await;
-        }
-        z.clone_snapshot(&base, image::SNAP, &root)
+        self.finish_swap(&r, "root")
             .await
             .context("the root disk")?;
-        e.rec.lock().unwrap().root_key = r.image_key;
-        self.save(e)
+        self.swap(&r, "root", &base, image::SNAP)
+            .await
+            .context("the root disk")?;
+        let dropped = {
+            let mut rec = e.rec.lock().unwrap();
+            rec.root_key = rec.image_key.clone();
+            let dropped: Vec<String> = rec
+                .snapshots
+                .iter()
+                .filter(|s| s.memory.is_some())
+                .map(|s| s.id.clone())
+                .collect();
+            for s in rec.snapshots.iter_mut() {
+                s.disks.retain(|d| d != "root");
+                s.memory = None;
+            }
+            rec.snapshots.retain(|s| !s.disks.is_empty());
+            dropped
+        };
+        for snap in dropped {
+            self.remove_memory(&r, &snap);
+        }
+        self.save(e)?;
+        Ok(self.tidy_or_warn(e).await)
     }
 
     /// The jail of a machine, when the daemon runs Firecracker under the jailer: one uid per
@@ -3115,18 +3192,30 @@ impl Manager {
             self.exited(e, code, oom, code != 0);
             return;
         }
-        let now = Utc::now();
-        e.set_state(state::STOPPED, |r| {
-            r.pid = 0;
-            r.stopped_at = Some(now);
-            let Some(why) = stop_req else {
+        let Some(why) = stop_req else {
+            e.set_state(state::STOPPED, |r| {
+                r.pid = 0;
+                r.stopped_at = Some(Utc::now());
                 r.stopped_reason = stop::USER.into();
-                return Some(
+                Some(
                     Ev::normal(reason::STOPPED, "stopped on request")
                         .data(json!({ "reason": stop::USER })),
-                );
-            };
-            r.stopped_reason = why.clone();
+                )
+            });
+            let _ = self.save(e);
+            return;
+        };
+        self.settle_stopped(e, &why);
+    }
+
+    /// A stop asked for `why` is done, its process gone: `stopped` with that reason, or
+    /// `suspended` when it kept a memory snapshot.
+    fn settle_stopped(&self, e: &Entry, why: &str) {
+        *e.stop_deadline.lock().unwrap() = None;
+        e.set_state(state::STOPPED, |r| {
+            r.pid = 0;
+            r.stopped_at = Some(Utc::now());
+            r.stopped_reason = why.into();
             tracing::info!(machine = r.id, reason = why, "machine stopped");
             let ev = match r.suspended {
                 true => Ev::normal(
@@ -3360,6 +3449,9 @@ impl Manager {
                 None => return Err(MError::NotRunning("no process".into())),
             };
             *e.stop_req.lock().unwrap() = Some(why.to_string());
+            // What this call waits at most below, the lock released: a start waits as long.
+            *e.stop_deadline.lock().unwrap() =
+                Some(tokio::time::Instant::now() + timeout + Duration::from_secs(20));
             e.set_state(state::STOPPING, |_| {
                 Some(
                     Ev::normal(reason::STOPPING, format!("stopping ({why})"))
@@ -3447,11 +3539,30 @@ impl Manager {
             Ok(e) => e,
             Err(_) => return Ok(()),
         };
-        let _guard = e.lock.lock().await;
-        if !self.inner.machines.lock().unwrap().contains_key(id) {
-            // A destroy that held the lock before this one finished the job.
-            return Ok(());
-        }
+        let others = {
+            let _guard = e.lock.lock().await;
+            if !self.inner.machines.lock().unwrap().contains_key(id) {
+                // A destroy that held the lock before this one finished the job.
+                return Ok(());
+            }
+            self.destroy_locked(&e, id, at).await?
+        };
+        // Its lock released, it is gone: the machines its disks touched are tidied, each
+        // under its own lock (ADR 0031).
+        self.tidy_machines(others).await;
+        Ok(())
+    }
+
+    /// The destroy's critical section. Returns the machines to tidy after it: those its disks
+    /// were cloned from, whose snapshot may be free now, and the forks promoted over it,
+    /// which hold its snapshots now.
+    async fn destroy_locked(
+        &self,
+        e: &Arc<Entry>,
+        id: &str,
+        at: Option<u64>,
+    ) -> Result<Vec<String>, MError> {
+        let e = e.clone();
         self.check_version(&e, at)?;
         // No event: the destroy is one step, and `destroyed` ends it.
         e.set_state(state::DESTROYING, |_| None);
@@ -3474,32 +3585,31 @@ impl Manager {
             .await
             .context("usage counters")?;
         // A fork is a clone of this machine's disks: it takes the snapshots over and lives on.
-        // What this machine was cloned from is read after that, since a promotion moves it:
-        // the fork snapshot it leaves behind goes once nothing clones it.
-        let mut origins = Vec::new();
-        for ds in [rec.root_dataset(), rec.data_dataset()] {
-            if self.inner.zfs.exists(&ds).await.context("disks")? {
-                self.inner
-                    .zfs
-                    .release_clones(&ds)
-                    .await
-                    .context("forks of the disks")?;
-                origins.extend(
-                    self.inner
-                        .zfs
-                        .origin(&ds)
-                        .await
-                        .context("origin of the disks")?,
-                );
+        // What this machine's disks were cloned from is read after that, since a promotion
+        // moves it: the snapshot it leaves behind goes once nothing clones it.
+        let z = &self.inner.zfs;
+        let mut others = Vec::new();
+        if z.exists(&rec.dataset()).await.context("disks")? {
+            let promoted = z
+                .release_clones(&rec.dataset())
+                .await
+                .context("forks of the disks")?;
+            others.extend(
+                promoted
+                    .iter()
+                    .filter_map(|c| snapshots::machine_of(c))
+                    .map(String::from),
+            );
+            for ds in z.volumes_under(&rec.dataset()).await.context("disks")? {
+                if let Some((origin, _)) = z.origin(&ds).await.context("origin of the disks")? {
+                    others.extend(
+                        snapshots::machine_of(&origin)
+                            .filter(|m| *m != id)
+                            .map(String::from),
+                    );
+                }
             }
-        }
-        self.inner
-            .zfs
-            .destroy(&rec.dataset())
-            .await
-            .context("disks")?;
-        for (ds, snap) in origins {
-            self.free_fork_snapshot(&ds, &snap).await;
+            z.destroy(&rec.dataset()).await.context("disks")?;
         }
         let _ = tokio::fs::remove_dir_all(self.inner.cfg.run_dir().join(id)).await;
         if let Some(j) = self.jail_for(&rec) {
@@ -3517,7 +3627,9 @@ impl Manager {
             .events
             .emit(Ev::normal(reason::DESTROYED, "destroyed").of(id, &rec.tenant));
         tracing::info!(machine = id, "machine destroyed");
-        Ok(())
+        others.sort();
+        others.dedup();
+        Ok(others)
     }
 
     // --- use and sleep ---
@@ -3893,11 +4005,13 @@ impl Manager {
             }
             let r = e.snapshot();
             let jail = self.jail_for(&r).map(|j| j.base);
-            let files = fc::snapshot_files(
+            let mut files = fc::snapshot_files(
                 &self.inner.cfg.run_dir().join(&r.id),
                 jail.as_deref(),
                 &r.id,
-            );
+            )
+            .to_vec();
+            files.extend(self.memory_snapshot_files(&r));
             let memory_snapshot = usage::file_bytes(&files);
             let cgroup = self.inner.vmm.cgroup(&r.id).await;
             let (who, used) = {
@@ -4257,59 +4371,6 @@ impl Manager {
                 return;
             }
         }
-    }
-
-    // --- snapshots ---
-
-    /// Removes a snapshot `snapshot` made, from both disks. Missing is success; a snapshot
-    /// of the daemon's own (a fork's, a backup's) is not the caller's to remove.
-    pub async fn delete_snapshot(&self, id: &str, snap: &str) -> Result<(), MError> {
-        let e = self.own_entry(id)?;
-        let r = e.snapshot();
-        if !snap.starts_with("s_") || !api::valid_id(snap) {
-            return Err(MError::NotFound);
-        }
-        self.inner
-            .zfs
-            .destroy_snapshot(&r.root_dataset(), snap)
-            .await?;
-        if r.volume.is_some() {
-            self.inner
-                .zfs
-                .destroy_snapshot(&r.data_dataset(), snap)
-                .await?;
-        }
-        Ok(())
-    }
-
-    pub async fn snapshot(&self, id: &str) -> Result<api::Snapshot, MError> {
-        let e = self.own_entry(id)?;
-        let r = e.snapshot();
-        let snap = new_id("s");
-        self.inner.zfs.snapshot(&r.root_dataset(), &snap).await?;
-        if r.volume.is_some() {
-            self.inner.zfs.snapshot(&r.data_dataset(), &snap).await?;
-        }
-        Ok(api::Snapshot {
-            id: snap,
-            machine_id: id.to_string(),
-            created_at: Utc::now(),
-        })
-    }
-
-    pub async fn snapshots(&self, id: &str) -> Result<Vec<api::Snapshot>, MError> {
-        let e = self.own_entry(id)?;
-        let r = e.snapshot();
-        let names = self.inner.zfs.snapshots(&r.root_dataset()).await?;
-        Ok(names
-            .into_iter()
-            .filter(|n| n.starts_with("s_"))
-            .map(|n| api::Snapshot {
-                id: n,
-                machine_id: id.to_string(),
-                created_at: r.created_at,
-            })
-            .collect())
     }
 
     // --- endpoints ---
@@ -5192,6 +5253,8 @@ mod tests {
             init_version: String::new(),
             vmm_version: String::new(),
             rest: Default::default(),
+            snapshots: Vec::new(),
+            restoring: None,
         }
     }
 
@@ -5477,6 +5540,7 @@ mod tests {
             let snapshot = b.dir.join("snap.mem");
             let resumed = b.resume && snapshot.exists();
             let _ = std::fs::remove_file(&snapshot);
+            let _ = std::fs::remove_file(b.dir.join("snap.state"));
             let pid = self
                 .next_pid
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -5547,7 +5611,13 @@ mod tests {
 
         async fn snapshot(&self, vm: &fc::Vm) -> Result<()> {
             self.record(format!("snapshot {}", vm.pid));
+            std::fs::write(vm.dir.join("snap.state"), b"state")?;
             std::fs::write(vm.dir.join("snap.mem"), b"memory")?;
+            Ok(())
+        }
+
+        async fn resume(&self, vm: &fc::Vm) -> Result<()> {
+            self.record(format!("resume {}", vm.pid));
             Ok(())
         }
 
@@ -5919,7 +5989,7 @@ mod tests {
         }
 
         /// The disks of an added machine, on the fake pool.
-        async fn disks(&self, e: &Entry) {
+        pub(super) async fn disks(&self, e: &Entry) {
             let r = e.snapshot();
             let z = &self.pool.zfs;
             z.create(&r.root_dataset(), 1 << 20).await.unwrap();
@@ -5954,6 +6024,21 @@ mod tests {
                 .await
                 .unwrap();
             self.pool.calls();
+        }
+
+        /// Each stop takes this long on the host from now on.
+        pub(super) fn stops_take(&self, d: Duration) {
+            self.host.stops_take(d);
+        }
+
+        /// The host's Firecracker and kernel from now on (ADR 0027): another one is an upgrade.
+        pub(super) fn set_vmm_version(&self, v: &str) {
+            *self.host.vmm_version.lock().unwrap() = v.into();
+        }
+
+        /// The host's calls so far (boots, snapshots, kills), then forgets them.
+        pub(super) fn host_calls(&self) -> Vec<String> {
+            self.host.calls()
         }
 
         /// The machine's record as the store has it.
@@ -6795,6 +6880,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_wake_during_a_sleep_waits_for_the_stop_then_starts() {
+        // Found by the e2e suite: an exec waking a machine the sleeper was stopping got
+        // `bad_state: stopping`.
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("db")).await.unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.host.stops_take(Duration::from_millis(300));
+        let (m2, e2) = (h.m.clone(), e.clone());
+        let sleep = tokio::spawn(async move {
+            m2.stop_entry(&e2, stop::IDLE, Duration::from_secs(1), false, None)
+                .await
+                .unwrap()
+        });
+        while e.snapshot().state != state::STOPPING {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let woken = h.m.wake(&m.id, None).await.unwrap();
+        assert_eq!(woken.state, state::RUNNING);
+        sleep.await.unwrap();
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
+    }
+
+    #[tokio::test]
     async fn a_create_whose_caller_hangs_up_still_runs() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
@@ -7149,7 +7258,7 @@ mod tests {
 
     impl Harness {
         /// A fork of `src`, both disks, started.
-        async fn fork(&self, src: &str, name: &str) -> api::Machine {
+        pub(super) async fn fork(&self, src: &str, name: &str) -> api::Machine {
             let mut req = self.request(name);
             req.image = String::new();
             req.fork = Some(api::ForkSpec {
@@ -7159,7 +7268,7 @@ mod tests {
             self.m.create(req).await.unwrap()
         }
 
-        fn snapshot_exists(&self, ds: &str, snap: &str) -> bool {
+        pub(super) fn snapshot_exists(&self, ds: &str, snap: &str) -> bool {
             self.pool.dev().join(format!("byard/{ds}@{snap}")).exists()
         }
     }
@@ -7216,7 +7325,9 @@ mod tests {
         assert!(h.pool.dev().join(format!("byard/{fork_root}")).exists());
         assert!(!h.pool.dev().join(format!("byard/m/{}", src.id)).exists());
         assert!(!h.snapshot_exists(&fork_root, &snap));
-        assert_eq!(h.pool.zfs.origin(&fork_root).await.unwrap(), None);
+        // It took its source's origin over, as ZFS's promote does: the image's.
+        let origin = h.pool.zfs.origin(&fork_root).await.unwrap().unwrap();
+        assert!(origin.0.starts_with("images/"), "{origin:?}");
         assert_eq!(h.m.get(&fork.id).unwrap().state, state::RUNNING);
         h.m.destroy(&fork.id, None).await.unwrap();
     }
@@ -7239,41 +7350,22 @@ mod tests {
         )
         .await
         .unwrap();
+        // One the record names, one a daemon that died before the record left (ADR 0031).
         z.snapshot("m/m_kept/root", "s_mine").await.unwrap();
+        z.snapshot("m/m_kept/root", "s_lost").await.unwrap();
+        kept.rec.lock().unwrap().snapshots.push(SnapshotRec {
+            id: "s_mine".into(),
+            name: None,
+            created_at: Utc::now(),
+            disks: vec!["root".into()],
+            memory: None,
+            vmm_version: String::new(),
+        });
         h.m.sweep_orphans().await;
         assert!(!h.snapshot_exists("m/m_kept/root", "fork-gone"));
         assert!(h.snapshot_exists("m/m_kept/root", "fork-m_child"));
         assert!(h.snapshot_exists("m/m_kept/root", "s_mine"));
-    }
-
-    #[tokio::test]
-    async fn a_snapshot_is_removed_on_request() {
-        let h = harness("10.64.0.0/22", 4096).await;
-        h.tenant("t1");
-        let e = h.add("m_s", state::STOPPED, 256);
-        h.disks(&e).await;
-        let s = h.m.snapshot("m_s").await.unwrap();
-        assert!(h.snapshot_exists("m/m_s/root", &s.id));
-        assert!(h.snapshot_exists("m/m_s/data", &s.id));
-        assert_eq!(h.m.snapshots("m_s").await.unwrap()[0].id, s.id);
-        h.m.delete_snapshot("m_s", &s.id).await.unwrap();
-        assert!(!h.snapshot_exists("m/m_s/root", &s.id));
-        assert!(!h.snapshot_exists("m/m_s/data", &s.id));
-        assert!(h.m.snapshots("m_s").await.unwrap().is_empty());
-        // Gone already: success. The daemon's own snapshots are not the caller's.
-        h.m.delete_snapshot("m_s", &s.id).await.unwrap();
-        h.pool.zfs.snapshot("m/m_s/root", "fork-x").await.unwrap();
-        for bad in ["fork-x", "bk-20260101T000000Z", "s_../x", ""] {
-            assert!(
-                matches!(h.m.delete_snapshot("m_s", bad).await, Err(MError::NotFound)),
-                "{bad}"
-            );
-        }
-        assert!(h.snapshot_exists("m/m_s/root", "fork-x"));
-        assert!(matches!(
-            h.m.delete_snapshot("m_none", "s_1").await,
-            Err(MError::NotFound)
-        ));
+        assert!(!h.snapshot_exists("m/m_kept/root", "s_lost"));
     }
 
     // --- egress (ADR 0015) ---
@@ -8566,13 +8658,23 @@ mod tests {
         assert_eq!(Harness::boots_of(&calls, &gw), 1);
         assert_eq!(calls.last().unwrap(), "wait_port 10.64.1.2:8080");
         let key2 = h.stored(&gw).unwrap().image_key;
+        // The old root disk swapped out (ADR 0031), then gone: no fork holds it.
         let zfs = h.pool.calls();
+        let retired = format!("byard/m/{gw}/root.r_");
         assert!(
-            zfs.contains(&format!("destroy -r byard/m/{gw}/root")),
+            zfs.iter()
+                .any(|c| c.starts_with(&format!("rename byard/m/{gw}/root {retired}"))),
             "{zfs:?}"
         );
         assert!(
-            zfs.contains(&format!("clone byard/images/{key2}@base byard/m/{gw}/root")),
+            zfs.iter()
+                .any(|c| c.starts_with(&format!("destroy -r {retired}"))),
+            "{zfs:?}"
+        );
+        assert!(
+            zfs.contains(&format!(
+                "clone byard/images/{key2}@base byard/m/{gw}/root.next"
+            )),
             "{zfs:?}"
         );
         assert_eq!(h.m.get(&gw).unwrap().image, IMAGE2);
@@ -8667,9 +8769,14 @@ mod tests {
             gateway(h.m.exec(&gw, exec).await.map(|_| ())),
             gateway(h.m.put_file(&gw, put).await),
             gateway(h.m.get_file(&gw, "/etc/hostname").await.map(|_| ())),
-            gateway(h.m.snapshot(&gw).await.map(|_| ())),
+            gateway(
+                h.m.snapshot(&gw, api::SnapshotRequest::default())
+                    .await
+                    .map(|_| ()),
+            ),
             gateway(h.m.snapshots(&gw).await.map(|_| ())),
             gateway(h.m.delete_snapshot(&gw, "s_1").await),
+            gateway(h.m.restore_snapshot(&gw, "s_1", None).await.map(|_| ())),
             gateway(h.m.backup(&gw).await.map(|_| ())),
             gateway(
                 h.m.create_endpoint(
@@ -11133,9 +11240,13 @@ mod tests {
             std::fs::read(dev.join("byard/m/m_x/data")).unwrap(),
             b"the database"
         );
+        // Swapped (ADR 0031): the old root disk renamed aside, a clone of the image in its
+        // place.
         let calls = h.pool.calls();
         assert!(
-            calls.contains(&"destroy -r byard/m/m_x/root".to_string()),
+            calls
+                .iter()
+                .any(|c| c.starts_with("rename byard/m/m_x/root byard/m/m_x/root.r_")),
             "{calls:?}"
         );
         assert!(
@@ -11144,11 +11255,13 @@ mod tests {
                 .any(|c| c.contains("m_x/data") && !c.starts_with("list ")),
             "{calls:?}"
         );
-        // The fork took the old root's snapshot over and lives on, whole; the snapshot went
-        // once nothing cloned it.
-        assert!(dev.join("byard/m/m_child/root").exists());
-        assert!(!dev.join("byard/m/m_child/root.origin").exists());
-        assert!(!dev.join("byard/m/m_child/root@fork-m_child").exists());
+        // The fork lives on, whole, a clone of the old root disk, retired and kept for it.
+        let fork_origin = std::fs::read_to_string(dev.join("byard/m/m_child/root.origin")).unwrap();
+        assert!(
+            fork_origin.starts_with("byard/m/m_x/root.r_")
+                && fork_origin.trim().ends_with("@fork-m_child"),
+            "{fork_origin}"
+        );
         // The next start has nothing to make.
         h.m.stop("m_x", Duration::from_secs(1), false, None)
             .await

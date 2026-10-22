@@ -507,11 +507,20 @@ fn policy(every: Option<&str>, keep: Option<u32>) -> Result<Option<Option<api::B
 
 #[derive(Subcommand)]
 enum SnapshotCmd {
-    /// Snapshot both disks now
-    Create { id: String },
+    /// Snapshot both disks now; --memory keeps a running machine's memory too
+    Create {
+        /// A name to find it by again (before-migration)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        memory: bool,
+        id: String,
+    },
     /// List a machine's snapshots
     Ls { id: String },
-    /// Remove a snapshot
+    /// Take the disks back to a snapshot (an id or a name); a running machine boots again
+    Restore { id: String, snap: String },
+    /// Delete a snapshot (an id or a name)
     Rm { id: String, snap: String },
 }
 
@@ -640,9 +649,12 @@ enum HostCmd {
     Retire {
         id: String,
     },
-    /// Forget a host (its machines are not touched)
+    /// Forget a host (its machines are not touched). A host with a pool key is refused unless
+    /// --force: the key goes with the record and its pool is unreadable at its next restart
     Rm {
         id: String,
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1260,14 +1272,26 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     .await?,
             ),
             MachineCmd::Snapshot(s) => match s {
-                SnapshotCmd::Create { id } => print_json(
-                    &c.call::<api::Snapshot>(POST, &format!("/v1/machines/{id}/snapshots"), NONE)
+                SnapshotCmd::Create { name, memory, id } => {
+                    let req = api::SnapshotRequest { name, memory };
+                    print_json(
+                        &c.call::<api::Snapshot>(
+                            POST,
+                            &format!("/v1/machines/{id}/snapshots"),
+                            Some(&req),
+                        )
                         .await?,
-                ),
-                SnapshotCmd::Ls { id } => print_json(
-                    &c.call::<Vec<api::Snapshot>>(
-                        GET,
-                        &format!("/v1/machines/{id}/snapshots"),
+                    )
+                }
+                SnapshotCmd::Ls { id } => {
+                    let path = format!("/v1/machines/{id}/snapshots");
+                    let ss: Vec<api::Snapshot> = c.call(GET, &path, NONE).await?;
+                    print!("{}", snapshot_table(&ss));
+                }
+                SnapshotCmd::Restore { id, snap } => print_json(
+                    &c.call::<api::Machine>(
+                        POST,
+                        &format!("/v1/machines/{id}/snapshots/{snap}/restore"),
                         NONE,
                     )
                     .await?,
@@ -1511,8 +1535,12 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 &c.call::<api::Host>(POST, &format!("/v1/hosts/{id}/retire"), NONE)
                     .await?,
             ),
-            HostCmd::Rm { id } => {
-                c.raw(DELETE, &format!("/v1/hosts/{id}"), NONE).await?;
+            HostCmd::Rm { id, force } => {
+                let q = if force { "?force=true" } else { "" };
+                c.raw(DELETE, &format!("/v1/hosts/{id}{q}"), NONE).await?;
+                if force {
+                    eprintln!("host {id} forgotten: a pool key it held went with its record, and its pool is unreadable at its next restart");
+                }
             }
         },
     }
@@ -1800,6 +1828,25 @@ fn machine_table(ms: &[api::Machine]) -> String {
             backup_label(m.backup.as_ref()),
             pending,
             m.host
+        ));
+    }
+    out
+}
+
+/// `machine snapshot ls`.
+fn snapshot_table(ss: &[api::Snapshot]) -> String {
+    let mut out = format!(
+        "{:<16} {:<20} {:<21} {:<10} MEMORY\n",
+        "ID", "NAME", "CREATED", "DISKS"
+    );
+    for s in ss {
+        out.push_str(&format!(
+            "{:<16} {:<20} {:<21} {:<10} {}\n",
+            s.id,
+            s.name.as_deref().unwrap_or("-"),
+            s.created_at.format("%Y-%m-%d %H:%M:%S"),
+            s.disks.join(","),
+            if s.memory { "yes" } else { "no" }
         ));
     }
     out

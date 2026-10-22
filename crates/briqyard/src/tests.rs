@@ -558,15 +558,37 @@ fn machine_lifecycle_commands() {
             "{sub} needs an id"
         );
     }
-    // Snapshots: create, ls and rm, each on a machine; rm names the snapshot too.
+    // Snapshots: create (named, with memory), ls, restore and rm, each on a machine; restore
+    // and rm name the snapshot too.
     for (args, want) in [
         (vec!["machine", "snapshot", "create", "m1"], "create"),
+        (
+            vec![
+                "machine", "snapshot", "create", "--name", "before", "--memory", "m1",
+            ],
+            "create before with memory",
+        ),
         (vec!["machine", "snapshot", "ls", "m1"], "ls"),
+        (
+            vec!["machine", "snapshot", "restore", "m1", "before"],
+            "restore",
+        ),
         (vec!["machine", "snapshot", "rm", "m1", "s_1"], "rm"),
     ] {
         let got = match machine(parse(&args)) {
-            MachineCmd::Snapshot(SnapshotCmd::Create { id }) if id == "m1" => "create",
+            MachineCmd::Snapshot(SnapshotCmd::Create { name, memory, id }) if id == "m1" => {
+                match (name, memory) {
+                    (None, false) => "create",
+                    (Some(n), true) if n == "before" => "create before with memory",
+                    _ => "?",
+                }
+            }
             MachineCmd::Snapshot(SnapshotCmd::Ls { id }) if id == "m1" => "ls",
+            MachineCmd::Snapshot(SnapshotCmd::Restore { id, snap })
+                if id == "m1" && snap == "before" =>
+            {
+                "restore"
+            }
             MachineCmd::Snapshot(SnapshotCmd::Rm { id, snap }) if id == "m1" && snap == "s_1" => {
                 "rm"
             }
@@ -576,6 +598,7 @@ fn machine_lifecycle_commands() {
     }
     for args in [
         vec!["machine", "snapshot", "create"],
+        vec!["machine", "snapshot", "restore", "m1"],
         vec!["machine", "snapshot", "rm", "m1"],
     ] {
         assert_eq!(fails(&args), ErrorKind::MissingRequiredArgument, "{args:?}");
@@ -807,7 +830,11 @@ fn host_commands() {
         _ => panic!("not a drain"),
     }
     match parse(&["host", "rm", "h_1"]).cmd {
-        Cmd::Host(HostCmd::Rm { id }) => assert_eq!(id, "h_1"),
+        Cmd::Host(HostCmd::Rm { id, force }) => assert!(id == "h_1" && !force),
+        _ => panic!("not a rm"),
+    }
+    match parse(&["host", "rm", "h_1", "--force"]).cmd {
+        Cmd::Host(HostCmd::Rm { force, .. }) => assert!(force),
         _ => panic!("not a rm"),
     }
     for sub in ["retire", "drain", "rm"] {
@@ -1388,6 +1415,38 @@ fn the_usage_table() {
         ]
     );
     assert_eq!(usage_table(&[]).lines().count(), 1, "the header alone");
+}
+
+#[test]
+fn the_snapshot_table() {
+    let ss = [
+        api::Snapshot {
+            id: "s_0123456789ab".into(),
+            machine_id: "m_01".into(),
+            name: Some("before-migration".into()),
+            created_at: ts(),
+            disks: vec!["root".into(), "data".into()],
+            memory: true,
+        },
+        api::Snapshot {
+            id: "s_ba9876543210".into(),
+            machine_id: "m_01".into(),
+            name: None,
+            created_at: ts(),
+            disks: vec!["data".into()],
+            memory: false,
+        },
+    ];
+    let out = snapshot_table(&ss);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "ID               NAME                 CREATED               DISKS      MEMORY",
+            "s_0123456789ab   before-migration     2026-10-19 08:30:00   root,data  yes",
+            "s_ba9876543210   -                    2026-10-19 08:30:00   data       no",
+        ]
+    );
 }
 
 #[test]

@@ -86,24 +86,50 @@ in a row is a `crash_loop` event. Probes are not use: they never keep a machine 
 
 ### Disks
 
-Every disk is a ZFS zvol in one pool (`byard` by default):
+Every disk is a ZFS zvol in one pool (`byard` by default), encrypted from its creation with
+the host's key (ADR 0026), and everything the daemon writes about a machine is on it:
 
 | Dataset | What |
 |---|---|
 | `byard/images/<digest>` | A root disk built from an image, with a `@base` snapshot |
 | `byard/m/<id>/root` | The machine's root disk, a clone of `@base` |
 | `byard/m/<id>/data` | The machine's data volume, when it has one |
-| `byard/jail` | A filesystem mounted at `jail_dir`: the chroots and the memory snapshots, on the pool, not on `/` |
+| `byard/m/<id>/root.<n>`, `data.<n>` | A disk a restore retired, while a newer snapshot or a fork needs it |
+| `byard/jail` | A filesystem mounted at `jail_dir`: the chroots and the memory snapshots |
+| `byard/images` | A filesystem mounted at `<data_dir>/images`: the images' metadata and extraction scratch |
+| `byard/state`, `byard/run` | Filesystems mounted at `<data_dir>/state` (records, events, usage) and `<data_dir>/run` (config drives, consoles) |
+
+After a reboot the pool's key is not loaded: the daemon loads it (`zfs load-key`, the key on
+stdin) before it reads or mounts anything, from `storage.key`: the fleet, which keeps one key
+per host in its registry and serves it to that host alone, or a file on a single host. Until it
+has the key the daemon serves nothing and says why in its log. A dataset is never mounted
+over files. Hosts run without swap, and a Firecracker never dumps core.
 
 The root disk outlives restarts and stops, as on Fly. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
 attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches the host's disk:
-a database on it is as safe as the host's drive. A snapshot is `zfs snapshot`; a fork is a clone
-of a snapshot of both disks, taken while the source runs (crash-consistent for the data volume).
-That snapshot (`@fork-<id>` on the source) pins every block the source has since rewritten, so
-it goes with the last machine cloned from it: a destroy frees the snapshot its disks came from
-once nothing clones it, and the sweep at start removes any `@fork-*` left with no clone. A
-snapshot made with `POST /machines/{id}/snapshots` stays until `DELETE /machines/{id}/snapshots/{snap}`.
+a database on it is as safe as the host's drive. A fork is a clone of a snapshot of both disks,
+taken while the source runs (crash-consistent for the data volume). That snapshot (`@fork-<id>`
+on the source) pins every block the source has since rewritten, so it goes with the last machine
+cloned from it.
+
+### Snapshots and restore
+
+`POST /machines/{id}/snapshots` snapshots both disks in one `zfs snapshot` (ADR 0031); the record
+lists it, with an optional name (`before-migration`) that finds it again. `POST
+.../snapshots/{snap}/restore` takes the disks back to it: under the machine's backup turn and
+lock, a running machine is stopped, then each disk is swapped for a clone of its snapshot
+(`clone`, the disk renamed aside to `<disk>.<n>`, the clone renamed into place, `promote` until
+its origin is outside the machine), and the machine boots again; any other stays as it is. The
+disk in use owns its whole history, so the next backup's base (its newest `bk-*`) is always an
+ancestor of what it holds. The disk it replaced is retired: it keeps the snapshots newer than the
+one restored and whatever clones them (a fork), and `tidy` (after a restore, a deletion, a fork's
+destroy, a new root disk, the daemon's start) removes it once neither is left, with any snapshot
+nothing names or clones. `memory: true` also keeps a running machine's memory (paused, written by
+Firecracker, the disks flushed and snapshotted, resumed): a restore of it resumes the processes
+where they were, while the machine's spec is the one it was taken with. A restore writes its
+intent first; one cut short is finished by the next restore, start or daemon start. A new image's
+root disk (ADR 0024) is the same swap, from the image's `@base`.
 
 Each disk the guest writes (the root disk and the volume) has Firecracker's rate limiter
 (ADR 0030): MB a second and requests a second, by default a rate per vCPU of the machine's size
@@ -186,7 +212,7 @@ nothing reads it, so nothing a guest prints can set its exit.
 
 ### Backups
 
-A backup is a ZFS snapshot of each disk streamed to an object store (`objstore.rs`: S3 or a
+A backup is a ZFS snapshot of each disk streamed to an object store (`briqyard-objstore`: S3 or a
 directory), incremental after the first; the record beside it holds the machine's spec, so a
 restore is a create that receives the chain of streams into fresh datasets on any host that
 reaches the store. Local snapshots stay only as the base of the next incremental send.
@@ -266,7 +292,8 @@ cannot pass it together. A refusal is 403 `quota` and a `quota_exceeded` event.
 Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the
 machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`; idle machines
 are stopped together, a few at a time, never one after another). A start, an
-ingress connection or an exec on an idle machine wakes it. `sleep: "never"` keeps it on. `PATCH
+ingress connection or an exec on an idle machine wakes it; one that arrives while the machine is
+being stopped waits for the stop, then starts it. `sleep: "never"` keeps it on. `PATCH
 /machines/{id} {"sleep": "3h"}` changes the window in any state, without a restart.
 
 A stop can keep a memory snapshot instead (`POST /machines/{id}/stop {"suspend": true}`, or
@@ -316,7 +343,9 @@ is down or does not answer fails the listing), since a control plane reads a mac
 from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host (`draining`),
 `undrain` resumes it; a host `upgrading` or `retiring` takes nothing new either. The registry
 (hosts, tenant → host, machine → host, endpoint → host) is one JSON file; a write that fails
-fails the request that needed it.
+fails the request that needed it. It is written to the object store once a minute when it
+changed, encrypted with age to a key kept off the fleet's host, and before any pool key is
+served; `briqyard-fleet restore` brings it back (ADR 0032).
 
 Provisioners add and release hosts through a cloud API: `hetzner-robot` (dedicated servers,
 monthly), `scaleway` (Elastic Metal, hourly), `static` (none). `POST /v1/hosts/order` orders
@@ -354,7 +383,10 @@ uid and gid of its own (`jail_uid_base` plus its place in the tenant's network, 
 machines share one); a new pid namespace; a cgroup v2 of its own; and Firecracker's seccomp
 filters. The daemon never mounts a guest filesystem. Guests reach only their tenant's bridge,
 the gateway's DNS, and the internet through NAT; nothing reaches a guest but the ingress.
-Secrets reach the guest on its config drive and never through the API's responses.
+Secrets reach the guest on its config drive and never through the API's responses. At rest
+everything of a machine (disks, records, config drives, consoles, memory snapshots) is on the
+encrypted pool: a disk or a server that leaves our hands is unreadable once the fleet forgets
+the host (ADR 0026).
 
 The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API and its
 endpoints listen on loopback unless told otherwise; on an address the internet could reach it

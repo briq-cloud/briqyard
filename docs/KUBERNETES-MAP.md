@@ -69,7 +69,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | CronJob | ✗ | | briq: a schedule on a workload is briq's; a schedule on what the host owns (its disks: backups) is the host's |
 | Ephemeral containers (debug) | ✓ exec | | |
 | — | ★ sleep on idle, wake on connect | | |
-| — | ★ suspend and resume in 0.2 s | Kubernetes checkpointing is alpha | |
+| — | ★ suspend and resume in 0.2 s; snapshots with memory, restored to resume where they were (ADR 0031) | Kubernetes checkpointing is alpha | |
 | — | ★ fork with the disk | | |
 
 ## Scheduling and nodes
@@ -113,9 +113,9 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | PV, PVC, StorageClass | ✓ a volume per machine | | |
 | Volume expansion | ✗ | grow the zvol and the filesystem at boot | yard, later |
-| VolumeSnapshot, restore | ◐ local snapshots (list, delete), fork, backups and restore anywhere | rollback to a named local snapshot | yard, later |
+| VolumeSnapshot, restore | ★ named snapshots of both disks, restored in place with newer snapshots, forks and the backup chain kept (ADR 0031); fork; backups and restore anywhere | a fork from a named snapshot | yard, later |
 | Scheduled backups and retention (Velero) | ✓ `backup: { every, keep }` run by the daemon, whole chains pruned, delete, a destroyed machine's kept `keep_destroyed_days` (ADR 0023) | | yard (values from briq) |
-| Encryption at rest (CSI, etcd secrets) | ✗ records, config drives and disks in clear (0600) | the pool encrypted at bootstrap, one key per host held by the fleet, handed over TLS at start, never on the host's disk | yard, before the first real host |
+| Encryption at rest (CSI, etcd secrets) | ✓ the pool encrypted at its creation (ZFS, AES-256-GCM), one key per host kept by the fleet and handed to that host at start, or a file on a single host; records, config drives, consoles and the image cache on the pool; no swap (ADR 0026) | key rotation; backups leave the host decrypted (the store's encryption); the registry's backup | yard |
 | emptyDir, tmpfs | ✓ `/tmp` | | |
 
 ## Configuration and images
@@ -161,7 +161,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | Control plane HA (etcd quorum) | ✗ one fleet process, one file | state the fleet can rebuild from the hosts | yard, later |
-| etcd backup | ✗ | the registry file copied to the object store on each write | yard |
+| etcd backup | ✓ the registry written to the object store once a minute when it changed and before a key is served, encrypted with age to a key kept offline; `briqyard-fleet restore` (ADR 0032) | | |
 | Cluster provisioning | ✓ bootstrap script, provisioners | | |
 | Version skew, upgrades | ✓ every binary and the init say `0.1.0+<commit>`; the wire is additive, unknown fields and values ignored; the fleet first, a host never newer (ADR 0027) | the init travels in the root disk: old inits live on until an image change | yard |
 | Multi-cluster | ◐ regions on hosts, placement by region (ADR 0025) | a fleet per region, or one across | yard, later |
@@ -182,4 +182,6 @@ Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit 
 
 Decided for the founder (advisor, 2026-10-20): the daemon runs scheduled backups from a policy briq sets; the pool is encrypted with one key per host held by the fleet, built before the first real host (after TLS); events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and briq's healthcheck moves onto them.
 
-Later, in the tables above: groups and load balancing, the mesh, volume expansion, encryption at rest, scoped tokens, fleet HA, OS patching through the fleet, evacuation, a TTY for exec.
+Built after: encryption at rest (ADR 0026).
+
+Later, in the tables above: groups and load balancing, the mesh, volume expansion, scoped tokens, fleet HA, OS patching through the fleet, evacuation, a TTY for exec.

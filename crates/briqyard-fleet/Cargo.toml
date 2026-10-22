@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 briqyard-api = { workspace = true, features = ["tls"] }
+briqyard-objstore = { workspace = true }
+age = { workspace = true }
 axum-server = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
