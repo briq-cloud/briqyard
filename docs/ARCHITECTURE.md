@@ -159,6 +159,7 @@ family chain pins every TAP to its machine's address (IP and ARP), so a guest th
 address sends nothing. A machine start adds its pin, a stop removes it; a tenant changes no rule.
 The daemon answers DNS on every gateway: `<alias>.internal` follows the machine's alias (what a sibling's
 env holds), `<id>.vm.internal` is that exact machine; everything else is forwarded upstream.
+Packets are decoded and encoded by `hickory-proto` (ADR 0033); one that does not parse is dropped.
 The guest configures its interface from the config drive (`briqyard-init`), so the guest kernel
 needs no `ip=` support.
 

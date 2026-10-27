@@ -38,6 +38,7 @@ rusty-s3 = { workspace = true }
 url = { workspace = true }
 rcgen = { workspace = true }
 axum-server = { workspace = true }
+hickory-proto = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

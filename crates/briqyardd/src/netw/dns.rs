@@ -1,8 +1,11 @@
 //! The gateway's DNS: answers `<name>.internal` for the tenant whose gateway the query came in
 //! on, and forwards everything else upstream as raw packets, except for the sources whose
-//! egress policy keeps them inside (ADR 0015): they get internal answers only.
+//! egress policy keeps them inside (ADR 0015): they get internal answers only. Packets are
+//! decoded and encoded by hickory-proto (ADR 0033); the names and the policy are ours.
 
 use anyhow::{Context, Result};
+use hickory_proto::op::{Message, MessageType, ResponseCode};
+use hickory_proto::rr::{rdata::A, RData, Record, RecordType};
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
@@ -125,19 +128,20 @@ impl Resolver {
     }
 
     async fn answer(&self, gateway: Ipv4Addr, source: Ipv4Addr, q: &[u8]) -> Option<Vec<u8>> {
-        let parsed = parse_question(q)?;
+        let query = parse_query(q)?;
+        let name = query_name(&query);
         // A source kept inside gets NXDOMAIN for every name the tenant does not have, never
         // a forward. Not REFUSED: glibc and Go fail at once on it, but musl ignores it and
         // waits out its timeout (5 s; res_msend.c: "ignore all other codes such as
         // refusal"), while NXDOMAIN is final for all three.
-        if self.is_internal_only(gateway, source) || parsed.name.ends_with(".internal") {
+        if self.is_internal_only(gateway, source) || name.ends_with(".internal") {
             let ip = self
                 .names
                 .read()
                 .unwrap()
                 .get(&gateway)
-                .and_then(|m| m.get(&parsed.name).copied());
-            return Some(build_answer(q, &parsed, ip));
+                .and_then(|m| m.get(&name).copied());
+            return build_answer(&query, ip);
         }
         self.forward(q).await
     }
@@ -175,61 +179,42 @@ fn system_upstreams() -> Vec<String> {
     out
 }
 
-struct Question {
-    name: String,
-    qtype: u16,
-    /// Where the question section ends.
-    end: usize,
+/// A guest's query, decoded whole by hickory-proto (ADR 0033): anything that does not parse,
+/// is not a query or asks nothing is dropped, never forwarded.
+fn parse_query(q: &[u8]) -> Option<Message> {
+    let m = Message::from_vec(q).ok()?;
+    (m.metadata.message_type == MessageType::Query && !m.queries.is_empty()).then_some(m)
 }
 
-fn parse_question(q: &[u8]) -> Option<Question> {
-    if q.len() < 12 || u16::from_be_bytes([q[4], q[5]]) < 1 {
-        return None;
-    }
-    let mut pos = 12;
-    let mut labels = Vec::new();
-    loop {
-        let len = *q.get(pos)? as usize;
-        pos += 1;
-        if len == 0 {
-            break;
-        }
-        if len & 0xC0 != 0 {
-            return None;
-        }
-        labels.push(String::from_utf8_lossy(q.get(pos..pos + len)?).to_lowercase());
-        pos += len;
-    }
-    let qtype = u16::from_be_bytes([*q.get(pos)?, *q.get(pos + 1)?]);
-    Some(Question {
-        name: labels.join("."),
-        qtype,
-        end: pos + 4,
-    })
+/// The first question's name, lowercase, without the trailing dot.
+fn query_name(query: &Message) -> String {
+    let name = query.queries[0].name().to_lowercase().to_ascii();
+    name.trim_end_matches('.').to_string()
 }
 
-fn build_answer(q: &[u8], question: &Question, ip: Option<Ipv4Addr>) -> Vec<u8> {
-    let mut r = Vec::with_capacity(question.end + 16);
-    r.extend_from_slice(&q[..2]);
-    // QR, AA, RD copied, RA; rcode 0 or NXDOMAIN
-    let rd = q[2] & 0x01;
-    r.push(0x84 | rd);
-    r.push(if ip.is_some() { 0x80 } else { 0x83 });
-    r.extend_from_slice(&[0, 1]);
-    let answers: u16 = if ip.is_some() && (question.qtype == 1 || question.qtype == 255) {
-        1
-    } else {
-        0
+/// The answer to the first question: the address for A (and ANY) when the name is known,
+/// NOERROR with no record for another type of a known name, NXDOMAIN otherwise. TTL 5 s.
+fn build_answer(query: &Message, ip: Option<Ipv4Addr>) -> Option<Vec<u8>> {
+    let question = query.queries[0].clone();
+    let mut r = Message::response(query.metadata.id, query.metadata.op_code);
+    r.metadata.authoritative = true;
+    r.metadata.recursion_desired = query.metadata.recursion_desired;
+    r.metadata.recursion_available = true;
+    r.metadata.response_code = match ip {
+        Some(_) => ResponseCode::NoError,
+        None => ResponseCode::NXDomain,
     };
-    r.extend_from_slice(&answers.to_be_bytes());
-    r.extend_from_slice(&[0, 0, 0, 0]);
-    r.extend_from_slice(&q[12..question.end]);
-    if answers == 1 {
-        let ip = ip.unwrap();
-        r.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 5, 0, 4]);
-        r.extend_from_slice(&ip.octets());
+    if let Some(ip) = ip {
+        if matches!(question.query_type(), RecordType::A | RecordType::ANY) {
+            r.add_answer(Record::from_rdata(
+                question.name().clone(),
+                5,
+                RData::A(A(ip)),
+            ));
+        }
     }
-    r
+    r.add_query(question);
+    r.to_vec().ok()
 }
 
 #[cfg(test)]
@@ -248,17 +233,132 @@ mod tests {
         q
     }
 
+    fn answer_to(q: &[u8], ip: Option<Ipv4Addr>) -> Message {
+        let query = parse_query(q).unwrap();
+        Message::from_vec(&build_answer(&query, ip).unwrap()).unwrap()
+    }
+
     #[test]
     fn parses_and_answers() {
         let q = query("Db.Internal", 1);
-        let p = parse_question(&q).unwrap();
-        assert_eq!(p.name, "db.internal");
-        let r = build_answer(&q, &p, Some(Ipv4Addr::new(10, 64, 0, 2)));
-        assert_eq!(&r[..2], &[0x12, 0x34]);
-        assert_eq!(r[3] & 0x0F, 0);
-        assert_eq!(&r[r.len() - 4..], &[10, 64, 0, 2]);
-        let nx = build_answer(&q, &p, None);
-        assert_eq!(nx[3] & 0x0F, 3);
+        assert_eq!(query_name(&parse_query(&q).unwrap()), "db.internal");
+        let ip = Ipv4Addr::new(10, 64, 0, 2);
+        let r = answer_to(&q, Some(ip));
+        assert_eq!(r.metadata.id, 0x1234);
+        assert_eq!(r.metadata.message_type, MessageType::Response);
+        assert!(r.metadata.authoritative && r.metadata.recursion_desired);
+        assert_eq!(r.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(r.answers.len(), 1);
+        assert_eq!(r.answers[0].data, RData::A(A(ip)));
+        assert_eq!(r.answers[0].ttl, 5);
+        // The question comes back as asked: resolvers that randomise case compare it.
+        assert_eq!(r.queries[0].name().to_ascii(), "Db.Internal.");
+        assert_eq!(
+            answer_to(&q, None).metadata.response_code,
+            ResponseCode::NXDomain
+        );
+        // A known name asked for another type: NOERROR, no record (musl asks A and AAAA).
+        let aaaa = answer_to(&query("db.internal", 28), Some(ip));
+        assert_eq!(aaaa.metadata.response_code, ResponseCode::NoError);
+        assert!(aaaa.answers.is_empty());
+        assert_eq!(
+            answer_to(&query("db.internal", 255), Some(ip))
+                .answers
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn edns_and_compressed_questions_parse() {
+        let mut q = query("db.internal", 1);
+        q[11] = 1; // ARCOUNT: an OPT record, as glibc and Go send
+        q.extend_from_slice(&[0, 0, 41, 0x04, 0xd0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(query_name(&parse_query(&q).unwrap()), "db.internal");
+        // Two questions, the second a pointer to the first: only the first is answered.
+        let mut q = query("db.internal", 1);
+        q[5] = 2;
+        q.extend_from_slice(&[0xC0, 12, 0, 28, 0, 1]);
+        let r = answer_to(&q, Some(Ipv4Addr::new(10, 64, 0, 2)));
+        assert_eq!(r.queries.len(), 1);
+    }
+
+    #[test]
+    fn what_is_not_a_query_is_dropped() {
+        let mut response = query("db.internal", 1);
+        response[2] |= 0x80;
+        assert!(parse_query(&response).is_none());
+        let mut no_question = query("db.internal", 1);
+        no_question[5] = 0;
+        no_question.truncate(12);
+        assert!(parse_query(&no_question).is_none());
+    }
+
+    /// Malformed packets from a guest are dropped, and none panics the daemon (release
+    /// builds abort on a panic).
+    #[test]
+    fn malformed_packets_are_dropped() {
+        let q = query("db.internal", 1);
+        for n in 0..q.len() {
+            assert!(parse_query(&q[..n]).is_none(), "truncated at {n}");
+        }
+        let header = |qd: u16, an: u16| {
+            let mut h = vec![0xab, 0xcd, 0x01, 0x00];
+            h.extend_from_slice(&qd.to_be_bytes());
+            h.extend_from_slice(&an.to_be_bytes());
+            h.extend_from_slice(&[0, 0, 0, 0]);
+            h
+        };
+        let mut bad: Vec<Vec<u8>> = Vec::new();
+        // A name pointing at itself, two names pointing at each other, a pointer past the end.
+        bad.push([header(1, 0), vec![0xC0, 12, 0, 1, 0, 1]].concat());
+        bad.push(
+            [
+                header(2, 0),
+                vec![0xC0, 18, 0, 1, 0, 1, 0xC0, 12, 0, 1, 0, 1],
+            ]
+            .concat(),
+        );
+        bad.push([header(1, 0), vec![0xC0, 0xFF, 0, 1, 0, 1]].concat());
+        // A label longer than 63, a name longer than 255.
+        bad.push([header(1, 0), vec![64], vec![b'a'; 64], vec![0, 0, 1, 0, 1]].concat());
+        let long: Vec<u8> = (0..5)
+            .flat_map(|_| [vec![63], vec![b'a'; 63]].concat())
+            .collect();
+        bad.push([header(1, 0), long, vec![0, 0, 1, 0, 1]].concat());
+        // Counts far beyond what the packet holds.
+        bad.push([header(0xFFFF, 0), q[12..].to_vec()].concat());
+        bad.push([header(1, 0xFFFF), q[12..].to_vec()].concat());
+        bad.push(
+            [
+                header(1, 1),
+                q[12..].to_vec(),
+                vec![0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 5, 0xFF, 0xFF],
+            ]
+            .concat(),
+        );
+        for (i, p) in bad.iter().enumerate() {
+            assert!(parse_query(p).is_none(), "packet {i} parsed");
+        }
+        // Random bytes, and random bytes behind a valid header: dropped or answered, never a panic.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        };
+        for i in 0..20_000 {
+            let len = 1 + (next() as usize) * 2;
+            let mut p: Vec<u8> = (0..len).map(|_| next()).collect();
+            if i % 2 == 0 && p.len() > 12 {
+                p[..12].copy_from_slice(&header(1, 0));
+            }
+            if let Some(m) = parse_query(&p) {
+                let _ = query_name(&m);
+                let _ = build_answer(&m, Some(Ipv4Addr::LOCALHOST));
+            }
+        }
     }
 
     #[tokio::test]
