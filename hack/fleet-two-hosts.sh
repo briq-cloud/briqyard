@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Checks a fleet (default http://127.0.0.1:7430) that fronts at least two ready hosts: tenants
+# Checks a fleet ($BRIQYARD_URL, default http://127.0.0.1:7430, with $BRIQYARD_TOKEN) that
+# fronts at least two ready hosts: tenants
 # land on different hosts, every call is forwarded to the right one, a host that stops
 # answering is marked down and its tenant's calls fail cleanly while the other goes on.
 # With SECOND_HOST_SH (a root shell on the second host), its pool is locked while it is down,
@@ -15,7 +16,8 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
-hosts() { curl -fsS "$BRIQYARD_URL/v1/hosts"; }
+auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
+hosts() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/hosts"; }
 CONF2=/etc/briqyard/config.yaml
 cleanup() {
   for t in "$T-a" "$T-b"; do

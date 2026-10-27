@@ -5,21 +5,24 @@ live, how to upgrade, what to watch, and what to do when something is off.
 
 ## Install
 
-A Linux server with KVM (`/dev/kvm`), Ubuntu 24.04 or newer. As root:
+A Linux server with KVM (`/dev/kvm`), Ubuntu 24.04 or newer. Through a fleet, `briqyard host
+add` runs the script for you (below, and "First OVH host"). By hand, as root:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/bootstrap-host.sh
 BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.0 \
-BRIQYARD_POOL_DEVICE=/dev/nvme1n1 \
+BRIQYARD_POOL_DEVICE=/dev/nvme0n1,/dev/nvme1n1 \
 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
-ALLOWED_CLIENTS=10.0.0.0/8 \
+PRIVATE_ADDRESS=10.42.0.11/16 ALLOWED_CLIENTS=10.42.0.0/16 \
 bash bootstrap-host.sh
 ```
 
-It installs the packages (ZFS, nftables, e2fsprogs), turns swap off for good, makes the pool
-encrypted (on the device given, or on a file for a trial; ADR 0026), downloads Firecracker, its
-jailer and a guest kernel, installs the binaries, writes `/etc/briqyard/config.yaml` (`0600`)
-and the systemd unit, and starts `briqyardd`.
+It installs the packages (ZFS, nftables, e2fsprogs, gdisk), caps the ZFS cache, turns swap off
+for good, puts the API on the private network and closes the public interface when
+`PRIVATE_ADDRESS` is set, makes the pool encrypted (on the devices given, or on a file for a
+trial; ADR 0026), downloads Firecracker, its jailer and a guest kernel, installs the binaries
+(each checked against the release's `SHA256SUMS-<arch>`), writes `/etc/briqyard/config.yaml`
+(`0600`) and the systemd unit, and starts `briqyardd`.
 The pool's key is the fleet's for this host when `FLEET_URL` is set (asked with
 `BRIQYARD_TOKEN`, never written on the host); without a fleet, the script makes one in
 `/etc/briqyard/pool.key` (`0600`): keep a copy off the host, the pool is unreadable without it.
@@ -32,7 +35,13 @@ address (the host's `hosts:` entry, below).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LISTEN` | `0.0.0.0:7420` | The API's address; TCP endpoints and the HTTP ingress bind the same address |
+| `BRIQYARD_POOL_DEVICE` | none (a file, `BRIQYARD_POOL_FILE_GB`, 50) | One device, or two comma-separated for a mirror (ADR 0028): a partition, an empty disk, or a disk with the OS on part of it, whose largest free space (10 GB or more) becomes a `briqyard-pool` partition. Mounted, swap, RAID or LVM members, any filesystem and a pool not imported (a re-run with the pool exported: `zpool import byard`) are refused; nothing is overwritten |
+| `BRIQYARD_RELEASE`, `BRIQYARD_RELEASE_TOKEN` | `./bin` | Where the binaries are; each checked against the release's `SHA256SUMS-<arch>`. The token (contents read) fetches a private GitHub repository's release through its API |
+| `BRIQYARD_ARC_GB` | 10 % of memory, 1 to 16 | The ZFS cache's ceiling (`/etc/modprobe.d/briqyard-zfs.conf`); the daemon's default capacity leaves it out |
+| `PRIVATE_ADDRESS` | none | The host's address on a private network, with its prefix (`10.42.0.11/16`): `LISTEN`, the endpoints and `ADVERTISE` default to it, and the public interface takes SSH and `PUBLIC_TCP_PORTS` only (`nft list table inet briqyard_host`, loaded by `briqyard-firewall.service` at boot) |
+| `PRIVATE_INTERFACE` | none | Where `PRIVATE_ADDRESS` is put (netplan, `/etc/netplan/60-briqyard-private.yaml`) when no interface has it yet |
+| `PUBLIC_TCP_PORTS` | none | Ports the public interface takes besides SSH's own (read from `sshd -T`), comma-separated: an edge's beside the daemon (80, 443, its TCP listeners). Written as `network.host_ports` too |
+| `LISTEN` | `PRIVATE_ADDRESS`'s, else `0.0.0.0:7420` | The API's address; TCP endpoints and the HTTP ingress bind the same address |
 | `ALLOWED_CLIENTS` | none | Comma-separated IPv4 CIDRs (a bare address is a `/32`) allowed to connect: the fleet's and the routers' networks. Written as `ingress.allowed_clients` |
 | `ALLOW_PUBLIC` | none | `1` writes `ingress.allow_public: true`: anyone can connect, a firewall of your own is in front |
 | `BRIQYARD_KEY_FILE` | `/etc/briqyard/pool.key` | Without `FLEET_URL`: the pool's key file, made when missing, written as `storage.key: file:…` |
@@ -95,19 +104,21 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `network.range` | `10.64.0.0/10` | Tenant subnets, one /24 each (16,384 tenants) |
 | `network.upstream_dns` | the host's, then `1.1.1.1` | Where the gateway forwards DNS |
 | `network.egress` | the default route's interface | Where machines reach the internet |
+| `network.host_ports` | none | TCP ports of the host's own services (an edge beside the daemon, ADR 0028) that machines with egress `open` reach at the host's addresses, as the internet does; never at a tenant's `.1`. Not the daemon's ports, nor 53 |
 | `egress_limits.blocked_ports` | `[25]` | Destination ports no machine reaches on the internet, TCP and UDP (ADR 0018). A machine's own `limits` override each field |
 | `egress_limits.new_connections_per_minute` | `0` (none) | New internet connections a machine may open a minute, as many at once |
 | `egress_limits.bandwidth_mbit` | `0` (none) | A machine's internet bandwidth, in and out together; at most 100000 |
 | `disk_limits.bandwidth_mb_per_vcpu` | `32` | MB a second on each disk of a machine (root and volume), per vCPU of its size (ADR 0030). A machine's own `disk_limits` override each field with an absolute value. `0`: none |
 | `disk_limits.iops_per_vcpu` | `4000` | Disk requests a second, per vCPU, on each disk. `0`: none |
 | `disk_limits.burst_sec` | `10` | Seconds at those rates let through at full speed once after a start, a wake or a change |
-| `ingress.tcp_ports` | `20000-29999` | Host ports handed to TCP endpoints |
+| `ingress.tcp_ports` | `30000-32767` | Host ports handed to TCP endpoints (2,768; Kubernetes' NodePort range: under the kernel's ephemeral ports, no well-known service's, ADR 0028). `network.host_ports` must be outside it |
 | `ingress.bind` | `127.0.0.1` | Where TCP endpoints listen. A public address is refused without `ingress.allowed_clients` or `ingress.allow_public` |
 | `ingress.allowed_clients` | none | The IPv4 networks (`a.b.c.d/n`) that may reach the API, the HTTP ingress and the TCP endpoints; rendered into the daemon's nftables table (`nft list table inet briqyard`). Loopback always may. Empty: anyone who can route to the address |
 | `ingress.allow_public` | `false` | Start on a public address with `allowed_clients` empty: a firewall of your own keeps the daemon's ports from the internet |
 | `ingress.advertise` | the host's primary address | The address endpoints are reported at (`address` on an endpoint): what a router on another machine dials, a private address when the host has one |
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
-| `capacity.memory_mb`, `capacity.vcpus` | host memory − 2 GB, threads × 4 | What the host hands out; shared vCPUs oversubscribe |
+| `capacity.memory_mb`, `capacity.vcpus` | host memory − `reserved_memory_mb` − the ZFS cache's ceiling (`zfs_arc_max`, when set), (threads − `reserved_threads`) × 4 | What the host hands out; shared vCPUs oversubscribe |
+| `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the default capacity leaves to the host and its other services (an edge: 3072); unused when `memory_mb` or `vcpus` is set |
 | `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start. An `http://` `url` must be a loopback or private address (ADR 0026) |
 
 ## Where things live
@@ -169,7 +180,8 @@ upgrade at a time per fleet. A static host (`hosts:`) needs the fleet's SSH key 
 `provisioner.bootstrap.release` to the release, for the hosts ordered next.
 
 A release is a URL where `<binary>-linux-<arch>` are (`briqyardd`, `briqyard-init`, `briqyard`,
-`briqyard-fleet`), or a version of the project's releases. Without a fleet, on the host:
+`briqyard-fleet`) with their `SHA256SUMS-<arch>`, or a version of the project's releases; a
+private repository's is read with `provisioner.bootstrap.release_token`. Without a fleet, on the host:
 `BRIQYARD_RELEASE=<url> bash bootstrap-host.sh` does the same install and hand-over.
 
 What the machines see:
@@ -208,7 +220,10 @@ the pool's ciphertext, ADR 0035).
 Each backup is a record (`backups/<machine>/<id>.json`: ids, names, sizes, the chain in clear;
 the machine's spec, its env and files, sealed under the pool's key) plus one object per disk. A backup of a
 running machine is crash-consistent, what a power cut would leave; stop the machine first for
-a clean one, or let the application do its own consistency (Postgres does).
+a clean one, or let the application do its own consistency (Postgres does). A stream goes up
+in 32 MB parts, four at a time, each request tried again with backoff for up to 10 minutes
+(ADR 0034). Give the bucket a lifecycle rule that aborts incomplete multipart uploads after a
+day: a daemon cut mid-upload leaves one.
 
 `briqyard machine backups <id>` lists them, from the store, so a machine that no longer exists
 still has them. `briqyard machine restore --from <machine id> [--backup <id>] --tenant T --name
@@ -336,6 +351,10 @@ snapshot, or is whole.
 | `registry backup` (fleet, `error`), 503 `backup` on `/v1/hosts/key` | The registry could not be written to `backup.store`: credentials, endpoint, the bucket. Hosts whose key the store holds are served; new keys wait for the store |
 | `read the registry …` (the fleet does not start) | `registry.json` does not parse: restore the file (fields a fleet does not know are kept, not refused). Never remove it: every host's pool key is in it (ADR 0026) |
 | `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
+| `bootstrap attempt N: … is in use (mounted at …)`, `… holds ext4` | `pool_device` names something in use: the OS's disks are named whole (their free space is taken), never the OS's partitions; a disk meant for the pool is wiped by you (`wipefs -a`) |
+| `… has under 10 GB free` | The install filled the disk: reinstall with the layout of "First OVH host", step 2 |
+| `no interface has 10.42.…: set PRIVATE_INTERFACE`, `… did not come up` | `private_interface` is not this server's vRack interface (`ip -br link`, the MAC the manager shows as Private), or the server is not in the vRack yet |
+| `release … has no …`, `digest differs from the release's SHA256SUMS` | `release` names a tag without this architecture's files, or the token cannot read the repository |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
 | `dataset is busy` | A zvol a Firecracker just released; the daemon retries for ten seconds |
 | A machine with `sleep` set never sleeps | A session is open on it (`session_opened` without its `exec session ended` line): it is in use until its client leaves |
@@ -354,8 +373,8 @@ daemon's; `briqyard host ls` shows the hosts.
 
 A host has one credential, its own API token, and the fleet must hold it before the host can
 be anything to it: it forwards with it and takes the host's heartbeats (`fleet:` in the host's
-config) only with it. A host the fleet orders gets its token from the bootstrap. A host you
-install yourself is listed under `hosts:` with it:
+config) only with it. A host the fleet orders or adds (`briqyard host add`) gets its token from
+the bootstrap. A host you install yourself is listed under `hosts:` with it:
 
 ```yaml
 hosts:
@@ -454,6 +473,8 @@ otherwise: it records what it would order and orders nothing. Turn it off only o
 has shown the right product, location and count.
 
 ```bash
+briqyard host add 51.68.1.2 --address 10.42.0.11 --region gra   # POST /v1/hosts: a server you bought, bootstrapped
+                                             # --public-tcp-ports 80,443,… (or none): its own, else the fleet's
 briqyard host order --reason "first host"    # POST /v1/hosts/order: a server, state provisioning
 briqyard host ls                             # its note says what the provider and the bootstrap last did
 briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: retiring, released once empty
@@ -466,31 +487,42 @@ briqyard host rm h_123456                    # forget it (its machines are not t
 Start, Rise; `ovh.range: eco`) or the Bare Metal range (Advance, Scale; `ovh.range: baremetal`)
 through the API's cart: `ovh.plan_code` (`25risem01-v2` for example, from the catalog), in
 `ovh.datacenter` (`gra`, `rbx`, `sbg`...), one month at a time, paid with the account's
-preferred payment method and the retraction period waived, with the plan's default options
-(memory, disks, bandwidth are not chosen here) and no OS. `ovh.subsidiary` is the OVH company
-the order is made under (`FR` by default). The credentials are an API application
-(`application_key`, `application_secret`) and a consumer key with rights on `/order/*`,
-`/me/order/*`, `/dedicated/server/*` and `GET /me`; every request is signed with them and
-OVH's own clock (`/auth/time`). The provider id is `order:<orderId>` until delivery. Every two
-minutes the fleet reads the order's status; once it is `delivered`, it assumes one of the
-order's details carries the server's service name as `domain` (a placeholder like `*001`
-before), checks that name against the account's server list (`GET /dedicated/server`), reads
-the server for its address, and starts an Ubuntu 24.04 install
-(`POST /dedicated/server/<name>/install/start`, template `ubuntu2404-server_64`) with the SSH
-key named `ovh.ssh_key_name`, which must already be in the account (`/me/sshKey`); the
-bootstrap then fails every two minutes until the install is done, which is expected. A
-delivered order whose details name no server of the account is an error in the host's note:
-add the host by hand. A retire terminates the server (`POST /dedicated/server/<name>/terminate`):
-OVH then emails a confirmation to accept, and the server is billed to the end of its period;
-a retire before delivery is refused (cancel the order in the OVH manager). This provisioner has
-not run against the real API yet: the request shapes follow OVH's API console, and the
-delivery assumption above is the one to check first.
+preferred payment method and the retraction period waived, with the cheapest option of each
+mandatory family (memory, disks, bandwidth: the plan's base configuration) and no OS.
+`ovh.subsidiary` is the OVH company the order is made under (`FR` by default). The credentials
+are an API application (`application_key`, `application_secret`) and a consumer key with
+rights on `/order/*`, `/me/order/*`, `/me/sshKey/*`, `/dedicated/server/*` and `GET /me`; every
+request is signed with them and OVH's own clock (`/auth/time`). The provider id is
+`order:<orderId>` until delivery. Every two minutes the fleet reads the order's status; once
+it is `delivered`, it assumes one of the order's details (`/me/order/<id>/details/<detail>`)
+carries the server's service name as `domain` (a placeholder like `*001` before), checks that
+name against the account's server list (`GET /dedicated/server`), reads the server for its
+address, and starts an Ubuntu 24.04 install (`POST /dedicated/server/<name>/reinstall`,
+`ubuntu2404-server_64`, the OS on a RAID 1 of `/boot` 1 GiB and `/` 100 GiB, the rest of the
+disks left for the pool, ADR 0028) with the SSH key named `ovh.ssh_key_name`, which must
+already be in the account (`/me/sshKey`); the bootstrap then fails every two minutes until the
+install is done, which is expected. A delivered order whose details name no server of the
+account is an error in the host's note: add the host by hand. A retire terminates the server
+(`POST /dedicated/server/<name>/terminate`): OVH then emails a confirmation to accept, and the
+server is billed to the end of its period; a retire before delivery is refused (cancel the
+order in the OVH manager). This provisioner has not run against the real API yet: the request
+shapes follow OVH's published schemas (ADR 0028 lists what is still assumed), and the delivery
+assumption above is the one to check first. An ordered host keeps its public address for its
+API: the vRack address of a server is not in OVH's API, so a vRack host is added by hand.
 
-A server the fleet ordered becomes a host on its own when `provisioner.bootstrap.enabled` is
-set: every two minutes the fleet asks the provider for the server's address, then runs
-`hack/bootstrap-host.sh` on it over SSH (`ssh_user`, `ssh_key`: the key the provider installed;
-`release`, `pool_device`, `fleet_url`, `allowed_clients` for the script), with a token of its
-own for the host's API.
+A server the fleet ordered or added becomes a host on its own when
+`provisioner.bootstrap.enabled` is set: every two minutes the fleet asks the provider for an
+ordered server's address, then runs `hack/bootstrap-host.sh` on it over SSH (`ssh_user`,
+`ssh_key`: the key the provider installed, or yours on a server you bought; `release`,
+`release_token`, `pool_device`, `fleet_url`, `allowed_clients` for the script), with a token
+of its own for the host's API. A host whose API address is in `private_network` (a CIDR, the
+vRack) is reached over SSH at its own address (`host add`'s first argument) and told its
+private address: `private_interface` gets it when the server does not have it yet, and its
+public interface takes SSH and `public_tcp_ports` only (ADR 0028). With `fleet_address` (the
+fleet's own vRack address), the host resolves `fleet_url`'s name to it in `/etc/hosts`: the
+fleet checks a host's calls by the address it knows the host at, its vRack one, and a call
+through the public network would come from the public address and be refused
+(`unknown_host`).
 Once the script succeeds, a second connection, strict against the pinned SSH key, reads the
 daemon's certificate fingerprint (`briqyardd tls-fingerprint`); the fleet pins it in the same
 write that marks the host `bootstrapped` (the note says `api certificate … pinned`), and dials
@@ -538,3 +570,226 @@ once the tenant has nothing left on the host, or mean to abandon what is there.
 The autoscaler (`provisioner.enabled: true`) orders a host when no ready host has a slot of
 `slot_mb` left and releases a provisioned host empty for `idle_grace`, between `min_hosts` and
 `max_hosts`, one change a minute.
+
+## First OVH host
+
+One server: the host, the fleet and an edge on it (a reverse proxy in front of the fleet and
+the endpoints, ADR 0028). The API and the endpoints on the vRack; the public interface takes
+SSH, 80, 443 and the edge's TCP listener ports; the fleet behind the edge. The values below
+(`10.42.0.0/16`, `10.42.0.11`, `enp3s0f1`, `gra`, `fleet.example.com`) are examples: write
+yours.
+
+**1. Order** (OVH manager, Bare Metal Cloud, Dedicated servers):
+
+| | |
+|---|---|
+| Range | Rise or Advance: KVM on every dedicated server; the vRack on these (not on Kimsufi or So you Start) |
+| Memory | 64 GB or more: machines get memory − 3 GB (the host and the edge) − the ZFS cache's cap (10 %) |
+| Disks | 2 × NVMe of one size |
+| Options | the vRack (private bandwidth) |
+| OS | Ubuntu Server 24.04 LTS |
+
+**2. Install layout** (Install, "Customise the partition configuration"), on both disks:
+
+| Mount | File system | RAID | Size |
+|---|---|---|---|
+| `/boot` | ext4 | 1 | 1 GiB |
+| `/` | ext4 | 1 | 100 GiB |
+| swap | removed | | |
+
+No partition fills the disks: the rest of each NVMe stays free for the pool. Add your SSH key
+and, from the second server on, the fleet's (`/etc/briqyard/fleet_ssh_key.pub` on its server).
+After the install, `sgdisk -p /dev/nvme0n1` ends with the free space (`Total free space is …`).
+On a UEFI server (`ls /sys/firmware/efi` lists something), `findmnt /boot/efi` must show the
+EFI partition OVH adds on its own; none there: reinstall before going on.
+If the manager makes the last partition fill the disk, reinstall through the API console
+(`POST /dedicated/server/{serviceName}/reinstall`) with `operatingSystem: ubuntu2404-server_64`,
+your key as `customizations.sshKey`, and `storage: [{partitioning: {layout: [{mountPoint:
+"/boot", fileSystem: ext4, raidLevel: 1, size: 1024}, {mountPoint: "/", fileSystem: ext4,
+raidLevel: 1, size: 102400}]}}]`, the provisioner's own body.
+
+**3. The vRack**: Network, vRack private network, add the server. Its private interface is
+the one whose MAC the manager shows as Private (server, Network interfaces): `ip -br link |
+grep -i <mac>` names it. Pick the range (`10.42.0.0/16`) and the server's address in it.
+
+**4. The fleet, on this server**, on loopback with `tls: off`: the edge serves its name
+(step 6). The fleet checks a pool key request by the caller's address (ADR 0026), which on a
+loopback listener it reads from the edge's `X-Forwarded-For`. The
+repository is private, so the binaries come from your Mac:
+
+```bash
+gh release download v0.1.0 -R briq-cloud/briqyard -p 'briqyard*-linux-x86_64' -p SHA256SUMS-x86_64 -D /tmp/byard
+(cd /tmp/byard && shasum -a 256 -c SHA256SUMS-x86_64)
+scp /tmp/byard/briqyard-fleet-linux-x86_64 root@<public ip>:/usr/local/bin/briqyard-fleet
+scp /tmp/byard/briqyard-linux-x86_64 root@<public ip>:/usr/local/bin/briqyard
+scp hack/briqyard-fleet.service root@<public ip>:/etc/systemd/system/
+ssh root@<public ip>
+chmod 0755 /usr/local/bin/briqyard /usr/local/bin/briqyard-fleet && mkdir -p /etc/briqyard
+ssh-keygen -q -t ed25519 -N '' -f /etc/briqyard/fleet_ssh_key && cat /etc/briqyard/fleet_ssh_key.pub >> /root/.ssh/authorized_keys
+install -m 0600 /dev/null /etc/briqyard/fleet.env && nano /etc/briqyard/fleet.env   # BRIQYARD_RELEASE_TOKEN=…
+install -m 0600 /dev/null /etc/briqyard/fleet.yaml && nano /etc/briqyard/fleet.yaml # below
+systemctl daemon-reload && systemctl enable --now briqyard-fleet
+```
+
+The release token is a fine-grained GitHub token, read-only on `briq-cloud/briqyard`'s
+contents, expiring in 30 days: written with an editor, never with `echo` (it would stay in the
+shell's history).
+
+`/etc/briqyard/fleet.yaml`:
+
+```yaml
+listen: 127.0.0.1:7430                     # loopback, plain HTTP: the edge terminates TLS
+tls: off
+token: <openssl rand -hex 24: what the control plane and the CLI present>
+state_dir: /var/lib/briqyard-fleet
+provisioner:
+  kind: static
+  bootstrap:
+    enabled: true
+    ssh_key: /etc/briqyard/fleet_ssh_key
+    release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.0
+    pool_device: /dev/nvme0n1,/dev/nvme1n1
+    fleet_url: https://fleet.example.com
+    fleet_address: 10.42.0.11                # this server on the vRack: hosts reach fleet_url here
+    private_network: 10.42.0.0/16
+    private_interface: enp3s0f1
+    allowed_clients: [10.42.0.0/16]
+    # Hosts without an edge open nothing more than SSH; the edge's host says its own (step 5).
+    public_tcp_ports: []
+```
+
+The fleet's state (`/var/lib/briqyard-fleet`: the registry with every host's token and pool
+key, the pinned SSH keys) is on this server alone: give the fleet a `backup:` ("The registry's
+backup") before the first host, since a registry lost is every host's pool unreadable.
+
+**5. Add the server to the fleet**, on the server (the fleet has no public name yet), once its
+kernel has ZFS and KVM, and once cloud-init leaves `/etc/hosts` alone: with
+`manage_etc_hosts: true` it rewrites the file at every boot, the fleet's line goes, and after a
+reboot the host's key request leaves by the public address and is refused (the pool stays
+locked). On every vRack server:
+
+```bash
+modprobe zfs && ls /dev/kvm
+grep -rs manage_etc_hosts /etc/cloud/   # nothing, or false; else:
+echo 'manage_etc_hosts: false' > /etc/cloud/cloud.cfg.d/99-briqyard-hosts.cfg
+export BRIQYARD_URL=http://127.0.0.1:7430 BRIQYARD_TOKEN=$(sed -n 's/^token: *//p' /etc/briqyard/fleet.yaml)
+briqyard host add <public ip> --address 10.42.0.11 --region gra \
+  --public-tcp-ports 80,443,5432,3306,6379,27017,5671,7687,6334
+briqyard host ls     # the note: what the last attempt did
+```
+
+Steps 5 and 6 interleave on this first server: the fleet is served by the edge, and the edge
+goes on after briqyard's firewall. Within two minutes, the first attempt puts the vRack address
+on its interface, writes the firewall (SSH and the ports above) and `fleet.example.com` at
+`10.42.0.11` in `/etc/hosts`, then fails at the pool's key (`no key for the pool`): nothing
+serves the fleet's name yet. Do step 6; the next attempt, two minutes later, gets the key,
+makes the pool and installs, and the note says the SSH key pinned (`SHA256:…`: compare it with
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`), then the API certificate. Every attempt
+is in the note; the host is `failed` after `max_attempts` (90, three hours). The host turns
+`ready` at its first heartbeat.
+
+The ports are the edge's (HTTP, HTTPS, its TCP listeners): its public interface takes them, and
+its machines reach them at its address (`network.host_ports`). They stay on the host's record
+(`host ls`: `public tcp:`), so a later bootstrap of it, or another host added, changes nothing
+for the other. Putting the vRack address on its interface runs `netplan apply`, which renews
+the public interface's DHCP lease too: a second's pause, SSH sessions survive.
+
+**6. The edge**, once the first attempt wrote the firewall (`nft list table inet
+briqyard_host`). It must:
+
+- write no firewall of its own: briqyard's (`/etc/briqyard/firewall.nft`) opens its ports, and
+  a second table would drop what this one lets in (the vRack, the machines' DNS);
+- keep Docker off the rules, when it runs in Docker (`/etc/docker/daemon.json`: `"iptables":
+  false, "ip6tables": false, "bridge": "none"`, before Docker is installed): Docker started
+  before the daemon sets the forward policy to drop, and machines lose the internet;
+- serve the fleet's name on every address, the vRack's included (that is where hosts reach it),
+  to `127.0.0.1:7430`, responses streamed (a watch, logs followed), the caller's address in
+  `X-Forwarded-For`. With Caddy:
+
+```
+fleet.example.com {
+	reverse_proxy 127.0.0.1:7430 {
+		flush_interval -1
+	}
+}
+```
+
+Then a DNS record for the fleet's name (`A fleet.example.com <public ip>`): the certificate's
+HTTP-01 challenge and outside callers come that way; hosts, by `/etc/hosts`, over the vRack.
+Once the host is `bootstrapped` or `ready` (`host ls`), keep 3 GB of memory for the host and the edge
+(`capacity.reserved_memory_mb`, 2048 by default; in the dev VM the idle edge took 29 MiB,
+Docker and containerd 555 MB with their page cache). Not before: a configuration there before
+the bootstrap's makes it an upgrade.
+
+```bash
+grep -q '^capacity:' /etc/briqyard/config.yaml || printf 'capacity:\n  reserved_memory_mb: 3072\n' >> /etc/briqyard/config.yaml
+systemctl restart briqyardd
+export BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN=<the fleet's token>
+briqyard host ls                                       # ready
+```
+
+**7. Smoke checks:**
+
+```bash
+ssh root@<public ip> briqyard doctor                   # every line ok
+ssh root@<public ip> zpool status byard                # mirror-0, both partitions ONLINE
+ssh root@<public ip> zfs get -H encryption,keystatus byard  # aes-256-gcm, available
+ssh root@<public ip> nft list tables                   # briqyard_host and briqyard's two: none of the edge's or Docker's
+ssh root@<public ip> nft list table inet briqyard_host # tcp 22, 80, 443 and the listeners', then drop
+nc -vz -w 3 <public ip> 7420                            # from the Mac: times out
+scp hack/e2e.sh root@<public ip>:/root/ && ssh root@<public ip> 'apt-get install -y bc postgresql-client'
+ssh root@<public ip> 'export BRIQYARD_URL=https://10.42.0.11:7420 BRIQYARD_TOKEN=$(sed -n "s/^token: \"\(.*\)\"/\1/p" /etc/briqyard/config.yaml) BRIQYARD_TLS_FINGERPRINT=$(briqyardd --config /etc/briqyard/config.yaml tls-fingerprint); bash /root/e2e.sh'
+BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN=<the fleet's token> hack/fleet-smoke.sh
+```
+
+e2e runs on the host (endpoints are vRack addresses, and it needs GNU tools) and needs a
+`backup.store` in the host's config: the real bucket (its test backups go, destroyed machines'
+after `keep_destroyed_days`), or `file:///var/lib/briqyard/backups` for this run. On the host
+it checks the host ports too (the edge's port 80 from a machine, the API dropped). The fleet
+smoke runs from anywhere that reaches the fleet and touches no real host.
+
+**8. The first day**, what to watch:
+
+| What | Where |
+|---|---|
+| Errors | `journalctl -u briqyardd -u briqyard-fleet -o cat \| jq -c 'select(.level != "INFO")'`, and the edge's |
+| The host | `briqyard host ls`: `ready`, conditions false, last seen within 15 s |
+| After a reboot | `getent hosts fleet.example.com` on the host: the fleet's vRack address (`10.42.0.11`), and the host `ready` again |
+| The disks | `zpool status -x` says all pools are healthy; `zpool list byard` |
+| Memory | `free -g`; `arc_summary \| head -30`: the ARC under its cap; the edge's use |
+| Machines | `briqyard top`, `briqyard events --watch` |
+| The kernel | `dmesg -T \| grep -iE 'kvm\|oom\|nvme\|mce'` |
+| The public interface | `nft list chain inet briqyard_host input`: the drop counter grows with the internet's scans |
+
+Never enable `nftables.service` or ufw: they flush every table, ours and the daemon's. Never
+let Docker write rules (step 6). After a kernel upgrade, check that `ip -br link` still names
+the public interface as `/etc/briqyard/firewall.nft` does: the rule `iifname != "<public>" accept` lets everything in
+once the interface is renamed (fix the name, `systemctl restart briqyard-firewall`).
+
+**9. Undo**: `briqyard host retire <id>` (drained, forgotten once it runs nothing). On the
+server: the edge stopped, `systemctl disable --now briqyardd briqyard-firewall`,
+`nft delete table inet briqyard_host`, `zpool destroy byard`, `sgdisk -d <n>` the `briqyard-pool` partition of each
+disk (`sgdisk -p`), `rm /etc/netplan/60-briqyard-private.yaml && netplan apply`. Or reinstall
+it from the OVH manager. Locked out of SSH: Netboot in rescue mode, mount the root RAID
+(`mdadm --assemble --scan`), remove `etc/systemd/system/sysinit.target.wants/briqyard-firewall.service`,
+reboot from the disk.
+
+### A KVM runner for the suites (later)
+
+On a server of its own, never one that runs customers' machines: a job installs a daemon,
+kills it, and runs as root.
+
+1. Bootstrap it as a host without `FLEET_URL` (`hack/bootstrap-host.sh`, a file or one disk
+   for the pool), so it has ZFS, Firecracker, the kernel and the unit.
+2. `useradd -m runner`, with `runner ALL=(ALL) NOPASSWD:ALL` in `/etc/sudoers.d/runner` (the
+   suites install and restart the daemon), and Rust for that user (`rustup`, the musl target).
+3. GitHub, briq-cloud/briqyard, Settings, Actions, Runners, New self-hosted runner, Linux x64:
+   as `runner`, download it, `./config.sh --url https://github.com/briq-cloud/briqyard --token
+   <token> --labels kvm --unattended`, then `sudo ./svc.sh install runner && sudo ./svc.sh start`.
+4. A job `runs-on: [self-hosted, kvm]` that builds, installs (as `hack/vm.sh install` does,
+   without Lima) and runs `hack/e2e.sh` and `hack/fleet-smoke.sh`.
+
+A self-hosted runner runs whatever a workflow says. On this private repository that is only
+us. Never let a public pull request reach it: before the repository goes public, the runner
+goes into a runner group limited to this repository, the KVM job runs on `push` to `main`
+(never on `pull_request` from forks), and outside contributors' workflows need approval.

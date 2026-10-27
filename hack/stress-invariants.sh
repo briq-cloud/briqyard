@@ -64,7 +64,9 @@ bridges=$(ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | gr
 check_eq "bridges == tenants" "$bridges" "$n_tenants"
 
 # --- ingress: one listening host port per TCP endpoint ---
-lo=20000; hi=29999
+# The host's range (`ingress.tcp_ports`), the daemon's default when its config names none.
+range=$(sudo sed -n 's/^  tcp_ports: *//p' /etc/briqyard/config.yaml 2>/dev/null)
+range=${range:-30000-32767}; lo=${range%-*}; hi=${range#*-}
 ports=$(ss -ltnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | awk -v lo=$lo -v hi=$hi '$1>=lo && $1<=hi' | sort -u | grep -c . || true)
 tcp_eps=$(echo "$E" | jq '[.[] | select(.protocol == "tcp")] | length')
 check_eq "listening endpoint ports == tcp endpoints" "$ports" "$tcp_eps"

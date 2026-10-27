@@ -45,10 +45,14 @@ impl std::fmt::Debug for PoolKey {
 }
 
 /// A host as the fleet keeps it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HostRec {
     pub id: String,
     pub url: String,
+    /// The address the bootstrap reaches the server at over SSH, when it is not the API's
+    /// (a host added with its API on a private network, ADR 0028); empty: the API's.
+    #[serde(default)]
+    pub ssh: String,
     /// The host's API token: what the fleet forwards with, and what the host's heartbeats
     /// present. Set at the order (the bootstrap writes it into the host) or by `hosts:`.
     #[serde(default)]
@@ -91,6 +95,12 @@ pub struct HostRec {
     pub note: String,
     #[serde(default)]
     pub bootstrap_attempts: u32,
+    /// `PUBLIC_TCP_PORTS` for this host's bootstrap (ADR 0028): what its public interface takes
+    /// besides SSH, and its machines reach on it. Set when the fleet adds or orders it, from the
+    /// request or `provisioner.bootstrap.public_tcp_ports`, so a later change of either leaves
+    /// it; absent (a record from before): that fleet-wide value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_tcp_ports: Option<Vec<u16>>,
     /// Memory and disk pressure, from the last heartbeat (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
@@ -136,6 +146,7 @@ impl HostRec {
         Host {
             id: self.id.clone(),
             url: self.url.clone(),
+            ssh: self.ssh.clone(),
             region: self.region.clone(),
             provider: self.provider.clone(),
             state: self.state.clone(),
@@ -147,6 +158,7 @@ impl HostRec {
             version: self.version.clone(),
             note: self.note.clone(),
             tls_fingerprint: self.tls_fingerprint.clone(),
+            public_tcp_ports: self.public_tcp_ports.clone().unwrap_or_default(),
             conditions: self.conditions.clone(),
             started: self.started,
         }
@@ -549,6 +561,7 @@ mod tests {
         HostRec {
             id: id.into(),
             url: format!("http://{id}:7420"),
+            ssh: String::new(),
             token: String::new(),
             tls_fingerprint: String::new(),
             region: "fsn".into(),
@@ -571,6 +584,7 @@ mod tests {
             empty_since: None,
             note: String::new(),
             bootstrap_attempts: 0,
+            public_tcp_ports: None,
             conditions: vec![],
             started: Default::default(),
             pool_key: PoolKey::default(),

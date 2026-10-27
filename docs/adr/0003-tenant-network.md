@@ -14,7 +14,7 @@ Machines of one tenant must reach each other by name and nothing of any other te
 
 **The guest configures its own interface from the config drive.** The guest kernel needs no `ip=` support.
 
-**The ingress is the only way in.** Two kinds of endpoints allocated by the API: a TCP port on the host (`20000-29999`) and an HTTP host name on one shared listener. A connection to a sleeping machine's endpoint starts it, waits for the port, then proxies. The address the endpoint is reported at is `ingress.advertise`, so a router on another machine knows what to dial.
+**The ingress is the only way in.** Two kinds of endpoints allocated by the API: a TCP port on the host (`20000-29999`; `30000-32767` since ADR 0028) and an HTTP host name on one shared listener. A connection to a sleeping machine's endpoint starts it, waits for the port, then proxies. The address the endpoint is reported at is `ingress.advertise`, so a router on another machine knows what to dial.
 
 **A tenant lives on one host** today, so the private network needs no overlay. A tenant across hosts is `../MESH.md` (WireGuard), or a vRack VLAN on OVH (ADR 0007).
 

@@ -166,6 +166,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
             h.id.clone()
         },
         url: h.url.clone(),
+        ssh: String::new(),
         token: h.token.clone(),
         tls_fingerprint: h.tls_fingerprint.clone(),
         region: h.region.clone(),
@@ -182,6 +183,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         empty_since: None,
         note: String::new(),
         bootstrap_attempts: 0,
+        public_tcp_ports: None,
         conditions: vec![],
         started: Default::default(),
         pool_key: Default::default(),
@@ -357,7 +359,7 @@ fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/v1/status", get(status))
-        .route("/v1/hosts", get(list_hosts))
+        .route("/v1/hosts", get(list_hosts).post(add_host))
         .route("/v1/hosts/register", post(register_host))
         .route("/v1/hosts/key", post(host_key))
         .route("/v1/hosts/order", post(order_host))
@@ -753,6 +755,7 @@ async fn register_host(
             HostRec {
                 id,
                 url: req.url,
+                ssh: String::new(),
                 token: String::new(),
                 tls_fingerprint: String::new(),
                 region: req.region,
@@ -769,6 +772,7 @@ async fn register_host(
                 empty_since: None,
                 note: String::new(),
                 bootstrap_attempts: 0,
+                public_tcp_ports: None,
                 conditions: req.conditions,
                 started: req.started,
                 pool_key: Default::default(),
@@ -851,6 +855,127 @@ async fn order_host(
     Ok((StatusCode::ACCEPTED, Json(h.to_api())).into_response())
 }
 
+/// Adds a server bought by hand: recorded as an ordered server is once its address is known
+/// (`provisioning`, a fresh token, nothing pinned), so the same bootstrap installs it and pins
+/// its SSH key and certificate (ADR 0028). Its API may be on the private network while SSH
+/// reaches its public address.
+async fn add_host(State(st): S, Json(req): Json<api::AddHostRequest>) -> Result<Response, Refusal> {
+    let h = new_added_host(&st.cfg.provisioner.bootstrap, req, Utc::now())?;
+    {
+        let mut reg = st.reg.lock().unwrap();
+        if let Some(other) = reg.hosts.values().find(|o| {
+            o.id == h.id
+                || (!o.url.is_empty() && url_host(&o.url) == url_host(&h.url))
+                || (!h.ssh.is_empty() && o.ssh == h.ssh)
+        }) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "conflict",
+                format!("host {} is already at {}", other.id, url_host(&other.url)),
+            ));
+        }
+        reg.hosts.insert(h.id.clone(), h.clone());
+    }
+    st.save().map_err(registry_error)?;
+    tracing::warn!(
+        host = h.id,
+        ssh = h.ssh,
+        url = h.url,
+        "host added; bootstrapped within two minutes"
+    );
+    Ok((StatusCode::ACCEPTED, Json(h.to_api())).into_response())
+}
+
+/// The record of a server added by hand, or why the request is refused.
+fn new_added_host(
+    b: &config::Bootstrap,
+    req: api::AddHostRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<HostRec, Refusal> {
+    let invalid = |m: String| err(StatusCode::BAD_REQUEST, "invalid", m);
+    if !b.enabled {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "bootstrap_off",
+            "provisioner.bootstrap.enabled is false: the fleet installs no host",
+        ));
+    }
+    let ssh_ok = !req.ssh.is_empty()
+        && !req.ssh.starts_with('-')
+        && req
+            .ssh
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-'));
+    if !ssh_ok {
+        return Err(invalid(format!(
+            "ssh {:?}: want the server's address or name",
+            req.ssh
+        )));
+    }
+    let address = if req.address.is_empty() {
+        req.ssh.clone()
+    } else {
+        req.address.clone()
+    };
+    let ip: std::net::Ipv4Addr = address.parse().map_err(|_| {
+        invalid(format!(
+            "address {address:?}: want the API's IPv4 address (its private one when it has one)"
+        ))
+    })?;
+    let url = bootstrap::host_url(&ip.to_string());
+    if address != req.ssh && bootstrap::private_address(b, &url).is_none() {
+        return Err(invalid(format!(
+            "address {address} is not in provisioner.bootstrap.private_network ({:?}): an API apart from the SSH address lives on the private network",
+            b.private_network
+        )));
+    }
+    let id = if req.id.is_empty() {
+        format!("h_{}", ip.to_string().replace(['.', ':'], "-"))
+    } else {
+        req.id
+    };
+    if !api::valid_id(&id) {
+        return Err(invalid(format!("id {id:?}: a-z, 0-9, _ and -")));
+    }
+    let public_tcp_ports = Some(
+        req.public_tcp_ports
+            .unwrap_or_else(|| b.public_tcp_ports.clone()),
+    );
+    if public_tcp_ports.iter().flatten().any(|&p| p == 0) {
+        return Err(invalid("public_tcp_ports: 0 is not a port".into()));
+    }
+    Ok(HostRec {
+        id,
+        url,
+        ssh: if address == req.ssh {
+            String::new()
+        } else {
+            req.ssh
+        },
+        token: bootstrap::new_token(),
+        tls_fingerprint: String::new(),
+        region: req.region,
+        provider: "manual".into(),
+        provider_id: String::new(),
+        state: "provisioning".into(),
+        capacity: Default::default(),
+        used: Default::default(),
+        machines: 0,
+        tenants: vec![],
+        last_seen: now,
+        version: String::new(),
+        disk_free_mb: 0,
+        empty_since: Some(now),
+        note: "added; waiting for the bootstrap".into(),
+        bootstrap_attempts: 0,
+        public_tcp_ports,
+        conditions: vec![],
+        started: Default::default(),
+        pool_key: Default::default(),
+        unknown: Default::default(),
+    })
+}
+
 /// Records a server the provisioner just made.
 fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
     let dry = st.cfg.provisioner.dry_run || server.provider_id.starts_with("dry-run-");
@@ -869,6 +994,7 @@ fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
             .ip
             .map(|ip| bootstrap::host_url(&ip))
             .unwrap_or_default(),
+        ssh: String::new(),
         token: bootstrap::new_token(),
         // Pinned by the bootstrap, once the host has made its certificate.
         tls_fingerprint: String::new(),
@@ -890,6 +1016,7 @@ fn add_ordered(st: &AppState, server: provision::Server) -> Result<HostRec> {
         empty_since: Some(now),
         note: server.note,
         bootstrap_attempts: 0,
+        public_tcp_ports: Some(st.cfg.provisioner.bootstrap.public_tcp_ports.clone()),
         conditions: vec![],
         started: Default::default(),
         pool_key: Default::default(),

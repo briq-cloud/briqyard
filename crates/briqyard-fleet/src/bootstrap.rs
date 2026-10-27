@@ -1,6 +1,11 @@
-//! Turns a server the provisioner delivered into a host: finds its address, then runs
+//! Turns a server into a host: one the provisioner delivered (its address found first) or one
+//! added by hand (`POST /v1/hosts`, its SSH and API addresses given), the same way: runs
 //! `hack/bootstrap-host.sh` on it over SSH with this fleet's details, every two minutes until
 //! it works or the attempts run out. The host turns `ready` on its first heartbeat.
+//!
+//! A host's API may live on a private network (OVH's vRack, `private_network`) while SSH
+//! reaches its public address: the script is told its private address, binds the API and the
+//! endpoints there and closes the public interface to all but SSH (ADR 0028).
 //!
 //! The server's SSH host key: no provider the fleet orders from gives it through its API, so
 //! the key seen at the first connect is pinned in `<state_dir>/known_hosts` once the bootstrap
@@ -63,15 +68,7 @@ pub fn new_token() -> String {
 pub async fn run(st: Arc<AppState>) {
     loop {
         tokio::time::sleep(Duration::from_secs(120)).await;
-        let pending: Vec<_> = st
-            .reg
-            .lock()
-            .unwrap()
-            .hosts
-            .values()
-            .filter(|h| h.state == "provisioning" && !h.provider_id.is_empty())
-            .cloned()
-            .collect();
+        let pending = to_install(&st.reg.lock().unwrap());
         for h in pending {
             // 1. The address, once the provider has one.
             if h.url.is_empty() {
@@ -94,8 +91,8 @@ pub async fn run(st: Arc<AppState>) {
             if !b.enabled {
                 continue;
             }
-            let ip = url_host(&h.url).to_string();
-            let env = bootstrap_env(b, &st.cfg.own_url(), &h.url, &h.token, &b.release);
+            let ip = ssh_address(&h).to_string();
+            let env = bootstrap_env(b, &st.cfg.own_url(), &h, &b.release);
             let outcome = match install(&st, &h.id, &ip, &env).await {
                 Ok(note) => api_fingerprint(&st, &ip).await.map(|fp| (note, fp)),
                 Err(e) => Err(e),
@@ -128,6 +125,59 @@ pub async fn run(st: Arc<AppState>) {
             let _ = st.save();
         }
     }
+}
+
+/// The hosts the bootstrap works on: `provisioning`, with a server behind them, ordered (a
+/// provider id, its address looked up first) or added by hand (its address given).
+pub fn to_install(reg: &crate::registry::Registry) -> Vec<crate::registry::HostRec> {
+    reg.hosts
+        .values()
+        .filter(|h| h.state == "provisioning" && !(h.provider_id.is_empty() && h.url.is_empty()))
+        .cloned()
+        .collect()
+}
+
+/// Where the bootstrap connects: the host's SSH address when it has one of its own, else its
+/// API's.
+pub fn ssh_address(h: &crate::registry::HostRec) -> &str {
+    if h.ssh.is_empty() {
+        url_host(&h.url)
+    } else {
+        &h.ssh
+    }
+}
+
+/// An IPv4 network, `a.b.c.d/n`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Network {
+    pub addr: std::net::Ipv4Addr,
+    pub prefix: u8,
+}
+
+impl Network {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        let bad = || anyhow::anyhow!("{s:?}: want an IPv4 network, a.b.c.d/n");
+        let (a, n) = s.split_once('/').ok_or_else(bad)?;
+        let addr: std::net::Ipv4Addr = a.parse().map_err(|_| bad())?;
+        let prefix: u8 = n.parse().map_err(|_| bad())?;
+        if prefix > 32 {
+            return Err(bad());
+        }
+        Ok(Self { addr, prefix })
+    }
+
+    pub fn contains(&self, ip: std::net::Ipv4Addr) -> bool {
+        let mask = u32::MAX.checked_shl(32 - self.prefix as u32).unwrap_or(0);
+        u32::from(ip) & mask == u32::from(self.addr) & mask
+    }
+}
+
+/// The host's private address with the network's prefix (`10.42.0.11/16`), when its API is
+/// on the fleet's private network; `None` for a host on a public address.
+pub fn private_address(b: &crate::config::Bootstrap, url: &str) -> Option<String> {
+    let net = Network::parse(&b.private_network).ok()?;
+    let ip: std::net::Ipv4Addr = url_host(url).parse().ok()?;
+    net.contains(ip).then(|| format!("{ip}/{}", net.prefix))
 }
 
 /// Records a bootstrap that succeeded: the API certificate pinned in the same write as the
@@ -336,35 +386,55 @@ fn fingerprints(known_hosts: &str) -> Vec<String> {
 }
 
 /// A new host's settings for the script, every value single-quoted for the remote shell.
-/// `own_url` is the fleet's own when `fleet_url` is not set; `url` is the host's API, what it
-/// advertises; `token` its own.
+/// `own_url` is the fleet's own when `fleet_url` is not set. From the host's record: its API's
+/// URL (what it advertises), its token and its public ports, its own or else the fleet's (a
+/// record from before they were kept), so a re-run never takes another host's edge ports away,
+/// or adds them.
 pub fn bootstrap_env(
     b: &crate::config::Bootstrap,
     own_url: &str,
-    url: &str,
-    token: &str,
+    h: &crate::registry::HostRec,
     release: &str,
 ) -> String {
+    let (url, token) = (h.url.as_str(), h.token.as_str());
+    let public_tcp_ports = h.public_tcp_ports.as_deref().unwrap_or(&b.public_tcp_ports);
     let fleet_url = if b.fleet_url.is_empty() {
         own_url
     } else {
         &b.fleet_url
     };
-    format!(
-        "FLEET_URL={} ADVERTISE={} BRIQYARD_TOKEN={} BRIQYARD_RELEASE={} BRIQYARD_POOL_DEVICE={} ALLOWED_CLIENTS={}",
+    let mut env = format!(
+        "FLEET_URL={} ADVERTISE={} BRIQYARD_TOKEN={} BRIQYARD_RELEASE={} BRIQYARD_RELEASE_TOKEN={} BRIQYARD_POOL_DEVICE={} ALLOWED_CLIENTS={}",
         shq(fleet_url),
         shq(url),
         shq(token),
         shq(release),
+        shq(&b.release_token),
         shq(&b.pool_device),
         shq(&b.allowed_clients.join(","))
-    )
+    );
+    if let Some(private) = private_address(b, url) {
+        let ports: Vec<String> = public_tcp_ports.iter().map(|p| p.to_string()).collect();
+        env += &format!(
+            " PRIVATE_ADDRESS={} PRIVATE_INTERFACE={} PUBLIC_TCP_PORTS={} FLEET_ADDRESS={}",
+            shq(&private),
+            shq(&b.private_interface),
+            shq(&ports.join(",")),
+            shq(&b.fleet_address)
+        );
+    }
+    env
 }
 
-/// An upgrade's settings (ADR 0027): the release alone. The host's configuration says the
-/// rest (its fleet, its token, its pool's key), and is not written again.
-pub fn upgrade_env(release: &str) -> String {
-    format!("BRIQYARD_RELEASE={}", shq(release))
+/// An upgrade's settings (ADR 0027): the release, and the token that reads it when it is a
+/// private repository's. The host's configuration says the rest (its fleet, its token, its
+/// pool's key), and is not written again.
+pub fn upgrade_env(release: &str, release_token: &str) -> String {
+    let mut env = format!("BRIQYARD_RELEASE={}", shq(release));
+    if !release_token.is_empty() {
+        env += &format!(" BRIQYARD_RELEASE_TOKEN={}", shq(release_token));
+    }
+    env
 }
 
 /// The bootstrap's `ssh` arguments: [`ssh_base`], then the remote command, which puts `env`
@@ -426,6 +496,16 @@ mod tests {
         assert_eq!(shq(""), "''");
     }
 
+    /// A host's record as the bootstrap reads it.
+    fn rec(url: &str, token: &str, public_tcp_ports: Option<Vec<u16>>) -> crate::registry::HostRec {
+        crate::registry::HostRec {
+            url: url.into(),
+            token: token.into(),
+            public_tcp_ports,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn ssh_command() {
         let b = crate::config::Bootstrap {
@@ -440,8 +520,7 @@ mod tests {
         let env = bootstrap_env(
             &b,
             "http://0.0.0.0:7430",
-            &host_url("10.0.0.9"),
-            "t0k'en",
+            &rec(&host_url("10.0.0.9"), "t0k'en", None),
             &b.release,
         );
         let args = ssh_args(&b, "10.0.0.9", &env, kh, true);
@@ -460,9 +539,13 @@ mod tests {
         assert!(remote.starts_with("env FLEET_URL='http://0.0.0.0:7430' ADVERTISE='https://10.0.0.9:7420' BRIQYARD_TOKEN='t0k'\\''en' "), "{remote}");
         assert!(
             remote.ends_with(
-                "BRIQYARD_RELEASE='https://x/v1' BRIQYARD_POOL_DEVICE='/dev/nvme1n1' ALLOWED_CLIENTS='10.0.0.0/8,192.168.0.0/16' bash -s"
+                "BRIQYARD_RELEASE='https://x/v1' BRIQYARD_RELEASE_TOKEN='' BRIQYARD_POOL_DEVICE='/dev/nvme1n1' ALLOWED_CLIENTS='10.0.0.0/8,192.168.0.0/16' bash -s"
             ),
             "{remote}"
+        );
+        assert!(
+            !remote.contains("PRIVATE_ADDRESS"),
+            "no private network configured: {remote}"
         );
         assert!(
             !remote.contains("FLEET_TOKEN"),
@@ -476,8 +559,7 @@ mod tests {
         let env = bootstrap_env(
             &named,
             "https://0.0.0.0:7430",
-            "https://10.0.0.9:7420",
-            "t",
+            &rec("https://10.0.0.9:7420", "t", Some(vec![80, 443])),
             "",
         );
         let args = ssh_args(&named, "10.0.0.9", &env, kh, false);
@@ -488,10 +570,150 @@ mod tests {
         assert!(args[13].contains("FLEET_URL='https://fleet.example'"));
         // An upgrade gives the release alone: the host's configuration says the rest, and the
         // fleet's own address (`0.0.0.0` in development) is never offered as its fleet.
-        let args = ssh_args(&b, "10.0.0.9", &upgrade_env("file:///r/it's"), kh, true);
+        let args = ssh_args(&b, "10.0.0.9", &upgrade_env("file:///r/it's", ""), kh, true);
         assert_eq!(
             args[13],
             "env BRIQYARD_RELEASE='file:///r/it'\\''s' bash -s"
+        );
+        // A private repository's release: its token too, and still nothing of the host's.
+        assert_eq!(
+            upgrade_env("https://github.com/o/r/releases/download/v1", "gh-t"),
+            "BRIQYARD_RELEASE='https://github.com/o/r/releases/download/v1' BRIQYARD_RELEASE_TOKEN='gh-t'"
+        );
+    }
+
+    #[test]
+    fn a_host_on_the_private_network_is_told_its_address() {
+        let b = crate::config::Bootstrap {
+            pool_device: "/dev/nvme0n1,/dev/nvme1n1".into(),
+            release_token: "gh-t".into(),
+            private_network: "10.42.0.0/16".into(),
+            private_interface: "enp3s0f1".into(),
+            public_tcp_ports: vec![7430, 80],
+            fleet_address: "10.42.0.11".into(),
+            allowed_clients: vec!["10.42.0.0/16".into()],
+            ..Default::default()
+        };
+        let kh = Path::new("/kh");
+        // SSH to the public address, the API on the vRack; the host's own ports, not the
+        // fleet's default.
+        let env = bootstrap_env(
+            &b,
+            "https://fleet.example",
+            &rec("https://10.42.0.11:7420", "t", Some(vec![80, 443])),
+            "",
+        );
+        let args = ssh_args(&b, "51.68.1.2", &env, kh, false);
+        assert_eq!(args[12], "root@51.68.1.2");
+        let remote = &args[13];
+        assert!(
+            remote.contains("ADVERTISE='https://10.42.0.11:7420'"),
+            "{remote}"
+        );
+        assert!(remote.contains("BRIQYARD_RELEASE_TOKEN='gh-t'"), "{remote}");
+        assert!(
+            remote.contains("BRIQYARD_POOL_DEVICE='/dev/nvme0n1,/dev/nvme1n1'"),
+            "{remote}"
+        );
+        assert!(
+            remote.ends_with(
+                " PRIVATE_ADDRESS='10.42.0.11/16' PRIVATE_INTERFACE='enp3s0f1' PUBLIC_TCP_PORTS='80,443' FLEET_ADDRESS='10.42.0.11' bash -s"
+            ),
+            "{remote}"
+        );
+        // A record from before hosts kept their ports: the fleet's.
+        let env = bootstrap_env(
+            &b,
+            "https://fleet.example",
+            &rec("https://10.42.0.11:7420", "t", None),
+            "",
+        );
+        let args = ssh_args(&b, "51.68.1.2", &env, kh, false);
+        assert!(
+            args[13].ends_with(" PUBLIC_TCP_PORTS='7430,80' FLEET_ADDRESS='10.42.0.11' bash -s"),
+            "{}",
+            args[13]
+        );
+        // An API outside the private network (an ordered host on its public address): no
+        // private settings, the public interface stays as it is.
+        let env = bootstrap_env(
+            &b,
+            "https://fleet.example",
+            &rec("https://51.68.1.2:7420", "t", Some(vec![80, 443])),
+            "",
+        );
+        let args = ssh_args(&b, "51.68.1.2", &env, kh, false);
+        assert!(!args[13].contains("PRIVATE_"), "{}", args[13]);
+        assert_eq!(
+            private_address(&b, "https://10.42.255.1:7420").as_deref(),
+            Some("10.42.255.1/16")
+        );
+        assert_eq!(private_address(&b, "https://10.43.0.1:7420"), None);
+        assert_eq!(
+            private_address(&Default::default(), "https://10.42.0.11:7420"),
+            None,
+            "no private network configured"
+        );
+    }
+
+    #[test]
+    fn networks() {
+        let n = Network::parse("10.42.0.0/16").unwrap();
+        assert!(n.contains("10.42.0.1".parse().unwrap()));
+        assert!(n.contains("10.42.255.255".parse().unwrap()));
+        assert!(!n.contains("10.43.0.0".parse().unwrap()));
+        let all = Network::parse("0.0.0.0/0").unwrap();
+        assert!(all.contains("203.0.113.5".parse().unwrap()));
+        let one = Network::parse("10.0.0.5/32").unwrap();
+        assert!(one.contains("10.0.0.5".parse().unwrap()));
+        assert!(!one.contains("10.0.0.6".parse().unwrap()));
+        for bad in ["10.0.0.0", "10.0.0.0/33", "10.0.0/8", "fd00::/8", "/8", ""] {
+            let err = Network::parse(bad).unwrap_err().to_string();
+            assert!(err.contains("want an IPv4 network"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn ordered_and_added_hosts_are_installed_alike() {
+        let now = Utc::now();
+        let rec = |id: &str, state: &str, url: &str, provider_id: &str, ssh: &str| {
+            let mut r = crate::static_host(
+                &crate::config::StaticHost {
+                    id: id.into(),
+                    url: url.into(),
+                    ..Default::default()
+                },
+                now,
+            );
+            r.state = state.into();
+            r.provider_id = provider_id.into();
+            r.ssh = ssh.into();
+            r
+        };
+        let mut reg = crate::registry::Registry::default();
+        for r in [
+            rec("ordered", "provisioning", "", "order:1", ""),
+            rec(
+                "added",
+                "provisioning",
+                "https://10.42.0.11:7420",
+                "",
+                "51.68.1.2",
+            ),
+            rec("nothing", "provisioning", "", "", ""),
+            rec("ready", "ready", "https://10.42.0.12:7420", "", ""),
+            rec("dry", "dry-run", "", "dry-run-1", ""),
+        ] {
+            reg.hosts.insert(r.id.clone(), r);
+        }
+        let mut ids: Vec<String> = to_install(&reg).into_iter().map(|h| h.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["added", "ordered"]);
+        assert_eq!(ssh_address(&reg.hosts["added"]), "51.68.1.2");
+        assert_eq!(
+            ssh_address(&reg.hosts["ready"]),
+            "10.42.0.12",
+            "no SSH address of its own: the API's"
         );
     }
 

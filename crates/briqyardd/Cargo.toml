@@ -36,7 +36,6 @@ oci-client = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }
 tokio-util = { workspace = true }
-rusty-s3 = { workspace = true }
 url = { workspace = true }
 rcgen = { workspace = true }
 axum-server = { workspace = true }

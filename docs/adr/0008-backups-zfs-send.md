@@ -1,6 +1,6 @@
 # ADR 0008: Backups: ZFS streams to an object store, incremental, restore is a create
 
-Date: 2026-10-20 · Status: accepted; scheduling, retention and delete by ADR 0023; raw sends by ADR 0035
+Date: 2026-10-20 · Status: accepted; scheduling, retention and delete by ADR 0023; the store's client by ADR 0034; raw sends by ADR 0035
 
 ## Context
 
@@ -10,7 +10,7 @@ Disks are local and not replicated (ADR 0002). Losing a host must not lose a ten
 
 **A backup is a ZFS snapshot of each disk streamed with `zfs send -c`** (raw, `-w`, since ADR 0035) to an object store, whole the first time, incremental from the previous backup's snapshot after. The record beside the streams (`backups/<machine>/<id>.json`) holds the machine's spec and the chain.
 
-**The object store is S3 or a directory** (`objstore.rs`: `s3://bucket/prefix` with multipart PUT in 32 MB parts and SigV4, or `file:///path`). A directory makes the e2e suite run without a bucket; the same code path.
+**The object store is S3 or a directory** (`briqyard-objstore` on Apache Arrow's `object_store` since ADR 0034: `s3://bucket/prefix` with multipart PUT in 32 MB parts and SigV4, or `file:///path`). A directory makes the e2e suite run without a bucket; the same code path.
 
 **Restore is a create with `restore: {machine_id, backup}`**: the chain is received into fresh datasets on any host that reaches the store, then the machine boots as usual. The size check runs after the receive, so a restored volume is never refused for the size it had.
 

@@ -132,6 +132,8 @@ pub struct Ruleset {
     pub allowed_clients: Vec<String>,
     /// The daemon's ports: the API, the HTTP ingress, the TCP endpoint range.
     pub ports: Vec<String>,
+    /// The host's own services that machines reach as the internet does (ADR 0028).
+    pub host_ports: Vec<u16>,
     /// `(tap, ip)` of every machine whose TAP exists: the guest behind it sends as that
     /// address and nothing else.
     pub pins: Vec<(String, String)>,
@@ -249,10 +251,29 @@ impl Ruleset {
         ));
         s.push_str("\t}\n\tchain input {\n\t\ttype filter hook input priority 0; policy accept;\n");
         s.push_str("\t\tiifname \"lo\" accept\n");
+        // The host's own services are the internet's: reached at the host's addresses, never
+        // at a tenant's `.1`, the one host address a `via` machine may send to (the bridge
+        // table holds it to its pairs); a machine without egress reaches none, and one whose
+        // policy turns to none loses its open connections (before the replies' accept).
+        let host_ports = (!self.host_ports.is_empty()).then(|| {
+            let p: Vec<String> = self.host_ports.iter().map(u16::to_string).collect();
+            format!("tcp dport {{ {} }}", p.join(", "))
+        });
+        if let Some(hp) = &host_ports {
+            s.push_str(&format!(
+                "\t\tiifname \"by*\" ip saddr @egress_none {hp} drop\n"
+            ));
+        }
         s.push_str("\t\tct state established,related accept\n");
         s.push_str("\t\tiifname \"by*\" udp dport 53 accept\n");
         s.push_str("\t\tiifname \"by*\" tcp dport 53 accept\n");
         s.push_str("\t\tiifname \"by*\" icmp type echo-request accept\n");
+        if let Some(hp) = &host_ports {
+            s.push_str(&format!(
+                "\t\tiifname \"by*\" ip daddr != {} {hp} accept\n",
+                self.range
+            ));
+        }
         s.push_str("\t\tiifname \"by*\" drop\n");
         if !self.allowed_clients.is_empty() {
             let ports = self.ports.join(", ");
@@ -551,6 +572,7 @@ mod tests {
             range: "10.64.0.0/10".into(),
             allowed_clients: vec!["10.0.0.0/8".into(), "192.168.64.1/32".into()],
             ports: daemon_ports("0.0.0.0:7420", "0.0.0.0:8080", "20000-29999").unwrap(),
+            host_ports: vec![80, 443],
             pins: vec![
                 ("btabcdef123456".into(), "10.64.0.2".into()),
                 ("bt0000000000a3".into(), "10.64.0.3".into()),
@@ -665,10 +687,12 @@ table inet briqyard {
 	chain input {
 		type filter hook input priority 0; policy accept;
 		iifname "lo" accept
+		iifname "by*" ip saddr @egress_none tcp dport { 80, 443 } drop
 		ct state established,related accept
 		iifname "by*" udp dport 53 accept
 		iifname "by*" tcp dport 53 accept
 		iifname "by*" icmp type echo-request accept
+		iifname "by*" ip daddr != 10.64.0.0/10 tcp dport { 80, 443 } accept
 		iifname "by*" drop
 		tcp dport { 7420, 8080, 20000-29999 } ip saddr @allowed_clients accept
 		tcp dport { 7420, 8080, 20000-29999 } drop
@@ -709,6 +733,7 @@ table bridge briqyard {
     fn no_clients_means_no_port_rules_and_empty_sets_have_no_elements() {
         let r = Ruleset {
             allowed_clients: vec![],
+            host_ports: vec![],
             pins: vec![],
             policies: vec![],
             counted: vec![],
@@ -717,6 +742,8 @@ table bridge briqyard {
         let s = r.render();
         assert!(!s.contains("@allowed_clients"), "{s}");
         assert!(!s.contains("20000-29999"), "{s}");
+        // No host ports: machines reach nothing on the host but its DNS and ping.
+        assert!(!s.contains("tcp dport { 80"), "{s}");
         assert!(!s.contains("elements"), "{s}");
         assert!(
             s.contains("\tset allowed_clients {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t}\n")
