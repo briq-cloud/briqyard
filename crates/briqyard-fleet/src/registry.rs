@@ -244,9 +244,21 @@ pub struct Registry {
     /// When each tenant was pinned by a placement (not by a heartbeat).
     #[serde(default)]
     pub pinned_at: HashMap<String, DateTime<Utc>>,
+    /// The pool keys of forgotten hosts (ADR 0035): a host's backups are encrypted under its
+    /// key, so the key outlives the record, for a restore on another host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_keys: Vec<RetiredKey>,
     /// Fields this fleet does not know, written back as they were.
     #[serde(flatten)]
     pub unknown: Unknown,
+}
+
+/// A forgotten host's pool key, kept for its backups.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetiredKey {
+    pub host: String,
+    pub key: PoolKey,
+    pub retired_at: DateTime<Utc>,
 }
 
 impl Registry {
@@ -338,9 +350,26 @@ impl Registry {
         Some((h.pool_key.clone(), made))
     }
 
-    /// Drops a host and everything indexed to it.
+    /// The pool key of id `key_id` (`briqyard_api::poolkey::id`), a host's or a forgotten
+    /// host's, with whose it is: the key a backup is encrypted under (ADR 0035).
+    pub fn key_by_id(&self, key_id: &str) -> Option<(String, PoolKey)> {
+        let live = self.hosts.values().map(|h| (&h.id, &h.pool_key));
+        let retired = self.retired_keys.iter().map(|r| (&r.host, &r.key));
+        live.chain(retired)
+            .find(|(_, k)| briqyard_api::poolkey::id(k.expose()).as_deref() == Some(key_id))
+            .map(|(h, k)| (h.clone(), k.clone()))
+    }
+
+    /// Drops a host and everything indexed to it but its pool key, kept as a retired key: its
+    /// backups stay readable (ADR 0035).
     pub fn forget(&mut self, id: &str) {
-        self.hosts.remove(id);
+        if let Some(h) = self.hosts.remove(id).filter(|h| !h.pool_key.is_empty()) {
+            self.retired_keys.push(RetiredKey {
+                host: h.id,
+                key: h.pool_key,
+                retired_at: Utc::now(),
+            });
+        }
         self.tenants.retain(|_, h| h != id);
         self.machines.retain(|_, h| h != id);
         self.endpoints.retain(|_, h| h != id);
@@ -921,6 +950,28 @@ mod tests {
         assert_eq!(reg.endpoints.get("e1"), None);
         assert_eq!(reg.listed().len(), 1);
         reg.forget("a");
+        assert!(
+            reg.retired_keys.is_empty(),
+            "a host with no key leaves none"
+        );
+    }
+
+    /// A forgotten host's pool key stays, found by its id beside the live hosts' (ADR 0035).
+    #[test]
+    fn a_forgotten_hosts_key_is_kept_for_its_backups() {
+        let now = Utc::now();
+        let mut reg = Registry::default();
+        reg.heartbeat(host("a", 1000, 0, 0), now);
+        reg.heartbeat(host("b", 1000, 0, 0), now);
+        let (ka, _) = reg.pool_key("a").unwrap();
+        let (kb, _) = reg.pool_key("b").unwrap();
+        let id = |k: &PoolKey| briqyard_api::poolkey::id(k.expose()).unwrap();
+        assert_eq!(reg.key_by_id(&id(&kb)), Some(("b".into(), kb.clone())));
+        reg.forget("a");
+        assert_eq!(reg.key_by_id(&id(&ka)), Some(("a".into(), ka.clone())));
+        assert_eq!(reg.key_by_id(&"0".repeat(32)), None);
+        let back: Registry = serde_json::from_slice(&serde_json::to_vec(&reg).unwrap()).unwrap();
+        assert_eq!(back.key_by_id(&id(&ka)), Some(("a".into(), ka)));
     }
 
     #[test]

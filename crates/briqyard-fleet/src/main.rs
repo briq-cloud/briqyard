@@ -641,6 +641,9 @@ async fn host_key(
 ) -> Result<Response, Refusal> {
     let caller = Caller::of(&st, info, &headers);
     let _turn = st.key_turn.lock().await;
+    if let Some(want) = &req.key_id {
+        return backup_key(&st, &req.url, &headers, caller, want);
+    }
     let (id, key, made) = {
         let mut reg = st.reg.lock().unwrap();
         let id = the_host(&reg, &req.url, &headers, caller, "pool key")?
@@ -677,6 +680,35 @@ async fn host_key(
     }
     let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
     tracing::info!(host = id, made, peer, "pool key served");
+    Ok(Json(api::HostKey {
+        key: key.expose().to_string(),
+    })
+    .into_response())
+}
+
+/// The pool key of a backup (ADR 0035), for any host of the fleet: the key of that id, a live
+/// host's or a forgotten one's. Every host reads every backup's streams (a restore lands
+/// anywhere), so the key opens nothing a host could not already ask for; it is never made here.
+fn backup_key(
+    st: &AppState,
+    url: &str,
+    headers: &HeaderMap,
+    caller: Caller,
+    key_id: &str,
+) -> Result<Response, Refusal> {
+    let reg = st.reg.lock().unwrap();
+    let host = the_host(&reg, url, headers, caller, "backup key")?
+        .id
+        .clone();
+    let Some((owner, key)) = reg.key_by_id(key_id) else {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "no_key",
+            format!("the fleet holds no pool key {key_id}: the backup was made on a host with a key file, or on a host forgotten before ADR 0035"),
+        ));
+    };
+    let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
+    tracing::info!(host, owner, key_id, peer, "backup key served");
     Ok(Json(api::HostKey {
         key: key.expose().to_string(),
     })
@@ -922,7 +954,7 @@ async fn release_host(st: &AppState, h: &HostRec) -> Result<api::Host> {
 
 /// What a forget of a host that holds a pool key costs, said by its refusal and by `force`.
 const FORGET_KEYED: &str =
-    "its pool key goes with the record: the pool is unreadable at the host's next restart; retire it, or --force";
+    "its pool key goes with the record (kept for its backups alone): the pool is unreadable at the host's next restart; retire it, or --force";
 
 #[derive(serde::Deserialize, Default)]
 struct ForgetQuery {

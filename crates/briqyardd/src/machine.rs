@@ -2557,10 +2557,12 @@ impl Manager {
         };
         self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
         let mut src: Option<Arc<Entry>> = None;
-        let mut restore_from: Option<api::Backup> = None;
+        let mut restore_from: Option<(api::Backup, Option<String>)> = None;
         if let Some(rs) = &req.restore {
             let b = self.find_backup(&rs.machine_id, &rs.backup).await?;
-            let was: Record = serde_json::from_value(b.machine.clone().unwrap_or_default())
+            // The key its streams and its record are under (ADR 0035); none in a backup in clear.
+            let key = self.backup_key(&b).await?;
+            let was: Record = serde_json::from_value(backups::spec_of(&b, key.as_deref())?)
                 .map_err(|e| invalid(format!("backup {}: machine record: {e}", b.id)))?;
             // The request says what it says; the backup fills the rest.
             rec.image = was.image;
@@ -2612,7 +2614,7 @@ impl Manager {
                 return Err(invalid("the backup's disks and the volume do not match"));
             }
             check_size(&rec.size)?;
-            restore_from = Some(b);
+            restore_from = Some((b, key));
         } else if let Some(fork) = &req.fork {
             let s = self.own_entry(&fork.machine_id).map_err(|e| match e {
                 MError::NotFound => invalid("fork source not found"),
@@ -2654,7 +2656,7 @@ impl Manager {
         let made = match self.inner.net.count(&ip).await.context("usage counters") {
             Err(err) => Err(err),
             Ok(()) => match &restore_from {
-                Some(b) => self.receive_disks(&e, b).await,
+                Some((b, key)) => self.receive_disks(&e, b, key.as_deref()).await,
                 None => self.make_disks(&e, src.as_deref(), req.fork.as_ref()).await,
             },
         };
@@ -2666,7 +2668,7 @@ impl Manager {
             return Err(err.into());
         }
         e.note(match (&restore_from, &req.fork) {
-            (Some(b), _) => Ev::normal(
+            (Some((b, _)), _) => Ev::normal(
                 reason::RESTORED,
                 format!("restored from backup {} of {}", b.id, b.machine_id),
             )
@@ -6032,10 +6034,15 @@ mod tests {
         let fake = crate::zfs::fake::Fake::open("byard").await.unwrap();
         let init = dir.path().join("init");
         std::fs::write(&init, b"init").unwrap();
+        // The pool's key, in a file as on a host alone: the one the fake's `load-key` takes.
+        let key = "0123456789abcdef".repeat(4);
+        std::fs::write(dir.path().join("pool.key"), &key).unwrap();
+        std::fs::write(fake.dev().join("key"), &key).unwrap();
         let mut cfg = Config {
             data_dir: dir.path().join("data"),
             ..Default::default()
         };
+        cfg.storage.key = format!("file:{}", dir.path().join("pool.key").display());
         f(&mut cfg);
         let zfs = fake.zfs.clone();
         let mut images = Builder::new(zfs.clone(), cfg.image_dir(), init, 8).unwrap();

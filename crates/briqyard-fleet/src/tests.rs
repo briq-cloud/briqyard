@@ -989,7 +989,7 @@ async fn a_registration_is_taken_only_for_the_host_that_expects_it() {
 
 /// A host's pool key (ADR 0026): made at its first ask and the same after, served to the host
 /// at its address with its own token and to nobody else, written (`0600`) before it is
-/// answered, in no listing, and gone with the record.
+/// answered, in no listing, and no longer the host's once its record is forgotten.
 #[tokio::test]
 async fn a_host_gets_its_own_pool_key_and_no_other() {
     let host = |id: &str, n: u8| config::StaticHost {
@@ -1042,9 +1042,74 @@ async fn a_host_gets_its_own_pool_key_and_no_other() {
     assert!(!listed.contains(&key), "never listed: {listed}");
     let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/s1?force=true", "api", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
-    assert!(!std::fs::read_to_string(&f.st.state_path)
-        .unwrap()
-        .contains(&key));
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(1)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert!(!body.contains(&key));
+}
+
+/// A backup's key (ADR 0035): any host of the fleet gets the key of a backup's `key_id`, a
+/// live host's or a forgotten one's (kept as a retired key), never one the fleet does not
+/// hold, and the fleet makes none for it.
+#[tokio::test]
+async fn a_host_gets_the_key_of_a_backup_by_its_id() {
+    let host = |id: &str, n: u8| config::StaticHost {
+        id: id.into(),
+        url: format!("http://10.0.0.{n}:7420"),
+        token: format!("{id}-token"),
+        ..Default::default()
+    };
+    let f = fleet(
+        config::Config {
+            token: "api".into(),
+            hosts: vec![host("s1", 1), host("s2", 2)],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let ask = |n: u8, id: &str| {
+        Some(serde_json::json!({ "url": format!("http://10.0.0.{n}:7420"), "key_id": id }))
+    };
+    let own = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
+    let (_, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", own).await;
+    let k1 = json(&body)["key"].as_str().unwrap().to_string();
+    let id1 = briqyard_api::poolkey::id(&k1).unwrap();
+
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2, &id1)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        json(&body)["key"],
+        k1.as_str(),
+        "s1's key, for s2's restore"
+    );
+    assert!(
+        f.st.reg.lock().unwrap().hosts["s2"].pool_key.is_empty(),
+        "no key made for s2 by an ask for another's"
+    );
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/hosts/key",
+        "s2-token",
+        ask(2, &"0".repeat(32)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(json(&body)["code"], "no_key");
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/key", "api", ask(2, &id1)).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "a host's token only");
+
+    // s1 forgotten: its key stays, for its backups, and for nothing else.
+    let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/s1?force=true", "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2, &id1)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(json(&body)["key"], k1.as_str());
+    let retired = &saved(&f.st).retired_keys;
+    assert_eq!(retired.len(), 1);
+    assert_eq!(
+        (retired[0].host.as_str(), retired[0].key.expose()),
+        ("s1", k1.as_str())
+    );
 }
 
 /// A restore says what the fleet will trust once started on it, never a token or a key.

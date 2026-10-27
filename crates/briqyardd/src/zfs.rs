@@ -132,6 +132,16 @@ impl Zfs {
         Ok(())
     }
 
+    /// Opens a dataset received from raw streams, its own encryption root under the key it
+    /// was sent with (`key`, the source host's), and makes it inherit the pool's key: from
+    /// then on it opens with the pool, like every other dataset (ADR 0035).
+    pub async fn inherit_key(&self, name: &str, key: &str) -> Result<()> {
+        let ds = self.ds(name);
+        self.load_key(&ds, key).await?;
+        self.run(&["change-key", "-i", &ds]).await?;
+        Ok(())
+    }
+
     /// Makes `name` a filesystem mounted at `dir`, whatever it was before: made, moved or
     /// mounted as needed, nothing when it is already there. Never over files: a directory
     /// that holds some while the dataset is not mounted there is refused, since mounting
@@ -562,8 +572,9 @@ impl Zfs {
         }
     }
 
-    /// Starts `zfs send` of a snapshot (incremental from `from` when given), compressed as
-    /// stored; the caller reads the stream from the child's stdout and waits for it.
+    /// Starts `zfs send` of a snapshot (incremental from `from` when given), raw: the blocks
+    /// as the pool holds them, encrypted under its key and compressed (ADR 0035); the caller
+    /// reads the stream from the child's stdout and waits for it.
     pub fn send(
         &self,
         name: &str,
@@ -572,7 +583,7 @@ impl Zfs {
     ) -> Result<tokio::process::Child> {
         let target = format!("{}@{snap}", self.ds(name));
         let mut cmd = self.binary.command();
-        cmd.arg("send").arg("-c");
+        cmd.arg("send").arg("-w");
         if let Some(f) = from {
             cmd.arg("-i").arg(format!("@{f}"));
         }
@@ -757,7 +768,8 @@ pub(crate) mod fake {
     /// "dataset is busy". A stream is one line naming its snapshot and its base, sent once no
     /// `hold.send` file is there; a receive makes the dataset and the snapshot, and refuses
     /// an increment whose base the dataset lacks, as ZFS does; `load-key` takes the line on its
-    /// stdin when it is the `key` file's and answers `keystatus` `available` from then on.
+    /// stdin when it is the `key` file's and answers `keystatus` `available` from then on;
+    /// `change-key` needs the dataset.
     /// Error texts are the real ones,
     /// since the code matches on them.
     const FAKE: &str = r#"#!/bin/sh
@@ -890,6 +902,8 @@ case "$1" in
       echo "Key load error: Incorrect key provided for '$last'." >&2; exit 255
     fi
     echo available > "$DEV/answer.keystatus"; exit 0;;
+  change-key)
+    [ -e "$DEV/$last" ] || missing "$last"; exit 0;;
   get)
     for a in "$@"; do prop="$last_but_one"; last_but_one="$a"; done
     if [ -f "$DEV/answer.$prop" ]; then cat "$DEV/answer.$prop"; exit 0; fi
