@@ -541,6 +541,27 @@ check "status: no condition true"         'briqyard status | jq -e "(.conditions
 briqyard machine rm "$M" >/dev/null
 
 if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then
+  echo "== Firecracker 1.17: deletes go back to the pool, a bare pause keeps exec (ADR 0037)"
+  POOL=$(sudo sed -n 's/^  pool: //p' /etc/briqyard/config.yaml); POOL=${POOL:-byard}
+  JAIL=$(sudo sed -n 's/^jail_dir: //p' /etc/briqyard/config.yaml); JAIL=${JAIL:-/var/lib/briqyard/jail}
+  DC=$(briqyard machine run --image alpine:3.20 --name trim --tenant "$T" --memory 256 --volume 2G:/data --disk-bw 0 --disk-iops 0 -- sleep 3600 | jq -r .id)
+  # What a disk takes in the pool, in MiB, once ZFS has written out what it holds.
+  mib() { sudo zpool sync "$POOL"; echo $(( $(sudo zfs get -Hp -o value used "$POOL/m/$DC/$1") >> 20 )); }
+  on_dc() { briqyard machine exec --timeout 120s "$DC" -- sh -c "$1"; }
+  on_dc 'head -c 268435456 /dev/urandom > /data/big && head -c 268435456 /dev/urandom > /root/big && sync'
+  vol=$(mib data) root=$(mib root)
+  on_dc 'rm /data/big /root/big && sync'
+  sleep 1
+  vol2=$(mib data) root2=$(mib root)
+  check "discard: a volume's 256 MiB deleted go back ($vol -> $vol2 MiB)"    '[ "$vol" -ge 250 ] && [ "$vol2" -le $((vol - 230)) ]'
+  check "discard: a root disk's 256 MiB deleted go back ($root -> $root2 MiB)" '[ "$root" -ge 250 ] && [ "$root2" -le $((root - 230)) ]'
+  # A snapshot that fails pauses and resumes the VM with nothing between (Firecracker #6100,
+  # fixed in 1.17): the host's next connection over vsock must still be answered.
+  fcapi() { sudo curl -fsS --unix-socket "$JAIL/firecracker/$DC/root/run/firecracker.socket" -X PATCH -H 'content-type: application/json' -d "{\"state\":\"$1\"}" http://localhost/vm; }
+  fcapi Paused && fcapi Resumed
+  check "a bare pause and resume: exec still answered" '[ "$(briqyard machine exec --timeout 20s "$DC" -- hostname)" = trim ]'
+  briqyard machine rm "$DC" >/dev/null
+
   echo "== daemon crash: running machines are adopted"
   K=$(briqyard machine run --image alpine:3.20 --name survivor --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
   # The daemon alone (systemctl kill would signal every process of the unit, machines included).

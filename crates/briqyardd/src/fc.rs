@@ -114,7 +114,8 @@ impl Client {
     }
 
     /// `cache` is "Unsafe" (no flush) or "Writeback" (a guest flush is a host fsync); `rate`
-    /// limits what the guest does on it.
+    /// limits what the guest does on it. A writable drive takes the guest's discards (v1.17,
+    /// the default `Sync` engine): the blocks a guest frees go back to the pool (ADR 0037).
     pub async fn drive(
         &self,
         id: &str,
@@ -125,6 +126,9 @@ impl Client {
         rate: Option<&DiskRate>,
     ) -> Result<()> {
         let mut d = json!({"drive_id": id, "path_on_host": path, "is_root_device": root, "is_read_only": read_only, "cache_type": cache});
+        if !read_only {
+            d["discard"] = json!(true);
+        }
         if let Some(r) = rate {
             d["rate_limiter"] = r.rate_limiter();
         }
@@ -1284,7 +1288,7 @@ mod tests {
     #[tokio::test]
     async fn every_call_has_its_path_and_body() {
         let (_dir, path) = socket();
-        let server = serve(&path, vec![NO_CONTENT; 12]);
+        let server = serve(&path, vec![NO_CONTENT; 13]);
         let c = Client::new(&path);
         c.boot_source(Path::new("/vmlinux"), "console=ttyS0")
             .await
@@ -1327,6 +1331,16 @@ mod tests {
         .unwrap();
         c.drive_rate("data", &DiskRate::default()).await.unwrap();
         c.metrics(Path::new("/metrics.fifo")).await.unwrap();
+        c.drive(
+            "config",
+            Path::new("/config.tar"),
+            false,
+            true,
+            "Unsafe",
+            None,
+        )
+        .await
+        .unwrap();
         let seen = server.await.unwrap();
         let first = |i: usize| seen[i].lines().next().unwrap().to_string();
         assert_eq!(first(0), "PUT /boot-source HTTP/1.1");
@@ -1337,7 +1351,7 @@ mod tests {
         assert_eq!(first(1), "PUT /drives/rootfs HTTP/1.1");
         assert_eq!(
             body(&seen[1]),
-            serde_json::json!({"drive_id": "rootfs", "path_on_host": "/root", "is_root_device": true, "is_read_only": false, "cache_type": "Writeback"})
+            serde_json::json!({"drive_id": "rootfs", "path_on_host": "/root", "is_root_device": true, "is_read_only": false, "cache_type": "Writeback", "discard": true})
         );
         assert_eq!(first(2), "PUT /network-interfaces/eth0 HTTP/1.1");
         assert_eq!(
@@ -1387,6 +1401,12 @@ mod tests {
         assert_eq!(
             body(&seen[11]),
             serde_json::json!({"metrics_path": "/metrics.fifo"})
+        );
+        // A writable drive takes discards (ADR 0037); a read-only one cannot.
+        assert_eq!(body(&seen[9])["discard"], true);
+        assert_eq!(
+            body(&seen[12]),
+            serde_json::json!({"drive_id": "config", "path_on_host": "/config.tar", "is_root_device": false, "is_read_only": true, "cache_type": "Unsafe"})
         );
     }
 

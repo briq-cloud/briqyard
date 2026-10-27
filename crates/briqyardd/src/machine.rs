@@ -5016,10 +5016,11 @@ fn jail_uid(base: u32, subnet_index: u32, host_num: u8) -> u32 {
     base + subnet_index * 256 + host_num as u32
 }
 
-/// The guest kernel's command line.
+/// The guest kernel's command line. The root disk is mounted with `discard`: what the guest
+/// deletes goes back to the pool (ADR 0037).
 fn boot_args(pci: bool, extra: &str) -> String {
     let mut args = format!(
-        "console=ttyS0 reboot=k panic=1 root=/dev/vda rw rootfstype=ext4 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd random.trust_cpu=on init={}",
+        "console=ttyS0 reboot=k panic=1 root=/dev/vda rw rootfstype=ext4 rootflags=discard i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd random.trust_cpu=on init={}",
         image::INIT_PATH
     );
     if !pci {
@@ -5268,6 +5269,7 @@ mod tests {
             "{a}"
         );
         assert!(a.contains(&format!("init={}", image::INIT_PATH)), "{a}");
+        assert!(a.contains(" rootfstype=ext4 rootflags=discard "), "{a}");
         assert!(a.ends_with(" pci=off"), "{a}");
         let b = boot_args(true, "loglevel=3 quiet");
         assert!(!b.contains("pci=off"), "{b}");

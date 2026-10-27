@@ -406,7 +406,8 @@ fn read_config_archive<R: Read>(r: R) -> Result<(Config, Vec<BootFile>)> {
 }
 
 /// Mounts the data volumes; a fresh one gets the image directory's owner and content, as
-/// Docker does for a named volume.
+/// Docker does for a named volume. An ext4 volume is mounted with `discard`, so what the guest
+/// deletes goes back to the host's pool (ADR 0037).
 fn setup_mounts(cfg: &Config) -> Result<()> {
     for m in &cfg.mounts {
         let path = Path::new(&m.path);
@@ -421,7 +422,7 @@ fn setup_mounts(cfg: &Config) -> Result<()> {
             path,
             Some(fstype),
             MsFlags::MS_NOATIME,
-            None::<&str>,
+            (fstype == "ext4").then_some("discard"),
         )
         .with_context(|| format!("mount {} on {}", m.device, m.path))?;
         seed_mount_point(path, seed);
