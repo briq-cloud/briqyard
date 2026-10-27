@@ -249,18 +249,21 @@ workspace, nightly only, never built by `cargo test --workspace` or CI.
 | `dns_query` | a guest's DNS query; every answer must parse back |
 | `ingress_head` | a public request head at the HTTP ingress |
 
-In the VM, as the Lima user (never root: `layer_extract` writes and removes files), one
-target at a time:
+In the VM, as the Lima user (never root: `layer_extract` writes and removes files). The
+mount is read-only and `cargo fuzz run` writes into `fuzz/`, so build with cargo-fuzz and run
+the binaries with the build, corpus and crashes in `$HOME`:
 
 ```bash
 rustup toolchain install nightly --profile minimal && cargo install cargo-fuzz
-cd /Users/uplab/projects/briqyard/fuzz   # read-only mount: keep the build and corpus in $HOME
-CARGO_TARGET_DIR=$HOME/target-fuzz cargo +nightly fuzz run dns_query \
-  $HOME/fuzz-corpus/dns_query -- -max_total_time=600 -artifact_prefix=$HOME/fuzz-artifacts/
+cd /Users/uplab/projects/briqyard/fuzz
+CARGO_TARGET_DIR=$HOME/target-fuzz cargo +nightly fuzz build
+t=dns_query; mkdir -p $HOME/fuzz-corpus/$t $HOME/fuzz-artifacts/$t $HOME/fuzz-tmp
+TMPDIR=$HOME/fuzz-tmp $HOME/target-fuzz/aarch64-unknown-linux-gnu/release/$t \
+  $HOME/fuzz-corpus/$t -max_total_time=600 -artifact_prefix=$HOME/fuzz-artifacts/$t/
 ```
 
-A crash leaves its input in the artifact directory; `cargo +nightly fuzz run <target>
-<file>` replays it. Every fix gets a unit test from that input. Last run in ADR 0033.
+A crash leaves its input in the artifact directory; the binary given that file replays it.
+Every fix gets a unit test from that input. Last run in ADR 0033.
 
 ## Layout
 
