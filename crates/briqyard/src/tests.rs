@@ -831,8 +831,8 @@ fn endpoint_tenant_and_image_commands() {
 #[test]
 fn host_commands() {
     assert!(matches!(parse(&["host", "ls"]).cmd, Cmd::Host(HostCmd::Ls)));
-    match parse(&["host", "order", "--reason", "launch week"]).cmd {
-        Cmd::Host(HostCmd::Order { reason }) => assert_eq!(reason, "launch week"),
+    match parse(&["host", "order", "--reason", "more capacity"]).cmd {
+        Cmd::Host(HostCmd::Order { reason }) => assert_eq!(reason, "more capacity"),
         _ => panic!("not an order"),
     }
     match parse(&["host", "order"]).cmd {

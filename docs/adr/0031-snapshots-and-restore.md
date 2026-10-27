@@ -4,7 +4,7 @@ Date: 2026-10-21 · Status: accepted; amends ADR 0019 (`restored` for a snapshot
 
 ## Context
 
-A sandbox's agent takes a checkpoint, tries something risky, and goes back: Fly Sprites' checkpoint and restore, E2B's pause and resume, Daytona's snapshots. A machine could take a snapshot of both disks (`POST /v1/machines/{id}/snapshots`), list it, delete it, and fork from a fresh one; it could not go back to one. Kubernetes' VolumeSnapshot restores into a new volume, which here is a fork; the map's gap (`../KUBERNETES-MAP.md`, Storage) is the rollback of a machine in place, to a snapshot it can find by name.
+A sandbox's agent takes a checkpoint, tries something risky, and goes back: checkpoint and restore, pause and resume, or snapshots, depending on the platform. A machine could take a snapshot of both disks (`POST /v1/machines/{id}/snapshots`), list it, delete it, and fork from a fresh one; it could not go back to one. Kubernetes' VolumeSnapshot restores into a new volume, which here is a fork; the map's gap (`../KUBERNETES-MAP.md`, Storage) is the rollback of a machine in place, to a snapshot it can find by name.
 
 A restore must not break what depends on the machine's snapshots: newer snapshots the caller made, forks (a fork is a ZFS clone of a `fork-*` snapshot, which pins its origin), the backup chain (the next incremental is sent from the newest `bk-*` snapshot on the disk, ADR 0023), and the machine's lock and backup turn.
 

@@ -4,7 +4,7 @@ Date: 2026-10-19 · Status: accepted
 
 ## Context
 
-Several hosts, one API for the control plane. The control plane reads a machine missing from a listing as gone and errors the briq (monorepo rule: `Provider.list` must throw, never return `[]`). A tenant's private network has no overlay yet (ADR 0003).
+Several hosts, one API for the control plane. The control plane reads a machine missing from a listing as gone and errors the briq (briq's rule: `Provider.list` must throw, never return `[]`). A tenant's private network has no overlay yet (ADR 0003).
 
 ## Decisions
 
@@ -24,5 +24,5 @@ Several hosts, one API for the control plane. The control plane reads a machine 
 
 - A tenant's machines are capped by one host. A tenant across hosts is `../MESH.md`, after this.
 - A host down takes its tenants down with it: no migration, the disks are there.
-- Review findings B13 and B14: registry save errors are swallowed, and the shared host token lets a host impersonate another. Both to fix before real servers.
+- Registry save errors were swallowed, and the shared host token let a host impersonate another: both fixed by ADR 0013.
 - Reopen the single file when the fleet passes a few dozen hosts: a small database, same shape.
