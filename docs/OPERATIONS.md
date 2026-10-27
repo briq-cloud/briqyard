@@ -514,7 +514,11 @@ ordered server's address, then runs `hack/bootstrap-host.sh` on it over SSH (`ss
 of its own for the host's API. A host whose API address is in `private_network` (a CIDR, the
 vRack) is reached over SSH at its own address (`host add`'s first argument) and told its
 private address: `private_interface` gets it when the server does not have it yet, and its
-public interface takes SSH and `public_tcp_ports` only (ADR 0028).
+public interface takes SSH and `public_tcp_ports` only (ADR 0028). With `fleet_address` (the
+fleet's own vRack address), the host resolves `fleet_url`'s name to it in `/etc/hosts`: the
+fleet checks a host's calls by the address it knows the host at, its vRack one, and a call
+through the public network would come from the public address and be refused
+(`unknown_host`).
 Once the script succeeds, a second connection, strict against the pinned SSH key, reads the
 daemon's certificate fingerprint (`briqyardd tls-fingerprint`); the fleet pins it in the same
 write that marks the host `bootstrapped` (the note says `api certificate … pinned`), and dials
@@ -642,6 +646,7 @@ provisioner:
     release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.0
     pool_device: /dev/nvme0n1,/dev/nvme1n1
     fleet_url: https://fleet.example.com
+    fleet_address: 10.42.0.11                # this server on the vRack: hosts reach fleet_url here
     private_network: 10.42.0.0/16
     private_interface: enp3s0f1
     allowed_clients: [10.42.0.0/16]
@@ -661,32 +666,36 @@ modprobe zfs && ls /dev/kvm
 export BRIQYARD_URL=http://127.0.0.1:7430 BRIQYARD_TOKEN=$(sed -n 's/^token: *//p' /etc/briqyard/fleet.yaml)
 briqyard host add <public ip> --address 10.42.0.11 --region gra \
   --public-tcp-ports 80,443,5432,3306,6379,27017,5671,7687,6334
-briqyard host ls     # within two minutes: the note, the keys pinned
-grep -q '^capacity:' /etc/briqyard/config.yaml || printf 'capacity:\n  reserved_memory_mb: 3072\n' >> /etc/briqyard/config.yaml
-systemctl restart briqyardd
+briqyard host ls     # the note: what the last attempt did
 ```
 
-The ports are the edge's (HTTP, HTTPS, its TCP listeners): its public interface takes them, and its machines reach them at its address
-(`network.host_ports`). They stay on the host's record (`host ls`: `public tcp:`), so a later
-bootstrap of it, or another host added, changes nothing for the other.
-Putting the vRack address on its interface runs `netplan apply`, which renews the public
-interface's DHCP lease too: a second's pause, SSH sessions survive. The note names the SSH key
-pinned (`SHA256:…`): compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. Then
-the API certificate pinned. A failed attempt is in the note and tried again every two minutes;
-fix the cause, nothing to undo. The host turns `ready` at its first heartbeat, which goes to
-`fleet_url` through the edge: after step 6. The last line keeps 3 GB of memory for the host and
-the edge (`capacity.reserved_memory_mb`, 2048 by default; in the dev VM the idle edge took 29 MiB,
-Docker and containerd 555 MB with their page cache).
+Steps 5 and 6 interleave on this first server: the fleet is served by the edge, and the edge
+goes on after briqyard's firewall. Within two minutes, the first attempt puts the vRack address
+on its interface, writes the firewall (SSH and the ports above) and `fleet.example.com` at
+`10.42.0.11` in `/etc/hosts`, then fails at the pool's key (`no key for the pool`): nothing
+serves the fleet's name yet. Do step 6; the next attempt, two minutes later, gets the key,
+makes the pool and installs, and the note says the SSH key pinned (`SHA256:…`: compare it with
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`), then the API certificate. Every attempt
+is in the note; the host is `failed` after `max_attempts` (90, three hours). The host turns
+`ready` at its first heartbeat.
 
-**6. The edge**, set up after briqyard's bootstrap. It must:
+The ports are the edge's (HTTP, HTTPS, its TCP listeners): its public interface takes them, and
+its machines reach them at its address (`network.host_ports`). They stay on the host's record
+(`host ls`: `public tcp:`), so a later bootstrap of it, or another host added, changes nothing
+for the other. Putting the vRack address on its interface runs `netplan apply`, which renews
+the public interface's DHCP lease too: a second's pause, SSH sessions survive.
+
+**6. The edge**, once the first attempt wrote the firewall (`nft list table inet
+briqyard_host`). It must:
 
 - write no firewall of its own: briqyard's (`/etc/briqyard/firewall.nft`) opens its ports, and
   a second table would drop what this one lets in (the vRack, the machines' DNS);
 - keep Docker off the rules, when it runs in Docker (`/etc/docker/daemon.json`: `"iptables":
   false, "ip6tables": false, "bridge": "none"`, before Docker is installed): Docker started
   before the daemon sets the forward policy to drop, and machines lose the internet;
-- serve the fleet's name to `127.0.0.1:7430`, responses streamed (a watch, logs followed), the
-  caller's address in `X-Forwarded-For`. With Caddy:
+- serve the fleet's name on every address, the vRack's included (that is where hosts reach it),
+  to `127.0.0.1:7430`, responses streamed (a watch, logs followed), the caller's address in
+  `X-Forwarded-For`. With Caddy:
 
 ```
 fleet.example.com {
@@ -696,10 +705,16 @@ fleet.example.com {
 }
 ```
 
-Then a DNS record for the fleet's name (`A fleet.example.com <public ip>`). Once the edge serves
-it:
+Then a DNS record for the fleet's name (`A fleet.example.com <public ip>`): the certificate's
+HTTP-01 challenge and outside callers come that way; hosts, by `/etc/hosts`, over the vRack.
+Once the host is `bootstrapped` or `ready` (`host ls`), keep 3 GB of memory for the host and the edge
+(`capacity.reserved_memory_mb`, 2048 by default; in the dev VM the idle edge took 29 MiB,
+Docker and containerd 555 MB with their page cache). Not before: a configuration there before
+the bootstrap's makes it an upgrade.
 
 ```bash
+grep -q '^capacity:' /etc/briqyard/config.yaml || printf 'capacity:\n  reserved_memory_mb: 3072\n' >> /etc/briqyard/config.yaml
+systemctl restart briqyardd
 export BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN=<the fleet's token>
 briqyard host ls                                       # ready
 ```

@@ -416,10 +416,11 @@ pub fn bootstrap_env(
     if let Some(private) = private_address(b, url) {
         let ports: Vec<String> = public_tcp_ports.iter().map(|p| p.to_string()).collect();
         env += &format!(
-            " PRIVATE_ADDRESS={} PRIVATE_INTERFACE={} PUBLIC_TCP_PORTS={}",
+            " PRIVATE_ADDRESS={} PRIVATE_INTERFACE={} PUBLIC_TCP_PORTS={} FLEET_ADDRESS={}",
             shq(&private),
             shq(&b.private_interface),
-            shq(&ports.join(","))
+            shq(&ports.join(",")),
+            shq(&b.fleet_address)
         );
     }
     env
@@ -589,6 +590,7 @@ mod tests {
             private_network: "10.42.0.0/16".into(),
             private_interface: "enp3s0f1".into(),
             public_tcp_ports: vec![7430, 80],
+            fleet_address: "10.42.0.11".into(),
             allowed_clients: vec!["10.42.0.0/16".into()],
             ..Default::default()
         };
@@ -615,7 +617,7 @@ mod tests {
         );
         assert!(
             remote.ends_with(
-                " PRIVATE_ADDRESS='10.42.0.11/16' PRIVATE_INTERFACE='enp3s0f1' PUBLIC_TCP_PORTS='80,443' bash -s"
+                " PRIVATE_ADDRESS='10.42.0.11/16' PRIVATE_INTERFACE='enp3s0f1' PUBLIC_TCP_PORTS='80,443' FLEET_ADDRESS='10.42.0.11' bash -s"
             ),
             "{remote}"
         );
@@ -628,7 +630,7 @@ mod tests {
         );
         let args = ssh_args(&b, "51.68.1.2", &env, kh, false);
         assert!(
-            args[13].ends_with(" PUBLIC_TCP_PORTS='7430,80' bash -s"),
+            args[13].ends_with(" PUBLIC_TCP_PORTS='7430,80' FLEET_ADDRESS='10.42.0.11' bash -s"),
             "{}",
             args[13]
         );

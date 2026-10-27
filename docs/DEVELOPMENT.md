@@ -124,7 +124,7 @@ ssh-keygen -q -t ed25519 -N '' -f /etc/byt-fleet/key && cat /etc/byt-fleet/key.p
 ln -sfn "$PWD/bin" /root/bin       # the binaries hack/vm.sh built, copied out of fc's target-<tree>
 ```
 
-A fleet on fc2 itself (`listen: 127.0.0.1:7431`, `provisioner.bootstrap`: `enabled`, `ssh_key:
+A fleet on fc2 itself (`listen: 0.0.0.0:7431` and `tls: off`, the token alone as in `hack/fleet.dev.yaml`: on loopback with no proxy in front, every host call would be refused for want of a caller address; `provisioner.bootstrap`: `enabled`, `ssh_key:
 /etc/byt-fleet/key`, `pool_device: $D0,$D1`, `fleet_url: http://127.0.0.1:7431`,
 `private_network: 10.99.0.0/24`, `private_interface: byvrack0`, `allowed_clients`), then
 `briqyard host add 192.168.64.2 --address 10.99.0.2`: the fleet bootstraps fc2 over SSH as it

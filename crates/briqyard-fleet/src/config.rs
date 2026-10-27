@@ -153,6 +153,10 @@ pub struct Bootstrap {
     pub public_tcp_ports: Vec<u16>,
     /// `FLEET_URL`: this fleet, as the new host reaches it.
     pub fleet_url: String,
+    /// `FLEET_ADDRESS`: the fleet's address on the private network. A private host resolves
+    /// `fleet_url`'s name to it, so its calls come from the private address the fleet knows
+    /// it by (ADR 0028); empty leaves the name to DNS.
+    pub fleet_address: String,
     /// `ALLOWED_CLIENTS`: the networks (CIDRs) the host's API and endpoints accept
     /// connections from: this fleet's and the routers'. Required when the host listens on a
     /// public address.
@@ -175,6 +179,7 @@ impl Default for Bootstrap {
             private_interface: String::new(),
             public_tcp_ports: Vec::new(),
             fleet_url: String::new(),
+            fleet_address: String::new(),
             allowed_clients: Vec::new(),
             max_attempts: 90,
         }
@@ -338,6 +343,15 @@ impl Config {
         if !b.private_network.is_empty() {
             crate::bootstrap::Network::parse(&b.private_network)
                 .map_err(|e| anyhow::anyhow!("provisioner.bootstrap.private_network {e}"))?;
+        }
+        if !b.fleet_address.is_empty()
+            && crate::bootstrap::private_address(b, &b.fleet_address).is_none()
+        {
+            bail!(
+                "provisioner.bootstrap.fleet_address {:?}: want an IPv4 address in private_network ({:?})",
+                b.fleet_address,
+                b.private_network
+            );
         }
         for h in &mut self.hosts {
             let name = if h.id.is_empty() { &h.url } else { &h.id };
@@ -516,6 +530,7 @@ provisioner:
     private_interface: enp3s0f1
     public_tcp_ports: [7430, 80]
     fleet_url: https://fleet.example
+    fleet_address: 10.42.0.11
     max_attempts: 3
 "#,
         );
@@ -583,6 +598,7 @@ provisioner:
         assert_eq!(b.private_interface, "enp3s0f1");
         assert_eq!(b.public_tcp_ports, [7430, 80]);
         assert_eq!(b.fleet_url, "https://fleet.example");
+        assert_eq!(b.fleet_address, "10.42.0.11");
         assert_eq!(b.max_attempts, 3);
     }
 
@@ -705,6 +721,29 @@ provisioner:
             let err = load(bad).unwrap_err().to_string();
             assert!(
                 err.starts_with("provisioner.bootstrap.private_network "),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fleet_address_is_on_the_private_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |addr: &str| {
+            let path = write(
+                &dir,
+                &format!(
+                    "provisioner:\n  bootstrap:\n    private_network: 10.42.0.0/16\n    fleet_address: \"{addr}\"\n"
+                ),
+            );
+            with_env(&[], || Config::load(Some(&path)))
+        };
+        load("10.42.0.11").unwrap();
+        load("").unwrap();
+        for bad in ["10.43.0.1", "fleet.example.com", "fd00::1"] {
+            let err = load(bad).unwrap_err().to_string();
+            assert!(
+                err.starts_with("provisioner.bootstrap.fleet_address "),
                 "{bad}: {err}"
             );
         }

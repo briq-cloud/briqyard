@@ -25,6 +25,8 @@
 # ALLOW_PUBLIC=1 (a firewall of your own); with neither, they bind loopback. With
 # PRIVATE_ADDRESS, the public interface takes SSH and PUBLIC_TCP_PORTS only. Machines reach
 # PUBLIC_TCP_PORTS on the host as the internet does (`network.host_ports`: an edge beside it).
+# FLEET_ADDRESS, the fleet's private address: FLEET_URL's name resolves to it here (/etc/hosts),
+# so the host's calls reach the fleet from the private address the fleet knows it by.
 # Off loopback the API serves TLS with a certificate of its own (ADR 0020): the script prints
 # its fingerprint, which the fleet pins (`tls_fingerprint` in the host's `hosts:` entry).
 #
@@ -44,6 +46,7 @@ API_TOKEN=${BRIQYARD_TOKEN:-}
 PRIVATE_ADDRESS=${PRIVATE_ADDRESS:-}
 PRIVATE_INTERFACE=${PRIVATE_INTERFACE:-}
 PUBLIC_TCP_PORTS=${PUBLIC_TCP_PORTS:-}
+FLEET_ADDRESS=${FLEET_ADDRESS:-}
 if [ -n "$PRIVATE_ADDRESS" ]; then LISTEN=${LISTEN:-${PRIVATE_ADDRESS%/*}:7420}; else LISTEN=${LISTEN:-0.0.0.0:7420}; fi
 ALLOWED_CLIENTS=${ALLOWED_CLIENTS:-}
 ALLOW_PUBLIC=${ALLOW_PUBLIC:-}
@@ -182,6 +185,13 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
     netplan apply
     for _ in $(seq 1 30); do has_address && break; sleep 1; done
     has_address || fail "$PRIVATE_ADDRESS did not come up on $PRIVATE_INTERFACE"
+  fi
+  fleet_name=${FLEET_URL#*://}; fleet_name=${fleet_name%%/*}; fleet_name=${fleet_name%:*}
+  # A name only: an address in FLEET_URL is dialled as it is.
+  if [ -n "$FLEET_ADDRESS" ] && [ -n "${fleet_name//[0-9.]/}" ]; then
+    sed -i '/# briqyard: the fleet$/d' /etc/hosts
+    printf '%s %s # briqyard: the fleet\n' "$FLEET_ADDRESS" "$fleet_name" >> /etc/hosts
+    echo "   $fleet_name at $FLEET_ADDRESS"
   fi
   private_dev=$(ip -4 -o addr show | awk -v a="$PRIVATE_ADDRESS" '$4 == a {print $2; exit}')
   public_dev=$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
@@ -322,7 +332,10 @@ if [ "$(zfs get -H -o value encryption "$POOL")" = off ]; then
 fi
 # A pool that exists, locked (a reboot): its key from the same source, checked now rather
 # than at the daemon's start.
-if [ "$(zfs get -H -o value keystatus "$POOL")" = unavailable ]; then
+if [ "$(zfs get -H -o value keystatus "$POOL")" = unavailable ] && [ -z "$FLEET_URL" ] &&
+  grep -qx '  key: fleet' /etc/briqyard/config.yaml 2>/dev/null; then
+  echo "   pool $POOL is locked: the daemon asks the fleet for its key at its start"
+elif [ "$(zfs get -H -o value keystatus "$POOL")" = unavailable ]; then
   root=$(zfs get -H -o value encryptionroot "$POOL")
   key=$(pool_key) || { echo "   pool $POOL is locked and its key could not be read (${FLEET_URL:-$KEY_FILE})"; exit 1; }
   if ! out=$(printf '%s\n' "$key" | zfs load-key -L prompt "$root" 2>&1); then
