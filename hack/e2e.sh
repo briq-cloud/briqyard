@@ -34,6 +34,14 @@ cleanup() {
     sudo mv "$KEY_FILE.e2e" "$KEY_FILE"
     for i in $(seq 1 60); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
   fi
+  # The mirror section stops the mirror and names it in the configuration for a moment.
+  if [ -n "${MIRROR:-}" ]; then
+    sudo systemctl start briqyard-mirror || true
+    if sudo test -f /etc/briqyard/config.yaml.e2e; then
+      sudo mv /etc/briqyard/config.yaml.e2e /etc/briqyard/config.yaml
+      handover
+    fi
+  fi
   for t in "$T" "$T-eg" "$T-gw" "$T-q"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
@@ -571,6 +579,49 @@ briqyard machine rm "$DK" >/dev/null
 check "status: no condition true"         'briqyard status | jq -e "(.conditions | map(.type) | sort) == [\"disk_pressure\", \"memory_pressure\"] and all(.conditions[]; .status == false)" >/dev/null'
 briqyard machine rm "$M" >/dev/null
 
+# What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start. The
+# machines carry on; the new daemon reads the configuration again.
+handover() {
+  local pid
+  pid=$(systemctl show -p MainPID --value briqyardd)
+  sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
+  for i in $(seq 1 100); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
+  sudo systemctl start briqyardd
+  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+}
+
+if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1 && systemctl is-active briqyard-mirror >/dev/null 2>&1; then
+  echo "== a registry mirror: pulls through it, from the registry when it is down (ADR 0036)"
+  MIRROR=127.0.0.1:7440 IMG=busybox:1.37.0-musl
+  # The dev host's configuration names the mirror, or names it for this section.
+  if ! sudo grep -q '^registry_mirrors:' /etc/briqyard/config.yaml; then
+    sudo cp /etc/briqyard/config.yaml /etc/briqyard/config.yaml.e2e
+    printf 'registry_mirrors:\n  docker.io: http://%s\n' "$MIRROR" | sudo tee -a /etc/briqyard/config.yaml >/dev/null
+    handover
+  fi
+  drop_image() { for k in $(briqyard image ls | awk -v r="$IMG" '$2 == r { print $1 }'); do briqyard image rm "$k" >/dev/null; done; }
+  last_pull() { briqyard events 2>/dev/null | awk '$4 == "image_pulled"' | grep -F "pulled $IMG " | tail -1; }
+  drop_image
+  MR=$(briqyard machine run --image "$IMG" --name mirrored --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+  digest=$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/images" | jq -r --arg r "$IMG" '.[] | select(.ref == $r) | .digest')
+  check "mirror: a pull goes through it"      '[ "$(briqyard machine get "$MR" | jq -r .state)" = running ] && last_pull | grep -qF "through $MIRROR"'
+  check "mirror: it holds the image by digest" 'curl -fsS -o /dev/null -I -H "Accept: application/vnd.oci.image.index.v1+json" "http://$MIRROR/v2/library/busybox/manifests/$digest"'
+  briqyard machine rm "$MR" >/dev/null
+  drop_image
+  sudo systemctl stop briqyard-mirror
+  since=$(date +%s)
+  MR=$(briqyard machine run --image "$IMG" --name unmirrored --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+  check "mirror down: the registry serves the pull" '[ "$(briqyard machine get "$MR" | jq -r .state)" = running ] && last_pull | grep -q . && ! last_pull | grep -qF through'
+  check "mirror down: the same digest"        '[ "$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/images" | jq -r --arg r "$IMG" ".[] | select(.ref == \$r) | .digest")" = "$digest" ]'
+  check "mirror down: the fallback logged"    'sudo journalctl -u briqyardd --since "@$since" -o cat | grep -F "mirror failed" | grep -qF "$IMG"'
+  sudo systemctl start briqyard-mirror
+  briqyard machine rm "$MR" >/dev/null
+  if sudo test -f /etc/briqyard/config.yaml.e2e; then
+    sudo mv /etc/briqyard/config.yaml.e2e /etc/briqyard/config.yaml
+    handover
+  fi
+fi
+
 if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then
   echo "== Firecracker 1.17: deletes go back to the pool, a bare pause keeps exec (ADR 0037)"
   POOL=$(sudo sed -n 's/^  pool: //p' /etc/briqyard/config.yaml); POOL=${POOL:-byard}
@@ -614,12 +665,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   check "status says the build"      '[ "$(briqyard status | jq -r .version)" = "$build" ]'
   check "the init says its version"  '[ "$(briqyard machine get "$V" | jq -r .init_version)" = "$build" ]'
   check "what ran it is the host's"  '[ "$(briqyard machine get "$V" | jq -r .vmm_version)" = "$(briqyard status | jq -r .vmm_version)" ]'
-  # What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start.
-  pid=$(systemctl show -p MainPID --value briqyardd)
-  sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
-  for i in $(seq 1 100); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
-  sudo systemctl start briqyardd
-  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  handover
   check "handed over: still running" '[ "$(briqyard machine get "$V" | jq -r .state)" = running ]'
   check "the new daemon adopted it"  'briqyard status | jq -e ".started.adopted >= 1 and .started.stopped == 0" >/dev/null'
   check "exec after the hand-over"   '[ "$(briqyard machine exec "$V" -- hostname)" = handover ]'

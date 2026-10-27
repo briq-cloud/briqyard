@@ -65,6 +65,15 @@ tree's builds. Delete it when the worktree goes.
 Everything under nested virtualization is slower than on a real server; the timings are not a
 benchmark.
 
+`hack/vm.sh install` also runs `hack/install-mirror.sh` in fc: Zot on `127.0.0.1:7440`, the
+registry mirror of ADR 0036, which `hack/config.dev.yaml` names for Docker Hub. Lima forwards
+it to the Mac's loopback, which fc2 reaches as `host.lima.internal` (Lima's user network, no
+port forward to add), so fc2's `/etc/briqyard/config.yaml` says
+`registry_mirrors: {docker.io: "http://host.lima.internal:7440"}`. A host configured before
+then: add the line and hand over (`systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd`,
+then `systemctl start briqyardd`); the e2e suite adds it on fc for its mirror section and takes
+it out after.
+
 `hack/vm.sh install` also lays out what `hack/fleet-smoke.sh` upgrades the VM's own host to
 (ADR 0027): this build's binaries under a release's names in `/var/lib/briqyard-fleet/release`
 (`file://` for `--release`), and the fleet's SSH key (`/etc/briqyard/fleet_ssh_key`, made once)
@@ -254,9 +263,10 @@ plus `apt-get purge docker.io` and the edge's files.
   event; a machine with a session open kept awake past its window, asleep once it closed),
   versions and a hand-over (status and the init say the build, `vmm_version` the host's;
   SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start: running
-  again unasked, resumed), Firecracker 1.17 (256 MiB deleted on a volume and on a root disk
-  given back to the pool, exec after a bare pause and resume). 191 checks, 187 without host
-  ports.
+  again unasked, resumed), a registry mirror (a pull through fc's Zot, the mirror then holding
+  the digest; with Zot stopped, the same image and digest from Docker Hub and the fallback
+  logged), Firecracker 1.17 (256 MiB deleted on a volume and on a root disk given back to the
+  pool, exec after a bare pause and resume). 196 checks, 192 without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).
