@@ -1,6 +1,6 @@
 # briqyard
 
-**Open source Fly Machines for AI agents.** Run any OCI image in a Firecracker microVM on your
+**Open source microVMs for AI agents.** Run any OCI image in a Firecracker microVM on your
 own servers, with a durable disk, a private network per tenant, and sleep when idle.
 
 briqyard is the runtime under [briq](https://briq.cloud). It is written in Rust and licensed under

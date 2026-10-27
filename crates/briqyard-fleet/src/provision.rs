@@ -1129,10 +1129,10 @@ mod tests {
     async fn dry_runs_order_nothing() {
         // No stub behind the URL: a call that reaches the network fails to connect.
         let h = hetzner(true, "http://127.0.0.1:1");
-        let s = h.create("launch week").await.unwrap();
+        let s = h.create("more capacity").await.unwrap();
         assert!(s.provider_id.starts_with("dry-run-"), "{}", s.provider_id);
         assert_eq!(s.ip, None);
-        assert_eq!(s.note, "DRY RUN: would order AX102 in FSN1 (launch week)");
+        assert_eq!(s.note, "DRY RUN: would order AX102 in FSN1 (more capacity)");
         h.release(&s.provider_id).await.unwrap();
         h.release("1234").await.unwrap();
         assert_eq!(h.lookup(&s.provider_id).await.unwrap(), None);
@@ -1158,12 +1158,12 @@ mod tests {
         assert_eq!(sc.lookup(&s.provider_id).await.unwrap(), None);
 
         let o = ovh(true, "http://127.0.0.1:1");
-        let s = o.create("launch week").await.unwrap();
+        let s = o.create("more capacity").await.unwrap();
         assert!(s.provider_id.starts_with("dry-run-"), "{}", s.provider_id);
         assert_eq!(s.ip, None);
         assert_eq!(
             s.note,
-            "DRY RUN: would order 25risem01-v2 (eco range) in gra with the plan's default options, ubuntu2404-server_64 with key fleet (launch week)"
+            "DRY RUN: would order 25risem01-v2 (eco range) in gra with the plan's default options, ubuntu2404-server_64 with key fleet (more capacity)"
         );
         o.release(&s.provider_id).await.unwrap();
         o.release("order:123").await.unwrap();
@@ -1197,7 +1197,7 @@ mod tests {
             r#"{"transaction":{"id":"B20261019-1","status":"in process","server_ip":null}}"#,
         )])
         .await;
-        let s = hetzner(false, &url).create("launch week").await.unwrap();
+        let s = hetzner(false, &url).create("more capacity").await.unwrap();
         assert_eq!(s.provider_id, "B20261019-1");
         assert_eq!(s.ip, None);
         assert_eq!(s.note, "ordered, status in process");
@@ -1460,7 +1460,7 @@ mod tests {
             ),
         ])
         .await;
-        let s = ovh(false, &url).create("launch week").await.unwrap();
+        let s = ovh(false, &url).create("more capacity").await.unwrap();
         assert_eq!(s.provider_id, "order:123");
         assert_eq!(s.ip, None);
         assert_eq!(s.note, "ordered 25risem01-v2 in gra, order 123");

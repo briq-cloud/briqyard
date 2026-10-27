@@ -4,7 +4,7 @@ Date: 2026-10-20 · Status: accepted
 
 ## Context
 
-Every machine of a host leaves through the host's IP. A sandbox that sends spam or scans the internet gets that IP blocklisted, and the provider (OVH, Scaleway) can suspend the server, taking every tenant on it down (`../LEAVING-FLY.md` item 3). Kubernetes's NetworkPolicy filters by port and CIDR; a multi-tenant host also needs a rate and a cap per machine.
+Every machine of a host leaves through the host's IP. A sandbox that sends spam or scans the internet gets that IP blocklisted, and the provider (OVH, Scaleway) can suspend the server, taking every tenant on it down. Kubernetes's NetworkPolicy filters by port and CIDR; a multi-tenant host also needs a rate and a cap per machine.
 
 ## Decisions
 
@@ -36,7 +36,7 @@ Verified in throwaway network namespaces on the dev VM (nft 1.1.6, kernel 7.0), 
 
 ## Consequences
 
-- briq sets the limits per plan; abuse response (suspending a team, the provider's abuse desk) stays briq's.
+- The control plane sets the limits per tenant and owns abuse response (suspending a tenant, answering the provider's abuse desk).
 - Policing costs retransmissions: the 1 MiB download above dropped 0.45 to 0.78 MB on the way. The cap protects the host's IP and link, it is not quality of service.
 - A limit's bucket starts full at every start and every change.
 - The drop counts restart at zero at a daemon start, as the internet counters do (ADR 0017).

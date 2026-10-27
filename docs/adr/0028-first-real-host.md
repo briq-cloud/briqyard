@@ -4,7 +4,7 @@ Date: 2026-10-21 · Status: accepted; amends ADR 0007 (the OVH install), ADR 001
 
 ## Context
 
-Everything ran on arm64 Lima VMs with a file-backed pool and one interface. The first real hosts are OVH dedicated servers this week: x86_64, two NVMe disks that OVH's installer puts the OS on in software RAID, a public interface and a vRack (a private layer-2 network between the servers, free). They are ordered in the OVH manager, not through the provisioner. The hosts' API, HTTP ingress and TCP endpoints carry tenants' secrets and traffic: they belong on the vRack, the public interface on nothing but SSH.
+Everything ran on arm64 Lima VMs with a file-backed pool and one interface. The first real hosts are OVH dedicated servers: x86_64, two NVMe disks that OVH's installer puts the OS on in software RAID, a public interface and a vRack (a private layer-2 network between the servers). They are ordered in the OVH manager, not through the provisioner. The hosts' API, HTTP ingress and TCP endpoints carry tenants' secrets and traffic: they belong on the vRack, the public interface on nothing but SSH.
 
 ## Decisions
 
@@ -40,7 +40,7 @@ The new partition is added to the running kernel alone (`partx -u`): the OS's pa
 
 Rejected: a flag telling the edge to skip its firewall (detection by the file is the same and cannot be forgotten); the edge's table accepting the vRack and the bridges (two owners of one policy); certbot DNS-01 (a token that edits the product's DNS zone, on a host); the fleet on its own port with lego following a CNAME into the endpoints' zone (one more tool and timer); allowing machines every port of the host's addresses (the daemon's would be among them).
 
-**The ZFS cache is capped: 10 % of memory, 1 to 16 GB (`BRIQYARD_ARC_GB`), and the daemon leaves the cap out of its capacity.** Ubuntu 24.04's OpenZFS 2.2 lets the ARC take half the memory (2.3: nearly all); the kernel reclaims it only when a guest faults its memory in, slowly, and the OOM killer's choice is a Firecracker. Proxmox VE caps it the same way (10 %, 16 GiB at most, since 8.1). Default `capacity.memory_mb` is the host's memory less 2 GB and less `zfs_arc_max`. Rejected: `primarycache=metadata` on the zvols (guests cache their own data; worth measuring, not a day-one change).
+**The ZFS cache is capped: 10 % of memory, 1 to 16 GB (`BRIQYARD_ARC_GB`), and the daemon leaves the cap out of its capacity.** Ubuntu 24.04's OpenZFS 2.2 lets the ARC take half the memory (2.3: nearly all); the kernel reclaims it only when a guest faults its memory in, slowly, and the OOM killer's choice is a Firecracker. Default `capacity.memory_mb` is the host's memory less 2 GB and less `zfs_arc_max`. Rejected: `primarycache=metadata` on the zvols (guests cache their own data; worth measuring, not a day-one change).
 
 **A private repository's release is read through GitHub's API.** `BRIQYARD_RELEASE_TOKEN` (fleet: `provisioner.bootstrap.release_token` or the fleet's environment; a fine-grained token, contents read on the repository) resolves each asset of `BRIQYARD_RELEASE`; every binary is checked against the release's `SHA256SUMS-<arch>` before any is installed. `host upgrade` (ADR 0027) passes the same token with the release, and nothing else of the host's. Release assets of a private repository are not served at their download URL. Rejected: the fleet copying its own binaries to the host (ties a host to the fleet's build and arch; how releases reach hosts is ADR 0027's).
 

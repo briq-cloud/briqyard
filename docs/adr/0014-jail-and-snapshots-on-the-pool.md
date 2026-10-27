@@ -4,7 +4,7 @@ Date: 2026-10-20 · Status: accepted
 
 ## Context
 
-Two findings of the 2026-10-20 review (C3, B9). A memory snapshot (ADR 0005) is written by Firecracker into its jail, and the jail was a directory on the host's root filesystem: a suspended 32 GB machine wrote 32 GB to `/`, and the shutdown path, which suspends every running machine, needed the memory of every guest free on the root disk. And every file the daemon wrote was world-readable under the default umask: the records (a machine's `env`, resolved secrets included), the config drives, the consoles. Any local uid on the host could read every tenant's secrets, including the uid of every other machine's Firecracker.
+Two findings of the 2026-10-20 review. A memory snapshot (ADR 0005) is written by Firecracker into its jail, and the jail was a directory on the host's root filesystem: a suspended 32 GB machine wrote 32 GB to `/`, and the shutdown path, which suspends every running machine, needed the memory of every guest free on the root disk. And every file the daemon wrote was world-readable under the default umask: the records (a machine's `env`, resolved secrets included), the config drives, the consoles. Any local uid on the host could read every tenant's secrets, including the uid of every other machine's Firecracker.
 
 ## Decisions
 
