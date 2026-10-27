@@ -14,8 +14,8 @@ use std::path::Path;
 /// The newest backup; one more per UTC day (`registry-<day>.json.age`), the last of that day.
 pub const LATEST: &str = "fleet/registry.json.age";
 
-/// A write of the registry is given this long: a key request waits on it, and the store's
-/// client allows an hour for a machine's backup.
+/// A write of the registry is given this long, retries included: a key request waits on it,
+/// and the store's client retries for minutes, which suits a machine's backup.
 const PUT_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct Backup {

@@ -207,7 +207,10 @@ what changed since the last backup whose snapshot is still on the host (`zfs sen
 Each backup is a record (`backups/<machine>/<id>.json`, the machine's spec included, secrets
 included: the store is as sensitive as the host) plus one object per disk. A backup of a
 running machine is crash-consistent, what a power cut would leave; stop the machine first for
-a clean one, or let the application do its own consistency (Postgres does).
+a clean one, or let the application do its own consistency (Postgres does). A stream goes up
+in 32 MB parts, four at a time, each request tried again with backoff for up to 10 minutes
+(ADR 0034). Give the bucket a lifecycle rule that aborts incomplete multipart uploads after a
+day: a daemon cut mid-upload leaves one.
 
 `briqyard machine backups <id>` lists them, from the store, so a machine that no longer exists
 still has them. `briqyard machine restore --from <machine id> [--backup <id>] --tenant T --name
