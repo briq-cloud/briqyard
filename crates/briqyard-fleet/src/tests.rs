@@ -1133,7 +1133,7 @@ fn a_restore_says_what_the_fleet_will_trust() {
         "file:///b fleet/registry.json.age",
         std::path::Path::new("/s/registry.json"),
     );
-    assert!(out.starts_with("restored 1 hosts (1 pool keys) and 0 tenants from file:///b fleet/registry.json.age into /s/registry.json\n"), "{out}");
+    assert!(out.starts_with("restored 1 hosts (1 pool keys, 0 retired) and 0 tenants from file:///b fleet/registry.json.age into /s/registry.json\n"), "{out}");
     assert!(
         out.contains("newest heartbeat in it: 2026-10-21T12:00:00+00:00"),
         "{out}"

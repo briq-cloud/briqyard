@@ -132,6 +132,18 @@ impl Zfs {
         Ok(())
     }
 
+    /// Checks that `key` is the one the pool is encrypted under, without loading anything
+    /// (`load-key -n`, which works while the key is loaded): what a backup names and seals with
+    /// must be what its raw streams are wrapped with (ADR 0035).
+    pub async fn check_key(&self, key: &str) -> Result<()> {
+        self.run_input(
+            &["load-key", "-n", "-L", "prompt", &self.pool],
+            format!("{key}\n").as_bytes(),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Opens a dataset received from raw streams, its own encryption root under the key it
     /// was sent with (`key`, the source host's), and makes it inherit the pool's key: from
     /// then on it opens with the pool, like every other dataset (ADR 0035).
@@ -901,7 +913,7 @@ case "$1" in
     if [ "$key" != "$(cat "$DEV/key" 2>/dev/null)" ]; then
       echo "Key load error: Incorrect key provided for '$last'." >&2; exit 255
     fi
-    echo available > "$DEV/answer.keystatus"; exit 0;;
+    [ "$2" = -n ] || echo available > "$DEV/answer.keystatus"; exit 0;;
   change-key)
     [ -e "$DEV/$last" ] || missing "$last"; exit 0;;
   get)

@@ -164,7 +164,7 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   key route: made at the first ask, the same after, one per host, refused to any other token
   or address, written `0600` before it is answered, in no listing, no longer the host's once
   it is forgotten but kept for its backups, served by its id to any host and refused for an
-  unknown id (ADR 0035); a backup raw under its key's id with its record sealed (the env in
+  unknown id (ADR 0035); a backup refused under a key that is not the pool's; a backup raw under its key's id with its record sealed (the env in
   no object, a sealed spec that does not open moved to another record), a restore opening it
   with the key of that id and giving its disks the pool's, the key file's own or the fleet's,
   refused with no fleet to ask; a backup in clear restored with no key, the next one whole; a

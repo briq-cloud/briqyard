@@ -656,7 +656,8 @@ enum HostCmd {
         id: String,
     },
     /// Forget a host (its machines are not touched). A host with a pool key is refused unless
-    /// --force: the key goes with the record and its pool is unreadable at its next restart
+    /// --force: the key leaves the record, kept only for its backups (ADR 0035), and its pool is
+    /// unreadable at its next restart
     Rm {
         id: String,
         #[arg(long)]

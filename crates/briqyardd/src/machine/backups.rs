@@ -135,9 +135,6 @@ pub(super) struct Backups {
     store: Option<ObjectStore>,
     gate: tokio::sync::Semaphore,
     holders: Mutex<HashMap<String, Arc<Holder>>>,
-    /// What the host's backups are sealed and named with, from the pool key asked of its
-    /// source at the first backup (ADR 0035).
-    seal: tokio::sync::OnceCell<Seal>,
 }
 
 /// A pool key's id and the key a backup's record is sealed with, derived from the pool key
@@ -243,7 +240,6 @@ impl Backups {
             store,
             gate: tokio::sync::Semaphore::new(cfg.at_once.max(1) as usize),
             holders: Mutex::new(holders),
-            seal: Default::default(),
         })
     }
 }
@@ -286,18 +282,20 @@ impl Manager {
             .ok_or_else(|| invalid("backups are off on this host (backup.store)"))
     }
 
-    /// What this host's backups are sealed and named with (ADR 0035).
-    async fn seal(&self) -> Result<&Seal, MError> {
-        let seal = self
-            .inner
-            .backups
-            .seal
-            .get_or_try_init(|| async {
-                Seal::of(&crate::poolkey::pool_key(&self.inner.cfg).await?)
-            })
+    /// What a backup is sealed and named with (ADR 0035): the pool key asked of its source,
+    /// checked against the pool (a key file replaced, a registry restored to an older key, a
+    /// pool re-keyed by hand would otherwise name a key its streams are not under), then
+    /// dropped once derived.
+    async fn seal(&self) -> Result<Seal, MError> {
+        let key = crate::poolkey::pool_key(&self.inner.cfg)
             .await
             .context("the pool key, for the backup's seal")?;
-        Ok(seal)
+        self.inner
+            .zfs
+            .check_key(&key)
+            .await
+            .context("the pool key from its source is not the pool's")?;
+        Ok(Seal::of(&key)?)
     }
 
     /// The key a backup is encrypted under, asked by its id; none for a backup in clear.
@@ -987,7 +985,8 @@ impl Manager {
     /// root under the key they were sent with: that key, asked by its id, opens them, and they
     /// then take the pool's. A chain in clear (before ADR 0035) is received as it always was.
     /// A chain is one or the other: a raw increment is sent only over a raw backup under the
-    /// same key (`in_store`).
+    /// same key (`in_store`). The key is given to a disk once its whole chain is in: a raw
+    /// increment is received only into a dataset that is still its own encryption root.
     pub(super) async fn receive_disks(
         &self,
         e: &Arc<Entry>,
@@ -1582,6 +1581,26 @@ mod tests {
             Err(e) => format!("{e:#}"),
         };
         assert!(msg.contains("no fleet to ask"), "{msg}");
+    }
+
+    /// A key from the source that is not the pool's (a key file replaced, a registry restored
+    /// to an older key) makes no backup: its record would name a key its streams are not under.
+    #[tokio::test]
+    async fn a_backup_is_refused_under_a_key_that_is_not_the_pools() {
+        let h = harness(|_| {}).await;
+        let m = h.machine("db", None, true).await;
+        let file =
+            h.m.inner
+                .cfg
+                .storage
+                .key
+                .trim_start_matches("file:")
+                .to_string();
+        std::fs::write(&file, "fedcba9876543210".repeat(4)).unwrap();
+        let err = h.m.backup(&m.id).await.unwrap_err();
+        assert!(format!("{err:#}").contains("not the pool's"), "{err:#}");
+        assert!(h.objects(&m.id).await.is_empty());
+        assert!(!h.pool.calls().iter().any(|c| c.starts_with("send ")));
     }
 
     /// A backup made before ADR 0035, its streams in clear, restores as it did, with no key;

@@ -312,8 +312,9 @@ fn restored(reg: &Registry, from: &str, path: &std::path::Path) -> String {
         .filter(|h| !h.pool_key.is_empty())
         .count();
     let mut out = format!(
-        "restored {} hosts ({keys} pool keys) and {} tenants from {from} into {}\n",
+        "restored {} hosts ({keys} pool keys, {} retired) and {} tenants from {from} into {}\n",
         reg.hosts.len(),
+        reg.retired_keys.len(),
         reg.tenants.len(),
         path.display()
     );
@@ -640,10 +641,11 @@ async fn host_key(
     Json(req): Json<api::HostKeyRequest>,
 ) -> Result<Response, Refusal> {
     let caller = Caller::of(&st, info, &headers);
-    let _turn = st.key_turn.lock().await;
+    // A backup's key is only read: it never waits behind a key being made.
     if let Some(want) = &req.key_id {
         return backup_key(&st, &req.url, &headers, caller, want);
     }
+    let _turn = st.key_turn.lock().await;
     let (id, key, made) = {
         let mut reg = st.reg.lock().unwrap();
         let id = the_host(&reg, &req.url, &headers, caller, "pool key")?
@@ -688,7 +690,8 @@ async fn host_key(
 
 /// The pool key of a backup (ADR 0035), for any host of the fleet: the key of that id, a live
 /// host's or a forgotten one's. Every host reads every backup's streams (a restore lands
-/// anywhere), so the key opens nothing a host could not already ask for; it is never made here.
+/// anywhere); a raw stream opens only with the pool key of the host that sent it, so that is
+/// what is served. Never made here, and every hand-out is a `warn` line.
 fn backup_key(
     st: &AppState,
     url: &str,
@@ -708,7 +711,7 @@ fn backup_key(
         ));
     };
     let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
-    tracing::info!(host, owner, key_id, peer, "backup key served");
+    tracing::warn!(host, owner, key_id, peer, "backup key served");
     Ok(Json(api::HostKey {
         key: key.expose().to_string(),
     })
@@ -954,7 +957,7 @@ async fn release_host(st: &AppState, h: &HostRec) -> Result<api::Host> {
 
 /// What a forget of a host that holds a pool key costs, said by its refusal and by `force`.
 const FORGET_KEYED: &str =
-    "its pool key goes with the record (kept for its backups alone): the pool is unreadable at the host's next restart; retire it, or --force";
+    "its pool key leaves the record and is kept only for its backups: the pool is unreadable at the host's next restart; retire it, or --force";
 
 #[derive(serde::Deserialize, Default)]
 struct ForgetQuery {
