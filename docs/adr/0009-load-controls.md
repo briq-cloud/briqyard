@@ -18,5 +18,5 @@ The stress spike (`../research/2026-10-19-stress-spike.md`) started 24 guests at
 
 ## Consequences
 
-- Under load a create can take minutes and still succeed; the control plane's timeout (130 s today) must follow the daemon's, or the transition must run detached from the request (review finding B2).
+- Under load a create can take minutes and still succeed; the control plane's timeout (130 s today) must follow the daemon's, or the transition must run detached from the request.
 - A tag moved at the registry is seen within 10 minutes, not at once.
