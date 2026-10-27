@@ -135,12 +135,11 @@ would an OVH server (the free space of `$D0` mirrored with `$D1`, `10.99.0.2` on
 unit and table, the netplan file, the dummy, the pool, the loops, the ARC cap), and put fc2's
 host back (`zpool import -d /var/lib/briqyard byard`).
 
-briq's edge beside it (ADR 0028) is exercised the same way: `hack/bootstrap-host.sh` run on fc2
+An edge beside it (ADR 0028) is exercised the same way: `hack/bootstrap-host.sh` run on fc2
 directly (a file pool, `PRIVATE_ADDRESS` on `byvrack0`, `PUBLIC_TCP_PORTS` the edge's), then
-briq's `infra/edge/host/bootstrap.sh` from the monorepo checkout with dummy secrets, the edge
-image built on the Mac (`infra/image.sh edge`, `docker build`, `docker save`, `limactl copy`)
-loaded and started by its unit with `CADDY_TLS=file` and a static endpoint on the host's
-ingress, and `hack/e2e.sh` on `https://10.99.0.2:7420` beside it (143 checks). Undo it as above,
+the edge's own bootstrap with dummy secrets, its image built on the Mac and copied in
+(`docker save`, `limactl copy`), started with a certificate from a file and a static endpoint
+on the host's ingress, and `hack/e2e.sh` on `https://10.99.0.2:7420` beside it. Undo it as above,
 plus `apt-get purge docker.io` and the edge's files.
 
 ## Tests
@@ -258,7 +257,7 @@ plus `apt-get purge docker.io` and the edge's files.
   again unasked, resumed). E2E checks, E2EN without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
-  port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 8).
+  port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
   relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a

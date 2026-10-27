@@ -80,4 +80,4 @@ Rejected, one line each:
 - The fleet reaches every host it upgrades over SSH with `provisioner.bootstrap.ssh_key`; a static host's key is pinned at its first upgrade, as an ordered host's at its bootstrap.
 - After a roll, `provisioner.bootstrap.release` is what new hosts get: set it to the same release.
 - Closed by ADR 0028: release digests, every binary checked against the release's `SHA256SUMS-<arch>` before any is installed.
-- Open: the init in an initramfs (every cold boot on the host's init, so the daemon could drop support for old inits); OS patching through the fleet (drain, reboot, undrain in one call); evacuating a host before a reboot (`LEAVING-FLY.md` item 6).
+- Open: the init in an initramfs (every cold boot on the host's init, so the daemon could drop support for old inits); OS patching through the fleet (drain, reboot, undrain in one call); evacuating a host before a reboot.

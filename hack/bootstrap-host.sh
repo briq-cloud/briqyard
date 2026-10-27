@@ -187,8 +187,8 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
   public_dev=$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
   [ -n "$public_dev" ] || fail "no default route: machines would have no way to the internet"
   [ "$public_dev" != "$private_dev" ] || fail "the default route goes through $private_dev, the private interface"
-  # One firewall owner per host (ADR 0028): briq's edge, on this host, runs its bootstrap after.
-  ! nft list table inet briq_edge >/dev/null 2>&1 || fail "briq's edge firewall is loaded: run its bootstrap after this one"
+  # One firewall owner per host (ADR 0028): an edge on this host runs its bootstrap after.
+  ! nft list table inet briq_edge >/dev/null 2>&1 || fail "an edge's firewall (table inet briq_edge) is loaded: run its bootstrap after this one"
   # A table of its own, loaded before the network at every boot; the daemon's are apart.
   # SSH's own ports, as sshd runs them: a literal 22 would lock out a server on another.
   ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}' | paste -sd, -)
