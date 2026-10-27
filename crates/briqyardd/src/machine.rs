@@ -13,7 +13,7 @@ use crate::netw::{self, dns::Resolver, host, nft, nft::Ruleset, Range, Subnet};
 use crate::store::Store;
 use crate::usage::{self, Ledger, Meter, Traffic};
 use crate::zfs::Zfs;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use briqyard_api::guest;
 use briqyard_api::{self as api, reason, state, stop};
 use chrono::{DateTime, Utc};
@@ -888,8 +888,8 @@ impl Manager {
         &self.inner.host_id
     }
 
-    /// Reads the records. A tenant whose subnet index is outside `network.range` is refused
-    /// here, with the fix, rather than found by the first request that needs its subnet. The
+    /// Reads the records. A tenant whose subnet index is outside `network.range`, or an
+    /// endpoint whose port is outside `ingress.tcp_ports`, is refused here, with the fix, rather than found by the first request that needs its subnet. The
     /// event log goes on past every machine's version.
     fn load(&self) -> Result<()> {
         let st = &self.inner.store;
@@ -916,7 +916,19 @@ impl Manager {
                 .unwrap()
                 .insert(id, Entry::new(r, self.inner.events.clone()));
         }
+        // An endpoint port outside the range would listen where the daemon's table does not
+        // hold it for `allowed_clients`: refused, like a tenant outside `network.range`.
+        let spec = &self.inner.cfg.ingress.tcp_ports;
+        let (lo, hi) = port_range(spec).map_err(|e| anyhow!("{e}"))?;
         for ep in st.list::<EndpointRec>("endpoints")? {
+            if let Some(p) = ep.host_port.filter(|p| !(lo..=hi).contains(p)) {
+                bail!(
+                    "endpoint {} (machine {}) holds host port {p}, outside ingress.tcp_ports \
+                     {spec}: put the range back, or remove the endpoint",
+                    ep.id,
+                    ep.machine_id
+                );
+            }
             self.inner
                 .endpoints
                 .lock()
@@ -1404,6 +1416,7 @@ impl Manager {
                 .map(|c| netw::cidr(c))
                 .collect::<Result<_>>()?,
             ports: netw::nft::daemon_ports(&cfg.listen, &cfg.ingress.http, &cfg.ingress.tcp_ports)?,
+            host_ports: cfg.network.host_ports.clone(),
             pins,
             policies,
             counted,
@@ -2434,15 +2447,13 @@ impl Manager {
             memory_mb: if c.memory_mb > 0 {
                 c.memory_mb
             } else {
-                host_memory_mb().saturating_sub(2048).max(1024)
+                default_memory_mb(host_memory_mb(), c.reserved_memory_mb, arc_max_mb())
             },
             vcpus: if c.vcpus > 0 {
                 c.vcpus
             } else {
-                (std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(2)
-                    * 4) as u32
+                let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+                default_vcpus(threads as u32, c.reserved_threads)
             },
         }
     }
@@ -4950,6 +4961,32 @@ fn meminfo_total_mb(text: &str) -> Option<u32> {
         .map(|kb| (kb / 1024) as u32)
 }
 
+/// What the host hands out when the configuration does not say: its memory less what it
+/// keeps for itself and its other services (`capacity.reserved_memory_mb`, 2 GB) and less the
+/// ZFS cache's ceiling when one is set (ADR 0028), at least 1 GB.
+fn default_memory_mb(host_mb: u32, reserved_mb: u32, arc_max_mb: u32) -> u32 {
+    host_mb
+        .saturating_sub(reserved_mb)
+        .saturating_sub(arc_max_mb)
+        .max(1024)
+}
+
+/// Four shared vCPUs a hardware thread, less the threads kept for the host's other services
+/// (`capacity.reserved_threads`), at least one thread's.
+fn default_vcpus(threads: u32, reserved: u32) -> u32 {
+    threads.saturating_sub(reserved).max(1) * 4
+}
+
+/// The ZFS cache's ceiling (`zfs_arc_max`, the bootstrap sets it), in MB; 0 when it is the
+/// module's default, which the cache gives back under pressure.
+fn arc_max_mb() -> u32 {
+    std::fs::read_to_string("/sys/module/zfs/parameters/zfs_arc_max")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|b| (b >> 20) as u32)
+        .unwrap_or(0)
+}
+
 /// The first IPv4 address in `ip -4 -o addr show` output.
 fn inet_of(text: &str) -> Option<Ipv4Addr> {
     let f: Vec<&str> = text.split_whitespace().collect();
@@ -5282,6 +5319,18 @@ mod tests {
         assert_eq!(meminfo_total_mb(meminfo), Some(15935));
         assert_eq!(meminfo_total_mb("MemFree: 1 kB\n"), None);
         assert_eq!(meminfo_total_mb(""), None);
+        // 64 GB, the ARC capped at 6 GB: 56 GB for machines; no cap, 2 GB kept only.
+        assert_eq!(default_memory_mb(65536, 2048, 6144), 57344);
+        assert_eq!(default_memory_mb(65536, 2048, 0), 63488);
+        assert_eq!(
+            default_memory_mb(65536, 3072, 6144),
+            56320,
+            "an edge beside it"
+        );
+        assert_eq!(default_memory_mb(3072, 2048, 1024), 1024, "at least 1 GB");
+        assert_eq!(default_vcpus(16, 0), 64);
+        assert_eq!(default_vcpus(16, 2), 56);
+        assert_eq!(default_vcpus(2, 4), 4, "at least one thread's");
 
         let addr = "2: eth0    inet 192.168.64.3/24 brd 192.168.64.255 scope global dynamic eth0\\       valid_lft 86000sec preferred_lft 86000sec\n";
         assert_eq!(inet_of(addr), Some(Ipv4Addr::new(192, 168, 64, 3)));
@@ -6022,6 +6071,7 @@ mod tests {
             cfg.capacity = crate::config::Capacity {
                 memory_mb,
                 vcpus: 1000,
+                ..Default::default()
             };
             cfg.egress_limits = egress_limits;
         })
@@ -6474,6 +6524,37 @@ mod tests {
         h.m.inner.store.put("tenants", "t1", &t).unwrap();
         h.m.load().unwrap();
         assert_eq!(h.m.tenants()[0].router, "10.64.3.1");
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_port_outside_the_range_is_refused_at_load() {
+        // A port the daemon's table does not keep for allowed_clients: refused, not opened.
+        let h = harness_config(|c| c.ingress.tcp_ports = "30000-32767".into()).await;
+        let ep = EndpointRec {
+            id: "ep_1".into(),
+            machine_id: "m_1".into(),
+            tenant: "t1".into(),
+            port: 5432,
+            protocol: "tcp".into(),
+            host_port: Some(20001),
+            host: String::new(),
+            created_at: Utc::now(),
+        };
+        h.m.inner.store.put("endpoints", "ep_1", &ep).unwrap();
+        let err = format!("{:#}", h.m.load().unwrap_err());
+        assert_eq!(
+            err,
+            "endpoint ep_1 (machine m_1) holds host port 20001, outside ingress.tcp_ports \
+             30000-32767: put the range back, or remove the endpoint"
+        );
+        assert!(h.m.inner.endpoints.lock().unwrap().is_empty());
+        let ep = EndpointRec {
+            host_port: Some(30001),
+            ..ep
+        };
+        h.m.inner.store.put("endpoints", "ep_1", &ep).unwrap();
+        h.m.load().unwrap();
+        assert_eq!(h.m.all_endpoints().len(), 1);
     }
 
     #[tokio::test]

@@ -58,6 +58,10 @@ hack/vm.sh logs        # follow the daemon's log
 hack/vm.sh e2e         # install, then run hack/e2e.sh inside the VM
 ```
 
+One target dir per tree in the VM (`$HOME/target-<tree's directory>`, the unit tests' too):
+cargo hashes a path package relative to its workspace, so a shared one hands out another
+tree's builds. Delete it when the worktree goes.
+
 Everything under nested virtualization is slower than on a real server; the timings are not a
 benchmark.
 
@@ -102,6 +106,41 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" \
   SECOND_HOST_SH="limactl shell fc2 sudo" bash hack/fleet-two-hosts.sh
 ```
+
+### fc2 as a real host
+
+fc2 has two interfaces (`lima0`, the default route, and `eth0`), so it stands in for an OVH
+server when a bootstrap change needs exercising (ADR 0028). Under the lock, fc2's own host
+parked first (`systemctl stop briqyardd`, `zpool export byard`, its empty mountpoints under
+`/byard` removed, which `zpool create` will not mount over, `/var/lib/briqyard` and
+`/etc/briqyard` moved aside), as root on fc2:
+
+```bash
+truncate -s 14G /srv/byt/disk0.img; truncate -s 12G /srv/byt/disk1.img
+D0=$(losetup -fP --show /srv/byt/disk0.img); D1=$(losetup -fP --show /srv/byt/disk1.img)
+sgdisk -n 1:0:+2G "$D0"; partx -u "$D0"; mkfs.ext4 -q "${D0}p1"; mount "${D0}p1" /mnt/byt-os   # the "OS"
+ip link add byvrack0 type dummy && ip link set byvrack0 up                                  # the "vRack"
+ssh-keygen -q -t ed25519 -N '' -f /etc/byt-fleet/key && cat /etc/byt-fleet/key.pub >> /root/.ssh/authorized_keys
+ln -sfn "$PWD/bin" /root/bin       # the binaries hack/vm.sh built, copied out of fc's target-<tree>
+```
+
+A fleet on fc2 itself (`listen: 0.0.0.0:7431` and `tls: off`, the token alone as in `hack/fleet.dev.yaml`: on loopback with no proxy in front, every host call would be refused for want of a caller address; `provisioner.bootstrap`: `enabled`, `ssh_key:
+/etc/byt-fleet/key`, `pool_device: $D0,$D1`, `fleet_url: http://127.0.0.1:7431`,
+`private_network: 10.99.0.0/24`, `private_interface: byvrack0`, `allowed_clients`), then
+`briqyard host add 192.168.64.2 --address 10.99.0.2`: the fleet bootstraps fc2 over SSH as it
+would an OVH server (the free space of `$D0` mirrored with `$D1`, `10.99.0.2` on `byvrack0`,
+`lima0` closed but for SSH, both keys pinned), and `hack/e2e.sh` runs on fc2 against
+`https://10.99.0.2:7420` with the token and the fingerprint, with `backup.store` and at most
+`capacity.memory_mb: 4096` added (fc2 has 6 GB and no swap: more overcommit hangs it). Undo it all after (the firewall
+unit and table, the netplan file, the dummy, the pool, the loops, the ARC cap), and put fc2's
+host back (`zpool import -d /var/lib/briqyard byard`).
+
+An edge beside it (ADR 0028) is exercised the same way: `hack/bootstrap-host.sh` run on fc2
+directly (a file pool, `PRIVATE_ADDRESS` on `byvrack0`, `PUBLIC_TCP_PORTS` the edge's), then
+the edge's own bootstrap with dummy secrets, its image built on the Mac and copied in
+(`docker save`, `limactl copy`), started with a certificate from a file and a static endpoint
+on the host's ingress, and `hack/e2e.sh` on `https://10.99.0.2:7420` beside it. Undo it as above,
+plus `apt-get purge docker.io` and the edge's files.
 
 ## Tests
 
@@ -199,28 +238,35 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   receiving a line printed after it began and ending at the destroy), disk limits (a machine's
   own over the host's for 2 vCPUs; at 4 MB/s, 32 MiB written to the volume in 5 s or more and
   16 MiB read from the root disk in 2 s or more, with O_DIRECT; `cpu.weight` 200; lifted live;
-  set while suspended and in force after the resume; throttling on `/metrics`), snapshots (files on the volume and the root disk back after a
-  restore, a running machine booted again, a fork made after the snapshot still working, a backup
-  after the restore continuing from the one before the snapshot and restoring to the machine's
-  content, the newer snapshot restored and the next backup whole, a snapshot with memory resumed
-  with `/tmp` and the uptime kept), encryption at rest
-  (the pool and every dataset under it encrypted, records, runs, images and jails on it, the
-  key in none of the daemon's files nor its log; the daemon stopped and the pool locked as a
-  reboot leaves it: without its key file no API and the reason logged, the file back and it
-  starts, a machine of before runs again), exec sessions (`-i` streaming stdin, stderr apart and the
-  code; `-it` driven by `hack/exec-tty.py`: a terminal of the size sent, a resize followed, the
-  exit code; the client's close hanging up a tty command and killing a piped one; the
-  `session_opened` event; a machine with a session open kept awake past its window, asleep once
-  it closed), versions and a hand-over (status and the init say the build, `vmm_version` the
-  host's; SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start:
-  running again unasked, resumed), Firecracker 1.17 (256 MiB deleted on a volume and on a root
-  disk given back to the pool, exec after a bare pause and resume). 187 checks.
-
+  set while suspended and in force after the resume; throttling on `/metrics`), host ports (on
+  the host, when its config lists `network.host_ports`: one reached from a machine with egress,
+  dropped for `none` and `via`, the API dropped), snapshots (files on the volume and the root
+  disk back after a restore, a running machine booted again, a fork made after the snapshot
+  still working, a backup after the restore continuing from the one before the snapshot and
+  restoring to the machine's content, the newer snapshot restored and the next backup whole, a
+  snapshot with memory resumed with `/tmp` and the uptime kept), encryption at rest (the pool
+  and every dataset under it encrypted, records, runs, images and jails on it, the key in none
+  of the daemon's files nor its log; the daemon stopped and the pool locked as a reboot leaves
+  it: without its key file no API and the reason logged, the file back and it starts, a machine
+  of before runs again), exec sessions (`-i` streaming stdin, stderr apart and the code; `-it`
+  driven by `hack/exec-tty.py`: a terminal of the size sent, a resize followed, the exit code;
+  the client's close hanging up a tty command and killing a piped one; the `session_opened`
+  event; a machine with a session open kept awake past its window, asleep once it closed),
+  versions and a hand-over (status and the init say the build, `vmm_version` the host's;
+  SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start: running
+  again unasked, resumed), Firecracker 1.17 (256 MiB deleted on a volume and on a root disk
+  given back to the pool, exec after a bare pause and resume). 191 checks, 187 without host
+  ports.
+  Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
+  calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
+  port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
   relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
   machine running (back `ready`, a new start of this version that adopted it, the machine
-  answering, never booted again). 31 checks.
+  answering, never booted again). 31 checks. With `BRIQYARD_TOKEN` against a real fleet: it
+  orders only through a dry-run provisioner and drains only the dev fleet's host `local`, so it
+  leaves real hosts alone (15 checks then).
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases
