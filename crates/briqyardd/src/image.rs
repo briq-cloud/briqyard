@@ -660,19 +660,13 @@ pub fn secure_join(root: &Path, rel: &str) -> Result<PathBuf> {
 /// Like `secure_join`, but the last component is never followed: this is where something is
 /// about to be written or removed, and an existing symlink there must be replaced, not
 /// written through (a layer that rewrites `usr/bin/lzcat -> /bin/busybox` would otherwise
-/// clobber busybox itself).
+/// clobber busybox itself). A path ending in `..` has no last name to keep: it resolves as
+/// `secure_join` does, never above `root`.
 pub fn secure_join_nofollow(root: &Path, rel: &str) -> Result<PathBuf> {
-    let rel = rel.trim_end_matches('/');
-    match rel.rsplit_once('/') {
-        Some((parent, base)) if !base.is_empty() && base != ".." => {
-            Ok(secure_join(root, parent)?.join(base))
-        }
-        _ => {
-            if rel == ".." || rel.is_empty() {
-                return Ok(root.to_path_buf());
-            }
-            Ok(root.join(rel))
-        }
+    let mut parts: Vec<String> = Path::new(rel).components().filter_map(component).collect();
+    match parts.pop() {
+        Some(last) if last != ".." => Ok(secure_join(root, &parts.join("/"))?.join(last)),
+        _ => secure_join(root, rel),
     }
 }
 
@@ -710,10 +704,16 @@ pub fn extract<R: Read>(root: &Path, r: R) -> Result<usize> {
         if let Some(victim) = base.strip_prefix(".wh.") {
             let parent = &clean[..clean.len() - base.len()];
             let target = secure_join_nofollow(root, &format!("{parent}{victim}"))?;
-            remove_any(&target);
+            if target != root {
+                remove_any(&target);
+            }
             continue;
         }
         let dest = secure_join_nofollow(root, clean)?;
+        // A name that resolves to the root itself (`a/..`) may only set its mode.
+        if dest == root && entry.header().entry_type() != tar::EntryType::Directory {
+            continue;
+        }
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -879,6 +879,56 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(root.path().join("dev/null")).is_err(),
             "devices are skipped"
+        );
+    }
+
+    #[test]
+    fn a_name_ending_in_dotdot_stays_in_root() {
+        // `x/../..` once resolved to `root/x/../..`, above the root: a directory entry
+        // changed that directory's mode, a file entry or a whiteout removed it whole.
+        for entry in [
+            ("x/../../..", tar::EntryType::Directory, "", ""),
+            ("y/../../..", tar::EntryType::Regular, "", "y"),
+            ("../../.wh..", tar::EntryType::Regular, "", ""),
+            ("a/..", tar::EntryType::Regular, "", "z"),
+        ] {
+            let base = tempfile::tempdir().unwrap();
+            let root = base.path().join("a/b/c/root");
+            std::fs::create_dir_all(&root).unwrap();
+            for dir in ["a", "a/b", "a/b/c"] {
+                std::fs::write(base.path().join(dir).join("keep"), "k").unwrap();
+            }
+            let b = base.path().join("a/b");
+            std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o711)).unwrap();
+            extract(
+                &root,
+                &archive(&[entry, ("etc/hello", tar::EntryType::Regular, "", "hi")])[..],
+            )
+            .unwrap();
+            for dir in ["a", "a/b", "a/b/c"] {
+                assert!(
+                    base.path().join(dir).join("keep").exists(),
+                    "{}: {dir} removed",
+                    entry.0
+                );
+            }
+            let mode = std::fs::metadata(&b).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, 0o711, "{}: mode of a/b changed", entry.0);
+            assert_eq!(
+                std::fs::read_to_string(root.join("etc/hello")).unwrap(),
+                "hi"
+            );
+        }
+        for rel in ["..", "a/..", "a/b/../..", "../../x/..", "./.."] {
+            assert_eq!(
+                secure_join_nofollow(Path::new("/r"), rel).unwrap(),
+                Path::new("/r"),
+                "{rel}"
+            );
+        }
+        assert_eq!(
+            secure_join_nofollow(Path::new("/r"), "a/../b").unwrap(),
+            Path::new("/r/b")
         );
     }
 
