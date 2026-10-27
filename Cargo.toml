@@ -63,6 +63,8 @@ rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 # DNS wire format for the tenant resolver (ADR 0033): the protocol crate only, no resolver or server.
 hickory-proto = { version = "0.26.3", default-features = false }
+# The ingress reads public request heads with it (ADR 0033); hyper already depends on it.
+httparse = "1.10"
 
 [profile.release]
 opt-level = "s"

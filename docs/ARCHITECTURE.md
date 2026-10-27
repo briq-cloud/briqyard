@@ -191,7 +191,8 @@ with 409 `gateway`: one resolver, `own_entry`, for every call that changes or ru
 No machine has a public address. Something outside reaches a port through the ingress, which is
 how sleep works: a connection to a sleeping machine's endpoint starts it, waits for the port and
 then proxies. Two kinds of endpoints: a TCP port on the host (Postgres, Redis), and an HTTP host
-name on the shared HTTP port (`<endpoint>.<domain>`), both allocated by the API.
+name on the shared HTTP port (`<endpoint>.<domain>`), both allocated by the API. The HTTP
+port reads the first request head with `httparse` and routes by its one `Host` (ADR 0033).
 
 ### Inside the microVM
 

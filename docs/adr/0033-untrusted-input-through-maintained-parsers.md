@@ -1,6 +1,6 @@
 # ADR 0033: Untrusted input goes through maintained, fuzzed parsers
 
-Date: 2026-10-27 · Status: accepted; amends ADR 0003 (the gateway's DNS)
+Date: 2026-10-27 · Status: accepted; amends ADR 0003 (the gateway's DNS, the ingress's request head)
 
 ## Context
 
@@ -19,8 +19,22 @@ The daemon reads bytes that someone else wrote: a guest's DNS queries on its gat
 | A label holding a `.` byte | joined as a dot (could match another name) | escaped, matches nothing |
 | New crates in the Linux build | | 6: `hickory-proto`, `rand` 0.10 with `rand_core` and `chacha20`, `critical-section`, `portable-atomic` |
 
+**The ingress reads a public request head with `httparse`** (1.10, MIT/Apache-2.0, hyper's parser, fuzzed upstream; already in the tree through hyper), at most 64 KiB and 100 header lines: beyond either, 431, as before for the size. What it routes by is ours, and strict, because the machine reads the same head after us (RFC 9112 §3.2):
+
+| Head | Answer |
+|---|---|
+| Not HTTP/1.x (bad request line, a space before a colon, a folded line, a bare CR, a NUL) | 400 |
+| No `Host`, an empty one, a port that is not a number | 400 (was 404 `no endpoint for`) |
+| Two `Host` lines | 400 (was: the first one routed) |
+| Absolute-form target (`GET http://a.example/`) | routed by its authority; 400 when `Host` says another |
+| `Host` of no endpoint | 404, as before |
+| A head ending in bare `\n` lines | routed (was: waited for `\r\n\r\n` until 64 KiB) |
+
+Only the first request of a connection is read; the rest is spliced, as before.
+
 ## Rejected
 
 - **`hickory-server`'s `RequestHandler`**: it brings its own listener, TCP, and a request/response framework, for a handler that is one lookup; our listener per gateway, the per-source policy and the raw forward would sit beside it rather than in it.
 - **Keeping the hand parser and fuzzing it**: fuzzing finds what it reaches; a crate fuzzed upstream by people who know the format, and used by every Hickory resolver and server, has been exercised far more than ten minutes here would.
+- **hyper's server for the ingress**: it would own the connection, and the ingress splices bytes after the head so WebSockets and streaming pass untouched.
 - **`simple-dns`, `domain`**: smaller or broader; `hickory-proto` is the one most deployed in Rust and the one whose security fixes we can follow.
