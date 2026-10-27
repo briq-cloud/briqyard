@@ -290,8 +290,8 @@ snapshot, or is whole.
   machine logs <id>` (its console; `-f` streams each new line until the machine is destroyed).
   `briqyard machine ls -l app=web -l tier` selects by labels (its `metadata`; `run -l K=V` sets them).
 - Quotas (ADR 0025): `briqyard tenant quota <tenant>` shows a tenant's limits and use;
-  `--machines N --memory-mb N --vcpus N --disk-gb N` puts exactly those (briq sets them from the
-  plan). A refusal is a `quota_exceeded` warning in `briqyard events --tenant <tenant>`.
+  `--machines N --memory-mb N --vcpus N --disk-gb N` puts exactly those (the control plane sets
+  them). A refusal is a `quota_exceeded` warning in `briqyard events --tenant <tenant>`.
 - A shell in a machine (ADR 0029): `briqyard machine exec -it <id> -- sh`; `-i` alone for a pipe.
   Each session is a `session_opened` event (`briqyard events --machine <id>`) and an `exec
   session ended` log line with its code and length. A machine with a session open does not go
@@ -456,7 +456,7 @@ otherwise: it records what it would order and orders nothing. Turn it off only o
 has shown the right product, location and count.
 
 ```bash
-briqyard host order --reason "launch week"   # POST /v1/hosts/order: a server, state provisioning
+briqyard host order --reason "first host"    # POST /v1/hosts/order: a server, state provisioning
 briqyard host ls                             # its note says what the provider and the bootstrap last did
 briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: retiring, released once empty
 briqyard host drain h_123456                 # draining: no new tenant on it, kept
