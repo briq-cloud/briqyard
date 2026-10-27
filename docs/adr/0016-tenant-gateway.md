@@ -1,6 +1,6 @@
 # ADR 0016: A tenant's gateway is the daemon's, not a machine of the tenant
 
-Date: 2026-10-20 · Status: accepted (Sylvain, 2026-10-20); amended with the implementation the same day (marked *Built*), and on 2026-10-27 (iron-proxy as the program, boot files on the spec; *Amended 2026-10-27*)
+Date: 2026-10-20 · Status: accepted; amended with the implementation the same day (marked *Built*), and on 2026-10-27 (iron-proxy as the program, boot files on the spec; *Amended 2026-10-27*)
 
 ## Context
 
