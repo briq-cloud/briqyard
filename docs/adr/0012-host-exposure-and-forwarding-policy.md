@@ -9,8 +9,8 @@ API (plain HTTP, a bearer), the HTTP ingress and every TCP endpoint were open to
 A `private` endpoint is private only because the control plane's router is the only way in; a
 port anyone can scan to is not. And the forward chain accepted by default and every rule keyed
 on the tenant range, so a guest that set another address (it is root in its VM) was forwarded,
-unmasqueraded, anywhere the host routes. C5: the input chain grew four rules per tenant and was
-reloaded whole on every tenant change. A2 and C12: the TAP name lost a hex digit of the id and
+unmasqueraded, anywhere the host routes. The input chain grew four rules per tenant and was
+reloaded whole on every tenant change. The TAP name lost a hex digit of the id and
 an existing link was reused silently.
 
 ## Decisions

@@ -4,7 +4,7 @@ Date: 2026-10-21 · Status: accepted; completes ADR 0014 (the image cache's scra
 
 ## Context
 
-Records (a machine's `env`, secrets included), config drives, consoles and every disk were in clear on the host, protected by file modes alone (`0600`, ADR 0014). What that does not cover is a disk or a server leaving our hands: a drive replaced, a server released to its provider at retire and handed to the next customer, a copy of a disk. The founder decided (`../KUBERNETES-MAP.md`, "Decided for the founder"): the pool encrypted at bootstrap, one key per host, held by the fleet, handed to the host over TLS (ADR 0020) at start, never written on the host's disk. ZFS cannot encrypt a pool after its creation, so this lands before the first real host.
+Records (a machine's `env`, secrets included), config drives, consoles and every disk were in clear on the host, protected by file modes alone (`0600`, ADR 0014). What that does not cover is a disk or a server leaving our hands: a drive replaced, a server released to its provider at retire and handed to the next customer, a copy of a disk. Decided 2026-10-20 (`../KUBERNETES-MAP.md`): the pool encrypted at bootstrap, one key per host, held by the fleet, handed to the host over TLS (ADR 0020) at start, never written on the host's disk. ZFS cannot encrypt a pool after its creation, so this lands before the first real host.
 
 ## Decisions
 
