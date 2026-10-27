@@ -4,7 +4,7 @@ Date: 2026-10-21 · Status: accepted; amends ADR 0019 (`quota_exceeded`)
 
 ## Context
 
-Four Kubernetes features the scope test (`../KUBERNETES-MAP.md`) puts in briqyard: node selectors (a team's region, `../LEAVING-FLY.md` item 7), label selectors on listings, ResourceQuota per namespace, and `kubectl logs -f`. Hosts carried a region the placement ignored; machines carried `metadata` nobody could select on; a tenant could fill a host; the CLI followed a console by polling `/logs` every second.
+Four Kubernetes features the scope test (`../KUBERNETES-MAP.md`) puts in briqyard: node selectors (a team's region, `../ROLLOVER.md` item 7), label selectors on listings, ResourceQuota per namespace, and `kubectl logs -f`. Hosts carried a region the placement ignored; machines carried `metadata` nobody could select on; a tenant could fill a host; the CLI followed a console by polling `/logs` every second.
 
 ## Decisions
 

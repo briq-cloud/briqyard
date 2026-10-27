@@ -4,7 +4,7 @@ Date: 2026-10-21 · Status: accepted; amends ADR 0021 (three more per-machine se
 
 ## Context
 
-Sandboxes run untrusted code, and every machine of a host writes to the same NVMe pool. ADR 0018 limits a machine's network; its disk had no limit, so one machine running `fio` or a runaway build could take the pool's whole bandwidth and every neighbour's database waits behind it. Kubernetes has no pod field for block IO: a node operator sets cgroup v2 `io.max` by hand, or a CSI driver offers QoS. Fly caps volume IOPS and bandwidth by machine size (4,000 IOPS and 16 MiB/s on `shared-cpu-1x`, up to 32,000 and 128 MiB/s on `performance-16x`, docs.fly.io/volumes/overview).
+Sandboxes run untrusted code, and every machine of a host writes to the same NVMe pool. ADR 0018 limits a machine's network; its disk had no limit, so one machine running `fio` or a runaway build could take the pool's whole bandwidth and every neighbour's database waits behind it. Kubernetes has no pod field for block IO: a node operator sets cgroup v2 `io.max` by hand, or a CSI driver offers QoS. Rented microVM volumes are commonly capped by machine size: 4,000 IOPS and 16 MiB/s on a one-vCPU shared size, up to 32,000 IOPS and 128 MiB/s on a 16-vCPU dedicated one.
 
 Firecracker has a rate limiter on each drive: a token bucket for bytes and one for requests, each with a one-time burst, set in the drive's config and changed on a running VM by `PATCH /drives/{id}` (v1.17). A bucket of size 0 is no limit. Requests over a bucket wait in the virtio queue; nothing fails.
 

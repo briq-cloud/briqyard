@@ -4,7 +4,7 @@ Date: 2026-10-20 · Status: accepted
 
 ## Context
 
-Every machine of a host leaves through the host's IP. A sandbox that sends spam or scans the internet gets that IP blocklisted, and the provider (OVH, Scaleway) can suspend the server, taking every tenant on it down (`../LEAVING-FLY.md` item 3). Kubernetes's NetworkPolicy filters by port and CIDR; a multi-tenant host also needs a rate and a cap per machine.
+Every machine of a host leaves through the host's IP. A sandbox that sends spam or scans the internet gets that IP blocklisted, and the provider (OVH, Scaleway) can suspend the server, taking every tenant on it down (`../ROLLOVER.md` item 3). Kubernetes's NetworkPolicy filters by port and CIDR; a multi-tenant host also needs a rate and a cap per machine.
 
 ## Decisions
 

@@ -4,7 +4,7 @@ Date: 2026-10-20 · Status: accepted
 
 ## Context
 
-briq's credential gateway (monorepo ADR 0015, merged 2026-10-20) puts a placeholder in the sandbox and swaps the real value in at a proxy the sandbox reaches through `HTTPS_PROXY`. On Fly the sandbox can bypass the proxy; the exfiltration side needs the host. Every competitor enforces on the host and injects outside the VM (E2B: per-sandbox nftables on the node; SPACE: policy and credentials on the host). `docs/research/2026-10-18-microvm-field-guide.md`, the monorepo's `docs/research/2026-10-sandbox-secrets.md`.
+briq's credential gateway (monorepo ADR 0015, merged 2026-10-20) puts a placeholder in the sandbox and swaps the real value in at a proxy the sandbox reaches through `HTTPS_PROXY`. On briq's current provider the sandbox can bypass the proxy; the exfiltration side needs the host. The usual design enforces on the host and injects outside the VM (per-sandbox nftables on the node, or policy and credentials on the host). `docs/research/2026-10-18-microvm-field-guide.md`, the monorepo's `docs/research/2026-10-sandbox-secrets.md`.
 
 ## Decisions
 

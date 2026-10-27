@@ -11,7 +11,7 @@ Most work here is done by agents. Everything an agent needs is in the repo: this
 - `docs/OPERATIONS.md`: install, config fields, upgrades, what to watch.
 - `docs/DEVELOPMENT.md`: the dev loop on a Mac (Lima VMs `fc` and `fc2`) and on Linux.
 - `docs/KUBERNETES-MAP.md`: briqyard as the Kubernetes of Firecracker: every Kubernetes feature, its briqyard equivalent, the gap, and whose scope (would kube provide it?).
-- `docs/LEAVING-FLY.md`: what is not covered yet for briq to run without Fly, with the briq/briqyard split.
+- `docs/ROLLOVER.md`: what briq needs to run on briqyard alone, with the briq/briqyard split.
 - `docs/review-2026-10-20.md`: open findings from the last review. Fix from the top; delete a finding when it is fixed.
 
 ## Layout
@@ -51,7 +51,8 @@ docs/                    architecture, operations, development, mesh design, adr
 - The API stays briq-shaped (tenant, name, metadata `briq_id`); a new field gets its OpenAPI entry and its CLI column in the same change.
 - Errors carry what failed and what was being done. The daemon logs one JSON line per event, nothing else on stdout. Never log a token or a secret.
 - Lima and Mac specifics live only in `hack/config.dev.yaml`, `hack/vm.sh` and `docs/DEVELOPMENT.md`.
-- **briqyard replaces Fly.** Nothing here exists to match a Fly limitation or to keep a Fly workaround working; when briq's control plane carries one, briqyard offers the native primitive and the control plane drops the workaround.
+- **briqyard is briq's only runtime.** Nothing here exists to match another platform's limitation or to keep a workaround for one working; when briq's control plane carries such a workaround, briqyard offers the native primitive and the control plane drops it.
+- **Never name a competitor** in code, comments, docs, ADRs, commit messages, PR titles or PR bodies. Describe the technique or the number instead of who does it. Open-source components (Firecracker, ZFS, Cloud Hypervisor, Kubernetes as the reference model) and suppliers where the code integrates them (OVH, Scaleway, Hetzner) are not competitors.
 
 ## Git
 

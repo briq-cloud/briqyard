@@ -2,18 +2,17 @@
 
 The research behind ADR 0001, 0002 and 0007. Checked on GitHub and vendor docs on 2026-10-18; OVH prices from its public catalog on 2026-10-19. The long form with diagrams: https://claude.ai/artifact/9XosKk1tk9dPtd8PYqehJY (internal).
 
-## Verdicts
+## Findings
 
-| Option | What | Verdict |
-|---|---|---|
-| Fly Machines | Firecracker + NVMe volumes, rented | Keep. The model to copy |
-| E2B runtime | E2B's backend, Apache 2.0, Go, Firecracker | Most mature sandbox stack. No team network, no durable data volume, no raw TCP. Not forked (ADR 0001) |
-| Ubicloud | Open cloud on bare metal, Cloud Hypervisor, AGPL, Ruby | Closest to Fly's model. Reference only; hosted cloud a possible second provider |
-| SPACE (Perplexity) | Firecracker on Kubernetes, Rust, 0.8 | Open multi-host install; `Unsafe` disk, three weeks old |
-| Agent Substrate + AX | gVisor / Cloud Hypervisor on Kubernetes | HTTP-only ingress, tar-snapshot volumes, isolation unfinished |
-| Daytona | Docker, privileged | Unmaintained since 2026-06, AGPL |
-| Neon | Postgres with storage on S3 | Postgres only. Maybe an engine for the recipe someday |
-| Kubernetes + Kata | A pod as a microVM | Wrong unit (ADR 0001) |
+| Approach | Finding |
+|---|---|
+| Rented Firecracker microVMs with local NVMe volumes | The model briqyard follows: any image, a durable disk, daily snapshots |
+| The most mature open sandbox stack (Apache 2.0, Go, Firecracker) | No team network, no durable data volume, no raw TCP. Not forked (ADR 0001) |
+| Ubicloud: open cloud on bare metal, Cloud Hypervisor, AGPL, Ruby | Reference only; its hosted cloud is a possible second supplier |
+| Firecracker on Kubernetes (Rust, 0.8) | An open multi-host install; `Unsafe` disk cache, three weeks old |
+| gVisor or Cloud Hypervisor on Kubernetes | HTTP-only ingress, tar-snapshot volumes, isolation unfinished |
+| Neon: Postgres with storage on S3 | Postgres only. Maybe an engine for the recipe someday |
+| Kubernetes + Kata | A pod as a microVM: wrong unit (ADR 0001) |
 
 ## Isolation
 
@@ -29,7 +28,7 @@ Firecracker as of 1.17 (2026-09): memory hotplug (virtio-mem), device hotplug an
 
 ## Where KVM runs
 
-Dedicated or bare metal: always. GCP, Azure: nested. AWS: nested since 2026-02 on C8i/M8i/R8i, else `.metal`. A Mac M3+ with macOS 15+: nested inside a Linux VM (Lima `vz`), ARM64 only; OrbStack did not expose `/dev/kvm`. Fly, Railway, PaaS: no. Nested virtualization costs most on disk and network I/O: fine for development, not for dense production.
+Dedicated or bare metal: always. GCP, Azure: nested. AWS: nested since 2026-02 on C8i/M8i/R8i, else `.metal`. A Mac M3+ with macOS 15+: nested inside a Linux VM (Lima `vz`), ARM64 only; OrbStack did not expose `/dev/kvm`. Railway, PaaS, rented microVM platforms: no. Nested virtualization costs most on disk and network I/O: fine for development, not for dense production.
 
 ## Storage
 
@@ -37,16 +36,16 @@ Three kinds: block (in-place writes, microseconds, one machine at a time), file 
 
 | Disk setup | VM crash | Host power cut | Host lost | Who |
 |---|---|---|---|---|
-| `Unsafe` local, saved at sleep | since last save lost | can corrupt | since last upload lost | SPACE, sandboxes |
-| `Writeback` local + snapshots to S3 | kept | kept | back to last snapshot | Fly volumes, briqyard |
+| `Unsafe` local, saved at sleep | since last save lost | can corrupt | since last upload lost | sandbox runtimes |
+| `Writeback` local + snapshots to S3 | kept | kept | back to last snapshot | rented microVM volumes, briqyard |
 | Replicated block (DRBD, Mayastor, Ceph) | kept | kept | kept | AWS EBS; not needed now |
 | Storage outside the VM | kept | kept | kept | Neon; Postgres only |
 
-Fly does not replicate volumes either: NVMe on the machine's server, daily snapshots. That is the bar.
+The rented microVM volumes briq runs on today are not replicated either: NVMe on the machine's server, daily snapshots. That is the bar.
 
 ## Licenses
 
-Apache 2.0, MIT, BSD, MPL, GPL: a competing hosted service is allowed. AGPL: allowed if we publish our modified source (Ubicloud, Daytona, ZeroFS). BSL and SSPL: written to block it. The risk with company-owned open source is a license change for future versions and a free package kept small on purpose (E2B Embed is one machine).
+Apache 2.0, MIT, BSD, MPL, GPL: a competing hosted service is allowed. AGPL: allowed if we publish our modified source (Ubicloud, ZeroFS). BSL and SSPL: written to block it. The risk with company-owned open source is a license change for future versions and a free package kept small on purpose (one open sandbox stack's free package is one machine).
 
 ## Servers, monthly, excl. VAT
 
@@ -67,4 +66,4 @@ OVH: no setup fee, 12 months about 5 % off, memory add-ons rose steeply in 2026.
 
 ## Density and cost per briq
 
-8 GB for the host, 15 % free, no memory overcommit, shared vCPUs 4 per thread. Running at once on an AX102-1 (102 GB usable): 128 nano, 51 small, 25 medium, 12 large. Compute cost per running briq-hour on an AX102-1 60 % full: nano 0.0047 €, small 0.0117 €, medium 0.0238 €, large 0.0497 €, against Fly's 0.0052 / 0.0178 / 0.0356 / 0.1261 € and our prices 0.01 / 0.045 / 0.09 / 0.30 €. Break-even fill against Fly: 54 % nano, 39 % small, 40 % medium, 24 % large. Dollars at the ECB rate of 2026-10-16 (1.1253).
+8 GB for the host, 15 % free, no memory overcommit, shared vCPUs 4 per thread. Running at once on an AX102-1 (102 GB usable): 128 nano, 51 small, 25 medium, 12 large. Compute cost per running briq-hour on an AX102-1 60 % full: nano 0.0047 €, small 0.0117 €, medium 0.0238 €, large 0.0497 €, against 0.0052 / 0.0178 / 0.0356 / 0.1261 € on the rented microVMs briq runs on today and our prices 0.01 / 0.045 / 0.09 / 0.30 €. Break-even fill against those rented prices: 54 % nano, 39 % small, 40 % medium, 24 % large. Dollars at the ECB rate of 2026-10-16 (1.1253).

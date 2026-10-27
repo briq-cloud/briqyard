@@ -4,7 +4,7 @@ Date: 2026-10-20 · Status: accepted (Sylvain, 2026-10-20); amended with the imp
 
 ## Context
 
-On Fly, briq prices its own infrastructure from Fly's list prices and inventory. On briqyard there is no list price: we pay a fixed monthly price per server, object storage per GB-month, and egress mostly included. Sylvain: briqyard reports usage; briq turns it into costs and billing. The cost model lives in briq.
+On its current provider, briq prices its own infrastructure from that provider's list prices and inventory. On briqyard there is no list price: we pay a fixed monthly price per server, object storage per GB-month, and egress mostly included. Sylvain: briqyard reports usage; briq turns it into costs and billing. The cost model lives in briq.
 
 ## Decisions
 

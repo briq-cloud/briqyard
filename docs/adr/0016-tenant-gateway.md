@@ -4,9 +4,9 @@ Date: 2026-10-20 · Status: accepted (Sylvain, 2026-10-20); amended with the imp
 
 ## Context
 
-ADR 0015 lets a machine send only through one machine of its tenant (`egress: via`). briq's credential gateway is that machine: one per team, holding the team's secrets, swapping placeholders into outbound HTTPS. On Fly the control plane runs it as a hidden briq (`briqs.kind = 'credential-gateway'`) and special-cases it in lists, limits, metering, the reconciler and the tenant's deletion, because Fly gives nothing else to run it on. briqyard replaces Fly (`CLAUDE.md`): the host should own it.
+ADR 0015 lets a machine send only through one machine of its tenant (`egress: via`). briq's credential gateway is that machine: one per team, holding the team's secrets, swapping placeholders into outbound HTTPS. On its current provider the control plane runs it as a hidden briq (`briqs.kind = 'credential-gateway'`) and special-cases it in lists, limits, metering, the reconciler and the tenant's deletion, because that provider gives nothing else to run it on. briqyard is briq's runtime (`CLAUDE.md`): the host should own it.
 
-Competitors run a shared injector on the host (E2B, SPACE). We keep one per tenant: a proxy bug or a leak stays inside one team, and the root daemon never holds a credential (ADR 0015).
+A common design is one shared injector on the host. We keep one per tenant: a proxy bug or a leak stays inside one team, and the root daemon never holds a credential (ADR 0015).
 
 ## Decisions
 
@@ -28,7 +28,7 @@ Competitors run a shared injector on the host (E2B, SPACE). We keep one per tena
 
 ## Consequences
 
-- briq's control plane, on briqyard, sets the gateway on the tenant and waits for the program to register its CA; it creates no briq for it, and the exceptions for `kind = 'credential-gateway'` stay on the Fly path only, to be removed with Fly.
+- briq's control plane, on briqyard, sets the gateway on the tenant and waits for the program to register its CA; it creates no briq for it, and the exceptions for `kind = 'credential-gateway'` stay on the current provider's path only, to be removed with it.
 - The gateway's cost is ours, not the tenant's: nothing meters it (it is not a briq).
 - One gateway per tenant; a second kind of system machine would generalize `role`, not before it is needed.
 - e2e: a tenant gateway (a forward proxy image), a `via: gateway` machine whose start boots it, a request through it, the gateway stopped by the sleeper once its consumer stops, absent from the machine list, gone with the tenant.
