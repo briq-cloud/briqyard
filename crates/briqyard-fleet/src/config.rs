@@ -135,10 +135,28 @@ pub struct Bootstrap {
     pub script: PathBuf,
     /// `BRIQYARD_RELEASE` for the script: where the binaries are.
     pub release: String,
-    /// `BRIQYARD_POOL_DEVICE`: the drive for the ZFS pool (a file when empty).
+    /// `BRIQYARD_RELEASE_TOKEN`: a token that reads the release of a private GitHub
+    /// repository; `BRIQYARD_RELEASE_TOKEN` in the fleet's environment overrides it.
+    pub release_token: String,
+    /// `BRIQYARD_POOL_DEVICE`: the drives for the ZFS pool, comma-separated, two for a mirror
+    /// (a file when empty). A drive the OS is on gives its free space (ADR 0028).
     pub pool_device: String,
+    /// The private network the hosts' APIs and endpoints live on (OVH's vRack), as a CIDR. A
+    /// host whose API address is in it gets `PRIVATE_ADDRESS` with this prefix, and its
+    /// public interface takes SSH and `public_tcp_ports` only (ADR 0028).
+    pub private_network: String,
+    /// `PRIVATE_INTERFACE`: the interface given the host's private address when it has none
+    /// yet (servers of one model share interface names).
+    pub private_interface: String,
+    /// `PUBLIC_TCP_PORTS`: ports a private host's public interface takes besides SSH (an
+    /// edge's beside the daemon), which its machines reach too (`network.host_ports`).
+    pub public_tcp_ports: Vec<u16>,
     /// `FLEET_URL`: this fleet, as the new host reaches it.
     pub fleet_url: String,
+    /// `FLEET_ADDRESS`: the fleet's address on the private network. A private host resolves
+    /// `fleet_url`'s name to it, so its calls come from the private address the fleet knows
+    /// it by (ADR 0028); empty leaves the name to DNS.
+    pub fleet_address: String,
     /// `ALLOWED_CLIENTS`: the networks (CIDRs) the host's API and endpoints accept
     /// connections from: this fleet's and the routers'. Required when the host listens on a
     /// public address.
@@ -155,8 +173,13 @@ impl Default for Bootstrap {
             ssh_key: "/etc/briqyard/fleet_ssh_key".into(),
             script: PathBuf::new(),
             release: String::new(),
+            release_token: String::new(),
             pool_device: String::new(),
+            private_network: String::new(),
+            private_interface: String::new(),
+            public_tcp_ports: Vec::new(),
             fleet_url: String::new(),
+            fleet_address: String::new(),
             allowed_clients: Vec::new(),
             max_attempts: 90,
         }
@@ -283,6 +306,9 @@ impl Config {
         if let Ok(v) = std::env::var("OVH_CONSUMER_KEY") {
             cfg.provisioner.ovh.consumer_key = v;
         }
+        if let Ok(v) = std::env::var("BRIQYARD_RELEASE_TOKEN") {
+            cfg.provisioner.bootstrap.release_token = v;
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -311,6 +337,20 @@ impl Config {
                  certificate for the fleet's name), or tls: off if something in front \
                  terminates TLS",
                 listen.ip()
+            );
+        }
+        let b = &self.provisioner.bootstrap;
+        if !b.private_network.is_empty() {
+            crate::bootstrap::Network::parse(&b.private_network)
+                .map_err(|e| anyhow::anyhow!("provisioner.bootstrap.private_network {e}"))?;
+        }
+        if !b.fleet_address.is_empty()
+            && crate::bootstrap::private_address(b, &b.fleet_address).is_none()
+        {
+            bail!(
+                "provisioner.bootstrap.fleet_address {:?}: want an IPv4 address in private_network ({:?})",
+                b.fleet_address,
+                b.private_network
             );
         }
         for h in &mut self.hosts {
@@ -350,13 +390,14 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    const ENV_VARS: [&str; 6] = [
+    const ENV_VARS: [&str; 7] = [
         "HETZNER_ROBOT_USER",
         "HETZNER_ROBOT_PASSWORD",
         "SCW_SECRET_KEY",
         "OVH_APPLICATION_KEY",
         "OVH_APPLICATION_SECRET",
         "OVH_CONSUMER_KEY",
+        "BRIQYARD_RELEASE_TOKEN",
     ];
 
     /// `load` reads the process environment, which every test shares: one at a time, and each
@@ -421,6 +462,9 @@ mod tests {
         assert_eq!(b.ssh_key, PathBuf::from("/etc/briqyard/fleet_ssh_key"));
         assert_eq!(b.script, PathBuf::new());
         assert_eq!(b.max_attempts, 90);
+        assert_eq!(b.release_token, "");
+        assert_eq!(b.private_network, "");
+        assert!(b.public_tcp_ports.is_empty());
     }
 
     #[test]
@@ -480,8 +524,13 @@ provisioner:
     ssh_key: /etc/briqyard/key
     script: /opt/bootstrap.sh
     release: https://example/v1
-    pool_device: /dev/nvme1n1
+    release_token: ghp-file
+    pool_device: /dev/nvme0n1,/dev/nvme1n1
+    private_network: 10.42.0.0/16
+    private_interface: enp3s0f1
+    public_tcp_ports: [7430, 80]
     fleet_url: https://fleet.example
+    fleet_address: 10.42.0.11
     max_attempts: 3
 "#,
         );
@@ -543,8 +592,13 @@ provisioner:
         assert_eq!(b.ssh_key, PathBuf::from("/etc/briqyard/key"));
         assert_eq!(b.script, PathBuf::from("/opt/bootstrap.sh"));
         assert_eq!(b.release, "https://example/v1");
-        assert_eq!(b.pool_device, "/dev/nvme1n1");
+        assert_eq!(b.release_token, "ghp-file");
+        assert_eq!(b.pool_device, "/dev/nvme0n1,/dev/nvme1n1");
+        assert_eq!(b.private_network, "10.42.0.0/16");
+        assert_eq!(b.private_interface, "enp3s0f1");
+        assert_eq!(b.public_tcp_ports, [7430, 80]);
         assert_eq!(b.fleet_url, "https://fleet.example");
+        assert_eq!(b.fleet_address, "10.42.0.11");
         assert_eq!(b.max_attempts, 3);
     }
 
@@ -653,6 +707,49 @@ provisioner:
     }
 
     #[test]
+    fn the_private_network_is_a_cidr() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |net: &str| {
+            let path = write(
+                &dir,
+                &format!("provisioner:\n  bootstrap:\n    private_network: \"{net}\"\n"),
+            );
+            with_env(&[], || Config::load(Some(&path)))
+        };
+        load("10.42.0.0/16").unwrap();
+        for bad in ["10.42.0.0", "10.42.0.0/33", "fd00::/8", "vrack"] {
+            let err = load(bad).unwrap_err().to_string();
+            assert!(
+                err.starts_with("provisioner.bootstrap.private_network "),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fleet_address_is_on_the_private_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |addr: &str| {
+            let path = write(
+                &dir,
+                &format!(
+                    "provisioner:\n  bootstrap:\n    private_network: 10.42.0.0/16\n    fleet_address: \"{addr}\"\n"
+                ),
+            );
+            with_env(&[], || Config::load(Some(&path)))
+        };
+        load("10.42.0.11").unwrap();
+        load("").unwrap();
+        for bad in ["10.43.0.1", "fleet.example.com", "fd00::1"] {
+            let err = load(bad).unwrap_err().to_string();
+            assert!(
+                err.starts_with("provisioner.bootstrap.fleet_address "),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn the_dev_config_loads() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hack/fleet.dev.yaml");
         let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
@@ -685,8 +782,10 @@ provisioner:
             ("OVH_APPLICATION_KEY", "env-ak"),
             ("OVH_APPLICATION_SECRET", "env-as"),
             ("OVH_CONSUMER_KEY", "env-ck"),
+            ("BRIQYARD_RELEASE_TOKEN", "env-gh"),
         ];
         let cfg = with_env(&set, || Config::load(Some(&path)).unwrap());
+        assert_eq!(cfg.provisioner.bootstrap.release_token, "env-gh");
         assert_eq!(cfg.provisioner.hetzner.user, "env-user");
         assert_eq!(cfg.provisioner.hetzner.password, "env-pass");
         assert_eq!(cfg.provisioner.scaleway.secret_key, "env-key");

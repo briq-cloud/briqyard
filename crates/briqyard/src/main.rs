@@ -633,6 +633,24 @@ enum ImageCmd {
 #[derive(Subcommand)]
 enum HostCmd {
     Ls,
+    /// Add a server bought by hand; the fleet bootstraps it over SSH and pins its keys:
+    /// briqyard host add 51.68.1.2 --address 10.42.0.11 --region gra
+    Add {
+        /// The server's SSH address (its public one)
+        ssh: String,
+        /// The API's IPv4 address, on the fleet's private network (its vRack address); default: the SSH address
+        #[arg(long, default_value = "")]
+        address: String,
+        #[arg(long, default_value = "")]
+        region: String,
+        /// The host's id; default: h_ and the address
+        #[arg(long, default_value = "")]
+        id: String,
+        /// Ports its public interface takes besides SSH, comma-separated (an edge's on it:
+        /// 80,443,5432,...), or none; default: the fleet's public_tcp_ports
+        #[arg(long)]
+        public_tcp_ports: Option<String>,
+    },
     /// Order a host from the fleet's provisioner now (dry-run unless the fleet says otherwise)
     Order {
         #[arg(long, default_value = "")]
@@ -1520,6 +1538,22 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 let hs: Vec<api::Host> = c.call(GET, "/v1/hosts", NONE).await?;
                 print!("{}", host_table(&hs));
             }
+            HostCmd::Add {
+                ssh,
+                address,
+                region,
+                id,
+                public_tcp_ports,
+            } => {
+                let req = api::AddHostRequest {
+                    ssh,
+                    address,
+                    region,
+                    id,
+                    public_tcp_ports: public_tcp_ports.as_deref().map(port_list).transpose()?,
+                };
+                print_json(&c.call::<api::Host>(POST, "/v1/hosts", Some(&req)).await?)
+            }
             HostCmd::Order { reason } => {
                 let req = api::OrderHostRequest { reason };
                 print_json(
@@ -1920,6 +1954,24 @@ fn image_table(ims: &[api::Image]) -> String {
     out
 }
 
+/// `--public-tcp-ports`: `80,443,5432`, or `none` for no port.
+fn port_list(s: &str) -> Result<Vec<u16>> {
+    if s == "none" {
+        return Ok(vec![]);
+    }
+    s.split(',')
+        .map(|p| {
+            p.trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|&p| p > 0)
+                .ok_or_else(|| {
+                    anyhow!("--public-tcp-ports {s:?}: want ports, comma-separated, or none")
+                })
+        })
+        .collect()
+}
+
 /// What `host upgrade --all` upgrades, in order: the ready and draining hosts by id; and the
 /// others, with their state, which it leaves.
 fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, String)>) {
@@ -1936,8 +1988,8 @@ fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, String)>) {
     )
 }
 
-/// `host ls`: a line per host, and under it its pin, each condition that is true and its
-/// note when the provisioner or the bootstrap left one.
+/// `host ls`: a line per host, and under it its SSH address when it is not the API's, its pin,
+/// each condition that is true and its note when the provisioner or the bootstrap left one.
 fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
         "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {:<20} LAST SEEN\n",
@@ -1961,8 +2013,15 @@ fn host_table(hs: &[api::Host]) -> String {
             },
             h.last_seen.to_rfc3339()
         ));
+        if !h.ssh.is_empty() {
+            out.push_str(&format!("{:<16} ssh: {}\n", "", h.ssh));
+        }
         if !h.tls_fingerprint.is_empty() {
             out.push_str(&format!("{:<16} tls: {}\n", "", h.tls_fingerprint));
+        }
+        if !h.public_tcp_ports.is_empty() {
+            let ports: Vec<String> = h.public_tcp_ports.iter().map(u16::to_string).collect();
+            out.push_str(&format!("{:<16} public tcp: {}\n", "", ports.join(",")));
         }
         for c in h.conditions.iter().filter(|c| c.status) {
             out.push_str(&format!(

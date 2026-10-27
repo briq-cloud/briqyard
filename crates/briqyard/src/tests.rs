@@ -857,7 +857,31 @@ fn host_commands() {
         Cmd::Host(HostCmd::Rm { force, .. }) => assert!(force),
         _ => panic!("not a rm"),
     }
-    for sub in ["retire", "drain", "rm"] {
+    match parse(&[
+        "host",
+        "add",
+        "51.68.1.2",
+        "--address",
+        "10.42.0.11",
+        "--region",
+        "gra",
+    ])
+    .cmd
+    {
+        Cmd::Host(HostCmd::Add {
+            ssh,
+            address,
+            region,
+            id,
+            ..
+        }) => assert_eq!(
+            (ssh.as_str(), address.as_str(), region.as_str(), id.as_str()),
+            ("51.68.1.2", "10.42.0.11", "gra", ""),
+            "the fleet names it"
+        ),
+        _ => panic!("not an add"),
+    }
+    for sub in ["add", "retire", "drain", "rm"] {
         assert_eq!(
             fails(&["host", sub]),
             ErrorKind::MissingRequiredArgument,
@@ -1201,6 +1225,7 @@ fn the_host_table() {
     let ready = api::Host {
         id: "h_byard-1".into(),
         url: "https://10.0.0.9:7420".into(),
+        ssh: String::new(),
         region: "par".into(),
         provider: "scaleway".into(),
         state: "ready".into(),
@@ -1218,6 +1243,7 @@ fn the_host_table() {
         version: "0.1.0".into(),
         note: String::new(),
         tls_fingerprint: "ab".repeat(32),
+        public_tcp_ports: vec![],
         conditions: vec![
             api::Condition {
                 kind: "memory_pressure".into(),
@@ -1250,12 +1276,21 @@ fn the_host_table() {
         version: String::new(),
         ..ready.clone()
     };
-    let out = host_table(&[ready, ordered]);
+    let added = api::Host {
+        id: "h_10-42-0-11".into(),
+        url: "https://10.42.0.11:7420".into(),
+        ssh: "51.68.1.2".into(),
+        region: "gra".into(),
+        note: String::new(),
+        public_tcp_ports: vec![80, 443, 5432],
+        ..ordered.clone()
+    };
+    let out = host_table(&[ready, ordered, added]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines.len(),
-        6,
-        "a pin, a true condition and a note take a line each"
+        9,
+        "an SSH address, a pin, public ports, a true condition and a note take a line each"
     );
     assert_eq!(
         lines[0],
@@ -1283,7 +1318,46 @@ fn the_host_table() {
         lines[5],
         "                 note: bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
     );
+    assert_eq!(
+        lines[6],
+        "h_10-42-0-11     https://10.42.0.11:7420      provisioning gra      0/0            0/0        0         0        -                    2026-10-19T08:30:00+00:00"
+    );
+    assert_eq!(
+        lines[7], "                 ssh: 51.68.1.2",
+        "the SSH address when it is not the API's"
+    );
+    assert_eq!(lines[8], "                 public tcp: 80,443,5432");
     assert!(out.ends_with('\n'));
+}
+
+#[test]
+fn host_add_takes_its_public_ports() {
+    for (arg, want) in [
+        (None, None),
+        (Some("80,443,5432"), Some(vec![80, 443, 5432])),
+        (Some("none"), Some(vec![])),
+    ] {
+        let mut args = vec!["host", "add", "51.68.1.2"];
+        if let Some(a) = arg {
+            args.extend(["--public-tcp-ports", a]);
+        }
+        match parse(&args).cmd {
+            Cmd::Host(HostCmd::Add {
+                public_tcp_ports, ..
+            }) => assert_eq!(
+                public_tcp_ports
+                    .as_deref()
+                    .map(port_list)
+                    .transpose()
+                    .unwrap(),
+                want
+            ),
+            _ => panic!("not a host add"),
+        }
+    }
+    for bad in ["", "80,", "0", "http"] {
+        assert!(port_list(bad).is_err(), "{bad:?}");
+    }
 }
 
 #[test]
@@ -1318,6 +1392,7 @@ fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
     let host = |id: &str, state: &str| api::Host {
         id: id.into(),
         url: String::new(),
+        ssh: String::new(),
         region: String::new(),
         provider: String::new(),
         state: state.into(),
@@ -1329,6 +1404,7 @@ fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
         version: String::new(),
         note: String::new(),
         tls_fingerprint: String::new(),
+        public_tcp_ports: vec![],
         conditions: vec![],
         started: Default::default(),
     };

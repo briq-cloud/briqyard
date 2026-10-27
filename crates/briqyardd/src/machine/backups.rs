@@ -1115,6 +1115,7 @@ mod tests {
             cfg.capacity = config::Capacity {
                 memory_mb: 4096,
                 vcpus: 1000,
+                ..Default::default()
             };
             cfg.egress_limits = config::EgressLimits {
                 blocked_ports: vec![],
