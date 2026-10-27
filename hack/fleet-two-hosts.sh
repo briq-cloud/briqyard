@@ -18,16 +18,15 @@ check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 hosts() { curl -fsS "$BRIQYARD_URL/v1/hosts"; }
 CONF2=/etc/briqyard/config.yaml
 cleanup() {
-  # The second host's config as it was, when the backup section gave it a store.
-  if [ -n "${SECOND_HOST_SH:-}" ] && $SECOND_HOST_SH test -f "$CONF2.two-hosts"; then
-    [ -n "${BK:-}" ] && briqyard backup rm "$B" "$BK" >/dev/null 2>&1
-    $SECOND_HOST_SH sh -c "mv $CONF2.two-hosts $CONF2 && systemctl restart briqyardd" || true
-    for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
-  fi
   for t in "$T-a" "$T-b"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
     briqyard tenant rm "$t" >/dev/null 2>&1 || true
   done
+  # The second host as it was, when the backup section gave it a store for the run.
+  if [ -n "${SECOND_HOST_SH:-}" ] && $SECOND_HOST_SH test -f "$CONF2.two-hosts"; then
+    $SECOND_HOST_SH sh -c "mv $CONF2.two-hosts $CONF2 && rm -rf /var/lib/briqyard/backups && systemctl restart briqyardd" || true
+    for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
+  fi
 }
 trap cleanup EXIT
 
@@ -108,14 +107,15 @@ if [ -n "${SECOND_HOST_SH:-}" ]; then
     for i in $(seq 1 45); do briqyard machine exec "$B" -- hostname >/dev/null 2>&1 && break; sleep 2; done
   fi
   STORE2=$(on_second "sed -n 's|^  store: file://||p' $CONF2")
-  MARK="briqyard-plaintext-$(date +%s)"
-  briqyard machine exec "$B" -- sh -c "echo $MARK > /root/mark; sync" >/dev/null
+  # Random text lz4 cannot shrink, so only encryption can hide it (as in hack/e2e.sh).
+  briqyard machine exec "$B" -- sh -c "head -c 98304 /dev/urandom | base64 -w 0 > /root/mark; sync" >/dev/null
+  MARK=$(briqyard machine exec "$B" -- head -c 48 /root/mark)
   BK=$(briqyard machine backup "$B" | jq -r .id)
   check "backed up with its key's id" '[ "$(briqyard machine backups "$B" | jq -r ".[-1].key_id | length")" = 32 ]'
-  check "its stream holds no plaintext" 'on_second "test -s $STORE2/backups/$B/root/$BK.zfs && ! grep -qaF $MARK $STORE2/backups/$B/root/$BK.zfs"'
+  check "its stream holds no plaintext" 'on_second "test -s $STORE2/backups/$B/root/$BK.zfs && ! grep -qaF -- $MARK $STORE2/backups/$B/root/$BK.zfs"'
   RB=$(briqyard machine restore --from "$B" --backup "$BK" --tenant "$T-b" --name b-back | jq -r .id)
   for i in $(seq 1 45); do [ "$(briqyard machine get "$RB" | jq -r .state)" = running ] && break; sleep 2; done
-  check "restored through the fleet, on the second host" '[ "$(briqyard machine get "$RB" | jq -r .host)" = "$HB" ] && [ "$(briqyard machine exec "$RB" -- cat /root/mark)" = "$MARK" ]'
+  check "restored through the fleet, on the second host" '[ "$(briqyard machine get "$RB" | jq -r .host)" = "$HB" ] && [ "$(briqyard machine exec "$RB" -- head -c 48 /root/mark)" = "$MARK" ]'
   check "its disk on the host's pool key" '[ "$(on_second "zfs get -H -o value encryptionroot byard/m/$RB/root")" = byard ]'
   briqyard machine destroy "$RB" >/dev/null
   briqyard backup rm "$B" "$BK" >/dev/null
