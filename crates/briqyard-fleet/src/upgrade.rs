@@ -8,7 +8,6 @@
 //! The upgrade runs in a task of its own that the request waits on: a caller that hangs up
 //! leaves it to finish, never a host half-moved.
 
-use crate::registry::url_host;
 use crate::{bootstrap, err, registry_error, AppState, Refusal};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -105,9 +104,12 @@ async fn run(
     was: &crate::registry::HostRec,
     release: &str,
 ) -> Result<(String, api::DaemonStart), String> {
-    let ip = url_host(&was.url).to_string();
+    // Over SSH where the bootstrap reached it: a host added by hand has an SSH address of its
+    // own, the API on the private network.
+    let ip = bootstrap::ssh_address(was).to_string();
     tracing::info!(host = was.id, release, "host upgrade");
-    let installed = bootstrap::install(st, &was.id, &ip, &bootstrap::upgrade_env(release))
+    let env = bootstrap::upgrade_env(release, &st.cfg.provisioner.bootstrap.release_token);
+    let installed = bootstrap::install(st, &was.id, &ip, &env)
         .await
         .map_err(|e| format!("install: {e:#}"))?;
     // What the install says of the SSH host key: pinned now (a static host's first upgrade),

@@ -696,6 +696,7 @@ mod tests {
             cfg.capacity = crate::config::Capacity {
                 memory_mb: 4096,
                 vcpus: 1000,
+                ..Default::default()
             };
             cfg.egress_limits = crate::config::EgressLimits {
                 blocked_ports: vec![],
