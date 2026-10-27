@@ -216,10 +216,10 @@ nothing reads it, so nothing a guest prints can set its exit.
 
 ### Backups
 
-A backup is a ZFS snapshot of each disk streamed to an object store (`briqyard-objstore`: S3 or a
-directory), incremental after the first; the record beside it holds the machine's spec, so a
-restore is a create that receives the chain of streams into fresh datasets on any host that
-reaches the store. Local snapshots stay only as the base of the next incremental send.
+A backup is a ZFS snapshot of each disk streamed to an object store (`briqyard-objstore` on
+Apache Arrow's `object_store`: S3 or a directory, ADR 0034), incremental after the first; the
+record beside it holds the machine's spec, so a restore is a create that receives the chain of
+streams into fresh datasets on any host that reaches the store. Local snapshots stay only as the base of the next incremental send.
 
 A machine's `backup: {every, keep}` is run by the daemon (ADR 0023, `machine/backups.rs`):
 the tick starts each due backup detached, through a semaphore (`backup.at_once`), and every
