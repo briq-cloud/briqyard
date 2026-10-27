@@ -216,7 +216,7 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   `session_opened` event; a machine with a session open kept awake past its window, asleep once
   it closed), versions and a hand-over (status and the init say the build, `vmm_version` the
   host's; SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start:
-  running again unasked, resumed). 184 checks.
+  running again unasked, resumed). 192 checks.
 
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
