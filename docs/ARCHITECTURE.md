@@ -28,7 +28,7 @@ Status: v0, in development. The API is not stable yet.
 
 ### Machines
 
-A machine is one microVM running one OCI image, like a Fly Machine. `POST /v1/machines` takes the
+A machine is one microVM running one OCI image. `POST /v1/machines` takes the
 image, command, environment, boot files, size (vCPUs, memory), an optional data volume and its
 mount path, the ports the image listens on, and the sleep window. The daemon:
 
@@ -105,7 +105,7 @@ per host in its registry and serves it to that host alone, or a file on a single
 has the key the daemon serves nothing and says why in its log. A dataset is never mounted
 over files. Hosts run without swap, and a Firecracker never dumps core.
 
-The root disk outlives restarts and stops, as on Fly. Boot files are rewritten at every cold
+The root disk outlives restarts and stops. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
 attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches the host's disk:
 a database on it is as safe as the host's drive. A fork is a clone of a snapshot of both disks,
@@ -383,7 +383,7 @@ SHA-256 alone, pinned in the host record: read by the bootstrap over the pinned 
 or written in `hosts:` by the operator. Every forwarded call verifies the pin; a heartbeat
 reporting another fingerprint, or reporting one for a host with none pinned, is refused. The
 CLI pins a daemon the same way (`--tls-fingerprint`, the same verifier in `briqyard-api`). The
-ingress and TCP endpoints are not covered: they need a private network (`LEAVING-FLY.md` item 1).
+ingress and TCP endpoints are not covered: they need a private network (`MESH.md`).
 
 A WireGuard mesh between hosts, so a tenant can span several, is the next step after that: `MESH.md` is its design.
 

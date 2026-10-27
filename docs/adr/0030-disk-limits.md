@@ -4,7 +4,7 @@ Date: 2026-10-21 · Status: accepted; amends ADR 0021 (three more per-machine se
 
 ## Context
 
-Sandboxes run untrusted code, and every machine of a host writes to the same NVMe pool. ADR 0018 limits a machine's network; its disk had no limit, so one machine running `fio` or a runaway build could take the pool's whole bandwidth and every neighbour's database waits behind it. Kubernetes has no pod field for block IO: a node operator sets cgroup v2 `io.max` by hand, or a CSI driver offers QoS. Fly caps volume IOPS and bandwidth by machine size (4,000 IOPS and 16 MiB/s on `shared-cpu-1x`, up to 32,000 and 128 MiB/s on `performance-16x`, docs.fly.io/volumes/overview).
+Sandboxes run untrusted code, and every machine of a host writes to the same NVMe pool. ADR 0018 limits a machine's network; its disk had no limit, so one machine running `fio` or a runaway build could take the pool's whole bandwidth and every neighbour's database waits behind it. Kubernetes has no pod field for block IO: a node operator sets cgroup v2 `io.max` by hand, or a CSI driver offers QoS. Rented microVM volumes are commonly capped by machine size: 4,000 IOPS and 16 MiB/s on a one-vCPU shared size, up to 32,000 IOPS and 128 MiB/s on a 16-vCPU dedicated one.
 
 Firecracker has a rate limiter on each drive: a token bucket for bytes and one for requests, each with a one-time burst, set in the drive's config and changed on a running VM by `PATCH /drives/{id}` (v1.17). A bucket of size 0 is no limit. Requests over a bucket wait in the virtio queue; nothing fails.
 
@@ -43,7 +43,7 @@ Reads, which the VM serves fast, stop at the limits (34 against 32 MB/s and 4,19
 
 ## Consequences
 
-- A machine's disk throughput is capped even on an idle host: a 1-vCPU machine reads at 32 MB/s after its burst. briq can raise a machine's own values per plan; `0` lifts a limit.
+- A machine's disk throughput is capped even on an idle host: a 1-vCPU machine reads at 32 MB/s after its burst. A control plane can raise a machine's own values; `0` lifts a limit.
 - Root disk and volume are limited separately, so a machine can do twice the rate across both.
 - The burst comes again at every start and every change, so a machine that restarts in a loop gets it each time; its restart backoff (ADR 0022) bounds how often.
 - Throttling is visible a minute late, and from the daemon's start (counters restart at zero with it, as ADR 0021's).

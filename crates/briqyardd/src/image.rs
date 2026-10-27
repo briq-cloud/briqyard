@@ -683,7 +683,9 @@ pub fn extract<R: Read>(root: &Path, r: R) -> Result<usize> {
     let mut archive = tar::Archive::new(r);
     archive.set_preserve_permissions(false);
     let mut n = 0;
-    let mut hardlinks: Vec<(PathBuf, String)> = Vec::new();
+    // Hard links are made after every other entry, so their target exists; each is
+    // resolved then, since a later entry may have replaced a directory of its path.
+    let mut hardlinks: Vec<(String, String)> = Vec::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
         let name = entry.path()?.to_string_lossy().into_owned();
@@ -717,6 +719,12 @@ pub fn extract<R: Read>(root: &Path, r: R) -> Result<usize> {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // The entry's own link name reads GNU long links and PAX `linkpath`; the header's
+        // stops at 100 bytes.
+        let link = entry
+            .link_name()?
+            .map(|p| p.into_owned())
+            .unwrap_or_default();
         let header = entry.header();
         let mode = header.mode().unwrap_or(0o644) & 0o7777;
         let (uid, gid) = (
@@ -748,28 +756,31 @@ pub fn extract<R: Read>(root: &Path, r: R) -> Result<usize> {
             }
             tar::EntryType::Symlink => {
                 remove_any(&dest);
-                let target = header
-                    .link_name()?
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_default();
                 // Kept as is: the guest resolves it inside its own root.
-                std::os::unix::fs::symlink(&target, &dest)?;
+                std::os::unix::fs::symlink(&link, &dest)?;
                 let _ = std::os::unix::fs::lchown(&dest, Some(uid), Some(gid));
             }
             tar::EntryType::Link => {
-                let target = header
-                    .link_name()?
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                hardlinks.push((dest, target.trim_start_matches('/').to_string()));
+                let target = link.to_string_lossy();
+                hardlinks.push((
+                    clean.to_string(),
+                    target.trim_start_matches('/').to_string(),
+                ));
                 continue;
             }
             _ => continue,
         }
         n += 1;
     }
-    for (dest, target) in hardlinks {
+    for (name, target) in hardlinks {
+        let dest = secure_join_nofollow(root, &name)?;
+        if dest == root {
+            continue;
+        }
         let src = secure_join(root, &target)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         remove_any(&dest);
         if std::fs::hard_link(&src, &dest).is_ok() {
             n += 1;
@@ -796,29 +807,49 @@ fn filetime(p: &Path, mtime: u64) -> std::io::Result<()> {
     f.set_modified(t)
 }
 
-/// Adds what every guest needs: the init, mount points, writable name files.
+/// Adds what every guest needs: the init, mount points, writable name files. Every path is
+/// resolved inside the root, and a symlink a layer left at one is replaced, never followed.
 pub fn prepare_root(root: &Path, init: &Path) -> Result<()> {
     for d in ["proc", "sys", "dev", "run", "tmp", "etc", ".briqyard"] {
-        std::fs::create_dir_all(root.join(d))?;
+        dir_in_root(root, d)?;
     }
-    let _ = std::fs::set_permissions(root.join("tmp"), std::fs::Permissions::from_mode(0o1777));
-    let dest = root.join(INIT_PATH.trim_start_matches('/'));
+    std::fs::set_permissions(
+        dir_in_root(root, "tmp")?,
+        std::fs::Permissions::from_mode(0o1777),
+    )?;
+    let dest = file_in_root(root, INIT_PATH.trim_start_matches('/'))?;
+    remove_any(&dest);
     std::fs::copy(init, &dest).context("copy init")?;
     std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
     // The init rewrites these at boot; a symlink (Debian's resolv.conf) or a missing file
     // would make that write land elsewhere or fail.
     for f in ["etc/hosts", "etc/resolv.conf", "etc/hostname"] {
-        let p = root.join(f);
-        if let Ok(m) = std::fs::symlink_metadata(&p) {
-            if m.file_type().is_symlink() {
-                let _ = std::fs::remove_file(&p);
-            }
-        }
+        let p = file_in_root(root, f)?;
         if std::fs::symlink_metadata(&p).is_err() {
             std::fs::write(&p, b"")?;
         }
     }
     Ok(())
+}
+
+/// A directory at `rel` inside `root`: made when missing, a symlink there replaced.
+fn dir_in_root(root: &Path, rel: &str) -> Result<PathBuf> {
+    let p = secure_join_nofollow(root, rel)?;
+    if std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
+        std::fs::remove_file(&p)?;
+    }
+    std::fs::create_dir_all(&p)?;
+    Ok(p)
+}
+
+/// Where a file at `rel` inside `root` goes: its directory made, a symlink at it removed.
+fn file_in_root(root: &Path, rel: &str) -> Result<PathBuf> {
+    let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let p = dir_in_root(root, dir)?.join(name);
+    if std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
+        std::fs::remove_file(&p)?;
+    }
+    Ok(p)
 }
 
 #[cfg(test)]
@@ -929,6 +960,140 @@ mod tests {
         assert_eq!(
             secure_join_nofollow(Path::new("/r"), "a/../b").unwrap(),
             Path::new("/r/b")
+        );
+    }
+
+    #[test]
+    fn a_hard_link_is_resolved_when_it_is_made() {
+        // Hard links are made after the other entries. One resolved when read kept its
+        // path through `a`, which a later entry turned into a link out of the root.
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("victim"), "keep").unwrap();
+        extract(
+            root.path(),
+            &archive(&[
+                ("bin/sh", tar::EntryType::Regular, "", "#!"),
+                ("a/victim", tar::EntryType::Link, "bin/sh", ""),
+                (
+                    "a",
+                    tar::EntryType::Symlink,
+                    outside.path().to_str().unwrap(),
+                    "",
+                ),
+            ])[..],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("victim")).unwrap(),
+            "keep"
+        );
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_hard_link_to_a_link_out_of_the_root_stays_in_it() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("f"), "keep").unwrap();
+        let out = outside.path().join("f");
+        extract(
+            root.path(),
+            &archive(&[
+                ("out", tar::EntryType::Symlink, out.to_str().unwrap(), ""),
+                ("copy", tar::EntryType::Link, "out", ""),
+            ])[..],
+        )
+        .unwrap();
+        // The source resolves inside the root, where nothing is: no link to the host file.
+        let host = std::fs::metadata(&out).unwrap();
+        assert_eq!(std::os::unix::fs::MetadataExt::nlink(&host), 1);
+    }
+
+    #[test]
+    fn preparing_a_root_never_follows_its_links() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        for d in ["etc", "tmp", ".briqyard"] {
+            let o = outside.path().join(d);
+            std::fs::create_dir(&o).unwrap();
+            std::fs::set_permissions(&o, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::os::unix::fs::symlink(&o, root.path().join(d)).unwrap();
+        }
+        let init = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(init.path(), "init").unwrap();
+        prepare_root(root.path(), init.path()).unwrap();
+        for d in ["etc", "tmp", ".briqyard"] {
+            let o = outside.path().join(d);
+            assert_eq!(
+                std::fs::read_dir(&o).unwrap().count(),
+                0,
+                "{d}: written outside"
+            );
+            let mode = std::fs::metadata(&o).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, 0o700, "{d}: mode outside changed");
+            assert!(std::fs::symlink_metadata(root.path().join(d))
+                .unwrap()
+                .is_dir());
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".briqyard/init")).unwrap(),
+            "init"
+        );
+        for f in ["etc/hosts", "etc/resolv.conf", "etc/hostname"] {
+            assert!(root.path().join(f).is_file(), "{f}");
+        }
+    }
+
+    #[test]
+    fn a_long_link_target_is_kept_whole() {
+        let target = format!("/{}/target", "d".repeat(150));
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(0);
+        b.append_link(&mut h, "ln", &target).unwrap();
+        let tar = b.into_inner().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        extract(root.path(), &tar[..]).unwrap();
+        assert_eq!(
+            std::fs::read_link(root.path().join("ln")).unwrap(),
+            Path::new(&target)
+        );
+    }
+
+    #[test]
+    fn whiteouts_of_links_remove_the_link_only() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("f"), "keep").unwrap();
+        extract(
+            root.path(),
+            &archive(&[
+                ("data/f", tar::EntryType::Regular, "", "x"),
+                ("ln", tar::EntryType::Symlink, "data", ""),
+                (
+                    "out",
+                    tar::EntryType::Symlink,
+                    outside.path().to_str().unwrap(),
+                    "",
+                ),
+            ])[..],
+        )
+        .unwrap();
+        extract(
+            root.path(),
+            &archive(&[
+                (".wh.ln", tar::EntryType::Regular, "", ""),
+                ("out/.wh..wh..opq", tar::EntryType::Regular, "", ""),
+            ])[..],
+        )
+        .unwrap();
+        assert!(std::fs::symlink_metadata(root.path().join("ln")).is_err());
+        assert!(root.path().join("data/f").exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("f")).unwrap(),
+            "keep"
         );
     }
 
