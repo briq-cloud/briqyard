@@ -757,22 +757,27 @@ fn endpoint_tenant_and_image_commands() {
         "3128",
         "-e",
         "TOKEN=a=b",
+        "--file",
+        "/etc/proxy.yaml=proxy.yaml",
         "--",
         "proxy",
         "-v",
     ])
     .cmd
     {
-        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set {
-            tenant,
-            region,
-            start,
-            image,
-            port,
-            readiness,
-            envs,
-            cmd,
-        })) => {
+        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set(a))) => {
+            let GatewaySetArgs {
+                tenant,
+                region,
+                start,
+                image,
+                port,
+                readiness,
+                envs,
+                files,
+                cmd,
+            } = *a;
+            assert_eq!(files, ["/etc/proxy.yaml=proxy.yaml"]);
             assert_eq!(
                 (tenant.as_str(), image.as_str(), port),
                 ("t1", "proxy:1", 3128)
@@ -790,8 +795,8 @@ fn endpoint_tenant_and_image_commands() {
     ])
     .cmd
     {
-        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set { start, cmd, .. })) => {
-            assert!(start && cmd.is_empty())
+        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set(a))) => {
+            assert!(a.start && a.cmd.is_empty())
         }
         _ => panic!("not a gateway set"),
     }
@@ -2216,7 +2221,8 @@ fn labels_regions_and_quotas_from_the_command_line() {
     ])
     .cmd
     {
-        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set { region, .. })) => {
+        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set(a))) => {
+            let region = a.region;
             assert_eq!(region.as_deref(), Some("gra"))
         }
         _ => panic!("not a gateway set"),

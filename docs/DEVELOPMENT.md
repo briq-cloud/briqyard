@@ -182,7 +182,10 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
   backups to a directory store and a restore, egress policies (`via` a gateway machine, `none`,
   back to `open`), a tenant gateway (a forward proxy its consumer's start boots, HTTPS through
-  it and nothing around it, stopped by the sleeper, gone with the tenant), egress limits (port
+  it and nothing around it, stopped by the sleeper, gone with the tenant), iron-proxy as a tenant
+  gateway (a stock image with its config and CA as boot files: a header injected and a proxy
+  token swapped on the way to a sibling's HTTPS echo, a request without the token and a host off
+  its list refused, no secret in the consumer), egress limits (port
   25 refused at once while 443 connects, 6 connections a minute then the 7th dropped, lifted
   live, drops shown, a download capped at 2 Mbit/s), usage (running seconds, internet and
   ingress bytes, a stopped machine's disk hours), events (a watch from before a stop gets it,

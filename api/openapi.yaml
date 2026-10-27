@@ -910,6 +910,7 @@ components:
         image: { type: string }
         cmd: { type: array, items: { type: string }, description: replaces the image's command }
         env: { type: object, additionalProperties: { type: string }, description: write-only, as a machine's }
+        files: { type: array, items: { $ref: "#/components/schemas/File" }, description: "boot files, as a machine's (a proxy's configuration, its CA); write-only" }
         size: { allOf: [{ $ref: "#/components/schemas/Size" }], description: "default 1 vCPU, 256 MB" }
         port: { type: integer, minimum: 1, maximum: 65535, description: "the port its program listens on: a start waits for it, within `boot_timeout_sec`" }
         volume_gb: { type: integer, minimum: 1, description: "a data volume at `/data`, fixed for the gateway's life" }

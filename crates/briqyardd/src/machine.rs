@@ -1735,6 +1735,7 @@ impl Manager {
             image: spec.image,
             cmd: spec.cmd,
             env: spec.env,
+            files: spec.files,
             volume: spec.volume_gb.map(|size_gb| api::VolumeSpec {
                 size_gb,
                 mount: "/data".into(),
@@ -1749,6 +1750,8 @@ impl Manager {
             start: Some(false),
             ..Default::default()
         };
+        // A machine's own check, so a replacement is refused in the words a create would be.
+        req.spec().check().map_err(invalid)?;
         check_size(&req.size)?;
         // Pulled before the tenant's lock: a pull may take minutes.
         let im = self.inner.images.ensure(&req.image).await?;
@@ -1787,6 +1790,7 @@ impl Manager {
         if im.key == was.image_key
             && req.cmd == was.cmd
             && req.env == was.env
+            && req.files == was.files
             && req.size == was.size
             && req.ports == was.ports
             && probes == was.probes
@@ -1813,6 +1817,7 @@ impl Manager {
                     ("image", im.key != r.image_key),
                     ("cmd", req.cmd != r.cmd),
                     ("env", req.env != r.env),
+                    ("files", req.files != r.files),
                     ("size", req.size != r.size),
                     ("ports", req.ports != r.ports),
                     ("probes", probes != r.probes),
@@ -1826,6 +1831,7 @@ impl Manager {
                 r.image_config = im.config;
                 r.cmd = req.cmd;
                 r.env = req.env;
+                r.files = req.files;
                 r.size = req.size;
                 r.ports = req.ports;
                 r.probes = probes;
@@ -8843,6 +8849,51 @@ mod tests {
             ..gateway_spec(8080)
         };
         assert!(refused(h.m.set_gateway("t1", spec).await).starts_with("volume_gb is fixed"));
+    }
+
+    /// A stock proxy reads its configuration and its CA from files (iron-proxy, ADR 0016):
+    /// the gateway's boot files are a machine's, on its config drive at each boot; a PUT that
+    /// changes them restarts it with the new ones; a bad one is refused as a create's is.
+    #[tokio::test]
+    async fn a_gateway_has_boot_files_as_a_machine_does() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let file = |body: &[u8]| api::File {
+            path: "/etc/proxy.yaml".into(),
+            base64: api::guest::base64_encode(body),
+            mode: Some("0600".into()),
+        };
+        let spec = |body: &[u8]| api::GatewaySpec {
+            files: vec![file(body)],
+            ..gateway_spec(3128)
+        };
+        let t = h.m.set_gateway("t1", spec(b"v1")).await.unwrap();
+        let gw = t.gateway.unwrap().machine_id;
+        h.m.create(h.consumer("sbx")).await.unwrap();
+        let on_drive =
+            |body: &[u8]| vec![("files/etc/proxy.yaml".to_string(), 0o600, body.to_vec())];
+        assert_eq!(h.drive(&gw).1, on_drive(b"v1"));
+        h.m.set_gateway("t1", spec(b"v2")).await.unwrap();
+        assert_eq!(h.gateway_view().state, state::RUNNING);
+        assert_eq!(h.drive(&gw).1, on_drive(b"v2"));
+        let ev = h
+            .events_of(&gw)
+            .into_iter()
+            .rev()
+            .find(|e| e.reason == "updated")
+            .unwrap();
+        assert_eq!(ev.data, Some(json!({"fields": ["files"]})));
+        let bad = api::GatewaySpec {
+            files: vec![api::File {
+                path: "etc/proxy.yaml".into(),
+                ..file(b"")
+            }],
+            ..gateway_spec(3128)
+        };
+        assert_eq!(
+            refused(h.m.set_gateway("t1", bad).await),
+            "file \"etc/proxy.yaml\": path must be absolute"
+        );
     }
 
     #[tokio::test]

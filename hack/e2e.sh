@@ -16,7 +16,7 @@ cleanup() {
     sudo mv "$KEY_FILE.e2e" "$KEY_FILE"
     for i in $(seq 1 60); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
   fi
-  for t in "$T" "$T-eg" "$T-gw" "$T-q"; do
+  for t in "$T" "$T-eg" "$T-gw" "$T-ip" "$T-q"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
     for i in $(seq 1 10); do
@@ -218,6 +218,74 @@ GW=$(setgw)
 briqyard machine rm "$C" >/dev/null
 check "tenant removed"              'briqyard tenant rm "$GT" && ! briqyard tenant get "$GT" >/dev/null 2>&1'
 check "gateway gone with it"        '! briqyard machine get "$GW" >/dev/null 2>&1'
+
+echo "== iron-proxy as the tenant gateway: a stock image, a header injected, a token swapped (ADR 0016)"
+IT="$T-ip" IRON=ironsh/iron-proxy:0.54.0@sha256:6d074be2de9188f88d08013788d5500fb4de8557f16c2e5b27af4d8d2cb1e3fb
+D=$(mktemp -d)
+# One CA: iron-proxy signs its leaves with it, and it signed the echo server's certificate, which
+# iron-proxy trusts upstream (SSL_CERT_FILE). The echo server is a sibling: no third party.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=e2e iron CA" -keyout "$D/ca.key" -out "$D/ca.crt" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" 2>/dev/null
+openssl req -newkey rsa:2048 -nodes -subj "/CN=echo.internal" -keyout "$D/echo.key" -out "$D/echo.csr" 2>/dev/null
+printf 'subjectAltName=DNS:echo.internal\n' > "$D/san"
+openssl x509 -req -in "$D/echo.csr" -CA "$D/ca.crt" -CAkey "$D/ca.key" -CAcreateserial -days 1 -extfile "$D/san" -out "$D/echo.crt" 2>/dev/null
+cat > "$D/echo.py" <<'PY'
+import http.server, json, ssl
+class Echo(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({k.lower(): v for k, v in self.headers.items()}).encode()
+        self.send_response(200)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+s = http.server.HTTPServer(("0.0.0.0", 443), Echo)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain("/srv/echo.crt", "/srv/echo.key")
+s.socket = ctx.wrap_socket(s.socket, server_side=True)
+s.serve_forever()
+PY
+cat > "$D/proxy.yaml" <<'YAML'
+dns:
+  enabled: false
+proxy:
+  tunnel_listen: ":3128"
+tls:
+  ca_cert: /etc/iron-proxy/ca.crt
+  ca_key: /etc/iron-proxy/ca.key
+transforms:
+  - name: allowlist
+    config:
+      domains: ["echo.internal"]
+  - name: secrets
+    config:
+      secrets:
+        - source: { type: env, var: INJECTED }
+          inject: { header: X-Injected }
+          rules: [{ host: echo.internal, methods: [GET] }]
+        # The CONNECT carries no header: a rule on every method would refuse the tunnel itself.
+        - source: { type: env, var: API_KEY }
+          replace: { proxy_value: proxy-tok, match_headers: [X-Api-Key], require: true }
+          rules: [{ host: echo.internal, methods: [GET] }]
+YAML
+ECHO=$(briqyard machine run --image python:3.12-alpine --name echo --tenant "$IT" --memory 128 --file /srv/echo.py="$D/echo.py" \
+  --file /srv/echo.crt="$D/echo.crt" --file /srv/echo.key="$D/echo.key" -- python3 /srv/echo.py | jq -r .id)
+check "iron: the gateway set, a stock image with its files" 'briqyard tenant gateway set "$IT" --image "$IRON" --port 3128 -e INJECTED=inj-s3cret -e API_KEY=real-s3cret -e SSL_CERT_FILE=/etc/iron-proxy/ca.crt \
+  --file /etc/iron-proxy/proxy.yaml="$D/proxy.yaml" --file /etc/iron-proxy/ca.crt="$D/ca.crt" --file /etc/iron-proxy/ca.key="$D/ca.key" -- -config /etc/iron-proxy/proxy.yaml >/dev/null'
+IC=$(briqyard machine run --image python:3.12-alpine --name agent --tenant "$IT" --memory 128 --egress via:gateway --file /etc/ca.crt="$D/ca.crt" -- sleep 3600 | jq -r .id)
+check "iron: its consumer's start runs it" '[ "$(briqyard tenant get "$IT" | jq -r .gateway.state)" = running ]'
+get='import sys, urllib.request; print(urllib.request.urlopen(urllib.request.Request(sys.argv[1], headers={"X-Api-Key": sys.argv[2]}), timeout=10).read().decode())'
+through() { briqyard machine exec "$IC" -- env https_proxy=http://gateway.internal:3128 SSL_CERT_FILE=/etc/ca.crt python3 -c "$get" "$1" "${2:-proxy-tok}" 2>&1; }
+seen=$(through https://echo.internal/ || true)
+check "iron: an allowed host through it, the header injected" 'echo "$seen" | jq -e ".[\"x-injected\"] == \"inj-s3cret\"" >/dev/null'
+check "iron: the proxy token swapped for the secret" 'echo "$seen" | jq -e ".[\"x-api-key\"] == \"real-s3cret\"" >/dev/null'
+check "iron: a request without the proxy token refused" 'out=$(through https://echo.internal/ another-key); echo "$out" | grep -q "HTTP Error 403"'
+check "iron: a host off its list refused" 'out=$(through https://example.com/); echo "$out" | grep -q "Tunnel connection failed: 403"'
+check "iron: the consumer holds no secret" '! briqyard machine exec "$IC" -- env | grep -q s3cret'
+briqyard machine rm "$IC" >/dev/null
+briqyard machine rm "$ECHO" >/dev/null
+briqyard tenant rm "$IT" >/dev/null 2>&1 || true
+check "iron: gone with its tenant" '! briqyard tenant get "$IT" >/dev/null 2>&1'
+rm -rf "$D"
 
 echo "== stop, start, exit handling"
 briqyard machine stop "$A" >/dev/null
