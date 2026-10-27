@@ -28,10 +28,10 @@ docs/                    architecture, operations, development, mesh design, adr
 
 ## Commands
 
-- `cargo test --workspace` runs anywhere, but CI is Linux: run it in the VM too before pushing (`CARGO_TARGET_DIR=$HOME/target-ci`). macOS hides Linux behaviours tests trip on (a just-written script refused as "Text file busy", coarse file times). The init's tests are Linux-only.
+- `cargo test --workspace` runs anywhere, but CI is Linux: run it in the VM too before pushing, in a target dir of the tree's own (`CARGO_TARGET_DIR=$HOME/target-<worktree dir>`, as `hack/vm.sh` does). macOS hides Linux behaviours tests trip on (a just-written script refused as "Text file busy", coarse file times). The init's tests are Linux-only.
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` are CI.
 - `hack/vm.sh install` builds in the VM, installs both units, restarts them. **Always after a config field change**: an old binary refuses a new field and systemd's start limit then needs `systemctl reset-failed`.
-- `hack/e2e.sh` (184 checks, one daemon), `hack/fleet-smoke.sh` (31, through the fleet, a `host upgrade` included), `hack/fleet-two-hosts.sh` (21, needs `fc2`), `hack/fleet-restore.sh` (10, needs `fc2`: the registry's backup and restore). Run the first two on every daemon change; the last two on every fleet change.
+- `hack/e2e.sh` (193 checks, one daemon; 189 without `network.host_ports`), `hack/fleet-smoke.sh` (31, through the fleet, a `host upgrade` included), `hack/fleet-two-hosts.sh` (21, needs `fc2`), `hack/fleet-restore.sh` (10, needs `fc2`: the registry's backup and restore). Run the first two on every daemon change; the last two on every fleet change.
 - `hack/stress.py` with `hack/stress-invariants.sh`: many tenants through every feature, host invariants between phases. Run it after any change to the manager, the network or the store.
 - Coverage: `cargo llvm-cov` in the VM. Last measure in `docs/research/2026-10-19-stress-spike.md`.
 - `limactl stop fc fc2` when done.

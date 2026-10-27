@@ -365,15 +365,18 @@ impl Provisioner for Scaleway {
 }
 
 /// OVHcloud dedicated servers: the Eco range (Kimsufi, So you Start, Rise) and the Bare Metal
-/// range (Advance, Scale), ordered through the API's cart with the plan's default options.
+/// range (Advance, Scale), ordered through the API's cart with the plan's cheapest option of
+/// each mandatory family (memory, disks, bandwidth: the plan's base configuration).
 /// A server is billed monthly; a termination takes effect at the end of the period, once the
 /// operator confirms it from the email OVH sends.
 ///
 /// The provider id is `order:<orderId>`: the server has no name until OVH delivers it.
 /// `lookup` turns the order into the server (`server_of_order`), starts the Ubuntu install
-/// with the fleet's key and answers the address; `release` terminates the server.
+/// (`/reinstall`, the OS on a small RAID 1, the rest of the disks left for the pool) with the
+/// fleet's key and answers the address; `release` terminates the server.
 ///
-/// Not run against the real API yet: the request shapes follow OVH's API console.
+/// Not run against the real API yet: the paths and bodies follow OVH's published API schemas
+/// (`/1.0/order.json`, `/1.0/dedicated/server.json`, `/1.0/me.json`, read 2026-10-21).
 pub struct Ovh {
     pub application_key: String,
     pub application_secret: String,
@@ -409,6 +412,16 @@ enum OvhId {
     Text(String),
 }
 
+impl OvhId {
+    /// As OVH sent it, for a body that names it back (`itemId` is a long).
+    fn json(&self) -> serde_json::Value {
+        match self {
+            OvhId::Number(n) => (*n).into(),
+            OvhId::Text(s) => s.as_str().into(),
+        }
+    }
+}
+
 impl std::fmt::Display for OvhId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -434,6 +447,69 @@ struct OvhOrder {
 struct OvhOrderDetail {
     #[serde(default)]
     domain: String,
+}
+
+/// An option of a plan in the cart (`order.cart.GenericOptionDefinition`).
+#[derive(Deserialize)]
+struct OvhOption {
+    family: String,
+    mandatory: bool,
+    #[serde(rename = "planCode")]
+    plan_code: String,
+    #[serde(default)]
+    prices: Vec<OvhPrice>,
+}
+
+#[derive(Deserialize)]
+struct OvhPrice {
+    #[serde(default)]
+    duration: String,
+    #[serde(default, rename = "pricingMode")]
+    pricing_mode: String,
+    #[serde(default, rename = "priceInUcents")]
+    price_in_ucents: u64,
+}
+
+#[derive(Deserialize)]
+struct OvhSshKey {
+    key: String,
+}
+
+/// The disks of a server the fleet installs (`dedicated.server.reinstall.Storage`): the OS on
+/// a software RAID 1 of every disk, `/boot` 1 GiB and `/` 100 GiB, no swap (memory is never
+/// overcommitted, ADR 0007); no partition fills the disks, so the rest of each one is left
+/// for the bootstrap's pool, a mirror of the two (ADR 0028). Sizes in MiB.
+fn ovh_storage() -> serde_json::Value {
+    serde_json::json!([{
+        "partitioning": {
+            "layout": [
+                {"mountPoint": "/boot", "fileSystem": "ext4", "raidLevel": 1, "size": 1024},
+                {"mountPoint": "/", "fileSystem": "ext4", "raidLevel": 1, "size": 102400},
+            ]
+        }
+    }])
+}
+
+/// The cheapest option of each mandatory family for a month, in the default pricing mode:
+/// the plan's base configuration. Ordered by family, so the cart is filled the same way
+/// every time.
+fn mandatory_options(options: &[OvhOption]) -> Vec<&str> {
+    let mut best: std::collections::BTreeMap<&str, (u64, &str)> = Default::default();
+    for o in options.iter().filter(|o| o.mandatory) {
+        let price = o
+            .prices
+            .iter()
+            .filter(|p| p.duration == "P1M" && p.pricing_mode == "default")
+            .map(|p| p.price_in_ucents)
+            .min();
+        if let Some(price) = price {
+            let e = best.entry(&o.family).or_insert((price, &o.plan_code));
+            if price < e.0 {
+                *e = (price, &o.plan_code);
+            }
+        }
+    }
+    best.into_values().map(|(_, code)| code).collect()
 }
 
 #[derive(Deserialize)]
@@ -587,8 +663,14 @@ impl Ovh {
             }
             _ => return Ok(None),
         }
-        let details: Vec<OvhOrderDetail> =
-            self.get(&format!("/me/order/{order_id}/details")).await?;
+        let ids: Vec<u64> = self.get(&format!("/me/order/{order_id}/details")).await?;
+        let mut details: Vec<OvhOrderDetail> = Vec::with_capacity(ids.len());
+        for id in ids {
+            details.push(
+                self.get(&format!("/me/order/{order_id}/details/{id}"))
+                    .await?,
+            );
+        }
         let servers: Vec<String> = self.get("/dedicated/server").await?;
         let name = details
             .iter()
@@ -617,7 +699,8 @@ impl Ovh {
 
     /// Starts the Ubuntu install with the fleet's key unless one is running already (an
     /// install in progress answers `/install/status`; none answers 404), so a lookup tried
-    /// again after a lost answer does not start a second one.
+    /// again after a lost answer does not start a second one. `/reinstall` takes the key
+    /// itself, read from the account's key of that name.
     async fn ensure_installing(&self, name: &str) -> Result<()> {
         let (status, text) = self
             .call_raw(
@@ -635,11 +718,15 @@ impl Ovh {
                 "ovh answered {status} on /dedicated/server/{name}/install/status: {text}"
             ));
         }
+        let key: OvhSshKey = self
+            .get(&format!("/me/sshKey/{}", self.ssh_key_name))
+            .await?;
         let body = serde_json::json!({
-            "templateName": OVH_TEMPLATE,
-            "details": {"sshKeyName": self.ssh_key_name},
+            "operatingSystem": OVH_TEMPLATE,
+            "customizations": {"sshKey": key.key},
+            "storage": ovh_storage(),
         });
-        self.post(&format!("/dedicated/server/{name}/install/start"), &body)
+        self.post(&format!("/dedicated/server/{name}/reinstall"), &body)
             .await?;
         tracing::info!(
             server = name,
@@ -701,6 +788,25 @@ impl Provisioner for Ovh {
         )
         .context("ovh cart item response")?;
         let item_id = item.item_id;
+        let options: Vec<OvhOption> = self
+            .get(&format!(
+                "/order/cart/{cart_id}/{product}/options?planCode={}",
+                self.plan_code
+            ))
+            .await?;
+        for code in mandatory_options(&options) {
+            self.post(
+                &format!("/order/cart/{cart_id}/{product}/options"),
+                &serde_json::json!({
+                    "itemId": item_id.json(),
+                    "planCode": code,
+                    "duration": "P1M",
+                    "pricingMode": "default",
+                    "quantity": 1,
+                }),
+            )
+            .await?;
+        }
         let mut configs = vec![
             ("dedicated_datacenter", self.datacenter.as_str()),
             ("dedicated_os", "none_64.en"),
@@ -803,6 +909,7 @@ mod tests {
     struct Seen {
         method: String,
         path: String,
+        query: String,
         authorization: String,
         auth_token: String,
         content_type: String,
@@ -855,6 +962,7 @@ mod tests {
         let mut seen = Seen {
             method: req.method().to_string(),
             path: req.uri().path().to_string(),
+            query: req.uri().query().unwrap_or("").to_string(),
             authorization: header(&req, "authorization"),
             auth_token: header(&req, "x-auth-token"),
             content_type: header(&req, "content-type"),
@@ -927,6 +1035,26 @@ mod tests {
         o
     }
 
+    /// A Rise plan's options as the cart lists them: memory, disks and bandwidth mandatory (two
+    /// of them priced), a vRack bandwidth optional, one mandatory option priced for a year only.
+    const OVH_OPTIONS: &str = r#"[
+        {"family":"memory","mandatory":true,"planCode":"ram-128g-ecc-4800-25rise","exclusive":true,
+         "prices":[{"duration":"P1M","pricingMode":"default","priceInUcents":4000000000}]},
+        {"family":"memory","mandatory":true,"planCode":"ram-64g-ecc-4800-25rise","exclusive":true,
+         "prices":[{"duration":"P1M","pricingMode":"default","priceInUcents":0},
+                   {"duration":"P12M","pricingMode":"upfront12","priceInUcents":0}]},
+        {"family":"storage","mandatory":true,"planCode":"softraid-2x960nvme-25rise","exclusive":true,
+         "prices":[{"duration":"P1M","pricingMode":"default","priceInUcents":0}]},
+        {"family":"storage","mandatory":true,"planCode":"softraid-2x1920nvme-yearly","exclusive":true,
+         "prices":[{"duration":"P12M","pricingMode":"upfront12","priceInUcents":0}]},
+        {"family":"bandwidth","mandatory":true,"planCode":"bandwidth-2000-unguaranteed-25rise","exclusive":true,
+         "prices":[{"duration":"P1M","pricingMode":"default","priceInUcents":900000000}]},
+        {"family":"bandwidth","mandatory":true,"planCode":"bandwidth-1000-unguaranteed-25rise","exclusive":true,
+         "prices":[{"duration":"P1M","pricingMode":"default","priceInUcents":0}]},
+        {"family":"vrack","mandatory":false,"planCode":"vrack-bandwidth-1000-25rise","exclusive":true,
+         "prices":[{"duration":"P1M","pricingMode":"default","priceInUcents":0}]}
+    ]"#;
+
     /// The signature OVH expects, computed here from the recipe, not through the code under test.
     fn ovh_signature(method: &str, url: &str, body: &str, timestamp: &str) -> String {
         use sha1::{Digest, Sha1};
@@ -949,7 +1077,10 @@ mod tests {
             }
             assert_eq!(s.ovh[0], "app-key", "{}", s.path);
             assert_eq!(s.ovh[1], "consumer-key", "{}", s.path);
-            let url = format!("{base_url}{}", s.path);
+            let url = match s.query.as_str() {
+                "" => format!("{base_url}{}", s.path),
+                q => format!("{base_url}{}?{q}", s.path),
+            };
             assert_eq!(
                 s.ovh[3],
                 ovh_signature(&s.method, &url, &s.body, &s.ovh[2]),
@@ -1316,6 +1447,10 @@ mod tests {
                 StatusCode::OK,
                 r#"{"itemId":456,"cartId":"cart-1","settings":{"planCode":"25risem01-v2"}}"#,
             ),
+            (StatusCode::OK, OVH_OPTIONS),
+            (StatusCode::OK, r#"{"itemId":457}"#),
+            (StatusCode::OK, r#"{"itemId":458}"#),
+            (StatusCode::OK, r#"{"itemId":459}"#),
             (StatusCode::OK, r#"{"label":"dedicated_datacenter","value":"gra"}"#),
             (StatusCode::OK, r#"{"label":"dedicated_os","value":"none_64.en"}"#),
             (StatusCode::OK, r#"{"label":"region","value":"europe"}"#),
@@ -1341,6 +1476,10 @@ mod tests {
                 ("POST", "/order/cart"),
                 ("POST", "/order/cart/cart-1/assign"),
                 ("POST", "/order/cart/cart-1/eco"),
+                ("GET", "/order/cart/cart-1/eco/options"),
+                ("POST", "/order/cart/cart-1/eco/options"),
+                ("POST", "/order/cart/cart-1/eco/options"),
+                ("POST", "/order/cart/cart-1/eco/options"),
                 ("POST", "/order/cart/cart-1/item/456/configuration"),
                 ("POST", "/order/cart/cart-1/item/456/configuration"),
                 ("POST", "/order/cart/cart-1/item/456/configuration"),
@@ -1354,20 +1493,27 @@ mod tests {
             body(3),
             serde_json::json!({"planCode": "25risem01-v2", "duration": "P1M", "pricingMode": "default", "quantity": 1})
         );
+        assert_eq!(seen[4].query, "planCode=25risem01-v2", "the plan's options");
+        // The cheapest of each mandatory family for a month, by family: no option chosen for
+        // the optional vRack, none priced only for a year.
+        let option = |code: &str| serde_json::json!({"itemId": 456, "planCode": code, "duration": "P1M", "pricingMode": "default", "quantity": 1});
+        assert_eq!(body(5), option("bandwidth-1000-unguaranteed-25rise"));
+        assert_eq!(body(6), option("ram-64g-ecc-4800-25rise"));
+        assert_eq!(body(7), option("softraid-2x960nvme-25rise"));
         assert_eq!(
-            body(4),
+            body(8),
             serde_json::json!({"label": "dedicated_datacenter", "value": "gra"})
         );
         assert_eq!(
-            body(5),
+            body(9),
             serde_json::json!({"label": "dedicated_os", "value": "none_64.en"})
         );
         assert_eq!(
-            body(6),
+            body(10),
             serde_json::json!({"label": "region", "value": "europe"})
         );
         assert_eq!(
-            body(7),
+            body(11),
             serde_json::json!({"autoPayWithPreferredPaymentMethod": true, "waiveRetractationPeriod": true})
         );
         assert_signed(&seen, &url);
@@ -1378,6 +1524,7 @@ mod tests {
             (StatusCode::OK, r#"{"cartId":"cart-2"}"#),
             (StatusCode::OK, "null"),
             (StatusCode::OK, r#"{"itemId":"789"}"#),
+            (StatusCode::OK, "[]"),
             (StatusCode::OK, "{}"),
             (StatusCode::OK, "{}"),
             (StatusCode::OK, r#"{"orderId":"124"}"#),
@@ -1398,6 +1545,7 @@ mod tests {
                 "/order/cart",
                 "/order/cart/cart-2/assign",
                 "/order/cart/cart-2/baremetalServers",
+                "/order/cart/cart-2/baremetalServers/options",
                 "/order/cart/cart-2/item/789/configuration",
                 "/order/cart/cart-2/item/789/configuration",
                 "/order/cart/cart-2/checkout",
@@ -1465,7 +1613,8 @@ mod tests {
     #[tokio::test]
     async fn ovh_looks_up_an_order() {
         let delivered = r#""delivered""#;
-        let details = r#"[{"orderDetailId":1,"description":"Rise-1","domain":"ns1.ip-1-2-3-4.eu","detailType":"DURATION","quantity":"1"}]"#;
+        let ids = "[1]";
+        let detail = r#"{"orderDetailId":1,"description":"Rise-1","domain":"ns1.ip-1-2-3-4.eu","detailType":"DURATION","quantity":"1"}"#;
         let list = r#"["ns0.ip-9-9-9-9.eu","ns1.ip-1-2-3-4.eu"]"#;
         let server = r#"{"name":"ns1.ip-1-2-3-4.eu","ip":"1.2.3.4","datacenter":"gra2","state":"ok","os":"none_64"}"#;
         let (url, stub) = Canned::start(vec![
@@ -1473,33 +1622,42 @@ mod tests {
             // Not delivered: nothing more is asked.
             (StatusCode::OK, r#""delivering""#),
             (StatusCode::OK, r#""checking""#),
-            // Delivered, first look: the install starts.
+            // Delivered, first look: the install starts, with the key of that name.
             (StatusCode::OK, delivered),
-            (StatusCode::OK, details),
+            (StatusCode::OK, ids),
+            (StatusCode::OK, detail),
             (StatusCode::OK, list),
             (StatusCode::OK, server),
             (
                 StatusCode::NOT_FOUND,
                 r#"{"message":"No installation in progress"}"#,
             ),
-            (StatusCode::OK, r#"{"taskId":1,"status":"todo"}"#),
+            (
+                StatusCode::OK,
+                r#"{"keyName":"fleet","key":"ssh-ed25519 AAAAC3Nz fleet"}"#,
+            ),
+            (
+                StatusCode::OK,
+                r#"{"taskId":1,"status":"todo","function":"reinstallServer"}"#,
+            ),
             // Delivered, looked up again (the first answer was lost): the install is running.
             (StatusCode::OK, delivered),
-            (StatusCode::OK, details),
+            (StatusCode::OK, ids),
+            (StatusCode::OK, detail),
             (StatusCode::OK, list),
             (StatusCode::OK, server),
             (StatusCode::OK, r#"{"progress":[]}"#),
             // Delivered, no address yet.
             (StatusCode::OK, delivered),
-            (StatusCode::OK, details),
+            (StatusCode::OK, ids),
+            (StatusCode::OK, detail),
             (StatusCode::OK, list),
             (StatusCode::OK, r#"{"name":"ns1.ip-1-2-3-4.eu","ip":""}"#),
             // Delivered, but no detail names a server of the account.
             (StatusCode::OK, delivered),
-            (
-                StatusCode::OK,
-                r#"[{"domain":"*001"},{"domain":"ns2.ip-5-5-5-5.eu"}]"#,
-            ),
+            (StatusCode::OK, "[1,2]"),
+            (StatusCode::OK, r#"{"domain":"*001"}"#),
+            (StatusCode::OK, r#"{"domain":"ns2.ip-5-5-5-5.eu"}"#),
             (StatusCode::OK, list),
             // An order that will not be delivered.
             (StatusCode::OK, r#""cancelled""#),
@@ -1533,10 +1691,13 @@ mod tests {
             .collect();
         let status = ("GET", "/me/order/123/status");
         let details = ("GET", "/me/order/123/details");
+        let detail = |id: &'static str| ("GET", id);
         let list = ("GET", "/dedicated/server");
         let server = ("GET", "/dedicated/server/ns1.ip-1-2-3-4.eu");
         let install_status = ("GET", "/dedicated/server/ns1.ip-1-2-3-4.eu/install/status");
-        let install_start = ("POST", "/dedicated/server/ns1.ip-1-2-3-4.eu/install/start");
+        let key = ("GET", "/me/sshKey/fleet");
+        let reinstall = ("POST", "/dedicated/server/ns1.ip-1-2-3-4.eu/reinstall");
+        let one = detail("/me/order/123/details/1");
         assert_eq!(
             calls,
             [
@@ -1545,28 +1706,42 @@ mod tests {
                 status,
                 status,
                 details,
+                one,
                 list,
                 server,
                 install_status,
-                install_start,
+                key,
+                reinstall,
                 status,
                 details,
+                one,
                 list,
                 server,
                 install_status,
                 status,
                 details,
+                one,
                 list,
                 server,
                 status,
                 details,
+                one,
+                detail("/me/order/123/details/2"),
                 list,
                 status,
             ]
         );
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&seen[8].body).unwrap(),
-            serde_json::json!({"templateName": "ubuntu2404-server_64", "details": {"sshKeyName": "fleet"}})
+            serde_json::from_str::<serde_json::Value>(&seen[10].body).unwrap(),
+            serde_json::json!({
+                "operatingSystem": "ubuntu2404-server_64",
+                "customizations": {"sshKey": "ssh-ed25519 AAAAC3Nz fleet"},
+                "storage": [{"partitioning": {"layout": [
+                    {"mountPoint": "/boot", "fileSystem": "ext4", "raidLevel": 1, "size": 1024},
+                    {"mountPoint": "/", "fileSystem": "ext4", "raidLevel": 1, "size": 102400},
+                ]}}],
+            }),
+            "the OS on a RAID 1 of every disk, no partition filling them: the rest is the pool's"
         );
         assert_signed(&seen, &url);
     }
@@ -1579,7 +1754,8 @@ mod tests {
             (StatusCode::OK, r#""delivering""#),
             // Delivered: the order's server.
             (StatusCode::OK, r#""delivered""#),
-            (StatusCode::OK, r#"[{"domain":"ns1.ip-1-2-3-4.eu"}]"#),
+            (StatusCode::OK, "[7]"),
+            (StatusCode::OK, r#"{"domain":"ns1.ip-1-2-3-4.eu"}"#),
             (StatusCode::OK, r#"["ns1.ip-1-2-3-4.eu"]"#),
             (StatusCode::OK, r#""ns1.ip-1-2-3-4.eu""#),
             // A server name as the id.
@@ -1603,12 +1779,13 @@ mod tests {
                 ("GET", "/me/order/123/status"),
                 ("GET", "/me/order/123/status"),
                 ("GET", "/me/order/123/details"),
+                ("GET", "/me/order/123/details/7"),
                 ("GET", "/dedicated/server"),
                 ("POST", "/dedicated/server/ns1.ip-1-2-3-4.eu/terminate"),
                 ("POST", "/dedicated/server/ns2.ip-5-5-5-5.eu/terminate"),
             ]
         );
-        assert_eq!(seen[5].body, "", "terminate takes no body");
+        assert_eq!(seen[6].body, "", "terminate takes no body");
         assert_signed(&seen, &url);
     }
 }

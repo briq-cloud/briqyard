@@ -4,6 +4,7 @@ use crate::{fc, netw};
 use anyhow::{bail, Context, Result};
 use briqyard_api as api;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
@@ -40,8 +41,13 @@ pub struct Config {
     /// The briqyard-init binary copied into every root disk.
     pub init: PathBuf,
     pub storage: Storage,
-    /// Credentials for private registries, by host ("ghcr.io", "registry-1.docker.io").
+    /// Credentials for private registries, by registry as a reference names it ("ghcr.io",
+    /// "docker.io" for Docker Hub).
     pub registries: Vec<Registry>,
+    /// A pull-through mirror per registry (`docker.io: http://10.0.0.2:7440`, ADR 0036): an
+    /// image's content is pulled from it first and from the registry when it fails; a tag is
+    /// always resolved by the registry.
+    pub registry_mirrors: BTreeMap<String, String>,
     pub network: Network,
     /// The limits on every machine's internet traffic, unless the machine sets its own
     /// (ADR 0018).
@@ -72,7 +78,8 @@ pub struct Config {
     pub fleet: Option<FleetClient>,
     pub backup: Backup,
     /// What the daemon advertises: memory it may hand to machines (default: the host's memory
-    /// minus 2 GB) and vCPUs (default: hardware threads times 4).
+    /// minus 2 GB and the ZFS cache's ceiling when set) and vCPUs (default: hardware threads
+    /// times 4).
     pub capacity: Capacity,
     /// When the host is under pressure (ADR 0021).
     pub conditions: Conditions,
@@ -139,6 +146,9 @@ pub struct Network {
     pub upstream_dns: Vec<String>,
     /// The host interface machines reach the internet through. Empty: the default route's.
     pub egress: String,
+    /// TCP ports of the host's own services (an edge beside the daemon, ADR 0028) that
+    /// machines with open egress reach at the host's addresses, as the internet does.
+    pub host_ports: Vec<u16>,
 }
 
 /// Limits on a machine's internet traffic, every field set: the host's defaults, and what a
@@ -341,11 +351,26 @@ pub struct FleetClient {
     pub region: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Capacity {
     pub memory_mb: u32,
     pub vcpus: u32,
+    /// Memory kept for the host and its other services when `memory_mb` is not set.
+    pub reserved_memory_mb: u32,
+    /// Hardware threads kept for them when `vcpus` is not set (ADR 0028).
+    pub reserved_threads: u32,
+}
+
+impl Default for Capacity {
+    fn default() -> Self {
+        Self {
+            memory_mb: 0,
+            vcpus: 0,
+            reserved_memory_mb: 2048,
+            reserved_threads: 0,
+        }
+    }
 }
 
 impl Default for Config {
@@ -366,6 +391,7 @@ impl Default for Config {
             init: "/usr/local/bin/briqyard-init".into(),
             storage: Storage::default(),
             registries: vec![],
+            registry_mirrors: BTreeMap::new(),
             network: Network::default(),
             egress_limits: EgressLimits::default(),
             disk_limits: DiskLimits::default(),
@@ -403,6 +429,7 @@ impl Default for Network {
             range: "10.64.0.0/10".into(),
             upstream_dns: vec![],
             egress: String::new(),
+            host_ports: vec![],
         }
     }
 }
@@ -410,7 +437,10 @@ impl Default for Network {
 impl Default for Ingress {
     fn default() -> Self {
         Self {
-            tcp_ports: "20000-29999".into(),
+            // Kubernetes' NodePort range: no well-known service's port (an edge beside the
+            // daemon listens on MongoDB's 27017, ADR 0028), and under the kernel's ephemeral
+            // ports, which outgoing connections take.
+            tcp_ports: "30000-32767".into(),
             http: String::new(),
             domain: "byard.localhost".into(),
             bind: "127.0.0.1".into(),
@@ -448,6 +478,7 @@ impl Config {
             bail!("storage.pool is required");
         }
         self.key_source()?;
+        self.mirrors()?;
         if self.root_disk_gb < 1 {
             bail!("root_disk_gb must be at least 1");
         }
@@ -478,6 +509,7 @@ impl Config {
         for c in &self.ingress.allowed_clients {
             netw::cidr(c).with_context(|| format!("ingress.allowed_clients {c:?}"))?;
         }
+        self.check_host_ports()?;
         if let Err(e) = self.egress_limits.view().check() {
             bail!("egress_limits.{e}");
         }
@@ -490,6 +522,29 @@ impl Config {
         self.check_fleet_url()?;
         self.check_exposure()?;
         self.check_advertise()
+    }
+
+    /// A host port is a service of the host's own: never one of the daemon's, which machines
+    /// must not reach, nor the gateway's DNS, which they reach already.
+    fn check_host_ports(&self) -> Result<()> {
+        let daemon =
+            netw::nft::daemon_ports(&self.listen, &self.ingress.http, &self.ingress.tcp_ports)?;
+        let daemons = |p: u16| {
+            daemon.iter().any(|d| {
+                let (lo, hi) = d.split_once('-').unwrap_or((d, d));
+                (lo.parse().unwrap_or(0)..=hi.parse().unwrap_or(0)).contains(&p)
+            })
+        };
+        for &p in &self.network.host_ports {
+            let why = match p {
+                0 => "not a port",
+                53 => "the gateway's DNS",
+                _ if daemons(p) => "one of the daemon's",
+                _ => continue,
+            };
+            bail!("network.host_ports: {p} is {why}: list ports of the host's own services");
+        }
+        Ok(())
     }
 
     /// The host's token goes to `fleet.url` with every heartbeat, and the pool's key comes back
@@ -537,6 +592,17 @@ impl Config {
             );
         }
         Ok(())
+    }
+
+    /// The registries' mirrors (`registry_mirrors`), each checked.
+    pub fn mirrors(&self) -> Result<Vec<crate::image::Mirror>> {
+        self.registry_mirrors
+            .iter()
+            .map(|(registry, url)| {
+                crate::image::Mirror::parse(registry, url)
+                    .with_context(|| format!("registry_mirrors.{registry}"))
+            })
+            .collect()
     }
 
     /// Whether the API is served over TLS: `api_tls`, unless `listen` is loopback.
@@ -710,6 +776,7 @@ mod tests {
             KeySource::File("/etc/briqyard/pool.key".into())
         );
         assert!(c.registries.is_empty());
+        assert!(c.registry_mirrors.is_empty());
         assert_eq!(c.network.range, "10.64.0.0/10");
         assert!(c.network.upstream_dns.is_empty());
         assert!(c.network.egress.is_empty());
@@ -717,7 +784,7 @@ mod tests {
         assert_eq!(c.egress_limits.new_connections_per_minute, 0);
         assert_eq!(c.egress_limits.bandwidth_mbit, 0);
         assert_eq!(c.disk_limits, DiskLimits::default());
-        assert_eq!(c.ingress.tcp_ports, "20000-29999");
+        assert_eq!(c.ingress.tcp_ports, "30000-32767");
         assert!(c.ingress.http.is_empty());
         assert_eq!(c.ingress.domain, "byard.localhost");
         assert_eq!(c.ingress.bind, "127.0.0.1");
@@ -732,6 +799,9 @@ mod tests {
         assert!(c.fleet.is_none());
         assert_eq!(c.capacity.memory_mb, 0);
         assert_eq!(c.capacity.vcpus, 0);
+        assert_eq!(c.capacity.reserved_memory_mb, 2048);
+        assert_eq!(c.capacity.reserved_threads, 0);
+        assert!(c.network.host_ports.is_empty());
         assert_eq!(
             c.conditions,
             Conditions {
@@ -857,10 +927,13 @@ registries:
   - host: ghcr.io
     username: bot
     password: pw
+registry_mirrors:
+  docker.io: http://10.0.0.2:7440
 network:
   range: 10.128.0.0/10
   upstream_dns: ["1.1.1.1", "9.9.9.9"]
   egress: eth0
+  host_ports: [80, 443, 5432]
 egress_limits:
   blocked_ports: [25, 465, 587]
   new_connections_per_minute: 600
@@ -889,6 +962,8 @@ fleet:
 capacity:
   memory_mb: 65536
   vcpus: 128
+  reserved_memory_mb: 3072
+  reserved_threads: 2
 conditions:
   memory_pct: 90
   disk_free_pct: 20
@@ -914,9 +989,18 @@ console_max_mb: 16
         assert_eq!(c.registries[0].host, "ghcr.io");
         assert_eq!(c.registries[0].username, "bot");
         assert_eq!(c.registries[0].password, "pw");
+        assert_eq!(
+            c.mirrors().unwrap(),
+            [crate::image::Mirror {
+                registry: "docker.io".into(),
+                host: "10.0.0.2:7440".into(),
+                plain_http: true,
+            }]
+        );
         assert_eq!(c.network.range, "10.128.0.0/10");
         assert_eq!(c.network.upstream_dns, vec!["1.1.1.1", "9.9.9.9"]);
         assert_eq!(c.network.egress, "eth0");
+        assert_eq!(c.network.host_ports, [80, 443, 5432]);
         assert_eq!(
             c.egress_limits,
             EgressLimits {
@@ -951,6 +1035,8 @@ console_max_mb: 16
         assert_eq!(f.region, "fsn1");
         assert_eq!(c.capacity.memory_mb, 65536);
         assert_eq!(c.capacity.vcpus, 128);
+        assert_eq!(c.capacity.reserved_memory_mb, 3072);
+        assert_eq!(c.capacity.reserved_threads, 2);
         assert_eq!(
             c.conditions,
             Conditions {
@@ -965,7 +1051,7 @@ console_max_mb: 16
     fn a_partial_section_keeps_the_other_defaults() {
         let c = load("ingress:\n  http: 127.0.0.1:8080\n").unwrap();
         assert_eq!(c.ingress.http, "127.0.0.1:8080");
-        assert_eq!(c.ingress.tcp_ports, "20000-29999");
+        assert_eq!(c.ingress.tcp_ports, "30000-32767");
         assert_eq!(c.ingress.domain, "byard.localhost");
         // A rate set for every machine keeps port 25 blocked.
         let c = load("egress_limits:\n  new_connections_per_minute: 600\n").unwrap();
@@ -1135,6 +1221,67 @@ console_max_mb: 16
         }
         // The jailer may stay empty (no jail) and is not checked for an absolute path here.
         load("jailer: \"\"\n").unwrap();
+
+        for (yaml, want) in [
+            (
+                "registry_mirrors:\n  docker.io: 10.0.0.2:7440\n",
+                "registry_mirrors.docker.io: \"10.0.0.2:7440\": want http:// or https://",
+            ),
+            (
+                "registry_mirrors:\n  docker.io: https://m.internal/docker\n",
+                "registry_mirrors.docker.io: \"https://m.internal/docker\": a mirror is a host and a port, with no path",
+            ),
+            (
+                "registry_mirrors:\n  https://docker.io: https://m.internal\n",
+                "registry_mirrors.https://docker.io: \"https://docker.io\" is not a registry name (docker.io, ghcr.io)",
+            ),
+        ] {
+            assert_eq!(format!("{:#}", load(yaml).unwrap_err()), want);
+        }
+        let m = load("registry_mirrors:\n  ghcr.io: https://m.internal:5000/\n").unwrap();
+        assert_eq!(
+            m.mirrors().unwrap()[0],
+            crate::image::Mirror {
+                registry: "ghcr.io".into(),
+                host: "m.internal:5000".into(),
+                plain_http: false,
+            }
+        );
+    }
+
+    #[test]
+    fn host_ports_are_never_the_daemons() {
+        for (yaml, why) in [
+            ("network:\n  host_ports: [0]\n", "0 is not a port"),
+            ("network:\n  host_ports: [53]\n", "53 is the gateway's DNS"),
+            (
+                "network:\n  host_ports: [443, 7420]\n",
+                "7420 is one of the daemon's",
+            ),
+            (
+                "ingress:\n  http: 127.0.0.1:8080\nnetwork:\n  host_ports: [8080]\n",
+                "8080 is one of the daemon's",
+            ),
+            (
+                "network:\n  host_ports: [31000]\n",
+                "31000 is one of the daemon's",
+            ),
+            // The endpoint range before ADR 0028 held MongoDB's port, an edge's listener.
+            (
+                "ingress:\n  tcp_ports: 20000-29999\nnetwork:\n  host_ports: [443, 27017]\n",
+                "27017 is one of the daemon's",
+            ),
+        ] {
+            let err = load(yaml).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                format!("network.host_ports: {why}: list ports of the host's own services"),
+                "{yaml:?}"
+            );
+        }
+        // 8080 is the HTTP ingress's only when it is on.
+        let c = load("network:\n  host_ports: [80, 443, 8080, 5432, 27017]\n").unwrap();
+        assert_eq!(c.network.host_ports, [80, 443, 8080, 5432, 27017]);
     }
 
     #[test]

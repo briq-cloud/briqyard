@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
-# End-to-end suite against a running briqyardd on this host. Needs: briqyard on PATH, curl, jq,
-# the daemon reachable at $BRIQYARD_URL (default http://127.0.0.1:7420), and the internet.
+# End-to-end suite against a running briqyardd. Needs: briqyard on PATH, curl, jq, bc, openssl,
+# GNU date and timeout (run it on the host, or on any Linux that reaches the host's private
+# address), the daemon at $BRIQYARD_URL (default http://127.0.0.1:7420) with $BRIQYARD_TOKEN and,
+# over TLS, $BRIQYARD_TLS_FINGERPRINT; its HTTP ingress at $BRIQYARD_INGRESS (default the API's
+# address, port 8080); a `backup.store`; and the internet. psql, when present, adds checks.
 # Every machine it makes lives in a tenant "e2e-<pid>…" and is destroyed at the end.
 set -euo pipefail
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7420}
+for c in briqyard curl jq bc openssl timeout; do command -v "$c" >/dev/null || { echo "e2e needs $c"; exit 2; }; done
+api_host=${BRIQYARD_URL#*://}; api_host=${api_host%%/*}; api_host=${api_host%:*}
+INGRESS=${BRIQYARD_INGRESS:-http://$api_host:8080}
+auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
+# curl to the API trusts what the CLI trusts: with a pin, the daemon's own certificate once its
+# SHA-256 matches, and nothing else.
+CURL=(curl)
+if [ -n "${BRIQYARD_TLS_FINGERPRINT:-}" ]; then
+  CERT=$(mktemp)
+  hostport=${BRIQYARD_URL#https://}; hostport=${hostport%%/*}
+  openssl s_client -connect "$hostport" </dev/null 2>/dev/null | openssl x509 > "$CERT"
+  seen=$(openssl x509 -in "$CERT" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr 'A-F' 'a-f')
+  [ "$seen" = "$(echo "$BRIQYARD_TLS_FINGERPRINT" | tr -d : | tr 'A-F' 'a-f')" ] || { echo "$hostport presents $seen, not the pinned certificate"; exit 2; }
+  CURL=(curl --cacert "$CERT")
+fi
 T=e2e-$$
 pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
@@ -15,6 +33,14 @@ cleanup() {
   if [ -n "${KEY_FILE:-}" ] && sudo test -f "$KEY_FILE.e2e"; then
     sudo mv "$KEY_FILE.e2e" "$KEY_FILE"
     for i in $(seq 1 60); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  fi
+  # The mirror section stops the mirror and names it in the configuration for a moment.
+  if [ -n "${MIRROR:-}" ]; then
+    sudo systemctl start briqyard-mirror || true
+    if sudo test -f /etc/briqyard/config.yaml.e2e; then
+      sudo mv /etc/briqyard/config.yaml.e2e /etc/briqyard/config.yaml
+      handover
+    fi
   fi
   for t in "$T" "$T-eg" "$T-gw" "$T-q"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
@@ -108,6 +134,20 @@ check "via: gateway name resolves" 'lookup "$V" egw.internal | grep -q "10\.6[4-
 check "none reaches a sibling"    'reach "$N" http://eside.internal:8080/'
 check "none: no internet"         '! connects "$N" "$NET"'
 check "none: outside name refused" 'lookup "$N" example.com | grep -q NXDOMAIN'
+# The host's own services (network.host_ports, ADR 0028), checked where the suite runs on the
+# host and its config lists one: reached at the host's address by a machine with egress
+# (connected, or refused at once), dropped for none and via; the daemon's API dropped for all.
+HP=$(sudo -n awk '/^  host_ports:/ {gsub(/[^0-9,]/, ""); split($0, p, ","); print p[1]}' /etc/briqyard/config.yaml 2>/dev/null || true)
+if [ -n "$HP" ]; then
+  HOST=$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')
+  api_port=${BRIQYARD_URL##*:}; api_port=${api_port%%/*}
+  # "dropped" when the connect waits out its 3 s, "reached" when it ends sooner either way.
+  knock() { briqyard machine exec "$1" -- sh -c 's=$(date +%s); nc -z -w 3 "$1" "$2"; [ $(($(date +%s) - s)) -ge 3 ] && echo dropped || echo reached' _ "$HOST" "$2" 2>/dev/null; }
+  check "host port $HP reached"     '[ "$(knock "$SIB" "$HP")" = reached ]'
+  check "none: host port dropped"   '[ "$(knock "$N" "$HP")" = dropped ]'
+  check "via: host port dropped"    '[ "$(knock "$V" "$HP")" = dropped ]'
+  check "the API dropped"           '[ "$(knock "$SIB" "$api_port")" = dropped ]'
+fi
 briqyard machine set-egress "$N" open >/dev/null
 check "open again: internet"      'connects "$N" "$NET"'
 for m in "$V" "$N" "$SIB" "$G"; do briqyard machine rm "$m" >/dev/null; done
@@ -230,7 +270,6 @@ for i in $(seq 1 30); do [ "$(briqyard machine get "$X" | jq -r .exit.code)" != 
 check "exit recorded"  '[ "$(briqyard machine get "$X" | jq -r .exit.code)" = 7 ]'
 
 echo "== events, versions and a watch"
-auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
 EV=$(briqyard machine run --image alpine:3.20 --name evts --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
 # A watch from the machine's version: started before the stop, bounded, in the background.
 timeout 60 briqyard events --machine "$EV" --since "$(briqyard machine get "$EV" | jq -r .version)" --watch > /tmp/by-e2e-watch.txt 2>&1 &
@@ -239,7 +278,7 @@ briqyard machine stop "$EV" >/dev/null
 for i in $(seq 1 30); do awk '$4 == "stopped"' /tmp/by-e2e-watch.txt | grep -q . && break; sleep 1; done
 check "a watch from before the stop gets it" 'awk "\$4 == \"stopped\"" /tmp/by-e2e-watch.txt | grep -q "$EV"'
 kill "$WATCH" 2>/dev/null || true; wait "$WATCH" 2>/dev/null || true
-patch_sleep() { curl -s -o /dev/null -w '%{http_code}' -X PATCH ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -H "If-Match: $1" -d '{"sleep":"3h"}' "$BRIQYARD_URL/v1/machines/$EV"; }
+patch_sleep() { "${CURL[@]}" -s -o /dev/null -w '%{http_code}' -X PATCH ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -H "If-Match: $1" -d '{"sleep":"3h"}' "$BRIQYARD_URL/v1/machines/$EV"; }
 ver=$(briqyard machine get "$EV" | jq -r .version)
 check "a stale If-Match is 409"      '[ "$(patch_sleep $((ver - 1)))" = 409 ]'
 check "the current If-Match passes"  '[ "$(patch_sleep "$ver")" = 200 ]'
@@ -278,7 +317,7 @@ check "a != selector is refused"     '! briqyard machine ls -l "app!=web" >/dev/
 Q="$T-q"
 briqyard tenant quota "$Q" --machines 1 >/dev/null
 briqyard machine run --image alpine:3.20 --name q1 --tenant "$Q" --memory 128 --no-start >/dev/null
-second=$(curl -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"tenant\":\"$Q\",\"name\":\"q2\",\"image\":\"alpine:3.20\",\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines")
+second=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"tenant\":\"$Q\",\"name\":\"q2\",\"image\":\"alpine:3.20\",\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines")
 check "quota: the second create is 403 quota" '[ "${second##* }" = 403 ] && [ "$(echo "${second% *}" | jq -r .code)" = quota ]'
 check "quota: its use shown"         '[ "$(briqyard tenant quota "$Q" | jq -c "[.quota.machines, .used.machines]")" = "[1,1]" ]'
 check "quota: the refusal is an event" 'briqyard events --tenant "$Q" | awk "\$4 == \"quota_exceeded\"" | grep -q .'
@@ -493,11 +532,11 @@ W=$(briqyard machine run --image nginx:alpine --name web --tenant "$T" --memory 
 WEP=$(briqyard endpoint add --http --host "e2e-web" "$W" 80 | jq -r .host)
 for i in $(seq 1 30); do briqyard machine exec "$W" -- wget -qO- http://127.0.0.1/ >/dev/null 2>&1 && break; sleep 1; done
 check "http endpoint host" '[ "$WEP" = "e2e-web.byard.localhost" ]'
-check "http routed by host" 'curl -fsS -H "Host: $WEP" http://127.0.0.1:8080/ | grep -qi "nginx"'
-check "http unknown host 404" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: nobody.byard.localhost" http://127.0.0.1:8080/)" = 404 ]'
+check "http routed by host" 'curl -fsS -H "Host: $WEP" "$INGRESS/" | grep -qi "nginx"'
+check "http unknown host 404" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: nobody.byard.localhost" "$INGRESS/")" = 404 ]'
 for i in $(seq 1 90); do [ "$(briqyard machine get "$W" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "web slept"          '[ "$(briqyard machine get "$W" | jq -r .stopped_reason)" = idle ]'
-check "http request wakes" 'curl -fsS --max-time 90 -H "Host: $WEP" http://127.0.0.1:8080/ | grep -qi "nginx"'
+check "http request wakes" 'curl -fsS --max-time 90 -H "Host: $WEP" "$INGRESS/" | grep -qi "nginx"'
 
 echo "== usage: compute, internet, ingress, a stopped machine's disks"
 from=$(date -u +%Y-%m-%dT%H:00:00Z)
@@ -505,7 +544,7 @@ U=$(briqyard machine run --image nginx:alpine --name use --tenant "$T" --memory 
 for i in $(seq 1 30); do briqyard machine exec "$U" -- wget -qO- http://127.0.0.1/ >/dev/null 2>&1 && break; sleep 1; done
 briqyard machine exec "$U" -- wget -qO /dev/null -T 10 https://example.com >/dev/null 2>&1 || true
 UEP=$(briqyard endpoint add --http --host e2e-use "$U" 80 | jq -r .host)
-curl -fsS -H "Host: $UEP" http://127.0.0.1:8080/ >/dev/null || true
+curl -fsS -H "Host: $UEP" "$INGRESS/" >/dev/null || true
 # The sum of a field over the machine's buckets since $from (the hour may turn meanwhile).
 usage_of() { briqyard usage --from "$from" --to "$(date -u -d '+1 hour' +%Y-%m-%dT%H:00:00Z)" --json | jq "[.[] | select(.machine_id == \"$1\") | .$2] | add // 0"; }
 # The tick measures every 15 s: wait on the values, at most a minute.
@@ -524,7 +563,7 @@ briqyard machine rm "$U" >/dev/null
 
 echo "== metrics, top, conditions"
 M=$(briqyard machine run --image alpine:3.20 --name top --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
-metrics=$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics")
+metrics=$("${CURL[@]}" -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics")
 check "metrics: the machine's CPU series" 'echo "$metrics" | grep -q "^briqyard_machine_cpu_seconds_total{machine=\"$M\",tenant=\"$T\",name=\"top\"} "'
 check "metrics: its state, running"      'echo "$metrics" | grep -qx "briqyard_machine_state{machine=\"$M\",tenant=\"$T\",name=\"top\",state=\"running\"} 1"'
 check "top lists it"                      'briqyard top --tenant "$T" | grep -q "^$M "'
@@ -533,12 +572,55 @@ windowed() { briqyard top --tenant "$T" --json | jq -e ".[] | select(.machine_id
 for i in $(seq 1 25); do windowed && break; sleep 2; done
 check "top: rates over the last window"   'windowed'
 # The slow writes above, held back by the disk limit: in the next line Firecracker writes.
-throttled() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics" | awk -v m="machine=\"$DK\"" 'index($0, "briqyard_machine_disk_throttled_total{") == 1 && index($0, m) && $2 > 0' | grep -q .; }
+throttled() { "${CURL[@]}" -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics" | awk -v m="machine=\"$DK\"" 'index($0, "briqyard_machine_disk_throttled_total{") == 1 && index($0, m) && $2 > 0' | grep -q .; }
 for i in $(seq 1 35); do throttled && break; sleep 2; done
 check "metrics: the disk's throttling counted" 'throttled'
 briqyard machine rm "$DK" >/dev/null
 check "status: no condition true"         'briqyard status | jq -e "(.conditions | map(.type) | sort) == [\"disk_pressure\", \"memory_pressure\"] and all(.conditions[]; .status == false)" >/dev/null'
 briqyard machine rm "$M" >/dev/null
+
+# What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start. The
+# machines carry on; the new daemon reads the configuration again.
+handover() {
+  local pid
+  pid=$(systemctl show -p MainPID --value briqyardd)
+  sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
+  for i in $(seq 1 100); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
+  sudo systemctl start briqyardd
+  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+}
+
+if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1 && systemctl is-active briqyard-mirror >/dev/null 2>&1; then
+  echo "== a registry mirror: pulls through it, from the registry when it is down (ADR 0036)"
+  MIRROR=127.0.0.1:7440 IMG=busybox:1.37.0-musl
+  # The dev host's configuration names the mirror, or names it for this section.
+  if ! sudo grep -q '^registry_mirrors:' /etc/briqyard/config.yaml; then
+    sudo cp /etc/briqyard/config.yaml /etc/briqyard/config.yaml.e2e
+    printf 'registry_mirrors:\n  docker.io: http://%s\n' "$MIRROR" | sudo tee -a /etc/briqyard/config.yaml >/dev/null
+    handover
+  fi
+  drop_image() { for k in $(briqyard image ls | awk -v r="$IMG" '$2 == r { print $1 }'); do briqyard image rm "$k" >/dev/null; done; }
+  last_pull() { briqyard events 2>/dev/null | awk '$4 == "image_pulled"' | grep -F "pulled $IMG " | tail -1; }
+  drop_image
+  MR=$(briqyard machine run --image "$IMG" --name mirrored --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+  digest=$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/images" | jq -r --arg r "$IMG" '.[] | select(.ref == $r) | .digest')
+  check "mirror: a pull goes through it"      '[ "$(briqyard machine get "$MR" | jq -r .state)" = running ] && last_pull | grep -qF "through $MIRROR"'
+  check "mirror: it holds the image by digest" 'curl -fsS -o /dev/null -I -H "Accept: application/vnd.oci.image.index.v1+json" "http://$MIRROR/v2/library/busybox/manifests/$digest"'
+  briqyard machine rm "$MR" >/dev/null
+  drop_image
+  sudo systemctl stop briqyard-mirror
+  since=$(date +%s)
+  MR=$(briqyard machine run --image "$IMG" --name unmirrored --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+  check "mirror down: the registry serves the pull" '[ "$(briqyard machine get "$MR" | jq -r .state)" = running ] && last_pull | grep -q . && ! last_pull | grep -qF through'
+  check "mirror down: the same digest"        '[ "$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/images" | jq -r --arg r "$IMG" ".[] | select(.ref == \$r) | .digest")" = "$digest" ]'
+  check "mirror down: the fallback logged"    'sudo journalctl -u briqyardd --since "@$since" -o cat | grep -F "mirror failed" | grep -qF "$IMG"'
+  sudo systemctl start briqyard-mirror
+  briqyard machine rm "$MR" >/dev/null
+  if sudo test -f /etc/briqyard/config.yaml.e2e; then
+    sudo mv /etc/briqyard/config.yaml.e2e /etc/briqyard/config.yaml
+    handover
+  fi
+fi
 
 if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then
   echo "== daemon crash: running machines are adopted"
@@ -562,12 +644,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   check "status says the build"      '[ "$(briqyard status | jq -r .version)" = "$build" ]'
   check "the init says its version"  '[ "$(briqyard machine get "$V" | jq -r .init_version)" = "$build" ]'
   check "what ran it is the host's"  '[ "$(briqyard machine get "$V" | jq -r .vmm_version)" = "$(briqyard status | jq -r .vmm_version)" ]'
-  # What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start.
-  pid=$(systemctl show -p MainPID --value briqyardd)
-  sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
-  for i in $(seq 1 100); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
-  sudo systemctl start briqyardd
-  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  handover
   check "handed over: still running" '[ "$(briqyard machine get "$V" | jq -r .state)" = running ]'
   check "the new daemon adopted it"  'briqyard status | jq -e ".started.adopted >= 1 and .started.stopped == 0" >/dev/null'
   check "exec after the hand-over"   '[ "$(briqyard machine exec "$V" -- hostname)" = handover ]'

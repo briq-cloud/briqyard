@@ -53,7 +53,10 @@ oci-client = { version = "0.14", default-features = false, features = ["rustls-t
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio-util = { version = "0.7", features = ["io"] }
-rusty-s3 = "0.7"
+# The object store (ADR 0034): S3 on our reqwest (its own HTTP client, reqwest 0.13 and
+# aws-lc, is left out), signing with ring; and the local file system.
+object_store = { version = "0.14", default-features = false, features = ["aws-base", "fs", "ring"] }
+http-body-util = "0.1"
 url = "2"
 tokio-vsock = "0.6"
 humantime = "2"
