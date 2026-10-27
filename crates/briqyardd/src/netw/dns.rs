@@ -146,19 +146,29 @@ impl Resolver {
         self.forward(q).await
     }
 
+    /// Sends the query to each upstream in turn and answers the first reply that is from that
+    /// upstream (a connected socket drops any other source) and carries the query's ID; a
+    /// datagram with another ID is ignored, so a spoofed one cannot answer in its place.
     async fn forward(&self, q: &[u8]) -> Option<Vec<u8>> {
+        let id = q.get(..2)?;
         for up in self.upstream.iter() {
-            let sock = match UdpSocket::bind("0.0.0.0:0").await {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await else {
+                continue;
             };
-            if sock.send_to(q, up).await.is_err() {
+            if sock.connect(up).await.is_err() || sock.send(q).await.is_err() {
                 continue;
             }
-            let mut buf = vec![0u8; 4096];
-            match tokio::time::timeout(Duration::from_secs(4), sock.recv_from(&mut buf)).await {
-                Ok(Ok((n, _))) => return Some(buf[..n].to_vec()),
-                _ => continue,
+            let reply = async {
+                let mut buf = vec![0u8; 4096];
+                loop {
+                    let n = sock.recv(&mut buf).await.ok()?;
+                    if buf[..n].get(..2) == Some(id) {
+                        return Some(buf[..n].to_vec());
+                    }
+                }
+            };
+            if let Ok(Some(r)) = tokio::time::timeout(Duration::from_secs(4), reply).await {
+                return Some(r);
             }
         }
         None
@@ -292,6 +302,27 @@ mod tests {
         no_question[5] = 0;
         no_question.truncate(12);
         assert!(parse_query(&no_question).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_forwarded_answer_must_carry_the_query_id() {
+        // The upstream first sends a reply with another ID, then the right one.
+        let up = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let r = Resolver::new(&[up.local_addr().unwrap().to_string()]);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            while let Ok((n, from)) = up.recv_from(&mut buf).await {
+                let mut wrong = buf[..n].to_vec();
+                wrong[0] ^= 0xFF;
+                wrong.extend_from_slice(b"wrong");
+                let _ = up.send_to(&wrong, from).await;
+                let mut right = buf[..n].to_vec();
+                right.extend_from_slice(b"right");
+                let _ = up.send_to(&right, from).await;
+            }
+        });
+        let reply = r.forward(&query("example.com", 1)).await.unwrap();
+        assert!(reply.ends_with(b"right"), "{reply:?}");
     }
 
     /// Malformed packets from a guest are dropped, and none panics the daemon (release
