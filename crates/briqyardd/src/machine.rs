@@ -3504,7 +3504,7 @@ impl Manager {
             // A suspend keeps a memory snapshot: the next start resumes in well under a
             // second. Refused, the machine is stopped the plain way.
             let suspended = suspend
-                && match self.inner.vmm.snapshot(&live).await {
+                && match self.inner.vmm.snapshot(&live, true).await {
                     Ok(()) => true,
                     Err(err) => {
                         tracing::warn!(machine = r.id, err = %err, "suspend refused, stopping");
@@ -5766,8 +5766,9 @@ mod tests {
             Ok(())
         }
 
-        async fn snapshot(&self, vm: &fc::Vm) -> Result<()> {
-            self.record(format!("snapshot {}", vm.pid));
+        async fn snapshot(&self, vm: &fc::Vm, durable: bool) -> Result<()> {
+            let how = if durable { "synced" } else { "unsynced" };
+            self.record(format!("snapshot {} {how}", vm.pid));
             std::fs::write(vm.dir.join("snap.state"), b"state")?;
             std::fs::write(vm.dir.join("snap.mem"), b"memory")?;
             Ok(())
@@ -7366,7 +7367,7 @@ mod tests {
         assert!(slept.suspended);
         assert_eq!(slept.state, state::STOPPED);
         let calls = h.host.calls();
-        assert_eq!(&calls[..2], ["snapshot 1000", "kill 1000"]);
+        assert_eq!(&calls[..2], ["snapshot 1000 synced", "kill 1000"]);
         let back = h.m.start(&m.id, None).await.unwrap();
         assert!(!back.suspended);
         assert_eq!(back.state, state::RUNNING);

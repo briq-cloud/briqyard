@@ -179,11 +179,13 @@ impl Client {
             .map(|_| ())
     }
 
-    /// A full snapshot (VM state and memory) of a paused machine.
-    pub async fn snapshot_create(&self, state: &Path, mem: &Path) -> Result<()> {
+    /// A full snapshot (VM state and memory) of a paused machine. `sync`: the files are
+    /// fsynced before the call returns (`sync_snapshot_files`, v1.17); otherwise they are in
+    /// the page cache only, and the caller syncs them before anything names them (ADR 0037).
+    pub async fn snapshot_create(&self, state: &Path, mem: &Path, sync: bool) -> Result<()> {
         self.put(
             "/snapshot/create",
-            &json!({"snapshot_type": "Full", "snapshot_path": state, "mem_file_path": mem}),
+            &json!({"snapshot_type": "Full", "snapshot_path": state, "mem_file_path": mem, "sync_snapshot_files": sync}),
         )
         .await
     }
@@ -764,8 +766,10 @@ pub trait Vmm: Send + Sync {
     async fn disk_rate(&self, vm: &Vm, rate: &DiskRate, volume: bool) -> Result<()>;
 
     /// Pauses the machine and writes its memory and state next to its sockets, for the
-    /// next boot to resume. An error means the VMM refused and the machine runs on.
-    async fn snapshot(&self, vm: &Vm) -> Result<()>;
+    /// next boot to resume. `durable`: the files are on disk when it returns (a suspend);
+    /// otherwise the caller syncs them, after resuming the machine. An error means the VMM
+    /// refused and the machine runs on.
+    async fn snapshot(&self, vm: &Vm, durable: bool) -> Result<()>;
 
     /// Lets a machine `snapshot` paused run on.
     async fn resume(&self, vm: &Vm) -> Result<()>;
@@ -998,11 +1002,11 @@ impl Vmm for Firecracker {
         Ok(())
     }
 
-    async fn snapshot(&self, vm: &Vm) -> Result<()> {
+    async fn snapshot(&self, vm: &Vm, durable: bool) -> Result<()> {
         let c = Client::new(&vm.api);
         c.pause().await.context("pause")?;
         if let Err(err) = c
-            .snapshot_create(&vm.inside("snap.state"), &vm.inside("snap.mem"))
+            .snapshot_create(&vm.inside("snap.state"), &vm.inside("snap.mem"), durable)
             .await
         {
             let _ = c.resume().await;
@@ -1303,7 +1307,7 @@ mod tests {
         c.start().await.unwrap();
         c.pause().await.unwrap();
         c.resume().await.unwrap();
-        c.snapshot_create(Path::new("/snap.state"), Path::new("/snap.mem"))
+        c.snapshot_create(Path::new("/snap.state"), Path::new("/snap.mem"), false)
             .await
             .unwrap();
         c.snapshot_load(
@@ -1374,6 +1378,7 @@ mod tests {
         assert_eq!(body(&seen[6]), serde_json::json!({"state": "Resumed"}));
         assert_eq!(first(7), "PUT /snapshot/create HTTP/1.1");
         assert_eq!(body(&seen[7])["snapshot_type"], "Full");
+        assert_eq!(body(&seen[7])["sync_snapshot_files"], false);
         assert_eq!(first(8), "PUT /snapshot/load HTTP/1.1");
         let load = body(&seen[8]);
         assert_eq!(load["resume_vm"], true);

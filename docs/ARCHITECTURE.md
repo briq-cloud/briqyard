@@ -130,7 +130,7 @@ ancestor of what it holds. The disk it replaced is retired: it keeps the snapsho
 one restored and whatever clones them (a fork), and `tidy` (after a restore, a deletion, a fork's
 destroy, a new root disk, the daemon's start) removes it once neither is left, with any snapshot
 nothing names or clones. `memory: true` also keeps a running machine's memory (paused, written by
-Firecracker, the disks flushed and snapshotted, resumed): a restore of it resumes the processes
+Firecracker, the disks flushed and snapshotted, resumed, then the files synced, ADR 0037): a restore of it resumes the processes
 where they were, while the machine's spec is the one it was taken with. A restore writes its
 intent first; one cut short is finished by the next restore, start or daemon start. A new image's
 root disk (ADR 0024) is the same swap, from the image's `@base`.

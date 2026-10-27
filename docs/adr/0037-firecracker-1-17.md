@@ -1,6 +1,6 @@
-# ADR 0037: Firecracker 1.17: deleted blocks go back to the pool; snapshot files stay synced; vsock after a bare pause
+# ADR 0037: Firecracker 1.17: deleted blocks go back to the pool; a memory snapshot's files synced after the resume; vsock after a bare pause
 
-Date: 2026-10-27 · Status: proposed; amends ADR 0002 (the disks take discards)
+Date: 2026-10-27 · Status: proposed; amends ADR 0002 (the disks take discards) and ADR 0031 (a memory snapshot is written unsynced, then synced after the resume)
 
 ## Context
 
@@ -29,9 +29,16 @@ Rejected, one line each:
 - The device's discard alone, each guest running `fstrim`: an OCI image has no `fstrim` job, so the zvol never shrinks.
 - The daemon running `fstrim` in each guest on a schedule: a scheduler and an exec into a tenant's machine for what the guest's own mount does. If online discard ever stalls a delete-heavy workload, a periodic `FITRIM` from `briqyard-init` is the fallback, still in the guest.
 
-**`sync_snapshot_files` stays `true`.** A suspend writes the snapshot, then the record says `suspended` (written durably), then Firecracker is killed. Unsynced, a host crash before writeback leaves a state file whole and a memory file torn or short: the state file has a CRC, the memory file has nothing, so the next start resumes a guest on torn memory against disks that are whole. That is the one outcome a suspend must never produce. Recording the host's boot id with an unsynced snapshot and booting cold when it changed would make it safe, but a planned reboot is exactly a suspend then a new boot id (ADR 0027): every machine would boot cold after one, unless the daemon's stop synced and the sleeper's did not, two modes for one operation. For the memory snapshot of ADR 0031 (the machine paused while it is written), `false` with the daemon's own `sync_all` of both files before the record names the snapshot would be safe (a crash leaves files no record points to); measured (below), the pause does not shrink enough to be worth a second path.
+**`sync_snapshot_files`: `true` for a suspend, `false` for a memory snapshot, whose files the daemon syncs after the resume.** A suspend writes the snapshot, then the record says `suspended` (written durably), then Firecracker is killed. Unsynced, a host crash before writeback leaves a state file whole and a memory file torn or short: the state file has a CRC, the memory file has nothing, so the next start resumes a guest on torn memory against disks that are whole. That is the one outcome a suspend must never produce. Recording the host's boot id with an unsynced snapshot and booting cold when it changed would make it safe, but a planned reboot is exactly a suspend then a new boot id (ADR 0027): every machine would boot cold after one, unless the daemon's stop synced and the sleeper's did not, two modes for one operation; and nobody waits on a suspend. A memory snapshot (ADR 0031) is different: the machine is paused while Firecracker writes. Unsynced, the daemon resumes the machine, moves the files to the snapshot directory, `sync_all`s each and the directory, and only then does the record name the snapshot: a crash before that leaves files no record names (they go with the machine), never a torn snapshot that loads.
 
-MEASURE
+Measured in the dev VM (a 1 GiB guest with 800 MiB of random data in memory, the caches dropped before each, `snapshot/create` on the API socket, two runs each):
+
+| `sync_snapshot_files` | `create` (the machine paused) | the sync after |
+|---|---|---|
+| `true` | 3.67 s, 4.05 s | none |
+| `false` | 2.20 s, 2.24 s | 1.07 s, 1.34 s |
+
+The pause shrinks by 42 %; the threshold set before measuring was 30 %. The whole memory snapshot through the daemon took 3.1 s with `true` (the flushes, the ZFS snapshot and the resume included); a suspend 3.5 s; its resume 0.3 s.
 
 **#6100 is covered for our pause paths.** A suspend pauses, creates and kills: never resumed in that process. A memory snapshot pauses, creates (the transport reset sent), flushes, snapshots the disks and resumes: the e2e suite has always execed into the machine after it. The bare case is ours too: when `snapshot/create` fails, `fc::snapshot` resumes the machine at once; under 1.16 that machine took no new exec, file transfer or session until it restarted. The e2e suite now pauses and resumes a running machine through its API socket and execs into it.
 
