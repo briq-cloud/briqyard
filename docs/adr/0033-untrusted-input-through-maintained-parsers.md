@@ -4,7 +4,7 @@ Date: 2026-10-27 · Status: accepted; amends ADR 0003 (the gateway's DNS)
 
 ## Context
 
-The daemon reads bytes that someone else wrote: a guest's DNS queries on its gateway, a public client's HTTP request head at the ingress, a guest's frames over vsock, an image's tar layers from any registry. A hand-written parser of a wire format is where a panic or a misread hides, and a release build aborts on a panic (`panic = "abort"`): one packet from one tenant would take every machine of the host down with the daemon. The build-vs-borrow review of 2026-10-27 found two such parsers written by hand where a maintained, fuzzed crate does the job.
+The daemon reads bytes that someone else wrote: a guest's DNS queries on its gateway, a public client's HTTP request head at the ingress, a guest's frames over vsock, an image's tar layers from any registry. A hand-written parser of a wire format is where a panic or a misread hides, and a release build aborts on a panic (`panic = "abort"`): one packet from one tenant would take every machine of the host down with the daemon. Two of them, the DNS and the HTTP head, were parsed by hand where a maintained, fuzzed crate does the job.
 
 ## Decisions
 
