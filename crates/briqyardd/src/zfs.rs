@@ -1609,7 +1609,7 @@ mod tests {
             f.calls(),
             ["list -H -p -o name,volsize,usedbydataset,usedbysnapshots -r -t filesystem,volume byard/m"]
         );
-        // What is not a size is an error, not a zero: a wrong figure would be billed.
+        // What is not a size is an error, not a zero: a wrong figure would be reported as usage.
         assert!(space_lines("byard/m\tx\t0\t0\n", "byard/").is_err());
         assert!(space_lines("byard/m\t0\t0\n", "byard/").is_err());
         assert!(space_lines("", "byard/").unwrap().is_empty());

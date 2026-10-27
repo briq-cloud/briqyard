@@ -1076,7 +1076,7 @@ pub struct Tenant {
 }
 
 /// `PUT /v1/tenants/{id}/quota` (ADR 0025): what the tenant may hold. A limit left out is no
-/// limit; set by the control plane from the team's plan, the daemon has no defaults.
+/// limit; set by the control plane, the daemon has no defaults.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quota {
     /// Machines, its gateway included.

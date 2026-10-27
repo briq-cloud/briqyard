@@ -4,13 +4,13 @@ Date: 2026-10-20 · Status: accepted
 
 ## Context
 
-Review finding B1 (`../review-2026-10-20.md`): on a server with a public address, the daemon's
+A review (2026-10-20) found that on a server with a public address, the daemon's
 API (plain HTTP, a bearer), the HTTP ingress and every TCP endpoint were open to the internet.
 A `private` endpoint is private only because the control plane's router is the only way in; a
-port anyone can scan to is not. B4: the forward chain accepted by default and every rule keyed
+port anyone can scan to is not. And the forward chain accepted by default and every rule keyed
 on the tenant range, so a guest that set another address (it is root in its VM) was forwarded,
-unmasqueraded, anywhere the host routes. C5: the input chain grew four rules per tenant and was
-reloaded whole on every tenant change. A2 and C12: the TAP name lost a hex digit of the id and
+unmasqueraded, anywhere the host routes. The input chain grew four rules per tenant and was
+reloaded whole on every tenant change. The TAP name lost a hex digit of the id and
 an existing link was reused silently.
 
 ## Decisions
@@ -64,7 +64,7 @@ link of that name rather than reuse it, since one there is a start that failed a
   that relied on it sets `ingress.bind` now.
 - `allowed_clients` is IPv4; IPv6 to the daemon's ports is dropped whenever the list is set.
 - The HTTP ingress trusts the `Host` header and limits nothing per client: it is for the
-  router, which is in `allowed_clients`, not for the internet (review B17).
+  router, which is in `allowed_clients`, not for the internet.
 - The WireGuard mesh (`../MESH.md`) is the next step: the router and the hosts share a private
   network, `ingress.advertise` becomes the host's mesh address and `allowed_clients` the mesh
   range, and the bearer stops crossing the internet in clear.

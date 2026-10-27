@@ -1600,7 +1600,7 @@ async fn an_order_in_dry_run_records_a_dry_run_host() {
         "POST",
         "/v1/hosts/order",
         "",
-        Some(serde_json::json!({"reason": "launch week"})),
+        Some(serde_json::json!({"reason": "more capacity"})),
     )
     .await;
     assert_eq!(s, StatusCode::ACCEPTED, "{body}");
@@ -1610,7 +1610,7 @@ async fn an_order_in_dry_run_records_a_dry_run_host() {
     assert_eq!(h.provider, "scaleway");
     assert_eq!(h.url, "", "no address yet");
     assert!(h.note.starts_with("DRY RUN: would create"), "{}", h.note);
-    assert!(h.note.ends_with("(launch week)"), "{}", h.note);
+    assert!(h.note.ends_with("(more capacity)"), "{}", h.note);
     let listed = hosts(&f.st);
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, h.id);
@@ -2325,8 +2325,8 @@ async fn usage_asks_every_host_and_is_never_partial() {
     let (s, _, body) = call(&f.st, "GET", "/v1/usage?to=x", "api", None).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(json(&body)["code"], "invalid");
-    // A host down fails the whole report, without asking it: a report missing a host is a
-    // bill missing a host.
+    // A host down fails the whole report, without asking it: a report missing a host
+    // undercounts.
     set_state(&f.st, "d2", "down");
     let d2_before = ds[1].stub.calls().len();
     let (s, _, body) = call(&f.st, "GET", q, "api", None).await;

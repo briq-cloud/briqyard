@@ -2,9 +2,9 @@
 
 briqyard is the Kubernetes of Firecracker: microVMs for services and sandboxes. This maps what Kubernetes offers the people who run workloads on it to what briqyard offers, and says where each gap belongs.
 
-**The scope test** (Sylvain, 2026-10-20): if briq ran on Kubernetes, would this be provided by Kubernetes, or built in briq? Provided by Kubernetes → briqyard builds it. Built in briq even on Kubernetes → briq. The same line as usage and costs (ADR 0017).
+**The scope test** (2026-10-20): if the control plane above ran on Kubernetes, would this be provided by Kubernetes, or built in the control plane? Provided by Kubernetes → briqyard builds it. Built in the control plane even on Kubernetes → the control plane. The same line as usage and prices (ADR 0017).
 
-Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes further. Scope: **yard** = briqyard, **briq** = briq's control plane or edge, **—** = not needed. Written 2026-10-20; a row changes when the gap closes.
+Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes further. Scope: **yard** = briqyard, **briq** = the control plane above briqyard (briq's API, router and edge), **—** = not needed. Written 2026-10-20; a row changes when the gap closes.
 
 ## The model, side by side
 
@@ -98,7 +98,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Cluster DNS | ✓ `<name>.internal` | | |
 | Service, ClusterIP load balancing | ✗ | with groups | yard, later |
 | Ingress controller | ✓ L4 ingress per host, private to the edge | | |
-| Ingress auth, TLS, hostnames | the router, Cloudflare in front | | briq |
+| Ingress auth, TLS, hostnames | the control plane's router and edge | | briq |
 | NetworkPolicy, egress | ✓ `open`, `via`, `none` | | |
 | NetworkPolicy, by port and CIDR | ◐ blocked ports, a connection rate, a bandwidth cap per machine (ADR 0018) | allow-lists by CIDR | yard, later |
 | NetworkPolicy, ingress between pods | ✗ | | yard, later |
@@ -141,7 +141,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | kube-state-metrics (machines by state, restarts) | ✓ `briqyard_machine_state`, `_restarts_total`, `_boot_seconds` | | |
 | metrics-server, `kubectl top pod` | ✓ `briqyard top`, `GET /v1/top` (the last 15 s) | | |
 | Usage accounting (OpenCost, outside core) | ★ hourly usage buckets (ADR 0017) | | |
-| Cost, billing | | | briq |
+| Prices, billing | | | briq |
 
 ## Security and multi-tenancy
 
@@ -149,8 +149,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | RuntimeClass (gVisor, Kata) | ★ every machine is a microVM under the jailer | | |
 | Pod security, seccomp | ★ Firecracker's own seccomp; the guest is root in its VM only | | |
-| ResourceQuota, LimitRange per namespace | ◐ a quota per tenant: machines, memory, vCPUs, disk, set by briq (ADR 0025) | LimitRange (a size per machine): briq's plan check | yard (values from briq) |
-| Plans, what a plan allows | | | briq |
+| ResourceQuota, LimitRange per namespace | ◐ a quota per tenant: machines, memory, vCPUs, disk, set by briq (ADR 0025) | LimitRange (a size per machine): the control plane's check | yard (values from briq) |
 | Egress abuse (outside core) | ✓ blocked ports, a connection rate, a bandwidth cap per machine, drops counted (ADR 0018) | | yard; the response to abuse is briq's |
 | Private endpoints, tokens | | | briq |
 | Workload identity (a token to a cloud API) | | the credential gateway | briq |
@@ -166,22 +165,10 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Version skew, upgrades | ✓ every binary and the init say `0.1.0+<commit>`; the wire is additive, unknown fields and values ignored; the fleet first, a host never newer (ADR 0027) | the init travels in the root disk: old inits live on until an image change | yard |
 | Multi-cluster | ◐ regions on hosts, placement by region (ADR 0025) | a fleet per region, or one across | yard, later |
 
-## Order of work
+## Built since the map was written
 
-Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit tests, Linux CI and the VM suites, the stress driver after the items that touch the manager, the network or the store:
+Each with an ADR, unit tests, Linux CI and the VM suites: egress controls (ADR 0018); events, watch and versions (ADR 0019); metrics, host conditions, image GC and log rotation (ADR 0021); probes (ADR 0022); scheduled backups and retention (ADR 0023); TLS between the fleet and the hosts (ADR 0020); changes at the next cold boot (ADR 0024); placement by region, labels, quotas, logs follow (ADR 0025); encryption at rest (ADR 0026); a TTY for exec (ADR 0029).
 
-1. **Egress controls**: blocked ports, connection rate, bandwidth per machine. Built: ADR 0018.
-2. **Events, watch, versions**, and `describe` from them.
-3. **Metrics**: per machine series and machine states on `/metrics`, host conditions, image GC and log rotation under them, `top`.
-4. **Probes**: exec, TCP, HTTP; `ready`, which the ingress and `/wait` follow; restart on liveness; a capped backoff with a `crash_loop` reason. Built: ADR 0022.
-5. **Backups on a schedule**, retention, delete (closes ADR 0017's storage hole). Built: ADR 0023.
-6. **TLS between the fleet and the hosts**, the certificate pinned at bootstrap. Built: ADR 0020.
-7. **Changes at the next cold boot**: image, env, command, size by PATCH. Built: ADR 0024.
-8. **Scheduling**: placement by region, hosts under pressure refused, labels on listings; quotas per tenant; logs follow. Built: ADR 0021 (pressure), ADR 0025.
-9. **The edge** (briq, in parallel): its servers, Cloudflare in front, client IPs, WebSockets. Built: up-lab/briq#277 (draft).
-
-Decided for the founder (advisor, 2026-10-20): the daemon runs scheduled backups from a policy briq sets; the pool is encrypted with one key per host held by the fleet, built before the first real host (after TLS); events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and briq's healthcheck moves onto them.
-
-Built after: encryption at rest (ADR 0026), a TTY for exec (ADR 0029).
+Decided 2026-10-20: the daemon runs scheduled backups from a policy the control plane sets; the pool is encrypted with one key per host held by the fleet; events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and a control plane's healthcheck moves onto them.
 
 Later, in the tables above: groups and load balancing, the mesh, volume expansion, scoped tokens, fleet HA, OS patching through the fleet, evacuation.
