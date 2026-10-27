@@ -1,0 +1,63 @@
+# Fuzz targets for what an untrusted party writes (ADR 0033). Nightly only, with cargo-fuzz:
+# `cargo +nightly fuzz run <target>` from this directory (docs/DEVELOPMENT.md). Its own
+# workspace, so `cargo test --workspace` and CI never build it.
+[package]
+name = "briqyard-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+briqyard-api = { path = "../crates/briqyard-api" }
+briqyardd = { path = "../crates/briqyardd" }
+futures = "0.3"
+hickory-proto = { version = "0.26.3", default-features = false }
+tar = "0.4"
+tempfile = "3"
+url = "2"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "guest_frames"
+path = "fuzz_targets/guest_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "session_input"
+path = "fuzz_targets/session_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "layer_extract"
+path = "fuzz_targets/layer_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_query"
+path = "fuzz_targets/dns_query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ingress_head"
+path = "fuzz_targets/ingress_head.rs"
+test = false
+doc = false
+bench = false

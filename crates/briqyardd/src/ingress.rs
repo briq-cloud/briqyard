@@ -261,7 +261,7 @@ const MAX_HEADERS: usize = 100;
 
 /// What the bytes read so far say about a request head, parsed by httparse (ADR 0033).
 #[derive(Debug, PartialEq)]
-enum Head {
+pub enum Head {
     /// The head is not complete yet.
     Partial,
     /// The head is complete and for this host: lowercase, without its port.
@@ -273,7 +273,7 @@ enum Head {
 const TOO_LARGE: &str = "431 Request Header Fields Too Large";
 const BAD_REQUEST: &str = "400 Bad Request";
 
-fn parse_head(buf: &[u8]) -> Head {
+pub fn parse_head(buf: &[u8]) -> Head {
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut req = httparse::Request::new(&mut headers);
     match req.parse(buf) {

@@ -236,6 +236,32 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   restored `0600` with the same key for fc2, then fc2's pool locked and fc2 back with the key
   of the restored registry; the config and the registry put back. 10 checks.
 
+### Fuzzing
+
+`fuzz/` holds `cargo fuzz` targets for what an untrusted party writes (ADR 0033): its own
+workspace, nightly only, never built by `cargo test --workspace` or CI.
+
+| Target | Input |
+|---|---|
+| `guest_frames` | what an init sends over vsock: exec output to its exit, the exit report, an answer |
+| `session_input` | an exec session's query and its client messages |
+| `layer_extract` | an image layer's tar entries (any name, type, link), extracted into a root; nothing may change beside it |
+| `dns_query` | a guest's DNS query; every answer must parse back |
+| `ingress_head` | a public request head at the HTTP ingress |
+
+In the VM, as the Lima user (never root: `layer_extract` writes and removes files), one
+target at a time:
+
+```bash
+rustup toolchain install nightly --profile minimal && cargo install cargo-fuzz
+cd /Users/uplab/projects/briqyard/fuzz   # read-only mount: keep the build and corpus in $HOME
+CARGO_TARGET_DIR=$HOME/target-fuzz cargo +nightly fuzz run dns_query \
+  $HOME/fuzz-corpus/dns_query -- -max_total_time=600 -artifact_prefix=$HOME/fuzz-artifacts/
+```
+
+A crash leaves its input in the artifact directory; `cargo +nightly fuzz run <target>
+<file>` replays it. Every fix gets a unit test from that input. Last run in ADR 0033.
+
 ## Layout
 
 ```

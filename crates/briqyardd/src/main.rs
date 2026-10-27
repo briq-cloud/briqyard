@@ -1,27 +1,8 @@
 //! briqyardd runs machines on one server.
 
-mod api;
-mod conditions;
-mod config;
-mod console;
-mod events;
-mod fc;
-mod guestc;
-mod heartbeat;
-mod image;
-mod ingress;
-mod machine;
-mod metrics;
-mod netw;
-mod poolkey;
-mod session;
-mod store;
-mod tls;
-mod usage;
-mod zfs;
+use briqyardd::{api, config, heartbeat, image, ingress, machine, netw, poolkey, store, tls, zfs};
 
 use anyhow::{anyhow, Context, Result};
-use briqyard_objstore as objstore;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;

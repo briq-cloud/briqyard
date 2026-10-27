@@ -165,7 +165,7 @@ async fn send<Tx: Sink<Message> + Unpin>(tx: &mut Tx, m: Message, within: Durati
 
 /// The guest frame a client's message asks for; `None` for one with nothing to do (an
 /// unknown channel, a close of another stream than stdin).
-fn input(m: &[u8]) -> Result<Option<Request>, String> {
+pub fn input(m: &[u8]) -> Result<Option<Request>, String> {
     let Some((ch, payload)) = wire::parse(m) else {
         return Ok(None);
     };
