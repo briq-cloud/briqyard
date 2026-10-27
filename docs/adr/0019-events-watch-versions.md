@@ -1,6 +1,6 @@
 # ADR 0019: Events, a watch and versions: what makes an imperative API safe to drive
 
-Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`), ADR 0022 (the probes' reasons, marked *0022*), ADR 0023 (the backups' reasons), ADR 0024 (`applied`), ADR 0025 (`quota_exceeded`), ADR 0029 (`session_opened`, which moves no version) and ADR 0031 (`snapshot_taken`, `snapshot_deleted`, `restored` for a snapshot)
+Date: 2026-10-20 · Status: accepted; amended by ADR 0021 (`host_condition`, `image_removed`), ADR 0022 (the probes' reasons, marked *0022*), ADR 0023 (the backups' reasons), ADR 0024 (`applied`), ADR 0025 (`quota_exceeded`), ADR 0029 (`session_opened`, which moves no version) ADR 0031 (`snapshot_taken`, `snapshot_deleted`, `restored` for a snapshot) and ADR 0036 (`image_pulled` says `from`)
 
 ## Context
 
@@ -49,7 +49,7 @@ briqyard is imperative; briq's reconciler is the declarative layer above it (`..
 | `destroyed` | normal | its record is gone | |
 | `gateway_started` | normal | the tenant's gateway was started and its port answers | `port` |
 | `gateway_stopped` | normal | the sleeper stopped the gateway: nothing sends through it | |
-| `image_pulled` | normal | an image was pulled and built into a root disk | `image`, `digest`, `seconds` |
+| `image_pulled` | normal | an image was pulled and built into a root disk | `image`, `digest`, `from`, `seconds` |
 | `host_started` | normal | the daemon started | `version`, `machines`, `adopted`, `stopped`, `swept` |
 | `adopted` | normal | a machine left running by a previous daemon was taken over | `pid` |
 | `host_condition` | warning when it turns true, normal when it clears | a host condition changed (ADR 0021) | `condition`, `status` |
