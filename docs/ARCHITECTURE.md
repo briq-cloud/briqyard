@@ -42,7 +42,8 @@ mount path, the ports the image listens on, and the sleep window. The daemon:
 States: `created` → `starting` → `running` → `stopping` → `stopped` → (`starting` again) …
 → `destroying` → gone. A `stopped` machine keeps both disks. `stopped_reason` says why it
 stopped: `user`, `idle` (went to sleep), `exit` (its process ended; `exit` says how), `host`
-(the daemon stopped it: a shutdown, or a leftover of a crashed daemon; wakeable like `idle`).
+(the daemon stopped it: a shutdown, or a leftover of a crashed daemon; the next daemon start
+boots it again unless its sleep window ran out, and it is wakeable like `idle`).
 `state_changed_at` moves only with `state`; `updated_at` with every change to the machine (a
 state, a setting), never with a use: `last_used_at` is kept in memory and reaches the record
 with the next change or the sleeper's tick, so a busy machine does not rewrite its record on
@@ -86,24 +87,51 @@ in a row is a `crash_loop` event. Probes are not use: they never keep a machine 
 ### Disks
 
 Every disk is a ZFS zvol in one pool (`byard` by default; on a real host a mirror of the free
-space of its two NVMe disks, the OS on a small RAID 1 beside it, ADR 0028):
+space of its two NVMe disks, the OS on a small RAID 1 beside it, ADR 0028), encrypted from its
+creation with the host's key (ADR 0026), and everything the daemon writes about a machine is
+on it:
 
 | Dataset | What |
 |---|---|
 | `byard/images/<digest>` | A root disk built from an image, with a `@base` snapshot |
 | `byard/m/<id>/root` | The machine's root disk, a clone of `@base` |
 | `byard/m/<id>/data` | The machine's data volume, when it has one |
-| `byard/jail` | A filesystem mounted at `jail_dir`: the chroots and the memory snapshots, on the pool, not on `/` |
+| `byard/m/<id>/root.<n>`, `data.<n>` | A disk a restore retired, while a newer snapshot or a fork needs it |
+| `byard/jail` | A filesystem mounted at `jail_dir`: the chroots and the memory snapshots |
+| `byard/images` | A filesystem mounted at `<data_dir>/images`: the images' metadata and extraction scratch |
+| `byard/state`, `byard/run` | Filesystems mounted at `<data_dir>/state` (records, events, usage) and `<data_dir>/run` (config drives, consoles) |
+
+After a reboot the pool's key is not loaded: the daemon loads it (`zfs load-key`, the key on
+stdin) before it reads or mounts anything, from `storage.key`: the fleet, which keeps one key
+per host in its registry and serves it to that host alone, or a file on a single host. Until it
+has the key the daemon serves nothing and says why in its log. A dataset is never mounted
+over files. Hosts run without swap, and a Firecracker never dumps core.
 
 The root disk outlives restarts and stops, as on Fly. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
 attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches the host's disk:
-a database on it is as safe as the host's drive. A snapshot is `zfs snapshot`; a fork is a clone
-of a snapshot of both disks, taken while the source runs (crash-consistent for the data volume).
-That snapshot (`@fork-<id>` on the source) pins every block the source has since rewritten, so
-it goes with the last machine cloned from it: a destroy frees the snapshot its disks came from
-once nothing clones it, and the sweep at start removes any `@fork-*` left with no clone. A
-snapshot made with `POST /machines/{id}/snapshots` stays until `DELETE /machines/{id}/snapshots/{snap}`.
+a database on it is as safe as the host's drive. A fork is a clone of a snapshot of both disks,
+taken while the source runs (crash-consistent for the data volume). That snapshot (`@fork-<id>`
+on the source) pins every block the source has since rewritten, so it goes with the last machine
+cloned from it.
+
+### Snapshots and restore
+
+`POST /machines/{id}/snapshots` snapshots both disks in one `zfs snapshot` (ADR 0031); the record
+lists it, with an optional name (`before-migration`) that finds it again. `POST
+.../snapshots/{snap}/restore` takes the disks back to it: under the machine's backup turn and
+lock, a running machine is stopped, then each disk is swapped for a clone of its snapshot
+(`clone`, the disk renamed aside to `<disk>.<n>`, the clone renamed into place, `promote` until
+its origin is outside the machine), and the machine boots again; any other stays as it is. The
+disk in use owns its whole history, so the next backup's base (its newest `bk-*`) is always an
+ancestor of what it holds. The disk it replaced is retired: it keeps the snapshots newer than the
+one restored and whatever clones them (a fork), and `tidy` (after a restore, a deletion, a fork's
+destroy, a new root disk, the daemon's start) removes it once neither is left, with any snapshot
+nothing names or clones. `memory: true` also keeps a running machine's memory (paused, written by
+Firecracker, the disks flushed and snapshotted, resumed): a restore of it resumes the processes
+where they were, while the machine's spec is the one it was taken with. A restore writes its
+intent first; one cut short is finished by the next restore, start or daemon start. A new image's
+root disk (ADR 0024) is the same swap, from the image's `@base`.
 
 Each disk the guest writes (the root disk and the volume) has Firecracker's rate limiter
 (ADR 0030): MB a second and requests a second, by default a rate per vCPU of the machine's size
@@ -174,7 +202,9 @@ volume (`/dev/vdc`) at its mount path (a fresh one gets the image directory's ow
 and loses `lost+found`, so a database accepts it), writes the boot files, sets the hostname,
 `/etc/hosts` and `/etc/resolv.conf`, configures `eth0` over netlink, then runs the image's
 entrypoint and command with its environment and user. It listens on vsock port 7421 for the
-host: `exec` (a command with stdin, streamed stdout and stderr, exit code, timeout), `put` and
+host: `exec` (a command with stdin, streamed stdout and stderr, exit code, timeout; on a
+terminal of its own with `tty`, its input as frames after the request, the host's close ending
+it, ADR 0029), `put` and
 `get` (files), `ping`, `shutdown`. PID 1 inherits every orphan on the system; the init reaps
 them with `waitid(WNOWAIT)` and leaves alone the children it waits for itself, so a command's
 exit status is never stolen. When the main process exits, the init connects out to the host
@@ -186,7 +216,7 @@ nothing reads it, so nothing a guest prints can set its exit.
 
 ### Backups
 
-A backup is a ZFS snapshot of each disk streamed to an object store (`objstore.rs`: S3 or a
+A backup is a ZFS snapshot of each disk streamed to an object store (`briqyard-objstore`: S3 or a
 directory), incremental after the first; the record beside it holds the machine's spec, so a
 restore is a create that receives the chain of streams into fresh datasets on any host that
 reaches the store. Local snapshots stay only as the base of the next incremental send.
@@ -252,6 +282,14 @@ offset in the whole console and reads across both files. `?follow=true` keeps th
 woken by the writer after each line), reads from its cursor, and ends at the machine's
 `destroyed` event or the daemon's shutdown, with `{}` every 30 s meanwhile.
 
+An exec session (`GET /v1/machines/{id}/exec` upgraded to a WebSocket, ADR 0029) is the same
+guest connection as a JSON exec, kept open: the client's messages (a channel byte, as
+Kubernetes') become the init's `stdin`, `resize` and `close_stdin` frames, its `stdout`,
+`stderr` and `exit` become messages (`session.rs`). With `tty` the init runs the command on a
+pseudo-terminal of its own as the leader of a new session. The host's close ends any exec's
+command (SIGKILL to its group; SIGHUP first on a terminal); the daemon pings the client every
+30 s and drops one silent for 90 s. A machine with a session open is in use and does not sleep.
+
 ### Labels and quotas
 
 A machine's `metadata` is its labels: `GET /v1/machines?label=k=v&label=k` keeps the machines
@@ -263,19 +301,33 @@ cannot pass it together. A refusal is 403 `quota` and a `quota_exceeded` event.
 
 ### Sleep
 
-Use is an exec, an ingress connection, or an explicit `POST /machines/{id}/touch`. After the
+Use is an exec or an exec session for as long as it runs (ADR 0029), an ingress connection, or
+an explicit `POST /machines/{id}/touch`. After the
 machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`; idle machines
 are stopped together, a few at a time, never one after another). A start, an
-ingress connection or an exec on an idle machine wakes it. `sleep: "never"` keeps it on. `PATCH
+ingress connection or an exec on an idle machine wakes it; one that arrives while the machine is
+being stopped waits for the stop, then starts it. `sleep: "never"` keeps it on. `PATCH
 /machines/{id} {"sleep": "3h"}` changes the window in any state, without a restart.
 
 A stop can keep a memory snapshot instead (`POST /machines/{id}/stop {"suspend": true}`, or
 `suspend_on_sleep: true` for the sleeper): the machine is paused, Firecracker writes its memory
 and state into its jail (on the pool), and the next start loads them into a fresh Firecracker and
 resumes, in about a quarter of a second under nested virtualization, without a boot: processes,
-connections and uptime carry on. The snapshot is used once; if it cannot be loaded, the start is
-a cold boot. The daemon suspends every running machine when it shuts down, so an upgrade costs
-each machine a quarter-second wake on its next use.
+connections and uptime carry on. The snapshot is used once; if it cannot be loaded, or was taken
+under another Firecracker or host kernel (the machine's `vmm_version`), the start is a cold boot.
+
+### Versions and upgrades
+
+Every binary says its version, the release and the commit (`0.1.0+fdad892eeefa`, ADR 0027):
+`/v1/status`, the heartbeat, `host ls`; the init in its `pong`, kept as the machine's
+`init_version`. The wire between versions is additive: a field added has a default, nothing is
+renamed or removed, unknown fields and values are ignored. The daemon's stop (SIGTERM) suspends
+every running machine, and its next start boots each one again; SIGUSR2 hands them over instead,
+once every transition under way has ended:
+the daemon exits and leaves them running, and the next one adopts them. `host upgrade` through
+the fleet (`upgrade.rs`) marks the host `upgrading`, runs the bootstrap script on it again with
+the release (whose last step is that hand-over), waits for a heartbeat from a new start of the
+installed version that stopped no machine, and puts the host back; the fleet is upgraded first.
 
 ## Several servers
 
@@ -291,7 +343,8 @@ spreads; a host that answers `capacity` for a tenant's first machine loses the p
 retry is placed afresh. A tenant's gateway goes to the tenant's host (`GET /v1/tenants/{id}`
 and `/gateway` are forwarded there); a PUT for a tenant with no host places it as a first machine
 would, the gateway's size as the need, in `?region=`; a quota PUT does the same with no need.
-A logs follow is streamed through as an events watch is. `POST /v1/tenants/{id}/unpin` releases a tenant by hand (ADR 0013).
+A logs follow is streamed through as an events watch is; an exec session's WebSocket is
+relayed as bytes once the host answered its upgrade (ADR 0029). `POST /v1/tenants/{id}/unpin` releases a tenant by hand (ADR 0013).
 
 Hosts report their capacity and tenants (`POST /v1/hosts/register`, every 15 s, from the
 daemon's `fleet:` configuration) or are listed in the fleet's configuration and polled. A host
@@ -301,13 +354,16 @@ address (the record of an order, or a `hosts:` entry); any other is refused. A h
 a minute is `down`: its machines' calls answer 503 `host_down` until it is back, and a listing
 of machines or endpoints is never partial (a tenant's listing asks its host alone; a host that
 is down or does not answer fails the listing), since a control plane reads a machine missing
-from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host. The registry
+from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host (`draining`),
+`undrain` resumes it; a host `upgrading` or `retiring` takes nothing new either. The registry
 (hosts, tenant → host, machine → host, endpoint → host) is one JSON file; a write that fails
-fails the request that needed it.
+fails the request that needed it. It is written to the object store once a minute when it
+changed, encrypted with age to a key kept off the fleet's host, and before any pool key is
+served; `briqyard-fleet restore` brings it back (ADR 0032).
 
 Provisioners add and release hosts through a cloud API: `hetzner-robot` (dedicated servers,
 monthly), `scaleway` (Elastic Metal, hourly), `static` (none). `POST /v1/hosts/order` orders
-a server and `POST /v1/hosts/{id}/retire` drains a host and releases it once empty; the
+a server and `POST /v1/hosts/{id}/retire` makes a host `retiring` and releases it once empty; the
 autoscaler, when `provisioner.enabled` is set, does the same on its own (no slot of `slot_mb`
 left: order one; a provisioned host empty for `idle_grace` above `min_hosts`: release it),
 one change a minute, never past `max_hosts`. Adding a host costs money, so every provisioner
@@ -322,7 +378,8 @@ host's API may live on a private network (OVH's vRack, the fleet's `private_netw
 reaches its public address: the script binds the API and the endpoints to the private address
 and closes the public interface to all but SSH (ADR 0028). No provider's API returns the server's SSH host key:
 the key seen at the first successful bootstrap is pinned in `<state_dir>/known_hosts`, its
-fingerprint in the host's note, and later connects are strict against it.
+fingerprint in the host's note, and later connects are strict against it. An upgrade runs the
+same script over the same connection with another release (ADR 0027).
 
 The control path is TLS (ADR 0020). Each daemon makes a self-signed certificate once and
 serves its API with it on any non-loopback address; the fleet trusts that certificate by its
@@ -344,7 +401,10 @@ uid and gid of its own (`jail_uid_base` plus its place in the tenant's network, 
 machines share one); a new pid namespace; a cgroup v2 of its own; and Firecracker's seccomp
 filters. The daemon never mounts a guest filesystem. Guests reach only their tenant's bridge,
 the gateway's DNS, and the internet through NAT; nothing reaches a guest but the ingress.
-Secrets reach the guest on its config drive and never through the API's responses.
+Secrets reach the guest on its config drive and never through the API's responses. At rest
+everything of a machine (disks, records, config drives, consoles, memory snapshots) is on the
+encrypted pool: a disk or a server that leaves our hands is unreadable once the fleet forgets
+the host (ADR 0026).
 
 The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API and its
 endpoints listen on loopback unless told otherwise; on an address the internet could reach it

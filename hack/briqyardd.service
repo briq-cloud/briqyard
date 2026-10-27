@@ -5,12 +5,15 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml
-# Only the daemon gets the signal: the machines (Firecracker processes in this cgroup) must
-# outlive a daemon crash, and a clean stop suspends them itself.
+# Only the daemon gets the signal: the machines (Firecracker processes in this cgroup) outlive
+# it. A stop (SIGTERM) suspends them, and the next start boots them again; SIGUSR2 (an upgrade)
+# leaves them running for the next daemon to adopt; a crash leaves them too (ADR 0027).
 KillMode=process
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536
+# A core dump of a Firecracker would be its guest's memory, on / in clear (ADR 0026).
+LimitCORE=0
 Environment=BRIQYARD_LOG=info
 
 [Install]

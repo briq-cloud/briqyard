@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Turns a fresh Ubuntu 24.04+ server with KVM into a briqyard host: packages, a ZFS pool on one
 # or two drives (or a file), Firecracker and a guest kernel, the briqyard binaries, the config,
-# the systemd unit. Idempotent: run it again to upgrade.
+# the systemd unit. Idempotent: run again with another BRIQYARD_RELEASE, it is the upgrade (the
+# fleet's `host upgrade` does that, ADR 0027): a running daemon hands its machines over to the new
+# one, which adopts them; nothing stops.
 #
 #   BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.0 \
 #   BRIQYARD_POOL_DEVICE=/dev/nvme0n1,/dev/nvme1n1 BRIQYARD_TOKEN=... FLEET_URL=https://fleet.example \
@@ -25,6 +27,11 @@
 # PUBLIC_TCP_PORTS on the host as the internet does (`network.host_ports`: an edge beside it).
 # Off loopback the API serves TLS with a certificate of its own (ADR 0020): the script prints
 # its fingerprint, which the fleet pins (`tls_fingerprint` in the host's `hosts:` entry).
+#
+# The pool is encrypted at its creation (ADR 0026), with the host's key: with FLEET_URL the
+# fleet's, asked with BRIQYARD_TOKEN and never written here; without, a key made into
+# BRIQYARD_KEY_FILE (/etc/briqyard/pool.key, 0600). Swap is turned off for good: guest memory
+# paged out would reach a disk in clear.
 set -euo pipefail
 POOL=${BRIQYARD_POOL:-byard}
 POOL_DEVICE=${BRIQYARD_POOL_DEVICE:-}
@@ -41,6 +48,7 @@ if [ -n "$PRIVATE_ADDRESS" ]; then LISTEN=${LISTEN:-${PRIVATE_ADDRESS%/*}:7420};
 ALLOWED_CLIENTS=${ALLOWED_CLIENTS:-}
 ALLOW_PUBLIC=${ALLOW_PUBLIC:-}
 ARC_GB=${BRIQYARD_ARC_GB:-}
+KEY_FILE=${BRIQYARD_KEY_FILE:-/etc/briqyard/pool.key}
 ARCH=$(uname -m)
 
 # Every host runs the same Firecracker and guest kernel: a memory snapshot only resumes under
@@ -63,6 +71,49 @@ esac
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 [ -e /dev/kvm ] || { echo "/dev/kvm is missing: this server has no KVM"; exit 1; }
 [ -n "$KERNEL_SHA256" ] || { echo "KERNEL_SHA256 is not pinned for $ARCH: set it to the sha256sum of $KERNEL_URL"; exit 1; }
+# The token goes into a configuration written now, and asks the fleet for the pool's key; an
+# upgrade (a configuration there, the pool open) needs neither (ADR 0027).
+[ -z "$FLEET_URL" ] || [ -n "$API_TOKEN" ] || [ -f /etc/briqyard/config.yaml ] || { echo "FLEET_URL needs BRIQYARD_TOKEN: the host's own, which the fleet expects"; exit 1; }
+
+# Loopback or RFC 1918: reachable from this host or its private network only.
+private() {
+  case "${1#[}" in 127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|::1]*|::1|f[cd]*:*|fe80:*) return 0 ;; esac
+  return 1
+}
+# Where the API and the endpoints listen, who may reach them, and the URL the fleet knows the
+# host at, with the scheme the API serves (TLS off loopback).
+bind=${LISTEN%:*}
+clients=""
+if [ -n "$ALLOWED_CLIENTS" ]; then
+  clients="  allowed_clients: [${ALLOWED_CLIENTS//,/, }]"
+elif [ "$ALLOW_PUBLIC" = 1 ]; then
+  clients="  allow_public: true"
+elif ! private "$bind"; then
+  # A host nobody can reach over a public bind, until the operator says who may.
+  echo "   LISTEN=$LISTEN is public and neither ALLOWED_CLIENTS nor ALLOW_PUBLIC is set: binding loopback"
+  bind=127.0.0.1
+fi
+scheme=https
+case "$bind" in 127.*) scheme=http ;; esac
+# The address the fleet knows the host at: the bound one, or the first one when bound to all.
+# The fleet's key route matches it against the host's record.
+advertise=${ADVERTISE:-$scheme://$([ "$bind" = 0.0.0.0 ] && hostname -I | awk '{print $1}' || echo "$bind"):7420}
+# The token and the pool's key cross the link to the fleet (ADR 0026): plain HTTP only to a
+# loopback or private address, as the daemon checks.
+case "$FLEET_URL" in
+  http://*)
+    fleet_host=${FLEET_URL#http://}; fleet_host=${fleet_host%%/*}
+    case "$fleet_host" in \[*) fleet_host=${fleet_host%%]*}] ;; *) fleet_host=${fleet_host%:*} ;; esac
+    private "$fleet_host" || { echo "FLEET_URL=$FLEET_URL is plain HTTP to an address the internet could reach: write https://, or a private address"; exit 1; }
+    ;;
+esac
+
+# Puts an executable in place by a rename: a running binary (the daemon, the fleet, Firecracker)
+# is replaced, never written into.
+put() {
+  install -m 0755 "$1" "$2.new"
+  mv -f "$2.new" "$2"
+}
 
 fail() { echo "   $*" >&2; exit 1; }
 
@@ -93,69 +144,31 @@ echo "options zfs zfs_arc_max=$((ARC_GB << 30))" > /etc/modprobe.d/briqyard-zfs.
 echo "$((ARC_GB << 30))" > /sys/module/zfs/parameters/zfs_arc_max
 echo "   at most $ARC_GB GB"
 
-# The partition labelled briqyard-pool on a disk, if it has one.
-pool_partition() { lsblk -nro PATH,PARTLABEL "$1" | awk '$2 == "briqyard-pool" {print $1; exit}'; }
+echo "== no swap"
+# Guest memory the kernel pages out would land on a disk in clear (ADR 0026): swap goes, and
+# stays gone across reboots (fstab lines commented out, swap units masked).
+swapoff -a
+sed -i -E 's|^([^#].*[[:space:]]swap[[:space:]].*)$|# briqyard, no swap: \1|' /etc/fstab
+for unit in $(systemctl list-units --type swap --all --plain --no-legend | awk '{print $1}'); do
+  systemctl mask "$unit" >/dev/null
+done
 
-# The device a pool member is: a partition as it is; a disk as it is when nothing is on it; a
-# disk with partitions (the OS on part of it) gets one in its largest free space, labelled
-# briqyard-pool and found by that label on a later run. Never a device in use.
-pool_device() {
-  local dev start end sector out used sig uuid
-  dev=$(readlink -f "$1")
-  [ -b "$dev" ] || fail "$1 is not a block device"
-  if [ "$(lsblk -dno TYPE "$dev")" != part ] && [ -n "$(lsblk -nro TYPE "$dev" | awk '$1 == "part"')" ]; then
-    if [ -z "$(pool_partition "$dev")" ]; then
-      [ "$(blkid -p -o value -s PTTYPE "$dev")" = gpt ] || fail "$1 has partitions but no GPT: name a partition for the pool"
-      start=$(sgdisk -F "$dev"); end=$(sgdisk -E "$dev"); sector=$(blockdev --getss "$dev")
-      [ $(( (end - start) * sector )) -ge $((10 << 30)) ] || fail "$1 has under 10 GB free: leave the rest of the disk unpartitioned at install, or name a partition"
-      # The kernel takes the new partition alone (partx): the OS's stay in use meanwhile.
-      out=$(sgdisk -n "0:$start:$end" -t 0:bf01 -c 0:briqyard-pool "$dev" 2>&1) || echo "   sgdisk: $out" >&2
-      partx -u "$dev" 2>/dev/null || true
-      udevadm settle
-      [ -n "$(pool_partition "$dev")" ] || fail "$1: no briqyard-pool partition after sgdisk"
-      echo "   $1: $(pool_partition "$dev"), $(( (end - start) * sector >> 30 )) GB of free space" >&2
-    fi
-    dev=$(pool_partition "$dev")
+echo "== no crash dumps"
+# A kernel crash dump is the whole memory, guests' included, written to /var/crash in clear.
+if dpkg -s kdump-tools >/dev/null 2>&1; then
+  apt-get purge -y -qq kdump-tools >/dev/null
+fi
+if [ "$(cat /sys/kernel/kexec_crash_loaded 2>/dev/null || echo 0)" = 1 ]; then
+  kexec -p -u 2>/dev/null || true
+  if [ "$(cat /sys/kernel/kexec_crash_loaded)" = 1 ]; then
+    echo "   a crash kernel is loaded (kdump) and could not be unloaded: its dump would hold guest memory in clear"
+    exit 1
   fi
-  used=$(lsblk -nro MOUNTPOINTS "$dev" | grep . | paste -sd, - || true)
-  [ -z "$used" ] || fail "$1 is in use (mounted at $used): the pool takes a device nothing uses"
-  [ "$(lsblk -nro NAME "$dev" | wc -l)" = 1 ] || fail "$1 is in use by $(lsblk -nro NAME "$dev" | sed 1d | paste -sd, -) (RAID, LVM, partitions)"
-  # Nothing is overwritten: a pool there is one not imported (a re-run, a reinstalled OS).
-  sig=$(blkid -p -o value -s TYPE "$dev" 2>/dev/null || true)
-  [ "$sig" != zfs_member ] || fail "$1 holds a pool: zpool import $POOL, or wipefs -a it if it is meant for a new one"
-  [ -z "$sig" ] || fail "$1 holds $sig: wipefs -a it if it is meant for the pool"
-  # A partition by its id: disk names may change order across reboots.
-  uuid=$(lsblk -dno PARTUUID "$dev")
-  if [ -n "$uuid" ] && [ -e "/dev/disk/by-partuuid/$uuid" ]; then echo "/dev/disk/by-partuuid/$uuid"; else echo "$dev"; fi
-}
-
-echo "== pool $POOL"
-if ! zpool list "$POOL" >/dev/null 2>&1; then
-  vdevs=()
-  if [ -n "$POOL_DEVICE" ]; then
-    for d in ${POOL_DEVICE//,/ }; do
-      dev=$(pool_device "$d") || exit 1
-      vdevs+=("$dev")
-    done
-    # -f for a mirror of two sizes alone (a disk's free space beside a whole disk): every
-    # member was checked to hold nothing above.
-    case ${#vdevs[@]} in
-      1) ;;
-      2) vdevs=(-f mirror "${vdevs[@]}") ;;
-      *) fail "BRIQYARD_POOL_DEVICE names ${#vdevs[@]} devices: one, or two for a mirror" ;;
-    esac
-  else
-    mkdir -p /var/lib/briqyard
-    truncate -s "${POOL_FILE_GB}G" /var/lib/briqyard/pool.img
-    vdevs=(/var/lib/briqyard/pool.img)
-    echo "   (a file-backed pool: fine for a trial, not for production)"
-  fi
-  zpool create -o ashift=12 -O compression=lz4 -O atime=off "$POOL" "${vdevs[@]}"
-  echo "   ${vdevs[*]}"
 fi
 
 # A private network (OVH's vRack): the API and the endpoints live on it; the public interface
-# takes SSH and PUBLIC_TCP_PORTS only, and machines still reach the internet through it.
+# takes SSH and PUBLIC_TCP_PORTS only, and machines still reach the internet through it. Up
+# before the pool: the fleet's key for it comes over this network.
 if [ -n "$PRIVATE_ADDRESS" ]; then
   echo "== private network $PRIVATE_ADDRESS"
   case "$PRIVATE_ADDRESS" in */*) ;; *) fail "PRIVATE_ADDRESS=$PRIVATE_ADDRESS: with its prefix, as 10.42.0.11/16" ;; esac
@@ -219,14 +232,116 @@ EOF
   echo "   public $public_dev: tcp $ports in, nothing else; private $private_dev"
 fi
 
+# The partition labelled briqyard-pool on a disk, if it has one.
+pool_partition() { lsblk -nro PATH,PARTLABEL "$1" | awk '$2 == "briqyard-pool" {print $1; exit}'; }
+
+# The device a pool member is: a partition as it is; a disk as it is when nothing is on it; a
+# disk with partitions (the OS on part of it) gets one in its largest free space, labelled
+# briqyard-pool and found by that label on a later run. Never a device in use.
+pool_device() {
+  local dev start end sector out used sig uuid
+  dev=$(readlink -f "$1")
+  [ -b "$dev" ] || fail "$1 is not a block device"
+  if [ "$(lsblk -dno TYPE "$dev")" != part ] && [ -n "$(lsblk -nro TYPE "$dev" | awk '$1 == "part"')" ]; then
+    if [ -z "$(pool_partition "$dev")" ]; then
+      [ "$(blkid -p -o value -s PTTYPE "$dev")" = gpt ] || fail "$1 has partitions but no GPT: name a partition for the pool"
+      start=$(sgdisk -F "$dev"); end=$(sgdisk -E "$dev"); sector=$(blockdev --getss "$dev")
+      [ $(( (end - start) * sector )) -ge $((10 << 30)) ] || fail "$1 has under 10 GB free: leave the rest of the disk unpartitioned at install, or name a partition"
+      # The kernel takes the new partition alone (partx): the OS's stay in use meanwhile.
+      out=$(sgdisk -n "0:$start:$end" -t 0:bf01 -c 0:briqyard-pool "$dev" 2>&1) || echo "   sgdisk: $out" >&2
+      partx -u "$dev" 2>/dev/null || true
+      udevadm settle
+      [ -n "$(pool_partition "$dev")" ] || fail "$1: no briqyard-pool partition after sgdisk"
+      echo "   $1: $(pool_partition "$dev"), $(( (end - start) * sector >> 30 )) GB of free space" >&2
+    fi
+    dev=$(pool_partition "$dev")
+  fi
+  used=$(lsblk -nro MOUNTPOINTS "$dev" | grep . | paste -sd, - || true)
+  [ -z "$used" ] || fail "$1 is in use (mounted at $used): the pool takes a device nothing uses"
+  [ "$(lsblk -nro NAME "$dev" | wc -l)" = 1 ] || fail "$1 is in use by $(lsblk -nro NAME "$dev" | sed 1d | paste -sd, -) (RAID, LVM, partitions)"
+  # Nothing is overwritten: a pool there is one not imported (a re-run, a reinstalled OS).
+  sig=$(blkid -p -o value -s TYPE "$dev" 2>/dev/null || true)
+  [ "$sig" != zfs_member ] || fail "$1 holds a pool: zpool import $POOL, or wipefs -a it if it is meant for a new one"
+  [ -z "$sig" ] || fail "$1 holds $sig: wipefs -a it if it is meant for the pool"
+  # A partition by its id: disk names may change order across reboots.
+  uuid=$(lsblk -dno PARTUUID "$dev")
+  if [ -n "$uuid" ] && [ -e "/dev/disk/by-partuuid/$uuid" ]; then echo "/dev/disk/by-partuuid/$uuid"; else echo "$dev"; fi
+}
+
+# The pool's key on stdout: the fleet's for this host, or the key file's. `pool_key make`
+# makes the file when it is missing (a pool about to be created), never otherwise.
+pool_key() {
+  if [ -n "$FLEET_URL" ]; then
+    [ -n "$API_TOKEN" ] || { echo "   the fleet's key needs BRIQYARD_TOKEN: the host's own" >&2; return 1; }
+    # The token goes in on stdin, off the command line.
+    printf 'Authorization: Bearer %s\n' "$API_TOKEN" |
+      curl -fsS --max-time 20 -H @- -H 'Content-Type: application/json' \
+        -d "{\"url\": \"$advertise\"}" "${FLEET_URL%/}/v1/hosts/key" | jq -er .key
+  else
+    if [ ! -f "$KEY_FILE" ] && [ "${1:-}" = make ]; then
+      (umask 077; mkdir -p "$(dirname "$KEY_FILE")"; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$KEY_FILE")
+      echo "   key made in $KEY_FILE: keep a copy off this host, the pool is unreadable without it" >&2
+    fi
+    tr -d ' \n' < "$KEY_FILE"
+  fi
+}
+
+echo "== pool $POOL, encrypted"
+if ! zpool list "$POOL" >/dev/null 2>&1; then
+  vdevs=()
+  if [ -n "$POOL_DEVICE" ]; then
+    for d in ${POOL_DEVICE//,/ }; do
+      dev=$(pool_device "$d") || exit 1
+      vdevs+=("$dev")
+    done
+    # -f for a mirror of two sizes alone (a disk's free space beside a whole disk): every
+    # member was checked to hold nothing above.
+    case ${#vdevs[@]} in
+      1) ;;
+      2) vdevs=(-f mirror "${vdevs[@]}") ;;
+      *) fail "BRIQYARD_POOL_DEVICE names ${#vdevs[@]} devices: one, or two for a mirror" ;;
+    esac
+  else
+    mkdir -p /var/lib/briqyard
+    truncate -s "${POOL_FILE_GB}G" /var/lib/briqyard/pool.img
+    vdevs=(/var/lib/briqyard/pool.img)
+    echo "   (a file-backed pool: fine for a trial, not for production)"
+  fi
+  key=$(pool_key make) || fail "no key for the pool (${FLEET_URL:-$KEY_FILE})"
+  [ "${#key}" = 64 ] || fail "the pool's key is not 64 hex digits"
+  # The key on stdin: in no file, on no command line.
+  printf '%s\n' "$key" | zpool create -o ashift=12 -O compression=lz4 -O atime=off \
+    -O encryption=aes-256-gcm -O keyformat=hex -O keylocation=prompt "$POOL" "${vdevs[@]}"
+  unset key
+  echo "   ${vdevs[*]}"
+fi
+if [ "$(zfs get -H -o value encryption "$POOL")" = off ]; then
+  echo "   pool $POOL is not encrypted (ADR 0026): ZFS cannot encrypt a pool after its creation."
+  echo "   Move what it holds elsewhere, destroy it, and run this script again."
+  exit 1
+fi
+# A pool that exists, locked (a reboot): its key from the same source, checked now rather
+# than at the daemon's start.
+if [ "$(zfs get -H -o value keystatus "$POOL")" = unavailable ]; then
+  root=$(zfs get -H -o value encryptionroot "$POOL")
+  key=$(pool_key) || { echo "   pool $POOL is locked and its key could not be read (${FLEET_URL:-$KEY_FILE})"; exit 1; }
+  if ! out=$(printf '%s\n' "$key" | zfs load-key -L prompt "$root" 2>&1); then
+    echo "   pool $POOL is locked and its key (${FLEET_URL:-$KEY_FILE}) does not open it: $out"
+    echo "   The pool was made with another key: the fleet's registry lost or replaced, or another key file."
+    exit 1
+  fi
+  unset key
+  echo "   key loaded"
+fi
+
 echo "== firecracker $FIRECRACKER_VERSION and a guest kernel"
 mkdir -p /var/lib/briqyard
 if [ "$(/usr/local/bin/firecracker --version 2>/dev/null | head -1)" != "Firecracker $FIRECRACKER_VERSION" ]; then
   fetch "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${ARCH}.tgz" "$FIRECRACKER_SHA256" /tmp/firecracker.tgz
   tar -xz -C /tmp -f /tmp/firecracker.tgz
   rm -f /tmp/firecracker.tgz
-  install -m 0755 "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}/firecracker-${FIRECRACKER_VERSION}-${ARCH}" /usr/local/bin/firecracker
-  install -m 0755 "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}/jailer-${FIRECRACKER_VERSION}-${ARCH}" /usr/local/bin/jailer
+  put "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}/firecracker-${FIRECRACKER_VERSION}-${ARCH}" /usr/local/bin/firecracker
+  put "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}/jailer-${FIRECRACKER_VERSION}-${ARCH}" /usr/local/bin/jailer
   rm -rf "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}"
 fi
 if ! echo "$KERNEL_SHA256  /var/lib/briqyard/vmlinux" | sha256sum -c --quiet - 2>/dev/null; then
@@ -234,6 +349,9 @@ if ! echo "$KERNEL_SHA256  /var/lib/briqyard/vmlinux" | sha256sum -c --quiet - 2
   chmod 0644 /var/lib/briqyard/vmlinux
   echo "   kernel ${KERNEL_URL##*/}"
 fi
+
+# A request to GitHub's API with BRIQYARD_RELEASE_TOKEN, the token on stdin, off the command line.
+github() { printf 'Authorization: Bearer %s\n' "$RELEASE_TOKEN" | curl -fsSL -H @- "$@"; }
 
 # A file of the release. With BRIQYARD_RELEASE_TOKEN, through GitHub's API: a private
 # repository's assets are not served at their download URL.
@@ -243,52 +361,42 @@ release_file() {
   if [ -z "$RELEASE_TOKEN" ]; then curl -fsSL -o "$dest" "$RELEASE/$name"; return; fi
   id=$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id' <<<"$assets")
   [ -n "$id" ] || fail "release $tag of $repo has no $name"
-  curl -fsSL -H "Authorization: Bearer $RELEASE_TOKEN" -H "Accept: application/octet-stream" -o "$dest" "https://api.github.com/repos/$repo/releases/assets/$id"
+  github -H "Accept: application/octet-stream" -o "$dest" "https://api.github.com/repos/$repo/releases/assets/$id"
 }
 
-echo "== binaries"
+echo "== binaries${RELEASE:+ from $RELEASE}"
+new=$(mktemp -d)
 if [ -n "$RELEASE" ]; then
   if [ -n "$RELEASE_TOKEN" ]; then
     repo=${RELEASE#https://github.com/}; tag=${repo##*/releases/download/}; repo=${repo%%/releases/download/*}
     [ "$repo" != "$tag" ] || fail "BRIQYARD_RELEASE=$RELEASE: with a token, a GitHub release (https://github.com/<owner>/<repo>/releases/download/<tag>)"
-    assets=$(curl -fsSL -H "Authorization: Bearer $RELEASE_TOKEN" "https://api.github.com/repos/$repo/releases/tags/$tag")
+    assets=$(github "https://api.github.com/repos/$repo/releases/tags/$tag")
   fi
   # Every file checked against the release's digests before any is installed.
-  dl=$(mktemp -d)
-  release_file "SHA256SUMS-$ARCH" "$dl/SHA256SUMS"
+  release_file "SHA256SUMS-$ARCH" "$new/SHA256SUMS"
   for b in briqyardd briqyard-init briqyard briqyard-fleet; do
-    release_file "$b-linux-$ARCH" "$dl/$b-linux-$ARCH"
-    (cd "$dl" && grep " $b-linux-$ARCH\$" SHA256SUMS | sha256sum -c --quiet -) || { rm -rf "$dl"; fail "$b-linux-$ARCH: digest differs from the release's SHA256SUMS-$ARCH"; }
+    release_file "$b-linux-$ARCH" "$new/$b"
+    sha=$(awk -v f="$b-linux-$ARCH" '$2 == f {print $1}' "$new/SHA256SUMS")
+    echo "$sha  $new/$b" | sha256sum -c --quiet - 2>/dev/null || { rm -rf "$new"; fail "$b-linux-$ARCH: digest differs from the release's SHA256SUMS-$ARCH"; }
   done
-  for b in briqyardd briqyard-init briqyard briqyard-fleet; do
-    install -m 0755 "$dl/$b-linux-$ARCH" "/usr/local/bin/$b"
-  done
-  rm -rf "$dl"
 else
-  for b in briqyardd briqyard-init briqyard briqyard-fleet; do
-    install -m 0755 "bin/$b" "/usr/local/bin/$b"
-  done
+  for b in briqyardd briqyard-init briqyard briqyard-fleet; do cp "bin/$b" "$new/$b"; done
 fi
+chmod 0755 "$new"/briq*
+# The new daemon reads the configuration before any binary lands: one it refuses leaves the
+# host as it was, its daemon running (ADR 0027).
+if [ -f /etc/briqyard/config.yaml ] && ! "$new/briqyardd" --config /etc/briqyard/config.yaml tls-fingerprint >/dev/null; then
+  rm -rf "$new"; fail "the new briqyardd refuses /etc/briqyard/config.yaml: nothing installed"
+fi
+for b in briqyardd briqyard-init briqyard briqyard-fleet; do put "$new/$b" "/usr/local/bin/$b"; done
+rm -rf "$new"
 
 echo "== config"
 mkdir -p /etc/briqyard
-# Loopback or RFC 1918: reachable from this host or its private network only.
-private() {
-  case "$1" in 127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;; esac
-  return 1
-}
+chmod 0700 /etc/briqyard
 if [ ! -f /etc/briqyard/config.yaml ]; then
-  bind=${LISTEN%:*}
-  clients=""
-  if [ -n "$ALLOWED_CLIENTS" ]; then
-    clients="  allowed_clients: [${ALLOWED_CLIENTS//,/, }]"
-  elif [ "$ALLOW_PUBLIC" = 1 ]; then
-    clients="  allow_public: true"
-  elif ! private "$bind"; then
-    # A host nobody can reach over a public bind, until the operator says who may.
-    echo "   LISTEN=$LISTEN is public and neither ALLOWED_CLIENTS nor ALLOW_PUBLIC is set: binding loopback"
-    bind=127.0.0.1
-  fi
+  key_source=fleet
+  [ -n "$FLEET_URL" ] || key_source="file:$KEY_FILE"
   cat > /etc/briqyard/config.yaml <<EOF
 listen: $bind:${LISTEN##*:}
 token: "$API_TOKEN"
@@ -301,6 +409,7 @@ root_disk_gb: 8
 storage:
   backend: zfs
   pool: $POOL
+  key: $key_source
 network:
   range: 10.64.0.0/10
 ${PUBLIC_TCP_PORTS:+  host_ports: [${PUBLIC_TCP_PORTS//,/, }]}
@@ -311,20 +420,22 @@ ingress:
 EOF
   [ -z "$clients" ] || echo "$clients" >> /etc/briqyard/config.yaml
   if [ -n "$FLEET_URL" ]; then
-    # The API serves TLS off loopback: advertised with the scheme it serves.
-    scheme=https
-    case "$bind" in 127.*) scheme=http ;; esac
     cat >> /etc/briqyard/config.yaml <<EOF
 fleet:
   url: $FLEET_URL
-  advertise: ${ADVERTISE:-$scheme://$([ "$bind" = 0.0.0.0 ] && hostname -I | awk '{print $1}' || echo "$bind"):7420}
+  advertise: $advertise
 EOF
   fi
 fi
+# The host's token is in it.
+chmod 0600 /etc/briqyard/config.yaml
 
 echo "== api certificate"
-# Made here, before the daemon starts, so it is there to read; kept across runs.
-fingerprint=$(/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml tls-fingerprint)
+# Made here, before the daemon starts, so it is there to read; kept across runs. It is also the
+# new binary reading the configuration: one it refuses stops here, before any hand-over, and the
+# running daemon goes on (ADR 0027).
+fingerprint=$(/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml tls-fingerprint) || {
+  echo "   the new briqyardd refuses /etc/briqyard/config.yaml: nothing handed over"; exit 1; }
 if [ -n "$fingerprint" ]; then
   echo "   sha256 $fingerprint: the fleet pins it (tls_fingerprint)"
 else
@@ -338,12 +449,15 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml
-# Only the daemon gets the signal: the machines (Firecracker processes in this cgroup) must
-# outlive a daemon crash, and a clean stop suspends them itself.
+# Only the daemon gets the signal: the machines (Firecracker processes in this cgroup) outlive
+# it. A stop (SIGTERM) suspends them, and the next start boots them again; SIGUSR2 (an upgrade)
+# leaves them running for the next daemon to adopt; a crash leaves them too (ADR 0027).
 KillMode=process
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536
+# A core dump of a Firecracker would be its guest's memory, on / in clear (ADR 0026).
+LimitCORE=0
 Environment=BRIQYARD_LOG=info
 
 [Install]
@@ -351,7 +465,16 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable briqyardd >/dev/null
-systemctl restart briqyardd
+# A running daemon hands its machines over (SIGUSR2, ADR 0027) and exits; the new one adopts them.
+# `systemctl restart` would suspend every machine instead.
+pid=$(systemctl show -p MainPID --value briqyardd)
+if [ "${pid:-0}" != 0 ]; then
+  echo "== handing the machines over to the new daemon"
+  systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
+  for _ in $(seq 1 120); do [ "$(systemctl show -p MainPID --value briqyardd)" = "$pid" ] || break; sleep 1; done
+  [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] || { echo "   briqyardd (pid $pid) did not exit within 120 s"; exit 1; }
+fi
+systemctl start briqyardd
 sleep 1
 systemctl --no-pager --lines=2 status briqyardd | grep -E "Active|listening" || true
-echo "== done: briqyard status"
+echo "== done: $(/usr/local/bin/briqyardd --version)"

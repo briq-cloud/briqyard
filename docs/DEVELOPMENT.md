@@ -15,12 +15,27 @@ publishes both; `hack/bootstrap-host.sh` downloads the pinned release and kernel
 against their digests) into `/usr/local/bin/firecracker` and `/var/lib/briqyard/vmlinux` (and
 does everything else a host needs: run it on a fresh server).
 
-A ZFS pool for the disks. For development, a file-backed one:
+A ZFS pool for the disks, encrypted as on every host (ADR 0026; the daemon refuses one that is
+not). For development, a file-backed one with its key in a file, what `hack/config.dev.yaml`
+names (`storage.key: file:/etc/briqyard/pool.key`):
 
 ```bash
+mkdir -p -m 0700 /etc/briqyard
+(umask 077; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > /etc/briqyard/pool.key)
 truncate -s 30G /var/lib/briqyard/pool.img
-zpool create -o ashift=12 -O compression=lz4 -O atime=off byard /var/lib/briqyard/pool.img
+zpool create -o ashift=12 -O compression=lz4 -O atime=off -O encryption=aes-256-gcm \
+  -O keyformat=hex -O keylocation=prompt byard /var/lib/briqyard/pool.img < /etc/briqyard/pool.key
 ```
+
+A pool made before ADR 0026 is not encrypted and cannot be made so: on a dev VM, destroy every
+machine (`briqyard machine ls`, `machine rm`), stop the daemon, `zpool destroy byard`, remove
+`pool.img` and `/var/lib/briqyard/{state,run,images,jail,backups}` (the daemon never mounts
+its datasets over files), then make the pool as above. `fc2` is made again by the bootstrap
+(below) with its key from the fleet: remove its `/etc/briqyard/config.yaml` too, so the script
+writes `storage.key: fleet`. The dev fleet is `tls: off` (fc2 reaches it through the Mac's
+port forwards, so it sees Lima's forwarder, not fc2): a host's calls are checked by their token
+alone there, not by their address (ADR 0026); the address check is in the unit tests. The dev VMs are aarch64, where OpenZFS's AES-GCM has no
+accelerated code: their disks are about 3.5 times slower encrypted (ADR 0026).
 
 Then `sudo briqyardd --config hack/config.dev.yaml`, and `briqyard status`.
 
@@ -49,6 +64,13 @@ tree's builds. Delete it when the worktree goes.
 
 Everything under nested virtualization is slower than on a real server; the timings are not a
 benchmark.
+
+`hack/vm.sh install` also lays out what `hack/fleet-smoke.sh` upgrades the VM's own host to
+(ADR 0027): this build's binaries under a release's names in `/var/lib/briqyard-fleet/release`
+(`file://` for `--release`), and the fleet's SSH key (`/etc/briqyard/fleet_ssh_key`, made once)
+in root's `authorized_keys`, so the fleet runs the bootstrap script on its own VM over SSH. The
+version a build says is `0.1.0+<commit>` of the checkout it was built from (`git` in the VM
+reads the mount; uncommitted changes say their HEAD's commit).
 
 ### Two hosts on the Mac
 
@@ -81,7 +103,8 @@ limactl shell fc2 sudo bash -c 'cd /Users/uplab/projects/briqyard && BRIQYARD_PO
 cargo build --release -p briqyard   # the CLI, on the Mac
 PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   SECOND_HOST_STOP="limactl shell fc2 sudo systemctl stop briqyardd" \
-  SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" hack/fleet-two-hosts.sh
+  SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" \
+  SECOND_HOST_SH="limactl shell fc2 sudo" bash hack/fleet-two-hosts.sh
 ```
 
 ### fc2 as a real host
@@ -167,7 +190,31 @@ plus `apt-get purge docker.io` and the edge's files.
   limits (the host's per vCPU under a machine's own at boot, a new size's at the next boot, a
   live change and a refused one, a stopped machine's at its start, the drive and metrics
   requests Firecracker gets, metrics lines added per machine across boots, the jail's
-  `cpu.weight`). What still needs the host: a tenant's first create (its bridge and
+  `cpu.weight`), snapshots and restore (ADR 0031: named, both disks at one instant, deleted by
+  name; a restore that swaps the disk, a newer snapshot and a fork kept on the retired disk, and
+  back again with nothing retired left; a deleted snapshot a retired disk hangs from freed with
+  it; a fork's destroy freeing the retired disk it held; a source destroyed under a fork of its
+  retired disk; a backup after a restore continuing from an ancestor, or whole, and restorable;
+  `If-Match` and a stopped machine left stopped; a restore cut short finished by the daemon and
+  by a start; a snapshot with memory resumed while the spec is the same, cold after a change; a
+  new image dropping the snapshots' root halves; a wake during a stop), the
+  pool's key (an unencrypted pool refused, a loaded key left alone, loaded from a file and from
+  a stub fleet as the host, each failed try saying why without the key, the wait ended by a
+  stop; `load-key` with the key on stdin; a filesystem never mounted over files; the fleet's
+  key route: made at the first ask, the same after, one per host, refused to any other token
+  or address, written `0600` before it is answered, in no listing, gone with the host; a
+  registry's backup: written sealed and only on a change, read back with its identity and no
+  other, a key served only once the store holds it; a
+  registry that does not parse refused, never read as empty, and fields it does not know
+  written back; a host call from another address than its record's refused unless behind
+  `tls: off`; a key whose write failed taken back, never served; a keyed host forgotten only by
+  force; a drained host never released, a retiring one once empty), upgrades (the init's and
+  the VMM's versions recorded at boot, a snapshot of another VMM booted cold, a hand-over that
+  waits for a stop to settle, touches no machine and lets no transition begin, the adoption
+  after it with `gone` apart from `stopped`, the daemon's start booting again what the host
+  stopped within its window, a record keeping a newer daemon's fields, an old init's unknown op
+  named, old and new wire shapes decoding, the fleet's refusals, its wait for a new start and
+  its end states, drain apart from retire). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
@@ -194,32 +241,58 @@ plus `apt-get purge docker.io` and the edge's files.
   16 MiB read from the root disk in 2 s or more, with O_DIRECT; `cpu.weight` 200; lifted live;
   set while suspended and in force after the resume; throttling on `/metrics`), host ports (on
   the host, when its config lists `network.host_ports`: one reached from a machine with egress,
-  dropped for `none` and `via`, the API dropped). 143 checks, 139 without host ports.
+  dropped for `none` and `via`, the API dropped), snapshots (files on the volume and the root
+  disk back after a restore, a running machine booted again, a fork made after the snapshot
+  still working, a backup after the restore continuing from the one before the snapshot and
+  restoring to the machine's content, the newer snapshot restored and the next backup whole, a
+  snapshot with memory resumed with `/tmp` and the uptime kept), encryption at rest (the pool
+  and every dataset under it encrypted, records, runs, images and jails on it, the key in none
+  of the daemon's files nor its log; the daemon stopped and the pool locked as a reboot leaves
+  it: without its key file no API and the reason logged, the file back and it starts, a machine
+  of before runs again), exec sessions (`-i` streaming stdin, stderr apart and the code; `-it`
+  driven by `hack/exec-tty.py`: a terminal of the size sent, a resize followed, the exit code;
+  the client's close hanging up a tty command and killing a piped one; the `session_opened`
+  event; a machine with a session open kept awake past its window, asleep once it closed),
+  versions and a hand-over (status and the init say the build, `vmm_version` the host's;
+  SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start: running
+  again unasked, resumed). E2E checks, E2EN without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 8).
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
-  daemon in the VM, a dry-run provisioner for order and retire). 19 checks. With
-  `BRIQYARD_TOKEN` against a real fleet: it orders only through a dry-run provisioner and
-  drains only a host of `hosts:`, so it leaves real hosts alone (13 checks then).
+  daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
+  relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
+  machine running (back `ready`, a new start of this version that adopted it, the machine
+  answering, never booted again). SMOKE checks. With `BRIQYARD_TOKEN` against a real fleet: it
+  orders only through a dry-run provisioner and drains only the dev fleet's host `local`, so it
+  leaves real hosts alone (SMOKEREAL checks then).
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases
   (ADR 0010). `--tenants 6 --per-tenant 4 --rounds 2 --crash`.
 - `hack/fleet-two-hosts.sh`: a fleet with two hosts: tenants placed on different hosts, calls
   forwarded to each, a host that stops answering marked down with its tenant's calls refused
-  (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back. 16 checks.
+  (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back;
+  with `SECOND_HOST_SH`, its pool locked while it is down and back encrypted and unlocked with
+  the fleet's key, the key on none of its files, in its log or in the fleet's host list. 21 checks.
+- `hack/fleet-restore.sh` (from the Mac, `FLEET_SH="limactl shell fc sudo" SECOND_HOST_SH="limactl
+  shell fc2 sudo"`): the dev fleet backed up to `file:///var/lib/briqyard-fleet-backup` for the
+  run (an identity in `/etc/briqyard/fleet-backup.key` on fc, development only), the backup
+  sealed (no key, no token in it), a restore refused over a registry, the registry lost and
+  restored `0600` with the same key for fc2, then fc2's pool locked and fc2 back with the key
+  of the restored registry; the config and the registry put back. 10 checks.
 
 ## Layout
 
 ```
-crates/briqyard-api     the API types and the host–guest protocol (shared by everything)
-crates/briqyardd        the daemon: config, state, zfs, netw (bridges, nft, dns), fc, image,
-                        guestc (vsock client), machine (the manager), ingress, api
-crates/briqyard-init    PID 1 inside the guest
-crates/briqyard         the CLI
-crates/briqyard-fleet   the orchestrator across hosts
-api/openapi.yaml        the API description, served at /v1/openapi.yaml
-hack/                   dev VM, systemd units, dev configs, the shell suites, the stress driver
-docs/adr                every technical decision; docs/research the numbers behind them
+crates/briqyard-api      the API types and the host–guest protocol (shared by everything)
+crates/briqyardd         the daemon: config, state, zfs, netw (bridges, nft, dns), fc, image,
+                         guestc (vsock client), machine (the manager), ingress, api
+crates/briqyard-init     PID 1 inside the guest
+crates/briqyard          the CLI
+crates/briqyard-fleet    the orchestrator across hosts
+crates/briqyard-objstore the object store (S3 or a directory), shared by the daemon and the fleet
+api/openapi.yaml         the API description, served at /v1/openapi.yaml
+hack/                    dev VM, systemd units, dev configs, the shell suites, the stress driver
+docs/adr                 every technical decision; docs/research the numbers behind them
 ```

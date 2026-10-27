@@ -671,6 +671,14 @@ pub struct Machine {
     pub pending: Option<Pending>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_since: Option<DateTime<Utc>>,
+    /// The init its root disk carries, as it said at the last boot (ADR 0027); empty before
+    /// its first boot, or from an init older than the report.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub init_version: String,
+    /// What ran it at its last boot: Firecracker's version and the host kernel's release,
+    /// `v1.17.0/6.8.0-45-generic`. A memory snapshot resumes only under the same (ADR 0027).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vmm_version: String,
     /// The briqyardd that runs it (set by the fleet).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
@@ -997,12 +1005,42 @@ pub struct StopRequest {
     pub timeout_sec: u64,
 }
 
-/// A point-in-time copy of a machine's disks.
+/// A snapshot to take now (ADR 0031).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SnapshotRequest {
+    /// A name to find it by again (`before-migration`), unique among the machine's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its memory too, on a running machine: a restore resumes its processes where they were.
+    #[serde(default)]
+    pub memory: bool,
+}
+
+/// A point-in-time copy of a machine's disks, and of its memory when taken with it (ADR 0031).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub id: String,
     pub machine_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// The disks it holds: `root`, and `data` on a machine with a volume. A new image drops
+    /// `root`: the root disk follows the image (ADR 0024).
+    #[serde(default)]
+    pub disks: Vec<String>,
+    #[serde(default)]
+    pub memory: bool,
+}
+
+/// A snapshot's name: an id's characters, and not the shape of a snapshot id (`s_…`), so a
+/// path segment names one snapshot whichever it is.
+pub fn check_snapshot_name(name: &str) -> Result<(), String> {
+    if !valid_id(name) || name.starts_with("s_") {
+        return Err(format!(
+            "name {name:?}: a-z, 0-9, _ and -, at most 64, not starting with s_"
+        ));
+    }
+    Ok(())
 }
 
 /// A tenant's network on a host.
@@ -1238,6 +1276,9 @@ pub mod reason {
     pub const BACKED_UP: &str = "backed_up";
     pub const BACKUP_FAILED: &str = "backup_failed";
     pub const BACKUP_DELETED: &str = "backup_deleted";
+    /// A snapshot of its disks taken, or deleted (ADR 0031).
+    pub const SNAPSHOT_TAKEN: &str = "snapshot_taken";
+    pub const SNAPSHOT_DELETED: &str = "snapshot_deleted";
     pub const DESTROYED: &str = "destroyed";
     pub const GATEWAY_STARTED: &str = "gateway_started";
     pub const GATEWAY_STOPPED: &str = "gateway_stopped";
@@ -1249,6 +1290,8 @@ pub mod reason {
     pub const IMAGE_REMOVED: &str = "image_removed";
     /// A create or a start refused by the tenant's quota (ADR 0025).
     pub const QUOTA_EXCEEDED: &str = "quota_exceeded";
+    /// An exec session began (ADR 0029): someone is in the machine. A use: no new version.
+    pub const SESSION_OPENED: &str = "session_opened";
     pub const ALL: &[&str] = &[
         CREATED,
         FORKED,
@@ -1274,6 +1317,8 @@ pub mod reason {
         BACKED_UP,
         BACKUP_FAILED,
         BACKUP_DELETED,
+        SNAPSHOT_TAKEN,
+        SNAPSHOT_DELETED,
         DESTROYED,
         GATEWAY_STARTED,
         GATEWAY_STOPPED,
@@ -1283,6 +1328,7 @@ pub mod reason {
         HOST_CONDITION,
         IMAGE_REMOVED,
         QUOTA_EXCEEDED,
+        SESSION_OPENED,
     ];
 }
 
@@ -1412,7 +1458,7 @@ pub struct Host {
     pub region: String,
     #[serde(default)]
     pub provider: String,
-    /// ready, draining, down, provisioning, bootstrapped, failed, dry-run
+    /// ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed, dry-run
     pub state: String,
     pub capacity: Capacity,
     pub used: Capacity,
@@ -1435,6 +1481,35 @@ pub struct Host {
     /// What its last heartbeat said (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    /// Its daemon's last start, from its heartbeat; absent from a daemon older than ADR 0027.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<DaemonStart>,
+}
+
+/// When a daemon started and what it did with the machines the previous one left running
+/// (ADR 0027): an upgrade waits for a start after its install, and fails one that stopped a
+/// machine instead of taking it over. Each one stopped is booted again when its sleep window
+/// had not run out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonStart {
+    pub at: DateTime<Utc>,
+    /// Left running and taken over.
+    pub adopted: usize,
+    /// Left running, its process still there but not answering for it: ended and marked
+    /// stopped. What an upgrade fails on.
+    pub stopped: usize,
+    /// Left running and found without its process (it exited while no daemon ran): marked
+    /// stopped.
+    #[serde(default)]
+    pub gone: usize,
+}
+
+/// POST /v1/hosts/{id}/upgrade (fleet only, ADR 0027).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpgradeHostRequest {
+    /// A release URL (where `briqyardd-linux-<arch>` and its siblings are), or a version
+    /// (`0.2.0`, `v0.2.0`) of the project's releases.
+    pub release: String,
 }
 
 /// POST /v1/hosts (fleet only): a server bought by hand, bootstrapped as an ordered one is.
@@ -1490,6 +1565,29 @@ pub struct RegisterHostRequest {
     /// The host's conditions (ADR 0021): the fleet places nothing new while one is true.
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    /// The daemon's start; absent from a daemon older than ADR 0027.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<DaemonStart>,
+}
+
+/// `POST /v1/hosts/key` (fleet only): a host asks for its pool's key, with its own API token
+/// as the bearer, for the record at the address it advertises (ADR 0026).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostKeyRequest {
+    pub url: String,
+}
+
+/// The answer: the key of the host's pool, 64 hex digits (ZFS's `hex` key format).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct HostKey {
+    pub key: String,
+}
+
+/// Never printed: a `{:?}` of it would put the key in a log.
+impl std::fmt::Debug for HostKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostKey { .. }")
+    }
 }
 
 /// GET /v1/status.
@@ -1510,6 +1608,13 @@ pub struct Status {
     /// Memory and disk pressure, as the tick last found them (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    /// The daemon's start; absent from a daemon older than ADR 0027.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<DaemonStart>,
+    /// What a machine booted now runs under: Firecracker's version and the host kernel's
+    /// release (ADR 0027).
+    #[serde(default)]
+    pub vmm_version: String,
 }
 
 /// Every error response's body.
@@ -1867,6 +1972,7 @@ mod tests {
         assert_eq!(m.started_at, None);
         assert_eq!(m.sleeps_at, None);
         assert_eq!(m.host, "");
+        assert_eq!((m.init_version.as_str(), m.vmm_version.as_str()), ("", ""));
     }
 
     #[test]
@@ -1896,6 +2002,7 @@ mod tests {
             "suspended": true, "backup": {"every": "6h", "keep": 4},
             "last_backup_at": "2026-01-02T03:04:05Z", "next_backup_at": "2026-01-02T09:04:05Z",
             "version": 812, "host": "h1",
+            "init_version": "0.1.0+fdad892eeefa", "vmm_version": "v1.17.0/6.8.0-45-generic",
             "restarts": 2, "restarting_at": "2026-01-02T03:04:25Z", "ready": false
         });
         let mut input = input;
@@ -1935,6 +2042,7 @@ mod tests {
         assert_eq!(m.endpoints[0].host_port, Some(20001));
         assert_eq!(m.sleeps_at.map(|t| (t - ts()).num_minutes()), Some(30));
         assert!(m.suspended);
+        assert_eq!(m.init_version, "0.1.0+fdad892eeefa");
     }
 
     #[test]
@@ -2371,10 +2479,29 @@ mod tests {
 
     #[test]
     fn snapshot_and_tenant() {
-        let s: Snapshot = same(json!({
-            "id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z"
-        }));
+        let s: Snapshot = round_trip(
+            json!({"id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z"}),
+            json!({
+                "id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z",
+                "disks": [], "memory": false
+            }),
+        );
         assert_eq!(s.machine_id, "m1");
+        let s: Snapshot = same(json!({
+            "id": "s_1", "machine_id": "m1", "name": "before-migration",
+            "created_at": "2026-01-02T03:04:05Z", "disks": ["root", "data"], "memory": true
+        }));
+        assert_eq!(s.name.as_deref(), Some("before-migration"));
+        let r: SnapshotRequest = round_trip(json!({}), json!({"memory": false}));
+        assert!(r.name.is_none() && !r.memory);
+        let r: SnapshotRequest = same(json!({"name": "x", "memory": true}));
+        assert!(r.memory);
+        for ok in ["before-migration", "a", "s1", "snap_2"] {
+            assert!(check_snapshot_name(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "s_abc", "Before", "a/b", "..", &"x".repeat(65)] {
+            assert!(check_snapshot_name(bad).is_err(), "{bad}");
+        }
         let t: Tenant = round_trip(
             json!({"id": "t1", "created_at": "2026-01-02T03:04:05Z"}),
             json!({
@@ -2541,9 +2668,11 @@ mod tests {
             "last_seen": "2026-01-02T03:04:05Z", "version": "0.1.0", "note": "ordered",
             "tls_fingerprint": "ab01",
             "conditions": [{"type": "disk_pressure", "status": true,
-                "since": "2026-01-02T03:04:05Z", "message": "pool 4% free"}]
+                "since": "2026-01-02T03:04:05Z", "message": "pool 4% free"}],
+            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0, "gone": 1}
         }));
         assert_eq!(h.tenants, vec!["t1", "t2"]);
+        assert_eq!(h.started.map(|s| (s.adopted, s.gone)), Some((2, 1)));
         assert_eq!(
             under_pressure(&h.conditions).map(|c| c.kind.as_str()),
             Some(condition::DISK_PRESSURE)
@@ -2574,7 +2703,8 @@ mod tests {
             "machines": 1, "tenants": ["t1"], "version": "0.1.0", "disk_free_mb": 100000,
             "tls_fingerprint": "ab01",
             "conditions": [{"type": "memory_pressure", "status": false,
-                "since": "2026-01-02T03:04:05Z", "message": "512 MB of 65536 committed (0%)"}]
+                "since": "2026-01-02T03:04:05Z", "message": "512 MB of 65536 committed (0%)"}],
+            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0, "gone": 1}
         }));
         assert_eq!(r.disk_free_mb, 100000);
         assert_eq!(r.tls_fingerprint, "ab01");
@@ -2593,7 +2723,7 @@ mod tests {
                 "version": "0.1.0", "host_id": "h1",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
                 "machines": 3, "running": 1, "disk_free_mb": 0, "tls_fingerprint": "",
-                "conditions": []
+                "conditions": [], "vmm_version": ""
             }),
         );
         assert_eq!(s.running, 1);
@@ -2606,7 +2736,8 @@ mod tests {
                  "message": "990 MB of 1000 committed (99%), over 95%"},
                 {"type": "disk_pressure", "status": false, "since": "2026-01-02T03:04:05Z",
                  "message": "pool 50% free"}
-            ]
+            ],
+            "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0, "gone": 1}, "vmm_version": "v1.17.0/6.8.0-45-generic"
         }));
         assert_eq!(
             under_pressure(&s.conditions).map(|c| c.kind.as_str()),
@@ -2618,6 +2749,13 @@ mod tests {
         )
         .is_err());
         assert_eq!(condition::ALL, ["memory_pressure", "disk_pressure"]);
+    }
+
+    #[test]
+    fn upgrade_request() {
+        let r: UpgradeHostRequest = same(json!({"release": "0.2.0"}));
+        assert_eq!(r.release, "0.2.0");
+        assert!(serde_json::from_value::<UpgradeHostRequest>(json!({})).is_err());
     }
 
     #[test]
@@ -2756,7 +2894,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), reason::ALL.len());
-        assert_eq!(all.len(), 33);
+        assert_eq!(all.len(), 36);
         assert!(all
             .iter()
             .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));

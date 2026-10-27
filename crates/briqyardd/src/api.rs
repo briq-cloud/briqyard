@@ -3,6 +3,8 @@
 use crate::events::Filter;
 use crate::machine::{detached, MError, Manager, Until};
 use axum::body::Body;
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -92,7 +94,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/machines/:id/restart", post(restart_machine))
         .route("/v1/machines/:id/touch", post(touch_machine))
         .route("/v1/machines/:id/wait", post(wait_machine))
-        .route("/v1/machines/:id/exec", post(exec))
+        .route("/v1/machines/:id/exec", get(exec_session).post(exec))
         .route("/v1/machines/:id/files", get(get_file).put(put_file))
         .route("/v1/machines/:id/logs", get(logs))
         .route("/v1/machines/:id/stats", get(stats))
@@ -109,6 +111,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/machines/:id/snapshots/:snap",
             axum::routing::delete(delete_snapshot),
+        )
+        .route(
+            "/v1/machines/:id/snapshots/:snap/restore",
+            post(restore_snapshot),
         )
         .route("/v1/machines/:id/endpoints", post(create_endpoint))
         .route("/v1/endpoints", get(list_endpoints))
@@ -147,7 +153,9 @@ pub struct AppError {
 /// "not in that state" answers; `capacity` stays a 503, which the control plane retries later.
 fn status_of(e: &MError) -> (StatusCode, &'static str) {
     match e {
-        MError::NotFound | MError::NoBackup(_) => (StatusCode::NOT_FOUND, "not_found"),
+        MError::NotFound | MError::NoBackup(_) | MError::NoSnapshot(_) => {
+            (StatusCode::NOT_FOUND, "not_found")
+        }
         MError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
         MError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
         MError::NotRunning(_) => (StatusCode::CONFLICT, "not_running"),
@@ -291,7 +299,7 @@ async fn metrics(State(st): S) -> Response {
 async fn status(State(st): S) -> Json<api::Status> {
     let (used, running, machines) = st.mgr.usage();
     Json(api::Status {
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: api::VERSION.into(),
         host_id: st.mgr.host_id().into(),
         capacity: st.mgr.capacity(),
         used,
@@ -300,6 +308,8 @@ async fn status(State(st): S) -> Json<api::Status> {
         disk_free_mb: st.mgr.disk_free_mb().await,
         tls_fingerprint: st.tls_fingerprint.clone(),
         conditions: st.mgr.conditions(),
+        started: Some(st.mgr.started()),
+        vmm_version: st.mgr.vmm_version(),
     })
 }
 
@@ -483,6 +493,33 @@ async fn exec(
     Ok(Json(st.mgr.exec(&id, req).await?))
 }
 
+/// The largest message a session takes: its stdin frame, base64 in JSON, stays under the
+/// guest protocol's largest frame.
+const MAX_SESSION_MESSAGE: usize = 1 << 20;
+
+/// An exec session (ADR 0029): the command starts, the machine woken first when asked, then
+/// the upgrade; every refusal before it is an HTTP answer like any other.
+async fn exec_session(
+    State(st): S,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<Response, AppError> {
+    let ws = ws.map_err(|e| {
+        MError::Invalid(format!(
+            "a session is a WebSocket upgrade of GET /v1/machines/{id}/exec: {e}"
+        ))
+    })?;
+    let pairs = url::form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes());
+    let mut req = api::session::ExecSession::from_query(pairs).map_err(MError::Invalid)?;
+    req.timeout_ms = exec_timeout_ms(req.timeout_ms);
+    let session = st.mgr.open_session(&id, req).await?;
+    Ok(ws
+        .max_message_size(MAX_SESSION_MESSAGE)
+        .max_frame_size(MAX_SESSION_MESSAGE)
+        .on_upgrade(move |socket| crate::session::serve(socket, session)))
+}
+
 async fn put_file(
     State(st): S,
     Path(id): Path<String>,
@@ -598,10 +635,24 @@ async fn stats(State(st): S, Path(id): Path<String>) -> Result<Json<api::Machine
 async fn snapshot(
     State(st): S,
     Path(id): Path<String>,
+    body: Option<Json<api::SnapshotRequest>>,
 ) -> Result<(StatusCode, Json<api::Snapshot>), AppError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
     let m = st.mgr.clone();
-    let s = detached(async move { m.snapshot(&id).await }).await?;
+    let s = detached(async move { m.snapshot(&id, req).await }).await?;
     Ok((StatusCode::CREATED, Json(s)))
+}
+
+async fn restore_snapshot(
+    State(st): S,
+    Path((id, snap)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<api::Machine>, AppError> {
+    let at = if_match(&headers)?;
+    let m = st.mgr.clone();
+    Ok(Json(
+        detached(async move { m.restore_snapshot(&id, &snap, at).await }).await?,
+    ))
 }
 
 async fn snapshots(

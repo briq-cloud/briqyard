@@ -7,15 +7,21 @@ use crate::machine::Manager;
 use briqyard_api as api;
 use std::time::Duration;
 
+/// The client to the fleet: its heartbeats and the pool's key (ADR 0026). An `https` fleet
+/// is verified against the web PKI roots (ADR 0020).
+pub fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("http client")
+}
+
 pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, mgr: Manager) {
     if api_token.is_empty() {
         tracing::error!("fleet.url is set but token is empty: a fleet accepts a heartbeat only with the host's own token");
         return;
     }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .expect("http client");
+    let client = client();
     loop {
         let (used, _, total) = mgr.usage();
         let req = api::RegisterHostRequest {
@@ -26,10 +32,11 @@ pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, m
             used,
             machines: total,
             tenants: mgr.tenants().into_iter().map(|t| t.id).collect(),
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: api::VERSION.into(),
             disk_free_mb: mgr.disk_free_mb().await,
             tls_fingerprint: tls_fingerprint.clone(),
             conditions: mgr.conditions(),
+            started: Some(mgr.started()),
         };
         let r = client
             .post(format!(

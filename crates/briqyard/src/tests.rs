@@ -353,7 +353,7 @@ fn machine_exec_takes_the_command_after_the_dashes() {
         "--no-wake",
         "--timeout",
         "10s",
-        "--stdin",
+        "-it",
         "m1",
         "--",
         "sh",
@@ -363,13 +363,14 @@ fn machine_exec_takes_the_command_after_the_dashes() {
         MachineCmd::Exec {
             no_wake,
             timeout,
-            stdin,
+            interactive,
+            tty,
             id,
             cmd,
         } => {
             assert!(no_wake);
-            assert_eq!(Duration::from(timeout), Duration::from_secs(10));
-            assert!(stdin);
+            assert_eq!(timeout.map(Duration::from), Some(Duration::from_secs(10)));
+            assert!(interactive && tty);
             assert_eq!(id, "m1");
             assert_eq!(cmd, ["sh", "-c", "ls -la"]);
         }
@@ -379,15 +380,29 @@ fn machine_exec_takes_the_command_after_the_dashes() {
         MachineCmd::Exec {
             no_wake,
             timeout,
-            stdin,
+            interactive,
+            tty,
             cmd,
             ..
         } => {
             assert!(!no_wake, "wakes by default");
-            assert_eq!(Duration::from(timeout), Duration::from_secs(300));
-            assert!(!stdin);
+            assert_eq!(timeout, None, "the daemon's default");
+            assert!(!interactive && !tty);
             assert_eq!(cmd, ["true"]);
         }
+        _ => panic!("not an exec"),
+    }
+    match machine(parse(&[
+        "machine",
+        "exec",
+        "--interactive",
+        "m1",
+        "--",
+        "cat",
+    ])) {
+        MachineCmd::Exec {
+            interactive, tty, ..
+        } => assert!(interactive && !tty),
         _ => panic!("not an exec"),
     }
     assert_eq!(
@@ -558,15 +573,37 @@ fn machine_lifecycle_commands() {
             "{sub} needs an id"
         );
     }
-    // Snapshots: create, ls and rm, each on a machine; rm names the snapshot too.
+    // Snapshots: create (named, with memory), ls, restore and rm, each on a machine; restore
+    // and rm name the snapshot too.
     for (args, want) in [
         (vec!["machine", "snapshot", "create", "m1"], "create"),
+        (
+            vec![
+                "machine", "snapshot", "create", "--name", "before", "--memory", "m1",
+            ],
+            "create before with memory",
+        ),
         (vec!["machine", "snapshot", "ls", "m1"], "ls"),
+        (
+            vec!["machine", "snapshot", "restore", "m1", "before"],
+            "restore",
+        ),
         (vec!["machine", "snapshot", "rm", "m1", "s_1"], "rm"),
     ] {
         let got = match machine(parse(&args)) {
-            MachineCmd::Snapshot(SnapshotCmd::Create { id }) if id == "m1" => "create",
+            MachineCmd::Snapshot(SnapshotCmd::Create { name, memory, id }) if id == "m1" => {
+                match (name, memory) {
+                    (None, false) => "create",
+                    (Some(n), true) if n == "before" => "create before with memory",
+                    _ => "?",
+                }
+            }
             MachineCmd::Snapshot(SnapshotCmd::Ls { id }) if id == "m1" => "ls",
+            MachineCmd::Snapshot(SnapshotCmd::Restore { id, snap })
+                if id == "m1" && snap == "before" =>
+            {
+                "restore"
+            }
             MachineCmd::Snapshot(SnapshotCmd::Rm { id, snap }) if id == "m1" && snap == "s_1" => {
                 "rm"
             }
@@ -576,6 +613,7 @@ fn machine_lifecycle_commands() {
     }
     for args in [
         vec!["machine", "snapshot", "create"],
+        vec!["machine", "snapshot", "restore", "m1"],
         vec!["machine", "snapshot", "rm", "m1"],
     ] {
         assert_eq!(fails(&args), ErrorKind::MissingRequiredArgument, "{args:?}");
@@ -807,7 +845,11 @@ fn host_commands() {
         _ => panic!("not a drain"),
     }
     match parse(&["host", "rm", "h_1"]).cmd {
-        Cmd::Host(HostCmd::Rm { id }) => assert_eq!(id, "h_1"),
+        Cmd::Host(HostCmd::Rm { id, force }) => assert!(id == "h_1" && !force),
+        _ => panic!("not a rm"),
+    }
+    match parse(&["host", "rm", "h_1", "--force"]).cmd {
+        Cmd::Host(HostCmd::Rm { force, .. }) => assert!(force),
         _ => panic!("not a rm"),
     }
     match parse(&[
@@ -1211,6 +1253,7 @@ fn the_host_table() {
                 message: "pool 4.0 GB free of 100.0 (4%), under 10%".into(),
             },
         ],
+        started: Default::default(),
     };
     let ordered = api::Host {
         id: "h_srv-9".into(),
@@ -1225,6 +1268,7 @@ fn the_host_table() {
         tls_fingerprint: String::new(),
         conditions: vec![],
         region: String::new(),
+        version: String::new(),
         ..ready.clone()
     };
     let added = api::Host {
@@ -1245,11 +1289,11 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[0],
-        "ID               URL                          STATE        REGION   MEMORY MB      VCPUS      MACHINES  TENANTS  LAST SEEN"
+        "ID               URL                          STATE        REGION   MEMORY MB      VCPUS      MACHINES  TENANTS  VERSION              LAST SEEN"
     );
     assert_eq!(
         lines[1],
-        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6/32       3         2        2026-10-19T08:30:00+00:00"
+        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6/32       3         2        0.1.0                2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[2],
@@ -1262,8 +1306,8 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[4],
-        "h_srv-9          -                            provisioning -        0/0            0/0        0         0        2026-10-19T08:30:00+00:00",
-        "no address nor region yet shows as -"
+        "h_srv-9          -                            provisioning -        0/0            0/0        0         0        -                    2026-10-19T08:30:00+00:00",
+        "no address, region nor version yet shows as -"
     );
     assert_eq!(
         lines[5],
@@ -1271,7 +1315,7 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[6],
-        "h_10-42-0-11     https://10.42.0.11:7420      provisioning gra      0/0            0/0        0         0        2026-10-19T08:30:00+00:00"
+        "h_10-42-0-11     https://10.42.0.11:7420      provisioning gra      0/0            0/0        0         0        -                    2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[7], "                 ssh: 51.68.1.2",
@@ -1309,6 +1353,72 @@ fn host_add_takes_its_public_ports() {
     for bad in ["", "80,", "0", "http"] {
         assert!(port_list(bad).is_err(), "{bad:?}");
     }
+}
+
+#[test]
+fn host_upgrade_takes_a_host_or_all() {
+    match parse(&["host", "upgrade", "h_a", "--release", "0.2.0"]).cmd {
+        Cmd::Host(HostCmd::Upgrade { id, all, release }) => assert_eq!(
+            (id.as_deref(), all, release.as_str()),
+            (Some("h_a"), false, "0.2.0")
+        ),
+        _ => panic!("not an upgrade"),
+    }
+    assert!(matches!(
+        parse(&["host", "upgrade", "--all", "--release", "0.2.0"]).cmd,
+        Cmd::Host(HostCmd::Upgrade {
+            id: None,
+            all: true,
+            ..
+        })
+    ));
+    match parse(&["host", "undrain", "h_1"]).cmd {
+        Cmd::Host(HostCmd::Undrain { id }) => assert_eq!(id, "h_1"),
+        _ => panic!("not an undrain"),
+    }
+    // A host or --all, never both nor neither, and always a release.
+    fails(&["host", "upgrade", "--release", "0.2.0"]);
+    fails(&["host", "upgrade", "h_a", "--all", "--release", "0.2.0"]);
+    fails(&["host", "upgrade", "h_a"]);
+}
+
+#[test]
+fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
+    let host = |id: &str, state: &str| api::Host {
+        id: id.into(),
+        url: String::new(),
+        ssh: String::new(),
+        region: String::new(),
+        provider: String::new(),
+        state: state.into(),
+        capacity: api::Capacity::default(),
+        used: api::Capacity::default(),
+        machines: 0,
+        tenants: vec![],
+        last_seen: ts(),
+        version: String::new(),
+        note: String::new(),
+        tls_fingerprint: String::new(),
+        public_tcp_ports: vec![],
+        conditions: vec![],
+        started: Default::default(),
+    };
+    let hs = [
+        host("h_c", "ready"),
+        host("h_a", "draining"),
+        host("h_d", "down"),
+        host("h_b", "ready"),
+        host("h_e", "retiring"),
+    ];
+    let (up, left) = upgrade_order(&hs);
+    assert_eq!(up, ["h_a", "h_b", "h_c"]);
+    assert_eq!(
+        left,
+        [
+            ("h_d".to_string(), "down".to_string()),
+            ("h_e".to_string(), "retiring".to_string())
+        ]
+    );
 }
 
 #[test]
@@ -1396,6 +1506,38 @@ fn the_usage_table() {
         ]
     );
     assert_eq!(usage_table(&[]).lines().count(), 1, "the header alone");
+}
+
+#[test]
+fn the_snapshot_table() {
+    let ss = [
+        api::Snapshot {
+            id: "s_0123456789ab".into(),
+            machine_id: "m_01".into(),
+            name: Some("before-migration".into()),
+            created_at: ts(),
+            disks: vec!["root".into(), "data".into()],
+            memory: true,
+        },
+        api::Snapshot {
+            id: "s_ba9876543210".into(),
+            machine_id: "m_01".into(),
+            name: None,
+            created_at: ts(),
+            disks: vec!["data".into()],
+            memory: false,
+        },
+    ];
+    let out = snapshot_table(&ss);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "ID               NAME                 CREATED               DISKS      MEMORY",
+            "s_0123456789ab   before-migration     2026-10-19 08:30:00   root,data  yes",
+            "s_ba9876543210   -                    2026-10-19 08:30:00   data       no",
+        ]
+    );
 }
 
 #[test]
@@ -1884,6 +2026,7 @@ fn describe_shows_the_machine_then_its_events() {
             ..Default::default()
         }),
         pending_since: Some(ts()),
+        init_version: "0.1.0+fdad892eeefa".into(),
         host: "d1".into(),
         restarts: 2,
         restarting_at: Some(ts() + chrono::Duration::seconds(20)),
@@ -1952,6 +2095,7 @@ fn describe_shows_the_machine_then_its_events() {
             "Volume:        2 GB at /data",
             "Disk limits:   32MB/s 4000io each, 10s burst",
             "Egress:        via:gateway",
+            "Runs on:       init 0.1.0+fdad892eeefa, vmm unknown",
             "Endpoints:     ep_1 http 80 -> http://web-ab12.byard.localhost",
             "               ep_2 tcp 5432 -> 10.0.0.5:20001",
             "Sleep:         30m",
@@ -1981,6 +2125,7 @@ fn describe_shows_the_machine_then_its_events() {
             restarting_at: None,
             probes: api::Probes::default(),
             pending: None,
+            init_version: String::new(),
             ..plain
         },
         &[],
@@ -1988,7 +2133,14 @@ fn describe_shows_the_machine_then_its_events() {
     assert!(out.contains("Endpoints:     none\n"), "{out}");
     assert!(out.contains("Backup:        none\n"), "{out}");
     assert!(out.ends_with("Events:\n  none\n"), "{out}");
-    for absent in ["Host:", "Exit:", "Restarts:", "Probes:", "Pending:"] {
+    for absent in [
+        "Host:",
+        "Exit:",
+        "Restarts:",
+        "Probes:",
+        "Pending:",
+        "Runs on:",
+    ] {
         assert!(!out.contains(absent), "{absent} {out}");
     }
 }
@@ -2202,4 +2354,127 @@ async fn a_follow_prints_until_the_machine_is_destroyed() {
         stub.seen.lock().unwrap()[0].path,
         "/v1/machines/m1/logs?since=&follow=true"
     );
+}
+
+// --- exec sessions (ADR 0029) ---
+
+/// A daemon's session reduced: stdin back on stdout, a resize as `COLSxROWS`, an exit of 5 at
+/// stdin's end; the query and the token it was asked with on stdout first. Not running when the
+/// machine is `m_asleep`.
+async fn session_stub() -> String {
+    use api::session::{channel, message, parse, Resize};
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    use axum::extract::{Path, RawQuery};
+    use axum::http::HeaderMap;
+    async fn exec(
+        Path(id): Path<String>,
+        RawQuery(q): RawQuery,
+        headers: HeaderMap,
+        ws: WebSocketUpgrade,
+    ) -> axum::response::Response {
+        if id == "m_asleep" {
+            let body = r#"{"error":"machine is not running: stopped (idle)","code":"not_running"}"#;
+            return (
+                StatusCode::CONFLICT,
+                [("content-type", "application/json")],
+                body,
+            )
+                .into_response();
+        }
+        let auth = headers
+            .get("authorization")
+            .map_or("no token", |v| v.to_str().unwrap())
+            .to_string();
+        ws.on_upgrade(move |mut socket| async move {
+            let hello = format!("{} {}\n", q.unwrap_or_default(), auth);
+            let _ = socket
+                .send(Message::Binary(message(channel::STDOUT, hello.as_bytes())))
+                .await;
+            while let Some(Ok(Message::Binary(b))) = socket.recv().await {
+                let reply = match parse(&b) {
+                    Some((channel::STDIN, p)) => message(channel::STDOUT, p),
+                    Some((channel::RESIZE, p)) => {
+                        let r: Resize = serde_json::from_slice(p).unwrap();
+                        message(channel::STDOUT, format!("{}x{}", r.cols, r.rows).as_bytes())
+                    }
+                    Some((channel::CLOSE, _)) => {
+                        message(channel::EXIT, br#"{"exit_code":5,"timed_out":true}"#)
+                    }
+                    _ => continue,
+                };
+                let last = reply[0] == channel::EXIT;
+                if socket.send(Message::Binary(reply)).await.is_err() || last {
+                    break;
+                }
+            }
+        })
+    }
+    let app = axum::Router::new().route("/v1/machines/:id/exec", axum::routing::get(exec));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    url
+}
+
+fn session_req(tty: bool) -> api::session::ExecSession {
+    api::session::ExecSession {
+        cmd: vec!["sh".into(), "-c".into(), "cat".into()],
+        tty,
+        cols: 100,
+        rows: 30,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_session_sends_the_local_side_and_answers_the_remote_code() {
+    let url = session_stub().await;
+    let c = client(&url, Some("t0k"));
+    let ws = session::connect(&c, "m1", &session_req(true))
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    for l in [
+        session::Local::Stdin(b"hi ".to_vec()),
+        session::Local::Resize(api::session::Resize {
+            cols: 120,
+            rows: 40,
+        }),
+        session::Local::EndOfInput,
+    ] {
+        tx.send(l).await.unwrap();
+    }
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = session::drive(ws, rx, &mut out, &mut err).await.unwrap();
+    assert_eq!(code, 5);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "cmd=sh&cmd=-c&cmd=cat&tty=true&cols=100&rows=30 Bearer t0k\nhi 120x40"
+    );
+    assert_eq!(String::from_utf8(err).unwrap(), "(timed out)\n");
+}
+
+#[tokio::test]
+async fn a_session_refused_or_stopped_locally() {
+    let url = session_stub().await;
+    let c = client(&url, None);
+    let e = session::connect(&c, "m_asleep", &session_req(false))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        e.to_string(),
+        "machine is not running: stopped (idle) (not_running)"
+    );
+    // A signal to the CLI ends the session with its code; the remote command ends with it.
+    let ws = session::connect(&c, "m1", &session_req(false))
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    tx.send(session::Local::Stop(130)).await.unwrap();
+    let mut sink = Vec::new();
+    let code = session::drive(ws, rx, &mut sink, &mut Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(code, 130);
 }

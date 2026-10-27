@@ -300,10 +300,10 @@ impl Manager {
                     ..Default::default()
                 };
                 // The init ends the command at its timeout; the margin is for the init itself.
-                let answer = tokio::time::timeout(
-                    timeout + Duration::from_secs(5),
-                    self.inner.guest.exec(&at.live.vsock, req),
-                )
+                let answer = tokio::time::timeout(timeout + Duration::from_secs(5), async {
+                    let mut conn = self.inner.guest.session(&at.live.vsock, req).await?;
+                    crate::guestc::collect(&mut conn).await
+                })
                 .await;
                 match answer {
                     Err(_) => (false, format!("no answer within {timeout:?}")),

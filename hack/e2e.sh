@@ -29,6 +29,11 @@ bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 cleanup() {
   echo "cleanup"
+  # The encryption section moves the pool's key away for a moment: put it back first.
+  if [ -n "${KEY_FILE:-}" ] && sudo test -f "$KEY_FILE.e2e"; then
+    sudo mv "$KEY_FILE.e2e" "$KEY_FILE"
+    for i in $(seq 1 60); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  fi
   for t in "$T" "$T-eg" "$T-gw" "$T-q"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
@@ -53,7 +58,7 @@ check "alpine running (${boot}s)" '[ "$state" = running ]'
 check "uname"        'briqyard machine exec "$A" -- uname -r | grep -q "^6\."'
 check "hostname"     '[ "$(briqyard machine exec "$A" -- hostname)" = alp ]'
 check "exit code"    'briqyard machine exec "$A" -- sh -c "exit 3"; [ $? = 3 ]'
-check "stdin"        '[ "$(echo hello | briqyard machine exec --stdin "$A" -- cat)" = hello ]'
+check "stdin"        '[ "$(echo hello | briqyard machine exec -i "$A" -- cat)" = hello ]'
 check "stderr"       '[ "$(briqyard machine exec "$A" -- sh -c "echo e >&2" 2>&1 >/dev/null)" = e ]'
 check "timeout"      'out=$(briqyard machine exec --timeout 2s "$A" -- sleep 30 2>&1 || true); echo "$out" | grep -q "timed out"'
 echo hello-file > /tmp/by-e2e.txt
@@ -61,6 +66,29 @@ check "put/get file" 'briqyard machine put "$A" /tmp/by-e2e.txt /root/f.txt && [
 check "own name"     'briqyard machine exec "$A" -- nslookup alp.internal 2>&1 | grep -q "10\.6[4-9]\."'
 check "egress"       'briqyard machine exec "$A" -- wget -qO- -T 10 https://example.com | grep -qi "example domain"'
 check "logs"         'briqyard machine logs "$A" --limit 5000 | grep -q "\[briqyard\] started"'
+
+echo "== exec sessions: stdin streamed, a terminal, the client's close (ADR 0029)"
+TTY="python3 $(dirname "$0")/exec-tty.py"
+running() { briqyard machine exec "$A" -- pgrep -f "$1" >/dev/null 2>&1; }
+ended() { for i in $(seq 1 20); do running "$1" || return 0; sleep 0.5; done; return 1; }
+check "session: stdin streams"          '[ "$(printf "one\ntwo\n" | briqyard machine exec -i "$A" -- cat)" = "$(printf "one\ntwo")" ]'
+check "session: stderr apart, the code" 'err=$(echo | briqyard machine exec -i "$A" -- sh -c "echo e >&2; exit 4" 2>&1 >/dev/null); [ $? = 4 ] && [ "$err" = e ]'
+check "tty: a terminal of the size sent" '$TTY 30x100 "send:tty; stty size\n" "expect:/dev/pts/[0-9]+" "expect:30 100" "send:exit\n" -- briqyard machine exec -it "$A" -- sh >/dev/null'
+check "tty: a resize follows"           '$TTY 30x100 "send:stty size\n" "expect:30 100" "resize:40x120" "ask:stty size\n=>40 120" "send:exit\n" -- briqyard machine exec -it "$A" -- sh >/dev/null'
+check "tty: the exit code comes back"   '$TTY 24x80 "send:exit 7\n" -- briqyard machine exec -it "$A" -- sh >/dev/null; [ $? = 7 ]'
+$TTY 24x80 "send:exec sleep 6061\n" "expect:never printed" -- briqyard machine exec -it "$A" -- sh >/dev/null 2>&1 &
+held=$!
+for i in $(seq 1 40); do running "sleep 6061" && break; sleep 0.5; done
+check "tty: the command runs"           'running "sleep 6061"'
+pkill -9 -f "machine exec -it $A -- sh" || true
+check "tty: the client's close hangs it up" 'ended "sleep 6061"'
+wait "$held" 2>/dev/null || true
+sleep 600 | briqyard machine exec -i "$A" -- sleep 6062 >/dev/null 2>&1 &
+for i in $(seq 1 40); do running "sleep 6062" && break; sleep 0.5; done
+check "session: the command runs"       'running "sleep 6062"'
+pkill -9 -f "machine exec -i $A -- sleep 6062" || true
+check "session: the client's close kills it" 'ended "sleep 6062"'
+check "session: an event"               'briqyard events --machine "$A" | awk "\$4 == \"session_opened\"" | grep -q .'
 
 echo "== second machine reaches the first by name"
 B=$(briqyard machine run --image alpine:3.20 --name alp2 --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
@@ -342,10 +370,18 @@ for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -
 check "data survived"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc "select x from t")" = 42 ]'
 
 echo "== sleep on idle, wake on connect"
+# A machine with a session open is in use: it stays up while the sleeper below goes down.
+W=$(briqyard machine run --image alpine:3.20 --name awake --tenant "$T" --memory 128 --sleep 20s -- sleep 3600 | jq -r .id)
+sleep 600 | briqyard machine exec -i "$W" -- cat >/dev/null 2>&1 &
 S=$(briqyard machine run --image postgres:16-alpine --name sleeper --tenant "$T" --memory 512 --volume 1G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 20s | jq -r .id)
 SEP=$(briqyard endpoint add "$S" 5432 | jq -r .address)
 for i in $(seq 1 90); do [ "$(briqyard machine get "$S" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "slept when idle" '[ "$(briqyard machine get "$S" | jq -r .stopped_reason)" = idle ]'
+check "awake while a session is open" '[ "$(briqyard machine get "$W" | jq -r .state)" = running ]'
+pkill -9 -f "machine exec -i $W -- cat" || true
+for i in $(seq 1 45); do [ "$(briqyard machine get "$W" | jq -r .state)" = stopped ] && break; sleep 2; done
+check "asleep once it closed" '[ "$(briqyard machine get "$W" | jq -r .stopped_reason)" = idle ]'
+briqyard machine rm "$W" >/dev/null
 check "set-sleep while stopped" '[ "$(briqyard machine set-sleep "$S" 45s | jq -r .sleep)" = 45s ]'
 check "set-sleep refuses a number" '! briqyard machine set-sleep "$S" 30 >/dev/null 2>&1'
 if command -v psql >/dev/null; then
@@ -407,6 +443,58 @@ briqyard machine destroy "$SB" >/dev/null
 check "a destroyed machine's backups listed" '[ "$(briqyard backups --tenant "$T" | jq "[.[] | select(.machine_id == \"$SB\" and .deletes_at != null)] | length")" = 2 ]'
 check "deleted with what continues from it" 'briqyard backup rm "$SB" "$S3" --chain && [ "$(briqyard machine backups "$SB" | jq length)" = 0 ]'
 
+
+echo "== snapshots: restore in place, a fork and backups around it, memory (ADR 0031)"
+CK=$(briqyard machine run --image alpine:3.20 --name ckpt --tenant "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
+on() { briqyard machine exec "$CK" -- sh -c "$1"; }
+on 'echo v1 > /data/f; echo r1 > /root/r; sync' >/dev/null
+CB1=$(briqyard machine backup "$CK" | jq -r .id)
+briqyard machine snapshot create --name before "$CK" >/dev/null
+check "snapshot listed by name, both disks" '[ "$(briqyard machine snapshot ls "$CK" | awk "NR == 2 {print \$2, \$5, \$6}")" = "before root,data no" ]'
+FK=$(briqyard machine fork "$CK" --name ckfork | jq -r .id)
+# A fork takes the disks, not the command: alpine's own (`sh`) would end at once.
+briqyard machine set "$FK" -- sleep 3600 >/dev/null && briqyard machine restart "$FK" >/dev/null
+on 'echo v2 > /data/f; rm /root/r; sync' >/dev/null
+S2=$(briqyard machine snapshot create "$CK" | jq -r .id)
+on 'rm /data/f; sync' >/dev/null
+t0=$(date +%s.%N)
+briqyard machine snapshot restore "$CK" before >/dev/null
+took=$(echo "$(date +%s.%N) - $t0" | bc)
+check "restore of a running machine boots it again (${took}s)" '[ "$(briqyard machine get "$CK" | jq -r .state)" = running ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 2 ]'
+check "the volume's file back, its content too" '[ "$(on "cat /data/f")" = v1 ]'
+check "the root disk's file back"     '[ "$(on "cat /root/r")" = r1 ]'
+check "the restored event"            'briqyard events --machine "$CK" | awk "\$4 == \"restored\"" | grep -q .'
+check "a fork made after the snapshot still works" '[ "$(briqyard machine exec "$FK" -- cat /data/f)" = v1 ] && briqyard machine exec "$FK" -- sh -c "echo w > /data/g" >/dev/null'
+on 'echo v3 > /data/f; sync' >/dev/null
+CB2=$(briqyard machine backup "$CK" | jq -r .id)
+check "a backup after it continues from the one before the snapshot" '[ "$(briqyard machine backups "$CK" | jq -r ".[] | select(.id == \"$CB2\") | .disks[0].from")" = "$CB1" ]'
+RK=$(briqyard machine restore --from "$CK" --backup "$CB2" --tenant "$T" --name ckback | jq -r .id)
+check "and restores to what the machine had" '[ "$(briqyard machine exec "$RK" -- cat /data/f /root/r | paste -sd, -)" = v3,r1 ]'
+briqyard machine destroy "$RK" >/dev/null
+briqyard machine snapshot restore "$CK" "$S2" >/dev/null
+check "the newer snapshot kept, restored" '[ "$(on "cat /data/f")" = v2 ] && ! on "test -e /root/r"'
+CB3=$(briqyard machine backup "$CK" | jq -r .id)
+check "its base gone with the restore: whole" '[ "$(briqyard machine backups "$CK" | jq -r ".[] | select(.id == \"$CB3\") | .incremental")" = false ]'
+RK=$(briqyard machine restore --from "$CK" --backup "$CB3" --tenant "$T" --name ckback3 | jq -r .id)
+check "and restores to what the machine had"  '[ "$(briqyard machine exec "$RK" -- cat /data/f)" = v2 ]'
+briqyard machine destroy "$RK" >/dev/null
+# Memory: /tmp is a tmpfs, only in memory; a resume keeps it, a boot would not.
+on 'echo m1 > /tmp/mark; echo v4 > /data/f' >/dev/null
+up=$(on 'cut -d. -f1 /proc/uptime')
+t0=$(date +%s.%N)
+briqyard machine snapshot create --name warm --memory "$CK" >/dev/null
+took=$(echo "$(date +%s.%N) - $t0" | bc)
+check "a snapshot with memory (${took}s), the machine running on" '[ "$(briqyard machine get "$CK" | jq -r .state)" = running ] && [ "$(on "cat /tmp/mark")" = m1 ]'
+on 'echo m2 > /tmp/mark; echo v5 > /data/f; sync' >/dev/null
+t0=$(date +%s.%N)
+briqyard machine snapshot restore "$CK" warm >/dev/null
+took=$(echo "$(date +%s.%N) - $t0" | bc)
+check "restored with memory (${took}s): resumed, not booted" '[ "$(briqyard events --machine "$CK" | awk "{print \$4}" | tail -1)" = resumed ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 3 ]'
+check "memory and disks as they were"  '[ "$(on "cat /tmp/mark /data/f" | paste -sd, -)" = m1,v4 ] && [ "$(on "cut -d. -f1 /proc/uptime")" -ge "$up" ]'
+briqyard machine snapshot rm "$CK" before
+check "deleted by name" '! briqyard machine snapshot ls "$CK" | grep -q " before "'
+briqyard machine destroy "$FK" >/dev/null
+briqyard machine destroy "$CK" >/dev/null
 
 echo "== tenants made together get bridges of their own"
 for i in 1 2 3; do briqyard machine run --image alpine:3.20 --name par --tenant "$T-par$i" --memory 128 -- sleep 600 > /tmp/by-par$i.json & done; wait
@@ -498,6 +586,64 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   check "one boot"         '[ "$(briqyard machine logs "$K" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
   briqyard machine stop "$K" >/dev/null
   check "stop after crash" '[ "$(briqyard machine get "$K" | jq -r .state)" = stopped ]'
+
+  echo "== versions, a hand-over (an upgrade) and a stop (a reboot): ADR 0027"
+  V=$(briqyard machine run --image alpine:3.20 --name handover --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
+  build=$(briqyardd --version | awk '{print $2}')
+  check "status says the build"      '[ "$(briqyard status | jq -r .version)" = "$build" ]'
+  check "the init says its version"  '[ "$(briqyard machine get "$V" | jq -r .init_version)" = "$build" ]'
+  check "what ran it is the host's"  '[ "$(briqyard machine get "$V" | jq -r .vmm_version)" = "$(briqyard status | jq -r .vmm_version)" ]'
+  # What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start.
+  pid=$(systemctl show -p MainPID --value briqyardd)
+  sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
+  for i in $(seq 1 100); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
+  sudo systemctl start briqyardd
+  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  check "handed over: still running" '[ "$(briqyard machine get "$V" | jq -r .state)" = running ]'
+  check "the new daemon adopted it"  'briqyard status | jq -e ".started.adopted >= 1 and .started.stopped == 0" >/dev/null'
+  check "exec after the hand-over"   '[ "$(briqyard machine exec "$V" -- hostname)" = handover ]'
+  check "never booted again"         '[ "$(briqyard machine logs "$V" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+  # A stop suspends it; the next start brings it back unasked, from its memory snapshot.
+  sudo systemctl stop briqyardd
+  sudo systemctl start briqyardd
+  for i in $(seq 1 60); do [ "$(briqyard machine get "$V" 2>/dev/null | jq -r .state)" = running ] && break; sleep 1; done
+  check "running again after a stop and a start" '[ "$(briqyard machine get "$V" | jq -r .state)" = running ]'
+  check "resumed, not booted"        '[ "$(briqyard machine logs "$V" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+  briqyard machine rm "$V" >/dev/null
+  echo "== encryption at rest: the pool, the daemon's files on it, its key loaded at start"
+  cfg() { sudo sed -n "s/^$1//p" /etc/briqyard/config.yaml; }
+  POOL=$(cfg '  pool: '); POOL=${POOL:-byard}
+  DATA=$(cfg 'data_dir: '); DATA=${DATA:-/var/lib/briqyard}
+  KEY_FILE=$(cfg '  key: file:'); KEY_FILE=${KEY_FILE:-/etc/briqyard/pool.key}
+  key=$(sudo cat "$KEY_FILE" | tr -d ' \n')
+  zget() { sudo zfs get -H -o value "$@"; }
+  check "the pool is encrypted"          '[ "$(zget encryption "$POOL")" = aes-256-gcm ] && [ "$(zget encryptionroot "$POOL")" = "$POOL" ]'
+  check "every dataset under it is"      '! zget -r -t filesystem,volume encryption "$POOL" | grep -qvx aes-256-gcm'
+  on_pool() { for d in state run images jail; do [ "$(findmnt -n -o SOURCE --target "$DATA/$d")" = "$POOL/$d" ] || return 1; done; }
+  check "records, runs, images, jails on the pool" 'on_pool'
+  check "the key in none of the daemon's files"    '! sudo grep -rqsF -D skip "$key" "$DATA" --exclude=pool.img'
+  check "nor in its log"                 '! sudo journalctl -u briqyardd -b -o cat | grep -qF "$key"'
+  # A reboot, as the pool sees it: the daemon stopped, the pool's filesystems unmounted and
+  # its key unloaded. The key file away, the daemon waits and says why; back, it starts.
+  # The machines still running are stopped first: the daemon's stop then suspends nothing.
+  for id in $(briqyard machine ls | awk 'NR > 1 && $5 == "running" { print $1 }'); do briqyard machine stop "$id" >/dev/null; done
+  lock() {
+    sudo systemctl stop briqyardd &&
+      sudo zfs list -H -o name,mounted -t filesystem -r "$POOL" | awk '$2 == "yes" { print $1 }' | tac | xargs -r -n1 sudo zfs unmount &&
+      sudo zfs unload-key "$POOL"
+  }
+  check "stopped and locked"             'lock && [ "$(zget keystatus "$POOL")" = unavailable ]'
+  sudo mv "$KEY_FILE" "$KEY_FILE.e2e"
+  since=$(date +%s)
+  sudo systemctl start briqyardd
+  for i in $(seq 1 20); do sudo journalctl -u briqyardd --since "@$since" -o cat | grep -q "pool locked" && break; sleep 1; done
+  check "without its key: no API, the reason logged" '! briqyard status >/dev/null 2>&1 && sudo journalctl -u briqyardd --since "@$since" -o cat | grep "pool locked" | grep -qF "$KEY_FILE"'
+  sudo mv "$KEY_FILE.e2e" "$KEY_FILE"
+  for i in $(seq 1 60); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  check "the key back: unlocked, started" 'briqyard status >/dev/null && [ "$(zget keystatus "$POOL")" = available ]'
+  briqyard machine start "$K" >/dev/null
+  check "a machine of before runs again" '[ "$(briqyard machine exec "$K" -- hostname)" = survivor ]'
+  briqyard machine stop "$K" >/dev/null
 fi
 
 echo

@@ -51,7 +51,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | Pod | ✓ machine | | |
 | Change image, env, command, size (`kubectl apply`, `set image`, in-place resize) | ✓ PATCH of image, entrypoint, cmd, env, files, size, ports, restart, `pending` until the next start, `POST /restart`; the root disk follows the image, the volume stays (ADR 0024) | a change to a running process (memory hot-plug) | |
-| `kubectl exec -it`, attach | ◐ exec with stdin and streamed output, no TTY | a TTY | yard, later |
+| `kubectl exec -it`, attach | ✓ exec sessions over a WebSocket: stdin streamed, a terminal with resize, the exit code, the client's close ends the command, use while open, through the fleet (ADR 0029) | attach to the main process (its output is `logs -f`) | yard, later |
 | `kubectl cp` | ✓ `/files` | | |
 | Pod phases and conditions | ✓ states, `stopped_reason`, exit code, `ready` (ADR 0022) | | |
 | Liveness, readiness, startup probes | ✓ in the daemon: exec, TCP, HTTP, Kubernetes's timings, 32 at once per host (ADR 0022) | gRPC probes | yard, later |
@@ -69,7 +69,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | CronJob | ✗ | | briq: a schedule on a workload is briq's; a schedule on what the host owns (its disks: backups) is the host's |
 | Ephemeral containers (debug) | ✓ exec | | |
 | — | ★ sleep on idle, wake on connect | | |
-| — | ★ suspend and resume in 0.2 s | Kubernetes checkpointing is alpha | |
+| — | ★ suspend and resume in 0.2 s; snapshots with memory, restored to resume where they were (ADR 0031) | Kubernetes checkpointing is alpha | |
 | — | ★ fork with the disk | | |
 
 ## Scheduling and nodes
@@ -80,7 +80,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Node allocatable (`systemReserved`) | ✓ `capacity.reserved_memory_mb`, `reserved_threads`: what the host keeps for itself and a service beside the daemon (ADR 0028) | | |
 | Node selectors, node affinity, topology | ✓ a create's `region` places a new tenant on a host of it; a tenant never spans regions (ADR 0025) | autoscaling per region | yard, later |
 | Pod affinity | ◐ a tenant's machines share a host, forced | | — |
-| Cordon | ✓ drain | | |
+| Cordon | ✓ `host drain`, `host undrain`; a drained host is never released (`retire` is its own state, ADR 0027) | | |
 | Taints, tolerations | ✗ | | — |
 | Drain with eviction | ◐ drain stops placement; machines stay | evacuate a host from backups | yard |
 | Node object, heartbeats | ✓ heartbeat every 15 s, `down` after a minute | | |
@@ -88,7 +88,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Node conditions (MemoryPressure, DiskPressure) | ✓ `memory_pressure`, `disk_pressure` in status and the heartbeat, `host_condition` events; the fleet places nothing new on a host under pressure (ADR 0021) | | |
 | Node-pressure eviction | ◐ thresholds and events; unused images removed under disk pressure | stopping machines to free memory or disk | yard |
 | Cluster autoscaler | ◐ provisioner autoscaler, stub-tested, dry run by default | a first real order | yard |
-| Node upgrades | ✗ by hand | `host upgrade`: drain, upgrade, back | yard |
+| Node upgrades | ◐ `host upgrade` (`--all` one host at a time): `upgrading`, the bootstrap script with the release, the daemon hands its machines over, back on a heartbeat from the new version (ADR 0027) | OS and kernel patching (a reboot): drain, `systemctl stop`, reboot, undrain by hand | yard |
 | `kubectl top node` | ◐ `/v1/status`, committed memory and the pool on `/metrics` | the host's own CPU and memory use | yard |
 
 ## Networking
@@ -116,9 +116,9 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | PV, PVC, StorageClass | ✓ a volume per machine | | |
 | Volume expansion | ✗ | grow the zvol and the filesystem at boot | yard, later |
-| VolumeSnapshot, restore | ◐ local snapshots (list, delete), fork, backups and restore anywhere | rollback to a named local snapshot | yard, later |
+| VolumeSnapshot, restore | ★ named snapshots of both disks, restored in place with newer snapshots, forks and the backup chain kept (ADR 0031); fork; backups and restore anywhere | a fork from a named snapshot | yard, later |
 | Scheduled backups and retention (Velero) | ✓ `backup: { every, keep }` run by the daemon, whole chains pruned, delete, a destroyed machine's kept `keep_destroyed_days` (ADR 0023) | | yard (values from briq) |
-| Encryption at rest (CSI, etcd secrets) | ✗ records, config drives and disks in clear (0600) | the pool encrypted at bootstrap, one key per host held by the fleet, handed over TLS at start, never on the host's disk | yard, before the first real host |
+| Encryption at rest (CSI, etcd secrets) | ✓ the pool encrypted at its creation (ZFS, AES-256-GCM), one key per host kept by the fleet and handed to that host at start, or a file on a single host; records, config drives, consoles and the image cache on the pool; no swap (ADR 0026) | key rotation; backups leave the host decrypted (the store's encryption); the registry's backup | yard |
 | emptyDir, tmpfs | ✓ `/tmp` | | |
 
 ## Configuration and images
@@ -164,9 +164,9 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | Control plane HA (etcd quorum) | ✗ one fleet process, one file | state the fleet can rebuild from the hosts | yard, later |
-| etcd backup | ✗ | the registry file copied to the object store on each write | yard |
+| etcd backup | ✓ the registry written to the object store once a minute when it changed and before a key is served, encrypted with age to a key kept offline; `briqyard-fleet restore` (ADR 0032) | | |
 | Cluster provisioning | ✓ bootstrap script, provisioners, `host add`; the pool a mirror, the public interface closed to all but SSH (ADR 0028) | a first real order | yard |
-| Version skew, upgrades | ✗ | `host upgrade` | yard |
+| Version skew, upgrades | ✓ every binary and the init say `0.1.0+<commit>`; the wire is additive, unknown fields and values ignored; the fleet first, a host never newer (ADR 0027) | the init travels in the root disk: old inits live on until an image change | yard |
 | Multi-cluster | ◐ regions on hosts, placement by region (ADR 0025) | a fleet per region, or one across | yard, later |
 
 ## Order of work
@@ -185,4 +185,6 @@ Reviewed by the advisor (2026-10-20); the night's order, each with an ADR, unit 
 
 Decided for the founder (advisor, 2026-10-20): the daemon runs scheduled backups from a policy briq sets; the pool is encrypted with one key per host held by the fleet, built before the first real host (after TLS); events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and briq's healthcheck moves onto them.
 
-Later, in the tables above: groups and load balancing, the mesh, volume expansion, encryption at rest, scoped tokens, fleet HA, `host upgrade`, evacuation, a TTY for exec.
+Built after: encryption at rest (ADR 0026), a TTY for exec (ADR 0029).
+
+Later, in the tables above: groups and load balancing, the mesh, volume expansion, scoped tokens, fleet HA, OS patching through the fleet, evacuation.

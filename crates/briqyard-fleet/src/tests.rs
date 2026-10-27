@@ -165,6 +165,8 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             disk_free_mb: 100_000,
             tls_fingerprint: d.tls_fingerprint.clone(),
             conditions: d.conditions.lock().unwrap().clone(),
+            started: Default::default(),
+            vmm_version: String::new(),
         })
     }
     async fn tenants(State(d): D) -> Json<Vec<api::Tenant>> {
@@ -305,6 +307,43 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             Body::from_stream(lines),
         )
             .into_response()
+    }
+    /// A session (ADR 0029) as the daemon serves one, reduced: its stdin back on stdout until
+    /// stdin closes, then an exit of 7. A machine not running is refused before the upgrade.
+    async fn exec_session(
+        State(d): D,
+        Path(id): Path<String>,
+        ws: axum::extract::ws::WebSocketUpgrade,
+    ) -> Response {
+        use api::session::{channel, message, parse};
+        use axum::extract::ws::Message;
+        let running = d
+            .machines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.id == id && m.state == api::state::RUNNING);
+        if !running {
+            return err(
+                StatusCode::CONFLICT,
+                "not_running",
+                "machine is not running: stopped",
+            )
+            .into_response();
+        }
+        ws.on_upgrade(|mut socket| async move {
+            while let Some(Ok(Message::Binary(b))) = socket.recv().await {
+                let reply = match parse(&b) {
+                    Some((channel::STDIN, p)) => message(channel::STDOUT, p),
+                    Some((channel::CLOSE, _)) => message(channel::EXIT, br#"{"exit_code":7}"#),
+                    _ => continue,
+                };
+                let last = reply[0] == channel::EXIT;
+                if socket.send(Message::Binary(reply)).await.is_err() || last {
+                    break;
+                }
+            }
+        })
     }
     /// Like the daemon: a bad name is refused, and a machine that does not fit in what the
     /// host has left.
@@ -516,6 +555,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         .route("/v1/machines/:id", get(get_machine).delete(delete_machine))
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/logs", get(logs))
+        .route("/v1/machines/:id/exec", get(exec_session))
         .route("/v1/tenants/:id/quota", get(get_quota).put(put_quota))
         .route("/v1/machines/:id/backups", get(backups))
         .route(
@@ -578,6 +618,7 @@ fn fleet_at(
     state_path: PathBuf,
 ) -> Fleet {
     cfg.state_dir = dir.path().to_path_buf();
+    let backup = backup::Backup::open(&cfg.backup).unwrap();
     let mut reg = Registry::default();
     let now = Utc::now();
     for h in &cfg.hosts {
@@ -594,6 +635,9 @@ fn fleet_at(
         http: reqwest::Client::new(),
         pinned: Mutex::new(HashMap::new()),
         prov,
+        upgrade: Default::default(),
+        backup,
+        key_turn: Default::default(),
     });
     Fleet { st, _dir: dir }
 }
@@ -663,6 +707,9 @@ async fn fleet_in_regions(regions: &[&str]) -> (Fleet, Vec<Running>) {
 }
 
 /// One request through the router. The body comes back as text.
+/// A call as a client makes it. A host's own call (a body with a `url`) comes from that url's
+/// address, as it does through a fleet that terminates its connections; anything else from
+/// loopback.
 async fn call(
     st: &Arc<AppState>,
     method: &str,
@@ -670,7 +717,45 @@ async fn call(
     token: &str,
     body: Option<serde_json::Value>,
 ) -> (StatusCode, HeaderMap, String) {
-    let mut req = axum::http::Request::builder().method(method).uri(path);
+    let peer = body
+        .as_ref()
+        .and_then(|b| b["url"].as_str())
+        .and_then(|u| url_host(u).parse().ok())
+        .unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]));
+    call_from(st, peer, method, path, token, body).await
+}
+
+/// `call` from the peer address given.
+async fn call_from(
+    st: &Arc<AppState>,
+    peer: std::net::IpAddr,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, HeaderMap, String) {
+    call_with(st, peer, &[], method, path, token, body).await
+}
+
+/// `call_from` with request headers of its own (a proxy's `X-Forwarded-For`).
+async fn call_with(
+    st: &Arc<AppState>,
+    peer: std::net::IpAddr,
+    extra: &[(&str, &str)],
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, HeaderMap, String) {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+            peer, 40000,
+        )));
+    for (k, v) in extra {
+        req = req.header(*k, *v);
+    }
     if !token.is_empty() {
         req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -902,6 +987,280 @@ async fn a_registration_is_taken_only_for_the_host_that_expects_it() {
     );
 }
 
+/// A host's pool key (ADR 0026): made at its first ask and the same after, served to the host
+/// at its address with its own token and to nobody else, written (`0600`) before it is
+/// answered, in no listing, and gone with the record.
+#[tokio::test]
+async fn a_host_gets_its_own_pool_key_and_no_other() {
+    let host = |id: &str, n: u8| config::StaticHost {
+        id: id.into(),
+        url: format!("http://10.0.0.{n}:7420"),
+        token: format!("{id}-token"),
+        ..Default::default()
+    };
+    let f = fleet(
+        config::Config {
+            token: "api".into(),
+            hosts: vec![host("s1", 1), host("s2", 2)],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let ask = |n: u8| Some(serde_json::json!({ "url": format!("http://10.0.0.{n}:7420") }));
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(9)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(json(&body)["code"], "unknown_host");
+    for token in ["", "api", "s2-token"] {
+        let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", token, ask(1)).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "token {token:?}: {body}");
+    }
+    assert!(
+        f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty(),
+        "nothing made for a refused ask"
+    );
+
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(1)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let key = json(&body)["key"].as_str().unwrap().to_string();
+    assert!(
+        key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
+        "ZFS's hex format: {key}"
+    );
+    assert_eq!(saved(&f.st).hosts["s1"].pool_key.expose(), key, "written");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&f.st.state_path)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "the registry is the fleet's alone");
+    let (_, _, again) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(1)).await;
+    assert_eq!(json(&again)["key"], key.as_str(), "the same key every time");
+    let (_, _, other) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2)).await;
+    assert_ne!(json(&other)["key"], key.as_str(), "one key per host");
+
+    let (_, _, listed) = call(&f.st, "GET", "/v1/hosts", "api", None).await;
+    assert!(!listed.contains(&key), "never listed: {listed}");
+    let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/s1?force=true", "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(!std::fs::read_to_string(&f.st.state_path)
+        .unwrap()
+        .contains(&key));
+}
+
+/// A restore says what the fleet will trust once started on it, never a token or a key.
+#[test]
+fn a_restore_says_what_the_fleet_will_trust() {
+    let mut reg = Registry::default();
+    let mut h = static_host(
+        &config::StaticHost {
+            id: "h1".into(),
+            url: "https://10.0.0.1:7420".into(),
+            token: "h1-token".into(),
+            ..Default::default()
+        },
+        Utc.with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap(),
+    );
+    h.tls_fingerprint = "ab".repeat(32);
+    reg.hosts.insert("h1".into(), h);
+    let (key, _) = reg.pool_key("h1").unwrap();
+    let out = restored(
+        &reg,
+        "file:///b fleet/registry.json.age",
+        std::path::Path::new("/s/registry.json"),
+    );
+    assert!(out.starts_with("restored 1 hosts (1 pool keys) and 0 tenants from file:///b fleet/registry.json.age into /s/registry.json\n"), "{out}");
+    assert!(
+        out.contains("newest heartbeat in it: 2026-10-21T12:00:00+00:00"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  h1  https://10.0.0.1:7420  pin abababababababab…  token  pool key\n"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("h1-token") && !out.contains(key.expose()),
+        "{out}"
+    );
+}
+
+/// With a backup, a pool key is handed out only once the store holds it (ADR 0032): a store
+/// that refuses the write refuses the key, and the backup read back holds the key served.
+#[tokio::test]
+async fn a_pool_key_is_in_the_backup_before_it_is_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = dir.path().join("backup.key");
+    let recipient = backup::keygen(&identity).unwrap();
+    let store = dir.path().join("store");
+    let f = fleet(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "s1-token".into(),
+                ..Default::default()
+            }],
+            backup: config::Backup {
+                store: format!("file://{}", store.display()),
+                recipient,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let ask = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
+    // The store's directory turned into a file: no write can make its `fleet/`, whoever runs.
+    let aside = dir.path().join("store.aside");
+    std::fs::rename(&store, &aside).unwrap();
+    std::fs::write(&store, b"").unwrap();
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask.clone()).await;
+    std::fs::remove_file(&store).unwrap();
+    std::fs::rename(&aside, &store).unwrap();
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "backup");
+    assert!(
+        !body.contains("\"key\"") && !body.contains("store"),
+        "no key, no details: {body}"
+    );
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let key = json(&body)["key"].as_str().unwrap().to_string();
+    let b = f.st.backup.as_ref().unwrap();
+    let back = b
+        .fetch(backup::LATEST, &backup::identity(&identity).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(back.hosts["s1"].pool_key.expose(), key);
+}
+
+/// Where the fleet terminates the connection (its TLS, or plain on loopback), a host's call
+/// must come from the host's address: its token alone, read off a disk that left our hands, is
+/// not enough (ADR 0026). Behind `tls: off` the peer is the proxy in front: not checked.
+#[tokio::test]
+async fn a_host_call_must_come_from_the_host() {
+    let hosts = vec![
+        config::StaticHost {
+            id: "s1".into(),
+            url: "http://10.0.0.1:7420".into(),
+            token: "s1-token".into(),
+            ..Default::default()
+        },
+        config::StaticHost {
+            id: "named".into(),
+            url: "http://host.example:7420".into(),
+            token: "named-token".into(),
+            ..Default::default()
+        },
+    ];
+    let f = fleet(
+        config::Config {
+            hosts: hosts.clone(),
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let ask = |u: &str| Some(serde_json::json!({ "url": u }));
+    let elsewhere = std::net::IpAddr::from([203, 0, 113, 7]);
+    for path in ["/v1/hosts/key", "/v1/hosts/register"] {
+        let body = if path.ends_with("key") {
+            ask("http://10.0.0.1:7420")
+        } else {
+            Some(heartbeat("http://10.0.0.1:7420", 1000, &[]))
+        };
+        let (s, _, text) = call_from(&f.st, elsewhere, "POST", path, "s1-token", body).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{path}: {text}");
+        assert!(
+            text.contains("come from 10.0.0.1, not 203.0.113.7"),
+            "{text}"
+        );
+    }
+    assert!(f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty());
+    // A host known by a name cannot be checked by address: refused, saying so.
+    let (s, _, text) = call_from(
+        &f.st,
+        elsewhere,
+        "POST",
+        "/v1/hosts/key",
+        "named-token",
+        ask("http://host.example:7420"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{text}");
+    assert!(text.contains("its url must be one"), "{text}");
+    // An IPv4 peer seen as IPv6-mapped is the same address.
+    let mapped: std::net::IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+    let (s, _, text) = call_from(
+        &f.st,
+        mapped,
+        "POST",
+        "/v1/hosts/key",
+        "s1-token",
+        ask("http://10.0.0.1:7420"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{text}");
+
+    // tls: off on a public address: whatever is in front is unknown, the token alone.
+    let behind = fleet(
+        config::Config {
+            hosts: hosts.clone(),
+            listen: "0.0.0.0:7430".into(),
+            tls: config::Tls::Off,
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let (s, _, text) = call_from(
+        &behind.st,
+        elsewhere,
+        "POST",
+        "/v1/hosts/key",
+        "s1-token",
+        ask("http://10.0.0.1:7420"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "tls: off checks the token alone: {text}");
+
+    // tls: off on loopback: a proxy of ours in front; its last X-Forwarded-For is the caller.
+    let local = fleet(
+        config::Config {
+            hosts,
+            listen: "127.0.0.1:7430".into(),
+            tls: config::Tls::Off,
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    let proxy = std::net::IpAddr::from([127, 0, 0, 1]);
+    let key = |xff: &'static [(&'static str, &'static str)]| {
+        let st = local.st.clone();
+        async move {
+            call_with(
+                &st,
+                proxy,
+                xff,
+                "POST",
+                "/v1/hosts/key",
+                "s1-token",
+                ask("http://10.0.0.1:7420"),
+            )
+            .await
+        }
+    };
+    let (s, _, text) = key(&[("x-forwarded-for", "203.0.113.7, 10.0.0.1")]).await;
+    assert_eq!(s, StatusCode::OK, "the proxy's own value, the last: {text}");
+    let (s, _, text) = key(&[("x-forwarded-for", "10.0.0.1, 203.0.113.7")]).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "a forged first value counts for nothing: {text}"
+    );
+    assert!(text.contains("not 203.0.113.7"), "{text}");
+    let (s, _, text) = key(&[]).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "no header, no address: {text}");
+    assert!(text.contains("not an unknown address"), "{text}");
+}
+
 #[tokio::test]
 async fn a_heartbeat_lands_on_the_record_ordered_for_its_address() {
     let f = fleet(config::Config::default(), dry_scaleway());
@@ -993,6 +1352,87 @@ async fn status_sums_the_ready_hosts_and_hosts_are_sorted() {
     let states: Vec<&str> = hs.iter().map(|h| h.state.as_str()).collect();
     assert_eq!(states, ["down", "ready", "draining"]);
     assert_eq!(hs[1].tenants, ["t1", "t2"]);
+}
+
+/// Forgetting a host that holds a pool key is refused unless forced: the key goes with the
+/// record, and a static host polled back would get a key its pool does not open.
+#[tokio::test]
+async fn a_keyed_host_is_forgotten_only_by_force() {
+    let f = fleet(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "s1-token".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+    );
+    seed(&f.st, "plain", 64_000, 0, 0, &[]);
+    let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/plain", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "no key: forgotten as before");
+    let ask = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/hosts/s1", "", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert_eq!(json(&body)["code"], "pool_key");
+    assert!(
+        body.contains("the pool is unreadable at the host's next restart; retire it, or --force"),
+        "{body}"
+    );
+    assert!(f.st.reg.lock().unwrap().hosts.contains_key("s1"), "kept");
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/hosts/s1?force=true", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(
+        !saved(&f.st).hosts.contains_key("s1"),
+        "forgotten, its key with it"
+    );
+}
+
+/// A key the registry could not be written with is not kept: the next ask is refused the same
+/// way rather than served a key only memory holds (ADR 0026).
+#[tokio::test]
+async fn a_key_that_could_not_be_written_is_not_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let nowhere = dir.path().join("missing").join("registry.json");
+    let f = fleet_at(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "s1-token".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Box::new(provision::Static),
+        dir,
+        nowhere.clone(),
+    );
+    let ask = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
+    for attempt in 1..=2 {
+        let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask.clone()).await;
+        assert_eq!(
+            s,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "attempt {attempt}: {body}"
+        );
+        assert_eq!(json(&body)["code"], "registry");
+        assert!(
+            f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty(),
+            "attempt {attempt}"
+        );
+    }
+    std::fs::create_dir_all(nowhere.parent().unwrap()).unwrap();
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        saved(&f.st).hosts["s1"].pool_key.expose(),
+        json(&body)["key"].as_str().unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1399,7 +1839,7 @@ async fn retire_releases_an_empty_host_at_once() {
 }
 
 #[tokio::test]
-async fn retire_drains_a_busy_host_until_it_empties() {
+async fn retire_keeps_a_busy_host_until_it_empties() {
     let f = fleet(config::Config::default(), dry_scaleway());
     seed(&f.st, "h_b", 64_000, 4_000, 2, &["t1"]);
     {
@@ -1409,16 +1849,16 @@ async fn retire_drains_a_busy_host_until_it_empties() {
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_b/retire", "", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     let h: api::Host = serde_json::from_str(&body).unwrap();
-    assert_eq!(h.state, "draining");
+    assert_eq!(h.state, "retiring");
     assert_eq!(h.machines, 2);
     let listed = hosts(&f.st);
     assert_eq!(listed.len(), 1, "still here");
-    assert_eq!(listed[0].state, "draining");
+    assert_eq!(listed[0].state, "retiring");
     assert!(f.st.reg.lock().unwrap().retirable().is_empty());
-    // Asked again while busy: still draining, not released.
+    // Asked again while busy: still retiring, not released.
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_b/retire", "", None).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(json(&body)["state"], "draining");
+    assert_eq!(json(&body)["state"], "retiring");
     // Its last machine goes (a heartbeat says so): the scaler's pass would release it.
     {
         let mut reg = f.st.reg.lock().unwrap();
@@ -2978,4 +3418,350 @@ async fn a_logs_follow_is_streamed_through_as_it_comes() {
         tx.send(l.to_string() + "\n").await.unwrap();
         assert_eq!(chunk(&mut w).await["line"], line);
     }
+}
+
+// --- drain, undrain, upgrade (ADR 0027) ---
+
+#[tokio::test]
+async fn a_drained_host_is_never_released_and_undrains() {
+    let f = fleet(config::Config::default(), dry_scaleway());
+    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_a/drain", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(
+        f.st.reg.lock().unwrap().retirable().is_empty(),
+        "an empty drained host is kept: only a retire releases"
+    );
+    // A heartbeat keeps the drain.
+    let h = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+    f.st.reg.lock().unwrap().heartbeat(h, Utc::now());
+    assert_eq!(hosts(&f.st)[0].state, "draining");
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_a/undrain", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(hosts(&f.st)[0].state, "ready");
+    // Undrain of a ready host, or of one that is not there.
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/undrain", "", None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(json(&body)["error"], "host h_a is ready");
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_x/undrain", "", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // A retire is undone the same way, before the host empties.
+    seed(&f.st, "h_b", 64_000, 0, 1, &["t1"]);
+    call(&f.st, "POST", "/v1/hosts/h_b/retire", "", None).await;
+    assert_eq!(f.st.reg.lock().unwrap().hosts["h_b"].state, "retiring");
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_b/undrain", "", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(f.st.reg.lock().unwrap().hosts["h_b"].state, "ready");
+}
+
+/// A fleet whose SSH key is a file that exists, so an upgrade gets past its own checks (the
+/// key is only read by `ssh`).
+fn fleet_with_key() -> Fleet {
+    let mut cfg = config::Config::default();
+    cfg.provisioner.bootstrap.ssh_key = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into();
+    fleet(cfg, Box::new(provision::Static))
+}
+
+#[tokio::test]
+async fn an_upgrade_refuses_what_it_cannot_do() {
+    let up = |r: &str| Some(serde_json::json!({ "release": r }));
+    // No SSH key: nothing can be installed. Named, not the default: a dev VM has that one.
+    let mut cfg = config::Config::default();
+    cfg.provisioner.bootstrap.ssh_key = "/nonexistent/briqyard-fleet-key".into();
+    let f = fleet(cfg, Box::new(provision::Static));
+    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", up("0.2.0")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(
+        json(&body)["error"]
+            .as_str()
+            .unwrap()
+            .contains("provisioner.bootstrap.ssh_key"),
+        "{body}"
+    );
+    let f = fleet_with_key();
+    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", up("latest")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json(&body)["error"],
+        "release \"latest\": a URL, or a version such as 0.2.0"
+    );
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_x/upgrade", "", up("0.2.0")).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    for state in ["down", "retiring", "provisioning", "upgrading"] {
+        set_state(&f.st, "h_a", state);
+        let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", up("0.2.0")).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{state}");
+        assert!(
+            json(&body)["error"].as_str().unwrap().contains(state),
+            "{body}"
+        );
+    }
+    // One at a time: while another upgrade holds the turn, nothing moves.
+    set_state(&f.st, "h_a", "ready");
+    let _turn = f.st.upgrade.clone().try_lock_owned().unwrap();
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", up("0.2.0")).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(
+        json(&body)["error"],
+        "another host is upgrading: one at a time"
+    );
+    assert_eq!(hosts(&f.st)[0].state, "ready");
+    // An upgrading host's state is the upgrade's: no drain, undrain or retire meanwhile.
+    set_state(&f.st, "h_a", "upgrading");
+    for op in ["drain", "undrain", "retire"] {
+        let (s, _, _) = call(&f.st, "POST", &format!("/v1/hosts/h_a/{op}"), "", None).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{op}");
+    }
+    // And a heartbeat keeps it.
+    let h = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+    f.st.reg.lock().unwrap().heartbeat(h, Utc::now());
+    assert_eq!(hosts(&f.st)[0].state, "upgrading");
+}
+
+#[tokio::test]
+async fn an_upgrade_waits_for_a_new_start_of_the_version_installed() {
+    let f = fleet_with_key();
+    seed(&f.st, "h_a", 64_000, 0, 1, &["t1"]);
+    let before = Utc::now() - Duration::minutes(5);
+    let beat = |version: &str, started: Option<api::DaemonStart>| {
+        let mut h = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+        h.version = version.into();
+        h.started = started;
+        f.st.reg.lock().unwrap().heartbeat(h, Utc::now());
+    };
+    let start = |at, adopted, stopped, gone| {
+        Some(api::DaemonStart {
+            at,
+            adopted,
+            stopped,
+            gone,
+        })
+    };
+    let wait = |ms| {
+        upgrade::come_back(
+            &f.st,
+            "h_a",
+            Some(before),
+            "0.2.0+b",
+            std::time::Duration::from_millis(ms),
+        )
+    };
+    // The old daemon still answering, or a new one of another build: not yet.
+    beat("0.1.0+a", start(before, 0, 0, 0));
+    let err = wait(600).await.unwrap_err();
+    assert_eq!(err, "no heartbeat from a new start of 0.2.0+b within 0 s");
+    beat("0.2.0+b", start(before, 0, 0, 0));
+    assert!(wait(600).await.is_err(), "the same start is not a new one");
+    // A daemon older than ADR 0027 reports no start: never the one installed.
+    beat("0.2.0+b", None);
+    assert!(wait(600).await.is_err(), "no start is not a new one");
+    // The new start, which adopted the machine; one whose process had exited meanwhile is gone,
+    // not a failure.
+    let now = Utc::now();
+    beat("0.2.0+b", start(now, 1, 0, 1));
+    let started = wait(600).await.unwrap();
+    assert_eq!((started.at, started.adopted, started.gone), (now, 1, 1));
+    // One that stopped a machine it could not take over fails the upgrade.
+    beat("0.2.0+b", start(now, 1, 2, 0));
+    let err = wait(600).await.unwrap_err();
+    assert_eq!(
+        err,
+        "0.2.0+b started and stopped 2 machines it could not take over (1 adopted)"
+    );
+}
+
+#[tokio::test]
+async fn an_upgrade_ends_in_the_hosts_state_or_drained() {
+    let f = fleet_with_key();
+    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+    let was = f.st.reg.lock().unwrap().hosts["h_a"].clone();
+    set_state(&f.st, "h_a", "upgrading");
+    let started = api::DaemonStart {
+        at: Utc::now(),
+        adopted: 3,
+        stopped: 0,
+        gone: 0,
+    };
+    let h = upgrade::finish(&f.st, &was, "file:///r", Ok(("0.2.0+b".into(), started))).unwrap();
+    assert_eq!(h.state, "ready");
+    assert!(h.note.starts_with("upgraded to 0.2.0+b at "), "{}", h.note);
+    assert!(h.note.ends_with("; machines handed over: 3"), "{}", h.note);
+    // A failure leaves it drained, the reason in its note, whatever it was before.
+    set_state(&f.st, "h_a", "upgrading");
+    let err = upgrade::finish(
+        &f.st,
+        &was,
+        "file:///r",
+        Err("install: ssh exited 255".into()),
+    )
+    .unwrap_err();
+    assert_eq!(err, "install: ssh exited 255");
+    let h = &hosts(&f.st)[0];
+    assert_eq!(h.state, "draining");
+    assert!(
+        h.note.starts_with("upgrade to file:///r failed at "),
+        "{}",
+        h.note
+    );
+    assert!(
+        h.note
+            .ends_with(": install: ssh exited 255; undrain once it is fixed"),
+        "{}",
+        h.note
+    );
+    // A fleet that stopped during an upgrade finds the host drained at its start.
+    set_state(&f.st, "h_a", "upgrading");
+    upgrade::interrupted(&mut f.st.reg.lock().unwrap());
+    let h = &hosts(&f.st)[0];
+    assert_eq!(h.state, "draining");
+    assert!(
+        h.note
+            .ends_with("interrupted by a fleet restart; undrain once checked"),
+        "{}",
+        h.note
+    );
+}
+
+#[tokio::test]
+async fn a_heartbeat_carries_the_daemons_start() {
+    let f = fleet(config::Config::default(), Box::new(provision::Static));
+    let mut h = static_host(
+        &config::StaticHost {
+            id: "h_a".into(),
+            url: "http://10.0.0.1:7420".into(),
+            ..Default::default()
+        },
+        Utc::now(),
+    );
+    h.started = Some(api::DaemonStart {
+        at: Utc::now(),
+        adopted: 4,
+        stopped: 1,
+        gone: 2,
+    });
+    f.st.reg.lock().unwrap().heartbeat(h.clone(), Utc::now());
+    assert_eq!(hosts(&f.st)[0].started, h.started);
+}
+
+// --- exec sessions (ADR 0029) ---
+
+/// The fleet on a port of its own: an upgrade needs a real connection.
+async fn serve_fleet(f: &Fleet) -> String {
+    let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = ln.local_addr().unwrap();
+    let app = app(f.st.clone());
+    tokio::spawn(async move { axum::serve(ln, app).await.unwrap() });
+    addr.to_string()
+}
+
+#[tokio::test]
+async fn a_session_is_relayed_unchanged_to_the_machines_host() {
+    use api::session::{channel, message, parse};
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+    let (f, ds) = fleet_with_daemons(2).await;
+    let m = ds[1].stub.add("t1", "sbx", 512);
+    let addr = serve_fleet(&f).await;
+    let mut req = format!("ws://{addr}/v1/machines/{}/exec?cmd=sh&tty=true", m.id)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer api".parse().unwrap());
+    let tcp = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let (mut ws, resp) = tokio_tungstenite::client_async(req, tcp).await.unwrap();
+    assert_eq!(resp.headers()["x-briqyard-host"], "d2");
+    // The handshake reached the machine's host, with its query and the host's token.
+    assert_eq!(
+        ds[1].stub.calls().last().unwrap(),
+        &format!("GET /v1/machines/{}/exec?cmd=sh&tty=true", m.id)
+    );
+    ws.send(Message::Binary(message(channel::STDIN, b"hi\n")))
+        .await
+        .unwrap();
+    let Some(Ok(Message::Binary(b))) = ws.next().await else {
+        panic!("no echo")
+    };
+    assert_eq!(parse(&b), Some((channel::STDOUT, &b"hi\n"[..])));
+    ws.send(Message::Binary(message(channel::CLOSE, &[channel::STDIN])))
+        .await
+        .unwrap();
+    let Some(Ok(Message::Binary(b))) = ws.next().await else {
+        panic!("no exit")
+    };
+    assert_eq!(parse(&b), Some((channel::EXIT, &br#"{"exit_code":7}"#[..])));
+}
+
+#[tokio::test]
+async fn a_session_refused_by_the_host_or_not_a_websocket_is_an_answer() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let m = ds[0].stub.add("t1", "sbx", 512);
+    let addr = serve_fleet(&f).await;
+    let http = reqwest::Client::new();
+    // Not an upgrade: refused by the fleet, before any host is asked.
+    let r = http
+        .get(format!("http://{addr}/v1/machines/{}/exec?cmd=sh", m.id))
+        .bearer_auth("api")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(&r.text().await.unwrap())["code"], "invalid");
+    // A machine no host has: 404, as for every machine route.
+    let upgrade = |url: String| {
+        http.get(url)
+            .bearer_auth("api")
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .send()
+    };
+    let r = upgrade(format!("http://{addr}/v1/machines/m_none/exec?cmd=sh"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    // The host's refusal comes back as it said it.
+    ds[0].stub.machines.lock().unwrap()[0].state = api::state::STOPPED.into();
+    let r = upgrade(format!("http://{addr}/v1/machines/{}/exec?cmd=sh", m.id))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert_eq!(r.headers()["x-briqyard-host"], "d1");
+    assert_eq!(json(&r.text().await.unwrap())["code"], "not_running");
+}
+
+#[tokio::test]
+async fn a_host_unreachable_never_shows_the_sessions_query() {
+    // The query holds the session's env: an error names the host, never the URL.
+    let (f, ds) = fleet_with_daemons(1).await;
+    let m = ds[0].stub.add("t1", "sbx", 512);
+    f.st.reg
+        .lock()
+        .unwrap()
+        .machines
+        .insert(m.id.clone(), "d1".into());
+    f.st.reg.lock().unwrap().hosts.get_mut("d1").unwrap().url = "http://127.0.0.1:1".into();
+    let addr = serve_fleet(&f).await;
+    let r = reqwest::Client::new()
+        .get(format!(
+            "http://{addr}/v1/machines/{}/exec?cmd=sh&env=TOKEN=hunter2",
+            m.id
+        ))
+        .bearer_auth("api")
+        .header("connection", "Upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+    let body = r.text().await.unwrap();
+    assert_eq!(json(&body)["code"], "host_unreachable");
+    assert!(
+        !body.contains("hunter2") && !body.contains("exec?"),
+        "{body}"
+    );
 }

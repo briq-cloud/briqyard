@@ -4,12 +4,14 @@ use anyhow::{anyhow, bail, Context, Result};
 use briqyard_api as api;
 use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
+mod session;
+
 #[derive(Parser)]
-#[command(name = "briqyard", version, about = "Machines in Firecracker microVMs")]
+#[command(name = "briqyard", version = api::VERSION, about = "Machines in Firecracker microVMs")]
 struct Cli {
     /// The daemon or fleet to talk to.
     #[arg(
@@ -149,16 +151,20 @@ enum MachineCmd {
     Rm {
         id: String,
     },
-    /// Run a command inside: briqyard machine exec ID -- cmd... (wakes a sleeping machine)
+    /// Run a command inside: briqyard machine exec [-it] ID -- cmd... (wakes a sleeping machine)
     Exec {
         /// Fail when the machine is not running instead of waking it
         #[arg(long)]
         no_wake: bool,
-        #[arg(long, default_value = "5m")]
-        timeout: humantime::Duration,
-        /// Send stdin to the command
+        /// The command's deadline: 5m by default, none for a session (-i, -t)
         #[arg(long)]
-        stdin: bool,
+        timeout: Option<humantime::Duration>,
+        /// A session: stdin streamed to the command as it comes
+        #[arg(short, long)]
+        interactive: bool,
+        /// A session on a terminal: the local one raw, its size followed
+        #[arg(short, long)]
+        tty: bool,
         id: String,
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
@@ -507,11 +513,20 @@ fn policy(every: Option<&str>, keep: Option<u32>) -> Result<Option<Option<api::B
 
 #[derive(Subcommand)]
 enum SnapshotCmd {
-    /// Snapshot both disks now
-    Create { id: String },
+    /// Snapshot both disks now; --memory keeps a running machine's memory too
+    Create {
+        /// A name to find it by again (before-migration)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        memory: bool,
+        id: String,
+    },
     /// List a machine's snapshots
     Ls { id: String },
-    /// Remove a snapshot
+    /// Take the disks back to a snapshot (an id or a name); a running machine boots again
+    Restore { id: String, snap: String },
+    /// Delete a snapshot (an id or a name)
     Rm { id: String, snap: String },
 }
 
@@ -638,13 +653,32 @@ enum HostCmd {
     Drain {
         id: String,
     },
-    /// Drain a host and release it at its provider once nothing runs on it
+    /// Place new tenants on a drained or retiring host again
+    Undrain {
+        id: String,
+    },
+    /// Install another release on a host, its machines running: drained, installed, back
+    /// once its daemon heartbeats with the new version (ADR 0027)
+    Upgrade {
+        /// The host; with --all, every ready or draining host, one at a time
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<String>,
+        #[arg(long)]
+        all: bool,
+        /// A release URL, or a version of the project's releases (0.2.0)
+        #[arg(long)]
+        release: String,
+    },
+    /// Take no new tenant on a host and release it at its provider once nothing runs on it
     Retire {
         id: String,
     },
-    /// Forget a host (its machines are not touched)
+    /// Forget a host (its machines are not touched). A host with a pool key is refused unless
+    /// --force: the key goes with the record and its pool is unreadable at its next restart
     Rm {
         id: String,
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -658,6 +692,8 @@ struct Client {
 const CALL_TIMEOUT: Duration = Duration::from_secs(900);
 /// A watch with no line this long is gone: the server sends one every 30 s.
 const WATCH_SILENCE: Duration = Duration::from_secs(90);
+/// A host upgrade: the bootstrap script's half hour, then the host's return.
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(2400);
 
 impl Client {
     async fn call<T: serde::de::DeserializeOwned>(
@@ -705,18 +741,10 @@ impl Client {
             .send()
             .await
             .with_context(|| format!("request {}", self.base))?;
-        let status = resp.status();
-        if status.is_success() {
+        if resp.status().is_success() {
             return Ok(resp);
         }
-        let text = resp.text().await?;
-        if let Ok(e) = serde_json::from_str::<api::ApiError>(&text) {
-            if e.request_id.is_empty() {
-                bail!("{} ({})", e.error, e.code);
-            }
-            bail!("{} ({}, request {})", e.error, e.code, e.request_id);
-        }
-        bail!("{status}: {}", text.trim());
+        Err(refusal(resp).await)
     }
 
     /// Every event of a read, page after page, and the cursor after the last.
@@ -770,6 +798,20 @@ impl Client {
                 }
             }
         }
+    }
+}
+
+/// The error an answer that is not a success carries: its `ApiError`, else its status and body.
+async fn refusal(resp: reqwest::Response) -> anyhow::Error {
+    let status = resp.status();
+    let text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => return e.into(),
+    };
+    match serde_json::from_str::<api::ApiError>(&text) {
+        Ok(e) if e.request_id.is_empty() => anyhow!("{} ({})", e.error, e.code),
+        Ok(e) => anyhow!("{} ({}, request {})", e.error, e.code, e.request_id),
+        Err(_) => anyhow!("{status}: {}", text.trim()),
     }
 }
 
@@ -1009,21 +1051,33 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::Exec {
                 no_wake,
                 timeout,
-                stdin,
+                interactive,
+                tty,
                 id,
                 cmd,
             } => {
-                let mut req = api::ExecRequest {
+                // 0 is the daemon's default: 5 minutes for a command, none for a session.
+                let timeout_ms = timeout.map_or(0, |t| t.as_millis() as u64);
+                if interactive || tty {
+                    let req = api::session::ExecSession {
+                        cmd,
+                        wake: !no_wake,
+                        timeout_ms,
+                        tty,
+                        ..Default::default()
+                    };
+                    let code = session::run(c, &id, req, interactive).await?;
+                    if code != 0 {
+                        std::process::exit(code);
+                    }
+                    return Ok(());
+                }
+                let req = api::ExecRequest {
                     cmd,
                     wake: !no_wake,
-                    timeout_ms: timeout.as_millis() as u64,
+                    timeout_ms,
                     ..Default::default()
                 };
-                if stdin {
-                    let mut s = String::new();
-                    std::io::stdin().read_to_string(&mut s)?;
-                    req.stdin = s;
-                }
                 let res: api::ExecResult = c
                     .call(POST, &format!("/v1/machines/{id}/exec"), Some(&req))
                     .await?;
@@ -1260,14 +1314,26 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     .await?,
             ),
             MachineCmd::Snapshot(s) => match s {
-                SnapshotCmd::Create { id } => print_json(
-                    &c.call::<api::Snapshot>(POST, &format!("/v1/machines/{id}/snapshots"), NONE)
+                SnapshotCmd::Create { name, memory, id } => {
+                    let req = api::SnapshotRequest { name, memory };
+                    print_json(
+                        &c.call::<api::Snapshot>(
+                            POST,
+                            &format!("/v1/machines/{id}/snapshots"),
+                            Some(&req),
+                        )
                         .await?,
-                ),
-                SnapshotCmd::Ls { id } => print_json(
-                    &c.call::<Vec<api::Snapshot>>(
-                        GET,
-                        &format!("/v1/machines/{id}/snapshots"),
+                    )
+                }
+                SnapshotCmd::Ls { id } => {
+                    let path = format!("/v1/machines/{id}/snapshots");
+                    let ss: Vec<api::Snapshot> = c.call(GET, &path, NONE).await?;
+                    print!("{}", snapshot_table(&ss));
+                }
+                SnapshotCmd::Restore { id, snap } => print_json(
+                    &c.call::<api::Machine>(
+                        POST,
+                        &format!("/v1/machines/{id}/snapshots/{snap}/restore"),
                         NONE,
                     )
                     .await?,
@@ -1488,12 +1554,51 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             HostCmd::Drain { id } => {
                 c.raw(POST, &format!("/v1/hosts/{id}/drain"), NONE).await?;
             }
+            HostCmd::Undrain { id } => {
+                c.raw(POST, &format!("/v1/hosts/{id}/undrain"), NONE)
+                    .await?;
+            }
+            HostCmd::Upgrade { id, all, release } => {
+                let ids = match (id, all) {
+                    (Some(id), _) => vec![id],
+                    (None, _) => {
+                        let hs: Vec<api::Host> = c.call(GET, "/v1/hosts", NONE).await?;
+                        let (ids, skipped) = upgrade_order(&hs);
+                        for (id, state) in skipped {
+                            eprintln!("{id}: {state}, not upgraded");
+                        }
+                        ids
+                    }
+                };
+                let req = api::UpgradeHostRequest { release };
+                for (i, id) in ids.iter().enumerate() {
+                    eprintln!("{id}: upgrading");
+                    let path = format!("/v1/hosts/{id}/upgrade");
+                    match c.send(POST, &path, Some(&req), Some(UPGRADE_TIMEOUT)).await {
+                        Ok(resp) => {
+                            let h: api::Host = resp.json().await?;
+                            println!("{id}: {}", h.note);
+                        }
+                        Err(e) => {
+                            let left = &ids[i + 1..];
+                            match left.is_empty() {
+                                true => bail!("{id}: {e:#}"),
+                                false => bail!("{id}: {e:#}; not upgraded: {}", left.join(", ")),
+                            }
+                        }
+                    }
+                }
+            }
             HostCmd::Retire { id } => print_json(
                 &c.call::<api::Host>(POST, &format!("/v1/hosts/{id}/retire"), NONE)
                     .await?,
             ),
-            HostCmd::Rm { id } => {
-                c.raw(DELETE, &format!("/v1/hosts/{id}"), NONE).await?;
+            HostCmd::Rm { id, force } => {
+                let q = if force { "?force=true" } else { "" };
+                c.raw(DELETE, &format!("/v1/hosts/{id}{q}"), NONE).await?;
+                if force {
+                    eprintln!("host {id} forgotten: a pool key it held went with its record, and its pool is unreadable at its next restart");
+                }
             }
         },
     }
@@ -1786,6 +1891,25 @@ fn machine_table(ms: &[api::Machine]) -> String {
     out
 }
 
+/// `machine snapshot ls`.
+fn snapshot_table(ss: &[api::Snapshot]) -> String {
+    let mut out = format!(
+        "{:<16} {:<20} {:<21} {:<10} MEMORY\n",
+        "ID", "NAME", "CREATED", "DISKS"
+    );
+    for s in ss {
+        out.push_str(&format!(
+            "{:<16} {:<20} {:<21} {:<10} {}\n",
+            s.id,
+            s.name.as_deref().unwrap_or("-"),
+            s.created_at.format("%Y-%m-%d %H:%M:%S"),
+            s.disks.join(","),
+            if s.memory { "yes" } else { "no" }
+        ));
+    }
+    out
+}
+
 /// `endpoint ls`.
 fn endpoint_table(eps: &[api::Endpoint]) -> String {
     let mut out = format!(
@@ -1820,9 +1944,7 @@ fn image_table(ims: &[api::Image]) -> String {
     out
 }
 
-/// `host ls`: a line per host, and under it its SSH address when it is not the API's, its pin,
-/// each condition that is true and its note when the provisioner or the bootstrap left one.
-/// `80,443,5432`, or `none` for no port.
+/// `--public-tcp-ports`: `80,443,5432`, or `none` for no port.
 fn port_list(s: &str) -> Result<Vec<u16>> {
     if s == "none" {
         return Ok(vec![]);
@@ -1840,14 +1962,32 @@ fn port_list(s: &str) -> Result<Vec<u16>> {
         .collect()
 }
 
+/// What `host upgrade --all` upgrades, in order: the ready and draining hosts by id; and the
+/// others, with their state, which it leaves.
+fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, String)>) {
+    let mut hs: Vec<&api::Host> = hs.iter().collect();
+    hs.sort_by(|a, b| a.id.cmp(&b.id));
+    let (up, left): (Vec<&api::Host>, Vec<&api::Host>) = hs
+        .into_iter()
+        .partition(|h| matches!(h.state.as_str(), "ready" | "draining"));
+    (
+        up.into_iter().map(|h| h.id.clone()).collect(),
+        left.into_iter()
+            .map(|h| (h.id.clone(), h.state.clone()))
+            .collect(),
+    )
+}
+
+/// `host ls`: a line per host, and under it its SSH address when it is not the API's, its pin,
+/// each condition that is true and its note when the provisioner or the bootstrap left one.
 fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
-        "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} LAST SEEN\n",
-        "ID", "URL", "STATE", "REGION", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS"
+        "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {:<20} LAST SEEN\n",
+        "ID", "URL", "STATE", "REGION", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS", "VERSION"
     );
     for h in hs {
         out.push_str(&format!(
-            "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {}\n",
+            "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {:<20} {}\n",
             h.id,
             if h.url.is_empty() { "-" } else { &h.url },
             h.state,
@@ -1856,6 +1996,11 @@ fn host_table(hs: &[api::Host]) -> String {
             format!("{}/{}", h.used.vcpus, h.capacity.vcpus),
             h.machines,
             h.tenants.len(),
+            if h.version.is_empty() {
+                "-"
+            } else {
+                &h.version
+            },
             h.last_seen.to_rfc3339()
         ));
         if !h.ssh.is_empty() {
@@ -2054,6 +2199,24 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
     };
     lines.push(("Disk limits", disk));
     lines.push(("Egress", egress_label(&m.egress)));
+    // What runs it (ADR 0027): the init its root disk carries, the VMM of its last boot.
+    if !m.init_version.is_empty() || !m.vmm_version.is_empty() {
+        let or_unknown = |v: &str| {
+            if v.is_empty() {
+                "unknown".to_string()
+            } else {
+                v.to_string()
+            }
+        };
+        lines.push((
+            "Runs on",
+            format!(
+                "init {}, vmm {}",
+                or_unknown(&m.init_version),
+                or_unknown(&m.vmm_version)
+            ),
+        ));
+    }
     let endpoints: Vec<String> = m
         .endpoints
         .iter()

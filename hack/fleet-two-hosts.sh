@@ -3,8 +3,11 @@
 # fronts at least two ready hosts: tenants
 # land on different hosts, every call is forwarded to the right one, a host that stops
 # answering is marked down and its tenant's calls fail cleanly while the other goes on.
+# With SECOND_HOST_SH (a root shell on the second host), its pool is locked while it is down,
+# as a reboot leaves it, and must come back with its key from the fleet (ADR 0026).
 #   SECOND_HOST_STOP="limactl shell fc2 sudo systemctl stop briqyardd" \
-#   SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" hack/fleet-two-hosts.sh
+#   SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" \
+#   SECOND_HOST_SH="limactl shell fc2 sudo" bash hack/fleet-two-hosts.sh
 set -euo pipefail
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7430}
 T=two-hosts
@@ -62,9 +65,30 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
   check "listing everything refuses" '! briqyard machine ls >/dev/null 2>&1'
   check "listing a's tenant works"   'briqyard machine ls --tenant "$T-a" | grep -q "$A"'
   check "no placement on a down host" '[ "$(briqyard machine run --image alpine:3.20 --name c --tenant "$T-b" --memory 256 -- true 2>&1 | grep -c "no host\|down\|unavailable")" -ge 1 ]'
+  if [ -n "${SECOND_HOST_SH:-}" ]; then
+    # Its pool's filesystems unmounted and its key unloaded: what a reboot leaves.
+    on_second() { $SECOND_HOST_SH sh -c "$1"; }
+    on_second 'zfs list -H -o name,mounted -t filesystem -r byard | awk '"'"'$2 == "yes" { print $1 }'"'"' | tac | xargs -r -n1 zfs unmount && zfs unload-key byard'
+    check "its pool locked"       '[ "$(on_second "zfs get -H -o value keystatus byard")" = unavailable ]'
+    started=$(on_second "date +%s")
+  fi
   eval "$SECOND_HOST_START"
   for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
   check "host back"             '[ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ]'
+  if [ -n "${SECOND_HOST_SH:-}" ]; then
+    check "with its pool encrypted and unlocked" '[ "$(on_second "zfs get -H -o value encryption,keystatus byard" | tr "\n" " ")" = "aes-256-gcm available " ]'
+    check "by the fleet's key"    'on_second "journalctl -u briqyardd --since @$started -o cat" | grep "pool key loaded" | grep -q "\"from\":\"fleet\""'
+    # The key, asked of the fleet as the host does; it must be nowhere on the host's disk or
+    # in its log, and in none of the fleet's answers but this one.
+    conf=$(on_second "cat /etc/briqyard/config.yaml")
+    token=$(echo "$conf" | sed -n 's/^token: "\(.*\)"$/\1/p')
+    advertise=$(echo "$conf" | sed -n 's/^  advertise: //p')
+    key=$(curl -fsS -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+      -d "{\"url\": \"$advertise\"}" "$BRIQYARD_URL/v1/hosts/key" | jq -r .key)
+    found() { echo "$key" | $SECOND_HOST_SH sh -c 'k=$(cat); grep -rlsF -D skip "$k" /etc/briqyard /var/lib/briqyard --exclude=pool.img; journalctl -u briqyardd -b -o cat | grep -cF "$k"'; }
+    check "its key on none of its files nor in its log" '[ "${#key}" = 64 ] && [ "$(found)" = 0 ]'
+    check "nor in the fleet host list" '! hosts | grep -qF "$key"'
+  fi
   for i in $(seq 1 30); do briqyard machine exec "$B" -- hostname >/dev/null 2>&1 && break; sleep 2; done
   check "b answers again"       '[ "$(briqyard machine exec "$B" -- hostname)" = b ]'
 fi

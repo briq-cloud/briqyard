@@ -144,6 +144,22 @@ paths:
         "409": { description: "`not_ready`: still running not ready at the timeout, the body's `machine` is it with its `probes_status`; `boot_failed` (`for=ready`): it is in `error`, its guest or its startup probe failed the boot, the body's `machine` is it; `not_running`: it will not run (stopped, destroying; `error` with `for=running`), or did not start in time" }
   /v1/machines/{id}/exec:
     parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: "An exec session (ADR 0029): a WebSocket upgrade (`Connection: Upgrade`, `Upgrade: websocket`, the bearer token as for every route). Every message is binary, its first byte the channel: 0 stdin (to the server), 1 stdout, 2 stderr (empty with `tty`), 3 the end (`SessionEnd`, last), 4 a resize (`Resize`, to the server), 255 a close (payload `0`: stdin's end; nothing on a terminal, where ^D is a byte). The command starts before the `101`; closing the connection ends it (SIGKILL to its process group; on a terminal SIGHUP first, SIGKILL 5 s later). The machine is in use while the session is open: it does not go to sleep. A ping every 30 s; a client silent for 90 s is gone. A `session_opened` event. Through the fleet, relayed as bytes to the machine's host"
+      parameters:
+        - { name: cmd, in: query, required: true, schema: { type: array, items: { type: string } }, style: form, explode: true, description: "one per argument, in order" }
+        - { name: env, in: query, schema: { type: array, items: { type: string } }, style: form, explode: true, description: "`NAME=VALUE`, one per variable" }
+        - { name: cwd, in: query, schema: { type: string } }
+        - { name: timeout_ms, in: query, schema: { type: integer, default: 0, maximum: 3600000 }, description: "the command's deadline; 0 is none: it lasts as long as the session" }
+        - { name: wake, in: query, schema: { type: boolean, default: true }, description: "wake a sleeping machine (and wait for it to be ready) before the command" }
+        - { name: tty, in: query, schema: { type: boolean, default: false }, description: "a pseudo-terminal: one output, `TERM` from `env` (`xterm` when absent), the command its session leader" }
+        - { name: cols, in: query, schema: { type: integer, default: 80, maximum: 65535 } }
+        - { name: rows, in: query, schema: { type: integer, default: 24, maximum: 65535 } }
+      responses:
+        "101": { description: "the session; its messages as above" }
+        "400": { description: "`invalid`: not an upgrade, no `cmd`, an unknown parameter or a value that does not parse" }
+        "404": { description: "`not_found`" }
+        "409": { description: "`not_running`: not running and `wake` was false, or the guest did not take the command; `boot_failed`: the wake did not boot" }
     post:
       summary: Run a command inside the machine
       requestBody:
@@ -225,20 +241,38 @@ paths:
   /v1/machines/{id}/snapshots:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
-      summary: List snapshots
+      summary: List its snapshots, oldest first (ADR 0031)
       responses:
         "200": { description: snapshots, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Snapshot" } } } } }
     post:
-      summary: Snapshot both disks now
+      summary: "Snapshot both disks at one instant, and the memory with `memory: true`; a `snapshot_taken` event"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SnapshotRequest" }
       responses:
         "201": { description: snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/Snapshot" } } } }
+        "400": { description: "`invalid`: a bad name" }
+        "409": { description: "`conflict`: the name is taken; `not_running`: memory asked of a machine with no process; `bad_state`: destroying, or a restore unfinished" }
   /v1/machines/{id}/snapshots/{snap}:
-    parameters: [{ $ref: "#/components/parameters/id" }, { name: snap, in: path, required: true, schema: { type: string } }]
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/snap" }]
     delete:
-      summary: Remove a snapshot made here, from both disks; missing is success
+      summary: "Delete a snapshot, from both disks and its memory; missing is success; a `snapshot_deleted` event. What a retired disk still clones goes with it"
       responses:
-        "204": { description: removed }
-        "404": { description: no such machine, or not a snapshot of the caller's }
+        "204": { description: deleted }
+        "404": { description: no such machine }
+        "409": { description: "`bad_state`: a restore unfinished" }
+  /v1/machines/{id}/snapshots/{snap}/restore:
+    parameters: [{ $ref: "#/components/parameters/id" }, { $ref: "#/components/parameters/snap" }]
+    post:
+      summary: "Take the disks back to the snapshot, and the memory when it holds it and the spec is the same (ADR 0031): a running machine is stopped, then booted or resumed; any other stays as it is. Newer snapshots, forks and the backup chain are kept. A `restored` event"
+      parameters: [{ $ref: "#/components/parameters/ifMatch" }]
+      responses:
+        "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "404": { description: "`not_found`: no such machine or snapshot" }
+        "409": { description: "`bad_state`: starting, stopping or destroying; `boot_failed`: restored, then the guest did not come up; `conflict`: a stale `If-Match`" }
+        "500": { description: "`internal`: the disks could not be swapped; the restore is finished by the next restore, start or daemon start" }
   /v1/machines/{id}/endpoints:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
@@ -404,6 +438,20 @@ paths:
         "204": { description: recorded }
         "401": { description: not the token the fleet holds for the host at this address }
         "403": { description: no host is expected at this address (`unknown_host`) }
+  /v1/hosts/key:
+    post:
+      summary: "A host's pool key (fleet only, ADR 0026): with the host's own API token as the bearer, for the one host record at the address it advertises; made at the first ask, the same after"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostKeyRequest" }
+      responses:
+        "200": { description: the key, content: { application/json: { schema: { $ref: "#/components/schemas/HostKey" } } } }
+        "401": { description: not the token the fleet holds for the host at this address }
+        "403": { description: no host is expected at this address (`unknown_host`) }
+        "500": { description: the registry could not be written (`registry`); no key is handed out unwritten }
+        "503": { description: "the registry's backup could not be written (`backup`, ADR 0032); no key is handed out before the backup holds it" }
   /v1/hosts/order:
     post:
       summary: Order a host from the provisioner now (fleet only; dry-run unless configured otherwise)
@@ -418,27 +466,60 @@ paths:
   /v1/hosts/{id}/retire:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Drain a host and release it at its provider once nothing runs on it (fleet only)
+      summary: Take no new tenant on a host and release it at its provider once nothing runs on it (fleet only)
       responses:
-        "200": { description: draining, or released when it was already empty, content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "200": { description: retiring, or released when it was already empty, content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "409": { description: the host is upgrading (`conflict`) }
   /v1/hosts/{id}/drain:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Take no new tenant on this host (fleet only)
+      summary: Take no new tenant on this host, and keep it (fleet only; Kubernetes's cordon)
       responses:
         "204": { description: draining }
+        "409": { description: the host is upgrading (`conflict`) }
+  /v1/hosts/{id}/undrain:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: Take new tenants on a draining or retiring host again (fleet only)
+      responses:
+        "204": { description: ready }
+        "409": { description: "the host is neither draining nor retiring (`conflict`)" }
+  /v1/hosts/{id}/upgrade:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      summary: "Install another release on a ready or draining host, its machines running (fleet only, ADR 0027): the host `upgrading`, `hack/bootstrap-host.sh` run over SSH with the release, the daemon handing its machines over to the new one, then a heartbeat from a new start of the installed version that stopped no machine; the host back in its state. Answers when it is done; one upgrade at a time"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpgradeHostRequest" }
+      responses:
+        "200": { description: "upgraded; the note says to what and how many machines were handed over", content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "400": { description: "a release that is neither a URL nor a version, or no SSH key (`provisioner.bootstrap.ssh_key`)" }
+        "404": { description: no such host }
+        "409": { description: "another upgrade under way, or the host is neither ready nor draining (`conflict`)" }
+        "502": { description: "the upgrade failed (`upgrade_failed`): the host is `draining`, the reason in its note" }
   /v1/hosts/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     delete:
-      summary: Forget a host (fleet only)
+      summary: "Forget a host (fleet only). A host whose record holds a pool key is refused unless `force`: the key goes with the record (ADR 0026)"
+      parameters:
+        - { name: force, in: query, schema: { type: boolean, default: false }, description: "forget a host that holds a pool key: its pool is unreadable at its next restart" }
       responses:
         "204": { description: forgotten }
+        "409": { description: "the host holds a pool key (`pool_key`): retire it, or force" }
 components:
   parameters:
     id:
       name: id
       in: path
       required: true
+      schema: { type: string }
+    snap:
+      name: snap
+      in: path
+      required: true
+      description: a snapshot's id or name
       schema: { type: string }
     ifMatch:
       name: If-Match
@@ -624,6 +705,8 @@ components:
         version: { type: integer, description: "the seq of the last event about it: every event moves it, its last use does not; what `If-Match` compares" }
         pending: { $ref: "#/components/schemas/Pending" }
         pending_since: { type: string, format: date-time, description: "when the oldest change still pending was made" }
+        init_version: { type: string, description: "what the init in its root disk said at its last boot (ADR 0027); empty before it, or from an init older than the report" }
+        vmm_version: { type: string, description: "what ran its last boot: Firecracker's version and the host kernel's release, `v1.17.0/6.8.0-45-generic`; a memory snapshot resumes only under the same" }
         host: { type: string, description: the host that runs it (fleet) }
     Endpoint:
       type: object
@@ -653,6 +736,20 @@ components:
         stdin: { type: string }
         timeout_ms: { type: integer, default: 300000, maximum: 3600000 }
         wake: { type: boolean, default: true, description: Wake a sleeping machine for the command; false answers 409 when it is not running }
+    SessionEnd:
+      type: object
+      description: "the last message of a session (channel 3): how the command ended (`exit_code`, `timed_out` when its deadline ended it), or, with `code` and no `exit_code`, why the session ended without it (`not_running`: the machine went down; `invalid`: a message the server could not read; `internal`)"
+      properties:
+        exit_code: { type: integer }
+        timed_out: { type: boolean }
+        code: { type: string }
+        error: { type: string }
+    Resize:
+      type: object
+      required: [cols, rows]
+      properties:
+        cols: { type: integer }
+        rows: { type: integer }
     ExecResult:
       type: object
       properties:
@@ -753,12 +850,20 @@ components:
       properties:
         suspend: { type: boolean, description: keep a memory snapshot so the next start resumes in well under a second; a plain stop when Firecracker refuses }
         timeout_sec: { type: integer, default: 10, maximum: 600 }
+    SnapshotRequest:
+      type: object
+      properties:
+        name: { type: string, description: "to find it by again: a-z, 0-9, _ and -, at most 64, not starting with s_; unique on the machine" }
+        memory: { type: boolean, description: "its memory too, on a running machine, paused while it is written: a restore resumes its processes where they were" }
     Snapshot:
       type: object
       properties:
         id: { type: string }
         machine_id: { type: string }
+        name: { type: string }
         created_at: { type: string, format: date-time }
+        disks: { type: array, items: { type: string, enum: [root, data] }, description: "the disks it holds; a new image drops root (ADR 0024)" }
+        memory: { type: boolean, description: "it holds the memory: a restore resumes, unless the image, command, env, files or size changed since" }
     MachineStats:
       type: object
       properties:
@@ -851,7 +956,7 @@ components:
         root_gb_hours: { type: number, description: "the root disk's allocated size × hours" }
         volume_gb_hours: { type: number, description: "the data volume's allocated size × hours" }
         disk_used_gb_hours: { type: number, description: what the disks take on the pool × hours }
-        snapshot_gb_hours: { type: number, description: "local snapshots, the memory snapshot included, × hours" }
+        snapshot_gb_hours: { type: number, description: "local snapshots, retired disks and memory snapshots included, × hours" }
         backup_gb_hours: { type: number, description: "the machine's backups in the object store × hours; a destroyed machine's go on in its buckets until they are deleted (ADR 0023)" }
         internet_out_bytes: { type: integer, description: "to the internet, through the host's NAT" }
         internet_in_bytes: { type: integer }
@@ -867,7 +972,7 @@ components:
         seq: { type: integer, description: one more per event on its host, never reused }
         at: { type: string, format: date-time }
         type: { type: string, enum: [normal, warning] }
-        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`" }
+        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, snapshot_taken, snapshot_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded, session_opened], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`, ADR 0029's for `session_opened`, ADR 0031's for snapshots and a restore to one" }
         message: { type: string, description: for a person; at most 1 KB }
         machine_id: { type: string }
         tenant: { type: string }
@@ -881,7 +986,7 @@ components:
     Status:
       type: object
       properties:
-        version: { type: string }
+        version: { type: string, description: "this build: the release and its commit, `0.1.0+fdad892eeefa` (ADR 0027)" }
         host_id: { type: string }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
@@ -890,6 +995,21 @@ components:
         disk_free_mb: { type: integer }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate, 64 hex digits; empty on plain HTTP (ADR 0020)" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
+        started: { $ref: "#/components/schemas/DaemonStart" }
+        vmm_version: { type: string, description: "what a machine booted now runs under: Firecracker's version and the host kernel's release" }
+    DaemonStart:
+      type: object
+      description: "When the daemon started and what it did with the machines the previous one left running (ADR 0027); absent from a daemon older than that"
+      properties:
+        at: { type: string, format: date-time }
+        adopted: { type: integer, description: left running and taken over }
+        stopped: { type: integer, description: "left running, its process still there but not taken over: ended, marked stopped, booted again when its sleep window had not run out; what fails an upgrade" }
+        gone: { type: integer, description: "left running, its process ended while no daemon ran: marked stopped, booted again the same way" }
+    UpgradeHostRequest:
+      type: object
+      required: [release]
+      properties:
+        release: { type: string, description: "a URL where `<binary>-linux-<arch>` are, or a version of the project's releases (`0.2.0`, `v0.2.0`)" }
     Condition:
       type: object
       description: "A host condition (ADR 0021), decided by the daemon's tick. Each is a pressure: the fleet places nothing new on a host while one is true"
@@ -909,7 +1029,7 @@ components:
         cpu_percent: { type: number, description: "CPU time over the window, in percent of one CPU (jailed hosts)" }
         memory_bytes: { type: integer, description: "what its process holds, from its cgroup (jailed hosts)" }
         memory_limit_bytes: { type: integer, description: its size's memory }
-        disk_used_bytes: { type: integer, description: "its disks, their snapshots and its memory snapshot on the pool" }
+        disk_used_bytes: { type: integer, description: "its disks, their snapshots, the disks a restore retired and its memory snapshots on the pool" }
         internet_in_bytes_per_sec: { type: number }
         internet_out_bytes_per_sec: { type: number }
         ingress_in_bytes_per_sec: { type: number }
@@ -924,17 +1044,18 @@ components:
         ssh: { type: string, description: "where the fleet reaches the server over SSH, when not at the API's address (its API on the private network); absent otherwise" }
         region: { type: string }
         provider: { type: string }
-        state: { type: string, enum: [ready, draining, down, provisioning, bootstrapped, failed, dry-run, released] }
+        state: { type: string, enum: [ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed, dry-run, released], description: "`draining` takes no new tenant; `retiring` neither, and is released once empty; `upgrading` while `host upgrade` runs" }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer }
         tenants: { type: array, items: { type: string } }
         last_seen: { type: string, format: date-time }
         version: { type: string }
-        note: { type: string, description: What the provisioner or the bootstrap last said }
+        note: { type: string, description: What the provisioner, the bootstrap or the last upgrade said }
         tls_fingerprint: { type: string, description: "SHA-256 of the host's API certificate, pinned by the fleet; empty on plain HTTP" }
         public_tcp_ports: { type: array, items: { type: integer }, description: "ports its public interface takes besides SSH, from its bootstrap (ADR 0028); absent: none" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" }, description: from its last heartbeat }
+        started: { $ref: "#/components/schemas/DaemonStart" }
     AddHostRequest:
       type: object
       required: [ssh]
@@ -963,11 +1084,22 @@ components:
         disk_free_mb: { type: integer }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate; a fingerprint other than the pinned one is refused (403 tls_mismatch)" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
+        started: { $ref: "#/components/schemas/DaemonStart" }
+    HostKeyRequest:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, description: "The URL the host advertises (`fleet.advertise`): the fleet finds the host's record by its address" }
+    HostKey:
+      type: object
+      required: [key]
+      properties:
+        key: { type: string, description: "The pool's key: 32 bytes as 64 hex digits, ZFS's `hex` key format" }
     ApiError:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, backup, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]

@@ -17,11 +17,16 @@ PRIVATE_ADDRESS=10.42.0.11/16 ALLOWED_CLIENTS=10.42.0.0/16 \
 bash bootstrap-host.sh
 ```
 
-It installs the packages (ZFS, nftables, e2fsprogs, gdisk), caps the ZFS cache, makes the pool
-(on the devices given, or on a file for a trial), puts the API on the private network and
-closes the public interface when `PRIVATE_ADDRESS` is set, downloads Firecracker, its jailer
-and a guest kernel, installs the binaries, writes `/etc/briqyard/config.yaml` and the systemd
-unit, and starts `briqyardd`.
+It installs the packages (ZFS, nftables, e2fsprogs, gdisk), caps the ZFS cache, turns swap off
+for good, puts the API on the private network and closes the public interface when
+`PRIVATE_ADDRESS` is set, makes the pool encrypted (on the devices given, or on a file for a
+trial; ADR 0026), downloads Firecracker, its jailer and a guest kernel, installs the binaries
+(each checked against the release's `SHA256SUMS-<arch>`), writes `/etc/briqyard/config.yaml`
+(`0600`) and the systemd unit, and starts `briqyardd`.
+The pool's key is the fleet's for this host when `FLEET_URL` is set (asked with
+`BRIQYARD_TOKEN`, never written on the host); without a fleet, the script makes one in
+`/etc/briqyard/pool.key` (`0600`): keep a copy off the host, the pool is unreadable without it.
+A pool that exists and is not encrypted stops the script: ZFS cannot encrypt it in place.
 Off loopback the API serves TLS with a certificate the daemon makes once (ADR 0020); the script
 prints its fingerprint (`== api certificate`, `sha256 <64 hex digits>`).
 With `FLEET_URL` and `ADVERTISE` set, the host registers with a fleet, presenting
@@ -39,16 +44,16 @@ address (the host's `hosts:` entry, below).
 | `LISTEN` | `PRIVATE_ADDRESS`'s, else `0.0.0.0:7420` | The API's address; TCP endpoints and the HTTP ingress bind the same address |
 | `ALLOWED_CLIENTS` | none | Comma-separated IPv4 CIDRs (a bare address is a `/32`) allowed to connect: the fleet's and the routers' networks. Written as `ingress.allowed_clients` |
 | `ALLOW_PUBLIC` | none | `1` writes `ingress.allow_public: true`: anyone can connect, a firewall of your own is in front |
+| `BRIQYARD_KEY_FILE` | `/etc/briqyard/pool.key` | Without `FLEET_URL`: the pool's key file, made when missing, written as `storage.key: file:…` |
 | `FIRECRACKER_VERSION`, `FIRECRACKER_SHA256` | `v1.17.0` and its release digest | The Firecracker and jailer every host runs |
 | `KERNEL_URL`, `KERNEL_SHA256` | the CI build of `vmlinux-6.18.54` | The guest kernel; the digest is checked after the download |
 
 A public `LISTEN` needs `ALLOWED_CLIENTS` or `ALLOW_PUBLIC`: with neither, the script binds
 the API and the endpoints to loopback (the daemon refuses to start on a public bind without
 one), and a host nobody reaches is the safe side. Every host runs the same
-Firecracker and kernel, so a memory snapshot resumes anywhere and two hosts never differ by
-the day they were installed; run the script again with new pins to upgrade them (stop
-suspended machines first: a snapshot resumes only under the Firecracker that wrote it). The
-kernel comes from Firecracker's CI bucket until we build and host it ourselves.
+Firecracker and kernel, so two hosts never differ by the day they were installed; new pins
+reach a host through an upgrade (below). The kernel comes from Firecracker's CI bucket until
+we build and host it ourselves.
 
 Then, from anywhere that reaches the host:
 
@@ -93,7 +98,8 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `backup.at_once` | `2` | Scheduled backups (and expired holders' deletions) the tick runs at once |
 | `backup.keep_destroyed_days` | `30` | A destroyed machine's backups stay this long, then go with its holder |
 | `suspend_on_sleep` | `false` | Sleep with a memory snapshot: wakes in a quarter second, costs the machine's memory in disk |
-| `storage.pool` | `byard` | The ZFS pool or dataset for every disk |
+| `storage.pool` | `byard` | The ZFS pool or dataset for every disk. Encrypted: the daemon refuses one that is not (ADR 0026) |
+| `storage.key` | `file:/etc/briqyard/pool.key` | Where the pool's key comes from when it is not loaded (after a reboot): `fleet` (`POST /v1/hosts/key` on `fleet.url`, with `token`, as the host at `fleet.advertise`) or `file:<absolute path>` (64 hex digits). Not read while the key is loaded |
 | `registries[]` | none | `{host, username, password}` for private registries |
 | `network.range` | `10.64.0.0/10` | Tenant subnets, one /24 each (16,384 tenants) |
 | `network.upstream_dns` | the host's, then `1.1.1.1` | Where the gateway forwards DNS |
@@ -113,40 +119,97 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
 | `capacity.memory_mb`, `capacity.vcpus` | host memory − `reserved_memory_mb` − the ZFS cache's ceiling (`zfs_arc_max`, when set), (threads − `reserved_threads`) × 4 | What the host hands out; shared vCPUs oversubscribe |
 | `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the default capacity leaves to the host and its other services (an edge: 3072); unused when `memory_mb` or `vcpus` is set |
-| `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start |
+| `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start. An `http://` `url` must be a loopback or private address (ADR 0026) |
 
 ## Where things live
 
 | Path | What |
 |---|---|
-| `<data_dir>/state/{machines,tenants,endpoints}/*.json` | The records, one file each, written atomically |
+| `<data_dir>/state/{machines,tenants,endpoints}/*.json` | The records, one file each, written atomically, on `byard/state` |
 | `<data_dir>/api-cert.pem`, `api-key.pem` | The API's certificate and key (`0600`). Both removed, a new pair is made at the next start: a new fingerprint to pin. The certificate without its key: the daemon refuses to start |
 | `<data_dir>/state/usage/<hour>.json` | Each machine's usage in that UTC hour (ADR 0017); the open hour is rewritten once a minute |
 | `<data_dir>/state/events/<hour>.ndjson` | The host's events of that hour, one JSON line each, appended and synced (ADR 0019) |
-| `<data_dir>/run/<machine>/` | `console.log` (the guest's serial console, timestamped), `console.<offset>.log` (the previous file, rotated at `console_max_mb`, named after where it starts in the console), `config.tar` (the config drive, `0600`), sockets when not jailed |
+| `<data_dir>/run/<machine>/` | On `byard/run`: `console.log` (the guest's serial console, timestamped), `console.<offset>.log` (the previous file, rotated at `console_max_mb`, named after where it starts in the console), `config.tar` (the config drive, `0600`), sockets when not jailed |
 | `<jail_dir>/firecracker/<machine>/root/` | The chroot, on `byard/jail`: kernel, config drive (`0400`, the jail's user), device nodes, sockets, `snap.state` and `snap.mem` while suspended |
-| `<data_dir>/images/meta/*.json` | What each image is |
+| `<jail_dir>/firecracker/<machine>/snapshots/` | `<snap>.state` and `<snap>.mem` of each snapshot taken with memory (ADR 0031); `<data_dir>/run/<machine>/snapshots/` without the jailer |
+| `<data_dir>/images/meta/*.json` | What each image is, on `byard/images`, with the extraction scratch (`extract-*`) |
 | `byard/jail` | A filesystem mounted at `jail_dir`: `zfs list byard/jail` is what the jails and the suspended machines hold |
+| `byard/state`, `byard/run`, `byard/images` | Filesystems mounted at `<data_dir>/state`, `run`, `images`: nothing the daemon writes about a machine is on `/` (ADR 0026). Never mounted over files: a directory that already holds some is refused at start |
+| `/etc/briqyard/config.yaml` | The config (`0600`: the host's token is in it); `pool.key` beside it on a host with a file key |
 | `byard/images/<key>` | A root disk per image, with its `@base` snapshot |
 | `byard/m/<machine>/root`, `.../data` | A machine's disks |
+| `byard/m/<machine>/root.r_<n>`, `.../data.r_<n>` | Disks a restore retired, kept while a newer snapshot or a fork needs them (ADR 0031) |
+
+The pool is encrypted (`zfs get encryption,keystatus byard`): after a reboot its key is not
+loaded, and the daemon loads it before anything else, from `storage.key`. Without it the
+daemon serves nothing, logs `pool locked` at `error` with why, and tries again (5 s, doubling to
+a minute); the fleet sees the host `down`.
 
 Every disk is a ZFS zvol: `zfs list -t all -r byard` shows them, `zfs get used,referenced` what
 they take. A machine's `fork-*` and `s_*` snapshots on its disks are its forks' and its own: a
-`fork-*` goes with the last machine cloned from it (the sweep at start catches what a failed
-destroy left), an `s_*` with `briqyard machine snapshot rm <id> <snap>`.
+`fork-*` goes with the last machine cloned from it, an `s_*` with `briqyard machine snapshot rm
+<id> <snap>` (or what a retired disk still needs, with that disk); the daemon's start removes
+what a failed destroy or a crash left. A `.next` dataset is a restore under way.
 
 ## Upgrade
 
-Install the new binaries and `systemctl restart briqyardd`. The daemon suspends every running
-machine on the way down (a memory snapshot each) and marks it so; each one resumes on its next
-use, in about a quarter of a second. Nothing reboots. A daemon that crashes instead leaves its
-machines running (`KillMode=process`), and the next daemon adopts them. A host from before ADR
-0014 (jails on `/`): stop the daemon and empty `jail_dir` before the first start that mounts
-`byard/jail` there, or the old files stay hidden on `/` and the machines suspended then boot cold.
+Through the fleet, one host or every host, machines running (ADR 0027). The fleet first, then
+the hosts: a host is never newer than its fleet.
 
-The guest kernel and `briqyard-init` are baked into root disks: an image built with an older
-init keeps it until the image is rebuilt (a new init hash makes a new image key; the old disk is
-garbage-collected once no machine uses it).
+```bash
+briqyard-fleet --version                                  # on the fleet's server: upgrade it first
+briqyard host upgrade h_123456 --release 0.2.0            # or a release URL
+briqyard host upgrade --all --release 0.2.0               # every ready or draining host, by id, one at a time
+briqyard host ls                                          # VERSION, and each host's note
+```
+
+What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it is done):
+
+| Step | |
+|---|---|
+| `upgrading` | Placement stops; the host's machines are served |
+| Install | `hack/bootstrap-host.sh` over SSH with the release (`provisioner.bootstrap.ssh_key`, the pinned host key), as at a bootstrap: packages, Firecracker and kernel pins, the binaries put in place by a rename, the unit |
+| Hand-over | The script sends the running daemon SIGUSR2: it exits and leaves every machine running; `systemctl start` brings the new one, which adopts them |
+| Back | `briqyardd --version` over SSH, then a heartbeat from a new start of that version that stopped nothing, within 5 minutes |
+| Undrained | The host is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
+
+A failure leaves the host `draining` with the reason in its note: fix it, then
+`briqyard host undrain <id>`. `--all` stops at the first failure and names the hosts left. One
+upgrade at a time per fleet. A static host (`hosts:`) needs the fleet's SSH key in root's
+`authorized_keys`; its host key is pinned at its first upgrade. After a roll, set
+`provisioner.bootstrap.release` to the release, for the hosts ordered next.
+
+A release is a URL where `<binary>-linux-<arch>` are (`briqyardd`, `briqyard-init`, `briqyard`,
+`briqyard-fleet`) with their `SHA256SUMS-<arch>`, or a version of the project's releases; a
+private repository's is read with `provisioner.bootstrap.release_token`. Without a fleet, on the host:
+`BRIQYARD_RELEASE=<url> bash bootstrap-host.sh` does the same install and hand-over.
+
+What the machines see:
+
+| | |
+|---|---|
+| Running | Nothing: no reboot, no pause. Connections through the ingress (TCP endpoints, HTTP) are reset; clients reconnect |
+| Suspended | Resumed at their next start when Firecracker and the host kernel are the same; booted cold otherwise (`starting` says so) |
+| Their init | The one in their root disk until it is made again (an image change); `init_version` on the machine |
+| Their Firecracker | The process they booted with until their next start; `vmm_version` on the machine, the host's in `briqyard status` |
+
+Each binary says what it is: `briqyardd --version`, `0.1.0+fdad892eeefa` (release and commit).
+The wire between versions is additive (ADR 0027): a newer daemon reads every init in use, a
+newer fleet every host one version behind. A caller uses a field new in a release once
+`host ls` shows every host on it: an older host ignores a field it does not know. A
+configuration field new in a release goes into the file after the upgrade (an older binary
+refuses it), and out of it before a rollback, which is an upgrade to the older release.
+
+**A reboot** (an OS or host kernel upgrade): `briqyard host drain <id>`, then on the host
+`systemctl stop briqyardd` (every machine suspended), the upgrade and the reboot; the daemon's
+start boots again each machine it stopped whose sleep window had not run out (cold, the kernel
+changed), and `briqyard host undrain <id>`. `systemctl restart briqyardd` by hand does the same
+without the reboot: a quarter-second pause per machine. A daemon that crashes leaves its
+machines running (`KillMode=process`), and the next one adopts them.
+
+A host from before ADR 0014 (jails on `/`): stop the daemon and empty `jail_dir` before the
+first start that mounts `byard/jail` there, or the old files stay hidden on `/` and the
+machines suspended then boot cold.
 
 ## Backups
 
@@ -197,7 +260,9 @@ millisecond, `20261021T101500.123Z`. A deletion removes the streams first, then 
 The state itself (`state/`) is small and lives only on the host; a lost host loses the records
 of machines that were never backed up, and their disks. A machine's own `POST
 /v1/machines/{id}/snapshots` is a local snapshot of its disks: instant, copy-on-write, not a
-backup until sent elsewhere.
+backup until sent elsewhere. A restore to one (`briqyard machine snapshot restore <id> <snap>`)
+keeps the backup chain correct: the next backup continues from the newest backup made before the
+snapshot, or is whole.
 
 ## Watch
 
@@ -212,10 +277,10 @@ backup until sent elsewhere.
   | `briqyard_pool_bytes`, `briqyard_disk_free_mb` | `kind="size\|used\|free"` | the pool |
   | `briqyard_host_condition` | `condition` | 1 while true |
   | `briqyard_events_total` | `type`, `reason` | events since the daemon started |
-  | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_tenants`, `briqyard_endpoints` | | counts |
+  | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_tenants`, `briqyard_endpoints` | | counts (`execs`: exec sessions included) |
   | `briqyard_machine_cpu_seconds_total` | `machine`, `tenant`, `name`, `role` (a gateway's) | its cgroup's CPU time |
   | `briqyard_machine_memory_bytes`, `_memory_limit_bytes` | same | its cgroup's memory, its size |
-  | `briqyard_machine_disk_used_bytes` | same | its disks, snapshots and memory snapshot |
+  | `briqyard_machine_disk_used_bytes` | same | its disks, snapshots (retired disks included) and memory snapshots |
   | `briqyard_machine_{internet,ingress}_{in,out}_bytes_total`, `_egress_dropped_packets_total` | same | its traffic |
   | `briqyard_machine_disk_{read,write}_bytes_total`, `_disk_throttled_total` | same | its disks, and the requests its disk limits held back; from Firecracker's metrics, a line a minute |
   | `briqyard_machine_restarts_total` | same | restarts by its policy |
@@ -236,6 +301,10 @@ backup until sent elsewhere.
 - Quotas (ADR 0025): `briqyard tenant quota <tenant>` shows a tenant's limits and use;
   `--machines N --memory-mb N --vcpus N --disk-gb N` puts exactly those (briq sets them from the
   plan). A refusal is a `quota_exceeded` warning in `briqyard events --tenant <tenant>`.
+- A shell in a machine (ADR 0029): `briqyard machine exec -it <id> -- sh`; `-i` alone for a pipe.
+  Each session is a `session_opened` event (`briqyard events --machine <id>`) and an `exec
+  session ended` log line with its code and length. A machine with a session open does not go
+  to sleep; a client silent for 90 s is dropped and its command ended.
 - `briqyard machine stats <id>`: CPU time, memory and disk it uses now, from its cgroup and its
   datasets. `briqyard machine set-sleep <id> 3h|never` changes the window without a restart.
 - What a machine runs (ADR 0024): `briqyard machine set <id> --image … --memory … -e K=V -- cmd…`
@@ -258,7 +327,9 @@ backup until sent elsewhere.
 | A create or start answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the last console lines. `briqyard machine logs`, then destroy it |
 | A start after `machine set --image` answers 409 `boot_failed`, `error: image …` | The new image could not be pulled or built; the change is still `pending`. `machine set` another image (or the one it runs, which drops the change) and start again |
 | A start after `machine set --memory` answers 503 `capacity` | The host has no room for the new size; the change is still `pending`. Through a fleet, the tenant stays on its host: move it (backups, `tenant unpin`, restores) |
-| A machine is `stopped (host)` | The daemon stopped it: a restart of `briqyardd` without a suspend, or a crashed daemon's leftover. The next use wakes it |
+| A machine is `stopped (host)` | The daemon stopped it: its stop, or a crashed daemon's leftover. The next start boots it again unless its sleep window had run out; else the next use wakes it |
+| `upgrade to … failed` in a host's note, the host `draining` | The step and the reason are in the note: SSH (the key, the pinned host key), the script's last lines, no heartbeat from the new version (`journalctl -u briqyardd` on the host), or a start that stopped machines it could not take over (`briqyard events --machine …`). Fix, then `briqyard host undrain` |
+| `the host now runs …, newer than this fleet` | Upgrade the fleet, then `host undrain` the host |
 | A machine stays `destroying` | Its disks could not be destroyed (`zfs destroy` in the log); the daemon tries again every 15 s |
 | The process exits at once (`stopped`, `exit.code`) | `briqyard machine logs`: the image's own output. `restart.policy: on-failure` tries three times, 10 s, 20 s, 40 s apart (`restarting_at`); `crash_loop` events from the third |
 | `/wait` answers 409 `not_ready`, or the ingress 502 after a wait | The program runs but its readiness or startup probe does not pass: `briqyard machine describe` shows each probe's last result. A TCP or HTTP probe needs the program on the machine's address, not only `127.0.0.1` |
@@ -273,6 +344,8 @@ backup until sent elsewhere.
 | `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just ordered gets this until its bootstrap has pinned it |
 | `host …: … is not the pinned …` (fleet, 502 `host_unreachable`) | The host presents another certificate than its record's `tls_fingerprint`: reinstalled (pin the new one), or not the host |
 | `write registry …` (fleet, 500 `registry`) | The fleet's `state_dir` is full or not writable; nothing is recorded until it is |
+| `registry backup` (fleet, `error`), 503 `backup` on `/v1/hosts/key` | The registry could not be written to `backup.store`: credentials, endpoint, the bucket. Hosts whose key the store holds are served; new keys wait for the store |
+| `read the registry …` (the fleet does not start) | `registry.json` does not parse: restore the file (fields a fleet does not know are kept, not refused). Never remove it: every host's pool key is in it (ADR 0026) |
 | `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
 | `bootstrap attempt N: … is in use (mounted at …)`, `… holds ext4` | `pool_device` names something in use: the OS's disks are named whole (their free space is taken), never the OS's partitions; a disk meant for the pool is wiped by you (`wipefs -a`) |
 | `… has under 10 GB free` | The install filled the disk: reinstall with the layout of "First OVH host", step 2 |
@@ -280,6 +353,12 @@ backup until sent elsewhere.
 | `release … has no …`, `digest differs from the release's SHA256SUMS` | `release` names a tag without this architecture's files, or the token cannot read the repository |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
 | `dataset is busy` | A zvol a Firecracker just released; the daemon retries for ten seconds |
+| A machine with `sleep` set never sleeps | A session is open on it (`session_opened` without its `exec session ended` line): it is in use until its client leaves |
+| `-t needs a terminal on stdin` | `machine exec -t` from a script or a pipe: use `-i` alone |
+| `host call refused: not from the host's address` (fleet), `unknown_host` `…'s calls come from …` | The host's heartbeat or key request reached the fleet from another address than its `url` (NAT, another route): list the host by the address it calls from. Behind a local proxy (`tls: off`, loopback `listen`): the proxy must set `X-Forwarded-For` |
+| `pool locked: its key could not be loaded` | The daemon waits for the pool's key (ADR 0026), `err` says why: the fleet unreachable or refusing (`unknown_host`, `unauthorized`: as for a heartbeat), the key file missing, `Incorrect key provided` (the fleet's registry lost or restored from before the host: the pool cannot be read with another key) |
+| `pool … is not encrypted` | A pool made before ADR 0026 or by hand: move what it holds, destroy it, run the bootstrap again |
+| `… holds files and byard/… is not mounted there` | The daemon's directories hold files on `/` (a host from before ADR 0026): stop the daemon, move the contents onto the dataset (mount it elsewhere, copy, empty the directory) |
 | A jail refuses to start | `<run>/<machine>/console.log` holds the jailer's own messages |
 
 ## A fleet
@@ -311,8 +390,67 @@ start otherwise): the fleet accepts that one certificate from the host and nothi
 and refuses a heartbeat reporting another (`tls_mismatch`). A host on plain HTTP (a loopback
 daemon you forwarded) has neither.
 A heartbeat from an address no entry or order expects is refused (`unknown_host`), so no host
-can speak for another. The registry is `<state_dir>/registry.json`; a write that fails is an
-`error` in the fleet's log and a 500 `registry` on the request that needed it.
+can speak for another. The registry is `<state_dir>/registry.json` (`0600`, its directory
+`0700`); a write that fails is an `error` in the fleet's log and a 500 `registry` on the
+request that needed it.
+
+Each host's pool key is in its record (ADR 0026): made at the host's first `POST
+/v1/hosts/key` (its bootstrap creating the pool), served to that host alone (its token, at its
+address, as a heartbeat), never listed, gone when the host is retired or forgotten. `briqyard
+host rm` refuses a host that holds a key (409 `pool_key`) unless `--force`: its pool is
+unreadable at its next restart, and a static host polled back gets a key its pool does not open.
+A drained host stays drained; a retiring host is released once empty. **Losing the
+registry loses every key**: a host keeps running while its key is loaded, and cannot read its
+pool after its next reboot. Back the registry up before a host holds anything that matters
+(below); a host still up can be re-keyed with `zfs change-key`. The fleet's `state_dir` must be
+on an encrypted disk: it opens every pool.
+
+### The registry's backup (ADR 0032)
+
+On your own machine, once: `briqyard-fleet keygen --out fleet-backup.key` prints the recipient
+(`age1…`); keep the file off the fleet's host (two copies: a password manager and paper). In
+the fleet's config:
+
+```yaml
+backup:
+  store: s3://briqyard-backups/fleet     # or file:///path, development
+  endpoint: https://s3.gra.io.cloud.ovh.net
+  region: gra
+  recipient: age1…                       # what keygen printed
+```
+
+with `BRIQYARD_S3_ACCESS_KEY` and `BRIQYARD_S3_SECRET_KEY` in the fleet's environment: the
+fleet's own key, never a host's. In the bucket's policy the hosts' key writes `backups/` only and
+the fleet's `fleet/` only, and versioning is on. The fleet
+writes `fleet/registry.json.age` once a minute when the registry changed, and
+`fleet/registry-<day>.json.age` with the last of each day; a host's pool key is served only once
+the store holds it (503 `backup` otherwise). A failed write is `registry backup` at `error`.
+
+To restore, on the fleet's host: stop the fleet, move `registry.json` aside if there is one,
+copy the identity there for the moment, export the fleet's `BRIQYARD_S3_ACCESS_KEY` and
+`BRIQYARD_S3_SECRET_KEY` (an S3 store), then
+
+```bash
+briqyard-fleet restore --identity fleet-backup.key        # --from fleet/registry-2026-10-21.json.age for a day's
+```
+
+which writes the registry (`0600`), refuses to write over one, and prints what the fleet will
+trust: each host's id, url, pin prefix, token and pool key there or not, and the newest
+heartbeat in the backup. Check them, then start the fleet and remove the identity from the
+host. From the backup's last minute, a restore does not bring back an ordered host not yet
+keyed (order it again), a rotated token (put it in the record), a drain, or a forget. Placements made since the backup come back from the hosts' heartbeats.
+`age -d -i fleet-backup.key registry.json.age` reads a backup without us.
+
+Where the fleet terminates the connection (its `tls`, or plain on loopback), a host's
+heartbeat and key request must come from the address in its `url`: a host is listed by its
+address, not a name. A fleet behind a proxy on the same machine (Caddy terminating TLS for
+the fleet's name) has `tls: off` and a loopback `listen` (`127.0.0.1:7430`): the caller is
+the last `X-Forwarded-For` value, which the proxy writes, and a call without one is refused.
+Behind `tls: off` on any other address only the token is checked. **Retire or forget a host
+before its server or a disk leaves our hands.** A disk the provider swaps while the host stays
+carries the host's token: rotate it (a static host: a new `token` in its `hosts:` entry and in
+its `/etc/briqyard/config.yaml`, then restart the fleet and the daemon; an ordered host: no
+route yet, the same edit in `registry.json` with the fleet stopped).
 
 The fleet's own listener serves TLS with a certificate of yours: `tls: { cert, key }`, PEM
 files, a chain for the fleet's name (Let's Encrypt in production: `certbot certonly
@@ -335,8 +473,9 @@ briqyard host add 51.68.1.2 --address 10.42.0.11 --region gra   # POST /v1/hosts
                                              # --public-tcp-ports 80,443,… (or none): its own, else the fleet's
 briqyard host order --reason "launch week"   # POST /v1/hosts/order: a server, state provisioning
 briqyard host ls                             # its note says what the provider and the bootstrap last did
-briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: drain, then release once empty
-briqyard host drain h_123456                 # place no new tenant on it, keep it
+briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: retiring, released once empty
+briqyard host drain h_123456                 # draining: no new tenant on it, kept
+briqyard host undrain h_123456               # ready again, from draining or retiring
 briqyard host rm h_123456                    # forget it (its machines are not touched)
 ```
 
@@ -392,7 +531,7 @@ fingerprint into the host's note (`ssh host key SHA256:… ed25519 pinned at fir
 compare it with the provider's console. Every later connect is strict against that file. A
 server reinstalled by the provider has a new key: remove its line from the file.
 
-A retire drains the host first (no new tenant lands on it) and releases it at the provider
+A retire makes the host `retiring` (no new tenant lands on it) and releases it at the provider
 once it runs nothing: at once when it is already empty, else from the hourly pass as soon as
 its last machine is destroyed. A host from the `hosts:` list is retired by removing it from
 the configuration; forgotten through the API, it is back on the next poll.
@@ -466,8 +605,8 @@ the one whose MAC the manager shows as Private (server, Network interfaces): `ip
 grep -i <mac>` names it. Pick the range (`10.42.0.0/16`) and the server's address in it.
 
 **4. The fleet, on this server**, on loopback with `tls: off`: the edge's Caddy serves its name
-(step 6). Once the pool key lands (PR #2, ADR 0026), the fleet checks a key request by the
-caller's address, which on a loopback listener it reads from Caddy's `X-Forwarded-For`. The
+(step 6). The fleet checks a pool key request by the caller's address (ADR 0026), which on a
+loopback listener it reads from Caddy's `X-Forwarded-For`. The
 repository is private, so the binaries come from your Mac:
 
 ```bash
@@ -510,10 +649,9 @@ provisioner:
     public_tcp_ports: []
 ```
 
-The fleet's state (`/var/lib/briqyard-fleet`: the registry with every host's token, the pinned
-SSH keys) lives only there until the fleet backs itself up (ADR 0032): copy it off the server
-after each host change, `scp -r root@<public ip>:/var/lib/briqyard-fleet ~/briqyard-fleet-<date>`,
-and keep the copy as private as the fleet's config.
+The fleet's state (`/var/lib/briqyard-fleet`: the registry with every host's token and pool
+key, the pinned SSH keys) is on this server alone: give the fleet a `backup:` ("The registry's
+backup") before the first host, since a registry lost is every host's pool unreadable.
 
 **5. Add the server to the fleet**, on the server (the fleet has no public name yet), once its
 kernel has ZFS and KVM:
@@ -588,6 +726,7 @@ curl -s https://edge-gra-1.stg.briq.run/__router/health
 ```bash
 ssh root@<public ip> briqyard doctor                   # every line ok
 ssh root@<public ip> zpool status byard                # mirror-0, both partitions ONLINE
+ssh root@<public ip> zfs get -H encryption,keystatus byard  # aes-256-gcm, available
 ssh root@<public ip> nft list tables                   # briqyard_host and briqyard's two: no briq_edge, none of Docker's
 ssh root@<public ip> nft list table inet briqyard_host # tcp 22, 80, 443 and the listeners', then drop
 nc -vz -w 3 <public ip> 7420                            # from the Mac: times out

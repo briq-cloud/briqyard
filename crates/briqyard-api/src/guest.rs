@@ -3,11 +3,18 @@
 //!
 //! Every message is one frame: a 4-byte big-endian length, then JSON. One request per
 //! connection; a request gets one response, except `exec`, which streams `stdout`/`stderr`
-//! frames and ends with `exit`.
+//! frames and ends with `exit`. After an `exec` the host may send more frames on the same
+//! connection (`stdin`, `resize`, `close_stdin`), and its close ends the command (ADR 0029).
 //!
 //! One connection goes the other way: when the main process ends, the init connects to the
 //! host on [`EXIT_PORT`] and sends one [`ExitReport`] frame, then waits for the host to close
 //! before it resets the machine.
+//!
+//! A machine keeps the init it booted with while daemons are upgraded under it, so both sides
+//! read what the other's version writes (ADR 0027): changes are additive (a field is added
+//! with a default that means what its absence meant, never renamed, retyped or removed);
+//! unknown fields are ignored; an unknown `op` is answered `error` "unknown op <op>"; an
+//! unknown response `type` in a stream is skipped. The init says its version in `pong`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -66,10 +73,11 @@ pub struct FileMeta {
     pub mode: u32,
 }
 
-/// One operation over one connection.
+/// One operation over one connection; after an `exec`, its input: `stdin` (`data`), `resize`
+/// (`cols`, `rows`), `close_stdin`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Request {
-    /// exec, put, get, ping, shutdown
+    /// exec, put, get, ping, shutdown; then stdin, resize, close_stdin
     pub op: String,
     #[serde(default)]
     pub cmd: Vec<String>,
@@ -77,10 +85,22 @@ pub struct Request {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub cwd: String,
+    /// Written to the command first; without `interactive` its stdin then ends.
     #[serde(default, with = "b64")]
     pub stdin: Vec<u8>,
+    /// The command's deadline; 0 is none.
     #[serde(default)]
     pub timeout_ms: u64,
+    /// Stdin stays open for `stdin` frames until `close_stdin`.
+    #[serde(default)]
+    pub interactive: bool,
+    /// Run the command on a pseudo-terminal of `cols` by `rows` (0: 80 by 24).
+    #[serde(default)]
+    pub tty: bool,
+    #[serde(default)]
+    pub cols: u16,
+    #[serde(default)]
+    pub rows: u16,
     #[serde(default)]
     pub path: String,
     #[serde(default)]
@@ -108,6 +128,9 @@ pub struct Response {
     pub uptime: f64,
     #[serde(default)]
     pub main_pid: i32,
+    /// The init's version, in a `pong` (ADR 0027); empty from an init older than the field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 /// How the main process ended, sent by the init on [`EXIT_PORT`] before the machine resets.
@@ -341,6 +364,7 @@ mod tests {
             json!({"op": "ping"}),
             json!({
                 "op": "ping", "cmd": [], "env": {}, "cwd": "", "stdin": "", "timeout_ms": 0,
+                "interactive": false, "tty": false, "cols": 0, "rows": 0,
                 "path": "", "mode": 0, "data": "", "grace_sec": 0
             }),
         );
@@ -352,8 +376,11 @@ mod tests {
     fn request_binary_fields() {
         let r: Request = same(json!({
             "op": "exec", "cmd": ["cat"], "env": {"A": "1"}, "cwd": "/tmp", "stdin": "aGk=",
-            "timeout_ms": 100, "path": "/etc/x", "mode": 420, "data": "AP8=", "grace_sec": 5
+            "timeout_ms": 100, "interactive": true, "tty": true, "cols": 100, "rows": 30,
+            "path": "/etc/x", "mode": 420, "data": "AP8=", "grace_sec": 5
         }));
+        assert!(r.interactive && r.tty);
+        assert_eq!((r.cols, r.rows), (100, 30));
         assert_eq!(r.stdin, b"hi");
         assert_eq!(r.data, [0u8, 0xff]);
         assert_eq!(r.mode, 0o644);
@@ -405,6 +432,57 @@ mod tests {
         let back: ExitReport = read_frame(&mut &buf[..]).unwrap();
         assert_eq!(back, r);
         assert_eq!(ExitReport::default().code, 0);
+    }
+
+    #[test]
+    fn a_pong_says_the_inits_version() {
+        let r: Response = same(json!({
+            "type": "pong", "data": "", "code": 0, "timed_out": false, "message": "",
+            "uptime": 1.0, "main_pid": 7, "version": "0.1.0+fdad892eeefa"
+        }));
+        assert_eq!(r.version, "0.1.0+fdad892eeefa");
+        // Written only when there is one: every other frame is as it was.
+        assert!(serde_json::to_value(Response::new("ok"))
+            .unwrap()
+            .get("version")
+            .is_none());
+    }
+
+    /// What each side of the oldest version still running may send (ADR 0027): the current
+    /// types read it, and read what a newer side adds (fields, an op, a type) without failing.
+    #[test]
+    fn old_and_new_shapes_decode() {
+        // A pong from an init older than its version: no version, which the daemon shows as
+        // unknown.
+        let r: Response =
+            serde_json::from_value(json!({"type": "pong", "uptime": 3.5, "main_pid": 9})).unwrap();
+        assert_eq!((r.version.as_str(), r.main_pid), ("", 9));
+        // The first exit report, and one with a field a later init adds.
+        let r: ExitReport =
+            serde_json::from_value(json!({"code": 1, "oom": false, "requested": true})).unwrap();
+        assert!(r.requested);
+        let r: ExitReport = serde_json::from_value(
+            json!({"code": 2, "oom": true, "requested": false, "signal": 9}),
+        )
+        .unwrap();
+        assert_eq!((r.code, r.oom), (2, true));
+        // A request with a field and an op this init does not know: decoded, the op answered
+        // `unknown op` by the init's dispatch.
+        let r: Request =
+            serde_json::from_value(json!({"op": "resize", "rows": 40, "cols": 120})).unwrap();
+        assert_eq!(r.op, "resize");
+        // A response of a type the daemon does not know, with a field it does not know.
+        let r: Response =
+            serde_json::from_value(json!({"type": "progress", "percent": 50})).unwrap();
+        assert_eq!(r.kind, "progress");
+        // A drive from a newer daemon: its new field ignored by this init.
+        let c: Config = serde_json::from_value(json!({
+            "hostname": "a", "ip": "10.64.0.2/24", "gateway": "10.64.0.1", "dns": [],
+            "entrypoint": [], "cmd": ["sleep"], "env": {}, "workdir": "/", "user": "",
+            "mounts": [], "files": [], "stop_timeout_sec": 10, "sysctls": {"a": "1"}
+        }))
+        .unwrap();
+        assert_eq!(c.cmd, ["sleep"]);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Where backups go: an S3 bucket (any provider that speaks the API: Scaleway, OVH, Hetzner,
+//! Where backups go, the machines' and the fleet's registry's: an S3 bucket (any provider that speaks the API: Scaleway, OVH, Hetzner,
 //! AWS, MinIO) or a directory, for development and for a host that backs up to its own second
 //! disk. Streams in and out, so a disk of any size passes without landing on the host's disk.
 
@@ -138,14 +138,23 @@ impl ObjectStore {
                 if eof {
                     let url = bucket.put_object(Some(creds), &key).sign(SIGN_FOR);
                     let n = buf.len() as u64;
-                    let resp = http.put(url).body(buf).send().await.context("s3 put")?;
+                    let resp = http
+                        .put(url)
+                        .body(buf)
+                        .send()
+                        .await
+                        .map_err(|e| unsigned(e, "s3 put"))?;
                     s3_ok(resp, "put").await?;
                     return Ok(n);
                 }
                 let url = bucket
                     .create_multipart_upload(Some(creds), &key)
                     .sign(SIGN_FOR);
-                let resp = http.post(url).send().await.context("s3 create upload")?;
+                let resp = http
+                    .post(url)
+                    .send()
+                    .await
+                    .map_err(|e| unsigned(e, "s3 create upload"))?;
                 let text = s3_ok(resp, "create upload").await?;
                 let upload = CreateMultipartUpload::parse_response(&text)
                     .context("s3 create upload response")?;
@@ -165,7 +174,7 @@ impl ObjectStore {
                         .body(body)
                         .send()
                         .await
-                        .context("s3 upload part")?;
+                        .map_err(|e| unsigned(e, "s3 upload part"))?;
                     let etag = resp
                         .headers()
                         .get("etag")
@@ -191,7 +200,7 @@ impl ObjectStore {
                             .body(body)
                             .send()
                             .await
-                            .context("s3 upload part")?;
+                            .map_err(|e| unsigned(e, "s3 upload part"))?;
                         let etag = resp
                             .headers()
                             .get("etag")
@@ -214,7 +223,7 @@ impl ObjectStore {
                     .body(body)
                     .send()
                     .await
-                    .context("s3 complete upload")?;
+                    .map_err(|e| unsigned(e, "s3 complete upload"))?;
                 s3_ok(resp, "complete upload").await?;
                 Ok(total)
             }
@@ -239,7 +248,11 @@ impl ObjectStore {
                 let url = bucket
                     .get_object(Some(creds), &self.full_key(key))
                     .sign(SIGN_FOR);
-                let resp = http.get(url).send().await.context("s3 get")?;
+                let resp = http
+                    .get(url)
+                    .send()
+                    .await
+                    .map_err(|e| unsigned(e, "s3 get"))?;
                 if !resp.status().is_success() {
                     return Err(anyhow!(
                         "s3 get {key}: {} {}",
@@ -254,7 +267,7 @@ impl ObjectStore {
                 }
                 let stream = resp
                     .bytes_stream()
-                    .map(|r| r.map_err(|e| std::io::Error::other(e.to_string())));
+                    .map(|r| r.map_err(|e| std::io::Error::other(unsigned(e, "s3 get"))));
                 Ok(Box::new(tokio_util::io::StreamReader::new(stream)))
             }
         }
@@ -318,7 +331,11 @@ impl ObjectStore {
                         action.with_continuation_token(t);
                     }
                     let url = action.sign(SIGN_FOR);
-                    let resp = http.get(url).send().await.context("s3 list")?;
+                    let resp = http
+                        .get(url)
+                        .send()
+                        .await
+                        .map_err(|e| unsigned(e, "s3 list"))?;
                     let text = s3_ok(resp, "list").await?;
                     let page = ListObjectsV2::parse_response(&text).context("s3 list response")?;
                     for c in page.contents {
@@ -341,7 +358,6 @@ impl ObjectStore {
     }
 
     /// Removes an object; missing is success. For the pruning of old backups.
-    #[allow(dead_code)]
     pub async fn delete(&self, key: &str) -> Result<()> {
         match self {
             Self::File { root } => {
@@ -360,7 +376,11 @@ impl ObjectStore {
                 let url = bucket
                     .delete_object(Some(creds), &self.full_key(key))
                     .sign(SIGN_FOR);
-                let resp = http.delete(url).send().await.context("s3 delete")?;
+                let resp = http
+                    .delete(url)
+                    .send()
+                    .await
+                    .map_err(|e| unsigned(e, "s3 delete"))?;
                 s3_ok(resp, "delete").await?;
                 Ok(())
             }
@@ -384,6 +404,12 @@ async fn read_part(reader: &mut (impl AsyncRead + Unpin), buf: &mut Vec<u8>) -> 
     Ok(false)
 }
 
+/// A request's error without its URL: a presigned URL carries the access key id and a
+/// signature good for an hour (`SIGN_FOR`), and errors reach logs and answers.
+fn unsigned(e: reqwest::Error, op: &str) -> anyhow::Error {
+    anyhow!("{op}: {:#}", anyhow::Error::from(e.without_url()))
+}
+
 async fn s3_ok(resp: reqwest::Response, op: &str) -> Result<String> {
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
@@ -397,7 +423,6 @@ async fn s3_ok(resp: reqwest::Response, op: &str) -> Result<String> {
 }
 
 /// A writer side for callers that produce bytes (used by tests and the record files).
-#[allow(dead_code)]
 pub async fn write_all(mut w: impl tokio::io::AsyncWrite + Unpin, data: &[u8]) -> Result<()> {
     w.write_all(data).await?;
     w.shutdown().await?;
@@ -407,6 +432,34 @@ pub async fn write_all(mut w: impl tokio::io::AsyncWrite + Unpin, data: &[u8]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request that fails says what failed, never the presigned URL: it carries the access
+    /// key id and an hour's signature.
+    #[tokio::test]
+    async fn a_failed_request_never_shows_its_signed_url() {
+        // Nothing listens on port 1: every request fails to connect.
+        let store = ObjectStore::open(
+            "s3://bucket/prefix",
+            "http://127.0.0.1:1",
+            "",
+            "AKIDSECRETID",
+            "secret-key",
+        )
+        .unwrap();
+        let errs = [
+            store.put_bytes("a", b"x").await.unwrap_err(),
+            store.get_bytes("a").await.unwrap_err(),
+            store.list("a").await.unwrap_err(),
+            store.delete("a").await.unwrap_err(),
+        ];
+        for e in errs {
+            let msg = format!("{e:#} {e:?}");
+            assert!(msg.contains("s3 "), "{msg}");
+            for leak in ["AKIDSECRETID", "Signature", "X-Amz", "127.0.0.1:1/bucket"] {
+                assert!(!msg.contains(leak), "{leak} in {msg}");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn file_store_round_trip() {

@@ -22,7 +22,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
@@ -30,6 +30,8 @@ use tokio::sync::{broadcast, Notify};
 mod backups;
 use backups::{Backups, Schedule, Turn};
 mod probes;
+mod snapshots;
+use snapshots::SnapshotRec;
 
 /// What the API maps to statuses.
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +40,8 @@ pub enum MError {
     NotFound,
     #[error("backup {0} not found")]
     NoBackup(String),
+    #[error("snapshot {0} not found")]
+    NoSnapshot(String),
     #[error("invalid request: {0}")]
     Invalid(String),
     #[error("{0}")]
@@ -206,6 +210,22 @@ pub struct Record {
     pub pending: Option<api::SpecChange>,
     #[serde(default)]
     pub pending_since: Option<DateTime<Utc>>,
+    /// Its snapshots, oldest first (ADR 0031).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshots: Vec<SnapshotRec>,
+    /// The snapshot its disks are going back to, until the restore is done (ADR 0031).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restoring: Option<String>,
+    /// What the init said at the last boot (ADR 0027).
+    #[serde(default)]
+    pub init_version: String,
+    /// What ran the last boot (`Vmm::version`): a memory snapshot resumes only under it.
+    #[serde(default)]
+    pub vmm_version: String,
+    /// What a newer daemon wrote and this one does not know: kept as it is, so a rollback that
+    /// rewrites the record does not drop it (ADR 0027).
+    #[serde(flatten)]
+    pub rest: BTreeMap<String, serde_json::Value>,
 }
 
 impl Record {
@@ -230,6 +250,10 @@ impl Record {
     }
     pub fn data_dataset(&self) -> String {
         format!("m/{}/data", self.id)
+    }
+    /// The dataset of a disk in use: `root` or `data`.
+    pub fn disk_dataset(&self, disk: &str) -> String {
+        format!("m/{}/{disk}", self.id)
     }
     /// Whether its next start makes the root disk again: a new image pending, or one applied
     /// whose root disk is not made yet (ADR 0024).
@@ -471,8 +495,8 @@ pub fn new_id(prefix: &str) -> String {
 }
 
 struct Entry {
-    /// Serializes lifecycle operations on one machine.
-    lock: tokio::sync::Mutex<()>,
+    /// Serializes lifecycle operations on one machine; owned by a hand-over (ADR 0027).
+    lock: Arc<tokio::sync::Mutex<()>>,
     rec: Mutex<Record>,
     live: Mutex<Option<fc::Vm>>,
     /// The reason set before asking the guest to stop; `None` when it ends on its own.
@@ -481,6 +505,9 @@ struct Entry {
     changed: Notify,
     /// A use since the record was last written; read and written under `rec`'s lock.
     unsaved_use: AtomicBool,
+    /// Commands running in it for a caller, exec sessions included (ADR 0029): in use, it does
+    /// not go to sleep.
+    in_flight: AtomicUsize,
     /// Its usage since the tick last took it (ADR 0017); locked after `rec`, never before.
     meter: Mutex<Meter>,
     /// Bytes through its endpoints, added by the ingress as they pass.
@@ -491,6 +518,8 @@ struct Entry {
     events: Events,
     /// Held by each backup and deletion of its backups.
     backup_turn: Turn,
+    /// While a stop that released the lock is under way: by when it has settled (ADR 0031).
+    stop_deadline: Mutex<Option<tokio::time::Instant>>,
     /// What its probes found in the current run (ADR 0022); locked before `rec`, never after.
     probe: Mutex<probes::Run>,
     /// The task running its probes, while one runs.
@@ -500,17 +529,19 @@ struct Entry {
 impl Entry {
     fn new(rec: Record, events: Events) -> Arc<Self> {
         Arc::new(Self {
-            lock: tokio::sync::Mutex::new(()),
+            lock: Default::default(),
             rec: Mutex::new(rec),
             live: Mutex::new(None),
             stop_req: Mutex::new(None),
             changed: Notify::new(),
             unsaved_use: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
             meter: Mutex::new(Meter::new(Utc::now())),
             traffic: Arc::default(),
             disk_io: Arc::default(),
             events,
             backup_turn: Turn::default(),
+            stop_deadline: Mutex::new(None),
             probe: Mutex::default(),
             prober: Mutex::new(None),
         })
@@ -520,25 +551,90 @@ impl Entry {
         self.rec.lock().unwrap().clone()
     }
 
-    /// Its lock for a start, after its backup turn when that start makes the root disk again
-    /// (ADR 0024): a backup takes the turn then the lock, so this start does too, and no
-    /// backup sends a disk while it is replaced. Whether it will is read again under the
-    /// lock: a PATCH in between takes the turn on the next round.
+    /// Its backup turn, then its lock: what anything that replaces a disk holds, in the
+    /// order a backup takes them, so no backup sends a disk while it is replaced.
+    async fn lock_with_turn(
+        &self,
+    ) -> (
+        tokio::sync::OwnedMutexGuard<()>,
+        tokio::sync::MutexGuard<'_, ()>,
+    ) {
+        let turn = self.backup_turn.clone().lock_owned().await;
+        (turn, self.lock.lock().await)
+    }
+
+    /// Its lock for a start, with its backup turn when that start replaces a disk: a new
+    /// image's root disk (ADR 0024), or a restore to finish (ADR 0031). Whether it will is
+    /// read again under the lock: a change in between takes the turn on the next round.
     async fn lock_for_start(
         &self,
     ) -> (
         Option<tokio::sync::OwnedMutexGuard<()>>,
         tokio::sync::MutexGuard<'_, ()>,
     ) {
+        let swaps = |r: Record| r.remakes_root() || r.restoring.is_some();
         loop {
-            let turn = match self.snapshot().remakes_root() {
-                true => Some(self.backup_turn.clone().lock_owned().await),
-                false => None,
-            };
-            let guard = self.lock.lock().await;
-            if turn.is_some() || !self.snapshot().remakes_root() {
-                return (turn, guard);
+            if swaps(self.snapshot()) {
+                let (turn, guard) = self.lock_with_turn().await;
+                return (Some(turn), guard);
             }
+            let guard = self.lock.lock().await;
+            if !swaps(self.snapshot()) {
+                return (None, guard);
+            }
+        }
+    }
+
+    /// `lock_for_start` (with the turn always when `turn`, as a restore takes it), once a
+    /// stop under way (the sleeper's, a caller's) has settled: a start, a wake or a restore
+    /// arriving meanwhile goes on after it rather than failing on `stopping`. A stop that has
+    /// not settled by the deadline it set is the caller's to refuse.
+    async fn lock_once_stopped(
+        &self,
+        turn: bool,
+    ) -> (
+        Option<tokio::sync::OwnedMutexGuard<()>>,
+        tokio::sync::MutexGuard<'_, ()>,
+    ) {
+        loop {
+            let turns = match turn {
+                true => {
+                    let (t, g) = self.lock_with_turn().await;
+                    (Some(t), g)
+                }
+                false => self.lock_for_start().await,
+            };
+            let deadline = *self.stop_deadline.lock().unwrap();
+            let deadline = match deadline {
+                Some(d) if self.snapshot().state == state::STOPPING => d,
+                _ => return turns,
+            };
+            if tokio::time::Instant::now() > deadline {
+                return turns;
+            }
+            // Registered before the lock goes: the settle that follows wakes it.
+            let settled = self.changed.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            drop(turns);
+            let _ = tokio::time::timeout_at(deadline, settled).await;
+        }
+    }
+
+    /// Its lock, once no stop is under way: a stop holds the lock to begin, then leaves it to
+    /// the watcher, which settles the state under it once the guest has ended (ADR 0027's
+    /// hand-over waits for that).
+    async fn settled_lock(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        loop {
+            let guard = self.lock.clone().lock_owned().await;
+            if self.snapshot().state != state::STOPPING {
+                return guard;
+            }
+            let settled = self.changed.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            drop(guard);
+            settled.await;
         }
     }
 
@@ -585,6 +681,33 @@ impl Entry {
 
     fn note_locked(&self, r: &mut Record, ev: Ev) {
         r.version = self.events.emit(ev.of(&r.id, &r.tenant));
+    }
+}
+
+/// An open exec session (ADR 0029): the command's connection to the init, which ends the
+/// command when it closes, and the machine held in use.
+pub struct Session {
+    pub conn: Box<dyn guestc::Conn>,
+    pub machine: String,
+    pub in_use: InUse,
+}
+
+/// A machine in use while this lives: it does not go to sleep, and its last use is when this
+/// began and when it ended.
+pub struct InUse(Arc<Entry>);
+
+impl InUse {
+    fn new(e: Arc<Entry>) -> Self {
+        e.in_flight.fetch_add(1, Relaxed);
+        e.touch();
+        Self(e)
+    }
+}
+
+impl Drop for InUse {
+    fn drop(&mut self) {
+        self.0.touch();
+        self.0.in_flight.fetch_sub(1, Relaxed);
     }
 }
 
@@ -637,6 +760,8 @@ struct Inner {
     /// The pool's space as the tick last read it, and the conditions it decided (ADR 0021).
     pool: Mutex<Option<crate::zfs::Pool>>,
     conditions: Mutex<Conditions>,
+    /// This daemon's start and what it did with what the previous one left (ADR 0027).
+    started: Mutex<api::DaemonStart>,
 }
 
 #[derive(Clone)]
@@ -696,6 +821,7 @@ impl Manager {
                 binary: cfg.firecracker.clone(),
                 pci: cfg.pci,
                 console_max: (cfg.console_max_mb as u64) << 20,
+                version: fc::vmm_version(&cfg.firecracker)?,
             }),
             guest: Arc::new(guestc::Vsock),
             net: Arc::new(host::HostNet),
@@ -721,6 +847,7 @@ impl Manager {
             events,
             pool: Mutex::new(None),
             conditions: Mutex::new(Conditions::new(Utc::now())),
+            started: Mutex::new(api::DaemonStart::default()),
         });
         let m = Self { inner };
         m.load()?;
@@ -731,19 +858,27 @@ impl Manager {
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
-        let (adopted, stopped) = m.recover().await;
+        let (adopted, stopped, gone) = m.recover().await;
         let swept = m.sweep_orphans().await;
         let machines = m.inner.machines.lock().unwrap().len();
+        *m.inner.started.lock().unwrap() = api::DaemonStart {
+            at: Utc::now(),
+            adopted,
+            stopped,
+            gone,
+        };
         m.inner.events.emit(
             Ev::normal(
                 reason::HOST_STARTED,
-                format!("daemon started: {adopted} machines adopted, {stopped} marked stopped, {swept} leftovers swept"),
+                format!("daemon started: {adopted} machines adopted, {stopped} not handed over and {gone} gone marked stopped, {swept} leftovers swept"),
             )
             .data(json!({
-                "version": env!("CARGO_PKG_VERSION"), "machines": machines,
-                "adopted": adopted, "stopped": stopped, "swept": swept,
+                "version": api::VERSION, "vmm_version": m.inner.vmm.version(),
+                "machines": machines, "adopted": adopted, "stopped": stopped, "gone": gone,
+                "swept": swept,
             })),
         );
+        m.start_stopped_by_host();
         let sleeper = m.clone();
         tokio::spawn(async move { sleeper.sleeper().await });
         Ok(m)
@@ -808,7 +943,7 @@ impl Manager {
     /// killed: after a reboot the pid is someone else's) and marked stopped by the host, so
     /// the next use wakes them. Destroys cut short are resumed by the sleeper's tick. How many
     /// were adopted, and how many marked stopped.
-    async fn recover(&self) -> (usize, usize) {
+    async fn recover(&self) -> (usize, usize, usize) {
         let entries: Vec<Arc<Entry>> = self
             .inner
             .machines
@@ -817,7 +952,7 @@ impl Manager {
             .values()
             .cloned()
             .collect();
-        let (mut adopted, mut stopped) = (0, 0);
+        let (mut adopted, mut stopped, mut gone) = (0, 0, 0);
         for e in entries {
             let rec = e.snapshot();
             if !matches!(
@@ -830,22 +965,27 @@ impl Manager {
                 adopted += 1;
                 continue;
             }
-            stopped += 1;
-            if rec.pid > 0 && self.inner.vmm.machine_of(rec.pid).as_deref() == Some(&rec.id) {
-                self.inner.vmm.kill(rec.pid);
-            }
+            // Its process still there but not answering for it (not handed over), or gone: it
+            // exited while no daemon ran.
+            let alive =
+                rec.pid > 0 && self.inner.vmm.machine_of(rec.pid).as_deref() == Some(&rec.id);
+            let why = match alive {
+                true => {
+                    stopped += 1;
+                    self.inner.vmm.kill(rec.pid);
+                    "left running by a previous daemon that could not hand it over: stopped"
+                }
+                false => {
+                    gone += 1;
+                    "its process ended while no daemon ran: stopped"
+                }
+            };
             self.unplug(&rec.id, &rec.ip).await;
             e.set_state(state::STOPPED, |r| {
                 r.stopped_reason = stop::HOST.into();
                 r.pid = 0;
                 r.stopped_at = Some(Utc::now());
-                Some(
-                    Ev::warning(
-                        reason::STOPPED,
-                        "left running by a previous daemon that could not hand it over: stopped",
-                    )
-                    .data(json!({"reason": stop::HOST})),
-                )
+                Some(Ev::warning(reason::STOPPED, why).data(json!({"reason": stop::HOST})))
             });
             tracing::warn!(
                 machine = rec.id,
@@ -863,7 +1003,7 @@ impl Manager {
                 }
             });
         }
-        (adopted, stopped)
+        (adopted, stopped, gone)
     }
 
     /// Resources a previous daemon left with no record to own them: a crash between a resource
@@ -943,39 +1083,13 @@ impl Manager {
                 }
             }
         }
-        // A fork's snapshot on its source outlives a destroy that failed to free it.
-        if let Ok(snaps) = self.inner.zfs.snapshots_under("m").await {
-            for s in snaps {
-                if let Some((ds, snap)) = s.split_once('@') {
-                    if self.free_fork_snapshot(ds, snap).await {
-                        tracing::warn!(snapshot = s, "fork snapshot with no clone, destroyed");
-                        swept += 1;
-                    }
-                }
-            }
-        }
+        // A restore cut short goes on; a snapshot or a retired disk nothing needs goes: a
+        // fork's that outlived the fork, one taken when the daemon died before its record.
+        swept += self.tidy_at_start().await;
         if swept > 0 {
             tracing::info!(swept, "orphans swept at start");
         }
         swept
-    }
-
-    /// Removes a `fork-*` snapshot nothing clones any more: `true` when it did. Kept, with a
-    /// warning, when ZFS cannot say or refuses; the sweep at start tries again.
-    async fn free_fork_snapshot(&self, ds: &str, snap: &str) -> bool {
-        if !snap.starts_with("fork-") {
-            return false;
-        }
-        let z = &self.inner.zfs;
-        let freed = match z.clones(ds, snap).await {
-            Ok(clones) if clones.is_empty() => z.destroy_snapshot(ds, snap).await.map(|_| true),
-            Ok(_) => Ok(false),
-            Err(err) => Err(err),
-        };
-        freed.unwrap_or_else(|err| {
-            tracing::warn!(dataset = ds, snapshot = snap, err = %err, "fork snapshot kept");
-            false
-        })
     }
 
     /// Takes over a VMM a previous daemon left running (it crashed; a shutdown suspends
@@ -1044,6 +1158,11 @@ impl Manager {
         let Ok(_turn) = e.lock.try_lock() else {
             return Ok(());
         };
+        self.write_use(e)
+    }
+
+    /// [`Self::flush_use`]'s write, for a caller that holds the machine's lock.
+    fn write_use(&self, e: &Arc<Entry>) -> Result<()> {
         if !self.holds(e) {
             return Ok(());
         }
@@ -1068,10 +1187,10 @@ impl Manager {
             .is_some_and(|m| Arc::ptr_eq(m, e))
     }
 
-    /// Suspends every running machine (a stop when Firecracker refuses); the daemon is going
-    /// down, and after its restart each one resumes on first use in well under a second.
-    /// Stopped by the host, not idle: the next use wakes it whatever its sleep window says.
-    /// Then the usage up to now is written: the next daemon goes on from it.
+    /// Suspends every running machine (a stop when Firecracker refuses): the daemon is going
+    /// down, the host perhaps with it (a reboot). Stopped by the host, not idle: the next
+    /// daemon starts each one again (ADR 0027), resumed when nothing under it changed. Then
+    /// what the next daemon goes on from is written.
     pub async fn close(&self) {
         let entries: Vec<Arc<Entry>> = self
             .inner
@@ -1099,6 +1218,62 @@ impl Manager {
         for t in tasks {
             let _ = t.await;
         }
+        self.write_down().await;
+    }
+
+    /// Leaves every machine as it is for the next daemon to adopt (ADR 0027: an upgrade).
+    /// Takes each machine's lock first, once a stop under way has settled, the tenants'
+    /// machines before the gateways (a start holds its machine's, then its gateway's): a
+    /// transition under way ends before, and none begins while the caller holds what this
+    /// answers, until the process ends. Then the last
+    /// uses the records lack and the usage up to now are written, and nothing else.
+    pub async fn hand_over(&self) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+        let mut entries: Vec<Arc<Entry>> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        entries.sort_by_key(|e| e.rec.lock().unwrap().is_gateway());
+        let mut held = Vec::with_capacity(entries.len());
+        for e in &entries {
+            held.push(e.settled_lock().await);
+        }
+        let running = self.usage().1;
+        tracing::info!(running, "handing the machines over to the next daemon");
+        for e in entries.iter().filter(|e| e.unsaved_use.load(Relaxed)) {
+            if let Err(err) = self.write_use(e) {
+                tracing::warn!(machine = e.snapshot().id, err = %err, "last use not written");
+            }
+        }
+        self.write_usage().await;
+        held
+    }
+
+    /// What the next daemon goes on from: the last uses not on the records yet, and the
+    /// usage measured up to now.
+    async fn write_down(&self) {
+        let used: Vec<Arc<Entry>> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| e.unsaved_use.load(Relaxed))
+            .cloned()
+            .collect();
+        for e in used {
+            if let Err(err) = self.flush_use(&e) {
+                tracing::warn!(machine = e.snapshot().id, err = %err, "last use not written");
+            }
+        }
+        self.write_usage().await;
+    }
+
+    /// The usage measured up to now, written.
+    async fn write_usage(&self) {
         let now = Utc::now();
         self.measure(now).await;
         if let Err(err) = self
@@ -1109,6 +1284,39 @@ impl Manager {
             .write(&self.inner.store, now)
         {
             tracing::warn!(err = %err, "usage not written");
+        }
+    }
+
+    /// Starts again the machines the host stopped (the last shutdown suspended them, or a
+    /// previous daemon could not hand them over) whose sleep window has not run out: what ran
+    /// before the daemon went down runs once it is back, used or not (ADR 0027). Detached,
+    /// through the boot gate; a gateway is started by what needs it.
+    fn start_stopped_by_host(&self) {
+        let now = Utc::now();
+        let left: Vec<Arc<Entry>> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| {
+                let r = e.rec.lock().unwrap();
+                stopped_by_host(&r) && !idle_past(r.last_used_at, r.sleep_window(), now)
+            })
+            .cloned()
+            .collect();
+        for e in left {
+            let m = self.clone();
+            tokio::spawn(async move {
+                let _turns = e.lock_for_start().await;
+                // A call may have moved it meanwhile (a wake, a stop, a destroy).
+                if !stopped_by_host(&e.snapshot()) {
+                    return;
+                }
+                if let Err(err) = m.start_entry(&e, false).await {
+                    tracing::warn!(machine = e.snapshot().id, err = %err, "start again after the daemon's start");
+                }
+            });
         }
     }
 
@@ -1850,7 +2058,7 @@ impl Manager {
     fn view(&self, e: &Entry) -> api::Machine {
         let r = e.snapshot();
         let running = r.state == state::RUNNING;
-        let sleeps_at = if running {
+        let sleeps_at = if running && e.in_flight.load(Relaxed) == 0 {
             sleeps_at(r.last_used_at, r.sleep_window())
         } else {
             None
@@ -1903,6 +2111,8 @@ impl Manager {
             version: r.version,
             pending: r.pending.as_ref().map(|p| p.view()),
             pending_since: r.pending_since,
+            init_version: r.init_version.clone(),
+            vmm_version: r.vmm_version.clone(),
             host: String::new(),
         }
     }
@@ -1963,6 +2173,10 @@ impl Manager {
             .map(|t| t.rec.quota)
             .unwrap_or_default();
         let mut applied = None;
+        // A memory snapshot taken under another Firecracker or host kernel is not loaded
+        // (ADR 0027): this start is cold.
+        let vmm = self.inner.vmm.version();
+        let mut dropped = None;
         let over = {
             let machines = self.inner.machines.lock().unwrap();
             let size = {
@@ -1984,6 +2198,10 @@ impl Manager {
                         r.pid = 0;
                         r.restarting_at = None;
                         applied = apply_pending(r, image);
+                        if r.suspended && r.vmm_version != vmm {
+                            r.suspended = false;
+                            dropped = Some(r.vmm_version.clone());
+                        }
                         None
                     });
                     None
@@ -2002,11 +2220,19 @@ impl Manager {
             );
         }
         let resume = e.snapshot().suspended;
-        let ev = match resume {
-            true => Ev::normal(reason::STARTING, "resuming from its memory snapshot"),
-            false => Ev::normal(reason::STARTING, "booting"),
+        let ev = match (resume, dropped) {
+            (true, _) => Ev::normal(reason::STARTING, "resuming from its memory snapshot")
+                .data(json!({ "resume": true })),
+            (false, None) => {
+                Ev::normal(reason::STARTING, "booting").data(json!({ "resume": false }))
+            }
+            (false, Some(was)) => Ev::normal(
+                reason::STARTING,
+                format!("booting: its memory snapshot was taken under {was}, the host runs {vmm}"),
+            )
+            .data(json!({ "resume": false, "snapshot_vmm": was })),
         };
-        e.note(ev.data(json!({ "resume": resume })));
+        e.note(ev);
         Ok(())
     }
 
@@ -2156,6 +2382,16 @@ impl Manager {
     /// The host's conditions as the tick last decided them.
     pub fn conditions(&self) -> Vec<api::Condition> {
         self.inner.conditions.lock().unwrap().list()
+    }
+
+    /// This daemon's start (ADR 0027).
+    pub fn started(&self) -> api::DaemonStart {
+        *self.inner.started.lock().unwrap()
+    }
+
+    /// What a machine booted now runs under (ADR 0027).
+    pub fn vmm_version(&self) -> String {
+        self.inner.vmm.version()
     }
 
     /// The running machines' use over the tick's last window (ADR 0021), of one tenant or
@@ -2324,6 +2560,11 @@ impl Manager {
             version: 0,
             pending: None,
             pending_since: None,
+            init_version: String::new(),
+            vmm_version: String::new(),
+            rest: Default::default(),
+            snapshots: Vec::new(),
+            restoring: None,
         };
         self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
         let mut src: Option<Arc<Entry>> = None;
@@ -2546,7 +2787,20 @@ impl Manager {
                 .map(|f| f.copy.is_empty() || f.copy == "disk")
                 .unwrap_or(false);
         if copy_disks {
-            let s = src.unwrap().snapshot();
+            // Under the source's lock: a restore swaps its disks under that lock (ADR 0031),
+            // and a tidy removes a fork snapshot nothing clones yet.
+            let src = src.unwrap();
+            let _src_lock = src.lock.lock().await;
+            let s = src.snapshot();
+            if s.state == state::DESTROYING {
+                return Err(anyhow!("fork source {} is being destroyed", s.id));
+            }
+            if let Some(snap) = &s.restoring {
+                return Err(anyhow!(
+                    "fork source {}: a restore to {snap} is unfinished",
+                    s.id
+                ));
+            }
             let snap = format!("fork-{}", r.id);
             z.snapshot(&s.root_dataset(), &snap).await?;
             z.clone_snapshot(&s.root_dataset(), &snap, &r.root_dataset())
@@ -2606,7 +2860,7 @@ impl Manager {
 
     pub async fn start(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _turns = e.lock_for_start().await;
+        let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;
         if e.snapshot().state != state::RUNNING {
             self.start_entry(&e, true).await?;
@@ -2618,7 +2872,7 @@ impl Manager {
     /// one stopped on purpose stays stopped.
     pub async fn wake(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        let _turns = e.lock_for_start().await;
+        let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;
         let r = e.snapshot();
         match r.state.as_str() {
@@ -2700,10 +2954,21 @@ impl Manager {
             let _ = self.save(e);
             MError::Other(err)
         };
-        // A new image's root disk first (ADR 0024).
+        // A restore cut short first (ADR 0031), then a new image's root disk (ADR 0024).
+        let rec = e.snapshot();
+        // The machines they free a snapshot of are tidied apart, once the caller's lock
+        // is released (ADR 0031): never another machine's lock under this one's.
+        if rec.restoring.is_some() {
+            let parents = self
+                .finish_restore(e)
+                .await
+                .map_err(|err| fail(anyhow!("{err:#}")))?;
+            self.tidy_later(parents);
+        }
         let rec = e.snapshot();
         if rec.root_key != rec.image_key {
-            self.remake_root(e).await.map_err(fail)?;
+            let parents = self.remake_root(e).await.map_err(fail)?;
+            self.tidy_later(parents);
         }
         // What this boot runs: the record, the change it applied on it.
         let rec = e.snapshot();
@@ -2789,6 +3054,7 @@ impl Manager {
             r.suspended = false;
             if !live.resumed {
                 r.boots += 1;
+                r.vmm_version = self.inner.vmm.version();
             }
         }
         let _ = self.save(e);
@@ -2804,6 +3070,9 @@ impl Manager {
             // `exited` is sent once the console is fully written, so the tail is complete.
             _ = exited.changed() => Err("the machine exited during boot".to_string()),
         };
+        if let Ok(init) = &outcome {
+            e.rec.lock().unwrap().init_version = init.clone();
+        }
         if let Err(why) = outcome {
             // The image's fault: the process is ended here, under the lock, so the watcher
             // finds nothing to settle and no restart policy applies. The machine stays in
@@ -2862,11 +3131,13 @@ impl Manager {
         MError::BootFailed(Box::new(self.view(e)))
     }
 
-    /// Makes the root disk again from the record's image, before a boot (ADR 0024): forks of
-    /// the old one take its snapshots over and the fork snapshot it came from goes once
-    /// nothing clones it, as at a destroy; the data volume is not touched. The image comes
-    /// from the cache, pulled again when the host removed it since the start resolved it.
-    async fn remake_root(&self, e: &Entry) -> Result<()> {
+    /// Makes the root disk again from the record's image, before a boot (ADR 0024): the root
+    /// disk is swapped for a clone of the image (ADR 0031), the old one retired and kept only
+    /// while forks clone it; the snapshots' root halves and memory go, since the root disk
+    /// follows the image; the data volume is not touched. The image comes from the cache,
+    /// pulled again when the host removed it since the start resolved it. Returns the
+    /// machines whose snapshots the old root disk was cloned from, to tidy.
+    async fn remake_root(&self, e: &Entry) -> Result<Vec<String>> {
         let im = self.inner.images.ensure(&e.snapshot().image).await?;
         let base = im.dataset();
         {
@@ -2876,23 +3147,33 @@ impl Manager {
             r.image_config = im.config;
         }
         let r = e.snapshot();
-        let (z, root) = (&self.inner.zfs, r.root_dataset());
-        let mut origin = None;
-        if z.exists(&root).await.context("root disk")? {
-            z.release_clones(&root)
-                .await
-                .context("forks of the root disk")?;
-            origin = z.origin(&root).await.context("origin of the root disk")?;
-            z.destroy(&root).await.context("the previous root disk")?;
-        }
-        if let Some((ds, snap)) = origin {
-            self.free_fork_snapshot(&ds, &snap).await;
-        }
-        z.clone_snapshot(&base, image::SNAP, &root)
+        self.finish_swap(&r, "root")
             .await
             .context("the root disk")?;
-        e.rec.lock().unwrap().root_key = r.image_key;
-        self.save(e)
+        self.swap(&r, "root", &base, image::SNAP)
+            .await
+            .context("the root disk")?;
+        let dropped = {
+            let mut rec = e.rec.lock().unwrap();
+            rec.root_key = rec.image_key.clone();
+            let dropped: Vec<String> = rec
+                .snapshots
+                .iter()
+                .filter(|s| s.memory.is_some())
+                .map(|s| s.id.clone())
+                .collect();
+            for s in rec.snapshots.iter_mut() {
+                s.disks.retain(|d| d != "root");
+                s.memory = None;
+            }
+            rec.snapshots.retain(|s| !s.disks.is_empty());
+            dropped
+        };
+        for snap in dropped {
+            self.remove_memory(&r, &snap);
+        }
+        self.save(e)?;
+        Ok(self.tidy_or_warn(e).await)
     }
 
     /// The jail of a machine, when the daemon runs Firecracker under the jailer: one uid per
@@ -2953,18 +3234,30 @@ impl Manager {
             self.exited(e, code, oom, code != 0);
             return;
         }
-        let now = Utc::now();
-        e.set_state(state::STOPPED, |r| {
-            r.pid = 0;
-            r.stopped_at = Some(now);
-            let Some(why) = stop_req else {
+        let Some(why) = stop_req else {
+            e.set_state(state::STOPPED, |r| {
+                r.pid = 0;
+                r.stopped_at = Some(Utc::now());
                 r.stopped_reason = stop::USER.into();
-                return Some(
+                Some(
                     Ev::normal(reason::STOPPED, "stopped on request")
                         .data(json!({ "reason": stop::USER })),
-                );
-            };
-            r.stopped_reason = why.clone();
+                )
+            });
+            let _ = self.save(e);
+            return;
+        };
+        self.settle_stopped(e, &why);
+    }
+
+    /// A stop asked for `why` is done, its process gone: `stopped` with that reason, or
+    /// `suspended` when it kept a memory snapshot.
+    fn settle_stopped(&self, e: &Entry, why: &str) {
+        *e.stop_deadline.lock().unwrap() = None;
+        e.set_state(state::STOPPED, |r| {
+            r.pid = 0;
+            r.stopped_at = Some(Utc::now());
+            r.stopped_reason = why.into();
             tracing::info!(machine = r.id, reason = why, "machine stopped");
             let ev = match r.suspended {
                 true => Ev::normal(
@@ -3198,6 +3491,9 @@ impl Manager {
                 None => return Err(MError::NotRunning("no process".into())),
             };
             *e.stop_req.lock().unwrap() = Some(why.to_string());
+            // What this call waits at most below, the lock released: a start waits as long.
+            *e.stop_deadline.lock().unwrap() =
+                Some(tokio::time::Instant::now() + timeout + Duration::from_secs(20));
             e.set_state(state::STOPPING, |_| {
                 Some(
                     Ev::normal(reason::STOPPING, format!("stopping ({why})"))
@@ -3285,11 +3581,30 @@ impl Manager {
             Ok(e) => e,
             Err(_) => return Ok(()),
         };
-        let _guard = e.lock.lock().await;
-        if !self.inner.machines.lock().unwrap().contains_key(id) {
-            // A destroy that held the lock before this one finished the job.
-            return Ok(());
-        }
+        let others = {
+            let _guard = e.lock.lock().await;
+            if !self.inner.machines.lock().unwrap().contains_key(id) {
+                // A destroy that held the lock before this one finished the job.
+                return Ok(());
+            }
+            self.destroy_locked(&e, id, at).await?
+        };
+        // Its lock released, it is gone: the machines its disks touched are tidied, each
+        // under its own lock (ADR 0031).
+        self.tidy_machines(others).await;
+        Ok(())
+    }
+
+    /// The destroy's critical section. Returns the machines to tidy after it: those its disks
+    /// were cloned from, whose snapshot may be free now, and the forks promoted over it,
+    /// which hold its snapshots now.
+    async fn destroy_locked(
+        &self,
+        e: &Arc<Entry>,
+        id: &str,
+        at: Option<u64>,
+    ) -> Result<Vec<String>, MError> {
+        let e = e.clone();
         self.check_version(&e, at)?;
         // No event: the destroy is one step, and `destroyed` ends it.
         e.set_state(state::DESTROYING, |_| None);
@@ -3312,32 +3627,31 @@ impl Manager {
             .await
             .context("usage counters")?;
         // A fork is a clone of this machine's disks: it takes the snapshots over and lives on.
-        // What this machine was cloned from is read after that, since a promotion moves it:
-        // the fork snapshot it leaves behind goes once nothing clones it.
-        let mut origins = Vec::new();
-        for ds in [rec.root_dataset(), rec.data_dataset()] {
-            if self.inner.zfs.exists(&ds).await.context("disks")? {
-                self.inner
-                    .zfs
-                    .release_clones(&ds)
-                    .await
-                    .context("forks of the disks")?;
-                origins.extend(
-                    self.inner
-                        .zfs
-                        .origin(&ds)
-                        .await
-                        .context("origin of the disks")?,
-                );
+        // What this machine's disks were cloned from is read after that, since a promotion
+        // moves it: the snapshot it leaves behind goes once nothing clones it.
+        let z = &self.inner.zfs;
+        let mut others = Vec::new();
+        if z.exists(&rec.dataset()).await.context("disks")? {
+            let promoted = z
+                .release_clones(&rec.dataset())
+                .await
+                .context("forks of the disks")?;
+            others.extend(
+                promoted
+                    .iter()
+                    .filter_map(|c| snapshots::machine_of(c))
+                    .map(String::from),
+            );
+            for ds in z.volumes_under(&rec.dataset()).await.context("disks")? {
+                if let Some((origin, _)) = z.origin(&ds).await.context("origin of the disks")? {
+                    others.extend(
+                        snapshots::machine_of(&origin)
+                            .filter(|m| *m != id)
+                            .map(String::from),
+                    );
+                }
             }
-        }
-        self.inner
-            .zfs
-            .destroy(&rec.dataset())
-            .await
-            .context("disks")?;
-        for (ds, snap) in origins {
-            self.free_fork_snapshot(&ds, &snap).await;
+            z.destroy(&rec.dataset()).await.context("disks")?;
         }
         let _ = tokio::fs::remove_dir_all(self.inner.cfg.run_dir().join(id)).await;
         if let Some(j) = self.jail_for(&rec) {
@@ -3355,7 +3669,9 @@ impl Manager {
             .events
             .emit(Ev::normal(reason::DESTROYED, "destroyed").of(id, &rec.tenant));
         tracing::info!(machine = id, "machine destroyed");
-        Ok(())
+        others.sort();
+        others.dedup();
+        Ok(others)
     }
 
     // --- use and sleep ---
@@ -3534,7 +3850,9 @@ impl Manager {
                 .values()
                 .filter(|e| {
                     let r = e.rec.lock().unwrap();
-                    r.state == state::RUNNING && idle_past(r.last_used_at, r.sleep_window(), now)
+                    r.state == state::RUNNING
+                        && e.in_flight.load(Relaxed) == 0
+                        && idle_past(r.last_used_at, r.sleep_window(), now)
                 })
                 .cloned()
                 .collect();
@@ -3731,11 +4049,13 @@ impl Manager {
             }
             let r = e.snapshot();
             let jail = self.jail_for(&r).map(|j| j.base);
-            let files = fc::snapshot_files(
+            let mut files = fc::snapshot_files(
                 &self.inner.cfg.run_dir().join(&r.id),
                 jail.as_deref(),
                 &r.id,
-            );
+            )
+            .to_vec();
+            files.extend(self.memory_snapshot_files(&r));
             let memory_snapshot = usage::file_bytes(&files);
             let cgroup = self.inner.vmm.cgroup(&r.id).await;
             let (who, used) = {
@@ -3898,12 +4218,9 @@ impl Manager {
         detached(async move { m.wake(&id, None).await }).await
     }
 
+    /// Runs a command to its end (the JSON exec): a session whose stdin is the request's,
+    /// read to its exit (ADR 0029). The machine is in use while it runs.
     pub async fn exec(&self, id: &str, req: api::ExecRequest) -> Result<api::ExecResult, MError> {
-        self.inner
-            .stats
-            .execs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let sock = self.running_vsock(id, req.wake).await?;
         let timeout_ms = if req.timeout_ms == 0 {
             300_000
         } else {
@@ -3918,9 +4235,10 @@ impl Manager {
             timeout_ms,
             ..Default::default()
         };
+        let (mut conn, _in_use) = self.start_command(id, req.wake, greq).await?;
         let out = tokio::time::timeout(
             Duration::from_millis(timeout_ms + 10_000),
-            self.inner.guest.exec(&sock, greq),
+            guestc::collect(&mut conn),
         )
         .await
         .map_err(|_| MError::NotRunning("the command did not finish".into()))?
@@ -3928,16 +4246,101 @@ impl Manager {
             if err.downcast_ref::<guestc::Closed>().is_some() {
                 MError::NotRunning("the machine went down during the command".into())
             } else {
-                MError::Other(err)
+                MError::Other(self.init_named(id, err))
             }
         })?;
-        let _ = self.touch(id);
         Ok(api::ExecResult {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             exit_code: out.code,
             timed_out: out.timed_out,
         })
+    }
+
+    /// A guest call's error with the machine's init named when it did not know the op (ADR
+    /// 0027): what an exec, a put, a get, and any op added later go through.
+    fn init_named(&self, id: &str, err: anyhow::Error) -> anyhow::Error {
+        let init = self
+            .entry(id)
+            .map(|e| e.snapshot().init_version)
+            .unwrap_or_default();
+        guestc::with_init(err, &init)
+    }
+
+    /// Starts an exec session (ADR 0029): the command runs once the guest takes it, and the
+    /// machine is in use until the session is dropped. Wakes the machine as an exec does.
+    pub async fn open_session(
+        &self,
+        id: &str,
+        req: api::session::ExecSession,
+    ) -> Result<Session, MError> {
+        if req.cmd.is_empty() {
+            return Err(invalid("cmd is required"));
+        }
+        let program = req.cmd[0].clone();
+        let greq = guest::Request {
+            op: "exec".into(),
+            cmd: req.cmd,
+            env: req.env,
+            cwd: req.cwd,
+            timeout_ms: req.timeout_ms,
+            interactive: true,
+            tty: req.tty,
+            cols: req.cols,
+            rows: req.rows,
+            ..Default::default()
+        };
+        let (conn, in_use) = self.start_command(id, req.wake, greq).await?;
+        let (machine, tenant) = {
+            let r = in_use.0.rec.lock().unwrap();
+            (r.id.clone(), r.tenant.clone())
+        };
+        // A use, not a change: the machine's version does not move (ADR 0019).
+        let tty = if req.tty { " on a terminal" } else { "" };
+        self.inner.events.emit(
+            Ev::normal(reason::SESSION_OPENED, format!("{program}{tty}"))
+                .of(&machine, &tenant)
+                .data(json!({ "command": program, "tty": req.tty })),
+        );
+        Ok(Session {
+            conn,
+            machine,
+            in_use,
+        })
+    }
+
+    /// The one way a command starts in a machine for a caller: woken when asked, the guest's
+    /// connection once it took the command, and the machine in use while `InUse` lives.
+    async fn start_command(
+        &self,
+        id: &str,
+        wake: bool,
+        req: guest::Request,
+    ) -> Result<(Box<dyn guestc::Conn>, InUse), MError> {
+        self.inner
+            .stats
+            .execs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let e = self.own_entry(id)?;
+        let sock = self.running_vsock(id, wake).await?;
+        // An init older than sessions takes the request as a plain exec, its input and terminal
+        // ignored (ADR 0027): refused, the init named, before the guest is asked.
+        let init = e.snapshot().init_version;
+        if req.interactive && api::version::before(&init, api::version::SESSIONS) {
+            let old = guestc::UnknownOp {
+                op: "session".into(),
+                init,
+            };
+            return Err(MError::Conflict(old.to_string()));
+        }
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.inner.guest.session(&sock, req),
+        )
+        .await
+        .map_err(|_| MError::NotRunning("the guest did not take the command".into()))?
+        .map_err(MError::Other)?;
+        Ok((conn, InUse::new(e)))
     }
 
     pub async fn put_file(&self, id: &str, req: api::PutFileRequest) -> Result<(), MError> {
@@ -3955,7 +4358,8 @@ impl Manager {
             self.inner.guest.put(&sock, &req.path, mode, data),
         )
         .await
-        .map_err(|_| MError::NotRunning("timeout".into()))??;
+        .map_err(|_| MError::NotRunning("timeout".into()))?
+        .map_err(|err| self.init_named(id, err))?;
         let _ = self.touch(id);
         Ok(())
     }
@@ -3964,7 +4368,8 @@ impl Manager {
         let sock = self.running_vsock(id, false).await?;
         let data = tokio::time::timeout(Duration::from_secs(60), self.inner.guest.get(&sock, path))
             .await
-            .map_err(|_| MError::NotRunning("timeout".into()))??;
+            .map_err(|_| MError::NotRunning("timeout".into()))?
+            .map_err(|err| self.init_named(id, err))?;
         let _ = self.touch(id);
         Ok(data)
     }
@@ -4083,59 +4488,6 @@ impl Manager {
                 return;
             }
         }
-    }
-
-    // --- snapshots ---
-
-    /// Removes a snapshot `snapshot` made, from both disks. Missing is success; a snapshot
-    /// of the daemon's own (a fork's, a backup's) is not the caller's to remove.
-    pub async fn delete_snapshot(&self, id: &str, snap: &str) -> Result<(), MError> {
-        let e = self.own_entry(id)?;
-        let r = e.snapshot();
-        if !snap.starts_with("s_") || !api::valid_id(snap) {
-            return Err(MError::NotFound);
-        }
-        self.inner
-            .zfs
-            .destroy_snapshot(&r.root_dataset(), snap)
-            .await?;
-        if r.volume.is_some() {
-            self.inner
-                .zfs
-                .destroy_snapshot(&r.data_dataset(), snap)
-                .await?;
-        }
-        Ok(())
-    }
-
-    pub async fn snapshot(&self, id: &str) -> Result<api::Snapshot, MError> {
-        let e = self.own_entry(id)?;
-        let r = e.snapshot();
-        let snap = new_id("s");
-        self.inner.zfs.snapshot(&r.root_dataset(), &snap).await?;
-        if r.volume.is_some() {
-            self.inner.zfs.snapshot(&r.data_dataset(), &snap).await?;
-        }
-        Ok(api::Snapshot {
-            id: snap,
-            machine_id: id.to_string(),
-            created_at: Utc::now(),
-        })
-    }
-
-    pub async fn snapshots(&self, id: &str) -> Result<Vec<api::Snapshot>, MError> {
-        let e = self.own_entry(id)?;
-        let r = e.snapshot();
-        let names = self.inner.zfs.snapshots(&r.root_dataset()).await?;
-        Ok(names
-            .into_iter()
-            .filter(|n| n.starts_with("s_"))
-            .map(|n| api::Snapshot {
-                id: n,
-                machine_id: id.to_string(),
-                created_at: r.created_at,
-            })
-            .collect())
     }
 
     // --- endpoints ---
@@ -4673,6 +5025,11 @@ fn sleeps_at(last_used: Option<DateTime<Utc>>, window: Option<Duration>) -> Opti
     last_used?.checked_add_signed(w)
 }
 
+/// A tenant's machine the host stopped: what the daemon's start boots again.
+fn stopped_by_host(r: &Record) -> bool {
+    r.state == state::STOPPED && r.stopped_reason == stop::HOST && r.is_tenants()
+}
+
 /// Whether the sleep window has run out at `now`. A clock that went backwards (a last use
 /// in the future) is not idle.
 fn idle_past(
@@ -5048,6 +5405,11 @@ mod tests {
             version: 0,
             pending: None,
             pending_since: None,
+            init_version: String::new(),
+            vmm_version: String::new(),
+            rest: Default::default(),
+            snapshots: Vec::new(),
+            restoring: None,
         }
     }
 
@@ -5104,7 +5466,7 @@ mod tests {
         exec_codes: Mutex<HashMap<String, i32>>,
         /// How long an exec takes, and how many run at once now and at most.
         exec_takes: Mutex<Duration>,
-        execs_now: std::sync::atomic::AtomicUsize,
+        execs_now: Arc<std::sync::atomic::AtomicUsize>,
         execs_most: std::sync::atomic::AtomicUsize,
         /// The ports of an address a TCP probe finds closed; every other one accepts.
         closed: Mutex<std::collections::HashSet<(Ipv4Addr, u16)>>,
@@ -5112,6 +5474,10 @@ mod tests {
         http_codes: Mutex<HashMap<(Ipv4Addr, u16), u16>>,
         /// The size each machine last booted with, as Firecracker is given it.
         booted: Mutex<HashMap<String, api::Size>>,
+        /// What the VMM says it is (ADR 0027): another value is an upgraded Firecracker.
+        vmm_version: Mutex<String>,
+        /// The version the guests' inits answer with.
+        init_version: Mutex<String>,
         /// The limits each machine's disks have now: given at boot, changed live, and
         /// whether the volume was given them too.
         disks: Mutex<HashMap<String, (fc::DiskRate, bool)>>,
@@ -5140,6 +5506,8 @@ mod tests {
                 closed: Mutex::new(Default::default()),
                 http_codes: Mutex::new(HashMap::new()),
                 booted: Mutex::new(HashMap::new()),
+                vmm_version: Mutex::new("v1.17.0/test".into()),
+                init_version: Mutex::new("0.1.0+init".into()),
                 disks: Mutex::new(HashMap::new()),
                 refuse_disk_rate: AtomicBool::new(false),
             })
@@ -5327,6 +5695,7 @@ mod tests {
             let snapshot = b.dir.join("snap.mem");
             let resumed = b.resume && snapshot.exists();
             let _ = std::fs::remove_file(&snapshot);
+            let _ = std::fs::remove_file(b.dir.join("snap.state"));
             let pid = self
                 .next_pid
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -5397,7 +5766,13 @@ mod tests {
 
         async fn snapshot(&self, vm: &fc::Vm) -> Result<()> {
             self.record(format!("snapshot {}", vm.pid));
+            std::fs::write(vm.dir.join("snap.state"), b"state")?;
             std::fs::write(vm.dir.join("snap.mem"), b"memory")?;
+            Ok(())
+        }
+
+        async fn resume(&self, vm: &fc::Vm) -> Result<()> {
+            self.record(format!("resume {}", vm.pid));
             Ok(())
         }
 
@@ -5426,12 +5801,16 @@ mod tests {
         async fn cgroup(&self, id: &str) -> Option<fc::CgroupUse> {
             self.cgroups.lock().unwrap().get(id).copied()
         }
+
+        fn version(&self) -> String {
+            self.vmm_version.lock().unwrap().clone()
+        }
     }
 
     #[async_trait::async_trait]
     impl guestc::Guest for Mock {
         /// Answers as the real wait does: only at the deadline when the init is silent.
-        async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<()> {
+        async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<String> {
             let (pid, boots, exited) = self.proc_at(vsock)?;
             self.record(format!("wait_ready {pid}"));
             let answers = async {
@@ -5445,7 +5824,8 @@ mod tests {
             };
             tokio::time::timeout(timeout, answers)
                 .await
-                .map_err(|_| anyhow!("guest init did not answer within {timeout:?}"))
+                .map_err(|_| anyhow!("guest init did not answer within {timeout:?}"))?;
+            Ok(self.init_version.lock().unwrap().clone())
         }
 
         async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()> {
@@ -5457,33 +5837,64 @@ mod tests {
             Ok(())
         }
 
-        async fn exec(&self, vsock: &Path, req: guest::Request) -> Result<guestc::ExecOutput> {
+        /// The init, reduced. A command (not `interactive`): `ok` on stdout (`no` on stderr too
+        /// when it fails) after `exec_takes`, its code from `exec_codes`. A session: each
+        /// `stdin` frame back as stdout, a `resize` as a `COLSxROWS` line, its code at
+        /// `close_stdin`.
+        async fn session(
+            &self,
+            vsock: &Path,
+            req: guest::Request,
+        ) -> Result<Box<dyn guestc::Conn>> {
+            use std::sync::atomic::Ordering::SeqCst;
+            use tokio::io::AsyncWriteExt;
             let (pid, _, _) = self.proc_at(vsock)?;
             let cmd = req.cmd.join(" ");
-            self.record(format!("exec {pid} {cmd}"));
-            use std::sync::atomic::Ordering::SeqCst;
-            let now = self.execs_now.fetch_add(1, SeqCst) + 1;
-            self.execs_most.fetch_max(now, SeqCst);
-            let takes = *self.exec_takes.lock().unwrap();
-            tokio::time::sleep(takes).await;
-            self.execs_now.fetch_sub(1, SeqCst);
-            let code = self
-                .exec_codes
-                .lock()
-                .unwrap()
-                .get(&cmd)
-                .copied()
-                .unwrap_or(0);
-            Ok(guestc::ExecOutput {
-                stdout: b"ok\n".to_vec(),
-                stderr: if code == 0 {
-                    Vec::new()
-                } else {
-                    b"no\n".to_vec()
-                },
-                code,
-                timed_out: false,
-            })
+            let code = self.exec_codes.lock().unwrap().get(&cmd).copied();
+            let (ours, theirs) = tokio::io::duplex(1 << 16);
+            if !req.interactive {
+                self.record(format!("exec {pid} {cmd}"));
+                let now = self.execs_now.fetch_add(1, SeqCst) + 1;
+                self.execs_most.fetch_max(now, SeqCst);
+                let takes = *self.exec_takes.lock().unwrap();
+                let running = self.execs_now.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(takes).await;
+                    running.fetch_sub(1, SeqCst);
+                    let code = code.unwrap_or(0);
+                    let mut out = vec![guest::Response::chunk("stdout", b"ok\n".to_vec())];
+                    if code != 0 {
+                        out.push(guest::Response::chunk("stderr", b"no\n".to_vec()));
+                    }
+                    out.push(guest::Response::exit(code, false));
+                    let mut theirs = theirs;
+                    for r in out {
+                        let _ = theirs.write_all(&guest::encode_frame(&r).unwrap()).await;
+                    }
+                });
+                return Ok(Box::new(ours));
+            }
+            self.record(format!("session {pid} {cmd} tty={}", req.tty));
+            tokio::spawn(async move {
+                let (mut rd, mut wr) = tokio::io::split(theirs);
+                while let Ok(f) = guestc::read_frame::<_, guest::Request>(&mut rd).await {
+                    let out = match f.op.as_str() {
+                        "stdin" => guest::Response::chunk("stdout", f.data),
+                        "resize" => guest::Response::chunk(
+                            "stdout",
+                            format!("{}x{}\n", f.cols, f.rows).into_bytes(),
+                        ),
+                        "close_stdin" => guest::Response::exit(code.unwrap_or(0), false),
+                        _ => continue,
+                    };
+                    let last = out.kind == "exit";
+                    let frame = guest::encode_frame(&out).unwrap();
+                    if wr.write_all(&frame).await.is_err() || last {
+                        break;
+                    }
+                }
+            });
+            Ok(Box::new(ours))
         }
 
         async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()> {
@@ -5712,6 +6123,7 @@ mod tests {
                 events,
                 pool: Mutex::new(None),
                 conditions: Mutex::new(Conditions::new(Utc::now())),
+                started: Mutex::new(api::DaemonStart::default()),
             }),
         };
         fake.calls();
@@ -5764,7 +6176,7 @@ mod tests {
         }
 
         /// The disks of an added machine, on the fake pool.
-        async fn disks(&self, e: &Entry) {
+        pub(super) async fn disks(&self, e: &Entry) {
             let r = e.snapshot();
             let z = &self.pool.zfs;
             z.create(&r.root_dataset(), 1 << 20).await.unwrap();
@@ -5799,6 +6211,21 @@ mod tests {
                 .await
                 .unwrap();
             self.pool.calls();
+        }
+
+        /// Each stop takes this long on the host from now on.
+        pub(super) fn stops_take(&self, d: Duration) {
+            self.host.stops_take(d);
+        }
+
+        /// The host's Firecracker and kernel from now on (ADR 0027): another one is an upgrade.
+        pub(super) fn set_vmm_version(&self, v: &str) {
+            *self.host.vmm_version.lock().unwrap() = v.into();
+        }
+
+        /// The host's calls so far (boots, snapshots, kills), then forgets them.
+        pub(super) fn host_calls(&self) -> Vec<String> {
+            self.host.calls()
         }
 
         /// The machine's record as the store has it.
@@ -6671,6 +7098,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_wake_during_a_sleep_waits_for_the_stop_then_starts() {
+        // Found by the e2e suite: an exec waking a machine the sleeper was stopping got
+        // `bad_state: stopping`.
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("db")).await.unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.host.stops_take(Duration::from_millis(300));
+        let (m2, e2) = (h.m.clone(), e.clone());
+        let sleep = tokio::spawn(async move {
+            m2.stop_entry(&e2, stop::IDLE, Duration::from_secs(1), false, None)
+                .await
+                .unwrap()
+        });
+        while e.snapshot().state != state::STOPPING {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let woken = h.m.wake(&m.id, None).await.unwrap();
+        assert_eq!(woken.state, state::RUNNING);
+        sleep.await.unwrap();
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
+    }
+
+    #[tokio::test]
     async fn a_create_whose_caller_hangs_up_still_runs() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
@@ -7025,7 +7476,7 @@ mod tests {
 
     impl Harness {
         /// A fork of `src`, both disks, started.
-        async fn fork(&self, src: &str, name: &str) -> api::Machine {
+        pub(super) async fn fork(&self, src: &str, name: &str) -> api::Machine {
             let mut req = self.request(name);
             req.image = String::new();
             req.fork = Some(api::ForkSpec {
@@ -7035,7 +7486,7 @@ mod tests {
             self.m.create(req).await.unwrap()
         }
 
-        fn snapshot_exists(&self, ds: &str, snap: &str) -> bool {
+        pub(super) fn snapshot_exists(&self, ds: &str, snap: &str) -> bool {
             self.pool.dev().join(format!("byard/{ds}@{snap}")).exists()
         }
     }
@@ -7092,7 +7543,9 @@ mod tests {
         assert!(h.pool.dev().join(format!("byard/{fork_root}")).exists());
         assert!(!h.pool.dev().join(format!("byard/m/{}", src.id)).exists());
         assert!(!h.snapshot_exists(&fork_root, &snap));
-        assert_eq!(h.pool.zfs.origin(&fork_root).await.unwrap(), None);
+        // It took its source's origin over, as ZFS's promote does: the image's.
+        let origin = h.pool.zfs.origin(&fork_root).await.unwrap().unwrap();
+        assert!(origin.0.starts_with("images/"), "{origin:?}");
         assert_eq!(h.m.get(&fork.id).unwrap().state, state::RUNNING);
         h.m.destroy(&fork.id, None).await.unwrap();
     }
@@ -7115,41 +7568,22 @@ mod tests {
         )
         .await
         .unwrap();
+        // One the record names, one a daemon that died before the record left (ADR 0031).
         z.snapshot("m/m_kept/root", "s_mine").await.unwrap();
+        z.snapshot("m/m_kept/root", "s_lost").await.unwrap();
+        kept.rec.lock().unwrap().snapshots.push(SnapshotRec {
+            id: "s_mine".into(),
+            name: None,
+            created_at: Utc::now(),
+            disks: vec!["root".into()],
+            memory: None,
+            vmm_version: String::new(),
+        });
         h.m.sweep_orphans().await;
         assert!(!h.snapshot_exists("m/m_kept/root", "fork-gone"));
         assert!(h.snapshot_exists("m/m_kept/root", "fork-m_child"));
         assert!(h.snapshot_exists("m/m_kept/root", "s_mine"));
-    }
-
-    #[tokio::test]
-    async fn a_snapshot_is_removed_on_request() {
-        let h = harness("10.64.0.0/22", 4096).await;
-        h.tenant("t1");
-        let e = h.add("m_s", state::STOPPED, 256);
-        h.disks(&e).await;
-        let s = h.m.snapshot("m_s").await.unwrap();
-        assert!(h.snapshot_exists("m/m_s/root", &s.id));
-        assert!(h.snapshot_exists("m/m_s/data", &s.id));
-        assert_eq!(h.m.snapshots("m_s").await.unwrap()[0].id, s.id);
-        h.m.delete_snapshot("m_s", &s.id).await.unwrap();
-        assert!(!h.snapshot_exists("m/m_s/root", &s.id));
-        assert!(!h.snapshot_exists("m/m_s/data", &s.id));
-        assert!(h.m.snapshots("m_s").await.unwrap().is_empty());
-        // Gone already: success. The daemon's own snapshots are not the caller's.
-        h.m.delete_snapshot("m_s", &s.id).await.unwrap();
-        h.pool.zfs.snapshot("m/m_s/root", "fork-x").await.unwrap();
-        for bad in ["fork-x", "bk-20260101T000000Z", "s_../x", ""] {
-            assert!(
-                matches!(h.m.delete_snapshot("m_s", bad).await, Err(MError::NotFound)),
-                "{bad}"
-            );
-        }
-        assert!(h.snapshot_exists("m/m_s/root", "fork-x"));
-        assert!(matches!(
-            h.m.delete_snapshot("m_none", "s_1").await,
-            Err(MError::NotFound)
-        ));
+        assert!(!h.snapshot_exists("m/m_kept/root", "s_lost"));
     }
 
     // --- egress (ADR 0015) ---
@@ -8442,13 +8876,23 @@ mod tests {
         assert_eq!(Harness::boots_of(&calls, &gw), 1);
         assert_eq!(calls.last().unwrap(), "wait_port 10.64.1.2:8080");
         let key2 = h.stored(&gw).unwrap().image_key;
+        // The old root disk swapped out (ADR 0031), then gone: no fork holds it.
         let zfs = h.pool.calls();
+        let retired = format!("byard/m/{gw}/root.r_");
         assert!(
-            zfs.contains(&format!("destroy -r byard/m/{gw}/root")),
+            zfs.iter()
+                .any(|c| c.starts_with(&format!("rename byard/m/{gw}/root {retired}"))),
             "{zfs:?}"
         );
         assert!(
-            zfs.contains(&format!("clone byard/images/{key2}@base byard/m/{gw}/root")),
+            zfs.iter()
+                .any(|c| c.starts_with(&format!("destroy -r {retired}"))),
+            "{zfs:?}"
+        );
+        assert!(
+            zfs.contains(&format!(
+                "clone byard/images/{key2}@base byard/m/{gw}/root.next"
+            )),
             "{zfs:?}"
         );
         assert_eq!(h.m.get(&gw).unwrap().image, IMAGE2);
@@ -8543,9 +8987,14 @@ mod tests {
             gateway(h.m.exec(&gw, exec).await.map(|_| ())),
             gateway(h.m.put_file(&gw, put).await),
             gateway(h.m.get_file(&gw, "/etc/hostname").await.map(|_| ())),
-            gateway(h.m.snapshot(&gw).await.map(|_| ())),
+            gateway(
+                h.m.snapshot(&gw, api::SnapshotRequest::default())
+                    .await
+                    .map(|_| ()),
+            ),
             gateway(h.m.snapshots(&gw).await.map(|_| ())),
             gateway(h.m.delete_snapshot(&gw, "s_1").await),
+            gateway(h.m.restore_snapshot(&gw, "s_1", None).await.map(|_| ())),
             gateway(h.m.backup(&gw).await.map(|_| ())),
             gateway(
                 h.m.create_endpoint(
@@ -9507,8 +9956,25 @@ mod tests {
             r.pid = pid;
             None
         });
+        // Its process gone: it exited while no daemon ran.
         h.add("m_lost", state::STARTING, 256);
-        assert_eq!(h.m.recover().await, (1, 1));
+        // Its process there, but mid-start: not one to take over, ended (what fails an upgrade).
+        let cut = h.add("m_cut", state::STARTING, 256);
+        let cut_pid = h
+            .host
+            .left_running("m_cut", &h.m.inner.cfg.run_dir().join("m_cut"));
+        cut.set_state(state::STARTING, |r| {
+            r.pid = cut_pid;
+            None
+        });
+        h.host.calls();
+        assert_eq!(h.m.recover().await, (1, 1, 1));
+        assert!(h.host.calls().contains(&format!("kill {cut_pid}")));
+        let cut = h.events_of("m_cut").pop().unwrap();
+        assert_eq!(
+            cut.message,
+            "left running by a previous daemon that could not hand it over: stopped"
+        );
         let adopted = h.events_of("m_ours").pop().unwrap();
         assert_eq!(adopted.reason, "adopted");
         assert_eq!(adopted.data, Some(json!({"pid": pid})));
@@ -9519,6 +9985,10 @@ mod tests {
             ("stopped", "warning")
         );
         assert_eq!(lost.data, Some(json!({"reason": "host"})));
+        assert_eq!(
+            lost.message,
+            "its process ended while no daemon ran: stopped"
+        );
     }
 
     /// The next line of a streamed answer, as JSON, within five seconds.
@@ -9987,6 +10457,227 @@ mod tests {
         assert_eq!((r.restarts, r.recent_restarts), (5, 1));
     }
 
+    // --- exec sessions (ADR 0029) ---
+
+    fn session_req(cmd: &[&str], tty: bool) -> api::session::ExecSession {
+        api::session::ExecSession {
+            cmd: cmd.iter().map(|c| c.to_string()).collect(),
+            tty,
+            cols: 100,
+            rows: 30,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_streams_both_ways_and_is_an_event_not_a_version() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("sbx")).await.unwrap();
+        h.host.answers("sh", 3);
+        let mut s =
+            h.m.open_session(&m.id, session_req(&["sh"], true))
+                .await
+                .unwrap();
+        assert_eq!(s.machine, m.id);
+        let pid = h
+            .host
+            .calls()
+            .into_iter()
+            .find(|c| c.starts_with("session "))
+            .unwrap();
+        assert!(pid.ends_with(" sh tty=true"), "{pid}");
+        // Input goes in, the command's answer comes back, the code ends it.
+        for f in [
+            guest::Request {
+                op: "stdin".into(),
+                data: b"ls\n".to_vec(),
+                ..Default::default()
+            },
+            guest::Request {
+                op: "resize".into(),
+                cols: 120,
+                rows: 40,
+                ..Default::default()
+            },
+            guest::Request {
+                op: "close_stdin".into(),
+                ..Default::default()
+            },
+        ] {
+            guestc::write_request(&mut s.conn, &f).await.unwrap();
+        }
+        let out = guestc::collect(&mut s.conn).await.unwrap();
+        assert_eq!(out.stdout, b"ls\n120x40\n");
+        assert_eq!(out.code, 3);
+        // An event says someone came in; the machine's version did not move.
+        let ev =
+            h.m.inner
+                .events
+                .read(0, &events::Filter::default(), 1000)
+                .unwrap();
+        let opened = ev
+            .events
+            .iter()
+            .find(|e| e.reason == reason::SESSION_OPENED)
+            .unwrap();
+        assert_eq!(
+            (opened.machine_id.as_str(), opened.message.as_str()),
+            (m.id.as_str(), "sh on a terminal")
+        );
+        assert_eq!(opened.data, Some(json!({"command": "sh", "tty": true})));
+        assert_eq!(h.m.get(&m.id).unwrap().version, m.version);
+    }
+
+    #[tokio::test]
+    async fn an_open_session_keeps_the_machine_awake() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("sbx")).await.unwrap();
+        let s =
+            h.m.open_session(&m.id, session_req(&["sh"], true))
+                .await
+                .unwrap();
+        let long_ago = Some(Utc::now() - chrono::Duration::hours(1));
+        let idle = || h.m.entry(&m.id).unwrap().rec.lock().unwrap().last_used_at = long_ago;
+        idle();
+        assert_eq!(
+            h.m.get(&m.id).unwrap().sleeps_at,
+            None,
+            "no sleep while in use"
+        );
+        h.m.tick().await;
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
+        // The session's end is a use: the window starts again from it.
+        drop(s);
+        let after = h.m.get(&m.id).unwrap();
+        assert!(after.last_used_at > long_ago);
+        assert!(after.sleeps_at.is_some());
+        h.m.tick().await;
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
+        idle();
+        h.m.tick().await;
+        let slept = h.m.get(&m.id).unwrap();
+        assert_eq!(
+            (slept.state.as_str(), slept.stopped_reason.as_str()),
+            (state::STOPPED, stop::IDLE)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_in_flight_keeps_the_machine_awake() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("job")).await.unwrap();
+        *h.host.exec_takes.lock().unwrap() = Duration::from_secs(3);
+        let mgr = h.m.clone();
+        let id = m.id.clone();
+        let job = tokio::spawn(async move {
+            mgr.exec(
+                &id,
+                api::ExecRequest {
+                    cmd: vec!["migrate".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+        eventually("the command runs", || {
+            h.host.execs_now.load(std::sync::atomic::Ordering::SeqCst) == 1
+        })
+        .await;
+        // Its window ran out while it runs: it is in use, it does not sleep under it.
+        h.m.entry(&m.id).unwrap().rec.lock().unwrap().last_used_at =
+            Some(Utc::now() - chrono::Duration::hours(1));
+        h.m.tick().await;
+        assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
+        let out = job.await.unwrap().unwrap();
+        assert_eq!((out.exit_code, out.stdout.as_str()), (0, "ok\n"));
+        assert!(
+            h.m.get(&m.id).unwrap().last_used_at > Some(Utc::now() - chrono::Duration::minutes(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_wakes_a_sleeping_machine_or_says_why_not() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("sbx")).await.unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        let mut asleep = session_req(&["sh"], false);
+        asleep.wake = false;
+        match h.m.open_session(&m.id, asleep).await {
+            Err(MError::NotRunning(why)) => assert_eq!(why, "stopped (idle)"),
+            other => panic!("{:?}", other.err()),
+        }
+        assert!(matches!(
+            h.m.open_session(&m.id, session_req(&[], false)).await.err(),
+            Some(MError::Invalid(_))
+        ));
+        let s =
+            h.m.open_session(&m.id, session_req(&["sh"], false))
+                .await
+                .unwrap();
+        assert_eq!(h.m.get(&s.machine).unwrap().state, state::RUNNING);
+        assert!(matches!(
+            h.m.open_session("m_none", session_req(&["sh"], false))
+                .await
+                .err(),
+            Some(MError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_session_on_an_init_older_than_sessions_is_refused_naming_it() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        // An init older than the version report: it would run the command as a plain exec,
+        // no input, no terminal.
+        *h.host.init_version.lock().unwrap() = String::new();
+        let m = h.m.create(h.request("old")).await.unwrap();
+        h.host.calls();
+        match h.m.open_session(&m.id, session_req(&["sh"], true)).await {
+            Err(MError::Conflict(why)) => assert_eq!(
+                why,
+                "the machine's init (older than the version report) does not know `session`: it is older than this daemon; the machine gets this daemon's init when its root disk is made again (an image change)"
+            ),
+            other => panic!("{:?}", other.err()),
+        }
+        assert!(
+            !h.host.calls().iter().any(|c| c.starts_with("session ")),
+            "nothing reached the guest"
+        );
+        // An exec is the old way in: it runs.
+        let exec = api::ExecRequest {
+            cmd: vec!["true".into()],
+            wake: true,
+            ..Default::default()
+        };
+        let out = h.m.exec(&m.id, exec).await.unwrap();
+        assert_eq!(out.exit_code, 0);
+        // One of a release before sessions, named.
+        *h.host.init_version.lock().unwrap() = "0.0.9+a".into();
+        let m = h.m.create(h.request("older")).await.unwrap();
+        match h.m.open_session(&m.id, session_req(&["sh"], false)).await {
+            Err(MError::Conflict(why)) => assert!(
+                why.starts_with("the machine's init (0.0.9+a) does not know `session`"),
+                "{why}"
+            ),
+            other => panic!("{:?}", other.err()),
+        }
+        // This release's: a session.
+        *h.host.init_version.lock().unwrap() = api::VERSION.into();
+        let m = h.m.create(h.request("new")).await.unwrap();
+        assert!(h
+            .m
+            .open_session(&m.id, session_req(&["sh"], false))
+            .await
+            .is_ok());
+    }
+
     /// Moves the current run's start back, as if it had run that long.
     fn e_started_minutes_ago(h: &Harness, id: &str, minutes: i64) {
         let e = h.m.entry(id).unwrap();
@@ -10200,7 +10891,7 @@ mod tests {
             None
         });
         h.host.http("10.64.1.2", 8080, 503);
-        assert_eq!(h.m.recover().await, (1, 0));
+        assert_eq!(h.m.recover().await, (1, 0, 0));
         // Not ready until its readiness probe passes again: results are not kept.
         let m = h.m.get("m_ours").unwrap();
         assert_eq!((m.state.as_str(), m.ready), (state::RUNNING, false));
@@ -10988,9 +11679,13 @@ mod tests {
             std::fs::read(dev.join("byard/m/m_x/data")).unwrap(),
             b"the database"
         );
+        // Swapped (ADR 0031): the old root disk renamed aside, a clone of the image in its
+        // place.
         let calls = h.pool.calls();
         assert!(
-            calls.contains(&"destroy -r byard/m/m_x/root".to_string()),
+            calls
+                .iter()
+                .any(|c| c.starts_with("rename byard/m/m_x/root byard/m/m_x/root.r_")),
             "{calls:?}"
         );
         assert!(
@@ -10999,11 +11694,13 @@ mod tests {
                 .any(|c| c.contains("m_x/data") && !c.starts_with("list ")),
             "{calls:?}"
         );
-        // The fork took the old root's snapshot over and lives on, whole; the snapshot went
-        // once nothing cloned it.
-        assert!(dev.join("byard/m/m_child/root").exists());
-        assert!(!dev.join("byard/m/m_child/root.origin").exists());
-        assert!(!dev.join("byard/m/m_child/root@fork-m_child").exists());
+        // The fork lives on, whole, a clone of the old root disk, retired and kept for it.
+        let fork_origin = std::fs::read_to_string(dev.join("byard/m/m_child/root.origin")).unwrap();
+        assert!(
+            fork_origin.starts_with("byard/m/m_x/root.r_")
+                && fork_origin.trim().ends_with("@fork-m_child"),
+            "{fork_origin}"
+        );
         // The next start has nothing to make.
         h.m.stop("m_x", Duration::from_secs(1), false, None)
             .await
@@ -11275,5 +11972,208 @@ mod tests {
                 .await,
         );
         assert_eq!(empty, "image must not be empty");
+    }
+
+    // --- upgrades (ADR 0027) ---
+
+    #[tokio::test]
+    async fn a_boot_records_what_the_init_says_and_what_ran_it() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        assert_eq!(
+            (m.init_version.as_str(), m.vmm_version.as_str()),
+            ("0.1.0+init", "v1.17.0/test")
+        );
+        let r = h.stored(&m.id).unwrap();
+        assert_eq!(
+            (r.init_version.as_str(), r.vmm_version.as_str()),
+            ("0.1.0+init", "v1.17.0/test")
+        );
+        // A cold boot under another init and Firecracker records them.
+        h.m.stop(&m.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        *h.host.init_version.lock().unwrap() = "0.2.0+b".into();
+        *h.host.vmm_version.lock().unwrap() = "v1.18.0/test".into();
+        let m = h.m.start(&m.id, None).await.unwrap();
+        assert_eq!(
+            (m.init_version.as_str(), m.vmm_version.as_str()),
+            ("0.2.0+b", "v1.18.0/test")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_taken_under_another_vmm_is_not_resumed() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let suspend = || h.m.stop(&m.id, Duration::from_secs(1), true, None);
+        assert!(suspend().await.unwrap().suspended);
+        // Firecracker (or the host kernel) changed under the suspended machine: a cold boot.
+        *h.host.vmm_version.lock().unwrap() = "v1.18.0/test".into();
+        h.host.calls();
+        let back = h.m.start(&m.id, None).await.unwrap();
+        assert!(!back.suspended);
+        assert!(h.host.calls().iter().any(|c| c.ends_with(" resume=false")));
+        let starting = h
+            .events_of(&m.id)
+            .into_iter()
+            .rev()
+            .find(|e| e.reason == "starting")
+            .unwrap();
+        assert_eq!(
+            starting.message,
+            "booting: its memory snapshot was taken under v1.17.0/test, the host runs v1.18.0/test"
+        );
+        assert_eq!(
+            starting.data,
+            Some(json!({"resume": false, "snapshot_vmm": "v1.17.0/test"}))
+        );
+        assert_eq!(back.vmm_version, "v1.18.0/test");
+        // Taken and resumed under the same one: a resume.
+        assert!(suspend().await.unwrap().suspended);
+        h.host.calls();
+        h.m.start(&m.id, None).await.unwrap();
+        assert!(h.host.calls().iter().any(|c| c.ends_with(" resume=true")));
+        // A snapshot from before the versions were recorded says none: cold, once.
+        assert!(suspend().await.unwrap().suspended);
+        h.m.entry(&m.id)
+            .unwrap()
+            .rec
+            .lock()
+            .unwrap()
+            .vmm_version
+            .clear();
+        h.host.calls();
+        h.m.start(&m.id, None).await.unwrap();
+        assert!(h.host.calls().iter().any(|c| c.ends_with(" resume=false")));
+    }
+
+    #[tokio::test]
+    async fn a_hand_over_leaves_every_machine_running_for_the_next_daemon() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        h.m.touch(&m.id).unwrap();
+        h.host.calls();
+        let _held = h.m.hand_over().await;
+        assert_eq!(
+            h.host.calls(),
+            Vec::<String>::new(),
+            "nothing stopped, suspended or killed"
+        );
+        let r = h.stored(&m.id).unwrap();
+        assert_eq!(
+            (r.state.as_str(), r.pid),
+            (state::RUNNING, m_pid(&h, &m.id))
+        );
+        assert!(
+            r.last_used_at >= m.last_used_at,
+            "the last use is on the record"
+        );
+        // What the next daemon's start finds: the machine, still running, adopted.
+        assert_eq!(h.m.recover().await, (1, 0, 0));
+    }
+
+    #[test]
+    fn a_record_keeps_what_a_newer_daemon_wrote() {
+        // A record with a field this daemon does not know (a newer one's, before a rollback).
+        let mut v = serde_json::to_value(record()).unwrap();
+        v["checkpoint"] = json!({"name": "before-migration", "vmm": "v1.18.0/x"});
+        let r: Record = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(r.rest.keys().collect::<Vec<_>>(), ["checkpoint"]);
+        // Rewritten as it came: the field is kept, nothing else moves.
+        assert_eq!(serde_json::to_value(&r).unwrap(), v);
+        // A record of this daemon's carries nothing more.
+        let mine = serde_json::to_value(record()).unwrap();
+        let back: Record = serde_json::from_value(mine.clone()).unwrap();
+        assert!(back.rest.is_empty());
+        assert_eq!(serde_json::to_value(&back).unwrap(), mine);
+    }
+
+    #[tokio::test]
+    async fn a_hand_over_waits_for_a_transition_and_lets_none_begin() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let a = h.m.create(h.request("a")).await.unwrap();
+        let b = h.m.create(h.request("b")).await.unwrap();
+        // A stop under way when the hand-over is asked: its guest takes a while to end.
+        *h.host.stops.lock().unwrap() = Duration::from_millis(300);
+        let m = h.m.clone();
+        let id = a.id.clone();
+        let stop =
+            tokio::spawn(async move { m.stop(&id, Duration::from_secs(5), false, None).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let held = h.m.hand_over().await;
+        // The stop finished before the hand-over wrote anything: its record says so.
+        assert_eq!(h.stored(&a.id).unwrap().state, state::STOPPED);
+        assert!(stop.await.unwrap().is_ok());
+        // While the hand-over's locks are held, a stop asked now does not begin.
+        let m = h.m.clone();
+        let id = b.id.clone();
+        let late =
+            tokio::spawn(async move { m.stop(&id, Duration::from_secs(5), false, None).await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!late.is_finished());
+        assert_eq!(h.stored(&b.id).unwrap().state, state::RUNNING);
+        drop(held);
+        late.await.unwrap().unwrap();
+    }
+
+    /// The machine's process as the manager holds it.
+    fn m_pid(h: &Harness, id: &str) -> u32 {
+        h.m.entry(id).unwrap().snapshot().pid
+    }
+
+    #[tokio::test]
+    async fn a_daemons_start_boots_again_what_the_host_stopped() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let a = h.m.create(h.request("a")).await.unwrap();
+        let b = h.m.create(h.request("b")).await.unwrap();
+        let c = h.m.create(h.request("c")).await.unwrap();
+        let mut never = h.request("d");
+        never.sleep = "never".into();
+        let d = h.m.create(never).await.unwrap();
+        h.m.stop(&c.id, Duration::from_secs(1), false, None)
+            .await
+            .unwrap();
+        // The daemon's stop: every running machine suspended, stopped by the host.
+        h.m.close().await;
+        for id in [&a.id, &b.id, &d.id] {
+            let r = h.stored(id).unwrap();
+            assert_eq!(
+                (r.state.as_str(), r.stopped_reason.as_str(), r.suspended),
+                ("stopped", "host", true)
+            );
+        }
+        // b's window ran out while the host was down; d never sleeps.
+        let long_ago = Utc::now() - chrono::Duration::hours(2);
+        h.m.entry(&b.id).unwrap().rec.lock().unwrap().last_used_at = Some(long_ago);
+        h.m.entry(&d.id).unwrap().rec.lock().unwrap().last_used_at = Some(long_ago);
+        h.host.calls();
+        h.m.start_stopped_by_host();
+        let running = |id: &str| h.m.get(id).unwrap().state == state::RUNNING;
+        eventually("a and d running again", || running(&a.id) && running(&d.id)).await;
+        let calls = h.host.calls();
+        let boots: Vec<&String> = calls.iter().filter(|c| c.starts_with("boot ")).collect();
+        assert_eq!(boots.len(), 2, "{calls:?}");
+        assert!(
+            boots.iter().all(|c| c.ends_with(" resume=true")),
+            "{boots:?}"
+        );
+        // b sleeps on, wakeable; c was stopped on purpose.
+        let b = h.m.get(&b.id).unwrap();
+        assert_eq!(
+            (b.state.as_str(), b.stopped_reason.as_str()),
+            ("stopped", "host")
+        );
+        let c = h.m.get(&c.id).unwrap();
+        assert_eq!(
+            (c.state.as_str(), c.stopped_reason.as_str()),
+            ("stopped", "user")
+        );
+        assert!(h.m.wake(&b.id, None).await.unwrap().state == state::RUNNING);
     }
 }

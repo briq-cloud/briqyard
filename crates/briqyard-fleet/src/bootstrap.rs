@@ -15,6 +15,9 @@
 //! The host's API certificate (ADR 0020): once the script has succeeded and the SSH key is
 //! pinned, a second, strict connection reads its fingerprint (`briqyardd tls-fingerprint`),
 //! recorded with the state `bootstrapped`, before the host's first heartbeat can be taken.
+//!
+//! An upgrade (ADR 0027, `upgrade.rs`) runs the same script with another release: one way to
+//! install a host.
 
 use crate::registry::url_host;
 use crate::AppState;
@@ -27,6 +30,26 @@ const SCRIPT: &str = include_str!("../../../hack/bootstrap-host.sh");
 
 /// Prints the host's API certificate fingerprint, from the configuration the script wrote.
 const FINGERPRINT_CMD: &str = "briqyardd --config /etc/briqyard/config.yaml tls-fingerprint";
+
+/// Prints the installed daemon's version, `briqyardd 0.1.0+fdad892eeefa`.
+const VERSION_CMD: &str = "briqyardd --version";
+
+/// Where the project's releases are, `<RELEASES>/v<version>/briqyardd-linux-<arch>`.
+const RELEASES: &str = "https://github.com/briq-cloud/briqyard/releases/download";
+
+/// What `BRIQYARD_RELEASE` is for a release asked as a URL (as it is) or as a version of the
+/// project's releases (`0.2.0`, `v0.2.0`); None for anything else.
+pub fn release_url(release: &str) -> Option<String> {
+    if release.contains("://") {
+        return Some(release.trim_end_matches('/').to_string());
+    }
+    let v = release.strip_prefix('v').unwrap_or(release);
+    let ok = !v.is_empty()
+        && v.split('.').count() == 3
+        && v.split('.')
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    ok.then(|| format!("{RELEASES}/v{v}"))
+}
 
 /// An ordered host's API URL: TLS, with the certificate the bootstrap pins.
 pub fn host_url(ip: &str) -> String {
@@ -69,7 +92,8 @@ pub async fn run(st: Arc<AppState>) {
                 continue;
             }
             let ip = ssh_address(&h).to_string();
-            let outcome = match install(&st, &h, &ip).await {
+            let env = bootstrap_env(b, &st.cfg.own_url(), &h, &b.release);
+            let outcome = match install(&st, &h.id, &ip, &env).await {
                 Ok(note) => api_fingerprint(&st, &ip).await.map(|fp| (note, fp)),
                 Err(e) => Err(e),
             };
@@ -182,6 +206,31 @@ async fn api_fingerprint(st: &AppState, ip: &str) -> anyhow::Result<String> {
     parse_api_fingerprint(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// The daemon's version installed on the host, read over the pinned SSH key.
+pub async fn installed_version(st: &AppState, ip: &str) -> anyhow::Result<String> {
+    let b = &st.cfg.provisioner.bootstrap;
+    let known_hosts = st.cfg.state_dir.join("known_hosts");
+    let mut args = ssh_base(b, ip, &known_hosts, true);
+    args.push(VERSION_CMD.into());
+    let out = ssh(&args, b"", Duration::from_secs(60)).await?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    match (out.status.success(), parse_version(&text)) {
+        (true, Some(v)) => Ok(v),
+        _ => anyhow::bail!(
+            "read the installed version: ssh exited {}: {} {}",
+            out.status.code().unwrap_or(-1),
+            text.trim(),
+            tail(&out.stderr)
+        ),
+    }
+}
+
+/// The version `briqyardd --version` printed (`briqyardd 0.1.0+fdad892eeefa`).
+fn parse_version(out: &str) -> Option<String> {
+    let v = out.trim().strip_prefix("briqyardd ")?.trim();
+    (!v.is_empty() && !v.contains(char::is_whitespace)).then(|| v.to_string())
+}
+
 /// What `briqyardd tls-fingerprint` printed: the fingerprint, or nothing for a plain API.
 fn parse_api_fingerprint(out: &str) -> anyhow::Result<String> {
     if out.trim().is_empty() {
@@ -217,6 +266,15 @@ async fn ssh(
         .map_err(Into::into)
 }
 
+/// What a failed run said last: its stderr's last lines, else its stdout's (the bootstrap
+/// script says why it stops on its stdout).
+fn said(out: &std::process::Output) -> String {
+    match tail(&out.stderr) {
+        e if e.trim().is_empty() => tail(&out.stdout),
+        e => e,
+    }
+}
+
 /// The last three lines of an output, on one line.
 fn tail(b: &[u8]) -> String {
     let s = String::from_utf8_lossy(b);
@@ -224,11 +282,11 @@ fn tail(b: &[u8]) -> String {
     lines[lines.len().saturating_sub(3)..].join(" | ")
 }
 
-/// Runs the bootstrap script on the server through `ssh`, the script on stdin, the settings
-/// in its environment. Nothing of it is on a command line the server's other users could see.
-/// Answers the note for the host: when it was bootstrapped, and the host key pinned.
-async fn install(st: &AppState, h: &crate::registry::HostRec, ip: &str) -> anyhow::Result<String> {
-    let host = h.id.as_str();
+/// Runs the bootstrap script on the server through `ssh`, the script on stdin, `env` its
+/// settings ([`bootstrap_env`], [`upgrade_env`]). Nothing of it is on a command line the
+/// server's other users could see. Answers the note for the host: when it was bootstrapped,
+/// and the host key pinned.
+pub async fn install(st: &AppState, host: &str, ip: &str, env: &str) -> anyhow::Result<String> {
     let b = &st.cfg.provisioner.bootstrap;
     let script = if b.script.as_os_str().is_empty() {
         SCRIPT.to_string()
@@ -248,7 +306,7 @@ async fn install(st: &AppState, h: &crate::registry::HostRec, ip: &str) -> anyho
     } else {
         st.cfg.state_dir.join(format!("known_hosts.{ip}"))
     };
-    let args = ssh_args(b, &st.cfg.own_url(), ip, h, &known_hosts, pinned);
+    let args = ssh_args(b, ip, env, &known_hosts, pinned);
     let out = ssh(&args, script.as_bytes(), Duration::from_secs(1800)).await?;
     let seen = if pinned {
         None
@@ -270,7 +328,7 @@ async fn install(st: &AppState, h: &crate::registry::HostRec, ip: &str) -> anyho
         return Err(anyhow::anyhow!(
             "ssh exited {}: {}{seen}",
             out.status.code().unwrap_or(-1),
-            tail(&out.stderr)
+            said(&out)
         ));
     }
     tracing::info!(host, ip, out = tail(&out.stdout), "bootstrap output");
@@ -327,20 +385,17 @@ fn fingerprints(known_hosts: &str) -> Vec<String> {
         .collect()
 }
 
-/// The bootstrap's `ssh` arguments: [`ssh_base`], then the remote command, which puts the
-/// settings in the environment of `bash -s` (the script arrives on stdin). Every value is
-/// single-quoted for the remote shell. `own_url` is the fleet's own when `fleet_url` is not set.
-/// From the host's record: its API's URL (what it advertises), its token and its public ports,
-/// its own or else the fleet's (a record from before they were kept), so a re-run never takes
-/// another host's edge ports away, or adds them.
-fn ssh_args(
+/// A new host's settings for the script, every value single-quoted for the remote shell.
+/// `own_url` is the fleet's own when `fleet_url` is not set. From the host's record: its API's
+/// URL (what it advertises), its token and its public ports, its own or else the fleet's (a
+/// record from before they were kept), so a re-run never takes another host's edge ports away,
+/// or adds them.
+pub fn bootstrap_env(
     b: &crate::config::Bootstrap,
     own_url: &str,
-    ip: &str,
     h: &crate::registry::HostRec,
-    known_hosts: &Path,
-    pinned: bool,
-) -> Vec<String> {
+    release: &str,
+) -> String {
     let (url, token) = (h.url.as_str(), h.token.as_str());
     let public_tcp_ports = h.public_tcp_ports.as_deref().unwrap_or(&b.public_tcp_ports);
     let fleet_url = if b.fleet_url.is_empty() {
@@ -353,7 +408,7 @@ fn ssh_args(
         shq(fleet_url),
         shq(url),
         shq(token),
-        shq(&b.release),
+        shq(release),
         shq(&b.release_token),
         shq(&b.pool_device),
         shq(&b.allowed_clients.join(","))
@@ -367,6 +422,29 @@ fn ssh_args(
             shq(&ports.join(","))
         );
     }
+    env
+}
+
+/// An upgrade's settings (ADR 0027): the release, and the token that reads it when it is a
+/// private repository's. The host's configuration says the rest (its fleet, its token, its
+/// pool's key), and is not written again.
+pub fn upgrade_env(release: &str, release_token: &str) -> String {
+    let mut env = format!("BRIQYARD_RELEASE={}", shq(release));
+    if !release_token.is_empty() {
+        env += &format!(" BRIQYARD_RELEASE_TOKEN={}", shq(release_token));
+    }
+    env
+}
+
+/// The bootstrap's `ssh` arguments: [`ssh_base`], then the remote command, which puts `env`
+/// in the environment of `bash -s` (the script arrives on stdin).
+fn ssh_args(
+    b: &crate::config::Bootstrap,
+    ip: &str,
+    env: &str,
+    known_hosts: &Path,
+    pinned: bool,
+) -> Vec<String> {
     let mut args = ssh_base(b, ip, known_hosts, pinned);
     args.push(format!("env {env} bash -s"));
     args
@@ -438,14 +516,13 @@ mod tests {
             ..Default::default()
         };
         let kh = Path::new("/var/lib/briqyard-fleet/known_hosts");
-        let args = ssh_args(
+        let env = bootstrap_env(
             &b,
             "http://0.0.0.0:7430",
-            "10.0.0.9",
             &rec(&host_url("10.0.0.9"), "t0k'en", None),
-            kh,
-            true,
+            &b.release,
         );
+        let args = ssh_args(&b, "10.0.0.9", &env, kh, true);
         assert_eq!(
             args[5], "StrictHostKeyChecking=yes",
             "a pinned key is checked"
@@ -478,19 +555,30 @@ mod tests {
             fleet_url: "https://fleet.example".into(),
             ..Default::default()
         };
-        let args = ssh_args(
+        let env = bootstrap_env(
             &named,
             "https://0.0.0.0:7430",
-            "10.0.0.9",
             &rec("https://10.0.0.9:7420", "t", Some(vec![80, 443])),
-            kh,
-            false,
+            "",
         );
+        let args = ssh_args(&named, "10.0.0.9", &env, kh, false);
         assert_eq!(
             args[5], "StrictHostKeyChecking=accept-new",
             "a new host's key is taken, into the file given"
         );
         assert!(args[13].contains("FLEET_URL='https://fleet.example'"));
+        // An upgrade gives the release alone: the host's configuration says the rest, and the
+        // fleet's own address (`0.0.0.0` in development) is never offered as its fleet.
+        let args = ssh_args(&b, "10.0.0.9", &upgrade_env("file:///r/it's", ""), kh, true);
+        assert_eq!(
+            args[13],
+            "env BRIQYARD_RELEASE='file:///r/it'\\''s' bash -s"
+        );
+        // A private repository's release: its token too, and still nothing of the host's.
+        assert_eq!(
+            upgrade_env("https://github.com/o/r/releases/download/v1", "gh-t"),
+            "BRIQYARD_RELEASE='https://github.com/o/r/releases/download/v1' BRIQYARD_RELEASE_TOKEN='gh-t'"
+        );
     }
 
     #[test]
@@ -507,14 +595,13 @@ mod tests {
         let kh = Path::new("/kh");
         // SSH to the public address, the API on the vRack; the host's own ports, not the
         // fleet's default.
-        let args = ssh_args(
+        let env = bootstrap_env(
             &b,
             "https://fleet.example",
-            "51.68.1.2",
             &rec("https://10.42.0.11:7420", "t", Some(vec![80, 443])),
-            kh,
-            false,
+            "",
         );
+        let args = ssh_args(&b, "51.68.1.2", &env, kh, false);
         assert_eq!(args[12], "root@51.68.1.2");
         let remote = &args[13];
         assert!(
@@ -533,14 +620,13 @@ mod tests {
             "{remote}"
         );
         // A record from before hosts kept their ports: the fleet's.
-        let args = ssh_args(
+        let env = bootstrap_env(
             &b,
             "https://fleet.example",
-            "51.68.1.2",
             &rec("https://10.42.0.11:7420", "t", None),
-            kh,
-            false,
+            "",
         );
+        let args = ssh_args(&b, "51.68.1.2", &env, kh, false);
         assert!(
             args[13].ends_with(" PUBLIC_TCP_PORTS='7430,80' bash -s"),
             "{}",
@@ -548,14 +634,13 @@ mod tests {
         );
         // An API outside the private network (an ordered host on its public address): no
         // private settings, the public interface stays as it is.
-        let args = ssh_args(
+        let env = bootstrap_env(
             &b,
             "https://fleet.example",
-            "51.68.1.2",
             &rec("https://51.68.1.2:7420", "t", Some(vec![80, 443])),
-            kh,
-            false,
+            "",
         );
+        let args = ssh_args(&b, "51.68.1.2", &env, kh, false);
         assert!(!args[13].contains("PRIVATE_"), "{}", args[13]);
         assert_eq!(
             private_address(&b, "https://10.42.255.1:7420").as_deref(),
@@ -676,6 +761,67 @@ mod tests {
         assert_eq!(
             r.note,
             format!("bootstrapped at now; api certificate {fp} pinned")
+        );
+    }
+
+    #[test]
+    fn a_release_is_a_url_or_a_version() {
+        assert_eq!(
+            release_url("https://example.test/r/v0.2.0/").as_deref(),
+            Some("https://example.test/r/v0.2.0")
+        );
+        assert_eq!(
+            release_url("file:///var/lib/briqyard-fleet/release").as_deref(),
+            Some("file:///var/lib/briqyard-fleet/release")
+        );
+        let v = "https://github.com/briq-cloud/briqyard/releases/download/v0.2.0";
+        assert_eq!(release_url("0.2.0").as_deref(), Some(v));
+        assert_eq!(release_url("v0.2.0").as_deref(), Some(v));
+        for bad in [
+            "",
+            "v",
+            "0.2",
+            "latest",
+            "0.2.0; rm -rf /",
+            "0..1",
+            "1.2.3.4",
+        ] {
+            assert_eq!(release_url(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_installed_version_is_read_from_the_daemon() {
+        assert_eq!(
+            parse_version("briqyardd 0.1.0+fdad892eeefa\n").as_deref(),
+            Some("0.1.0+fdad892eeefa")
+        );
+        assert_eq!(parse_version("briqyard-fleet 0.1.0\n"), None);
+        assert_eq!(parse_version("briqyardd \n"), None);
+        assert_eq!(parse_version("bash: briqyardd: command not found"), None);
+        let b = crate::config::Bootstrap::default();
+        let kh = Path::new("/var/lib/briqyard-fleet/known_hosts");
+        let mut args = ssh_base(&b, "10.0.0.9", kh, true);
+        args.push(VERSION_CMD.into());
+        assert_eq!(args[5], "StrictHostKeyChecking=yes");
+        assert_eq!(args[13], "briqyardd --version");
+    }
+
+    #[test]
+    fn a_failed_run_says_its_stderr_else_its_stdout() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |stdout: &[u8], stderr: &[u8]| std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        };
+        assert_eq!(
+            said(&out(b"== binaries\n   refused\n", b"ssh: oops\n")),
+            "ssh: oops"
+        );
+        assert_eq!(
+            said(&out(b"== binaries\n   refused\n", b"")),
+            "== binaries |    refused"
         );
     }
 

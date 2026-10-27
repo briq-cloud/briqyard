@@ -386,6 +386,16 @@ pub fn snapshot_files(dir: &Path, jail_base: Option<&Path>, id: &str) -> [PathBu
     ["snap.state", "snap.mem"].map(|n| outside_path(root.as_deref(), dir, n))
 }
 
+/// Where a machine's snapshots with memory are kept (ADR 0031): beside its jail's root, so on
+/// the pool and out of the jailer's reach, or in its run dir without the jailer. A file there
+/// is moved from, and linked back to, `snapshot_files`: one filesystem.
+pub fn memory_dir(dir: &Path, jail_base: Option<&Path>, id: &str) -> PathBuf {
+    match jail_base {
+        Some(b) => b.join("firecracker").join(fc_id(id)).join("snapshots"),
+        None => dir.join("snapshots"),
+    }
+}
+
 /// The jailer's command line for a machine: what to run, as whom, where, with what limits.
 fn jailer_args(j: &Jail, id: &str, binary: &Path) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec![
@@ -753,6 +763,9 @@ pub trait Vmm: Send + Sync {
     /// next boot to resume. An error means the VMM refused and the machine runs on.
     async fn snapshot(&self, vm: &Vm) -> Result<()>;
 
+    /// Lets a machine `snapshot` paused run on.
+    async fn resume(&self, vm: &Vm) -> Result<()>;
+
     /// SIGKILL to the process and to its group.
     fn kill(&self, pid: u32);
 
@@ -764,6 +777,10 @@ pub trait Vmm: Send + Sync {
 
     /// What the machine's cgroup says; none without one (not jailed, or never booted).
     async fn cgroup(&self, id: &str) -> Option<CgroupUse>;
+
+    /// What a machine booted now runs under: the VMM's version and the host kernel's release
+    /// (ADR 0027). A memory snapshot resumes only under the one it was taken under.
+    fn version(&self) -> String;
 }
 
 /// The Firecracker on this host.
@@ -773,6 +790,33 @@ pub struct Firecracker {
     pub pci: bool,
     /// A console past this size is rotated while the machine runs (ADR 0021).
     pub console_max: u64,
+    /// [`vmm_version`] of `binary`, read once at the daemon's start.
+    pub version: String,
+}
+
+/// `<Firecracker's version>/<the host kernel's release>`, `v1.17.0/6.8.0-45-generic`: what a
+/// memory snapshot is tied to. Firecracker promises no snapshot across its versions, and
+/// calls one across host kernels unstable (ADR 0027).
+pub fn vmm_version(binary: &Path) -> Result<String> {
+    let out = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("{} --version", binary.display()))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    version_of(&text, &kernel)
+        .ok_or_else(|| anyhow!("{} --version said {text:?}", binary.display()))
+}
+
+/// The version on `firecracker --version`'s first line (`Firecracker v1.17.0`), and the
+/// kernel's release.
+fn version_of(firecracker: &str, kernel: &str) -> Option<String> {
+    let v = firecracker
+        .lines()
+        .next()?
+        .trim()
+        .strip_prefix("Firecracker ")?;
+    (!v.is_empty()).then(|| format!("{v}/{}", kernel.trim()))
 }
 
 #[async_trait]
@@ -965,6 +1009,10 @@ impl Vmm for Firecracker {
         Ok(())
     }
 
+    async fn resume(&self, vm: &Vm) -> Result<()> {
+        Client::new(&vm.api).resume().await.context("resume")
+    }
+
     fn kill(&self, pid: u32) {
         unsafe {
             libc::kill(-(pid as i32), libc::SIGKILL);
@@ -974,6 +1022,10 @@ impl Vmm for Firecracker {
 
     fn machine_of(&self, pid: u32) -> Option<String> {
         machine_of(pid)
+    }
+
+    fn version(&self) -> String {
+        self.version.clone()
     }
 
     /// Read from `/proc`: what a sweep compares to the records.
@@ -1071,7 +1123,7 @@ fn listen_exit(
             _ = done.wait_for(|d| *d) => None,
         };
         if let Some((mut s, _)) = accepted {
-            if let Ok(report) = crate::guestc::read_frame::<guest::ExitReport>(&mut s).await {
+            if let Ok(report) = crate::guestc::read_frame::<_, guest::ExitReport>(&mut s).await {
                 let _ = tx.send(Some(report));
             }
         }
@@ -1137,6 +1189,18 @@ async fn stamp<R: tokio::io::AsyncRead + Unpin>(
 mod tests {
     use super::*;
     use tokio::net::UnixListener;
+
+    #[test]
+    fn the_vmm_version_is_firecrackers_and_the_kernels() {
+        let out = "Firecracker v1.17.0\n\nSupported snapshot data format versions: v8.0.0\n";
+        assert_eq!(
+            version_of(out, "6.8.0-45-generic\n"),
+            Some("v1.17.0/6.8.0-45-generic".into())
+        );
+        assert_eq!(version_of("jailer v1.17.0\n", "6.8.0"), None);
+        assert_eq!(version_of("", "6.8.0"), None);
+        assert_eq!(version_of("Firecracker \n", "6.8.0"), None);
+    }
 
     /// A stand-in for Firecracker's API socket: answers each connection with the next canned
     /// response and hands back the requests it read, in order.
@@ -1538,6 +1602,12 @@ mod tests {
         assert_eq!(
             snapshot_files(dir, Some(base), "m_abc123"),
             [root.join("snap.state"), root.join("snap.mem")]
+        );
+        // Snapshots with memory beside the chroot, out of the jailer's cleaning (ADR 0031).
+        assert_eq!(memory_dir(dir, None, "m_abc123"), dir.join("snapshots"));
+        assert_eq!(
+            memory_dir(dir, Some(base), "m_abc123"),
+            root.parent().unwrap().join("snapshots")
         );
         assert_eq!(
             paths(dir),
