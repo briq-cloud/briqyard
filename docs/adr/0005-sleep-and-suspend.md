@@ -4,7 +4,7 @@ Date: 2026-10-19 · Status: accepted; amended by ADR 0027 (a stop's machines are
 
 ## Context
 
-briq's product rule (monorepo ADR 0009): one `sleep` window, use is an agent call or router traffic, a sleeping briq keeps its disk and costs nothing, the next use wakes it. The runtime has to make that cheap enough that a wake feels like nothing.
+The control plane's rule: one `sleep` window, use is an API call or ingress traffic, a sleeping machine keeps its disk and frees its compute, the next use wakes it. The runtime has to make that cheap enough that a wake feels like nothing.
 
 ## Decisions
 
@@ -20,6 +20,6 @@ briq's product rule (monorepo ADR 0009): one `sleep` window, use is an agent cal
 
 ## Consequences
 
-- A suspend costs the machine's memory in disk, today on the daemon's data directory (review finding C3: move it to the pool).
+- A suspend costs the machine's memory in disk, on the pool (ADR 0014).
 - The snapshot ties the machine to the host's Firecracker and CPU: it is never sent anywhere.
 - Firecracker's VMClock (1.15) tells the guest it was restored; clocks and random numbers after a resume are the guest's problem, as on every platform.

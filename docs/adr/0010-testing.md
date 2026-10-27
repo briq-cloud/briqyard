@@ -20,6 +20,6 @@ The daemon needs Linux, KVM, ZFS and root. Most of its logic does not. Bugs must
 
 ## Consequences
 
-- `api.rs` is covered by the e2e suite, not by unit tests. The manager's transitions are unit-tested on the mock host since 2026-10-20 (review finding D4); the coverage number is measured in the VM.
+- `api.rs` is covered by the e2e suite, not by unit tests. The manager's transitions are unit-tested on the mock host since 2026-10-20; the coverage number is measured in the VM.
 - Timings on the Mac are not a benchmark: nested virtualization, 6 vCPUs, 24 guests saturate it.
-- The TypeScript provider parses every daemon answer through zod schemas and a fixtures file of real answers (review finding D3); the live contract check is `apps/api/scripts/briqyard-spike.ts` against a daemon.
+- The TypeScript provider parses every daemon answer through zod schemas and a fixtures file of real answers; the live contract check is a script in briq's repository, run against a daemon.

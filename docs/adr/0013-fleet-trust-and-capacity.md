@@ -4,7 +4,7 @@ Date: 2026-10-20 · Status: accepted; amended by ADR 0027 (`draining` takes noth
 
 ## Context
 
-Review findings B12, B13, B14, C6, C7 (`../review-2026-10-20.md`). The fleet took any registration that carried a shared `host_token`: one compromised host could register any URL under any id and receive every tenant's requests, env secrets included. The bootstrap connected to a freshly delivered address with `StrictHostKeyChecking=accept-new` and nothing recorded. Placement read `used` from the last heartbeat, so a burst of creates landed on one host, and a tenant pinned to a host that then answered `capacity` was stuck there, with no way out short of forgetting the host. Registry writes failed silently.
+A review (2026-10-20) found five gaps. The fleet took any registration that carried a shared `host_token`: one compromised host could register any URL under any id and receive every tenant's requests, env secrets included. The bootstrap connected to a freshly delivered address with `StrictHostKeyChecking=accept-new` and nothing recorded. Placement read `used` from the last heartbeat, so a burst of creates landed on one host, and a tenant pinned to a host that then answered `capacity` was stuck there, with no way out short of forgetting the host. Registry writes failed silently.
 
 ## Decisions
 

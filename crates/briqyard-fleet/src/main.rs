@@ -1574,8 +1574,8 @@ async fn all_backups(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
     Json(all).into_response()
 }
 
-/// Usage of every host, never partial (ADR 0017): a usage report missing a host is a bill
-/// missing a host. Every listed host is asked, the query as it came (the hosts check it), and
+/// Usage of every host, never partial (ADR 0017): a usage report missing a host undercounts.
+/// Every listed host is asked, the query as it came (the hosts check it), and
 /// each bucket says which host measured it.
 async fn usage(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
     let hosts = st.reg.lock().unwrap().listed();
