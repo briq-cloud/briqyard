@@ -1,6 +1,6 @@
 # briqyard
 
-The runtime under briq: any OCI image in a Firecracker microVM on servers we own. One daemon per host (`briqyardd`), a guest init (`briqyard-init`), a controller across hosts (`briqyard-fleet`), a CLI (`briqyard`). Rust workspace, AGPL-3.0, private until launch.
+The runtime under briq: any OCI image in a Firecracker microVM on servers we own. One daemon per host (`briqyardd`), a guest init (`briqyard-init`), a controller across hosts (`briqyard-fleet`), a CLI (`briqyard`). Rust workspace, AGPL-3.0.
 
 Most work here is done by agents. Everything an agent needs is in the repo: this file says how to work, `docs/` says what and why, `docs/adr/` says what was decided and why.
 
@@ -11,8 +11,6 @@ Most work here is done by agents. Everything an agent needs is in the repo: this
 - `docs/OPERATIONS.md`: install, config fields, upgrades, what to watch.
 - `docs/DEVELOPMENT.md`: the dev loop on a Mac (Lima VMs `fc` and `fc2`) and on Linux.
 - `docs/KUBERNETES-MAP.md`: briqyard as the Kubernetes of Firecracker: every Kubernetes feature, its briqyard equivalent, the gap, and whose scope (would kube provide it?).
-- `docs/ROLLOVER.md`: what briq needs to run on briqyard alone, with the briq/briqyard split.
-- `docs/review-2026-10-20.md`: open findings from the last review. Fix from the top; delete a finding when it is fixed.
 
 ## Layout
 
@@ -51,18 +49,18 @@ docs/                    architecture, operations, development, mesh design, adr
 - The API stays briq-shaped (tenant, name, metadata `briq_id`); a new field gets its OpenAPI entry and its CLI column in the same change.
 - Errors carry what failed and what was being done. The daemon logs one JSON line per event, nothing else on stdout. Never log a token or a secret.
 - Lima and Mac specifics live only in `hack/config.dev.yaml`, `hack/vm.sh` and `docs/DEVELOPMENT.md`.
-- **briqyard is briq's only runtime.** Nothing here exists to match another platform's limitation or to keep a workaround for one working; when briq's control plane carries such a workaround, briqyard offers the native primitive and the control plane drops it.
-- **Never name a competitor** in code, comments, docs, ADRs, commit messages, PR titles or PR bodies. Describe the technique or the number instead of who does it. Open-source components (Firecracker, ZFS, Cloud Hypervisor, Kubernetes as the reference model) and suppliers where the code integrates them (OVH, Scaleway, Hetzner) are not competitors.
+- **Native primitives, not another platform's workarounds.** Nothing here exists to match another platform's limitation or to keep a workaround for one working; when the control plane above carries such a workaround, briqyard offers the native primitive and the control plane drops it.
+- **This repo is public: no strategy, marketing, competitor names or business internals** in files, comments, commit messages, PR titles or PR bodies. No pricing, plans, billing or cost decisions, rollout plans, or another platform named as a comparison: describe the technique or the number instead of who does it. No personal paths or private locations. Open-source components (Firecracker, ZFS, Cloud Hypervisor, Kubernetes as the reference model) and the hosting providers a provisioner integrates (OVH, Scaleway, Hetzner) may be named.
 
 ## Git
 
 - **Every change goes through a PR.** Never commit or push to `main`. One branch per task (`feat/…`, `fix/…`, `docs/…`) in its own worktree: `git worktree add ../briqyard-<task> -b <branch> origin/main`. This checkout stays on `main`.
 - A PR body says what was built, the checks with their numbers (unit, clippy, e2e, fleet suites), the choices to review, and its merge order when it depends on another PR. A draft while still pushing.
-- An advisor agent (Fable) reviews every PR and approves before a merge; the founder delegated the review. Its findings are fixed on the branch and checked again. Merge with a merge commit once CI is green; a PR that conflicts with one merged before it is updated on its own branch, its checks run again.
+- A reviewer approves every PR before a merge. Its findings are fixed on the branch and checked again. Merge with a merge commit once CI is green; a PR that conflicts with one merged before it is updated on its own branch, its checks run again.
 - Delete the worktree and the branch once merged.
-- The monorepo side (`BriqyardProvider`, PR up-lab/briq#250) lives in `/Users/uplab/projects/briq-briqyard-provider` and follows that repo's `CLAUDE.md`.
+- The control plane's adapter for briqyard (`BriqyardProvider`) lives in briq's own repository and follows that repo's rules.
 - Never commit `target/`, `bin/`, `.env`, a token or a key.
 
 ## Hand-off
 
-At the end of a session: the ADRs for what was decided, the review file trimmed to what is still open, the suite counts and the coverage number in `docs/`, and a short note in the commit message of what is next. The next agent starts from the repo alone.
+At the end of a session: the ADRs for what was decided, the suite counts and the coverage number in `docs/`, and a short note in the commit message of what is next. The next agent starts from the repo alone.

@@ -1,10 +1,10 @@
 # ADR 0017: briqyard reports usage, never costs
 
-Date: 2026-10-20 · Status: accepted (Sylvain, 2026-10-20); amended with the implementation the same day (marked *Built*), by ADR 0018 (`egress_dropped_packets`), and by ADR 0023 (a destroyed machine's backups)
+Date: 2026-10-20 · Status: accepted; amended with the implementation the same day (marked *Built*), by ADR 0018 (`egress_dropped_packets`), and by ADR 0023 (a destroyed machine's backups)
 
 ## Context
 
-On its current provider, briq prices its own infrastructure from that provider's list prices and inventory. On briqyard there is no list price: we pay a fixed monthly price per server, object storage per GB-month, and egress mostly included. Sylvain: briqyard reports usage; briq turns it into costs and billing. The cost model lives in briq.
+A runtime on rented servers has no per-machine list price: a server is a fixed monthly price, object storage is per GB-month, egress is mostly included. briqyard reports what it can measure; turning usage into prices is the control plane's job, with its own model.
 
 ## Decisions
 
@@ -22,16 +22,15 @@ Intra-tenant traffic is not counted: it is bridged, never routed, and costs noth
 
 **Measured by the daemon's tick, kept on the host.** The tick (every 15 s) adds what each machine used since the last tick to the open hour's bucket; a counter that went backwards (a restart) adds what it reads. Buckets are written to the store once a minute and when the hour closes; a crash loses at most a minute. A closed hour never changes. Closed hours are kept `usage_keep_days` (90).
 
-**Read through the API, whole or not at all.** `GET /v1/usage?from=<hour>&to=<hour>[&tenant=]` answers the buckets in the range, each with `closed: true|false`. The fleet asks every host and fails when one does not answer, as listings do (ADR 0006): a usage report missing a host is a bill missing a host.
+**Read through the API, whole or not at all.** `GET /v1/usage?from=<hour>&to=<hour>[&tenant=]` answers the buckets in the range, each with `closed: true|false`. The fleet asks every host and fails when one does not answer, as listings do (ADR 0006): a usage report missing a host undercounts.
 
-**A machine destroyed in an hour keeps its bucket** to the end of retention: briq bills the hour it ran.
+**A machine destroyed in an hour keeps its bucket** to the end of retention: the hour it ran stays counted.
 
 *Built:* running is `starting` to `stopping` (the process holds its memory), suspended is `stopped` with a snapshot; time is accrued at every state change, so a stop between ticks is exact. The bucket is one flat JSON object: the field names carry their group and unit. Backups are counted from the machine record's `backup_bytes`, added at each backup, not by reading the store every tick. CPU and network land in the hour of the tick that reads them. A counter that goes backwards adds what it reads, except the first CPU reading after a daemon start, which is the base (an adopted machine's earlier CPU is not this daemon's); the internet counters start at zero with the table at every daemon start. Ingress bytes are added as they pass, not when the connection ends: a long connection lands in the hours it ran, and one cut short still counts. While the daemon is down nothing is measured; a crash loses that time and at most the last minute. The destroy measures the machine a last time, then removes its counters; counters that cannot be removed keep the destroy from finishing, since the address would come back with the old count.
 
 ## Consequences
 
-- briq collects closed hours it has not collected yet, idempotently, and prices them with its own model (server price × share, object storage price, egress over an allowance). The Costs page and billing read briq's tables, not briqyard.
-- briq's metering of running time stays the source of what a customer is billed until the two are reconciled; the usage feed is what makes disk, storage and network billable later.
-- The host's own overhead (the daemon, unused capacity) is not a machine: briq derives it as the server's price minus what machines used.
-- *Built:* a destroyed machine's backups stay in the store, and no bucket reports them after its last hour; and a host released by `retire` takes its stored hours with it. briq collects before both, or a later change reports them.
+- A control plane collects the closed hours it has not collected yet, idempotently, and applies its own model to them.
+- The host's own overhead (the daemon, unused capacity) is not a machine: a control plane derives it as the host's capacity minus what machines used.
+- *Built:* a destroyed machine's backups stay in the store, and no bucket reports them after its last hour; and a host released by `retire` takes its stored hours with it. A control plane collects before both, or a later change reports them.
 - *Amended by ADR 0023:* a destroyed machine's backups go on in its own buckets (`backup_gb_hours` only) until they are deleted.

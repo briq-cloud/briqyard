@@ -4,7 +4,7 @@ Date: 2026-10-20 · Status: accepted
 
 ## Context
 
-A create request carries a tenant's environment secrets to the daemon. The fleet forwarded it to `http://<ip>:7420` with the host's bearer, in clear across the internet between providers. Kubernetes nodes serve TLS with a certificate the control plane trusts (`KUBERNETES-MAP.md`, TLS to the nodes). This covers the control path only: the HTTP ingress and TCP endpoints carry customers' traffic from the edge and need a private network (`ROLLOVER.md` item 1).
+A create request carries a tenant's environment secrets to the daemon. The fleet forwarded it to `http://<ip>:7420` with the host's bearer, in clear across the internet between providers. Kubernetes nodes serve TLS with a certificate the control plane trusts (`KUBERNETES-MAP.md`, TLS to the nodes). This covers the control path only: the HTTP ingress and TCP endpoints carry tenants' traffic from the edge and need a private network.
 
 ## Decisions
 

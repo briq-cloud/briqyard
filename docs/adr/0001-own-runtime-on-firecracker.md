@@ -4,9 +4,9 @@ Date: 2026-10-18 · Status: accepted
 
 ## Context
 
-briq runs on rented microVMs whose terms do not cover resale. briq needs a place of its own to run briqs: any OCI image, a durable disk, a private network per team, sleep and wake on use, raw TCP in.
+briq needs a runtime of its own on servers it controls: any OCI image, a durable disk, a private network per team, sleep and wake on use, raw TCP in.
 
-Research on 2026-10-18 reviewed eight isolation technologies and nine platforms: `../research/2026-10-18-microvm-field-guide.md`.
+Research on 2026-10-18 reviewed eight isolation technologies (containers, gVisor, Firecracker, Cloud Hypervisor, QEMU + KVM, Kata among them) and the open stacks built on them.
 
 ## Decisions
 
@@ -16,13 +16,13 @@ Research on 2026-10-18 reviewed eight isolation technologies and nine platforms:
 
 **Not a fork of an open sandbox stack.** The most mature one is sandbox-shaped: no team network, no durable data volume, no raw TCP. No module system, about 115 merged PRs a month, all from its company's accounts: core changes would not land upstream.
 
-**Rust.** The first version was Go; Sylvain asked for Rust and the Go code was dropped. One workspace; the init is a static musl binary because the guest has no shared libraries of ours.
+**Rust.** The first version was Go; it moved to Rust and the Go code was dropped. One workspace; the init is a static musl binary because the guest has no shared libraries of ours.
 
-**A separate repository, AGPL-3.0 from the first commit, private until launch.** Open source for visibility. A CLA so Uplab SAS can run it as a hosted service. The monorepo integrates it through a `Provider` adapter (up-lab/briq#250), beside its current provider.
+**A separate repository, AGPL-3.0 from the first commit.** A CLA so Uplab SAS can run it as a hosted service. briq's control plane integrates it through a `Provider` adapter.
 
 ## Consequences
 
 - Everything above the VMM is ours: image to disk, network, volumes, sleep, snapshots, upgrades, placement.
 - No live migration and no GPU until Firecracker ships them. A machine resumes only where its disk is.
 - Firecracker's developer-preview features (device hotplug, io_uring) stay out of production paths.
-- Reopen: Cloud Hypervisor if briqs need hotplug or live migration; Kubernetes if briq becomes a general PaaS of stateless services.
+- Reopen: Cloud Hypervisor if machines need hotplug or live migration; Kubernetes if the workloads become stateless services that reschedule freely.

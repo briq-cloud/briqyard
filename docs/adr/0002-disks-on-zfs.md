@@ -4,7 +4,7 @@ Date: 2026-10-18 · Status: accepted
 
 ## Context
 
-A sandbox runtime typically keeps its writes in a diff beside the template and ships them to object storage at pause. A briq is a Postgres an agent comes back to next month: a committed write must be on disk when the machine says so. Same mechanism (the disk is part of the snapshot), different promise. See `../research/2026-10-18-microvm-field-guide.md`, sections 05 to 07 and 11.
+A sandbox runtime typically keeps its writes in a diff beside the template and ships them to object storage at pause. A briq is a Postgres an agent comes back to next month: a committed write must be on disk when the machine says so. Same mechanism (the disk is part of the snapshot), different promise.
 
 ## Decisions
 
@@ -23,4 +23,4 @@ A sandbox runtime typically keeps its writes in a diff beside the template and s
 - A tenant's machines live where their disks are: one pool, one host (ADR 0006). Moving one is a backup sent on purpose.
 - Placement counts free disk as well as memory.
 - `zfs destroy` answers "busy" briefly after Firecracker exits: retried. Destroying a forked source promotes its clones first.
-- Reopen replication when customers need databases that survive hardware failure without their own replica.
+- Reopen replication when tenants need databases that survive hardware failure without their own replica.

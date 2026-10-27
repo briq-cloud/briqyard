@@ -4,7 +4,7 @@ Date: 2026-10-21 · Status: accepted
 
 ## Context
 
-Backups (ADR 0008) are made on request only, and nothing is ever deleted from the store. briq's current provider gives every volume a daily snapshot kept 5 days (`../ROLLOVER.md` item 2). On Kubernetes this is Velero's job; here the host owns the disks, so the host runs it (`../KUBERNETES-MAP.md`: the daemon runs scheduled backups from a policy briq sets). And a destroyed machine's backups stay in the store with no usage bucket after its last hour (ADR 0017).
+Backups (ADR 0008) are made on request only, and nothing is ever deleted from the store. A volume service usually snapshots every volume daily and keeps a few days of them. On Kubernetes this is Velero's job; here the host owns the disks, so the host runs it (`../KUBERNETES-MAP.md`: the daemon runs scheduled backups from a policy the control plane sets). And a destroyed machine's backups stay in the store with no usage bucket after its last hour (ADR 0017).
 
 ## Decisions
 
@@ -34,11 +34,11 @@ Every backup whole costs `keep` whole streams; rebasing when a prune would break
 
 **A destroy keeps the machine's backups; a holder keeps them visible, counted and finite.** Restoring a destroyed machine is the point of a backup. The destroy writes `state/holders/<id>.json` (tenant, name, metadata, size, `destroyed_at`, bytes). `GET /v1/backups?tenant=` lists the backups of the host's machines and holders, a destroyed machine's with `deletes_at`; the fleet asks the tenant's host, or every host, never partial. `backup.keep_destroyed_days` (30) after the destroy, the backups are deleted, then the holder.
 
-**A holder's usage goes on in the machine's own buckets, `backup_gb_hours` only.** No role and no flag: a bucket is one machine and one hour (ADR 0017), and the hour of the destroy holds both its last running seconds and its backups, so a marker would be wrong there. briq knows which briqs are gone.
+**A holder's usage goes on in the machine's own buckets, `backup_gb_hours` only.** No role and no flag: a bucket is one machine and one hour (ADR 0017), and the hour of the destroy holds both its last running seconds and its backups, so a marker would be wrong there. The control plane knows which machines are gone.
 
 ## Consequences
 
-- briq sets the policy per plan at create: today's daily snapshots kept 5 days are `{ every: "1d", keep: 5 }`, at most 9 backups in the store, 2 of them whole.
+- The control plane sets the policy at create: daily snapshots kept 5 days are `{ every: "1d", keep: 5 }`, at most 9 backups in the store, 2 of them whole.
 - No time of day and no cron: the schedule drifts by a tick (15 s) and by the backup's length. A daemon down skips nothing for good: what fell due runs at its first tick.
 - A backup lists the machine's records in the store and reads each: `2·keep` requests at most, beside the streams.
 - Holders live on the host, like the usage hours: `host retire` takes them, and the store objects stay, unlisted. Backups of machines destroyed before this change have no holder.

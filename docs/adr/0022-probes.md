@@ -4,7 +4,7 @@ Date: 2026-10-21 · Status: accepted
 
 ## Context
 
-A machine is `running` once its init answers on vsock (ADR 0004), which says nothing of the program: Postgres takes seconds to accept, a web app minutes to warm up. briq runs its healthcheck from the control plane (`BriqyardProvider.waitReady`: `/wait`, then an exec every `intervalMs` until `timeoutMs`), the ingress proxies as soon as a TCP connect succeeds, and nothing notices a program that hangs while its process lives. The restart backoff is linear (the attempt's number in seconds) and never resets. Kubernetes has all of this in the kubelet; the scope test (`../KUBERNETES-MAP.md`) puts it here, and the advisor decided "probes run in the daemon and briq's healthcheck moves onto them".
+A machine is `running` once its init answers on vsock (ADR 0004), which says nothing of the program: Postgres takes seconds to accept, a web app minutes to warm up. briq's control plane ran its healthcheck itself (`BriqyardProvider.waitReady`: `/wait`, then an exec every `intervalMs` until `timeoutMs`), the ingress proxies as soon as a TCP connect succeeds, and nothing notices a program that hangs while its process lives. The restart backoff is linear (the attempt's number in seconds) and never resets. Kubernetes has all of this in the kubelet; the scope test (`../KUBERNETES-MAP.md`) puts it here: probes run in the daemon and a control plane's healthcheck moves onto them.
 
 ## Decisions
 
@@ -43,7 +43,7 @@ Exactly one of `exec` (argv, through the guest's exec, exit 0 passes), `tcp` (a 
 
 **The restart backoff doubles: 10 s, 20 s, 40 s, 80 s, 160 s, then 300 s**, Kubernetes's CrashLoopBackOff. The step is `recent_restarts`, the restarts since the last run that lasted 10 minutes; a run of 10 minutes resets it at its exit. The view says `restarting_at` while it waits. `max_retries` keeps its meaning: `on-failure` restarts while `restarts` (in a row, reset only by an exit the policy does not restart) is under it; a 10-minute run resets the backoff, not the count, as Docker does.
 
-**briq's healthcheck moves onto probes.** `BriqyardProvider` (up-lab/briq#250) changes as follows; the daemon side is built.
+**A control plane's healthcheck moves onto probes.** For briq's adapter (`BriqyardProvider`) that is as follows; the daemon side is built.
 
 1. `machineBody` adds, when `spec.healthcheck` is set (`period = max(1, ceil(intervalMs / 1000))`):
    `probes: { startup: { exec: healthcheck.cmd, period_sec: period, timeout_sec: 10, failure_threshold: max(1, ceil(timeoutMs / (period × 1000))) }, readiness: { exec: healthcheck.cmd, period_sec: 10, timeout_sec: 10 } }`.
@@ -53,7 +53,7 @@ Exactly one of `exec` (argv, through the guest's exec, exit 0 passes), `tcp` (a 
 
 ## Consequences
 
-- briq drops its polling exec: one request per create instead of one every `intervalMs`, and the router's traffic waits for the program, not only for the port.
+- The control plane drops its polling exec: one request per create instead of one every `intervalMs`, and the router's traffic waits for the program, not only for the port.
 - A readiness probe delays every connection to a machine that is not ready by up to the wake timeout, then 502: a machine with one replica has nowhere else to send it. Groups behind one name would route around it (`../KUBERNETES-MAP.md`, later).
 - Probe results are not persisted: after a daemon restart a machine with a readiness probe is not ready until it passes again.
 - A crash loop costs at most one boot every 5 minutes per machine.

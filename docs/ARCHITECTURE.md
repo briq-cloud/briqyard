@@ -381,7 +381,7 @@ SHA-256 alone, pinned in the host record: read by the bootstrap over the pinned 
 or written in `hosts:` by the operator. Every forwarded call verifies the pin; a heartbeat
 reporting another fingerprint, or reporting one for a host with none pinned, is refused. The
 CLI pins a daemon the same way (`--tls-fingerprint`, the same verifier in `briqyard-api`). The
-ingress and TCP endpoints are not covered: they need a private network (`ROLLOVER.md` item 1).
+ingress and TCP endpoints are not covered: they need a private network (`MESH.md`).
 
 A WireGuard mesh between hosts, so a tenant can span several, is the next step after that: `MESH.md` is its design.
 

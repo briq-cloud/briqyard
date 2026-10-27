@@ -43,7 +43,7 @@ Reads, which the VM serves fast, stop at the limits (34 against 32 MB/s and 4,19
 
 ## Consequences
 
-- A machine's disk throughput is capped even on an idle host: a 1-vCPU machine reads at 32 MB/s after its burst. briq can raise a machine's own values per plan; `0` lifts a limit.
+- A machine's disk throughput is capped even on an idle host: a 1-vCPU machine reads at 32 MB/s after its burst. A control plane can raise a machine's own values; `0` lifts a limit.
 - Root disk and volume are limited separately, so a machine can do twice the rate across both.
 - The burst comes again at every start and every change, so a machine that restarts in a loop gets it each time; its restart backoff (ADR 0022) bounds how often.
 - Throttling is visible a minute late, and from the daemon's start (counters restart at zero with it, as ADR 0021's).

@@ -4,7 +4,7 @@ Date: 2026-10-20 · Status: accepted
 
 ## Context
 
-briq's credential gateway (monorepo ADR 0015, merged 2026-10-20) puts a placeholder in the sandbox and swaps the real value in at a proxy the sandbox reaches through `HTTPS_PROXY`. On briq's current provider the sandbox can bypass the proxy; the exfiltration side needs the host. The usual design enforces on the host and injects outside the VM (per-sandbox nftables on the node, or policy and credentials on the host). `docs/research/2026-10-18-microvm-field-guide.md`, the monorepo's ADR 0015.
+A credential gateway puts a placeholder in the sandbox and swaps the real value in at a proxy the sandbox reaches through `HTTPS_PROXY`. A sandbox that can open any connection can bypass the proxy: the exfiltration side needs the host. The usual design enforces on the host and injects outside the VM (per-sandbox nftables on the node, or policy and credentials on the host).
 
 ## Decisions
 
@@ -26,11 +26,11 @@ briq's credential gateway (monorepo ADR 0015, merged 2026-10-20) puts a placehol
 
 ## Who runs the gateway machine
 
-The daemon, as the tenant's gateway: ADR 0016 (decided 2026-10-20). The credential program stays briq's.
+The daemon, as the tenant's gateway: ADR 0016 (decided 2026-10-20). The credential program is the control plane's choice.
 
 ## Consequences
 
-- A `via` machine cannot reach its siblings: a stack whose sandbox needs its database goes through `none` plus an allow-list, which is the next mode (ADR 0005 on the briq side).
+- A `via` machine cannot reach its siblings: a stack whose sandbox needs its database goes through `none` plus an allow-list, which is the next mode.
 - The policy is IPv4; IPv6 from tenants is dropped already (ADR 0012).
 - A gateway machine destroyed under `via` machines leaves their policy as it is: they reach nothing (its address is not handed out while a policy names it), and their next start is refused until `egress` names a machine that exists.
 - e2e: a `via` machine reaches the gateway and nothing else, a `none` machine reaches a sibling and not the internet, an outside name is refused for both, `open` is unchanged.

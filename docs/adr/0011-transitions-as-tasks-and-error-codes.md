@@ -4,7 +4,7 @@ Date: 2026-10-20 · Status: accepted
 
 ## Context
 
-The review of 2026-10-20 (findings B2, B3, E1) found two things in how the daemon answers the control plane.
+The review of 2026-10-20 found two things in how the daemon answers the control plane.
 
 axum drops a handler's future when the client closes the connection. Every transition ran inside that future, so a create whose caller timed out (the provider gives it 130 s; a first pull of a large image takes longer) was cut wherever it was: an image build's `Notify` left in the map, so every later create of that image waited forever; a Firecracker running with its record still `starting`; an entry with no record, its name taken until the next restart.
 
@@ -18,7 +18,7 @@ A guest that never came up, or exited while booting, answered 500 `internal`. Th
 
 **`capacity` stays 503.** The host has no room now and may later; the control plane's retry is the right reaction.
 
-What the control plane does with each code: `boot_failed` → the briq ends in `error`, billed nothing, with the console tail, and the agent is told (a `MachineNotRunningError`, not a retry); `capacity` → the job keeps its pending state and tries later, and the fleet places the next machine elsewhere; `internal`, a timeout or a connection failure → `ProviderUnavailableError`, retried.
+What the control plane does with each code: `boot_failed` → the briq ends in `error`, with the console tail, and the agent is told (a `MachineNotRunningError`, not a retry); `capacity` → the job keeps its pending state and tries later, and the fleet places the next machine elsewhere; `internal`, a timeout or a connection failure → `ProviderUnavailableError`, retried.
 
 ## Consequences
 
