@@ -34,7 +34,7 @@ Rejected, one line each:
 
 ## Consequences
 
-- Measured in the dev VM, through the daemon (`image_pulled`'s seconds, which include the build): see the PR; nested virtualization, so the shape counts, not the numbers.
+- Measured in the dev VM, `node:22-alpine` through the daemon (`image_pulled`'s seconds, the build included): from Docker Hub 11.7 s, through a cold mirror 15.4 s (Zot fetches, then serves), through a warm one 12.4 s. Under nested virtualization the build dominates; the mirror is for the registry's limits and outages, not for speed here. A real host's link to Docker Hub and the vRack decide the rest.
 - The mirror is one process per region: down, every pull goes to the registry as before, at the cost of a 10 s connect timeout only when its address does not refuse. A host that never reaches it pays nothing more.
 - A pinned digest that Docker Hub deleted still pulls from the mirror while Zot keeps it.
 - e2e (`hack/e2e.sh`): a pull through the mirror (`through 127.0.0.1:7440`, the mirror holding the digest); with the mirror stopped, the same image from the registry, the same digest, the fallback logged. The VM's mirror is fc's, reached by fc2 at `host.lima.internal:7440` (`DEVELOPMENT.md`).

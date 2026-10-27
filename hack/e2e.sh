@@ -569,7 +569,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1 && 
     handover
   fi
   drop_image() { for k in $(briqyard image ls | awk -v r="$IMG" '$2 == r { print $1 }'); do briqyard image rm "$k" >/dev/null; done; }
-  last_pull() { briqyard events | awk '$4 == "image_pulled"' | grep -F "pulled $IMG " | tail -1; }
+  last_pull() { briqyard events 2>/dev/null | awk '$4 == "image_pulled"' | grep -F "pulled $IMG " | tail -1; }
   drop_image
   MR=$(briqyard machine run --image "$IMG" --name mirrored --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
   digest=$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/images" | jq -r --arg r "$IMG" '.[] | select(.ref == $r) | .digest')
