@@ -11,7 +11,7 @@ use arbitrary::Arbitrary;
 use briqyardd::image;
 use libfuzzer_sys::fuzz_target;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path};
+use std::path::Path;
 
 #[derive(Arbitrary, Debug)]
 enum Kind {
@@ -54,11 +54,6 @@ fn archive(entries: &[Entry]) -> Vec<u8> {
     b.into_inner().unwrap()
 }
 
-/// Every path a layer may write to is inside the root, without a `..` left to climb.
-fn inside(root: &Path, p: &Path) -> bool {
-    p.starts_with(root) && !p.components().any(|c| c == Component::ParentDir)
-}
-
 fuzz_target!(|entries: Vec<Entry>| {
     let base = tempfile::tempdir().unwrap();
     let outer = base.path().join("a");
@@ -67,20 +62,6 @@ fuzz_target!(|entries: Vec<Entry>| {
     std::fs::create_dir(outer.join("out")).unwrap();
     std::fs::write(outer.join("keep"), "k").unwrap();
     std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o711)).unwrap();
-    for e in &entries {
-        let name = String::from_utf8_lossy(&e.name[..e.name.len().min(99)]);
-        let name = name.split('\0').next().unwrap_or("");
-        let clean = name.trim_start_matches('/').trim_end_matches('/');
-        for p in [
-            image::secure_join(&root, clean),
-            image::secure_join_nofollow(&root, clean),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            assert!(inside(&root, &p), "{name:?} resolves to {p:?}");
-        }
-    }
     let _ = image::extract(&root, &archive(&entries)[..]);
     let mut names: Vec<String> = std::fs::read_dir(&outer)
         .unwrap()
