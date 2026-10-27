@@ -146,6 +146,11 @@ order, whiteouts applied, every path resolved inside the directory (a symlink in
 leads outside, and the last component is never followed, so a rewritten link replaces the link
 rather than its target), devices skipped; then `mkfs.ext4 -d` builds the disk.
 
+A tag is resolved by its registry (a `HEAD`, remembered 10 minutes, ADR 0009); the content is
+then pulled by that digest, from the registry's mirror first when `registry_mirrors` names one
+(Zot, one per region, ADR 0036) and from the registry when the mirror fails. Every manifest and
+blob is checked against its digest, so a mirror can fail a pull, never change what it runs.
+
 ### Network
 
 One Linux bridge per tenant (`by<n>`), one /24 from `10.64.0.0/10` per tenant, the host as

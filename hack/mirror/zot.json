@@ -1,0 +1,39 @@
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/briqyard-mirror",
+    "dedupe": true,
+    "gc": true,
+    "gcDelay": "1h",
+    "gcInterval": "6h",
+    "retention": {
+      "delay": "24h",
+      "policies": [
+        {
+          "repositories": ["**"],
+          "deleteReferrers": true,
+          "deleteUntagged": true,
+          "keepTags": [{ "pulledWithin": "720h" }],
+          "keepUntagged": { "pulledWithin": "720h" }
+        }
+      ]
+    }
+  },
+  "http": { "address": "127.0.0.1", "port": "7440" },
+  "log": { "level": "info" },
+  "extensions": {
+    "sync": {
+      "enable": true,
+      "registries": [
+        {
+          "urls": ["https://index.docker.io"],
+          "onDemand": true,
+          "tlsVerify": true,
+          "maxRetries": 2,
+          "retryDelay": "5s",
+          "syncTimeout": "10m"
+        }
+      ]
+    }
+  }
+}

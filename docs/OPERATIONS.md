@@ -57,6 +57,26 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 `briqyardd tls-fingerprint`, or `openssl x509 -in /var/lib/briqyard/api-cert.pem -noout
 -fingerprint -sha256` (colons and case do not matter).
 
+### A registry mirror per region (ADR 0036)
+
+One host of each region runs Zot, a pull-through mirror of Docker Hub, on its private address;
+every daemon of the region pulls through it:
+
+```bash
+MIRROR_LISTEN=10.0.0.5:7440 bash hack/install-mirror.sh     # on that host, as root
+```
+
+```yaml
+registry_mirrors:                                             # every host's config.yaml
+  docker.io: http://10.0.0.5:7440
+```
+
+The script installs the pinned Zot (checked by digest), `hack/mirror/zot.json` with the
+address, and the unit `briqyard-mirror` (data in `/var/lib/briqyard-mirror`); it refuses a
+public address: the mirror has no authentication. Keep port 7440 to the private network in
+the host firewall. Down, the daemons pull from Docker Hub as before (`journalctl -u briqyardd |
+grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it served.
+
 ## Configuration
 
 `/etc/briqyard/config.yaml`; every field has a default.
@@ -76,7 +96,7 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `image_keep_days` | `14` | An image no machine uses is removed this long after it was built; under disk pressure, sooner (ADR 0021) |
 | `usage_keep_days` | `90` | Closed hours of usage (`GET /v1/usage`) are kept this long, then removed by the tick |
 | `events_keep_days` | `7` | Events (`GET /v1/events`, ADR 0019) are kept this long, and at most 100,000 per host; whole hours go, the newest always stays |
-| `image_resolve_minutes` | `10` | A tag's digest is reused this long before the registry is asked again; when the registry refuses (a rate limit), the image already on the host serves |
+| `image_resolve_minutes` | `10` | A tag's digest is reused this long before the registry is asked again (a `HEAD`, which Docker Hub does not count as a pull); when the registry refuses (a rate limit), the image already on the host serves |
 | `conditions.memory_pct` | `95` | `memory_pressure` when committed memory is over this share of capacity (ADR 0021): the fleet places nothing new on the host |
 | `conditions.disk_free_pct` | `10` | `disk_pressure` when the pool's free space is under this share of its size: the fleet places nothing new, and unused images go, oldest first, until it is back. `0`: never |
 | `console_max_mb` | `64` | A running machine's console is rotated past this size; one previous file is kept |
@@ -92,6 +112,7 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 | `storage.pool` | `byard` | The ZFS pool or dataset for every disk. Encrypted: the daemon refuses one that is not (ADR 0026) |
 | `storage.key` | `file:/etc/briqyard/pool.key` | Where the pool's key comes from when it is not loaded (after a reboot): `fleet` (`POST /v1/hosts/key` on `fleet.url`, with `token`, as the host at `fleet.advertise`) or `file:<absolute path>` (64 hex digits). Not read while the key is loaded |
 | `registries[]` | none | `{host, username, password}` for private registries |
+| `registry_mirrors` | none | A pull-through mirror per registry, `{docker.io: http://10.0.0.5:7440}` (ADR 0036): an image's content is pulled from it first, from the registry when it fails; a tag is always resolved by the registry, and everything is checked by digest. The mirror gets no credentials |
 | `network.range` | `10.64.0.0/10` | Tenant subnets, one /24 each (16,384 tenants) |
 | `network.upstream_dns` | the host's, then `1.1.1.1` | Where the gateway forwards DNS |
 | `network.egress` | the default route's interface | Where machines reach the internet |

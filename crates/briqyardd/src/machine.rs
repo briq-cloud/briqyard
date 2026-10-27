@@ -6038,7 +6038,7 @@ mod tests {
         };
         f(&mut cfg);
         let zfs = fake.zfs.clone();
-        let mut images = Builder::new(zfs.clone(), cfg.image_dir(), init, 8).unwrap();
+        let mut images = Builder::new(zfs.clone(), cfg.image_dir(), init, 8, vec![]).unwrap();
         let store = Store::open(&cfg.state_dir()).unwrap();
         let events = Events::open(&store.dir("events")).unwrap();
         images.events = Some(events.clone());

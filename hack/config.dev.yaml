@@ -12,6 +12,9 @@ init: /usr/local/bin/briqyard-init
 # Mac): three times the production default, so a stress run fails on bugs, not on the host.
 boot_timeout_sec: 300
 root_disk_gb: 8
+# Docker Hub through the VM's Zot (hack/install-mirror.sh, ADR 0036).
+registry_mirrors:
+  docker.io: http://127.0.0.1:7440
 storage:
   backend: zfs
   pool: byard

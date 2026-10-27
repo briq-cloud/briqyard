@@ -61,6 +61,15 @@ hack/vm.sh e2e         # install, then run hack/e2e.sh inside the VM
 Everything under nested virtualization is slower than on a real server; the timings are not a
 benchmark.
 
+`hack/vm.sh install` also runs `hack/install-mirror.sh` in fc: Zot on `127.0.0.1:7440`, the
+registry mirror of ADR 0036, which `hack/config.dev.yaml` names for Docker Hub. Lima forwards
+it to the Mac's loopback, which fc2 reaches as `host.lima.internal` (Lima's user network, no
+port forward to add), so fc2's `/etc/briqyard/config.yaml` says
+`registry_mirrors: {docker.io: "http://host.lima.internal:7440"}`. A host configured before
+then: add the line and hand over (`systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd`,
+then `systemctl start briqyardd`); the e2e suite adds it on fc for its mirror section and takes
+it out after.
+
 `hack/vm.sh install` also lays out what `hack/fleet-smoke.sh` upgrades the VM's own host to
 (ADR 0027): this build's binaries under a release's names in `/var/lib/briqyard-fleet/release`
 (`file://` for `--release`), and the fleet's SSH key (`/etc/briqyard/fleet_ssh_key`, made once)

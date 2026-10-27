@@ -41,6 +41,8 @@ for b in briqyardd briqyard-init briqyard briqyard-fleet; do cp "/usr/local/bin/
 [ -f /etc/briqyard/fleet_ssh_key ] || ssh-keygen -q -t ed25519 -N "" -C briqyard-fleet -f /etc/briqyard/fleet_ssh_key
 install -d -m 0700 /root/.ssh
 grep -qxF "\$(cat /etc/briqyard/fleet_ssh_key.pub)" /root/.ssh/authorized_keys 2>/dev/null || cat /etc/briqyard/fleet_ssh_key.pub >> /root/.ssh/authorized_keys
+# The registry mirror both VMs pull through (ADR 0036): fc2 reaches it at host.lima.internal.
+bash "$SRC/hack/install-mirror.sh" >/dev/null
 systemctl daemon-reload
 systemctl enable briqyardd briqyard-fleet >/dev/null 2>&1 || true
 systemctl restart briqyardd briqyard-fleet
