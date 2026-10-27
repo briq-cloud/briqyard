@@ -309,34 +309,31 @@ mod tests {
             h.extend_from_slice(&[0, 0, 0, 0]);
             h
         };
-        let mut bad: Vec<Vec<u8>> = Vec::new();
-        // A name pointing at itself, two names pointing at each other, a pointer past the end.
-        bad.push([header(1, 0), vec![0xC0, 12, 0, 1, 0, 1]].concat());
-        bad.push(
+        let long: Vec<u8> = (0..5)
+            .flat_map(|_| [vec![63], vec![b'a'; 63]].concat())
+            .collect();
+        let bad: Vec<Vec<u8>> = vec![
+            // A name pointing at itself, two names pointing at each other, a pointer past the end.
+            [header(1, 0), vec![0xC0, 12, 0, 1, 0, 1]].concat(),
             [
                 header(2, 0),
                 vec![0xC0, 18, 0, 1, 0, 1, 0xC0, 12, 0, 1, 0, 1],
             ]
             .concat(),
-        );
-        bad.push([header(1, 0), vec![0xC0, 0xFF, 0, 1, 0, 1]].concat());
-        // A label longer than 63, a name longer than 255.
-        bad.push([header(1, 0), vec![64], vec![b'a'; 64], vec![0, 0, 1, 0, 1]].concat());
-        let long: Vec<u8> = (0..5)
-            .flat_map(|_| [vec![63], vec![b'a'; 63]].concat())
-            .collect();
-        bad.push([header(1, 0), long, vec![0, 0, 1, 0, 1]].concat());
-        // Counts far beyond what the packet holds.
-        bad.push([header(0xFFFF, 0), q[12..].to_vec()].concat());
-        bad.push([header(1, 0xFFFF), q[12..].to_vec()].concat());
-        bad.push(
+            [header(1, 0), vec![0xC0, 0xFF, 0, 1, 0, 1]].concat(),
+            // A label longer than 63, a name longer than 255.
+            [header(1, 0), vec![64], vec![b'a'; 64], vec![0, 0, 1, 0, 1]].concat(),
+            [header(1, 0), long, vec![0, 0, 1, 0, 1]].concat(),
+            // Counts far beyond what the packet holds, a record longer than the packet.
+            [header(0xFFFF, 0), q[12..].to_vec()].concat(),
+            [header(1, 0xFFFF), q[12..].to_vec()].concat(),
             [
                 header(1, 1),
                 q[12..].to_vec(),
                 vec![0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 5, 0xFF, 0xFF],
             ]
             .concat(),
-        );
+        ];
         for (i, p) in bad.iter().enumerate() {
             assert!(parse_query(p).is_none(), "packet {i} parsed");
         }
