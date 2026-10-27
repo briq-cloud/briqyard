@@ -693,7 +693,7 @@ async fn host_key(
 /// The pool key of a backup (ADR 0035), for any host of the fleet: the key of that id, a live
 /// host's or a forgotten one's. Every host reads every backup's streams (a restore lands
 /// anywhere); a raw stream opens only with the pool key of the host that sent it, so that is
-/// what is served. Never made here, and every hand-out is a `warn` line.
+/// what is served. Never made here; another host's key is a `warn` line.
 fn backup_key(
     st: &AppState,
     url: &str,
@@ -713,7 +713,12 @@ fn backup_key(
         ));
     };
     let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
-    tracing::warn!(host, owner, key_id, peer, "backup key served");
+    // Its own key is routine; another host's is the hand-out worth a look.
+    if owner == host {
+        tracing::info!(host, owner, key_id, peer, "backup key served");
+    } else {
+        tracing::warn!(host, owner, key_id, peer, "backup key served");
+    }
     Ok(Json(api::HostKey {
         key: key.expose().to_string(),
     })

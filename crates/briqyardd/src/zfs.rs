@@ -136,8 +136,9 @@ impl Zfs {
     /// (`load-key -n`, which works while the key is loaded): what a backup names and seals with
     /// must be what its raw streams are wrapped with (ADR 0035).
     pub async fn check_key(&self, key: &str) -> Result<()> {
+        let root = self.get_ds(&self.pool, "encryptionroot").await?;
         self.run_input(
-            &["load-key", "-n", "-L", "prompt", &self.pool],
+            &["load-key", "-n", "-L", "prompt", &root],
             format!("{key}\n").as_bytes(),
         )
         .await?;

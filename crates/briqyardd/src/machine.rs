@@ -6088,6 +6088,7 @@ mod tests {
         let key = "0123456789abcdef".repeat(4);
         std::fs::write(dir.path().join("pool.key"), &key).unwrap();
         std::fs::write(fake.dev().join("key"), &key).unwrap();
+        fake.answer("encryptionroot", "byard\n");
         let mut cfg = Config {
             data_dir: dir.path().join("data"),
             ..Default::default()

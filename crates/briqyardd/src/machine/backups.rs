@@ -137,47 +137,54 @@ pub(super) struct Backups {
     holders: Mutex<HashMap<String, Arc<Holder>>>,
 }
 
-/// A pool key's id and the key a backup's record is sealed with, derived from the pool key
-/// (HKDF-SHA256, AES-256-GCM): the pool key itself is not kept (ADR 0035).
+/// A pool key's id and what a backup's record is sealed with: a key per record, derived from
+/// the pool key by HKDF-SHA256 with the record's place in its info, for AES-256-GCM. The pool
+/// key itself is not kept (ADR 0035).
 pub(super) struct Seal {
     id: String,
-    key: ring::aead::LessSafeKey,
+    prk: ring::hkdf::Prk,
 }
 
 impl Seal {
     pub(super) fn of(pool_key: &str) -> Result<Seal> {
-        use ring::{aead, hkdf};
+        use ring::hkdf;
         let id = api::poolkey::id(pool_key).ok_or_else(|| anyhow!("not a pool key"))?;
         let bytes = hex::decode(pool_key.trim())?;
         let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, b"briqyard backup record").extract(&bytes);
-        let okm = prk
-            .expand(&[b"aes-256-gcm"], &aead::AES_256_GCM)
-            .map_err(|_| anyhow!("derive the record key"))?;
-        Ok(Seal {
-            id,
-            key: aead::LessSafeKey::new(aead::UnboundKey::from(okm)),
-        })
+        Ok(Seal { id, prk })
     }
 
-    /// `plain` sealed for the record at `place` (`<machine>/<backup>`, so a sealed spec opens
-    /// in no other record): a random nonce, then the ciphertext and its tag, in base64.
-    fn seal(&self, place: &str, plain: &[u8]) -> String {
+    /// The key of the record at `place` (`<machine>/<backup>`): a sealed spec opens in no
+    /// other record.
+    fn key(&self, place: &str) -> Result<ring::aead::LessSafeKey> {
+        use ring::aead;
+        let info: [&[u8]; 2] = [b"aes-256-gcm ", place.as_bytes()];
+        let okm = self
+            .prk
+            .expand(&info, &aead::AES_256_GCM)
+            .map_err(|_| anyhow!("derive the key of record {place}"))?;
+        Ok(aead::LessSafeKey::new(aead::UnboundKey::from(okm)))
+    }
+
+    /// `plain` sealed for the record at `place`: a random nonce, then the ciphertext and its
+    /// tag, in base64; the place is the associated data too.
+    fn seal(&self, place: &str, plain: &[u8]) -> Result<String> {
         use base64::Engine;
         use ring::aead::{Aad, Nonce};
         use ring::rand::SecureRandom;
         let mut nonce = [0u8; 12];
         ring::rand::SystemRandom::new()
             .fill(&mut nonce)
-            .expect("the OS's random bytes");
+            .map_err(|_| anyhow!("the OS gave no random bytes for a record's nonce"))?;
         let mut out = plain.to_vec();
-        self.key
+        self.key(place)?
             .seal_in_place_append_tag(
                 Nonce::assume_unique_for_key(nonce),
                 Aad::from(place.as_bytes()),
                 &mut out,
             )
-            .expect("a record's size is far under AES-GCM's limit");
-        base64::engine::general_purpose::STANDARD.encode([&nonce[..], &out].concat())
+            .map_err(|_| anyhow!("seal record {place}"))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode([&nonce[..], &out].concat()))
     }
 
     fn open(&self, place: &str, sealed: &str) -> Result<Vec<u8>> {
@@ -190,7 +197,7 @@ impl Seal {
         let (nonce, rest) = data.split_at(12);
         let mut buf = rest.to_vec();
         let plain = self
-            .key
+            .key(place)?
             .open_in_place(
                 Nonce::try_assume_unique_for_key(nonce).expect("12 bytes"),
                 Aad::from(place.as_bytes()),
@@ -498,7 +505,7 @@ impl Manager {
             sealed: Some(seal.seal(
                 &format!("{}/{bid}", rec.id),
                 &serde_json::to_vec(rec).unwrap_or_default(),
-            )),
+            )?),
             ..b.clone()
         };
         let stored = store
@@ -1526,6 +1533,10 @@ mod tests {
         assert_eq!(b.key_id, briqyard_api::poolkey::id(&key));
         let calls = h.pool.calls();
         assert!(calls.iter().any(|c| c.starts_with("send -w ")), "{calls:?}");
+        assert!(
+            calls.contains(&"load-key -n -L prompt byard".to_string()),
+            "the key checked on the pool's encryption root: {calls:?}"
+        );
         assert!(
             !calls.iter().any(|c| c.starts_with("send -c ")),
             "{calls:?}"
