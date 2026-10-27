@@ -187,12 +187,18 @@ if [ -n "$PRIVATE_ADDRESS" ]; then
     has_address || fail "$PRIVATE_ADDRESS did not come up on $PRIVATE_INTERFACE"
   fi
   fleet_name=${FLEET_URL#*://}; fleet_name=${fleet_name%%/*}; fleet_name=${fleet_name%:*}
-  # A name only: an address in FLEET_URL is dialled as it is.
-  if [ -n "$FLEET_ADDRESS" ] && [ -n "${fleet_name//[0-9.]/}" ]; then
-    sed -i '/# briqyard: the fleet$/d' /etc/hosts
-    printf '%s %s # briqyard: the fleet\n' "$FLEET_ADDRESS" "$fleet_name" >> /etc/hosts
-    echo "   $fleet_name at $FLEET_ADDRESS"
-  fi
+  sed -i '/# briqyard: the fleet$/d' /etc/hosts
+  # A name only: an address in FLEET_URL (IPv6 in brackets, whose hex has letters) is dialled
+  # as it is.
+  case "$fleet_name" in
+    \[*) ;;
+    *[a-zA-Z]*)
+      if [ -n "$FLEET_ADDRESS" ]; then
+        printf '%s %s # briqyard: the fleet\n' "$FLEET_ADDRESS" "$fleet_name" >> /etc/hosts
+        echo "   $fleet_name at $FLEET_ADDRESS"
+      fi
+      ;;
+  esac
   private_dev=$(ip -4 -o addr show | awk -v a="$PRIVATE_ADDRESS" '$4 == a {print $2; exit}')
   public_dev=$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
   [ -n "$public_dev" ] || fail "no default route: machines would have no way to the internet"

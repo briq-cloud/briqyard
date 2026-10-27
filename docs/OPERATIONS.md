@@ -659,10 +659,15 @@ key, the pinned SSH keys) is on this server alone: give the fleet a `backup:` ("
 backup") before the first host, since a registry lost is every host's pool unreadable.
 
 **5. Add the server to the fleet**, on the server (the fleet has no public name yet), once its
-kernel has ZFS and KVM:
+kernel has ZFS and KVM, and once cloud-init leaves `/etc/hosts` alone: with
+`manage_etc_hosts: true` it rewrites the file at every boot, the fleet's line goes, and after a
+reboot the host's key request leaves by the public address and is refused (the pool stays
+locked). On every vRack server:
 
 ```bash
 modprobe zfs && ls /dev/kvm
+grep -rs manage_etc_hosts /etc/cloud/   # nothing, or false; else:
+echo 'manage_etc_hosts: false' > /etc/cloud/cloud.cfg.d/99-briqyard-hosts.cfg
 export BRIQYARD_URL=http://127.0.0.1:7430 BRIQYARD_TOKEN=$(sed -n 's/^token: *//p' /etc/briqyard/fleet.yaml)
 briqyard host add <public ip> --address 10.42.0.11 --region gra \
   --public-tcp-ports 80,443,5432,3306,6379,27017,5671,7687,6334
@@ -745,6 +750,7 @@ smoke runs from anywhere that reaches the fleet and touches no real host.
 |---|---|
 | Errors | `journalctl -u briqyardd -u briqyard-fleet -o cat \| jq -c 'select(.level != "INFO")'`, and the edge's |
 | The host | `briqyard host ls`: `ready`, conditions false, last seen within 15 s |
+| After a reboot | `getent hosts fleet.example.com` on the host: the fleet's vRack address (`10.42.0.11`), and the host `ready` again |
 | The disks | `zpool status -x` says all pools are healthy; `zpool list byard` |
 | Memory | `free -g`; `arc_summary \| head -30`: the ARC under its cap; the edge's use |
 | Machines | `briqyard top`, `briqyard events --watch` |
