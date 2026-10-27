@@ -495,6 +495,11 @@ for i in $(seq 1 30); do briqyard machine exec "$W" -- wget -qO- http://127.0.0.
 check "http endpoint host" '[ "$WEP" = "e2e-web.byard.localhost" ]'
 check "http routed by host" 'curl -fsS -H "Host: $WEP" http://127.0.0.1:8080/ | grep -qi "nginx"'
 check "http unknown host 404" '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: nobody.byard.localhost" http://127.0.0.1:8080/)" = 404 ]'
+# The status line the ingress answers to a head sent as it is.
+raw_head() { exec 3<>/dev/tcp/127.0.0.1/8080; printf "$1" >&3; head -1 <&3; exec 3<&-; }
+check "http two hosts 400"         'raw_head "GET / HTTP/1.1\r\nHost: $WEP\r\nHost: $WEP\r\n\r\n" | grep -q " 400 "'
+check "http absolute-form routed"  'raw_head "GET http://$WEP/ HTTP/1.1\r\nHost: $WEP\r\n\r\n" | grep -q " 200 "'
+check "http absolute-form mismatch 400" 'raw_head "GET http://$WEP/ HTTP/1.1\r\nHost: nobody.byard.localhost\r\n\r\n" | grep -q " 400 "'
 for i in $(seq 1 90); do [ "$(briqyard machine get "$W" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "web slept"          '[ "$(briqyard machine get "$W" | jq -r .stopped_reason)" = idle ]'
 check "http request wakes" 'curl -fsS --max-time 90 -H "Host: $WEP" http://127.0.0.1:8080/ | grep -qi "nginx"'

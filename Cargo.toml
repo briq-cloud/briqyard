@@ -61,6 +61,8 @@ humantime = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+# The ingress reads public request heads with it (ADR 0033); hyper already depends on it.
+httparse = "1.10"
 
 [profile.release]
 opt-level = "s"
