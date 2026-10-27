@@ -1,7 +1,8 @@
 # Development
 
 briqyard is a Rust workspace. The daemon and the init only run on Linux with KVM; the API
-types, the CLI and the unit tests build anywhere.
+types, the CLI and the unit tests build anywhere; the tests of image extraction and of the init
+run on Linux only.
 
 ## On a Linux host with KVM
 
@@ -144,7 +145,7 @@ plus `apt-get purge docker.io` and the edge's files.
 
 ## Tests
 
-- `cargo test --workspace`: unit tests, which run anywhere (extraction and whiteouts, DNS
+- `cargo test --workspace`: unit tests, which run anywhere (extraction and whiteouts on Linux, DNS
   packets, the guest protocol, address allocation, the store, the configuration, the ZFS
   backend against a fake `zfs`, the Firecracker and guest clients against in-test sockets,
   the config drive, restart and sleep decisions, and the manager's transitions through a
