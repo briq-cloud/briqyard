@@ -41,7 +41,8 @@ pub struct Config {
     /// The briqyard-init binary copied into every root disk.
     pub init: PathBuf,
     pub storage: Storage,
-    /// Credentials for private registries, by host ("ghcr.io", "registry-1.docker.io").
+    /// Credentials for private registries, by registry as a reference names it ("ghcr.io",
+    /// "docker.io" for Docker Hub).
     pub registries: Vec<Registry>,
     /// A pull-through mirror per registry (`docker.io: http://10.0.0.2:7440`, ADR 0036): an
     /// image's content is pulled from it first and from the registry when it fails; a tag is

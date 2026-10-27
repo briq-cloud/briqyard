@@ -120,7 +120,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `suspend_on_sleep` | `false` | Sleep with a memory snapshot: wakes in a quarter second, costs the machine's memory in disk |
 | `storage.pool` | `byard` | The ZFS pool or dataset for every disk. Encrypted: the daemon refuses one that is not (ADR 0026) |
 | `storage.key` | `file:/etc/briqyard/pool.key` | Where the pool's key comes from when it is not loaded (after a reboot): `fleet` (`POST /v1/hosts/key` on `fleet.url`, with `token`, as the host at `fleet.advertise`) or `file:<absolute path>` (64 hex digits). Not read while the key is loaded |
-| `registries[]` | none | `{host, username, password}` for private registries |
+| `registries[]` | none | `{host, username, password}` for private registries, `host` the registry as a reference names it (`ghcr.io`; `docker.io` for Docker Hub) |
 | `registry_mirrors` | none | A pull-through mirror per registry, `{docker.io: http://10.0.0.5:7440}` (ADR 0036): an image's content is pulled from it first, from the registry when it fails; a tag is always resolved by the registry, and everything is checked by digest. The mirror gets no credentials |
 | `network.range` | `10.64.0.0/10` | Tenant subnets, one /24 each (16,384 tenants) |
 | `network.upstream_dns` | the host's, then `1.1.1.1` | Where the gateway forwards DNS |

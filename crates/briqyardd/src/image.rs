@@ -180,6 +180,27 @@ impl Mirror {
     }
 }
 
+/// How long a registry or a mirror may stay silent on a connection (each read, so a slow blob
+/// is not cut). Above Zot's `syncTimeout` (10 minutes, `hack/mirror/zot.json`): a mirror's first
+/// pull of an image copies it before answering. A mirror silent past it is left for the registry.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// The registry client: HTTPS except to the `plain` hosts; a connect that does not complete
+/// within 10 s, or a connection silent for `read_timeout`, fails that source.
+fn client_config(plain: Vec<String>, read_timeout: std::time::Duration) -> ClientConfig {
+    ClientConfig {
+        platform_resolver: Some(Box::new(host_platform)),
+        protocol: if plain.is_empty() {
+            ClientProtocol::Https
+        } else {
+            ClientProtocol::HttpsExcept(plain)
+        },
+        connect_timeout: Some(std::time::Duration::from_secs(10)),
+        read_timeout: Some(read_timeout),
+        ..Default::default()
+    }
+}
+
 /// Where a pull's content comes from: the registry's mirror first when it has one, then the
 /// registry. Both by the same digest, so either serves the same bytes or fails.
 struct Source {
@@ -202,6 +223,7 @@ impl Builder {
         let init_hash = hex::encode(Sha256::digest(&data));
         private_dir(&dir)?;
         private_dir(&dir.join("meta"))?;
+        // Only a mirror may be plain HTTP: what it serves is checked by digest.
         let plain: Vec<String> = mirrors
             .iter()
             .filter(|m| m.plain_http)
@@ -215,19 +237,7 @@ impl Builder {
             registries: vec![],
             mirrors,
             init_hash,
-            client: Client::new(ClientConfig {
-                platform_resolver: Some(Box::new(host_platform)),
-                // Only a mirror may be plain HTTP: what it serves is checked by digest.
-                protocol: if plain.is_empty() {
-                    ClientProtocol::Https
-                } else {
-                    ClientProtocol::HttpsExcept(plain)
-                },
-                // A mirror that does not answer is left for the registry within seconds. No
-                // read timeout: a mirror's first pull of an image copies it before answering.
-                connect_timeout: Some(std::time::Duration::from_secs(10)),
-                ..Default::default()
-            }),
+            client: Client::new(client_config(plain, READ_TIMEOUT)),
             building: Mutex::new(HashMap::new()),
             resolved: Mutex::new(HashMap::new()),
             resolve_ttl: std::time::Duration::from_secs(600),
@@ -1619,12 +1629,16 @@ mod tests {
         let init = dir.join("init");
         std::fs::write(&init, b"init").unwrap();
         let mirror = Mirror::parse(origin, &format!("http://{mirror}")).unwrap();
-        let mut b =
-            Builder::new(fake.zfs.clone(), dir.join("images"), init, 8, vec![mirror]).unwrap();
-        b.client = Client::new(ClientConfig {
-            protocol: ClientProtocol::Http,
-            ..Default::default()
-        });
+        let mut b = Builder::new(
+            fake.zfs.clone(),
+            dir.join("images"),
+            init,
+            8,
+            vec![mirror.clone()],
+        )
+        .unwrap();
+        let plain = vec![origin.to_string(), mirror.host.clone()];
+        b.client = Client::new(client_config(plain, std::time::Duration::from_secs(1)));
         b
     }
 
@@ -1673,8 +1687,8 @@ mod tests {
         assert_eq!(asked.len(), 3, "manifest, config, layer: {asked:?}");
     }
 
-    /// A mirror that is down, does not have the image, or serves other bytes for the digest is
-    /// left for the registry, which serves the rest of the pull.
+    /// A mirror that is down, silent, does not have the image, or serves other bytes for the
+    /// digest is left for the registry, which serves the rest of the pull.
     #[tokio::test]
     async fn a_mirror_that_fails_or_lies_leaves_the_pull_to_the_registry() {
         let dir = tempfile::tempdir().unwrap();
@@ -1703,7 +1717,18 @@ mod tests {
         forger.manifests.insert(want.clone(), forged);
         let (lying_manifest, _) = forger.serve().await;
 
-        for mirror in [down, empty, lying_layer, lying_manifest] {
+        // Silent: it takes the connection and never answers (bounded by the read timeout, 1 s
+        // in these tests).
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let quiet = silent.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = silent.accept().await {
+                held.push(s);
+            }
+        });
+
+        for mirror in [down, empty, lying_layer, lying_manifest, quiet] {
             let b = builder(dir.path(), &origin_host, &mirror).await;
             let (digest, layer, from) = pull(&b, &reference, dir.path()).await.unwrap();
             assert_eq!(

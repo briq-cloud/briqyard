@@ -1,6 +1,6 @@
 # ADR 0036: A pull-through registry mirror per region (Zot), tried first; tags resolved by the registry, content checked by digest
 
-Date: 2026-10-27 · Status: proposed; amends ADR 0009 (a tag is resolved with a `HEAD`) and ADR 0019 (`image_pulled` says `from`)
+Date: 2026-10-27 · Status: accepted; amends ADR 0009 (a tag is resolved with a `HEAD`) and ADR 0019 (`image_pulled` says `from`)
 
 ## Context
 
@@ -16,7 +16,7 @@ Kubernetes leaves this to the container runtime: containerd's `hosts.toml` lists
 
 **A tag is resolved by the registry, never by a mirror, with a `HEAD`.** `fetch_manifest_digest` reads `Docker-Content-Digest` (a GET only if the registry sends none). Docker Hub does not count a `HEAD` as a pull, so tags cost nothing against its limit; ADR 0009 resolved with a GET of the manifest, which counted. The digest is the one the registry names: an index's for a multi-platform image (it was the platform manifest's), so a tagged multi-platform image is built once more on each host after this change. When the registry cannot answer, ADR 0009 holds: the image already built for the last resolution serves, else the create fails. A mirror's answer for a tag is never asked: it would let the mirror choose the image.
 
-**The content by that digest: the mirror first, then the registry.** The manifest (and, for an index, the platform's manifest), the config and each layer are pulled by digest, and checked by `oci-client` against it. A source that fails (no answer within 10 s of connect, an error, bytes that are not the digest) is dropped for the rest of the pull with a warning (`mirror failed; pulling from the registry`), and the registry serves what is left. A mirror cannot serve another image for a digest: it can only fail. That is why plain HTTP is enough on the vRack.
+**The content by that digest: the mirror first, then the registry.** The manifest (and, for an index, the platform's manifest), the config and each layer are pulled by digest, and checked by `oci-client` against it. A source that fails (no connection within 10 s, a connection silent for 15 minutes, an error, bytes that are not the digest) is dropped for the rest of the pull with a warning (`mirror failed; pulling from the registry`), and the registry serves what is left. A mirror cannot serve another image for a digest: it can only fail. That is why plain HTTP is enough on the vRack.
 
 **The daemon sends a mirror no credentials.** `registries[]` credentials go to their registry only. The mirror holds what it serves: public images only for now; a private registry is pulled directly.
 
@@ -35,7 +35,7 @@ Rejected, one line each:
 ## Consequences
 
 - Measured in the dev VM, `node:22-alpine` through the daemon (`image_pulled`'s seconds, the build included): from Docker Hub 11.7 s, through a cold mirror 15.4 s (Zot fetches, then serves), through a warm one 12.4 s. Under nested virtualization the build dominates; the mirror is for the registry's limits and outages, not for speed here. A real host's link to Docker Hub and the vRack decide the rest.
-- The mirror is one process per region: down, every pull goes to the registry as before, at the cost of a 10 s connect timeout only when its address does not refuse. A host that never reaches it pays nothing more.
+- The mirror is one process per region: down, every pull goes to the registry as before, at the cost of a 10 s connect timeout only when its address does not refuse. A mirror that takes the connection and never answers holds a pull for the read timeout, 15 minutes per read, above Zot's `syncTimeout` (10 minutes, its first copy of an image); every create of that image waits on that one pull. A host that never reaches it pays nothing more.
 - A pinned digest that Docker Hub deleted still pulls from the mirror while Zot keeps it.
 - e2e (`hack/e2e.sh`): a pull through the mirror (`through 127.0.0.1:7440`, the mirror holding the digest); with the mirror stopped, the same image from the registry, the same digest, the fallback logged. The VM's mirror is fc's, reached by fc2 at `host.lima.internal:7440` (`DEVELOPMENT.md`).
 - Not built: Docker Hub credentials in Zot (higher limits), mirrors of other registries (a Zot per registry, or `content` prefixes once a reference can carry a path), a mirror's own metrics in the host's.
