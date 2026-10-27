@@ -102,7 +102,7 @@ On briqyard: a tenant lives on one host. `MESH.md` is the design (WireGuard, fle
 
 Fly today: volumes are encrypted at rest.
 
-On briqyard (built, ADR 0026): the pool is encrypted at its creation, one key per host made and kept by the fleet, loaded by the daemon at start; everything of a machine is on the pool, and hosts run without swap. The registry's backup (ADR 0032) and raw backups, ciphertext in the bucket (ADR 0035), are built.
+On briqyard (built, ADR 0026): the pool is encrypted at its creation, one key per host made and kept by the fleet, loaded by the daemon at start; everything of a machine is on the pool, and hosts run without swap. Missing: the fleet registry's backup (losing it loses every key, item 13), and backups leave the host decrypted (encrypt the bucket).
 
 ## 10. Usage and costs
 
