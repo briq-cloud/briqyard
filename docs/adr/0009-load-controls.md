@@ -1,6 +1,6 @@
 # ADR 0009: Load: boots take turns, a tag's digest is remembered
 
-Date: 2026-10-20 · Status: accepted
+Date: 2026-10-20 · Status: accepted; amended by ADR 0036 (a tag resolved with a `HEAD`, the content through a mirror)
 
 ## Context
 

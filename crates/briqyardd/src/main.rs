@@ -120,6 +120,7 @@ async fn run(args: Args) -> Result<()> {
         cfg.image_dir(),
         cfg.init.clone(),
         cfg.root_disk_gb,
+        cfg.mirrors()?,
     )?;
     images.resolve_ttl = std::time::Duration::from_secs(cfg.image_resolve_minutes as u64 * 60);
     images.registries = cfg

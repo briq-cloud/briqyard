@@ -1571,6 +1571,183 @@ async fn an_order_in_dry_run_records_a_dry_run_host() {
     assert!(h.note.ends_with("(ordered through the API)"), "{}", h.note);
 }
 
+/// A fleet that bootstraps the hosts added to it, its APIs on the 10.42.0.0/16 vRack.
+fn bootstrapping_fleet() -> Fleet {
+    let mut cfg = config::Config::default();
+    cfg.provisioner.bootstrap.enabled = true;
+    cfg.provisioner.bootstrap.private_network = "10.42.0.0/16".into();
+    cfg.provisioner.bootstrap.public_tcp_ports = vec![80, 443];
+    fleet(cfg, Box::new(provision::Static))
+}
+
+#[tokio::test]
+async fn a_server_bought_by_hand_is_added_for_the_bootstrap() {
+    let f = bootstrapping_fleet();
+    let add = |body: serde_json::Value| {
+        let st = f.st.clone();
+        async move { call(&st, "POST", "/v1/hosts", "", Some(body)).await }
+    };
+    let (s, _, body) =
+        add(serde_json::json!({"ssh": "51.68.1.2", "address": "10.42.0.11", "region": "gra"}))
+            .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
+    let h: api::Host = serde_json::from_str(&body).unwrap();
+    assert_eq!(h.id, "h_10-42-0-11");
+    assert_eq!(
+        h.url, "https://10.42.0.11:7420",
+        "its API on the vRack, over TLS"
+    );
+    assert_eq!(h.ssh, "51.68.1.2");
+    assert_eq!(
+        (h.state.as_str(), h.provider.as_str(), h.region.as_str()),
+        ("provisioning", "manual", "gra")
+    );
+    assert_eq!(
+        h.tls_fingerprint, "",
+        "pinned by the bootstrap, as an ordered host's"
+    );
+    {
+        let reg = f.st.reg.lock().unwrap();
+        let rec = &reg.hosts["h_10-42-0-11"];
+        assert_eq!(rec.token.len(), 32, "a token of its own for its API");
+        assert_eq!(rec.provider_id, "");
+        let picked: Vec<String> = bootstrap::to_install(&reg)
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(
+            picked,
+            ["h_10-42-0-11"],
+            "the bootstrap takes it as it takes an order"
+        );
+    }
+    assert!(saved(&f.st).hosts.contains_key("h_10-42-0-11"), "written");
+    assert_eq!(
+        h.public_tcp_ports,
+        [80, 443],
+        "the fleet's, kept on the host"
+    );
+    // One address only: the API there too, its id named; no public ports of its own (a host
+    // without an edge), whatever the fleet's are.
+    let (s, _, body) = add(serde_json::json!({
+        "ssh": "51.68.1.3", "id": "gra-2", "public_tcp_ports": []
+    }))
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
+    let h: api::Host = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (h.id.as_str(), h.url.as_str(), h.ssh.as_str()),
+        ("gra-2", "https://51.68.1.3:7420", "")
+    );
+    assert_eq!(
+        f.st.reg.lock().unwrap().hosts["gra-2"].public_tcp_ports,
+        Some(vec![]),
+        "its own, empty: never the fleet's"
+    );
+    // The same server again, by its address, its id or its SSH address.
+    for body in [
+        serde_json::json!({"ssh": "51.68.1.9", "address": "10.42.0.11"}),
+        serde_json::json!({"ssh": "51.68.1.9", "address": "10.42.0.12", "id": "gra-2"}),
+        serde_json::json!({"ssh": "51.68.1.2", "address": "10.42.0.13"}),
+    ] {
+        let (s, _, text) = add(body).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{text}");
+        assert_eq!(json(&text)["code"], "conflict", "{text}");
+    }
+    // What makes no host.
+    for (body, msg) in [
+        (
+            serde_json::json!({"ssh": ""}),
+            "ssh \"\": want the server's address or name",
+        ),
+        (
+            serde_json::json!({"ssh": "-oProxyCommand=x"}),
+            "want the server's address or name",
+        ),
+        (
+            serde_json::json!({"ssh": "root@1.2.3.4"}),
+            "want the server's address or name",
+        ),
+        (
+            serde_json::json!({"ssh": "1.2.3.4:2222"}),
+            "want the server's address or name",
+        ),
+        (
+            serde_json::json!({"ssh": "server.example"}),
+            "address \"server.example\": want the API's IPv4 address",
+        ),
+        (
+            serde_json::json!({"ssh": "51.68.1.2", "address": "192.168.1.5"}),
+            "is not in provisioner.bootstrap.private_network",
+        ),
+        (
+            serde_json::json!({"ssh": "51.68.1.4", "id": "Gra 1"}),
+            "id \"Gra 1\": a-z, 0-9, _ and -",
+        ),
+        (
+            serde_json::json!({"ssh": "51.68.1.4", "public_tcp_ports": [443, 0]}),
+            "public_tcp_ports: 0 is not a port",
+        ),
+    ] {
+        let (s, _, text) = add(body.clone()).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{body}: {text}");
+        let m = json(&text)["error"].as_str().unwrap().to_string();
+        assert!(m.contains(msg), "{body}: {m}");
+    }
+    assert_eq!(hosts(&f.st).len(), 2, "nothing recorded for a refusal");
+    // A fleet that bootstraps nothing adds nothing.
+    let off = fleet(config::Config::default(), Box::new(provision::Static));
+    let (s, _, text) = call(
+        &off.st,
+        "POST",
+        "/v1/hosts",
+        "",
+        Some(serde_json::json!({"ssh": "51.68.1.2"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{text}");
+    assert_eq!(json(&text)["code"], "bootstrap_off");
+}
+
+#[tokio::test]
+async fn an_added_host_turns_ready_at_its_first_heartbeat_on_its_private_address() {
+    let f = bootstrapping_fleet();
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/hosts",
+        "",
+        Some(serde_json::json!({"ssh": "51.68.1.2", "address": "10.42.0.11"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
+    let token = f.st.reg.lock().unwrap().hosts["h_10-42-0-11"].token.clone();
+    let fp = "ab".repeat(32);
+    bootstrap::bootstrapped(
+        f.st.reg
+            .lock()
+            .unwrap()
+            .hosts
+            .get_mut("h_10-42-0-11")
+            .unwrap(),
+        "bootstrapped".into(),
+        fp.clone(),
+    );
+    let mut hb = heartbeat("https://10.42.0.11:7420", 64_000, &[]);
+    hb["tls_fingerprint"] = fp.clone().into();
+    // From its public address, it is no host the fleet expects.
+    let mut public = hb.clone();
+    public["url"] = "https://51.68.1.2:7420".into();
+    let (s, _, text) = call(&f.st, "POST", "/v1/hosts/register", &token, Some(public)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{text}");
+    let (s, _, text) = call(&f.st, "POST", "/v1/hosts/register", &token, Some(hb)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{text}");
+    let h = &hosts(&f.st)[0];
+    assert_eq!((h.state.as_str(), h.provider.as_str()), ("ready", "manual"));
+    assert_eq!(h.ssh, "51.68.1.2", "kept for the next bootstrap");
+    assert_eq!(h.tls_fingerprint, fp);
+}
+
 #[tokio::test]
 async fn an_order_past_max_hosts_is_refused() {
     let f = fleet(
