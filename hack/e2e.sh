@@ -67,6 +67,14 @@ check "own name"     'briqyard machine exec "$A" -- nslookup alp.internal 2>&1 |
 check "egress"       'briqyard machine exec "$A" -- wget -qO- -T 10 https://example.com | grep -qi "example domain"'
 check "logs"         'briqyard machine logs "$A" --limit 5000 | grep -q "\[briqyard\] started"'
 
+echo "== image layers: hard links, merged /usr (ADR 0039)"
+BB=$(briqyard machine run --image busybox:1.37 --name bb --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+check "busybox: 400 applets, one file"   '[ "$(briqyard machine exec "$BB" -- stat -c %h /bin/busybox)" -gt 400 ]'
+DB=$(briqyard machine run --image debian:bookworm-slim --name deb --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+check "debian: /bin a link to usr/bin"   '[ "$(briqyard machine exec "$DB" -- readlink /bin)" = usr/bin ]'
+check "debian: a command through it"     '[ "$(briqyard machine exec "$DB" -- /bin/sh -c "echo ok")" = ok ]'
+briqyard machine rm "$BB" >/dev/null; briqyard machine rm "$DB" >/dev/null
+
 echo "== exec sessions: stdin streamed, a terminal, the client's close (ADR 0029)"
 TTY="python3 $(dirname "$0")/exec-tty.py"
 running() { briqyard machine exec "$A" -- pgrep -f "$1" >/dev/null 2>&1; }
