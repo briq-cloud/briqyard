@@ -254,7 +254,7 @@ plus `apt-get purge docker.io` and the edge's files.
   event; a machine with a session open kept awake past its window, asleep once it closed),
   versions and a hand-over (status and the init say the build, `vmm_version` the host's;
   SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start: running
-  again unasked, resumed). E2E checks, E2EN without host ports.
+  again unasked, resumed). 188 checks, 184 without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).
@@ -262,9 +262,9 @@ plus `apt-get purge docker.io` and the edge's files.
   daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
   relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
   machine running (back `ready`, a new start of this version that adopted it, the machine
-  answering, never booted again). SMOKE checks. With `BRIQYARD_TOKEN` against a real fleet: it
+  answering, never booted again). 31 checks. With `BRIQYARD_TOKEN` against a real fleet: it
   orders only through a dry-run provisioner and drains only the dev fleet's host `local`, so it
-  leaves real hosts alone (SMOKEREAL checks then).
+  leaves real hosts alone (15 checks then).
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases
