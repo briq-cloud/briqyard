@@ -108,7 +108,9 @@ over files. Hosts run without swap, and a Firecracker never dumps core.
 The root disk outlives restarts and stops. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
 attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches the host's disk:
-a database on it is as safe as the host's drive. A fork is a clone of a snapshot of both disks,
+a database on it is as safe as the host's drive. Both disks the guest writes take its discards,
+and both are mounted with `discard` (the root by the kernel, the volume by the init): what a guest
+deletes goes back to the pool, unless a snapshot still holds it (ADR 0037). A fork is a clone of a snapshot of both disks,
 taken while the source runs (crash-consistent for the data volume). That snapshot (`@fork-<id>`
 on the source) pins every block the source has since rewritten, so it goes with the last machine
 cloned from it.

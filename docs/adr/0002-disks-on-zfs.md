@@ -1,6 +1,6 @@
 # ADR 0002: Disks: ZFS zvols on the host's NVMe, Writeback, an image to a root disk once
 
-Date: 2026-10-18 · Status: accepted
+Date: 2026-10-18 · Status: accepted; amended by ADR 0037 (the disks take the guest's discards)
 
 ## Context
 

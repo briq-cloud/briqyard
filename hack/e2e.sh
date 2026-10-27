@@ -557,9 +557,9 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   check "discard: a root disk's 256 MiB deleted go back ($root -> $root2 MiB)" '[ "$root" -ge 250 ] && [ "$root2" -le $((root - 230)) ]'
   # A snapshot that fails pauses and resumes the VM with nothing between (Firecracker #6100,
   # fixed in 1.17): the host's next connection over vsock must still be answered.
-  fcapi() { sudo curl -fsS --unix-socket "$JAIL/firecracker/$DC/root/run/firecracker.socket" -X PATCH -H 'content-type: application/json' -d "{\"state\":\"$1\"}" http://localhost/vm; }
-  fcapi Paused && fcapi Resumed
-  check "a bare pause and resume: exec still answered" '[ "$(briqyard machine exec --timeout 20s "$DC" -- hostname)" = trim ]'
+  # The jail's directory is the machine id with a dash (Firecracker's id rules).
+  fcapi() { sudo curl -fsS --unix-socket "$JAIL/firecracker/${DC/_/-}/root/run/firecracker.socket" -X PATCH -H 'content-type: application/json' -d "{\"state\":\"$1\"}" http://localhost/vm; }
+  check "a bare pause and resume: exec still answered" 'fcapi Paused && fcapi Resumed && [ "$(briqyard machine exec --timeout 20s "$DC" -- hostname)" = trim ]'
   briqyard machine rm "$DC" >/dev/null
 
   echo "== daemon crash: running machines are adopted"
