@@ -77,12 +77,14 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | Fit by resources | ✓ memory and disk, reserved at placement | | |
+| Node allocatable (`systemReserved`) | ✓ `capacity.reserved_memory_mb`, `reserved_threads`: what the host keeps for itself and a service beside the daemon (ADR 0028) | | |
 | Node selectors, node affinity, topology | ✓ a create's `region` places a new tenant on a host of it; a tenant never spans regions (ADR 0025) | autoscaling per region | yard, later |
 | Pod affinity | ◐ a tenant's machines share a host, forced | | — |
 | Cordon | ✓ `host drain`, `host undrain`; a drained host is never released (`retire` is its own state, ADR 0027) | | |
 | Taints, tolerations | ✗ | | — |
 | Drain with eviction | ◐ drain stops placement; machines stay | evacuate a host from backups | yard |
 | Node object, heartbeats | ✓ heartbeat every 15 s, `down` after a minute | | |
+| Joining a node (`kubeadm join`) | ✓ `host add`: a server bought by hand, bootstrapped over SSH as an ordered one, its SSH key and certificate pinned; its API on the private network (ADR 0028) | | |
 | Node conditions (MemoryPressure, DiskPressure) | ✓ `memory_pressure`, `disk_pressure` in status and the heartbeat, `host_condition` events; the fleet places nothing new on a host under pressure (ADR 0021) | | |
 | Node-pressure eviction | ◐ thresholds and events; unused images removed under disk pressure | stopping machines to free memory or disk | yard |
 | Cluster autoscaler | ◐ provisioner autoscaler, stub-tested, dry run by default | a first real order | yard |
@@ -98,6 +100,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Cluster DNS | ✓ `<name>.internal` | | |
 | Service, ClusterIP load balancing | ✗ | with groups | yard, later |
 | Ingress controller | ✓ L4 ingress per host, private to the edge | | |
+| Pods reaching a `hostNetwork` pod (an edge on the node) | ✓ `network.host_ports`, at the host's addresses, for machines with egress (ADR 0028) | | |
 | Ingress auth, TLS, hostnames | the control plane's router and edge | | briq |
 | NetworkPolicy, egress | ✓ `open`, `via`, `none` | | |
 | NetworkPolicy, by port and CIDR | ◐ blocked ports, a connection rate, a bandwidth cap per machine (ADR 0018) | allow-lists by CIDR | yard, later |
@@ -161,7 +164,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | Control plane HA (etcd quorum) | ✗ one fleet process, one file | state the fleet can rebuild from the hosts | yard, later |
 | etcd backup | ✓ the registry written to the object store once a minute when it changed and before a key is served, encrypted with age to a key kept offline; `briqyard-fleet restore` (ADR 0032) | | |
-| Cluster provisioning | ✓ bootstrap script, provisioners | | |
+| Cluster provisioning | ✓ bootstrap script, provisioners, `host add`; the pool a mirror, the public interface closed to all but SSH (ADR 0028) | a first real order | yard |
 | Version skew, upgrades | ✓ every binary and the init say `0.1.0+<commit>`; the wire is additive, unknown fields and values ignored; the fleet first, a host never newer (ADR 0027) | the init travels in the root disk: old inits live on until an image change | yard |
 | Multi-cluster | ◐ regions on hosts, placement by region (ADR 0025) | a fleet per region, or one across | yard, later |
 

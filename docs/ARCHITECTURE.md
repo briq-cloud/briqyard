@@ -11,7 +11,7 @@ Status: v0, in development. The API is not stable yet.
 ## One server
 
 ```
-                 HTTP API (:7420)                     TCP / HTTP ingress (:20000-29999, :8080)
+                 HTTP API (:7420)                     TCP / HTTP ingress (:30000-32767, :8080)
                         │                                          │
  ┌──────────────────────┴──────────────────────────────────────────┴─────────────────────┐
  │ briqyardd (root)                                                                        │
@@ -86,8 +86,10 @@ in a row is a `crash_loop` event. Probes are not use: they never keep a machine 
 
 ### Disks
 
-Every disk is a ZFS zvol in one pool (`byard` by default), encrypted from its creation with
-the host's key (ADR 0026), and everything the daemon writes about a machine is on it:
+Every disk is a ZFS zvol in one pool (`byard` by default; on a real host a mirror of the free
+space of its two NVMe disks, the OS on a small RAID 1 beside it, ADR 0028), encrypted from its
+creation with the host's key (ADR 0026), and everything the daemon writes about a machine is
+on it:
 
 | Dataset | What |
 |---|---|
@@ -370,7 +372,11 @@ stays in `dry_run` unless told otherwise.
 A server becomes a host in three steps: the fleet polls the provider for its address, runs
 `hack/bootstrap-host.sh` on it over SSH (the script on stdin, the fleet's URL and a fresh API
 token in the environment) until it succeeds, and the host turns `ready` on its first heartbeat,
-taken for the record made at the order. No provider's API returns the server's SSH host key:
+taken for the record made at the order. A server bought by hand is added (`POST /v1/hosts`,
+`briqyard host add`, its SSH and API addresses) and goes through the last two steps alike. A
+host's API may live on a private network (OVH's vRack, the fleet's `private_network`) while SSH
+reaches its public address: the script binds the API and the endpoints to the private address
+and closes the public interface to all but SSH (ADR 0028). No provider's API returns the server's SSH host key:
 the key seen at the first successful bootstrap is pinned in `<state_dir>/known_hosts`, its
 fingerprint in the host's note, and later connects are strict against it. An upgrade runs the
 same script over the same connection with another release (ADR 0027).
@@ -381,7 +387,7 @@ SHA-256 alone, pinned in the host record: read by the bootstrap over the pinned 
 or written in `hosts:` by the operator. Every forwarded call verifies the pin; a heartbeat
 reporting another fingerprint, or reporting one for a host with none pinned, is refused. The
 CLI pins a daemon the same way (`--tls-fingerprint`, the same verifier in `briqyard-api`). The
-ingress and TCP endpoints are not covered: they need a private network (`MESH.md`).
+ingress and TCP endpoints are not covered by TLS: they ride the private network (ADR 0028; across networks, `MESH.md`).
 
 A WireGuard mesh between hosts, so a tenant can span several, is the next step after that: `MESH.md` is its design.
 
