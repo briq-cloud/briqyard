@@ -4,7 +4,7 @@ Date: 2026-10-27 · Status: accepted; amends ADR 0008 (the store's client) and A
 
 ## Context
 
-`briqyard-objstore` (ADR 0032) held our own S3 client: rusty-s3 presigned each request, and the crate wrote the multipart upload (32 MB parts, one at a time), the list's pagination, the error mapping and the streaming around it, 532 lines with tests. It had no retry: one dropped connection in a 50 GB `zfs send` failed the backup, and the next one started whole again an hour later. The build-vs-borrow review (2026-10-27) named Apache Arrow's `object_store` as the library to take: the S3 client of DataFusion, Polars, delta-rs and InfluxDB, Apache-2.0, released monthly; multipart writes with parts in flight at once, retries with backoff, a get that resumes a cut stream with a ranged request, and a local file system store behind the same trait.
+`briqyard-objstore` (ADR 0032) held our own S3 client: rusty-s3 presigned each request, and the crate wrote the multipart upload (32 MB parts, one at a time), the list's pagination, the error mapping and the streaming around it, 532 lines with tests. It had no retry: one dropped connection in a 50 GB `zfs send` failed the backup, and the next one started whole again an hour later. Apache Arrow's `object_store` does all of that: the S3 client of DataFusion, Polars, delta-rs and InfluxDB, Apache-2.0, released monthly; multipart writes with parts in flight at once, retries with backoff, a get that resumes a cut stream with a ranged request, and a local file system store behind the same trait.
 
 ## Decisions
 
