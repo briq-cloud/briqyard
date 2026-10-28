@@ -478,6 +478,9 @@ LimitNOFILE=65536
 # A core dump of a Firecracker would be its guest's memory, on / in clear (ADR 0026).
 LimitCORE=0
 Environment=BRIQYARD_LOG=info
+# Credentials (BRIQYARD_S3_ACCESS_KEY, BRIQYARD_S3_SECRET_KEY), root's alone, when there is one;
+# written by the operator, read at the next start: a hand-over, never a restart (ADR 0041).
+EnvironmentFile=-/etc/briqyard/briqyardd.env
 
 [Install]
 WantedBy=multi-user.target

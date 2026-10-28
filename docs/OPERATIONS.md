@@ -111,7 +111,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `console_max_mb` | `64` | A running machine's console is rotated past this size; one previous file is kept |
 | `boot_timeout_sec` | `120` | How long a guest may take to answer after its process starts |
 | `boots_at_once` | half the threads, at least 2 | Boots run at once; the rest wait their turn, each with the whole timeout |
-| `backup.store` | none | `s3://bucket/prefix` or `file:///path`; set, `POST /v1/machines/{id}/backups` works. Credentials in `BRIQYARD_S3_ACCESS_KEY` / `BRIQYARD_S3_SECRET_KEY` |
+| `backup.store` | none | `s3://bucket/prefix` or `file:///path`; set, `POST /v1/machines/{id}/backups` works. Credentials `BRIQYARD_S3_ACCESS_KEY` / `BRIQYARD_S3_SECRET_KEY` in `/etc/briqyard/briqyardd.env` (root's, `0600`), read at the next start: change them with a hand-over, never `systemctl restart` (ADR 0041) |
 | `backup.endpoint`, `backup.region` | none | The S3 endpoint (`https://s3.fr-par.scw.cloud`) and region |
 | `backup.keep_snapshots` | `1` | Backup snapshots kept on the host per machine (the newest is the base of the next incremental send) |
 | `backup.default_every`, `backup.default_keep` | none | The schedule of a machine created without `backup` (ADR 0023): both or neither, `every` at least `1h`, `keep` at least 1 |
@@ -754,7 +754,7 @@ the bootstrap's makes it an upgrade.
 
 ```bash
 grep -q '^capacity:' /etc/briqyard/config.yaml || printf 'capacity:\n  reserved_memory_mb: 3072\n' >> /etc/briqyard/config.yaml
-systemctl restart briqyardd
+systemctl restart briqyardd                            # no machine runs yet; later, a hand-over
 export BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN=<the fleet's token>
 briqyard host ls                                       # ready
 ```
