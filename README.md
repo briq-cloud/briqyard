@@ -71,7 +71,7 @@ briqyard is four programs and an install script.
 |---|---|---|
 | `briqyardd` | On every server, as root | Runs the machines of that server: their Firecracker processes, disks, networks, endpoints, sleep and backups. Serves the HTTP API |
 | `briqyard-init` | Inside every microVM, as PID 1 | Starts the image's command and reports when it exits. Answers exec, files and terminal sessions over vsock |
-| `briqyard-fleet` | On one server | Serves the same API for all hosts: picks a host for each tenant and forwards each call there. Keeps the list of hosts and their disk keys. Installs and upgrades hosts over SSH; can order servers from Hetzner Robot, Scaleway or OVH (dry run by default) |
+| `briqyard-fleet` | On one server that reaches every host | Serves the same API for all hosts: picks a host for each tenant and forwards each call there. Keeps the list of hosts and their disk keys. Installs and upgrades hosts over SSH; can order servers from Hetzner Robot, Scaleway or OVH (dry run by default) |
 | `briqyard` | Anywhere | The CLI, for one daemon or a fleet |
 | `hack/bootstrap-host.sh` | On a new server | Turns a fresh Ubuntu server into a host. The fleet runs it to install a host, and again to upgrade it |
 
@@ -113,7 +113,7 @@ BRIQYARD_POOL_DEVICE=/dev/nvme1n1 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
 ALLOWED_CLIENTS=203.0.113.0/24 bash bootstrap-host.sh
 ```
 
-Run a machine, from a computer in `ALLOWED_CLIENTS`:
+Run a machine, from a computer in `ALLOWED_CLIENTS` (the script prints the API certificate's fingerprint):
 
 ```bash
 export BRIQYARD_URL=https://<host>:7420 BRIQYARD_TOKEN=<token> BRIQYARD_TLS_FINGERPRINT=<fingerprint>

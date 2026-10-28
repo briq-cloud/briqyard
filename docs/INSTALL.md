@@ -36,7 +36,7 @@ Run it again with another release to upgrade: the running daemon hands its machi
 | `BRIQYARD_POOL_DEVICE` | One device, or two comma-separated for a mirror. A device already in use is refused: nothing is overwritten |
 | `BRIQYARD_TOKEN` | The API's token: what the CLI and a control plane present |
 | `ALLOWED_CLIENTS` | Comma-separated networks that may reach the API and the endpoints. Without it (or `PRIVATE_ADDRESS`, or `ALLOW_PUBLIC=1`), both listen on loopback only, in plain HTTP |
-| `PRIVATE_ADDRESS`, `PRIVATE_INTERFACE` | Put the API and the endpoints on a private network, and close the public interface to all but SSH |
+| `PRIVATE_ADDRESS`, `PRIVATE_INTERFACE` | Put the API and the endpoints on a private network, and close the public interface to all but SSH (and `PUBLIC_TCP_PORTS`) |
 
 Every variable: [OPERATIONS.md, Install](OPERATIONS.md#install).
 
