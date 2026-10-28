@@ -504,11 +504,13 @@ Prometheus text:
 new host fixes both. `pressure`: the tenant's own host (or a fork's source's) is under a
 condition; a new host does not help, that host must be freed (or the tenant moved, below). A
 region no host is in counts as `region="other"`; a create that asked for none, as `region=""`.
-Counters start at 0 when the fleet starts. The token: `metrics_token` in the fleet's config
+Those two carry `briqyard_fleet_unschedulable_total` only (and `""` the room too when a host
+has no region): no host, no room. Counters start at 0 when the fleet starts. The token: `metrics_token` in the fleet's config
 when set (then only it), else the API's; none on a loopback `listen` with `tls` unset.
 
 `GET /v1/status` has the same per region (`regions`: `free`, `largest_slot`,
-`unschedulable`), and `briqyard host ls` prints them under the hosts. Each refusal is a `warn`
+`unschedulable`; no `free` or `largest_slot` where no host is), and `briqyard host ls` prints
+them under the hosts (`-` there). Each refusal is a `warn`
 line `unschedulable` with `resource`, `region`, `tenant`, `host` (the tenant's), `memory_mb`,
 `disk_mb` (asked) and `largest_memory_mb`, `largest_disk_mb` (the region's).
 

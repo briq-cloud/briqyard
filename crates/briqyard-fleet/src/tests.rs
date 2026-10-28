@@ -1559,6 +1559,17 @@ async fn each_refusal_is_counted_by_what_ran_out_and_the_room_is_shown() {
         assert!(lines.iter().any(|l| l == want), "{want}\n{lines:#?}");
     }
     assert!(!lines.iter().any(|l| l.contains("nowhere")), "{lines:#?}");
+    // `other` and `""` have no host: their counters only, never a room of 0 that reads as a
+    // full region.
+    for region in ["other", ""] {
+        let room = format!("region=\"{region}\"}}");
+        let gauges: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with("briqyard_fleet_") && !l.contains("unschedulable"))
+            .filter(|l| l.split(' ').next().unwrap().ends_with(&room))
+            .collect();
+        assert!(gauges.is_empty(), "{region:?}: {gauges:#?}");
+    }
     // The same in /v1/status.
     let (s, _, body) = call(&f.st, "GET", "/v1/status", "", None).await;
     assert_eq!(s, StatusCode::OK);
@@ -1574,8 +1585,18 @@ async fn each_refusal_is_counted_by_what_ran_out_and_the_room_is_shown() {
             pressure: 1
         }
     );
-    assert_eq!(regions[1].free, api::Room::default());
+    assert_eq!(regions[1].free, Some(api::Room::default()), "gra: full");
     assert_eq!(regions[2].unschedulable.memory, 1);
+    for r in [&regions[0], &regions[2]] {
+        assert_eq!(
+            (r.free, r.largest_slot),
+            (None, None),
+            "{:?}: no host",
+            r.region
+        );
+    }
+    let v = json(&body);
+    assert!(v["regions"][0].get("free").is_none(), "absent, not 0: {v}");
 }
 
 #[tokio::test]

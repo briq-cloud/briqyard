@@ -1673,11 +1673,14 @@ pub struct RegionRoom {
     /// The hosts' `region`; empty for hosts with none, and for refusals of creates that asked
     /// for none. `other` counts refusals in a region no host is in.
     pub region: String,
-    /// Free on those hosts, summed.
-    pub free: Room,
+    /// Free on those hosts, summed. Absent for a region no host is in (`other`, or empty when
+    /// every host has a region): it has refusals only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free: Option<Room>,
     /// The most free on one of them: the largest machine (memory) or volume plus headroom
-    /// (disk) the region still takes.
-    pub largest_slot: Room,
+    /// (disk) the region still takes. Absent as `free` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub largest_slot: Option<Room>,
     /// Creates refused 503 `capacity` since the fleet started, by what ran out.
     pub unschedulable: Unschedulable,
 }

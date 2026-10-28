@@ -1016,8 +1016,8 @@ components:
       description: "A region as the fleet sees it (ADR 0042): its hosts that take a new tenant (ready, under the fill ceiling, no condition), and its refusals"
       properties:
         region: { type: string, description: "a host's region; empty for none; `other` counts refusals in a region no host is in" }
-        free: { $ref: "#/components/schemas/Room" }
-        largest_slot: { $ref: "#/components/schemas/Room" }
+        free: { $ref: "#/components/schemas/Room", description: "absent for a region no host is in (refusals only)" }
+        largest_slot: { $ref: "#/components/schemas/Room", description: "absent as `free` is" }
         unschedulable:
           type: object
           description: "creates refused 503 `capacity` since the fleet started, by what ran out"

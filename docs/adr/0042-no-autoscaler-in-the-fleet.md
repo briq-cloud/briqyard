@@ -22,7 +22,7 @@ Before this change the fleet's only capacity signal was a 503 `capacity` answer 
 | `disk` | A new tenant: hosts have the memory, none the disk (a volume plus 2 GB), or those with both are under `disk_pressure` | yes |
 | `pressure` | The host the create is bound to (a pinned tenant's, a fork's source's) is under a condition (ADR 0021) | no: the tenant's machines stay on its host (ADR 0006), so that host must be freed |
 
-A host under a condition is short of what its condition names, so a new tenant refused for it counts as `memory` or `disk` (the condition of the host with the most memory free among those with the room). That keeps the scaler's rule to one line: `memory` or `disk` grew, add a host in the region. A host's own refusal (its answer passes through, ADR 0013) is not counted: a host the fleet thought had room, or a pinned tenant's, and the daemon does not say which resource.
+A host under a condition is short of what its condition names, so a new tenant refused for it counts as `memory` or `disk` (the condition of the host with the most memory free among those with the room). That keeps the scaler's rule to one line: `memory` or `disk` grew, add a host in the region. A host's own refusal (its answer passes through, ADR 0013) is not counted: a host the fleet thought had room, or a pinned tenant's, and the daemon does not say which resource. So a pinned tenant's machine refused by its own host, full but under its pressure thresholds, is neither counted nor logged by the fleet; `memory_pressure` at 95 % of capacity (the default) keeps that window small.
 
 **The signals, on the fleet's `GET /metrics`** (Prometheus text, written as the daemon's, the helpers shared in `briqyard_api::metrics`):
 
@@ -33,7 +33,7 @@ A host under a condition is short of what its condition names, so a new tenant r
 | `briqyard_fleet_largest_slot_mb` | same | the most free on one of them: the largest machine the region still takes |
 | `briqyard_fleet_unschedulable_total` | `resource="memory\|disk\|pressure"`, `region` | refusals since the fleet started |
 
-Every region a host is in has every series, zeros included, so `increase()` works from the first scrape. A region asked that no host is in counts as `region="other"`: a caller's typo never makes a new series. `/metrics` takes the API's token, or `metrics_token` when set (then only it), and none on a loopback listener with `tls` unset: the daemon's rule (ADR 0021).
+Every region a host is in has every series, zeros included, so `increase()` works from the first scrape. A region asked that no host is in counts as `region="other"`: a caller's typo never makes a new series. `other`, and `""` when every host has a region, have the counter only: a room of 0 there would read as a full region. `/v1/status` leaves their `free` and `largest_slot` out. `/metrics` takes the API's token, or `metrics_token` when set (then only it), and none on a loopback listener with `tls` unset: the daemon's rule (ADR 0021).
 
 **The same numbers elsewhere.** `GET /v1/status` gets `regions` (additive, ADR 0027): per region `free`, `largest_slot` (`memory_mb`, `disk_mb`) and `unschedulable` (`memory`, `disk`, `pressure`). `briqyard host ls` prints them under the hosts. Each refusal is a `warn` line, `unschedulable`, with `resource`, `region`, `tenant`, `host` (a pinned one), the ask (`memory_mb`, `disk_mb`) and the region's largest slot (`largest_memory_mb`, `largest_disk_mb`), for log-based alerts.
 

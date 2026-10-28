@@ -1232,25 +1232,30 @@ fn the_region_table() {
     assert_eq!(region_table(&[]), "", "a daemon has no regions");
     let gra = api::RegionRoom {
         region: "gra".into(),
-        free: api::Room {
+        free: Some(api::Room {
             memory_mb: 120_000,
             disk_mb: 800_000,
-        },
-        largest_slot: api::Room {
+        }),
+        largest_slot: Some(api::Room {
             memory_mb: 60_000,
             disk_mb: 400_000,
-        },
+        }),
         unschedulable: api::Unschedulable {
             memory: 3,
             disk: 0,
             pressure: 1,
         },
     };
-    let other = api::RegionRoom {
+    // Refusals of creates that asked for no region, while every host has one: no room.
+    let any = api::RegionRoom {
         region: String::new(),
+        unschedulable: api::Unschedulable {
+            memory: 1,
+            ..Default::default()
+        },
         ..Default::default()
     };
-    let out = region_table(&[gra, other]);
+    let out = region_table(&[gra, any]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -1258,7 +1263,7 @@ fn the_region_table() {
             "",
             "REGION   FREE MB MEM/DISK     LARGEST MB MEM/DISK  UNSCHEDULABLE MEM/DISK/PRESSURE",
             "gra      120000/800000        60000/400000         3/0/1",
-            "-        0/0                  0/0                  0/0/0",
+            "-        -                    -                    1/0/0",
         ]
     );
 }

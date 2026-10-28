@@ -4,7 +4,7 @@
 
 use crate::registry::{Policy, Registry, Resource};
 use briqyard_api::metrics::{family, label_value};
-use briqyard_api::{RegionRoom, Unschedulable};
+use briqyard_api::{RegionRoom, Room, Unschedulable};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -37,7 +37,8 @@ pub fn counted_region<'a>(reg: &Registry, asked: &'a str) -> &'a str {
     }
 }
 
-/// Each region a host is in, and each a refusal was counted in, by name.
+/// Each region a host is in, with its room, and each a refusal was counted in, by name. A
+/// region no host is in has no room: it would read as a region with none.
 pub fn regions(reg: &Registry, policy: &Policy, refusals: &Refusals) -> Vec<RegionRoom> {
     let mut out: BTreeMap<String, RegionRoom> = reg
         .room(policy)
@@ -45,8 +46,8 @@ pub fn regions(reg: &Registry, policy: &Policy, refusals: &Refusals) -> Vec<Regi
         .map(|(region, (free, largest_slot))| {
             let room = RegionRoom {
                 region: region.clone(),
-                free,
-                largest_slot,
+                free: Some(free),
+                largest_slot: Some(largest_slot),
                 unschedulable: Unschedulable::default(),
             };
             (region, room)
@@ -67,8 +68,9 @@ pub fn regions(reg: &Registry, policy: &Policy, refusals: &Refusals) -> Vec<Regi
     out.into_values().collect()
 }
 
-/// The fleet's `/metrics`: hosts by state, then each region's room and refusals. Every region
-/// has every series, zeros included, so a rate is defined from the first scrape.
+/// The fleet's `/metrics`: hosts by state, then each region's room and refusals. A region a
+/// host is in has every series, zeros included, so a rate is defined from the first scrape; a
+/// region with refusals only has the counter alone.
 pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
     let mut out = String::new();
     let o = &mut out;
@@ -87,12 +89,12 @@ pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
         "Hosts in the registry, by state.",
         states,
     );
-    let per_resource = |pick: fn(&RegionRoom) -> [(&'static str, u64); 2]| {
+    let per_resource = |pick: fn(&RegionRoom) -> Option<Room>| {
         regions
             .iter()
-            .flat_map(|r| {
-                pick(r).map(|(resource, v)| {
-                    let region = label_value(&r.region);
+            .filter_map(|r| pick(r).map(|room| (label_value(&r.region), room)))
+            .flat_map(|(region, room)| {
+                [("memory", room.memory_mb), ("disk", room.disk_mb)].map(|(resource, v)| {
                     (
                         format!("resource=\"{resource}\",region=\"{region}\""),
                         v.to_string(),
@@ -106,19 +108,14 @@ pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
         "briqyard_fleet_free_mb",
         "gauge",
         "Free memory and disk, in MB, summed over the region's hosts that take a new tenant.",
-        per_resource(|r| [("memory", r.free.memory_mb), ("disk", r.free.disk_mb)]),
+        per_resource(|r| r.free),
     );
     family(
         o,
         "briqyard_fleet_largest_slot_mb",
         "gauge",
         "The most free memory and disk, in MB, on one of the region's hosts that take a new tenant.",
-        per_resource(|r| {
-            [
-                ("memory", r.largest_slot.memory_mb),
-                ("disk", r.largest_slot.disk_mb),
-            ]
-        }),
+        per_resource(|r| r.largest_slot),
     );
     let refused = regions
         .iter()

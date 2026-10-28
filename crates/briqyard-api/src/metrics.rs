@@ -29,6 +29,8 @@ pub fn family(
 /// sample; a family's HELP and TYPE once, before its samples, which are together; label names
 /// and values well formed; values numbers; no series twice. Panics on the first fault: for
 /// tests, the daemon's and the fleet's.
+// For tests only: it panics.
+#[doc(hidden)]
 pub fn check_exposition(text: &str) {
     use std::collections::HashSet;
     let name_ok = |n: &str| {

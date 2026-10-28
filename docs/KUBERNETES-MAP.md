@@ -87,7 +87,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Joining a node (`kubeadm join`) | ✓ `host add`: a server bought by hand, bootstrapped over SSH as an ordered one, its SSH key and certificate pinned; its API on the private network (ADR 0028) | | |
 | Node conditions (MemoryPressure, DiskPressure) | ✓ `memory_pressure`, `disk_pressure` in status and the heartbeat, `host_condition` events; the fleet places nothing new on a host under pressure (ADR 0021) | | |
 | Node-pressure eviction | ◐ thresholds and events; unused images removed under disk pressure | stopping machines to free memory or disk | yard |
-| Cluster autoscaler | ✓ external, as in Kubernetes: it reads the fleet's `/metrics` (`briqyard_fleet_unschedulable_total` by resource and region, `_free_mb`, `_largest_slot_mb`) and adds hosts with `host add` (ADR 0042); the in-fleet autoscaler goes in a second change | the scaler itself | briq |
+| Cluster autoscaler | ◐ external, as in Kubernetes: it reads the fleet's `/metrics` (`briqyard_fleet_unschedulable_total` by resource and region, `_free_mb`, `_largest_slot_mb`) and adds hosts with `host add` (ADR 0042); the in-fleet autoscaler goes in a second change | the scaler itself | briq |
 | Node upgrades | ◐ `host upgrade` (`--all` one host at a time): `upgrading`, the bootstrap script with the release, the daemon hands its machines over, back on a heartbeat from the new version (ADR 0027) | OS and kernel patching (a reboot): drain, `systemctl stop`, reboot, undrain by hand | yard |
 | `kubectl top node` | ◐ `/v1/status`, committed memory and the pool on `/metrics` | the host's own CPU and memory use | yard |
 
