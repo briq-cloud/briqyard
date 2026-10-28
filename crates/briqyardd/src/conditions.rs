@@ -161,10 +161,26 @@ mod tests {
     }
 
     #[test]
+    fn storage_is_stalled_by_its_oldest_command() {
+        let ran = std::time::Duration::from_secs(75);
+        assert_eq!(
+            storage(Some((ran, "zfs snapshot byard/m/m_1/root@fork-x".into()))),
+            (
+                true,
+                "zfs snapshot byard/m/m_1/root@fork-x running for 75 s".into()
+            )
+        );
+        assert_eq!(
+            storage(None),
+            (false, "no zfs command running for over 60 s".into())
+        );
+    }
+
+    #[test]
     fn a_condition_changes_once_and_keeps_its_message_fresh() {
         let mut c = Conditions::new(t("2026-10-21T10:00:00Z"));
         assert_eq!(api::under_pressure(&c.list()), None);
-        assert_eq!(c.list().len(), 2);
+        assert_eq!(c.list().len(), 3);
         // The same status: no change, the message follows the figures.
         let same = c.set(
             condition::DISK_PRESSURE,

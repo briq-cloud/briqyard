@@ -110,6 +110,11 @@ per host in its registry and serves it to that host alone, or a file on a single
 has the key the daemon serves nothing and says why in its log. A dataset is never mounted
 over files. Hosts run without swap, and a Firecracker never dumps core.
 
+A disk's device is `/dev/zdN`, never udev's link: ZFS renames and removes devices after `zfs`
+returned and udev can drop the event that moves a link, so the daemon takes the device the link
+names only once `zvol_id` says it is that disk, and sends a change event for a device whose link
+is wrong. A rename waits for the kernel to rename the device, then for its link (ADR 0043).
+
 The root disk outlives restarts and stops. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
 attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches the host's disk:
@@ -285,7 +290,9 @@ counters' totals since the daemon started, the cgroup's memory and the last two 
 scrape probes nothing. `GET /v1/top` takes CPU percent and network rates from the last two
 readings, 15 s apart. After the measure the tick reads the pool once and decides the host's
 conditions (`conditions.rs`): `memory_pressure`, committed memory over `memory_pct` of
-capacity; `disk_pressure`, the pool's free space under `disk_free_pct`. A change is a
+capacity; `disk_pressure`, the pool's free space under `disk_free_pct`. A task of its own
+decides `storage_stalled` every 15 s, a `zfs` command running for over a minute (ADR 0043):
+the tick would wait on the same pool. A change is a
 `host_condition` event; `/v1/status` and the heartbeat carry them. Under disk pressure the tick
 removes unused images (no clone, no record naming them), oldest first, counting what each took
 as freed, until the pool is back over the threshold. The console is written by the daemon's

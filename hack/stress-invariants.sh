@@ -46,6 +46,27 @@ missing=$(comm -13 <(echo "$roots") <(echo "$ids"))
 check_eq "data disks == machines with a volume" "$(echo "$datas" | grep -c . || true)" "$(echo "$with_volume" | grep -c . || true)"
 [ -z "$others" ] && ok "no stray dataset under m/" || fail "stray datasets: $(echo "$others" | tr '\n' ' ')"
 
+# --- devices (ADR 0043): each disk's link names it; a Firecracker holds its own disks only ---
+wrong=""
+for v in $(sudo zfs list -H -o name -t volume -r "$POOL/m" 2>/dev/null); do
+  d=$(readlink -f "/dev/zvol/$v" 2>/dev/null)
+  [ -b "$d" ] && [ "$(sudo /usr/lib/udev/zvol_id "$d" 2>/dev/null)" = "$v" ] || wrong="$wrong $v"
+done
+[ -z "$wrong" ] && ok "every disk's link names it" || fail "links missing or naming another disk:$wrong"
+# A jailed Firecracker opens its own node of the device: matched to /dev/zdN by number.
+declare -A zd
+for d in /dev/zd*; do [ -b "$d" ] && zd[$(stat -c '%t:%T' "$d")]=$d; done
+held=""
+while read -r pid id; do
+  for f in $(sudo ls "/proc/$pid/fd" 2>/dev/null); do
+    sudo test -b "/proc/$pid/fd/$f" || continue
+    d=${zd[$(sudo stat -L -c '%t:%T' "/proc/$pid/fd/$f")]:-}
+    n=$([ -n "$d" ] && sudo /usr/lib/udev/zvol_id "$d" 2>&1)
+    case "$n" in "$POOL/m/$id/root" | "$POOL/m/$id/data") ;; *) held="$held $id:${d:-?}:$n" ;; esac
+  done
+done < <(pgrep -a firecracker 2>/dev/null | sed -n 's/^\([0-9]*\) .*--id \([a-z0-9-]*\).*/\1 \2/p' | sed 's/ m-/ m_/')
+[ -z "$held" ] && ok "every firecracker holds its own disks" || fail "firecrackers holding another disk:$held"
+
 # --- processes and taps: one Firecracker and one TAP per live machine, none for unknown ids ---
 pending=$(echo "$M" | jq '[.[] | select(.state == "starting" or .state == "stopping")] | length')
 fcs=$(pgrep -a firecracker 2>/dev/null | grep -o -- '--id [a-z0-9_-]*' | awk '{print $2}' | sed 's/^m-/m_/; s/-/_/g' | sort -u)

@@ -177,7 +177,9 @@ plus `apt-get purge docker.io` and the edge's files.
 
 - `cargo test --workspace`: unit tests, which run anywhere (extraction and whiteouts on Linux, DNS
   packets, the guest protocol, address allocation, the store, the configuration, the ZFS
-  backend against a fake `zfs`, the Firecracker and guest clients against in-test sockets,
+  backend against a fake `zfs`, `udevadm` and `zvol_id` (a device per volume through renames;
+  links udev left wrong, or never made, mended; a command running past its time stalled; ADR
+  0043), the Firecracker and guest clients against in-test sockets,
   the config drive, restart and sleep decisions, and the manager's transitions through a
   harness over a temp directory, the same fake `zfs` and a mock host (`Vmm`, `Guest`,
   `Net`; ADR 0010): create to running, boot failures, start against destroy, starts past
@@ -185,7 +187,8 @@ plus `apt-get purge docker.io` and the edge's files.
   the sleeper's tick, the init's exit report, fork snapshots freed, backups (the schedule due
   and not before, at most `at_once`, one per machine, a machine with no process skipped while
   unchanged, retention and its restores, delete and `chain`, a failure and its backoff, a
-  refused store leaving nothing, a destroyed machine's held, counted and expired), the tenant's gateway
+  refused store leaving nothing, a destroyed machine's held, counted and expired, a backup racing
+  a destroy answered 404), the tenant's gateway
   (booted once by what needs it, its failure named, slept by the tick, kept while in use),
   usage (hours split, counter resets, suspended and stopped machines, traffic on its machine,
   closed hours, a restart, retention, a destroyed machine, the route's range), egress limits
@@ -198,7 +201,8 @@ plus `apt-get purge docker.io` and the edge's files.
   records at load, the route's pages, watch and 410; the log itself: seqs across a restart, a
   torn line, retention, a watch's backlog, lag, heartbeat and shutdown), metrics and
   conditions (the exposition of machines in every state checked line by line and against the
-  format, no probe per scrape, conditions turning true and clearing with their events, a pool
+  format, no probe per scrape, conditions turning true and clearing with their events, a stuck
+  `zfs` command as `storage_stalled` until it exits, a pool
   that cannot be read, image removal under disk pressure oldest unused first, `top` from two
   ticks, the console rotated while two tasks write with no line lost, logs across the rotated
   file, placement and creates refused on a host under pressure), probes (readiness and
@@ -227,7 +231,8 @@ plus `apt-get purge docker.io` and the edge's files.
   retired disk; a backup after a restore continuing from an ancestor, or whole, and restorable;
   `If-Match` and a stopped machine left stopped; a restore cut short finished by the daemon and
   by a start; a snapshot with memory resumed while the spec is the same, cold after a change; a
-  new image dropping the snapshots' root halves; a wake during a stop), the
+  new image dropping the snapshots' root halves; a wake during a stop; a restore booting the new
+  disk when udev dropped every event), the
   pool's key (an unencrypted pool refused, a loaded key left alone, loaded from a file and from
   a stub fleet as the host, each failed try saying why without the key, the wait ended by a
   stop; `load-key` with the key on stdin; a filesystem never mounted over files; the fleet's
