@@ -1,0 +1,153 @@
+<!-- Renders docs/images/architecture.png (1660 px wide: the 830 px README column at 2×). From the repository root:
+     npx playwright screenshot --viewport-size=1660,1048 --wait-for-selector=body.ready "file://$PWD/docs/images/src/architecture.html" docs/images/architecture.png -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>briqyard across servers</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=Instrument+Sans:wght@400;500&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; background: #141110; }
+  svg { display: block; }
+</style>
+</head>
+<body>
+<svg id="art" xmlns="http://www.w3.org/2000/svg" width="1660" height="1048" viewBox="0 0 830 524"></svg>
+<script>
+// Components as flat tiles with a strip in the colour of their kind (briqyard brick, network
+// cobalt, storage moss, outside neutral); the things they hold as small filled bricks; dotted
+// links with rounded corners in neutral grey. Units are CSS px of the 830 px README column.
+const C = {
+  kiln: '#141110', surface: '#1c1815', line: '#2e2925', lineStrong: '#4a423b',
+  ink: '#f3eee8', inkMuted: '#a89d92', inkFaint: '#6e645b', onBlock: '#17130f',
+  brick: '#f06a3c', cobalt: '#6b86f5', amber: '#f0b43a', moss: '#4fb47e', plum: '#b48cf0',
+};
+const NS = 'http://www.w3.org/2000/svg';
+const MONO = 'IBM Plex Mono', SANS = 'Instrument Sans';
+const svg = document.getElementById('art');
+/** Back to front: frames, links, their labels, tiles, what sits inside tiles, links into those. */
+const L = Object.fromEntries(['frame', 'links', 'labels', 'tiles', 'inner', 'over'].map((k) => [k, el(svg, 'g', {})]));
+function el(parent, name, attrs, text) {
+  const e = document.createElementNS(NS, name);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (text !== undefined) e.textContent = text;
+  parent.append(e);
+  return e;
+}
+const box = (x, y, w, h) => ({ x, y, w, h, cx: x + w / 2, cy: y + h / 2, r: x + w, b: y + h });
+
+/** A tile: surface, a hairline, a strip of its kind's colour on top; a title and lines under it. */
+function tile({ x, y, w, h, kind, title, mono = true, sub = [], bricks = [], layer = L.tiles }) {
+  el(layer, 'rect', { x, y, width: w, height: h, rx: 4, fill: C.surface, stroke: C.line, 'stroke-width': 1 });
+  el(layer, 'path', { d: `M${x} ${y + 4}a4 4 0 0 1 4 -4h${w - 8}a4 4 0 0 1 4 4v1h${-w}z`, fill: kind });
+  el(layer, 'text', { x: x + 14, y: y + 30, 'font-family': mono ? MONO : SANS, 'font-weight': 500,
+    'font-size': mono ? 14.5 : 15, fill: C.ink }, title);
+  sub.forEach((line, i) =>
+    el(layer, 'text', { x: x + 14, y: y + 50 + i * 18, 'font-family': SANS, 'font-size': 13, fill: C.inkMuted }, line));
+  // Machines on a host: small 2:1 bricks in block colours along the tile's foot.
+  bricks.forEach((fill, i) =>
+    el(layer, 'rect', { x: x + 14 + i * 36, y: y + h - 30, width: 32, height: 16, rx: 2, fill }));
+  return box(x, y, w, h);
+}
+/** A filled brick holding a name in mono; returns its box. */
+function chip(x, y, text, fill, layer = L.tiles) {
+  const t = el(layer, 'text', { x: x + 10, y: y + 15, 'font-family': MONO, 'font-weight': 500, 'font-size': 12, fill: C.onBlock }, text);
+  const w = t.getComputedTextLength() + 20;
+  layer.insertBefore(el(layer, 'rect', { x, y, width: w, height: 22, rx: 2, fill }), t);
+  return box(x, y, w, 22);
+}
+
+const DOT = { 'stroke-dasharray': '0.1 6', 'stroke-width': 2.2 };
+const DASH = { 'stroke-dasharray': '5 5', 'stroke-width': 1.6 };
+/** An orthogonal link through `pts` with rounded corners; arrowheads at the end, or both ends. */
+function route(pts, { style = DOT, radius = 28, both = false, layer = L.links } = {}) {
+  let d = `M${pts[0]}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [a, b, c] = [pts[i - 1], pts[i], pts[i + 1]];
+    const into = unit(a, b), out = unit(b, c);
+    const r = Math.min(radius, Math.hypot(b[0] - a[0], b[1] - a[1]) / 2, Math.hypot(c[0] - b[0], c[1] - b[1]) / 2);
+    d += `L${b[0] - into[0] * r} ${b[1] - into[1] * r}Q${b} ${b[0] + out[0] * r} ${b[1] + out[1] * r}`;
+  }
+  d += `L${pts[pts.length - 1]}`;
+  el(layer, 'path', { d, fill: 'none', stroke: C.inkFaint, 'stroke-linecap': 'round', ...style });
+  arrow(pts[pts.length - 2], pts[pts.length - 1], layer);
+  if (both) arrow(pts[1], pts[0], layer);
+}
+function unit(a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy);
+  return [dx / l, dy / l];
+}
+function arrow(from, to, layer) {
+  const a = Math.atan2(to[1] - from[1], to[0] - from[0]);
+  const p = (o) => `${to[0] - 7 * Math.cos(a + o)} ${to[1] - 7 * Math.sin(a + o)}`;
+  el(layer, 'path', { d: `M${p(0.5)}L${to[0]} ${to[1]}L${p(-0.5)}`, fill: 'none', stroke: C.inkFaint,
+    'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
+}
+/** A small label on the kiln ground, cut out of whatever link runs under it. */
+function note(x, y, text, anchor = 'middle', layer = L.labels) {
+  const t = el(layer, 'text', { x, y: y + 4, 'font-family': SANS, 'font-size': 12.5, fill: C.inkMuted, 'text-anchor': anchor }, text);
+  const b = t.getBBox();
+  layer.insertBefore(el(layer, 'rect', { x: b.x - 5, y: b.y - 2, width: b.width + 10, height: b.height + 4, rx: 3, fill: C.kiln }), t);
+}
+
+function draw() {
+  const client = tile({ x: 305, y: 16, w: 220, h: 50, kind: C.lineStrong, title: 'Control plane or CLI', mono: false });
+  const fleet = tile({ x: 285, y: 128, w: 260, h: 76, kind: C.brick, title: 'briqyard-fleet',
+    sub: ['placement, registry, pool keys'] });
+  const h1 = tile({ x: 24, y: 290, w: 204, h: 100, kind: C.brick, title: 'briqyardd', sub: ['host 1'],
+    bricks: [C.cobalt, C.amber, C.plum, C.moss] });
+  const h2 = tile({ x: 602, y: 290, w: 204, h: 100, kind: C.brick, title: 'briqyardd', sub: ['host 2'],
+    bricks: [C.plum, C.cobalt, C.plum] });
+  const s3 = tile({ x: 355, y: 308, w: 120, h: 64, kind: C.moss, title: 'S3 bucket', mono: false,
+    sub: ['object storage'] });
+  const edge = tile({ x: 315, y: 456, w: 200, h: 50, kind: C.cobalt, title: 'Edge or router', mono: false });
+
+  // Client → fleet.
+  route([[client.cx, client.b + 6], [fleet.cx, fleet.y - 6]]);
+  note(fleet.cx + 12, (client.b + fleet.y) / 2, 'HTTPS API', 'start');
+
+  // Fleet ↔ hosts: the API over TLS, certificate pinned (outer), heartbeats back (inner).
+  const api = fleet.y + 24, beat = fleet.b - 20;
+  const l1 = h1.x + 56, l2 = h1.x + 124;
+  route([[fleet.x - 6, api], [l1, api], [l1, h1.y - 6]]);
+  route([[l2, h1.y - 6], [l2, beat], [fleet.x - 6, beat]]);
+  note(l1 + 8, api - 14, 'TLS, certificate pinned', 'start');
+  note(l2 + 12, beat + 34, 'heartbeat', 'start');
+  const r1 = h2.r - 56, r2 = h2.r - 124;
+  route([[fleet.r + 6, api], [r1, api], [r1, h2.y - 6]]);
+  route([[r2, h2.y - 6], [r2, beat], [fleet.r + 6, beat]]);
+  note(r1 - 8, api - 14, 'TLS, certificate pinned', 'end');
+  note(r2 - 12, beat + 34, 'heartbeat', 'end');
+  // Fleet → host 2 over SSH: install, upgrade (outermost).
+  const ssh = h2.r - 20, top = fleet.y - 40;
+  route([[fleet.r - 24, fleet.y - 6], [fleet.r - 24, top], [ssh, top], [ssh, h2.y - 6]], { style: DASH });
+  note(ssh - 12, top - 14, 'SSH: install, upgrade', 'end');
+
+  // Fleet → bucket: its registry, encrypted.
+  route([[fleet.cx, fleet.b + 6], [s3.cx, s3.y - 6]]);
+  note(fleet.cx + 12, (fleet.b + s3.y) / 2, 'registry, encrypted', 'start');
+  // Hosts → bucket: encrypted backups.
+  route([[h1.r + 6, s3.cy], [s3.x - 6, s3.cy]]);
+  route([[h2.x - 6, s3.cy], [s3.r + 6, s3.cy]]);
+  for (const x of [(h1.r + s3.x) / 2, (h2.x + s3.r) / 2]) {
+    note(x, s3.cy - 34, 'encrypted');
+    note(x, s3.cy - 16, 'backups');
+  }
+  // Edge → hosts: TCP and HTTP endpoints.
+  for (const h of [h1, h2]) {
+    const side = h === h1 ? edge.x - 6 : edge.r + 6;
+    route([[side, edge.cy], [h.cx, edge.cy], [h.cx, h.b + 6]]);
+    note(h === h1 ? h.cx + 16 : h.cx - 16, edge.cy - 20, 'TCP and HTTP endpoints', h === h1 ? 'start' : 'end');
+  }
+}
+
+Promise.all([
+  document.fonts.load('500 14px "IBM Plex Mono"'),
+  document.fonts.load('400 13px "Instrument Sans"'),
+  document.fonts.load('500 15px "Instrument Sans"'),
+]).then(() => document.fonts.ready).then(() => { draw(); document.body.classList.add('ready'); });
+</script>
+</body>
+</html>

@@ -1,0 +1,167 @@
+<!-- Renders docs/images/host.png (1660 px wide: the 830 px README column at 2×). From the repository root:
+     npx playwright screenshot --viewport-size=1660,1244 --wait-for-selector=body.ready "file://$PWD/docs/images/src/host.html" docs/images/host.png -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>briqyard on one server</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=Instrument+Sans:wght@400;500&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; background: #141110; }
+  svg { display: block; }
+</style>
+</head>
+<body>
+<svg id="art" xmlns="http://www.w3.org/2000/svg" width="1660" height="1244" viewBox="0 0 830 622"></svg>
+<script>
+// Components as flat tiles with a strip in the colour of their kind (briqyard brick, network
+// cobalt, storage moss, outside neutral); the things they hold as small filled bricks; dotted
+// links with rounded corners in neutral grey. Units are CSS px of the 830 px README column.
+const C = {
+  kiln: '#141110', surface: '#1c1815', line: '#2e2925', lineStrong: '#4a423b',
+  ink: '#f3eee8', inkMuted: '#a89d92', inkFaint: '#6e645b', onBlock: '#17130f',
+  brick: '#f06a3c', cobalt: '#6b86f5', amber: '#f0b43a', moss: '#4fb47e', plum: '#b48cf0',
+};
+const NS = 'http://www.w3.org/2000/svg';
+const MONO = 'IBM Plex Mono', SANS = 'Instrument Sans';
+const svg = document.getElementById('art');
+/** Back to front: frames, links, their labels, tiles, what sits inside tiles, links into those. */
+const L = Object.fromEntries(['frame', 'links', 'labels', 'tiles', 'inner', 'over'].map((k) => [k, el(svg, 'g', {})]));
+function el(parent, name, attrs, text) {
+  const e = document.createElementNS(NS, name);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (text !== undefined) e.textContent = text;
+  parent.append(e);
+  return e;
+}
+const box = (x, y, w, h) => ({ x, y, w, h, cx: x + w / 2, cy: y + h / 2, r: x + w, b: y + h });
+
+/** A tile: surface, a hairline, a strip of its kind's colour on top; a title and lines under it. */
+function tile({ x, y, w, h, kind, title, mono = true, sub = [], bricks = [], layer = L.tiles }) {
+  el(layer, 'rect', { x, y, width: w, height: h, rx: 4, fill: C.surface, stroke: C.line, 'stroke-width': 1 });
+  el(layer, 'path', { d: `M${x} ${y + 4}a4 4 0 0 1 4 -4h${w - 8}a4 4 0 0 1 4 4v1h${-w}z`, fill: kind });
+  el(layer, 'text', { x: x + 14, y: y + 30, 'font-family': mono ? MONO : SANS, 'font-weight': 500,
+    'font-size': mono ? 14.5 : 15, fill: C.ink }, title);
+  sub.forEach((line, i) =>
+    el(layer, 'text', { x: x + 14, y: y + 50 + i * 18, 'font-family': SANS, 'font-size': 13, fill: C.inkMuted }, line));
+  // Machines on a host: small 2:1 bricks in block colours along the tile's foot.
+  bricks.forEach((fill, i) =>
+    el(layer, 'rect', { x: x + 14 + i * 36, y: y + h - 30, width: 32, height: 16, rx: 2, fill }));
+  return box(x, y, w, h);
+}
+/** A filled brick holding a name in mono; returns its box. */
+function chip(x, y, text, fill, layer = L.tiles) {
+  const t = el(layer, 'text', { x: x + 10, y: y + 15, 'font-family': MONO, 'font-weight': 500, 'font-size': 12, fill: C.onBlock }, text);
+  const w = t.getComputedTextLength() + 20;
+  layer.insertBefore(el(layer, 'rect', { x, y, width: w, height: 22, rx: 2, fill }), t);
+  return box(x, y, w, 22);
+}
+
+const DOT = { 'stroke-dasharray': '0.1 6', 'stroke-width': 2.2 };
+const DASH = { 'stroke-dasharray': '5 5', 'stroke-width': 1.6 };
+/** An orthogonal link through `pts` with rounded corners; arrowheads at the end, or both ends. */
+function route(pts, { style = DOT, radius = 28, both = false, layer = L.links } = {}) {
+  let d = `M${pts[0]}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [a, b, c] = [pts[i - 1], pts[i], pts[i + 1]];
+    const into = unit(a, b), out = unit(b, c);
+    const r = Math.min(radius, Math.hypot(b[0] - a[0], b[1] - a[1]) / 2, Math.hypot(c[0] - b[0], c[1] - b[1]) / 2);
+    d += `L${b[0] - into[0] * r} ${b[1] - into[1] * r}Q${b} ${b[0] + out[0] * r} ${b[1] + out[1] * r}`;
+  }
+  d += `L${pts[pts.length - 1]}`;
+  el(layer, 'path', { d, fill: 'none', stroke: C.inkFaint, 'stroke-linecap': 'round', ...style });
+  arrow(pts[pts.length - 2], pts[pts.length - 1], layer);
+  if (both) arrow(pts[1], pts[0], layer);
+}
+function unit(a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy);
+  return [dx / l, dy / l];
+}
+function arrow(from, to, layer) {
+  const a = Math.atan2(to[1] - from[1], to[0] - from[0]);
+  const p = (o) => `${to[0] - 7 * Math.cos(a + o)} ${to[1] - 7 * Math.sin(a + o)}`;
+  el(layer, 'path', { d: `M${p(0.5)}L${to[0]} ${to[1]}L${p(-0.5)}`, fill: 'none', stroke: C.inkFaint,
+    'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
+}
+/** A small label on the kiln ground, cut out of whatever link runs under it. */
+function note(x, y, text, anchor = 'middle', layer = L.labels) {
+  const t = el(layer, 'text', { x, y: y + 4, 'font-family': SANS, 'font-size': 12.5, fill: C.inkMuted, 'text-anchor': anchor }, text);
+  const b = t.getBBox();
+  layer.insertBefore(el(layer, 'rect', { x: b.x - 5, y: b.y - 2, width: b.width + 10, height: b.height + 4, rx: 3, fill: C.kiln }), t);
+}
+
+function draw() {
+  // Ways in, over the host.
+  const api = tile({ x: 150, y: 16, w: 200, h: 58, kind: C.lineStrong, title: 'HTTP API', mono: false, sub: [] });
+  el(L.tiles, 'text', { x: api.x + 14, y: api.y + 48, 'font-family': MONO, 'font-size': 12.5, fill: C.inkMuted }, ':7420');
+  const ing = tile({ x: 400, y: 16, w: 280, h: 58, kind: C.cobalt, title: 'Endpoints', mono: false });
+  el(L.tiles, 'text', { x: ing.x + 14, y: ing.y + 48, 'font-family': MONO, 'font-size': 12.5, fill: C.inkMuted },
+    'TCP :30000-32767, HTTP :8080');
+
+  // The host.
+  const host = box(12, 104, 806, 506);
+  el(L.frame, 'rect', { x: host.x, y: host.y, width: host.w, height: host.h, rx: 6, fill: 'none', stroke: C.lineStrong, 'stroke-width': 1 });
+  el(L.frame, 'text', { x: host.x + 16, y: host.y + 26, 'font-family': SANS, 'font-weight': 500, 'font-size': 13, fill: C.inkMuted },
+    'Host: Linux with KVM');
+
+  const d = tile({ x: 300, y: 140, w: 230, h: 58, kind: C.brick, title: 'briqyardd', sub: [] });
+  el(L.tiles, 'text', { x: d.x + 14, y: d.y + 48, 'font-family': SANS, 'font-size': 13, fill: C.inkMuted }, 'the host daemon');
+  route([[api.cx, api.b + 6], [api.cx, api.b + 26], [d.x + 50, api.b + 26], [d.x + 50, d.y - 6]]);
+  route([[ing.cx, ing.b + 6], [ing.cx, ing.b + 26], [d.r - 50, ing.b + 26], [d.r - 50, d.y - 6]]);
+
+  // Two machines: Firecracker under the jailer, the microVM inside, briqyard-init as PID 1.
+  const inits = [];
+  for (const [i, x] of [[0, 44], [1, 432]]) {
+    const fc = tile({ x, y: 268, w: 354, h: 156, kind: C.lineStrong, title: 'Firecracker under the jailer', mono: false });
+    const vm = box(fc.x + 14, fc.y + 46, fc.w - 28, fc.h - 60);
+    el(L.inner, 'rect', { x: vm.x, y: vm.y, width: vm.w, height: vm.h, rx: 4, fill: C.kiln, stroke: C.brick, 'stroke-width': 1.5 });
+    el(L.inner, 'text', { x: vm.x + 12, y: vm.y + 20, 'font-family': MONO, 'font-weight': 500, 'font-size': 12, fill: C.brick }, 'microVM');
+    // The init on the side nearest the daemon's vsock, the command beside it.
+    const iw = 140, cw = 128, ih = 52, iy = vm.y + 30;
+    const ix = i === 0 ? vm.r - 12 - iw : vm.x + 12;
+    const cx = i === 0 ? vm.x + 12 : vm.r - 12 - cw;
+    const init = tile({ x: ix, y: iy, w: iw, h: ih, kind: C.brick, title: 'briqyard-init', layer: L.inner });
+    el(L.inner, 'text', { x: init.x + 14, y: init.y + 46, 'font-family': SANS, 'font-size': 13, fill: C.inkMuted }, 'PID 1');
+    const cmd = box(cx, iy, cw, ih);
+    el(L.inner, 'rect', { x: cmd.x, y: cmd.y, width: cmd.w, height: cmd.h, rx: 3, fill: C.plum });
+    const words = el(L.inner, 'text', { 'font-family': SANS, 'font-weight': 500, 'font-size': 13.5, fill: C.onBlock }, '');
+    el(words, 'tspan', { x: cmd.x + 12, y: cmd.y + 22 }, "the image's");
+    el(words, 'tspan', { x: cmd.x + 12, y: cmd.y + 40 }, 'command');
+    const [from, to] = i === 0 ? [init.x - 6, cmd.r + 6] : [init.r + 6, cmd.x - 6];
+    route([[from, init.cy], [to, init.cy]], { layer: L.over });
+    route([[i === 0 ? d.x + 40 : d.r - 40, d.b + 6], [i === 0 ? d.x + 40 : d.r - 40, 234], [fc.cx, 234], [fc.cx, fc.y - 6]]);
+    inits.push(init);
+  }
+  // vsock: the daemon and each init, both ways.
+  const vx = d.cx;
+  for (const init of inits) {
+    const side = init.x < vx ? init.r + 6 : init.x - 6;
+    route([[vx, d.b + 6], [vx, init.cy], [side, init.cy]], { both: true, layer: L.over });
+  }
+  note(vx + 10, 252, 'vsock: exec, files, exit', 'start', L.over);
+
+  // The pool and the networks, reached down the host's sides.
+  const pool = tile({ x: 44, y: 462, w: 354, h: 118, kind: C.moss, title: 'ZFS pool, encrypted', mono: false });
+  const net = tile({ x: 432, y: 462, w: 354, h: 118, kind: C.cobalt, title: 'Tenant networks', mono: false });
+  for (const [t, rows, fill] of [
+    [pool, [['image disks', 'root zvols', 'data zvols'], ['snapshots']], C.moss],
+    [net, [['bridge per tenant', 'TAP per machine'], ['nftables', 'DNS']], C.cobalt],
+  ])
+    rows.forEach((row, r) => {
+      let x = t.x + 14;
+      for (const text of row) x = chip(x, t.y + 48 + r * 32, text, fill).r + 8;
+    });
+  route([[d.x - 6, d.cy], [28, d.cy], [28, pool.cy], [pool.x - 6, pool.cy]]);
+  route([[d.r + 6, d.cy], [802, d.cy], [802, net.cy], [net.r + 6, net.cy]]);
+}
+
+Promise.all([
+  document.fonts.load('500 14px "IBM Plex Mono"'),
+  document.fonts.load('400 13px "Instrument Sans"'),
+  document.fonts.load('500 15px "Instrument Sans"'),
+]).then(() => document.fonts.ready).then(() => { draw(); document.body.classList.add('ready'); });
+</script>
+</body>
+</html>

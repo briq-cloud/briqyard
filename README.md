@@ -1,3 +1,5 @@
+<img src="docs/images/hero.png" alt="Bots laid into a brick wall, each running machines: postgres and its fork, redis, web, and a sandbox asleep. Beside them: briqyard, open-source microVMs for sandboxes and services that sleep, wake and fork." width="830">
+
 # briqyard
 
 **Open-source microVMs for sandboxes and services that sleep, wake and fork.**
@@ -8,81 +10,72 @@ briqyard runs any OCI image in a Firecracker microVM on servers you own. Each ma
 
 ## Key features
 
-| | |
-|---|---|
-| **Any image** | Pulled from a registry, unpacked once into an image disk, cloned per machine in milliseconds |
-| **Durable disks** | A root disk and an optional data volume per machine, ZFS zvols on the host's NVMe; `fsync` reaches the disk; a volume grows, never shrinks |
-| **Snapshots and forks** | Copy-on-write: a snapshot of the disks (and of the memory, if asked), a restore in place, a fork as a new machine with its data |
-| **Sleep and wake** | Stopped after its sleep window, woken by a connection or a command; with a memory snapshot, the processes carry on where they were |
-| **A network per tenant** | A bridge, a subnet and DNS per tenant: machines reach each other by name, nothing else reaches them; no machine has a public address |
-| **Egress control** | Per machine: open, none, or only through another machine (the tenant's gateway, which can hold secrets or filter traffic); blocked ports, a connection rate and a bandwidth cap |
-| **Endpoints** | A TCP port or an HTTP name on the host that reaches a machine's port, and wakes it |
-| **Exec, files, logs** | Commands with stdin, exit code and timeout; interactive sessions with a terminal over a WebSocket; files in and out; the console as logs, followed live |
-| **Probes and restarts** | Startup, readiness and liveness checks (exec, TCP, HTTP); a restart policy with backoff |
-| **Limits and quotas** | vCPUs, memory, disk throughput and IOPS per machine; machines, memory, vCPUs and disk per tenant |
-| **Backups** | ZFS streams to S3 or a directory: incremental, encrypted, on a schedule, restored on any host |
-| **Encrypted at rest** | Every host's pool is encrypted (AES-256-GCM) with a key the fleet holds; no swap |
-| **Isolation** | KVM per machine; Firecracker under its jailer, with a chroot, a uid, a pid namespace, a cgroup and seccomp filters each |
-| **Several servers** | One API across hosts: placement by region and free memory, hosts added over SSH or ordered from a provider's API (with an autoscaler), upgraded in place while their machines run |
-| **Observable** | An event log with a watch, a version per machine (`If-Match`), Prometheus metrics, host conditions, usage per machine |
+- 📦 **Any image.** Pulled from a registry, unpacked once into an image disk, cloned per machine in milliseconds.
+- 💾 **Durable disks.** A root disk and an optional data volume per machine, ZFS zvols on the host's NVMe. `fsync` reaches the disk; a volume grows, never shrinks.
+- 🔀 **Snapshots and forks.** Copy-on-write: a snapshot of the disks (and of the memory, if asked), a restore in place, a fork as a new machine with its data.
+- 😴 **Sleep and wake.** Stopped after its sleep window, woken by a connection or a command. With a memory snapshot, the processes carry on where they were.
+- 🌐 **A network per tenant.** A bridge, a subnet and DNS per tenant: machines reach each other by name, nothing else reaches them. No machine has a public address.
+- 🚦 **Egress control.** Per machine: open, none, or only through another machine (the tenant's gateway, which can hold secrets or filter traffic). Blocked ports, a connection rate and a bandwidth cap.
+- 🔌 **Endpoints.** A TCP port or an HTTP name on the host that reaches a machine's port, and wakes it.
+- 💻 **Exec, files, logs.** Commands with stdin, exit code and timeout; interactive sessions with a terminal over a WebSocket; files in and out; the console as logs, followed live.
+- 🩺 **Probes and restarts.** Startup, readiness and liveness checks (exec, TCP, HTTP); a restart policy with backoff.
+- ⚖️ **Limits and quotas.** vCPUs, memory, disk throughput and IOPS per machine; machines, memory, vCPUs and disk per tenant.
+- 🗄️ **Backups.** ZFS streams to S3 or a directory: incremental, encrypted, on a schedule, restored on any host.
+- 🔐 **Encrypted at rest.** Every host's pool is encrypted (AES-256-GCM) with a key the fleet holds; no swap.
+- 🛡️ **Isolation.** KVM per machine; Firecracker under its jailer, with a chroot, a uid, a pid namespace, a cgroup and seccomp filters each.
+- 🖥️ **Several servers.** One API across hosts: placement by region and free memory, hosts added over SSH or ordered from a provider's API (with an autoscaler), upgraded in place while their machines run.
+- 📈 **Observable.** An event log with a watch, a version per machine (`If-Match`), Prometheus metrics, host conditions, usage per machine.
 
-## Components
+## Concepts
 
-| Component | Runs | Role |
+What you work with, and its closest Kubernetes counterpart.
+
+| briqyard | What it is | Kubernetes |
 |---|---|---|
-| `briqyardd` | on every server, as root | The host daemon: the machines of that server. HTTP API, Firecracker processes, ZFS disks, tenant networks, nftables and DNS, endpoints, sleep, backups |
-| `briqyard-init` | inside every microVM, as PID 1 | A static binary: mounts the disks, starts the image's command, reports its exit, serves exec, files and sessions over vsock |
-| `briqyard-fleet` | once per installation | The same API across hosts: places tenants, forwards every call, keeps the hosts' registry and pool keys, orders and releases servers through provisioners (Hetzner Robot, Scaleway, OVH; dry run by default), installs and upgrades hosts over SSH |
-| `briqyard` | anywhere | The CLI, for a daemon or a fleet |
-| `briqyard-api` | library | The API's types and the host–guest protocol, shared by the four above |
-| `briqyard-objstore` | library | Object storage (S3 or a directory) for backups and the fleet's registry |
-| `hack/bootstrap-host.sh` | on a new server | Turns a fresh Ubuntu server into a host. The fleet ships it and runs it, and runs it again to upgrade |
+| **Machine** | One microVM running one OCI image: its own kernel, one main process, exec for the rest | Pod |
+| **Image** | An OCI image, unpacked once per digest into a disk that machines clone | Container image |
+| **Volume** | A machine's data disk, kept across stops, snapshots and forks | PersistentVolume and claim |
+| **Snapshot** | A named copy of a machine's disks, and of its memory if asked; a machine goes back to it in place | VolumeSnapshot |
+| **Fork** | A new machine made from another's disks, at once | none |
+| **Tenant** | A group of machines with its own network, DNS and quotas, isolated from the others | Namespace |
+| **Endpoint** | A TCP port or an HTTP name on the host that reaches a machine's port and wakes it | Service (NodePort), Ingress |
+| **Egress policy** | Where a machine's traffic may go: open, none, or through another machine | NetworkPolicy |
+| **Gateway** | A machine of the tenant that the machines set to `via: gateway` send their traffic through, to filter it or add secrets | Egress gateway |
+| **Probes, restart policy** | Startup, readiness and liveness checks; what to do when the process exits | The same |
+| **Sleep window** | How long a machine stays up unused before it stops; the next use wakes it | none |
+| **Backup** | A machine's disks in an object store, restored as a new machine on any host | Velero, outside the core |
+| **Host** | A server running `briqyardd` and its machines | Node |
+| **Fleet** | One API over many hosts: places each tenant on a host, forwards the calls | Control plane and scheduler |
+| **Region** | Where a host is; a tenant's machines stay in one | Topology zone |
+| **Labels, events** | Metadata to select machines by; a log of what happened, with a watch | The same |
+
+Not there yet: replicas and groups of identical machines, rolling updates, load balancing between machines, and a tenant spanning several hosts. The full comparison: [docs/KUBERNETES-MAP.md](docs/KUBERNETES-MAP.md).
 
 ## Architecture
 
 Across servers. The fleet speaks the daemon's API, so a client talks to either the same way. A tenant lives on one host, so its network needs no overlay.
 
-```mermaid
-flowchart LR
-  client["Control plane or CLI"] -->|HTTPS API| fleet["briqyard-fleet<br/>placement, registry, pool keys"]
-  fleet -->|"TLS, certificate pinned"| h1["briqyardd<br/>host 1"]
-  fleet -->|"TLS, certificate pinned"| h2["briqyardd<br/>host 2"]
-  fleet -.->|"SSH: install, upgrade"| h2
-  h1 -.->|heartbeat| fleet
-  h2 -.->|heartbeat| fleet
-  edge["Edge or router"] -->|"TCP and HTTP endpoints"| h1
-  edge --> h2
-  h1 -->|"encrypted backups"| s3[("S3 bucket")]
-  h2 --> s3
-  fleet -->|"registry, encrypted"| s3
-```
+<img src="docs/images/architecture.png" alt="Across servers: a control plane or the CLI calls briqyard-fleet (placement, registry, pool keys) over HTTPS. The fleet calls briqyardd on host 1 and host 2 over TLS with the certificate pinned, installs and upgrades host 2 over SSH, and gets a heartbeat back from each. An edge or router reaches the TCP and HTTP endpoints on both hosts. The hosts send encrypted backups, and the fleet its encrypted registry, to an S3 bucket." width="830">
 
 On one server. Each machine is a Firecracker process with its disks on the pool and a TAP device on its tenant's bridge.
 
-```mermaid
-flowchart TB
-  api["HTTP API :7420"] --> d
-  ing["Endpoints: TCP :30000-32767, HTTP :8080"] --> d
-  subgraph host["Host: Linux with KVM"]
-    d["briqyardd"]
-    d --> zfs[("ZFS pool, encrypted<br/>image disks, root and data zvols, snapshots")]
-    d --> net["Bridge per tenant, TAP per machine<br/>nftables, DNS"]
-    d --> fc1["Firecracker under the jailer"]
-    d --> fc2["Firecracker under the jailer"]
-    subgraph vm1["microVM"]
-      init1["briqyard-init, PID 1"] --> app1["the image's command"]
-    end
-    subgraph vm2["microVM"]
-      init2["briqyard-init, PID 1"] --> app2["the image's command"]
-    end
-    fc1 --- vm1
-    fc2 --- vm2
-    d <-->|"vsock: exec, files, exit"| init1
-    d <-->|vsock| init2
-  end
-```
+<img src="docs/images/host.png" alt="One server, a Linux host with KVM: the HTTP API on :7420 and the endpoints (TCP :30000-32767, HTTP :8080) reach briqyardd. briqyardd runs one Firecracker under the jailer per microVM; inside each microVM, briqyard-init runs as PID 1 and starts the image's command, and talks to briqyardd over vsock (exec, files, exit). briqyardd also keeps the encrypted ZFS pool (image disks, root and data zvols, snapshots) and the tenant networks (a bridge per tenant, a TAP per machine, nftables, DNS)." width="830">
 
 A create: the daemon resolves the image, unpacks it once into an image disk, clones that as the machine's root disk, makes the data volume, writes a config drive (env, files, secrets) and starts Firecracker under the jailer. The init boots the image's command and reports when it exits. How each part works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Every decision and its reasons: [docs/adr/](docs/adr/).
+
+### Components
+
+briqyard is four programs and an install script.
+
+| Program | Where it runs | What it does |
+|---|---|---|
+| `briqyardd` | On every server, as root | Runs the machines of that server: their Firecracker processes, disks, networks, endpoints, sleep and backups. Serves the HTTP API |
+| `briqyard-init` | Inside every microVM, as PID 1 | Starts the image's command and reports when it exits. Answers exec, files and terminal sessions over vsock |
+| `briqyard-fleet` | On one server that reaches every host | Serves the same API for all hosts: picks a host for each tenant and forwards each call there. Keeps the list of hosts and their disk keys. Installs and upgrades hosts over SSH; can order servers from Hetzner Robot, Scaleway or OVH (dry run by default) |
+| `briqyard` | Anywhere | The CLI, for one daemon or a fleet |
+| `hack/bootstrap-host.sh` | On a new server | Turns a fresh Ubuntu server into a host. The fleet runs it to install a host, and again to upgrade it |
+
+Two libraries are shared between them: `briqyard-api` (the API's types and the protocol between the daemon and the init) and `briqyard-objstore` (S3 or a directory, for backups and the fleet's registry).
 
 ## Open-source software it builds on
 
@@ -109,31 +102,21 @@ A create: the daemon resolves the image, unpacks it once into an image disk, clo
 
 ## Install
 
-You need an x86_64 or arm64 Linux server with KVM (`ls /dev/kvm` lists it), Ubuntu Server 26.04, and free disk space for the pool. Each release carries the binaries for both architectures and their checksums (`SHA256SUMS-x86_64`, `SHA256SUMS-aarch64`).
+You need a Linux server, x86_64 or arm64, with KVM (`ls /dev/kvm`), Ubuntu Server 26.04, and a disk or free space for the pool. Releases carry the binaries for both architectures.
 
-**One host.** As root on the server:
+Install a host, as root on the server:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/bootstrap-host.sh
 BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.0 \
-BRIQYARD_POOL_DEVICE=/dev/nvme1n1 \
-BRIQYARD_TOKEN=$(openssl rand -hex 24) \
-ALLOWED_CLIENTS=203.0.113.0/24 \
-bash bootstrap-host.sh
+BRIQYARD_POOL_DEVICE=/dev/nvme1n1 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
+ALLOWED_CLIENTS=203.0.113.0/24 bash bootstrap-host.sh
 ```
 
-The script:
-- installs ZFS and nftables;
-- makes the encrypted pool on the device (on a file without `BRIQYARD_POOL_DEVICE`);
-- downloads Firecracker, the jailer and a guest kernel, and checks their digests;
-- installs the binaries, checked against the release's checksums;
-- writes `/etc/briqyard/config.yaml` and starts `briqyardd`.
-
-Without a fleet, the pool's key is `/etc/briqyard/pool.key`: keep a copy off the host. `ALLOWED_CLIENTS` lists the networks that may reach the API and the endpoints (`PRIVATE_ADDRESS` puts them on a private network instead); without either, they listen on loopback only, in plain HTTP. Off loopback the API serves TLS with a certificate of its own, whose fingerprint the script prints. Then, from a machine in `ALLOWED_CLIENTS`:
+Run a machine, from a computer in `ALLOWED_CLIENTS` (the script prints the API certificate's fingerprint):
 
 ```bash
 export BRIQYARD_URL=https://<host>:7420 BRIQYARD_TOKEN=<token> BRIQYARD_TLS_FINGERPRINT=<fingerprint>
-briqyard status
 briqyard machine run --image postgres:16-alpine -e POSTGRES_PASSWORD=secret \
   --volume 10G:/var/lib/postgresql/data -p 5432 --sleep 30m
 briqyard machine exec <id> -- psql -U postgres -c 'select 1'
@@ -141,17 +124,14 @@ briqyard endpoint add <id> 5432     # a port on the host; a connection wakes the
 briqyard machine fork <id>          # a copy of its disks, as a new machine
 ```
 
-**Several hosts.** Run `briqyard-fleet` on one server, then add each server by its SSH address. The fleet runs the same script over SSH, gives the host its pool key, and pins its SSH key and API certificate. The host turns `ready` at its first heartbeat.
+Add hosts to a fleet:
 
 ```bash
 briqyard host add <ssh address> --address <API address> --region <region>
-briqyard host ls
 briqyard host upgrade <id> --release <version or URL>   # its machines keep running
 ```
 
-Every option, the private network, backups, upgrades and a first server step by step: [docs/OPERATIONS.md](docs/OPERATIONS.md).
-
-**On a Mac.** Apple silicon (M3 or later, macOS 15 or later) runs a host in a Lima VM with nested virtualization, along with the test suites: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Step by step, with every option, a fleet and a Mac for development: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Tests
 
