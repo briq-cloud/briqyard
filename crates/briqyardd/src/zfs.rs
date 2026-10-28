@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
-/// A `zfs` command that runs this long makes the host `storage_stalled` (ADR 0043).
+/// A `zfs` command that runs this long makes the host `storage_stalled` (ADR 0046).
 pub const STALL_AFTER: Duration = Duration::from_secs(60);
-/// How long a volume's device link may take to be right (ADR 0043).
+/// How long a volume's device link may take to be right (ADR 0046).
 const LINK_WAIT: Duration = Duration::from_secs(15);
 
 /// A command the backend runs: a program and the arguments that come before the backend's own.
@@ -73,7 +73,7 @@ pub struct Zfs {
     tools: Tools,
     /// Where udev links zvols (`/dev/zvol/<dataset>`).
     dev_root: PathBuf,
-    /// The `zfs` commands running now (ADR 0043).
+    /// The `zfs` commands running now (ADR 0046).
     running: Arc<Mutex<Running>>,
 }
 
@@ -263,7 +263,7 @@ impl Zfs {
     }
 
     /// Runs a `zfs` command, counted as running until it exits: one that never does (stuck in
-    /// the kernel) is the host's `storage_stalled` (ADR 0043). It is not timed out: a command
+    /// the kernel) is the host's `storage_stalled` (ADR 0046). It is not timed out: a command
     /// stuck in the kernel cannot be killed, and one that is only slow finishes what it started.
     async fn call(&self, args: &[&str], input: Option<Vec<u8>>) -> Result<String> {
         use std::process::Stdio;
@@ -387,7 +387,7 @@ impl Zfs {
 
     /// A volume's device (`/dev/zdN`), checked to be that volume now: never another's. ZFS
     /// makes, renames and removes a zvol's device after `zfs` returned, and udev may drop the
-    /// event that moves its link (ADR 0043), so the link at the volume's name can be missing a
+    /// event that moves its link (ADR 0046), so the link at the volume's name can be missing a
     /// while, or name the device of a disk renamed or destroyed under it. Each device the link
     /// names is asked its dataset (`zvol_id`); a wrong one gets a change event of its own,
     /// which moves its links. Every zvol's event is replayed, once, when the link is still not
@@ -541,7 +541,7 @@ impl Zfs {
 
     /// Renames a volume in place: its snapshots and its clones' origins follow it, and so does
     /// its device's link. ZFS renames the device after `zfs rename` returned and udev may drop
-    /// the event that moves the link (ADR 0043): the device, found before, is waited for until
+    /// the event that moves the link (ADR 0046): the device, found before, is waited for until
     /// the kernel names it `to`, then given a change event until the link at `to` names it.
     pub async fn rename(&self, name: &str, to: &str) -> Result<()> {
         let dev = self.device(name).await?;
@@ -1536,7 +1536,7 @@ mod tests {
         assert!(device_of(&dev, f.dev().join("byard/m/x/root")), "{dev:?}");
     }
 
-    /// A restore's swap (ADR 0043): udev dropped the events of both renames, so the link at the
+    /// A restore's swap (ADR 0046): udev dropped the events of both renames, so the link at the
     /// disk's name still names the old disk's device. The renamed devices are given events of
     /// their own, and the disk's device is the clone's, never the retired disk's.
     #[tokio::test]
@@ -1560,7 +1560,7 @@ mod tests {
     }
 
     /// A link udev left on the device of a destroyed volume, at the name of a volume made since
-    /// (ADR 0043): that device is never answered, the new volume's is.
+    /// (ADR 0046): that device is never answered, the new volume's is.
     #[tokio::test(start_paused = true)]
     async fn a_link_left_on_a_destroyed_volume_is_never_its_device() {
         let f = Fake::open("byard").await.unwrap();
@@ -1609,7 +1609,7 @@ mod tests {
     }
 
     /// A `zfs` command is counted as running until it exits: past the time given, it is the
-    /// host's stalled command (ADR 0043).
+    /// host's stalled command (ADR 0046).
     #[tokio::test]
     async fn a_command_running_past_its_time_is_stalled() {
         let f = Fake::open("byard").await.unwrap();
@@ -1632,7 +1632,7 @@ mod tests {
         assert_eq!(f.zfs.stalled(Duration::ZERO), None);
     }
 
-    /// Against the kernel and udev, on a Linux host with ZFS, as root (ADR 0043):
+    /// Against the kernel and udev, on a Linux host with ZFS, as root (ADR 0046):
     /// `BRIQYARD_ZFS_TEST_POOL=byard cargo test -p briqyardd -- --ignored real_pool`. A
     /// restore's renames, then the links RISE-M was left with set by hand: the link at the disk's
     /// name on the retired disk's device, the retired disk's link gone. Datasets under

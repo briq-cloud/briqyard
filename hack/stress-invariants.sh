@@ -46,7 +46,7 @@ missing=$(comm -13 <(echo "$roots") <(echo "$ids"))
 check_eq "data disks == machines with a volume" "$(echo "$datas" | grep -c . || true)" "$(echo "$with_volume" | grep -c . || true)"
 [ -z "$others" ] && ok "no stray dataset under m/" || fail "stray datasets: $(echo "$others" | tr '\n' ' ')"
 
-# --- devices (ADR 0043): each disk's link names it; a Firecracker holds its own disks only ---
+# --- devices (ADR 0046): each disk's link names it; a Firecracker holds its own disks only ---
 wrong=""
 for v in $(sudo zfs list -H -o name -t volume -r "$POOL/m" 2>/dev/null); do
   d=$(readlink -f "/dev/zvol/$v" 2>/dev/null)

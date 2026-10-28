@@ -1,6 +1,6 @@
 # zvol links after a rename, and a VMM on a destroyed zvol (2026-10-28)
 
-What ADR 0043 is decided on. Hosts: two OVH servers (x86_64, Ubuntu 26.04, kernel 7.0.0-38,
+What ADR 0046 is decided on. Hosts: two OVH servers (x86_64, Ubuntu 26.04, kernel 7.0.0-38,
 OpenZFS 2.4.1, systemd 259, briqyard v0.1.1) and the dev VM `fc2` (aarch64, the same kernel,
 OpenZFS and systemd).
 

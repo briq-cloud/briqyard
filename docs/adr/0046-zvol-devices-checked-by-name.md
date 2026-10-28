@@ -1,4 +1,4 @@
-# ADR 0043: A zvol's device is checked by name before use; a stuck `zfs` is a host condition
+# ADR 0046: A zvol's device is checked by name before use; a stuck `zfs` is a host condition
 
 Date: 2026-10-28 · Status: accepted
 

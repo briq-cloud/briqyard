@@ -4161,7 +4161,7 @@ impl Manager {
     }
 
     /// Every 15 s, apart from the tick, which a stuck `zfs` command holds too:
-    /// `storage_stalled` while one has run past `zfs::STALL_AFTER` (ADR 0043).
+    /// `storage_stalled` while one has run past `zfs::STALL_AFTER` (ADR 0046).
     async fn storage_watch(self) {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
         loop {
@@ -11439,7 +11439,7 @@ mod tests {
         assert!(matches!(other, MError::Other(_)));
     }
 
-    /// A `zfs` command that does not come back (ADR 0043): `storage_stalled` while it runs,
+    /// A `zfs` command that does not come back (ADR 0046): `storage_stalled` while it runs,
     /// decided apart from the tick it holds, and cleared once it exits.
     #[tokio::test]
     async fn a_stuck_zfs_command_is_storage_stalled_until_it_exits() {

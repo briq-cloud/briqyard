@@ -113,7 +113,7 @@ over files. Hosts run without swap, and a Firecracker never dumps core.
 A disk's device is `/dev/zdN`, never udev's link: ZFS renames and removes devices after `zfs`
 returned and udev can drop the event that moves a link, so the daemon takes the device the link
 names only once `zvol_id` says it is that disk, and sends a change event for a device whose link
-is wrong. A rename waits for the kernel to rename the device, then for its link (ADR 0043).
+is wrong. A rename waits for the kernel to rename the device, then for its link (ADR 0046).
 
 The root disk outlives restarts and stops. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
@@ -291,7 +291,7 @@ scrape probes nothing. `GET /v1/top` takes CPU percent and network rates from th
 readings, 15 s apart. After the measure the tick reads the pool once and decides the host's
 conditions (`conditions.rs`): `memory_pressure`, committed memory over `memory_pct` of
 capacity; `disk_pressure`, the pool's free space under `disk_free_pct`. A task of its own
-decides `storage_stalled` every 15 s, a `zfs` command running for over a minute (ADR 0043):
+decides `storage_stalled` every 15 s, a `zfs` command running for over a minute (ADR 0046):
 the tick would wait on the same pool. A change is a
 `host_condition` event; `/v1/status` and the heartbeat carry them. Under disk pressure the tick
 removes unused images (no clone, no record naming them), oldest first, counting what each took

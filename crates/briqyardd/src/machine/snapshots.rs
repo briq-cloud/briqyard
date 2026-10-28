@@ -965,7 +965,7 @@ mod tests {
         assert_eq!(h.m.get(&fork.id).unwrap().state, state::RUNNING);
     }
 
-    /// The restore of RISE-M (ADR 0043): udev drops every event from the snapshot on, so the
+    /// The restore of RISE-M (ADR 0046): udev drops every event from the snapshot on, so the
     /// link at the root disk's name still names the disk the restore retired, then destroyed.
     /// The machine boots on the clone's device all the same, never on the retired disk's.
     #[tokio::test(start_paused = true)]
