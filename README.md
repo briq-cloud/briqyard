@@ -13,7 +13,7 @@ briqyard runs any OCI image in a Firecracker microVM on servers you own. Each ma
 | **Any image** | Pulled from a registry, unpacked once into an image disk, cloned per machine in milliseconds |
 | **Durable disks** | A root disk and an optional data volume per machine, ZFS zvols on the host's NVMe; `fsync` reaches the disk; a volume grows, never shrinks |
 | **Snapshots and forks** | Copy-on-write: a snapshot of the disks (and of the memory, if asked), a restore in place, a fork as a new machine with its data |
-| **Sleep and wake** | Stopped after its sleep window, woken by a connection or a command; with a memory snapshot, a wake takes about a quarter of a second and the processes carry on |
+| **Sleep and wake** | Stopped after its sleep window, woken by a connection or a command; with a memory snapshot, the processes carry on where they were |
 | **A network per tenant** | A bridge, a subnet and DNS per tenant: machines reach each other by name, nothing else reaches them; no machine has a public address |
 | **Egress control** | Per machine: open, none, or only through another machine (the tenant's gateway, which can hold secrets or filter traffic); blocked ports, a connection rate and a bandwidth cap |
 | **Endpoints** | A TCP port or an HTTP name on the host that reaches a machine's port, and wakes it |
@@ -23,7 +23,7 @@ briqyard runs any OCI image in a Firecracker microVM on servers you own. Each ma
 | **Backups** | ZFS streams to S3 or a directory: incremental, encrypted, on a schedule, restored on any host |
 | **Encrypted at rest** | Every host's pool is encrypted (AES-256-GCM) with a key the fleet holds; no swap |
 | **Isolation** | KVM per machine; Firecracker under its jailer, with a chroot, a uid, a pid namespace, a cgroup and seccomp filters each |
-| **Several servers** | One API across hosts: placement by region and free memory, hosts added over SSH and upgraded in place while their machines run |
+| **Several servers** | One API across hosts: placement by region and free memory, hosts added over SSH or ordered from a provider's API (with an autoscaler), upgraded in place while their machines run |
 | **Observable** | An event log with a watch, a version per machine (`If-Match`), Prometheus metrics, host conditions, usage per machine |
 
 ## Components
@@ -32,7 +32,7 @@ briqyard runs any OCI image in a Firecracker microVM on servers you own. Each ma
 |---|---|---|
 | `briqyardd` | on every server, as root | The host daemon: the machines of that server. HTTP API, Firecracker processes, ZFS disks, tenant networks, nftables and DNS, endpoints, sleep, backups |
 | `briqyard-init` | inside every microVM, as PID 1 | A static binary: mounts the disks, starts the image's command, reports its exit, serves exec, files and sessions over vsock |
-| `briqyard-fleet` | once per installation | The same API across hosts: places tenants, forwards every call, keeps the hosts' registry and pool keys, installs and upgrades hosts over SSH |
+| `briqyard-fleet` | once per installation | The same API across hosts: places tenants, forwards every call, keeps the hosts' registry and pool keys, orders and releases servers through provisioners (Hetzner Robot, Scaleway, OVH; dry run by default), installs and upgrades hosts over SSH |
 | `briqyard` | anywhere | The CLI, for a daemon or a fleet |
 | `briqyard-api` | library | The API's types and the host–guest protocol, shared by the four above |
 | `briqyard-objstore` | library | Object storage (S3 or a directory) for backups and the fleet's registry |
@@ -99,7 +99,7 @@ A create: the daemon resolves the image, unpacks it once into an image disk, clo
 | Rust crates | Use |
 |---|---|
 | tokio, axum, hyper, reqwest, tokio-tungstenite | Async runtime, HTTP server and client, WebSockets |
-| rustls, rcgen, ring | TLS for the API, its certificate, hashing |
+| rustls, rcgen, ring, sha2 | TLS for the API and its certificate, the backup records' seal, digests |
 | oci-client, tar, flate2, zstd | Pulling and unpacking images |
 | object_store (Apache Arrow) | S3 and directory storage |
 | hickory-proto, httparse | Parsing the DNS and HTTP that guests and clients send |
@@ -109,7 +109,7 @@ A create: the daemon resolves the image, unpacks it once into an image disk, clo
 
 ## Install
 
-You need an x86_64 or arm64 Linux server with KVM (`ls /dev/kvm` lists it), Ubuntu Server 26.04, and free disk space for the pool. Each release carries the binaries for both architectures and their `SHA256SUMS`.
+You need an x86_64 or arm64 Linux server with KVM (`ls /dev/kvm` lists it), Ubuntu Server 26.04, and free disk space for the pool. Each release carries the binaries for both architectures and their checksums (`SHA256SUMS-x86_64`, `SHA256SUMS-aarch64`).
 
 **One host.** As root on the server:
 
@@ -118,6 +118,7 @@ curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/boot
 BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.0 \
 BRIQYARD_POOL_DEVICE=/dev/nvme1n1 \
 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
+ALLOWED_CLIENTS=203.0.113.0/24 \
 bash bootstrap-host.sh
 ```
 
@@ -128,7 +129,7 @@ The script:
 - installs the binaries, checked against the release's checksums;
 - writes `/etc/briqyard/config.yaml` and starts `briqyardd`.
 
-Without a fleet, the pool's key is `/etc/briqyard/pool.key`: keep a copy off the host. The script prints the API certificate's fingerprint. The API listens on loopback unless you set `ALLOWED_CLIENTS` (or `PRIVATE_ADDRESS` for a private network). Then, from a machine that reaches it:
+Without a fleet, the pool's key is `/etc/briqyard/pool.key`: keep a copy off the host. `ALLOWED_CLIENTS` lists the networks that may reach the API and the endpoints (`PRIVATE_ADDRESS` puts them on a private network instead); without either, they listen on loopback only, in plain HTTP. Off loopback the API serves TLS with a certificate of its own, whose fingerprint the script prints. Then, from a machine in `ALLOWED_CLIENTS`:
 
 ```bash
 export BRIQYARD_URL=https://<host>:7420 BRIQYARD_TOKEN=<token> BRIQYARD_TLS_FINGERPRINT=<fingerprint>
