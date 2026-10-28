@@ -12,14 +12,14 @@ use crate::zfs::Zfs;
 use anyhow::{anyhow, Context, Result};
 use briqyard_api::reason;
 use chrono::{DateTime, Utc};
-use oci_client::client::ClientConfig;
+use oci_client::client::{ClientConfig, ClientProtocol};
 use oci_client::manifest::{ImageIndexEntry, OciImageManifest, Platform};
 use oci_client::secrets::RegistryAuth;
 use oci_client::{Client, Reference};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
@@ -31,12 +31,12 @@ use extract::{apply_layer, prepare_root};
 
 /// The daemon runs on Linux alone: elsewhere, a build fails at its first layer.
 #[cfg(not(target_os = "linux"))]
-fn apply_layer(_: &std::path::Path, _: &str, _: std::fs::File) -> Result<usize> {
+fn apply_layer(_: &Path, _: &str, _: std::fs::File) -> Result<usize> {
     Err(anyhow!("image extraction needs Linux (openat2)"))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn prepare_root(_: &std::path::Path, _: &std::path::Path) -> Result<()> {
+fn prepare_root(_: &Path, _: &Path) -> Result<()> {
     Err(anyhow!("image extraction needs Linux (openat2)"))
 }
 
@@ -92,6 +92,8 @@ pub struct Builder {
     pub root_gb: u32,
     /// Credentials by registry host; anything else is pulled anonymously.
     pub registries: Vec<(String, String, String)>,
+    /// Pull-through mirrors, at most one per registry (ADR 0036).
+    mirrors: Vec<Mirror>,
     init_hash: String,
     /// One registry client: its connection pool and TLS sessions serve every pull.
     client: Client,
@@ -155,24 +157,101 @@ struct Resolution {
     at: DateTime<Utc>,
 }
 
+/// A registry's pull-through mirror (ADR 0036): the registry it stands in for (`docker.io`,
+/// as a reference names it) and its address as a registry name (`10.0.0.2:7440`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mirror {
+    pub registry: String,
+    pub host: String,
+    pub plain_http: bool,
+}
+
+impl Mirror {
+    /// `registry_mirrors` entry: `docker.io: http://10.0.0.2:7440`. A mirror is a registry
+    /// of its own at the root of its address, so the URL has no path.
+    pub fn parse(registry: &str, url: &str) -> Result<Mirror> {
+        if registry.is_empty() || registry.contains(['/', ' ']) {
+            return Err(anyhow!(
+                "{registry:?} is not a registry name (docker.io, ghcr.io)"
+            ));
+        }
+        let (plain_http, rest) = match (url.strip_prefix("http://"), url.strip_prefix("https://")) {
+            (Some(rest), _) => (true, rest),
+            (_, Some(rest)) => (false, rest),
+            _ => return Err(anyhow!("{url:?}: want http:// or https://")),
+        };
+        let host = rest.trim_end_matches('/');
+        if host.is_empty() || host.contains(['/', '?', '#', '@']) {
+            return Err(anyhow!(
+                "{url:?}: a mirror is a host and a port, with no path"
+            ));
+        }
+        Ok(Mirror {
+            registry: registry.to_string(),
+            host: host.to_string(),
+            plain_http,
+        })
+    }
+}
+
+/// How long a registry or a mirror may stay silent on a connection (each read, so a slow blob
+/// is not cut). Above Zot's `syncTimeout` (10 minutes, `hack/mirror/zot.json`): a mirror's first
+/// pull of an image copies it before answering. A mirror silent past it is left for the registry.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// The registry client: HTTPS except to the `plain` hosts; a connect that does not complete
+/// within 10 s, or a connection silent for `read_timeout`, fails that source.
+fn client_config(plain: Vec<String>, read_timeout: std::time::Duration) -> ClientConfig {
+    ClientConfig {
+        platform_resolver: Some(Box::new(host_platform)),
+        protocol: if plain.is_empty() {
+            ClientProtocol::Https
+        } else {
+            ClientProtocol::HttpsExcept(plain)
+        },
+        connect_timeout: Some(std::time::Duration::from_secs(10)),
+        read_timeout: Some(read_timeout),
+        ..Default::default()
+    }
+}
+
+/// Where a pull's content comes from: the registry's mirror first when it has one, then the
+/// registry. Both by the same digest, so either serves the same bytes or fails.
+struct Source {
+    reference: Reference,
+    auth: RegistryAuth,
+    /// The mirror's host; None for the registry itself.
+    mirror: Option<String>,
+}
+
 impl Builder {
-    pub fn new(zfs: Zfs, dir: PathBuf, init: PathBuf, root_gb: u32) -> Result<Self> {
+    pub fn new(
+        zfs: Zfs,
+        dir: PathBuf,
+        init: PathBuf,
+        root_gb: u32,
+        mirrors: Vec<Mirror>,
+    ) -> Result<Self> {
         let data =
             std::fs::read(&init).with_context(|| format!("init binary {}", init.display()))?;
         let init_hash = hex::encode(Sha256::digest(&data));
         private_dir(&dir)?;
         private_dir(&dir.join("meta"))?;
+        // Only a mirror may be plain HTTP: what it serves is checked by digest.
+        let plain: Vec<String> = mirrors
+            .iter()
+            .filter(|m| m.plain_http)
+            .map(|m| m.host.clone())
+            .collect();
         Ok(Self {
             zfs,
             dir,
             init,
             root_gb,
             registries: vec![],
+            mirrors,
             init_hash,
-            client: Client::new(ClientConfig {
-                platform_resolver: Some(Box::new(host_platform)),
-                ..Default::default()
-            }),
+            client: Client::new(client_config(plain, READ_TIMEOUT)),
             building: Mutex::new(HashMap::new()),
             resolved: Mutex::new(HashMap::new()),
             resolve_ttl: std::time::Duration::from_secs(600),
@@ -237,6 +316,9 @@ impl Builder {
 
     /// The digest a reference names: pinned in the reference, remembered from a recent answer,
     /// asked of the registry, or, when the registry refuses, the one the host already built.
+    /// A tag is asked of the registry itself, never of a mirror (ADR 0036), with a `HEAD`,
+    /// which Docker Hub does not count as a pull: the digest is the one the registry names
+    /// (an index's for a multi-platform image), and everything pulled after is checked by it.
     async fn resolve(&self, r: &Reference, reference: &str, auth: &RegistryAuth) -> Result<String> {
         if let Some(d) = r.digest() {
             return Ok(d.to_string());
@@ -246,8 +328,8 @@ impl Builder {
                 return Ok(d.clone());
             }
         }
-        match self.client.pull_image_manifest(r, auth).await {
-            Ok((_, digest)) => {
+        match self.client.fetch_manifest_digest(r, auth).await {
+            Ok(digest) => {
                 self.resolved.lock().unwrap().insert(
                     reference.to_string(),
                     (digest.clone(), std::time::Instant::now()),
@@ -299,10 +381,9 @@ impl Builder {
         tracing::info!(image = reference, digest, key, "building image");
         let started = std::time::Instant::now();
         // Pulled by the digest resolved above, so a tag moved since names the same build.
-        let pinned = r.clone_with_digest(digest.to_string());
-        let (manifest, _, config) = self
-            .client
-            .pull_manifest_and_config(&pinned, &self.auth_for(r))
+        let mut sources = self.sources(r, digest);
+        let (manifest, config) = self
+            .pull_manifest(&mut sources, reference)
             .await
             .with_context(|| format!("pull {reference}"))?;
         check_layers(&manifest)?;
@@ -315,19 +396,86 @@ impl Builder {
             size_gb: self.root_gb,
             built_at: Utc::now(),
         };
-        if let Err(e) = self.build(&pinned, &manifest, &image).await {
+        if let Err(e) = self.build(&mut sources, &manifest, &image).await {
             let _ = self.zfs.destroy(&image.dataset()).await;
             let _ = std::fs::remove_dir_all(self.dir.join(format!("extract-{}", image.key)));
             return Err(e);
         }
         write_private(&self.meta_path(key), &serde_json::to_vec_pretty(&image)?)?;
         if let Some(ev) = &self.events {
-            ev.emit(pulled(reference, digest, started.elapsed()));
+            let from = sources[0].mirror.as_deref();
+            ev.emit(pulled(reference, digest, from, started.elapsed()));
         }
         Ok(image)
     }
 
-    async fn build(&self, r: &Reference, manifest: &OciImageManifest, image: &Image) -> Result<()> {
+    /// Where `digest` of `r` is pulled from: its registry's mirror, then the registry. The
+    /// daemon sends a mirror no credentials: a mirror of a private registry holds its own.
+    fn sources(&self, r: &Reference, digest: &str) -> Vec<Source> {
+        let mut out = Vec::with_capacity(2);
+        if let Some(m) = self.mirrors.iter().find(|m| m.registry == r.registry()) {
+            out.push(Source {
+                reference: Reference::with_digest(
+                    m.host.clone(),
+                    r.repository().to_string(),
+                    digest.to_string(),
+                ),
+                auth: RegistryAuth::Anonymous,
+                mirror: Some(m.host.clone()),
+            });
+        }
+        out.push(Source {
+            reference: r.clone_with_digest(digest.to_string()),
+            auth: self.auth_for(r),
+            mirror: None,
+        });
+        out
+    }
+
+    /// The image's manifest and config, from the first source that serves them.
+    async fn pull_manifest(
+        &self,
+        sources: &mut Vec<Source>,
+        reference: &str,
+    ) -> Result<(OciImageManifest, String)> {
+        loop {
+            let s = &sources[0];
+            match self
+                .client
+                .pull_manifest_and_config(&s.reference, &s.auth)
+                .await
+            {
+                Ok((manifest, _, config)) => return Ok((manifest, config)),
+                Err(err) => fall_back(sources, reference, "manifest", err)?,
+            }
+        }
+    }
+
+    /// One layer into `path`, from the first source that serves it.
+    async fn pull_layer(
+        &self,
+        sources: &mut Vec<Source>,
+        reference: &str,
+        layer: &oci_client::manifest::OciDescriptor,
+        path: &Path,
+    ) -> Result<()> {
+        loop {
+            let s = &sources[0];
+            let mut out = tokio::fs::File::create(path).await?;
+            match self.client.pull_blob(&s.reference, layer, &mut out).await {
+                Ok(()) => return Ok(out.flush().await?),
+                Err(err) => fall_back(sources, reference, &layer.digest, err)
+                    .with_context(|| format!("pull layer {}", layer.digest))?,
+            }
+        }
+    }
+
+    async fn build(
+        &self,
+        sources: &mut Vec<Source>,
+        manifest: &OciImageManifest,
+        image: &Image,
+    ) -> Result<()> {
         let scratch = self.dir.join(format!("extract-{}", image.key));
         let _ = std::fs::remove_dir_all(&scratch);
         let root = scratch.join("root");
@@ -337,13 +485,8 @@ impl Builder {
         let layer_file = scratch.join("layer");
         let mut files = 0;
         for layer in &manifest.layers {
-            let mut out = tokio::fs::File::create(&layer_file).await?;
-            self.client
-                .pull_blob(r, layer, &mut out)
-                .await
-                .with_context(|| format!("pull layer {}", layer.digest))?;
-            out.flush().await?;
-            drop(out);
+            self.pull_layer(sources, &image.r#ref, layer, &layer_file)
+                .await?;
             let (root, path, media_type) =
                 (root.clone(), layer_file.clone(), layer.media_type.clone());
             files += tokio::task::spawn_blocking(move || {
@@ -431,14 +574,40 @@ fn removed(im: &Image, how: Removal) -> Ev {
     }))
 }
 
-/// The event of a pull and build: which image, which digest, how long it took.
-fn pulled(reference: &str, digest: &str, took: std::time::Duration) -> Ev {
+/// A source failed (the mirror is down, refused, or served bytes that are not the digest):
+/// it is dropped for the rest of the pull and the next one serves. The last one's failure is
+/// the pull's.
+fn fall_back(
+    sources: &mut Vec<Source>,
+    reference: &str,
+    what: &str,
+    err: oci_client::errors::OciDistributionError,
+) -> Result<()> {
+    if sources.len() == 1 {
+        return Err(anyhow!(err));
+    }
+    let s = sources.remove(0);
+    tracing::warn!(
+        image = reference,
+        mirror = s.mirror.as_deref().unwrap_or(""),
+        what,
+        err = %err,
+        "mirror failed; pulling from the registry"
+    );
+    Ok(())
+}
+
+/// The event of a pull and build: which image, which digest, where its content came from
+/// (`from`: the mirror's host, or `registry`), how long it took.
+fn pulled(reference: &str, digest: &str, mirror: Option<&str>, took: std::time::Duration) -> Ev {
     let secs = (took.as_secs_f64() * 10.0).round() / 10.0;
+    let from = mirror.unwrap_or("registry");
+    let via = mirror.map(|m| format!(" through {m}")).unwrap_or_default();
     Ev::normal(
         reason::IMAGE_PULLED,
-        format!("pulled {reference} in {secs} s"),
+        format!("pulled {reference} in {secs} s{via}"),
     )
-    .data(serde_json::json!({"image": reference, "digest": digest, "seconds": secs}))
+    .data(serde_json::json!({"image": reference, "digest": digest, "from": from, "seconds": secs}))
 }
 
 /// Refuses an image with no layers or a layer kind the extractor cannot read, before any
@@ -680,20 +849,28 @@ mod tests {
     }
 
     #[test]
-    fn a_pull_is_an_event_with_its_digest_and_time() {
-        let ev = pulled(
-            "alpine:3.20",
-            "sha256:abc",
-            std::time::Duration::from_millis(4240),
-        );
+    fn a_pull_is_an_event_with_its_digest_source_and_time() {
         let dir = tempfile::tempdir().unwrap();
         let log = Events::open(dir.path()).unwrap();
-        log.emit(ev);
-        let e = log
-            .read(0, &Default::default(), 1)
-            .unwrap()
-            .events
-            .remove(0);
+        log.emit(pulled(
+            "alpine:3.20",
+            "sha256:abc",
+            Some("10.0.0.2:7440"),
+            std::time::Duration::from_millis(1000),
+        ));
+        log.emit(pulled(
+            "alpine:3.20",
+            "sha256:abc",
+            None,
+            std::time::Duration::from_millis(4240),
+        ));
+        let mut evs = log.read(0, &Default::default(), 2).unwrap().events;
+        assert_eq!(
+            evs[0].message,
+            "pulled alpine:3.20 in 1 s through 10.0.0.2:7440"
+        );
+        assert_eq!(evs[0].data.as_ref().unwrap()["from"], "10.0.0.2:7440");
+        let e = evs.remove(1);
         assert_eq!(
             (e.reason.as_str(), e.message.as_str()),
             ("image_pulled", "pulled alpine:3.20 in 4.2 s")
@@ -701,7 +878,7 @@ mod tests {
         assert_eq!(
             e.data,
             Some(
-                serde_json::json!({"image": "alpine:3.20", "digest": "sha256:abc", "seconds": 4.2})
+                serde_json::json!({"image": "alpine:3.20", "digest": "sha256:abc", "from": "registry", "seconds": 4.2})
             )
         );
         assert_eq!(e.machine_id, "");
@@ -764,5 +941,233 @@ mod tests {
         };
         drop(slot);
         assert!(matches!(take(&building, "k2"), Turn::Build(_)));
+    }
+
+    /// A registry on loopback serving manifests by tag or digest and blobs by digest, and
+    /// logging each request as `METHOD manifests/<ref>` or `GET blobs/<digest>`.
+    #[derive(Default)]
+    struct FakeRegistry {
+        manifests: HashMap<String, (Vec<u8>, String)>,
+        blobs: HashMap<String, Vec<u8>>,
+        log: Mutex<Vec<String>>,
+    }
+
+    fn sha(b: &[u8]) -> String {
+        format!("sha256:{}", hex::encode(Sha256::digest(b)))
+    }
+
+    impl FakeRegistry {
+        /// An image of one config and one layer, under `tag` and its digest. Its digest.
+        fn add(&mut self, tag: &str, layer: &[u8]) -> String {
+            let config = br#"{"config":{"Cmd":["sh"]}}"#.to_vec();
+            let manifest = serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": oci_client::manifest::OCI_IMAGE_MEDIA_TYPE,
+                "config": {"mediaType": oci_client::manifest::IMAGE_CONFIG_MEDIA_TYPE,
+                           "digest": sha(&config), "size": config.len()},
+                "layers": [{"mediaType": oci_client::manifest::IMAGE_LAYER_MEDIA_TYPE,
+                            "digest": sha(layer), "size": layer.len()}],
+            }))
+            .unwrap();
+            let digest = sha(&manifest);
+            self.blobs.insert(sha(&config), config);
+            self.blobs.insert(sha(layer), layer.to_vec());
+            self.manifests
+                .insert(tag.into(), (manifest.clone(), digest.clone()));
+            self.manifests
+                .insert(digest.clone(), (manifest, digest.clone()));
+            digest
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+
+        /// Serves on a loopback port: its `host:port`.
+        async fn serve(self) -> (String, std::sync::Arc<FakeRegistry>) {
+            use axum::http::{header, Method, StatusCode, Uri};
+            use axum::response::IntoResponse;
+            let me = std::sync::Arc::new(self);
+            let state = me.clone();
+            let app = axum::Router::new().fallback(move |method: Method, uri: Uri| {
+                let f = state.clone();
+                async move {
+                    let path = uri.path().to_string();
+                    if path == "/v2/" {
+                        return StatusCode::OK.into_response();
+                    }
+                    let (kind, name) =
+                        match (path.rsplit_once("/manifests/"), path.rsplit_once("/blobs/")) {
+                            (Some((_, r)), _) => ("manifests", r.to_string()),
+                            (_, Some((_, d))) => ("blobs", d.to_string()),
+                            _ => return StatusCode::NOT_FOUND.into_response(),
+                        };
+                    f.log
+                        .lock()
+                        .unwrap()
+                        .push(format!("{method} {kind}/{name}"));
+                    let found = match kind {
+                        "manifests" => f.manifests.get(&name).map(|(b, d)| {
+                            (
+                                oci_client::manifest::OCI_IMAGE_MEDIA_TYPE,
+                                b.clone(),
+                                d.clone(),
+                            )
+                        }),
+                        _ => f
+                            .blobs
+                            .get(&name)
+                            .map(|b| ("application/octet-stream", b.clone(), name.clone())),
+                    };
+                    match found {
+                        Some((media_type, body, digest)) => (
+                            [
+                                (header::CONTENT_TYPE, media_type.to_string()),
+                                (
+                                    header::HeaderName::from_static("docker-content-digest"),
+                                    digest,
+                                ),
+                            ],
+                            body,
+                        )
+                            .into_response(),
+                        None => StatusCode::NOT_FOUND.into_response(),
+                    }
+                }
+            });
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let host = l.local_addr().unwrap().to_string();
+            tokio::spawn(async move { axum::serve(l, app).await });
+            (host, me)
+        }
+    }
+
+    /// A builder whose registries are `origin` (the image's) and its mirror at `mirror`, both
+    /// plain HTTP on loopback.
+    async fn builder(dir: &Path, origin: &str, mirror: &str) -> Builder {
+        let fake = crate::zfs::fake::Fake::open("byard").await.unwrap();
+        let init = dir.join("init");
+        std::fs::write(&init, b"init").unwrap();
+        let mirror = Mirror::parse(origin, &format!("http://{mirror}")).unwrap();
+        let mut b = Builder::new(
+            fake.zfs.clone(),
+            dir.join("images"),
+            init,
+            8,
+            vec![mirror.clone()],
+        )
+        .unwrap();
+        let plain = vec![origin.to_string(), mirror.host.clone()];
+        b.client = Client::new(client_config(plain, std::time::Duration::from_secs(1)));
+        b
+    }
+
+    /// Resolves `reference` and pulls its manifest and layer as a build does: the layer's
+    /// bytes, and which mirror served (None: the registry).
+    async fn pull(
+        b: &Builder,
+        reference: &str,
+        dir: &Path,
+    ) -> Result<(String, Vec<u8>, Option<String>)> {
+        let r: Reference = reference.parse()?;
+        let digest = b.resolve(&r, reference, &RegistryAuth::Anonymous).await?;
+        let mut sources = b.sources(&r, &digest);
+        let (manifest, _) = b.pull_manifest(&mut sources, reference).await?;
+        let file = dir.join("layer");
+        b.pull_layer(&mut sources, reference, &manifest.layers[0], &file)
+            .await?;
+        let from = sources[0].mirror.clone();
+        Ok((digest, std::fs::read(&file)?, from))
+    }
+
+    /// ADR 0036: a tag is asked of the registry alone, by a HEAD, and the content by its
+    /// digest of the mirror; the mirror's own idea of the tag is never asked.
+    #[tokio::test]
+    async fn a_tag_is_resolved_by_the_registry_and_the_content_pulled_from_the_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut origin = FakeRegistry::default();
+        let want = origin.add("1", b"the layer");
+        let mut mirror = FakeRegistry::default();
+        assert_eq!(mirror.add("1", b"the layer"), want);
+        // The mirror says the tag is another image: it must not matter.
+        mirror.add("1", b"another layer");
+        let (origin_host, origin) = origin.serve().await;
+        let (mirror_host, mirror) = mirror.serve().await;
+        let b = builder(dir.path(), &origin_host, &mirror_host).await;
+        let (digest, layer, from) = pull(&b, &format!("{origin_host}/app:1"), dir.path())
+            .await
+            .unwrap();
+        assert_eq!(digest, want);
+        assert_eq!(layer, b"the layer");
+        assert_eq!(from.as_deref(), Some(mirror_host.as_str()));
+        assert_eq!(origin.requests(), ["HEAD manifests/1"]);
+        let asked = mirror.requests();
+        assert!(asked.iter().all(|r| !r.ends_with("/1")), "{asked:?}");
+        assert_eq!(asked[0], format!("GET manifests/{want}"));
+        assert_eq!(asked.len(), 3, "manifest, config, layer: {asked:?}");
+    }
+
+    /// A mirror that is down, silent, does not have the image, or serves other bytes for the
+    /// digest is left for the registry, which serves the rest of the pull.
+    #[tokio::test]
+    async fn a_mirror_that_fails_or_lies_leaves_the_pull_to_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut origin = FakeRegistry::default();
+        let want = origin.add("1", b"the layer");
+        let (origin_host, origin) = origin.serve().await;
+        let reference = format!("{origin_host}/app:1");
+
+        // Down: nothing listens there.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let down = closed.local_addr().unwrap().to_string();
+        drop(closed);
+        // Empty: it has nothing.
+        let (empty, _) = FakeRegistry::default().serve().await;
+        // A lying layer: the manifest is right, the layer's bytes are not its digest.
+        let mut liar = FakeRegistry::default();
+        liar.add("1", b"the layer");
+        let layer_digest = sha(b"the layer");
+        liar.blobs
+            .insert(layer_digest.clone(), b"evil layer".to_vec());
+        let (lying_layer, liar) = liar.serve().await;
+        // A lying manifest: other bytes under the image's digest.
+        let mut forger = FakeRegistry::default();
+        let other = forger.add("x", b"evil layer");
+        let forged = forger.manifests[&other].clone();
+        forger.manifests.insert(want.clone(), forged);
+        let (lying_manifest, _) = forger.serve().await;
+
+        // Silent: it takes the connection and never answers (bounded by the read timeout, 1 s
+        // in these tests).
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let quiet = silent.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = silent.accept().await {
+                held.push(s);
+            }
+        });
+
+        for mirror in [down, empty, lying_layer, lying_manifest, quiet] {
+            let b = builder(dir.path(), &origin_host, &mirror).await;
+            let (digest, layer, from) = pull(&b, &reference, dir.path()).await.unwrap();
+            assert_eq!(
+                (digest.as_str(), layer.as_slice(), from),
+                (want.as_str(), &b"the layer"[..], None),
+                "mirror {mirror}"
+            );
+        }
+        // The liar served the manifest and config; only the layer came from the registry.
+        assert_eq!(liar.requests().len(), 3);
+        assert!(origin
+            .requests()
+            .contains(&format!("GET blobs/{layer_digest}")));
+
+        // With the registry gone too, the pull fails with the registry's error.
+        let b = builder(dir.path(), "127.0.0.1:9", "127.0.0.1:9").await;
+        let err = pull(&b, &format!("127.0.0.1:9/app@{want}"), dir.path())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("127.0.0.1:9"), "{err:#}");
     }
 }
