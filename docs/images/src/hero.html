@@ -60,9 +60,9 @@ const AGENTS = {
 const BRIQS = [
   { id: 'pg', label: 'postgres', box: cell(1, 9, 2), fill: C.cobalt, from: 'a' },
   { id: 'fork', label: 'postgres-fork', box: cell(3, 10, 2), fill: C.cobalt, from: 'pg' },
-  { id: 'redis', label: 'redis', box: cell(5, 9, 2), fill: C.amber, from: 'b' },
-  { id: 'web', label: 'web', box: cell(7, 9, 2), fill: C.moss, from: 'b' },
-  { id: 'sandbox', label: 'sandbox', box: cell(5, 12, 2), fill: C.plum, from: 'c', asleep: true },
+  { id: 'sb1', label: 'sandbox-1', box: cell(5, 9, 2), fill: C.plum, from: 'b' },
+  { id: 'sb2', label: 'sandbox-2', box: cell(7, 9, 2), fill: C.plum, from: 'b' },
+  { id: 'web', label: 'web', box: cell(5, 12, 2), fill: C.moss, from: 'c', asleep: true },
 ];
 const TEXT = { x: 44, y: 96, w: 360, h: 148 };
 
