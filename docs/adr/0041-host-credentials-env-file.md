@@ -23,4 +23,4 @@ systemctl start briqyardd                                    # adopts them, with
 ## Consequences
 
 - A host gets the line at its next bootstrap. Through a fleet, that is a release of the fleet with this script (`bootstrap.rs` embeds it), then `host upgrade`. Before that, a drop-in with the same line does the same.
-- Checked: `systemd-analyze verify` of the unit on Ubuntu 26.04 (systemd 259) with and without the file; `bash -n hack/bootstrap-host.sh`.
+- The dev VM's unit (`hack/briqyardd.service`, installed by `hack/vm.sh`) carries the same line, so a VM install and a bootstrap write the same unit.

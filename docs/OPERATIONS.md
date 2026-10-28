@@ -754,7 +754,7 @@ the bootstrap's makes it an upgrade.
 
 ```bash
 grep -q '^capacity:' /etc/briqyard/config.yaml || printf 'capacity:\n  reserved_memory_mb: 3072\n' >> /etc/briqyard/config.yaml
-systemctl restart briqyardd
+systemctl restart briqyardd                            # no machine runs yet; later, a hand-over
 export BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN=<the fleet's token>
 briqyard host ls                                       # ready
 ```
