@@ -281,7 +281,9 @@ plus `apt-get purge docker.io` and the edge's files.
   logged), raw backups (ADR 0035: the record names the key's id, never the key; no plaintext
   marker of a file or the env in the stream or the record, while the same snapshot sent in
   clear shows it; a raw restore with the marker back and its disk on the pool's key; a backup
-  in clear, as made before, restored). 212 checks, 208 without host ports.
+  in clear, as made before, restored), Firecracker 1.17 (256 MiB deleted on a volume and on a
+  root disk given back to the pool, exec after a bare pause and resume). 215 checks, 211
+  without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).

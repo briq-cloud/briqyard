@@ -30,7 +30,7 @@ The daemon reads bytes that someone else wrote: a guest's DNS queries on its gat
 | `Host` of no endpoint | 404, as before |
 | A head ending in bare `\n` lines | routed (was: waited for `\r\n\r\n` until 64 KiB) |
 
-Only the first request of a connection is read; the rest is spliced, as before.
+The whole head must arrive within 30 s of the connection; a client that sends it slower is closed. Only the first request of a connection is read; the rest is spliced, as before. A connection therefore belongs to its first host: anything in front must open connections per host, never pool them across hosts.
 
 **What stays ours is fuzzed here**: `cargo fuzz` targets in `fuzz/` (its own workspace, nightly only, run by hand, `../DEVELOPMENT.md`) for every decoder an untrusted party feeds. `briqyardd` is a library plus its binary so the targets reach them; the cost is that a library's dead-code lint trusts `pub`, so a daemon item made `pub` and used nowhere is no longer flagged. A crash's input becomes a unit test with its fix. CI cannot run them (stable); it checks they build (`cargo check --manifest-path fuzz/Cargo.toml --locked`). A nightly job would be minutes billed for a run too short to find much.
 
