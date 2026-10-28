@@ -303,7 +303,10 @@ plus `apt-get purge docker.io` and the edge's files.
   marker of a file or the env in the stream or the record, while the same snapshot sent in
   clear shows it; a raw restore with the marker back and its disk on the pool's key; a backup
   in clear, as made before, restored), Firecracker 1.17 (256 MiB deleted on a volume and on a
-  root disk given back to the pool, exec after a bare pause and resume). 215 checks, 211
+  root disk given back to the pool, exec after a bare pause and resume), a volume grown (ADR
+  0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
+  smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
+  data kept, the next backup incremental and its restore at the grown size). 227 checks, 223
   without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
@@ -313,9 +316,9 @@ plus `apt-get purge docker.io` and the edge's files.
   daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
   relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
   machine running (back `ready`, a new start of this version that adopted it, the machine
-  answering, never booted again). 31 checks. With `BRIQYARD_TOKEN` against a real fleet: it
-  orders only through a dry-run provisioner and drains only the dev fleet's host `local`, so it
-  leaves real hosts alone (15 checks then).
+  answering, never booted again), a volume's growth forwarded. 32 checks. With `BRIQYARD_TOKEN`
+  against a real fleet: it orders only through a dry-run provisioner and drains only the dev
+  fleet's host `local`, so it leaves real hosts alone (16 checks then).
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases
