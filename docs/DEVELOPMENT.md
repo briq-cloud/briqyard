@@ -211,7 +211,12 @@ plus `apt-get purge docker.io` and the edge's files.
   a stub fleet as the host, each failed try saying why without the key, the wait ended by a
   stop; `load-key` with the key on stdin; a filesystem never mounted over files; the fleet's
   key route: made at the first ask, the same after, one per host, refused to any other token
-  or address, written `0600` before it is answered, in no listing, gone with the host; a
+  or address, written `0600` before it is answered, in no listing, no longer the host's once
+  it is forgotten but kept for its backups, served by its id to any host and refused for an
+  unknown id (ADR 0035); a backup refused under a key that is not the pool's; a backup raw under its key's id with its record sealed (the env in
+  no object, a sealed spec that does not open moved to another record), a restore opening it
+  with the key of that id and giving its disks the pool's, the key file's own or the fleet's,
+  refused with no fleet to ask; a backup in clear restored with no key, the next one whole; a
   registry's backup: written sealed and only on a change, read back with its identity and no
   other, a key served only once the store holds it; a
   registry that does not parse refused, never read as empty, and fields it does not know
@@ -270,7 +275,10 @@ plus `apt-get purge docker.io` and the edge's files.
   SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start: running
   again unasked, resumed), a registry mirror (a pull through fc's Zot, the mirror then holding
   the digest; with Zot stopped, the same image and digest from Docker Hub and the fallback
-  logged). 204 checks, 200 without host ports.
+  logged), raw backups (ADR 0035: the record names the key's id, never the key; no plaintext
+  marker of a file or the env in the stream or the record, while the same snapshot sent in
+  clear shows it; a raw restore with the marker back and its disk on the pool's key; a backup
+  in clear, as made before, restored). 209 checks, 205 without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).
@@ -289,7 +297,10 @@ plus `apt-get purge docker.io` and the edge's files.
   forwarded to each, a host that stops answering marked down with its tenant's calls refused
   (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back;
   with `SECOND_HOST_SH`, its pool locked while it is down and back encrypted and unlocked with
-  the fleet's key, the key on none of its files, in its log or in the fleet's host list. 21 checks.
+  the fleet's key, the key on none of its files, in its log or in the fleet's host list; and a
+  backup there (a directory store for the run when it has none): its key's id, no plaintext in
+  its stream, restored through the fleet onto it with the key the fleet served by its id, its
+  disk on the host's pool key. 25 checks.
 - `hack/fleet-restore.sh` (from the Mac, `FLEET_SH="limactl shell fc sudo" SECOND_HOST_SH="limactl
   shell fc2 sudo"`): the dev fleet backed up to `file:///var/lib/briqyard-fleet-backup` for the
   run (an identity in `/etc/briqyard/fleet-backup.key` on fc, development only), the backup

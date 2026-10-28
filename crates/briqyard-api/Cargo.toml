@@ -16,8 +16,8 @@ sha2 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 
 [features]
-# The pinned verifier and the server config the daemon, the fleet and the CLI share (ADR 0020).
-# Off for the init, which has no TLS.
+# What the daemon, the fleet and the CLI share and the init does not: the pinned verifier and
+# the server config (ADR 0020), a pool key's id (ADR 0035).
 tls = ["dep:rustls", "dep:sha2", "dep:hex"]
 
 [dev-dependencies]

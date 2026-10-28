@@ -505,6 +505,39 @@ for i in $(seq 1 60); do briqyard machine exec "$R1" -- pg_isready -h 127.0.0.1 
 check "restored the first backup" '[ "$(briqyard machine exec "$R1" -- psql -U postgres -tAc "select sum(x) from t")" = 85 ]'
 briqyard machine destroy "$R1" >/dev/null
 
+echo "== backups hold ciphertext; a backup in clear still restores (ADR 0035)"
+CONF=/etc/briqyard/config.yaml
+STORE=$(sudo sed -n 's|^  store: file://||p' $CONF)
+POOL=$(sudo sed -n 's/^  pool: //p' $CONF); POOL=${POOL:-byard}
+KF=$(sudo sed -n 's/^  key: file://p' $CONF); KF=${KF:-/etc/briqyard/pool.key}
+# A file of random text on its root disk, whose blocks lz4 cannot shrink and ZFS keeps as they
+# are (a short line would be hidden by compression alone), and a random value in its env.
+ENVMARK=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+DATA=$(sudo sed -n 's/^data_dir: //p' $CONF); DATA=${DATA:-/var/lib/briqyard}
+K=$(briqyard machine run --image alpine:3.20 --name rawmark --tenant "$T" --memory 128 -e "RAWMARK=$ENVMARK" -- sleep 3600 | jq -r .id)
+briqyard machine exec "$K" -- sh -c "head -c 98304 /dev/urandom | base64 -w 0 > /root/mark; sync" >/dev/null
+MARK=$(briqyard machine exec "$K" -- head -c 48 /root/mark)
+KB=$(briqyard machine backup "$K" | jq -r .id)
+KS="$STORE/backups/$K/root/$KB.zfs"
+check "its record says the key's id, never the key" '[ "$(briqyard machine backups "$K" | jq -r ".[0].key_id | length")" = 32 ] && ! sudo grep -rqF "$(sudo cat "$KF" | tr -d " \n")" "$STORE/backups/$K"'
+check "its stream and its record hold no plaintext" 'sudo test -s "$KS" && ! sudo grep -rqaF -e "$MARK" -e "$ENVMARK" -- "$STORE/backups/$K"'
+RK=$(briqyard machine restore --from "$K" --tenant "$T" --name rawback | jq -r .id)
+for i in $(seq 1 30); do [ "$(briqyard machine get "$RK" | jq -r .state)" = running ] && break; sleep 1; done
+check "restored, its env opened, its disk on the pool's key" '[ "$(briqyard machine exec "$RK" -- sh -c "head -c 48 /root/mark; echo; echo \$RAWMARK" | paste -sd, -)" = "$MARK,$ENVMARK" ] && [ "$(sudo zfs get -H -o value encryptionroot "$POOL/m/$RK/root")" = "$POOL" ]'
+# The same snapshot sent in clear, its record beside it with the machine open, as a backup
+# made before ADR 0035.
+OLD=m_clear$(date +%s)
+sudo mkdir -p "$STORE/backups/$OLD/root"
+sudo sh -c "zfs send -c $POOL/m/$K/root@bk-$KB > $STORE/backups/$OLD/root/$KB.zfs"
+sudo cat "$STORE/backups/$K/$KB.json" | jq --arg m "$OLD" --arg k "backups/$OLD/root/$KB.zfs" --slurpfile spec <(sudo cat "$DATA/state/machines/$K.json") \
+  '.machine_id = $m | .machine = $spec[0] | del(.key_id, .sealed) | .disks = [.disks[] | select(.disk == "root") | .key = $k]' | sudo tee "$STORE/backups/$OLD/$KB.json" >/dev/null
+check "the same in clear shows the plaintext" 'sudo grep -qaF -- "$MARK" "$STORE/backups/$OLD/root/$KB.zfs" && sudo grep -qF "$ENVMARK" "$STORE/backups/$OLD/$KB.json"'
+RC=$(briqyard machine restore --from "$OLD" --backup "$KB" --tenant "$T" --name clearback | jq -r .id)
+for i in $(seq 1 30); do [ "$(briqyard machine get "$RC" | jq -r .state)" = running ] && break; sleep 1; done
+check "a backup in clear still restores" '[ "$(briqyard machine exec "$RC" -- head -c 48 /root/mark)" = "$MARK" ]'
+for id in "$RC" "$RK" "$K"; do briqyard machine destroy "$id" >/dev/null; done
+sudo rm -rf "${STORE:?}/backups/$OLD"
+
 echo "== backups on a schedule: retention, delete, a destroyed machine's"
 # The schedule's own backups are an hour apart: the API's make the points, and retention
 # is the same after either.

@@ -467,6 +467,7 @@ dependencies = [
  "rand 0.8.8",
  "rcgen",
  "reqwest",
+ "ring",
  "rustix",
  "serde",
  "serde_json",

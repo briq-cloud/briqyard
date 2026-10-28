@@ -137,6 +137,88 @@ pub(super) struct Backups {
     holders: Mutex<HashMap<String, Arc<Holder>>>,
 }
 
+/// A pool key's id and what a backup's record is sealed with: a key per record, derived from
+/// the pool key by HKDF-SHA256 with the record's place in its info, for AES-256-GCM. The pool
+/// key itself is not kept (ADR 0035).
+pub(super) struct Seal {
+    id: String,
+    prk: ring::hkdf::Prk,
+}
+
+impl Seal {
+    pub(super) fn of(pool_key: &str) -> Result<Seal> {
+        use ring::hkdf;
+        let id = api::poolkey::id(pool_key).ok_or_else(|| anyhow!("not a pool key"))?;
+        let bytes = hex::decode(pool_key.trim())?;
+        let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, b"briqyard backup record").extract(&bytes);
+        Ok(Seal { id, prk })
+    }
+
+    /// The key of the record at `place` (`<machine>/<backup>`): a sealed spec opens in no
+    /// other record.
+    fn key(&self, place: &str) -> Result<ring::aead::LessSafeKey> {
+        use ring::aead;
+        let info: [&[u8]; 2] = [b"aes-256-gcm ", place.as_bytes()];
+        let okm = self
+            .prk
+            .expand(&info, &aead::AES_256_GCM)
+            .map_err(|_| anyhow!("derive the key of record {place}"))?;
+        Ok(aead::LessSafeKey::new(aead::UnboundKey::from(okm)))
+    }
+
+    /// `plain` sealed for the record at `place`: a random nonce, then the ciphertext and its
+    /// tag, in base64; the place is the associated data too.
+    fn seal(&self, place: &str, plain: &[u8]) -> Result<String> {
+        use base64::Engine;
+        use ring::aead::{Aad, Nonce};
+        use ring::rand::SecureRandom;
+        let mut nonce = [0u8; 12];
+        ring::rand::SystemRandom::new()
+            .fill(&mut nonce)
+            .map_err(|_| anyhow!("the OS gave no random bytes for a record's nonce"))?;
+        let mut out = plain.to_vec();
+        self.key(place)?
+            .seal_in_place_append_tag(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(place.as_bytes()),
+                &mut out,
+            )
+            .map_err(|_| anyhow!("seal record {place}"))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode([&nonce[..], &out].concat()))
+    }
+
+    fn open(&self, place: &str, sealed: &str) -> Result<Vec<u8>> {
+        use base64::Engine;
+        use ring::aead::{Aad, Nonce};
+        let data = base64::engine::general_purpose::STANDARD.decode(sealed)?;
+        if data.len() < 12 + 16 {
+            return Err(anyhow!("sealed record of {place}: too short"));
+        }
+        let (nonce, rest) = data.split_at(12);
+        let mut buf = rest.to_vec();
+        let plain = self
+            .key(place)?
+            .open_in_place(
+                Nonce::try_assume_unique_for_key(nonce).expect("12 bytes"),
+                Aad::from(place.as_bytes()),
+                &mut buf,
+            )
+            .map_err(|_| anyhow!("sealed record of {place}: does not open under its key"))?;
+        Ok(plain.to_vec())
+    }
+}
+
+/// The machine a backup holds: opened with the backup's key when sealed (ADR 0035), as it is
+/// in a backup made before.
+pub(super) fn spec_of(b: &api::Backup, key: Option<&str>) -> Result<serde_json::Value> {
+    let Some(sealed) = &b.sealed else {
+        return Ok(b.machine.clone().unwrap_or_default());
+    };
+    let key = key.ok_or_else(|| anyhow!("backup {}: sealed, and no key", b.id))?;
+    let plain = Seal::of(key)?.open(&format!("{}/{}", b.machine_id, b.id), sealed)?;
+    Ok(serde_json::from_slice(&plain)?)
+}
+
 impl Backups {
     /// Opens the store `backup.store` names (none when empty) and reads the holders back.
     pub(super) fn open(cfg: &config::Backup, state: &Store) -> Result<Self> {
@@ -205,6 +287,33 @@ impl Manager {
             .store
             .as_ref()
             .ok_or_else(|| invalid("backups are off on this host (backup.store)"))
+    }
+
+    /// What a backup is sealed and named with (ADR 0035): the pool key asked of its source,
+    /// checked against the pool (a key file replaced, a registry restored to an older key, a
+    /// pool re-keyed by hand would otherwise name a key its streams are not under), then
+    /// dropped once derived.
+    async fn seal(&self) -> Result<Seal, MError> {
+        let key = crate::poolkey::pool_key(&self.inner.cfg)
+            .await
+            .context("the pool key, for the backup's seal")?;
+        self.inner
+            .zfs
+            .check_key(&key)
+            .await
+            .context("the pool key from its source is not the pool's")?;
+        Ok(Seal::of(&key)?)
+    }
+
+    /// The key a backup is encrypted under, asked by its id; none for a backup in clear.
+    pub(super) async fn backup_key(&self, b: &api::Backup) -> Result<Option<String>, MError> {
+        let Some(id) = &b.key_id else {
+            return Ok(None);
+        };
+        let key = crate::poolkey::by_id(&self.inner.cfg, id)
+            .await
+            .with_context(|| format!("the key of backup {}", b.id))?;
+        Ok(Some(key))
     }
 
     fn holder(&self, id: &str) -> Option<Arc<Holder>> {
@@ -326,6 +435,8 @@ impl Manager {
         rec: &Record,
     ) -> Result<(api::Backup, Vec<api::Backup>), MError> {
         let mut all = self.backups(&rec.id).await?;
+        let seal = self.seal().await?;
+        let key_id = seal.id.clone();
         let whole = rec
             .backup
             .policy
@@ -341,12 +452,13 @@ impl Manager {
                 if !z.exists(&ds).await? {
                     continue;
                 }
-                // The base must be a backup of this machine in the store: a restored
-                // machine's received snapshots are its source's.
+                // The base must be a backup of this machine in the store, sent raw under this
+                // pool's key: a restored machine's received snapshots are its source's, and a
+                // raw increment applies only over a raw stream (ADR 0035).
                 let base = match whole {
                     true => None,
                     false => newest_backup_snapshot(&z.snapshots(&ds).await?)
-                        .filter(|s| in_store(&all, s, disk)),
+                        .filter(|s| in_store(&all, s, disk, &key_id)),
                 };
                 z.snapshot(&ds, &snap).await?;
                 snapped.push(ds.clone());
@@ -379,7 +491,9 @@ impl Manager {
                 bytes: disks.iter().map(|d| d.bytes).sum(),
                 incremental: disks.iter().any(|d| d.from.is_some()),
                 disks,
-                machine: Some(serde_json::to_value(rec).unwrap_or_default()),
+                key_id: Some(key_id.clone()),
+                machine: None,
+                sealed: None,
                 deletes_at: None,
             },
             Err(err) => {
@@ -387,10 +501,17 @@ impl Manager {
                 return Err(err.into());
             }
         };
+        let record = api::Backup {
+            sealed: Some(seal.seal(
+                &format!("{}/{bid}", rec.id),
+                &serde_json::to_vec(rec).unwrap_or_default(),
+            )?),
+            ..b.clone()
+        };
         let stored = store
             .put_bytes(
                 &format!("backups/{}/{bid}.json", rec.id),
-                &serde_json::to_vec_pretty(&b).unwrap_or_default(),
+                &serde_json::to_vec_pretty(&record).unwrap_or_default(),
             )
             .await
             .context("backup record");
@@ -415,10 +536,7 @@ impl Manager {
                 }
             }
         }
-        all.push(api::Backup {
-            machine: None,
-            ..b.clone()
-        });
+        all.push(b.clone());
         Ok((b, all))
     }
 
@@ -497,6 +615,7 @@ impl Manager {
             match serde_json::from_slice::<api::Backup>(&data) {
                 Ok(mut b) => {
                     b.machine = None;
+                    b.sealed = None;
                     b.deletes_at = deletes_at;
                     out.push(b);
                 }
@@ -869,8 +988,18 @@ impl Manager {
     }
 
     /// Makes the machine's disks from a backup: the whole chain of streams, oldest first,
-    /// received into the new datasets.
-    pub(super) async fn receive_disks(&self, e: &Arc<Entry>, b: &api::Backup) -> Result<()> {
+    /// received into the new datasets. Raw streams (ADR 0035) land as their own encryption
+    /// root under the key they were sent with: that key, asked by its id, opens them, and they
+    /// then take the pool's. A chain in clear (before ADR 0035) is received as it always was.
+    /// A chain is one or the other: a raw increment is sent only over a raw backup under the
+    /// same key (`in_store`). The key is given to a disk once its whole chain is in: a raw
+    /// increment is received only into a dataset that is still its own encryption root.
+    pub(super) async fn receive_disks(
+        &self,
+        e: &Arc<Entry>,
+        b: &api::Backup,
+        key: Option<&str>,
+    ) -> Result<()> {
         let store = self.backup_store()?;
         let rec = e.snapshot();
         let all = self.backups(&b.machine_id).await?;
@@ -891,6 +1020,9 @@ impl Manager {
                     .with_context(|| format!("restore {}", step.key))?;
                 drop(stdin);
                 Zfs::finish(child, "zfs receive").await?;
+            }
+            if let Some(key) = key {
+                self.inner.zfs.inherit_key(&ds, key).await?;
             }
             self.inner.zfs.device(&ds).await?;
         }
@@ -915,11 +1047,13 @@ fn newest_backup_snapshot(snaps: &[String]) -> Option<String> {
     snaps.iter().filter(|s| s.starts_with("bk-")).max().cloned()
 }
 
-/// Whether a snapshot `bk-<id>` is the snapshot of a backup in `all` holding that disk.
-fn in_store(all: &[api::Backup], snap: &str, disk: &str) -> bool {
+/// Whether a snapshot `bk-<id>` is the snapshot of a backup in `all` holding that disk, sent
+/// raw under the key `key_id`.
+fn in_store(all: &[api::Backup], snap: &str, disk: &str, key_id: &str) -> bool {
     let id = snap.trim_start_matches("bk-");
-    all.iter()
-        .any(|b| b.id == id && b.disks.iter().any(|d| d.disk == disk))
+    all.iter().any(|b| {
+        b.id == id && b.key_id.as_deref() == Some(key_id) && b.disks.iter().any(|d| d.disk == disk)
+    })
 }
 
 fn is_whole(b: &api::Backup) -> bool {
@@ -1018,7 +1152,9 @@ mod tests {
             bytes: 1,
             incremental: from.is_some(),
             disks: vec![disk("root", id, from)],
+            key_id: Some("k1".into()),
             machine: None,
+            sealed: None,
             deletes_at: None,
         }
     }
@@ -1058,9 +1194,14 @@ mod tests {
         );
         assert_eq!(newest_backup_snapshot(&["fork-x".into()]), None);
         // A base is a snapshot of one of the machine's backups that holds that disk.
-        assert!(in_store(&all, "bk-b", "root"));
-        assert!(!in_store(&all, "bk-b", "data"));
-        assert!(!in_store(&all, "bk-zz", "root"));
+        assert!(in_store(&all, "bk-b", "root", "k1"));
+        assert!(!in_store(&all, "bk-b", "data", "k1"));
+        assert!(!in_store(&all, "bk-zz", "root", "k1"));
+        // And sent raw under this pool's key: never over a stream in clear or another key's.
+        assert!(!in_store(&all, "bk-b", "root", "k2"));
+        let mut clear = all.clone();
+        clear[1].key_id = None;
+        assert!(!in_store(&clear, "bk-b", "root", "k1"));
     }
 
     #[test]
@@ -1362,6 +1503,149 @@ mod tests {
         let all = h.listed(&m.id).await;
         assert_eq!(all.len(), 2, "written: backed up");
         assert!(all[1].incremental);
+    }
+
+    fn restore_of(machine_id: &str, backup: &str, name: &str) -> api::CreateMachineRequest {
+        api::CreateMachineRequest {
+            tenant: "t1".into(),
+            name: name.into(),
+            restore: Some(api::RestoreSpec {
+                machine_id: machine_id.into(),
+                backup: backup.into(),
+            }),
+            start: Some(false),
+            ..Default::default()
+        }
+    }
+
+    /// A backup is sent raw and its record says the id of the pool's key, never the key; a
+    /// restore opens the received streams with the key of that id and gives them the pool's
+    /// (ADR 0035).
+    #[tokio::test]
+    async fn a_backup_is_raw_and_its_restore_takes_the_pools_key() {
+        let h = harness(|_| {}).await;
+        let mut req = h.request("db");
+        req.env.insert("PASSWORD".into(), "s3cret".into());
+        let m = h.m.create(req).await.unwrap();
+        h.pool.calls();
+        let b = h.m.backup(&m.id).await.unwrap();
+        let key = "0123456789abcdef".repeat(4);
+        assert_eq!(b.key_id, briqyard_api::poolkey::id(&key));
+        let calls = h.pool.calls();
+        assert!(calls.iter().any(|c| c.starts_with("send -w ")), "{calls:?}");
+        assert!(
+            calls.contains(&"load-key -n -L prompt byard".to_string()),
+            "the key checked on the pool's encryption root: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("send -c ")),
+            "{calls:?}"
+        );
+        let store = h.m.backup_store().unwrap();
+        let record = store
+            .get_bytes(&format!("backups/{}/{}.json", m.id, b.id))
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&record);
+        assert!(!text.contains(&key));
+        let record: api::Backup = serde_json::from_slice(&record).unwrap();
+        assert!(
+            record.machine.is_none() && record.sealed.is_some(),
+            "{text}"
+        );
+        assert!(
+            !text.contains("s3cret"),
+            "the machine's env is sealed: {text}"
+        );
+        let spec = spec_of(&record, Some(&key)).unwrap();
+        assert_eq!(spec["env"]["PASSWORD"], "s3cret");
+        // Sealed for its place: moved to another backup's record, it does not open.
+        let mut moved = record.clone();
+        moved.id = "20991231T000000.000Z".into();
+        assert!(spec_of(&moved, Some(&key)).is_err());
+        let r = h.m.create(restore_of(&m.id, &b.id, "r")).await.unwrap();
+        let env = h.m.entry(&r.id).unwrap().snapshot().env;
+        assert_eq!(env["PASSWORD"], "s3cret", "the spec opened");
+        let calls = h.pool.calls();
+        let load = calls
+            .iter()
+            .position(|c| c.starts_with("load-key -L prompt ") && c.contains(&r.id))
+            .unwrap_or_else(|| panic!("{calls:?}"));
+        let ds = calls[load].rsplit(' ').next().unwrap();
+        assert!(
+            calls[load..].contains(&format!("change-key -i {ds}")),
+            "{calls:?}"
+        );
+        // A key the host does not have, with no fleet to ask: the restore is refused.
+        let mut other = b.clone();
+        other.id = "20991231T000000.000Z".into();
+        other.key_id = briqyard_api::poolkey::id(&"fedcba9876543210".repeat(4));
+        store
+            .put_bytes(
+                &format!("backups/{}/{}.json", m.id, other.id),
+                &serde_json::to_vec(&other).unwrap(),
+            )
+            .await
+            .unwrap();
+        let err = h.m.create(restore_of(&m.id, &other.id, "r2")).await;
+        let msg = match err {
+            Ok(r) => h.m.get(&r.id).unwrap().error,
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(msg.contains("no fleet to ask"), "{msg}");
+    }
+
+    /// A key from the source that is not the pool's (a key file replaced, a registry restored
+    /// to an older key) makes no backup: its record would name a key its streams are not under.
+    #[tokio::test]
+    async fn a_backup_is_refused_under_a_key_that_is_not_the_pools() {
+        let h = harness(|_| {}).await;
+        let m = h.machine("db", None, true).await;
+        let file =
+            h.m.inner
+                .cfg
+                .storage
+                .key
+                .trim_start_matches("file:")
+                .to_string();
+        std::fs::write(&file, "fedcba9876543210".repeat(4)).unwrap();
+        let err = h.m.backup(&m.id).await.unwrap_err();
+        assert!(format!("{err:#}").contains("not the pool's"), "{err:#}");
+        assert!(h.objects(&m.id).await.is_empty());
+        assert!(!h.pool.calls().iter().any(|c| c.starts_with("send ")));
+    }
+
+    /// A backup made before ADR 0035, its streams in clear, restores as it did, with no key;
+    /// the next backup is whole: a raw increment never continues a stream in clear.
+    #[tokio::test]
+    async fn a_backup_in_clear_restores_and_the_next_one_is_whole() {
+        let h = harness(|_| {}).await;
+        let m = h.machine("db", None, true).await;
+        let b = h.m.backup(&m.id).await.unwrap();
+        // Its record as a backup in clear had it: the machine open, no key.
+        let place = format!("backups/{}/{}.json", m.id, b.id);
+        let store = h.m.backup_store().unwrap();
+        let mut record: api::Backup =
+            serde_json::from_slice(&store.get_bytes(&place).await.unwrap()).unwrap();
+        let key = "0123456789abcdef".repeat(4);
+        record.machine = Some(spec_of(&record, Some(&key)).unwrap());
+        (record.key_id, record.sealed) = (None, None);
+        store
+            .put_bytes(&place, &serde_json::to_vec(&record).unwrap())
+            .await
+            .unwrap();
+        h.pool.calls();
+        let r = h.m.create(restore_of(&m.id, &b.id, "r")).await.unwrap();
+        assert_eq!(r.state, state::CREATED);
+        let calls = h.pool.calls();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("load-key") || c.starts_with("change-key")),
+            "{calls:?}"
+        );
+        let next = h.m.backup(&m.id).await.unwrap();
+        assert!(!next.incremental, "{next:?}");
     }
 
     #[tokio::test]
