@@ -480,7 +480,7 @@ mod tests {
         assert!(ObjectStore::open("file://", "", "", "", "").is_err());
     }
 
-    /// Against a real bucket: MinIO in development, Scaleway before a release.
+    /// Against a real bucket: MinIO in development, a real S3 bucket before a release.
     /// `BRIQYARD_S3_TEST_STORE=s3://bucket/prefix BRIQYARD_S3_TEST_ENDPOINT=… BRIQYARD_S3_TEST_REGION=…
     /// BRIQYARD_S3_ACCESS_KEY=… BRIQYARD_S3_SECRET_KEY=… cargo test -p briqyard-objstore -- --ignored`
     #[tokio::test]

@@ -301,7 +301,10 @@ fn old_provisioner(doc: &mut serde_yaml::Value) -> Result<Option<&'static str>> 
         Some(Value::Null) => Default::default(),
         Some(_) => bail!("provisioner: removed (ADR 0042): delete it"),
     };
-    let move_it = "move provisioner.bootstrap to a top-level bootstrap: and delete provisioner:";
+    let move_it = match old.contains_key("bootstrap") {
+        true => "move provisioner.bootstrap to a top-level bootstrap: and delete provisioner:",
+        false => "delete provisioner:",
+    };
     match old.remove("kind") {
         None => {}
         Some(Value::String(k)) if k == "static" => {}
@@ -729,6 +732,19 @@ bootstrap:
             assert!(err.contains(msg), "{text:?}: {err}");
             assert!(err.contains("ADR 0042"), "{text:?}: {err}");
         }
+        // What to do names the bootstrap only when the file has one.
+        let err = format!("{:#}", load("provisioner:\n  enabled: true\n").unwrap_err());
+        assert!(err.ends_with("; delete provisioner:"), "{err}");
+        let err = format!(
+            "{:#}",
+            load("provisioner:\n  enabled: true\n  bootstrap:\n    enabled: true\n").unwrap_err()
+        );
+        assert!(
+            err.ends_with(
+                "; move provisioner.bootstrap to a top-level bootstrap: and delete provisioner:"
+            ),
+            "{err}"
+        );
         // A typo in the old place is refused as in the new one.
         let err = format!(
             "{:#}",
