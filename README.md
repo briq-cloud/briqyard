@@ -50,17 +50,6 @@ What a create does:
 
 How each part works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Every decision and its reasons: [docs/adr/](docs/adr/).
 
-### Binaries
-
-| Binary | Runs on | What it does |
-|---|---|---|
-| `briqyardd` | Every host, as root | Runs the host's machines: their Firecracker processes, disks, networks, endpoints, sleep and backups. Serves the API |
-| `briqyard-init` | Inside every machine, as PID 1 | Starts the image's command and reports when it exits. Answers exec, files and terminal sessions over vsock |
-| `briqyard-fleet` | One server that reaches every host | Serves the same API for the whole fleet: picks a host for each tenant and forwards each call there. Keeps the list of hosts and their disk keys. Installs and upgrades hosts over SSH, and can order servers from Hetzner Robot, Scaleway or OVH (dry run by default) |
-| `briqyard` | Anywhere | The CLI, for one host or a fleet |
-
-`hack/bootstrap-host.sh` turns a fresh Ubuntu server into a host; the fleet runs it to install a host and again to upgrade it. Two libraries are shared: `briqyard-api` (the API's types, and the protocol between a host and its machines' init) and `briqyard-objstore` (S3 or a directory, for backups and the fleet's registry).
-
 ## Concepts
 
 What you work with, and its closest Kubernetes counterpart.
@@ -87,6 +76,17 @@ What you work with, and its closest Kubernetes counterpart.
 | **Events** | A log of what happened on a host, with a watch from a cursor | Events, watch |
 
 Not there yet: replicas and groups of identical machines, rolling updates, load balancing between machines, and a tenant spanning several hosts. The full comparison: [docs/KUBERNETES-MAP.md](docs/KUBERNETES-MAP.md).
+
+## Binaries
+
+| Binary | Runs on | What it does |
+|---|---|---|
+| `briqyardd` | Every host, as root | Runs the host's machines: their Firecracker processes, disks, networks, endpoints, sleep and backups. Serves the API |
+| `briqyard-init` | Inside every machine, as PID 1 | Starts the image's command and reports when it exits. Answers exec, files and terminal sessions over vsock |
+| `briqyard-fleet` | One server that reaches every host | Serves the same API for the whole fleet: picks a host for each tenant and forwards each call there. Keeps the list of hosts and their disk keys. Installs and upgrades hosts over SSH, and can order servers from Hetzner Robot, Scaleway or OVH (dry run by default) |
+| `briqyard` | Anywhere | The CLI, for one host or a fleet |
+
+`hack/bootstrap-host.sh` turns a fresh Ubuntu server into a host; the fleet runs it to install a host and again to upgrade it. Two libraries are shared: `briqyard-api` (the API's types, and the protocol between a host and its machines' init) and `briqyard-objstore` (S3 or a directory, for backups and the fleet's registry).
 
 ## Install
 
@@ -125,10 +125,6 @@ Step by step, with every option, a fleet and a Mac for development: [docs/INSTAL
 
 `cargo test` runs the unit tests. `hack/e2e.sh` checks a host end to end (about 220 checks); `hack/fleet-smoke.sh`, `hack/fleet-two-hosts.sh` and `hack/fleet-restore.sh` check a fleet; `hack/stress.py` runs many tenants at once and checks the host's invariants. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-## License
-
-AGPL-3.0, see [LICENSE](LICENSE). Contributions need a signed CLA, see [CONTRIBUTING.md](CONTRIBUTING.md).
-
 ## Open-source software it builds on
 
 | On the host | Use |
@@ -150,3 +146,7 @@ AGPL-3.0, see [LICENSE](LICENSE). Contributions need a signed CLA, see [CONTRIBU
 | [hickory-proto](https://github.com/hickory-dns/hickory-dns), [httparse](https://github.com/seanmonstar/httparse) | Parsing the DNS and HTTP that guests and clients send |
 | [age](https://github.com/str4d/rage) | Encrypting the fleet's registry backup |
 | [rtnetlink](https://github.com/rust-netlink/rtnetlink), [tokio-vsock](https://github.com/rust-vsock/tokio-vsock) | In the init: the guest's network interface through netlink, and its end of the vsock channel |
+
+## License
+
+AGPL-3.0, see [LICENSE](LICENSE). Contributions need a signed CLA, see [CONTRIBUTING.md](CONTRIBUTING.md).
