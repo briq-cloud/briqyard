@@ -46,6 +46,10 @@ fi
 M=$(briqyard machine run --image alpine:3.20 --name viafleet --tenant "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
 check "created, placed" '[ -n "$(briqyard machine get "$M" | jq -r .host)" ]'
 check "running"         '[ "$(briqyard machine get "$M" | jq -r .state)" = running ]'
+# The tenant's watch, streamed from its host as it is: its events, and a bookmark at 30 s.
+since=$(api "/v1/events?tenant=$T" | jq -r .next)
+timeout 90 curl -sN ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/events?tenant=$T&since=$since&watch=true" > /tmp/by-fleet-watch.txt 2>&1 &
+WATCH=$!
 check "exec forwarded"  '[ "$(briqyard machine exec "$M" -- hostname)" = viafleet ]'
 check "session forwarded" '[ "$(echo hi | briqyard machine exec -i "$M" -- cat)" = hi ]'
 check "tty forwarded"   'python3 "$(dirname "$0")/exec-tty.py" 30x100 "send:stty size; exit 3\n" "expect:30 100" -- briqyard machine exec -it "$M" -- sh >/dev/null; [ $? = 3 ]'
@@ -62,6 +66,10 @@ briqyard machine destroy "$M"
 check "destroyed"       '! briqyard machine get "$M" >/dev/null 2>&1'
 briqyard tenant rm "$T"
 check "tenant unpinned" '! briqyard tenant ls | jq -e ".[] | select(.id == \"$T\")" >/dev/null 2>&1'
+watched() { jq -se 'any(.reason == "destroyed") and any(has("bookmark"))' /tmp/by-fleet-watch.txt >/dev/null 2>&1; }
+for i in $(seq 1 60); do watched && break; sleep 1; done
+kill "$WATCH" 2>/dev/null || true; wait "$WATCH" 2>/dev/null || true
+check "a tenant watch: its events, then a bookmark" 'watched'
 # The fleet's own static host of hack/fleet.dev.yaml, never another: forgetting a host drops
 # its pool key with its record (ADR 0026); a second host (fc2) is refused, and drained it would
 # take no tenant.

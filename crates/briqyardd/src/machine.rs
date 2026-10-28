@@ -686,8 +686,11 @@ impl Entry {
         self.note_locked(&mut r, ev);
     }
 
+    /// A repeat folded with no seq (a use, a refusal: nothing changed) keeps the version.
     fn note_locked(&self, r: &mut Record, ev: Ev) {
-        r.version = self.events.emit(ev.of(&r.id, &r.tenant));
+        if let Some(seq) = self.events.emit(ev.of(&r.id, &r.tenant)) {
+            r.version = seq;
+        }
     }
 }
 
@@ -760,6 +763,9 @@ struct Inner {
     boot_gate: tokio::sync::Semaphore,
     /// Probe executions run at once (ADR 0022).
     probe_gate: tokio::sync::Semaphore,
+    /// When this daemon started: a probe that starts within its period of it spreads its
+    /// first run (`probes::first_run`).
+    began: tokio::time::Instant,
     /// The hours of usage not closed yet.
     usage: Mutex<Ledger>,
     /// What happened on the host (ADR 0019).
@@ -850,6 +856,7 @@ impl Manager {
             backups,
             boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),
             probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),
+            began: tokio::time::Instant::now(),
             usage: Mutex::new(ledger),
             events,
             pool: Mutex::new(None),
@@ -3977,6 +3984,29 @@ impl Manager {
         }
     }
 
+    /// Logs the repeats folded for 10 minutes (ADR 0019): a machine's flips under its record,
+    /// since their line is its version.
+    fn log_folded(&self, now: DateTime<Utc>) {
+        for id in self.inner.events.flush_due(now) {
+            let e = self.inner.machines.lock().unwrap().get(&id).cloned();
+            let Some(e) = e else {
+                self.inner.events.flush_machine(&id, now);
+                continue;
+            };
+            let moved = {
+                let mut r = e.rec.lock().unwrap();
+                let seq = self.inner.events.flush_machine(&id, now);
+                if let Some(seq) = seq {
+                    r.version = seq;
+                }
+                seq.is_some()
+            };
+            if moved {
+                let _ = self.save(&e);
+            }
+        }
+    }
+
     async fn tick(&self) {
         let now = Utc::now();
         self.measure(now).await;
@@ -3988,6 +4018,7 @@ impl Manager {
         {
             tracing::warn!(err = %err, "old events not removed");
         }
+        self.log_folded(now);
         let (due, used, destroying): (Vec<Arc<Entry>>, Vec<Arc<Entry>>, Vec<String>) = {
             let machines = self.inner.machines.lock().unwrap();
             let due = machines
@@ -5644,6 +5675,8 @@ mod tests {
         execs_most: std::sync::atomic::AtomicUsize,
         /// The ports of an address a TCP probe finds closed; every other one accepts.
         closed: Mutex<std::collections::HashSet<(Ipv4Addr, u16)>>,
+        /// When each TCP probe and exec began, on the runtime's clock.
+        probed: Mutex<Vec<(String, tokio::time::Instant)>>,
         /// What an HTTP probe of an address and port answers; 200 when absent.
         http_codes: Mutex<HashMap<(Ipv4Addr, u16), u16>>,
         /// The size each machine last booted with, as Firecracker is given it.
@@ -5678,6 +5711,7 @@ mod tests {
                 execs_now: Default::default(),
                 execs_most: Default::default(),
                 closed: Mutex::new(Default::default()),
+                probed: Mutex::new(Vec::new()),
                 http_codes: Mutex::new(HashMap::new()),
                 booted: Mutex::new(HashMap::new()),
                 vmm_version: Mutex::new("v1.17.0/test".into()),
@@ -6043,6 +6077,8 @@ mod tests {
             let (ours, theirs) = tokio::io::duplex(1 << 16);
             if !req.interactive {
                 self.record(format!("exec {pid} {cmd}"));
+                let at = tokio::time::Instant::now();
+                self.probed.lock().unwrap().push((cmd.clone(), at));
                 let now = self.execs_now.fetch_add(1, SeqCst) + 1;
                 self.execs_most.fetch_max(now, SeqCst);
                 let takes = *self.exec_takes.lock().unwrap();
@@ -6178,6 +6214,8 @@ mod tests {
 
         async fn probe_tcp(&self, ip: Ipv4Addr, port: u16, _timeout: Duration) -> Result<()> {
             self.record(format!("probe_tcp {ip}:{port}"));
+            let at = tokio::time::Instant::now();
+            self.probed.lock().unwrap().push((format!("{ip}"), at));
             match self.closed.lock().unwrap().contains(&(ip, port)) {
                 true => Err(anyhow!("{ip}:{port}: Connection refused")),
                 false => Ok(()),
@@ -6316,6 +6354,7 @@ mod tests {
                 backups,
                 boot_gate: tokio::sync::Semaphore::new(2),
                 probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),
+                began: tokio::time::Instant::now(),
                 usage: Mutex::new(Ledger::default()),
                 events,
                 pool: Mutex::new(None),
@@ -10250,7 +10289,7 @@ mod tests {
         assert_eq!(h.m.get(&r.id).unwrap().version, 500);
         assert_eq!(
             h.m.inner.events.emit(Ev::normal(reason::HOST_STARTED, "")),
-            501
+            Some(501)
         );
     }
 
@@ -11187,7 +11226,7 @@ mod tests {
         assert_eq!(h.last_event(&gw.id).reason, "gateway_started");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_adopted_machine_runs_its_probes_again() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.tenant("t1");
@@ -11213,6 +11252,137 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flapping_readiness_probe_is_folded_and_its_version_still_moves() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let p = api::Probe {
+            failure_threshold: 1,
+            ..http_probe(8080)
+        };
+        let m = h.m.create(h.probed("web", readiness(p))).await.unwrap();
+        let mut versions = vec![];
+        for _ in 0..4 {
+            for (code, ready) in [(200, true), (500, false)] {
+                h.host.http(&m.ip, 8080, code);
+                eventually("flipped", || h.m.get(&m.id).unwrap().ready == ready).await;
+                versions.push(h.m.get(&m.id).unwrap().version);
+            }
+        }
+        // Eight flips, two lines: the first of each; every flip moved the version, on disk too.
+        let flips = |h: &Harness| {
+            h.events_of(&m.id)
+                .into_iter()
+                .filter(|e| e.reason == "ready" || e.reason == "not_ready")
+                .map(|e| (e.reason, e.count))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(flips(&h), [("ready".into(), 1), ("not_ready".into(), 1)]);
+        assert!(versions.windows(2).all(|v| v[0] < v[1]), "{versions:?}");
+        let now = h.m.get(&m.id).unwrap();
+        assert_eq!(h.stored(&m.id).unwrap().version, now.version);
+        // A writer that read before the last flip is refused.
+        let stale = versions[versions.len() - 2];
+        let refused = h.m.stop(&m.id, Duration::from_secs(1), false, Some(stale));
+        assert!(matches!(refused.await, Err(MError::Moved(_))));
+        // The window over, the tick logs them: the last line says what it is, and is its version.
+        h.m.log_folded(Utc::now() + chrono::Duration::minutes(11));
+        assert_eq!(
+            flips(&h),
+            [
+                ("ready".into(), 1),
+                ("not_ready".into(), 1),
+                ("ready".into(), 3),
+                ("not_ready".into(), 3)
+            ]
+        );
+        let last = h.events_of(&m.id).pop().unwrap();
+        assert!(last.first_at.is_some_and(|t| t < last.at));
+        assert_eq!(h.m.get(&m.id).unwrap().version, last.seq);
+        assert_eq!(h.stored(&m.id).unwrap().version, last.seq);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn probes_of_machines_adopted_at_a_start_are_spread_over_their_period() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.tenant("t1");
+        let p = api::Probe {
+            tcp: Some(80),
+            ..Default::default()
+        };
+        for i in 0..16 {
+            let id = format!("m_{i:02}");
+            let e = h.add(&id, state::RUNNING, 64);
+            let pid = h.host.left_running(&id, &h.m.inner.cfg.run_dir().join(&id));
+            e.set_state(state::RUNNING, |r| {
+                r.pid = pid;
+                r.ip = format!("10.64.1.{}", 10 + i);
+                r.probes = readiness(p.clone());
+                None
+            });
+        }
+        let began = tokio::time::Instant::now();
+        assert_eq!(h.m.recover().await.0, 16);
+        let adopted = tokio::time::Instant::now() - began;
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        // Each machine's first probe at a point of a period from its adoption, not all at
+        // once; then every 10 s from there. (A boot later than a period after the start is
+        // not delayed: `first_run`'s test.)
+        let probed = h.host.probed.lock().unwrap().clone();
+        let mut first = BTreeMap::new();
+        for (ip, at) in &probed {
+            first.entry(ip.clone()).or_insert(*at - began);
+        }
+        assert_eq!(first.len(), 16);
+        let offsets: std::collections::BTreeSet<Duration> = first.values().copied().collect();
+        assert!(offsets.len() > 8, "{offsets:?}");
+        let period = Duration::from_secs(10);
+        assert!(offsets.iter().all(|d| *d < adopted + period), "{offsets:?}");
+        let spread = *offsets.last().unwrap() - *offsets.first().unwrap();
+        assert!(spread > period / 2, "{offsets:?}");
+        for (ip, at0) in &first {
+            let times: Vec<Duration> = probed
+                .iter()
+                .filter(|(i, _)| i == ip)
+                .map(|(_, at)| *at - began - *at0)
+                .collect();
+            assert_eq!(
+                times[..2],
+                [Duration::ZERO, Duration::from_secs(10)],
+                "{ip}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_slower_than_its_period_keeps_the_period_and_skips_a_tick() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        // Past a period after the daemon's start: no spread.
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        *h.host.exec_takes.lock().unwrap() = Duration::from_millis(1500);
+        let p = api::Probe {
+            period_sec: 1,
+            timeout_sec: 5,
+            ..exec_probe("slow-check")
+        };
+        h.m.create(h.probed("web", readiness(p))).await.unwrap();
+        let began = tokio::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(6500)).await;
+        let times: Vec<Duration> = h
+            .host
+            .probed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(cmd, _)| cmd == "slow-check")
+            .map(|(_, at)| *at - began)
+            .collect();
+        // On the ticks, every other one: 0, 2, 4, 6 s, never 1.5 s after the last one ended.
+        let s = Duration::from_secs;
+        assert_eq!(times, [s(0), s(2), s(4), s(6)]);
     }
 
     // --- metrics, conditions, top (ADR 0021) ---

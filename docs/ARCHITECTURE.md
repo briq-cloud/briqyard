@@ -78,7 +78,10 @@ init grows the ext4 filesystem online.
 A machine may have a startup, a readiness and a liveness probe (ADR 0022, `machine/probes.rs`),
 Kubernetes's: `exec` through the guest's init, `tcp` and `http` from the host to the machine's
 address. One task per running machine with probes, ended with its process; 32 executions at
-once per host. Startup runs first and gates the others; `ready` is true at `running` without a
+once per host. Each probe runs on a fixed period, a slow run skipping the ticks it ran over;
+while the daemon is younger than a probe's period, its first run is at a random point of one
+period after its initial delay, so a start that adopts every machine does not probe them all at
+once (ADR 0047). Startup runs first and gates the others; `ready` is true at `running` without a
 startup or readiness probe, else when they pass; liveness failures end the process as a failure
 for the restart policy. A startup failure on a run a caller asked for is a failed boot (`error`,
 ADR 0011); on a run the policy started, a crash. `/wait` waits for `ready` (`?for=running`
@@ -273,8 +276,12 @@ start, an adoption) are logged where they happen. The seq of the last event abou
 its `version`; `PATCH`, `DELETE`, `start`, `stop`, `wake` and `restart` take `If-Match` and answer 409
 `conflict` with the machine when it moved. `GET /v1/events` reads from a cursor (`since`, 410
 `gone` when it is pruned or past the log); `watch=true` subscribes, sends the backlog, then each
-new event as NDJSON with `{}` every 30 s, and closes a watcher that falls 1,024 events behind.
-Retention is `events_keep_days` and 100,000 events. The fleet sends a tenant's or a machine's
+new event as NDJSON with a bookmark (`{"bookmark": seq}`, the last seq it looked at) every 30 s
+of quiet, and closes a watcher that falls 1,024 events behind. Repeats of `session_opened`,
+`quota_exceeded`, `ready` and `not_ready` within 10 minutes of their line are folded (ADR 0047):
+the log keeps the first and, at the window's end (the tick, the next one, any other line about
+the machine, the shutdown), one line with `count` and `first_at`; a folded flip still takes a
+seq, its machine's version, with no line. Retention is `events_keep_days` and 100,000 lines. The fleet sends a tenant's or a machine's
 read to its host and merges a read of every host, never partial, with a cursor per host.
 
 ### Metrics and conditions

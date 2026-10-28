@@ -103,6 +103,8 @@ impl Daemon {
             tenant: tenant.into(),
             host: String::new(),
             data: None,
+            count: 1,
+            first_at: None,
         };
         evs.push(e.clone());
         e

@@ -1391,6 +1391,20 @@ pub struct Event {
     pub host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// How many times it happened: more than 1 on a line that folds repeats (ADR 0019), whose
+    /// `at` is the last time and `first_at` the first; `message` and `data` are the last's.
+    #[serde(default = "one", skip_serializing_if = "at_most_one")]
+    pub count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_at: Option<DateTime<Utc>>,
+}
+
+fn one() -> u64 {
+    1
+}
+
+fn at_most_one(n: &u64) -> bool {
+    *n <= 1
 }
 
 /// A page of events, oldest first, and the cursor to read on from.
