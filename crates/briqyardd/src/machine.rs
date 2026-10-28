@@ -2693,10 +2693,13 @@ impl Manager {
                 None => self.make_disks(&e, src.as_deref(), req.fork.as_ref()).await,
             },
         };
-        // A larger volume than the source's: its disk grows to it (ADR 0040).
+        // A fork's or a restore's volume larger than its source's: its disk grows to it (ADR
+        // 0040). A new volume is made at its size.
         let made = match made {
-            Ok(()) => self.fit_volume(&e.snapshot()).await.map(drop),
-            err => err,
+            Ok(()) if src.is_some() || restore_from.is_some() => {
+                self.fit_volume(&e.snapshot()).await.map(drop)
+            }
+            other => other,
         };
         if let Err(err) = made {
             let rec = e.snapshot();
@@ -3879,8 +3882,9 @@ impl Manager {
     /// Grows the machine's volume from `from` to `to` GB now, its lock held (ADR 0040): the
     /// pool's room checked as a create's, then the growth checked against the tenant's quota
     /// and the size taken on the record in one step under the map's lock, as a start takes its
-    /// memory (two grows cannot pass the quota together), then the disk grown; refused there,
-    /// the record goes back. The guest's filesystem follows at its next start.
+    /// memory (two grows cannot pass the quota together), then the disk grown and the record
+    /// saved; refused there, the record goes back. The guest's filesystem follows at its next
+    /// start.
     async fn grow_volume(&self, e: &Entry, from: u32, to: u32) -> Result<(), MError> {
         self.room_on_pool(to - from).await?;
         let tenant = e.rec.lock().unwrap().tenant.clone();
@@ -3915,6 +3919,8 @@ impl Manager {
             resize(&mut e.rec.lock().unwrap(), from);
             return Err(err.context(format!("grow the volume to {to} GB")).into());
         }
+        // On disk with the disk: the stored record is never smaller than the volume.
+        self.save(e)?;
         Ok(())
     }
 
@@ -12217,6 +12223,17 @@ mod tests {
             Some(json!({"fields": ["volume"]}))
         );
         assert_eq!(h.drive("m_v").0.mounts[0].fstype, "ext4");
+    }
+
+    #[tokio::test]
+    async fn a_grown_volume_is_on_the_stored_record_once_its_disk_grew() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let e = with_volume(&h, "m_v", state::STOPPED, 2).await;
+        h.m.grow_volume(&e, 2, 5).await.unwrap();
+        // Saved with the disk: a crash before the PATCH's own save leaves no record smaller
+        // than its disk.
+        assert_eq!(h.stored("m_v").map(|r| r.volume.unwrap().size_gb), Some(5));
     }
 
     #[tokio::test]

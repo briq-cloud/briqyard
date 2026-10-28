@@ -456,8 +456,14 @@ impl Manager {
                 .ok_or_else(|| anyhow!("snapshot {} of the {disk} disk is gone", s.id))?;
             self.swap(&r, disk, &from, &s.id).await?;
         }
-        // A volume grown since the snapshot keeps its size (ADR 0040).
-        let grew = s.disks.iter().any(|d| d == "data") && self.fit_volume(&r).await?;
+        // A volume grown since the snapshot keeps its size, and its filesystem, the
+        // snapshot's, is smaller until the next boot (ADR 0040). Read from the snapshot, not
+        // from the disk, so a restore run again from the top says the same.
+        let grew = match s.disks.iter().any(|d| d == "data") {
+            true => self.smaller_than_its_volume(&r, &s.id).await?,
+            false => false,
+        };
+        self.fit_volume(&r).await?;
         let kept = self.memory_files(&r, &s.id);
         let resume = s.memory.as_deref() == Some(memory_spec(&r).as_str())
             && kept.iter().all(|f| f.exists());
@@ -516,6 +522,16 @@ impl Manager {
             "restored to a snapshot"
         );
         Ok(self.tidy_or_warn(e).await)
+    }
+
+    /// Whether the data disk's snapshot `snap` is smaller than the record's volume: taken
+    /// before a growth (ADR 0040).
+    async fn smaller_than_its_volume(&self, r: &Record, snap: &str) -> Result<bool> {
+        let (Some(v), Some(ds)) = (&r.volume, self.holder_of(r, "data", snap).await?) else {
+            return Ok(false);
+        };
+        let size = self.inner.zfs.volsize(&format!("{ds}@{snap}")).await?;
+        Ok(size < (v.size_gb as u64) << 30)
     }
 
     /// The dataset of a disk's lineage (the disk, or one it retired) holding `snap`.
@@ -1086,6 +1102,30 @@ mod tests {
             );
             assert_eq!(h.restored_data("m_v")["memory"], false, "{snap}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_restore_cut_short_after_the_growth_still_leaves_the_filesystem_pending() {
+        let h = harness().await;
+        let e = with_volume(&h, "m_v", state::STOPPED, 2).await;
+        let s = h.m.snapshot("m_v", named("small")).await.unwrap();
+        h.m.update("m_v", grow_to(5), None).await.unwrap();
+        h.m.restart("m_v", None).await.unwrap();
+        h.m.stop("m_v", Duration::ZERO, false, None).await.unwrap();
+        // The disks swapped and the volume grown back, then the daemon stopped before the
+        // record said so: the record still has the intent, nothing pending.
+        h.m.restore_snapshot("m_v", "small", None).await.unwrap();
+        {
+            let mut r = e.rec.lock().unwrap();
+            r.pending = None;
+            r.restoring = Some(s.id.clone());
+        }
+        h.m.finish_restore(&e).await.unwrap();
+        assert_eq!(h.pool.zfs.volsize("m/m_v/data").await.unwrap(), 5 << 30);
+        assert_eq!(
+            h.m.get("m_v").unwrap().pending.and_then(|p| p.volume),
+            Some(api::VolumeSize { size_gb: 5 })
+        );
     }
 
     #[tokio::test]

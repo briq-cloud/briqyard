@@ -460,7 +460,7 @@ fn grow_filesystem(device: &str, path: &Path) -> Result<Option<(u64, u64)>> {
     let statvfs = || nix::sys::statvfs::statvfs(path).context("statvfs");
     let mb = |st: &nix::sys::statvfs::Statvfs| (st.blocks() * st.fragment_size()) >> 20;
     let st = statvfs()?;
-    let blocks: u64 = bytes / st.block_size();
+    let blocks: u64 = bytes / st.fragment_size();
     let dir = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     // SAFETY: the ioctl reads one u64 from the pointer, which outlives the call.
     unsafe { ext4_resize_fs(dir.as_raw_fd(), &blocks) }
