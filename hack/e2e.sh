@@ -265,7 +265,10 @@ check "stopped (user)" '[ "$(briqyard machine get "$A" | jq -r .stopped_reason)"
 briqyard machine start "$A" >/dev/null
 check "started again"  '[ "$(briqyard machine get "$A" | jq -r .state)" = running ]'
 check "file survived"  '[ "$(briqyard machine get-file "$A" /root/f.txt)" = hello-file ]'
-X=$(briqyard machine run --image alpine:3.20 --name exiter --tenant "$T" --memory 256 -- sh -c "exit 7" 2>/dev/null | jq -r .id || true)
+# It exits once told, after its boot: a command that ends before the guest answers is a failed
+# boot (ADR 0011), and which comes first would depend on how fast the guest booted.
+X=$(briqyard machine run --image alpine:3.20 --name exiter --tenant "$T" --memory 256 -- sh -c 'until [ -f /tmp/go ]; do sleep 0.1; done; exit 7' | jq -r .id)
+briqyard machine exec "$X" -- touch /tmp/go >/dev/null 2>&1 || true
 for i in $(seq 1 30); do [ "$(briqyard machine get "$X" | jq -r .exit.code)" != null ] && break; sleep 1; done
 check "exit recorded"  '[ "$(briqyard machine get "$X" | jq -r .exit.code)" = 7 ]'
 
