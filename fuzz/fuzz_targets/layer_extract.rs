@@ -1,5 +1,6 @@
 //! An image layer from any registry: tar entries with any name, type and link, extracted
-//! into a root. Nothing may be written, removed or changed outside the root.
+//! into a root by the extractor (`image/extract.rs`, Linux only). Nothing may be written,
+//! removed or changed outside the root.
 //!
 //! The entries are built from the input with valid checksums (the tar crate refuses the rest
 //! before the extractor sees it) and raw names, `..` and absolute links included. The root
@@ -8,7 +9,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use briqyardd::image;
+use briqyardd::image::extract::extract;
 use libfuzzer_sys::fuzz_target;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -62,7 +63,7 @@ fuzz_target!(|entries: Vec<Entry>| {
     std::fs::create_dir(outer.join("out")).unwrap();
     std::fs::write(outer.join("keep"), "k").unwrap();
     std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o711)).unwrap();
-    let _ = image::extract(&root, &archive(&entries)[..]);
+    let _ = extract(&root, &archive(&entries)[..]);
     let mut names: Vec<String> = std::fs::read_dir(&outer)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

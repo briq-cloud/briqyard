@@ -25,7 +25,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 
 #[cfg(target_os = "linux")]
-mod extract;
+pub mod extract;
 #[cfg(target_os = "linux")]
 use extract::{apply_layer, prepare_root};
 
