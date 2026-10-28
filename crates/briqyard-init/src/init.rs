@@ -728,7 +728,7 @@ fn main_command(st: &State) -> Result<Command> {
 /// Runs the command as `uid`, `gid` and `groups` (none clears root's own). The child drops
 /// root itself, in the only order that works: `setgroups` and `setgid` while still root,
 /// `setuid` last. Not std's `Command::uid` and `gid`: std switches to the user before any
-/// `pre_exec`, where a `setgroups` then fails with EPERM.
+/// `pre_exec`, where a `setgroups` then fails with EPERM; std's own `groups` is unstable (#90747).
 fn run_as(cmd: &mut std::process::Command, uid: u32, gid: u32, groups: Vec<u32>) {
     use std::os::unix::process::CommandExt;
     // SAFETY: only async-signal-safe calls between fork and exec; `groups` is built before.
