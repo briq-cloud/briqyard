@@ -170,6 +170,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             conditions: d.conditions.lock().unwrap().clone(),
             started: Default::default(),
             vmm_version: String::new(),
+            regions: Vec::new(),
         })
     }
     async fn tenants(State(d): D) -> Json<Vec<api::Tenant>> {
@@ -645,6 +646,7 @@ fn fleet_at(
         backup,
         key_turn: Default::default(),
         restores: Default::default(),
+        refusals: Default::default(),
     });
     Fleet { st, _dir: dir }
 }
@@ -1458,6 +1460,173 @@ async fn status_sums_the_ready_hosts_and_hosts_are_sorted() {
 
 /// Forgetting a host that holds a pool key is refused unless forced: the key goes with the
 /// record, and a static host polled back would get a key its pool does not open.
+/// A create in `region`, of `memory_mb`, with a volume of `volume_gb` when not 0.
+fn ask(tenant: &str, region: &str, memory_mb: u32, volume_gb: u32) -> serde_json::Value {
+    let mut b = create_body(tenant, "web", memory_mb);
+    b["region"] = region.into();
+    if volume_gb > 0 {
+        b["volume"] = serde_json::json!({"size_gb": volume_gb, "mount": "/data"});
+    }
+    b
+}
+
+/// The fleet's `/metrics`, checked against the format, as lines.
+async fn scrape(st: &Arc<AppState>, token: &str) -> Vec<String> {
+    let (s, headers, text) = call(st, "GET", "/metrics", token, None).await;
+    assert_eq!(s, StatusCode::OK, "{text}");
+    assert_eq!(
+        headers[header::CONTENT_TYPE],
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    api::metrics::check_exposition(&text);
+    text.lines().map(String::from).collect()
+}
+
+#[tokio::test]
+async fn each_refusal_is_counted_by_what_ran_out_and_the_room_is_shown() {
+    let f = fleet(config::Config::default(), Box::new(provision::Static));
+    seed(&f.st, "a", 64_000, 4_000, 1, &["t0"]);
+    seed(&f.st, "b", 64_000, 0, 0, &[]);
+    seed(&f.st, "c", 64_000, 0, 0, &[]);
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        for (id, disk) in [("a", 10_000), ("b", 900_000), ("c", 900_000)] {
+            let h = reg.hosts.get_mut(id).unwrap();
+            h.region = "gra".into();
+            h.disk_free_mb = disk;
+        }
+    }
+    set_state(&f.st, "b", "draining");
+    let refused = |tenant: &'static str, region: &'static str, mb: u32, gb: u32| {
+        let st = f.st.clone();
+        async move {
+            let body = ask(tenant, region, mb, gb);
+            let (s, _, body) = call(&st, "POST", "/v1/machines", "", Some(body)).await;
+            assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{tenant}: {body}");
+            assert_eq!(json(&body)["code"], "capacity", "{tenant}");
+        }
+    };
+    // No host of gra has 100 GB of memory; a and c have 512 MB, neither 1000 GB of disk.
+    refused("t1", "gra", 100_000, 0).await;
+    refused("t2", "gra", 512, 1000).await;
+    let lines = scrape(&f.st, "").await;
+    for want in [
+        r#"briqyard_fleet_hosts{state="ready"} 2"#,
+        r#"briqyard_fleet_hosts{state="draining"} 1"#,
+        // a and c: b is drained.
+        r#"briqyard_fleet_free_mb{resource="memory",region="gra"} 124000"#,
+        r#"briqyard_fleet_free_mb{resource="disk",region="gra"} 910000"#,
+        r#"briqyard_fleet_largest_slot_mb{resource="memory",region="gra"} 64000"#,
+        r#"briqyard_fleet_largest_slot_mb{resource="disk",region="gra"} 900000"#,
+        r#"briqyard_fleet_unschedulable_total{resource="memory",region="gra"} 1"#,
+        r#"briqyard_fleet_unschedulable_total{resource="disk",region="gra"} 1"#,
+        r#"briqyard_fleet_unschedulable_total{resource="pressure",region="gra"} 0"#,
+    ] {
+        assert!(lines.iter().any(|l| l == want), "{want}\n{lines:#?}");
+    }
+    // c has the room and memory pressure: memory, a new host fixes it. t0's host a gets a
+    // condition: its own create is refused before a is asked, as pressure, which a new host
+    // does not fix.
+    f.st.reg
+        .lock()
+        .unwrap()
+        .hosts
+        .get_mut("c")
+        .unwrap()
+        .conditions = vec![pressure(api::condition::MEMORY_PRESSURE, true)];
+    refused("t3", "gra", 512, 20).await;
+    f.st.reg
+        .lock()
+        .unwrap()
+        .hosts
+        .get_mut("a")
+        .unwrap()
+        .conditions = vec![pressure(api::condition::DISK_PRESSURE, true)];
+    refused("t0", "", 512, 0).await;
+    // A region no host is in counts as `other`; no region asked, as none.
+    refused("t5", "nowhere", 512, 0).await;
+    refused("t6", "", 100_000, 0).await;
+    let lines = scrape(&f.st, "").await;
+    for want in [
+        r#"briqyard_fleet_free_mb{resource="memory",region="gra"} 0"#,
+        r#"briqyard_fleet_largest_slot_mb{resource="disk",region="gra"} 0"#,
+        r#"briqyard_fleet_unschedulable_total{resource="memory",region="gra"} 2"#,
+        r#"briqyard_fleet_unschedulable_total{resource="pressure",region="gra"} 1"#,
+        r#"briqyard_fleet_unschedulable_total{resource="memory",region="other"} 1"#,
+        r#"briqyard_fleet_unschedulable_total{resource="disk",region="other"} 0"#,
+        r#"briqyard_fleet_unschedulable_total{resource="memory",region=""} 1"#,
+    ] {
+        assert!(lines.iter().any(|l| l == want), "{want}\n{lines:#?}");
+    }
+    assert!(!lines.iter().any(|l| l.contains("nowhere")), "{lines:#?}");
+    // `other` and `""` have no host: their counters only, never a room of 0 that reads as a
+    // full region.
+    for region in ["other", ""] {
+        let room = format!("region=\"{region}\"}}");
+        let gauges: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with("briqyard_fleet_") && !l.contains("unschedulable"))
+            .filter(|l| l.split(' ').next().unwrap().ends_with(&room))
+            .collect();
+        assert!(gauges.is_empty(), "{region:?}: {gauges:#?}");
+    }
+    // The same in /v1/status.
+    let (s, _, body) = call(&f.st, "GET", "/v1/status", "", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let regions: Vec<api::RegionRoom> =
+        serde_json::from_value(json(&body)["regions"].clone()).unwrap();
+    let names: Vec<&str> = regions.iter().map(|r| r.region.as_str()).collect();
+    assert_eq!(names, ["", "gra", "other"]);
+    assert_eq!(
+        regions[1].unschedulable,
+        api::Unschedulable {
+            memory: 2,
+            disk: 1,
+            pressure: 1
+        }
+    );
+    assert_eq!(regions[1].free, Some(api::Room::default()), "gra: full");
+    assert_eq!(regions[2].unschedulable.memory, 1);
+    for r in [&regions[0], &regions[2]] {
+        assert_eq!(
+            (r.free, r.largest_slot),
+            (None, None),
+            "{:?}: no host",
+            r.region
+        );
+    }
+    let v = json(&body);
+    assert!(v["regions"][0].get("free").is_none(), "absent, not 0: {v}");
+}
+
+#[tokio::test]
+async fn metrics_take_the_metrics_token_or_the_apis() {
+    let mut cfg = config::Config {
+        token: "api".into(),
+        tls: config::Tls::Off,
+        ..Default::default()
+    };
+    let f = fleet(cfg.clone(), Box::new(provision::Static));
+    let (s, _, _) = call(&f.st, "GET", "/metrics", "", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    scrape(&f.st, "api").await;
+    // A metrics token of its own: the scraper's, and the API's no longer opens it.
+    cfg.metrics_token = "scrape".into();
+    let f = fleet(cfg.clone(), Box::new(provision::Static));
+    scrape(&f.st, "scrape").await;
+    let (s, _, _) = call(&f.st, "GET", "/metrics", "api", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _, _) = call(&f.st, "GET", "/v1/status", "scrape", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "it opens nothing else");
+    // On loopback with nothing in front (`tls` unset), none, as the daemon's.
+    cfg.tls = config::Tls::Unset;
+    let f = fleet(cfg, Box::new(provision::Static));
+    let lines = scrape(&f.st, "").await;
+    assert!(lines.contains(&r#"briqyard_fleet_hosts{state="ready"} 0"#.to_string()));
+    let (s, _, _) = call(&f.st, "GET", "/v1/status", "", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn a_keyed_host_is_forgotten_only_by_force() {
     let f = fleet(

@@ -15,6 +15,9 @@ pub struct Config {
     /// Required from API clients when set. A host's heartbeat presents the host's own token
     /// instead (`hosts[].token`, or the one the bootstrap gave it).
     pub token: String,
+    /// A token of its own for `/metrics`, so a scraper never holds the API's. Empty: the API's;
+    /// none at all on a loopback listener with `tls` unset (ADR 0042).
+    pub metrics_token: String,
     pub state_dir: PathBuf,
     /// Hosts you manage yourself: polled, and expected to register with their token.
     pub hosts: Vec<StaticHost>,
@@ -268,6 +271,7 @@ impl Default for Config {
             listen: "127.0.0.1:7430".into(),
             tls: Tls::Unset,
             token: String::new(),
+            metrics_token: String::new(),
             state_dir: "/var/lib/briqyard-fleet".into(),
             hosts: vec![],
             placement: Placement::default(),

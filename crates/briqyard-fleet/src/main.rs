@@ -8,6 +8,7 @@ mod config;
 mod provision;
 mod registry;
 mod restores;
+mod signals;
 mod upgrade;
 
 use anyhow::{anyhow, Context, Result};
@@ -20,7 +21,7 @@ use axum::{Json, Router};
 use briqyard_api as api;
 use chrono::{Duration, Utc};
 use clap::{Parser, Subcommand};
-use registry::{url_host, HostRec, Policy, Registry, ScalePolicy};
+use registry::{url_host, HostRec, Policy, Registry, Resource, ScalePolicy};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -74,6 +75,8 @@ struct AppState {
     key_turn: tokio::sync::Mutex<()>,
     /// Restores forwarded and not over: what a backup's key is served for (ADR 0035).
     restores: restores::Restores,
+    /// Creates refused for want of room, for an external scaler (ADR 0042).
+    refusals: signals::Refusals,
 }
 
 /// Writes a registry file, the fleet's alone (`0600`: it holds every host's token and pool
@@ -245,6 +248,7 @@ async fn run(args: Args) -> Result<()> {
         backup: backup::Backup::open(&cfg.backup)?,
         key_turn: Default::default(),
         restores: Default::default(),
+        refusals: Default::default(),
     });
     tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));
@@ -362,6 +366,7 @@ fn restored(reg: &Registry, from: &str, path: &std::path::Path) -> String {
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
+        .route("/metrics", get(metrics))
         .route("/v1/status", get(status))
         .route("/v1/hosts", get(list_hosts).post(add_host))
         .route("/v1/hosts/register", post(register_host))
@@ -449,14 +454,26 @@ fn bearer(headers: &HeaderMap) -> &str {
         .unwrap_or("")
 }
 
+/// The token a client's path needs (empty: none): the metrics token for `/metrics` when one is
+/// set, so a scraper never holds the API's, and none there on a loopback listener with nothing
+/// in front (`tls` unset), as the daemon's (ADR 0021); else the API's.
+fn token_for<'a>(cfg: &'a config::Config, path: &str) -> &'a str {
+    match path {
+        "/metrics" if cfg.tls == config::Tls::Unset => "",
+        "/metrics" if !cfg.metrics_token.is_empty() => &cfg.metrics_token,
+        _ => &cfg.token,
+    }
+}
+
 async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Response {
     let path = req.uri().path().to_string();
     // A heartbeat and a key request present the host's own token, checked against its record
     // by the handler.
     let open = path == "/healthz" || path == "/v1/hosts/register" || path == "/v1/hosts/key";
+    let token = token_for(&st.cfg, &path);
     if !open
-        && !st.cfg.token.is_empty()
-        && !api::constant_eq(bearer(req.headers()).as_bytes(), st.cfg.token.as_bytes())
+        && !token.is_empty()
+        && !api::constant_eq(bearer(req.headers()).as_bytes(), token.as_bytes())
     {
         return err(
             StatusCode::UNAUTHORIZED,
@@ -475,6 +492,23 @@ async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Respo
 }
 
 // --- hosts ---
+
+/// Prometheus text: hosts by state, each region's room and the creates refused for want of
+/// it (ADR 0042).
+async fn metrics(State(st): S) -> Response {
+    let text = {
+        let reg = st.reg.lock().unwrap();
+        signals::render(&reg, &signals::regions(&reg, &st.policy, &st.refusals))
+    };
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        text,
+    )
+        .into_response()
+}
 
 async fn status(State(st): S) -> Json<serde_json::Value> {
     let reg = st.reg.lock().unwrap();
@@ -497,6 +531,7 @@ async fn status(State(st): S) -> Json<serde_json::Value> {
         "capacity": cap, "used": used, "machines": machines, "running": machines,
         "hosts": reg.hosts.len(), "ready": ready, "tenants": reg.tenants.len(),
         "provisioner": st.cfg.provisioner.kind, "dry_run": st.cfg.provisioner.dry_run,
+        "regions": signals::regions(&reg, &st.policy, &st.refusals),
     }))
 }
 
@@ -1541,7 +1576,13 @@ async fn create_machine(
 ) -> Result<Response, Refusal> {
     let req: api::CreateMachineRequest = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-    let disk = disk_need(req.volume.as_ref().map(|v| v.size_gb));
+    let ask = Ask {
+        tenant: &req.tenant,
+        region: &req.region,
+        memory_mb: req.size.memory_mb,
+        disk_mb: disk_need(req.volume.as_ref().map(|v| v.size_gb)),
+        what: "machine",
+    };
     let (host, first) = {
         let mut reg = st.reg.lock().unwrap();
         let first = !reg.tenants.contains_key(&req.tenant);
@@ -1554,23 +1595,25 @@ async fn create_machine(
             .clone()
             .or_else(|| reg.tenants.get(&req.tenant).cloned());
         refuse_outside(&reg, bound.as_deref(), &req.tenant, &req.region)?;
-        refuse_under_pressure(&reg, bound.as_deref())?;
+        refuse_under_pressure(&st, &reg, bound.as_deref(), &ask)?;
         let chosen = match source {
             Some(id) => {
-                reg.reserve(&id, req.size.memory_mb, disk);
+                reg.reserve(&id, ask.memory_mb, ask.disk_mb);
                 Some(id)
             }
             None => reg.place(
                 &req.tenant,
                 &req.region,
-                req.size.memory_mb,
-                disk,
+                ask.memory_mb,
+                ask.disk_mb,
                 &st.policy,
             ),
         };
-        (chosen.and_then(|id| reg.hosts.get(&id).cloned()), first)
+        match chosen.and_then(|id| reg.hosts.get(&id).cloned()) {
+            Some(host) => (host, first),
+            None => return Err(no_room(&st, &reg, &ask)),
+        }
     };
-    let host = host.ok_or_else(|| no_room(&req.region, "this machine"))?;
     st.save().map_err(registry_error)?;
     // A restore may ask for its backup's key while this forward lasts (ADR 0035).
     let restoring = req
@@ -1617,30 +1660,86 @@ fn refuse_outside(
     }
 }
 
-/// No host (of the region asked) with room for `what`: 503 `capacity`, which a caller tries
-/// again later.
-fn no_room(region: &str, what: &str) -> Refusal {
-    let hosts = match region {
+/// What a placement asks for: what a refusal counts and logs.
+struct Ask<'a> {
+    tenant: &'a str,
+    region: &'a str,
+    memory_mb: u32,
+    disk_mb: u64,
+    /// `machine`, `gateway`, `quota`: for the refusal's message.
+    what: &'a str,
+}
+
+/// No host (of the region asked) with room for a new tenant's machine: 503 `capacity`, which a
+/// caller tries again later, counted by what ran out.
+fn no_room(st: &AppState, reg: &Registry, ask: &Ask) -> Refusal {
+    let hosts = match ask.region {
         "" => "no host".to_string(),
         r => format!("no host in region {r}"),
     };
+    let resource = reg.shortage(ask.region, ask.memory_mb, ask.disk_mb, &st.policy);
+    unschedulable(st, reg, ask.region, resource, ask, None);
     err(
         StatusCode::SERVICE_UNAVAILABLE,
         "capacity",
-        format!("{hosts} has room for {what}"),
+        format!("{hosts} has room for this {}", ask.what),
     )
 }
 
 /// A create on a host that takes nothing new while a condition is true (ADR 0021): a pinned
-/// tenant's host, or a fork's source's. 503 `capacity`, which a caller tries again later.
-fn refuse_under_pressure(reg: &Registry, host: Option<&str>) -> Result<(), Refusal> {
-    match host
-        .and_then(|id| reg.hosts.get(id))
-        .and_then(|h| h.pressure())
-    {
-        Some(why) => Err(err(StatusCode::SERVICE_UNAVAILABLE, "capacity", why)),
+/// tenant's host, or a fork's source's. 503 `capacity`, which a caller tries again later,
+/// counted as `pressure` in the host's region.
+fn refuse_under_pressure(
+    st: &AppState,
+    reg: &Registry,
+    host: Option<&str>,
+    ask: &Ask,
+) -> Result<(), Refusal> {
+    let Some(h) = host.and_then(|id| reg.hosts.get(id)) else {
+        return Ok(());
+    };
+    match h.pressure() {
+        Some(why) => {
+            unschedulable(st, reg, &h.region, Resource::Pressure, ask, Some(&h.id));
+            Err(err(StatusCode::SERVICE_UNAVAILABLE, "capacity", why))
+        }
         None => Ok(()),
     }
+}
+
+/// Counts a create refused for want of room and logs it at `warn` (ADR 0042): what ran out, in
+/// which region (the host's, or the one asked), what was asked, and the most the region still
+/// has on one host.
+fn unschedulable(
+    st: &AppState,
+    reg: &Registry,
+    region: &str,
+    resource: Resource,
+    ask: &Ask,
+    host: Option<&str>,
+) {
+    st.refusals
+        .count(signals::counted_region(reg, region), resource);
+    // An ask of any region could have had a host of any region.
+    let largest = reg
+        .room(&st.policy)
+        .into_iter()
+        .filter(|(r, _)| region.is_empty() || r == region)
+        .fold(api::Room::default(), |a, (_, (_, l))| api::Room {
+            memory_mb: a.memory_mb.max(l.memory_mb),
+            disk_mb: a.disk_mb.max(l.disk_mb),
+        });
+    tracing::warn!(
+        resource = resource.as_str(),
+        region,
+        tenant = ask.tenant,
+        host,
+        memory_mb = ask.memory_mb,
+        disk_mb = ask.disk_mb,
+        largest_memory_mb = largest.memory_mb,
+        largest_disk_mb = largest.disk_mb,
+        "unschedulable"
+    );
 }
 
 /// The disk a machine is placed for: root disks are thin, a volume takes what it says, plus
@@ -2061,16 +2160,25 @@ async fn put_on_tenant(
             "tenant must be a-z, 0-9, _ or -, at most 64 characters",
         ));
     }
+    let ask = Ask {
+        tenant: id,
+        region,
+        memory_mb: need_mb,
+        disk_mb: need_disk_mb,
+        what,
+    };
     let (host, first) = {
         let mut reg = st.reg.lock().unwrap();
         let first = !reg.tenants.contains_key(id);
         let bound = reg.tenants.get(id).cloned();
         refuse_outside(&reg, bound.as_deref(), id, region)?;
-        refuse_under_pressure(&reg, bound.as_deref())?;
+        refuse_under_pressure(st, &reg, bound.as_deref(), &ask)?;
         let chosen = reg.place(id, region, need_mb, need_disk_mb, &st.policy);
-        (chosen.and_then(|h| reg.hosts.get(&h).cloned()), first)
+        match chosen.and_then(|h| reg.hosts.get(&h).cloned()) {
+            Some(host) => (host, first),
+            None => return Err(no_room(st, &reg, &ask)),
+        }
     };
-    let host = host.ok_or_else(|| no_room(region, &format!("this {what}")))?;
     st.save().map_err(registry_error)?;
     let path = format!("/v1/tenants/{id}/{what}");
     let resp = forward(st, &host, Method::PUT, &path, headers, body).await;
