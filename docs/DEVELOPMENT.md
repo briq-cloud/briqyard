@@ -300,7 +300,8 @@ plus `apt-get purge docker.io` and the edge's files.
   without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
-  port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).
+  port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7). The mirror section
+  runs only where a `briqyard-mirror` unit is active: on a host without one, 5 checks fewer.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
   relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
