@@ -1,6 +1,6 @@
 <img src="docs/images/hero.png" alt="Bots laid into a brick wall, each running machines: postgres and its fork, two sandboxes, and a web app asleep. Beside them: briqyard, open-source microVMs for sandboxes and services that sleep, wake and fork." width="830">
 
-# briqyard
+# 🧱 briqyard
 
 **Open-source microVMs for sandboxes and services that sleep, wake and fork.**
 
