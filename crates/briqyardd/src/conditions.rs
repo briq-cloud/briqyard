@@ -1,5 +1,5 @@
 //! The host's conditions (ADR 0021): memory and disk pressure, decided by the tick on what it
-//! measured. Each is a pressure: true is trouble.
+//! measured, and a stalled pool (ADR 0043). Each is a pressure: true is trouble.
 
 use crate::config;
 use crate::zfs::Pool;
@@ -85,6 +85,20 @@ pub fn disk(pool: Pool, t: &config::Conditions) -> (bool, String) {
         msg.push_str(&format!(", under {}%", t.disk_free_pct));
     }
     (under, msg)
+}
+
+/// `storage_stalled`: a `zfs` command has run past `zfs::STALL_AFTER` (ADR 0043), the oldest.
+pub fn storage(stalled: Option<(std::time::Duration, String)>) -> (bool, String) {
+    match stalled {
+        Some((ran, what)) => (true, format!("{what} running for {} s", ran.as_secs())),
+        None => (
+            false,
+            format!(
+                "no zfs command running for over {} s",
+                crate::zfs::STALL_AFTER.as_secs()
+            ),
+        ),
+    }
 }
 
 #[cfg(test)]
