@@ -1,6 +1,6 @@
 # Fuzz targets for what an untrusted party writes (ADR 0033). Nightly only, with cargo-fuzz:
 # `cargo +nightly fuzz run <target>` from this directory (docs/DEVELOPMENT.md). Its own
-# workspace, so `cargo test --workspace` and CI never build it.
+# workspace, so `cargo test --workspace` never builds it; CI only checks that it builds.
 [package]
 name = "briqyard-fuzz"
 version = "0.0.0"

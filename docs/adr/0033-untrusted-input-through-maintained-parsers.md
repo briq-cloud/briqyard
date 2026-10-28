@@ -32,15 +32,15 @@ The daemon reads bytes that someone else wrote: a guest's DNS queries on its gat
 
 Only the first request of a connection is read; the rest is spliced, as before.
 
-**What stays ours is fuzzed here**: `cargo fuzz` targets in `fuzz/` (its own workspace, nightly only, run by hand, `../DEVELOPMENT.md`) for every decoder an untrusted party feeds. `briqyardd` is a library plus its binary so the targets reach them. A crash's input becomes a unit test with its fix. Not in CI: the stable job cannot run them, and a nightly job is minutes billed for a run too short to find much.
+**What stays ours is fuzzed here**: `cargo fuzz` targets in `fuzz/` (its own workspace, nightly only, run by hand, `../DEVELOPMENT.md`) for every decoder an untrusted party feeds. `briqyardd` is a library plus its binary so the targets reach them; the cost is that a library's dead-code lint trusts `pub`, so a daemon item made `pub` and used nowhere is no longer flagged. A crash's input becomes a unit test with its fix. CI cannot run them (stable); it checks they build (`cargo check --manifest-path fuzz/Cargo.toml --locked`). A nightly job would be minutes billed for a run too short to find much.
 
 | Target | What it feeds | Checks | Last run: 2026-10-28, 300 s each on the corpus of a 600 s run, aarch64 VM |
 |---|---|---|---|
 | `guest_frames` | the init's frames: exec output to its exit, the exit report, an answer | no panic | 4.0 M runs, cov 1732, no crash |
 | `session_input` | an exec session's query and client messages | no panic | 4.0 M runs, cov 1619, no crash |
-| `layer_extract` | tar entries built from the input (any name, type, link, mode), raw names | nothing beside the root changes | 0.46 M runs, cov 1416 (the `openat2` extractor, ADR 0039), no crash |
-| `dns_query` | a guest's query | every answer parses back | 3.3 M runs, cov 2860, no crash |
-| `ingress_head` | a public request head | a routed host is non-empty and lowercase | 4.8 M runs, cov 525, no crash |
+| `layer_extract` | tar entries built from the input (any name, type, link, mode), raw names | nothing beside the root or its parent changes, no file outside it gets a link | 0.46 M runs, cov 1416 (the `openat2` extractor, ADR 0039), no crash |
+| `dns_query` | a guest's query | every answer parses back, with the query's id and question | 3.3 M runs, cov 2860, no crash |
+| `ingress_head` | a public request head | a routed host is non-empty and lowercase; past 64 KiB a head is never more to read | 4.8 M runs, cov 525, no crash |
 
 ## Rejected
 

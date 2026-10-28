@@ -13,9 +13,12 @@ fuzz_target!(|data: &[u8]| {
     let _ = dns::query_name(&query);
     for ip in [Some(Ipv4Addr::LOCALHOST), None] {
         if let Some(answer) = dns::build_answer(&query, ip) {
-            assert!(
-                Message::from_vec(&answer).is_ok(),
-                "our answer does not parse"
+            let answer = Message::from_vec(&answer).expect("our answer does not parse");
+            assert_eq!(answer.metadata.id, query.metadata.id, "another id");
+            assert_eq!(
+                answer.queries.first(),
+                query.queries.first(),
+                "another question"
             );
         }
     }

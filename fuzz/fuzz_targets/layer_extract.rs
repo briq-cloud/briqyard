@@ -11,7 +11,7 @@
 use arbitrary::Arbitrary;
 use briqyardd::image::extract::extract;
 use libfuzzer_sys::fuzz_target;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 #[derive(Arbitrary, Debug)]
@@ -64,18 +64,26 @@ fuzz_target!(|entries: Vec<Entry>| {
     std::fs::write(outer.join("keep"), "k").unwrap();
     std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o711)).unwrap();
     let _ = extract(&root, &archive(&entries)[..]);
-    let mut names: Vec<String> = std::fs::read_dir(&outer)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    assert_eq!(names, ["keep", "out", "root"], "beside the root");
+    assert_eq!(names(&outer), ["keep", "out", "root"], "beside the root");
+    assert_eq!(names(base.path()), ["a"], "beside the root's parent");
     assert_eq!(std::fs::read_to_string(outer.join("keep")).unwrap(), "k");
+    let keep = std::fs::symlink_metadata(outer.join("keep")).unwrap();
+    assert_eq!(keep.nlink(), 1, "a file outside the root linked from it");
     assert_eq!(std::fs::read_dir(outer.join("out")).unwrap().count(), 0);
     let mode = std::fs::metadata(&outer).unwrap().permissions().mode() & 0o7777;
     assert_eq!(mode, 0o711, "the root's parent changed mode");
     unlock(&root);
 });
+
+/// The names in a directory, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
 
 /// Gives back what a layer made unreadable, so the temporary directory can be removed.
 fn unlock(p: &Path) {

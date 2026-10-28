@@ -315,15 +315,15 @@ plus `apt-get purge docker.io` and the edge's files.
 ### Fuzzing
 
 `fuzz/` holds `cargo fuzz` targets for what an untrusted party writes (ADR 0033): its own
-workspace, nightly only, never built by `cargo test --workspace` or CI.
+workspace, nightly only, never run by `cargo test --workspace` or CI (CI checks they build).
 
 | Target | Input |
 |---|---|
 | `guest_frames` | what an init sends over vsock: exec output to its exit, the exit report, an answer |
 | `session_input` | an exec session's query and its client messages |
-| `layer_extract` | an image layer's tar entries (any name, type, link), extracted into a root; nothing may change beside it |
-| `dns_query` | a guest's DNS query; every answer must parse back |
-| `ingress_head` | a public request head at the HTTP ingress |
+| `layer_extract` | an image layer's tar entries (any name, type, link), extracted into a root; nothing may change beside it or its parent, nothing outside get a link |
+| `dns_query` | a guest's DNS query; every answer must parse back with the query's id and question |
+| `ingress_head` | a public request head at the HTTP ingress; past 64 KiB never more to read |
 
 In the VM, as the Lima user (never root: `layer_extract` writes and removes files). The
 mount is read-only and `cargo fuzz run` writes into `fuzz/`, so build with cargo-fuzz and run
@@ -331,10 +331,10 @@ the binaries with the build, corpus and crashes in `$HOME`:
 
 ```bash
 rustup toolchain install nightly --profile minimal && cargo install cargo-fuzz
-cd /Users/uplab/projects/briqyard/fuzz
+cd fuzz
 CARGO_TARGET_DIR=$HOME/target-fuzz cargo +nightly fuzz build
 t=dns_query; mkdir -p $HOME/fuzz-corpus/$t $HOME/fuzz-artifacts/$t $HOME/fuzz-tmp
-TMPDIR=$HOME/fuzz-tmp $HOME/target-fuzz/aarch64-unknown-linux-gnu/release/$t \
+TMPDIR=$HOME/fuzz-tmp $HOME/target-fuzz/$(rustc -vV | sed -n 's/^host: //p')/release/$t \
   $HOME/fuzz-corpus/$t -max_total_time=600 -artifact_prefix=$HOME/fuzz-artifacts/$t/
 ```
 

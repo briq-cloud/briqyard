@@ -256,7 +256,8 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
 }
 
 /// The longest request head read, and the most header lines in it: beyond either, 431.
-const MAX_HEAD: usize = 64 << 10;
+/// The longest request head read, in bytes: a longer one is refused.
+pub const MAX_HEAD: usize = 64 << 10;
 const MAX_HEADERS: usize = 100;
 
 /// What the bytes read so far say about a request head, parsed by httparse (ADR 0033).
