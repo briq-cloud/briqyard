@@ -30,7 +30,7 @@ The daemon reads bytes that someone else wrote: a guest's DNS queries on its gat
 | `Host` of no endpoint | 404, as before |
 | A head ending in bare `\n` lines | routed (was: waited for `\r\n\r\n` until 64 KiB) |
 
-Only the first request of a connection is read; the rest is spliced, as before.
+The whole head must arrive within 30 s of the connection; a client that sends it slower is closed. Only the first request of a connection is read; the rest is spliced, as before. A connection therefore belongs to its first host: anything in front must open connections per host, never pool them across hosts.
 
 ## Rejected
 

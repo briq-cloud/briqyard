@@ -166,27 +166,8 @@ impl Ingress {
     }
 
     async fn serve_http(&self, mut conn: TcpStream) {
-        // Read the request head: enough to find the host it is for.
-        let mut head = Vec::with_capacity(4096);
-        let mut buf = [0u8; 4096];
-        let host = loop {
-            let n = match tokio::time::timeout(Duration::from_secs(30), conn.read(&mut buf)).await {
-                Ok(Ok(n)) if n > 0 => n,
-                _ => return,
-            };
-            head.extend_from_slice(&buf[..n]);
-            match parse_head(&head) {
-                Head::Partial => continue,
-                Head::Host(host) => break host,
-                Head::Refused(status) => {
-                    let _ = conn
-                        .write_all(
-                            format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n").as_bytes(),
-                        )
-                        .await;
-                    return;
-                }
-            }
+        let Some((head, host)) = read_head(&mut conn, HEAD_TIMEOUT).await else {
+            return;
         };
         let ep = self.hosts.lock().unwrap().get(&host).cloned();
         let ep = match ep {
@@ -256,6 +237,42 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
 }
 
 /// The longest request head read, and the most header lines in it: beyond either, 431.
+/// How long a client has to send its whole request head.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reads a request head until it names a host, all of it within `limit`: a client that sends
+/// it slower is dropped, so it cannot hold a task. A refused head is answered here. Returns the
+/// bytes read and the host.
+async fn read_head<S: AsyncRead + AsyncWrite + Unpin>(
+    conn: &mut S,
+    limit: Duration,
+) -> Option<(Vec<u8>, String)> {
+    let read = async {
+        let mut head = Vec::with_capacity(4096);
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = match conn.read(&mut buf).await {
+                Ok(n) if n > 0 => n,
+                _ => return None,
+            };
+            head.extend_from_slice(&buf[..n]);
+            match parse_head(&head) {
+                Head::Partial => continue,
+                Head::Host(host) => return Some((head, host)),
+                Head::Refused(status) => {
+                    let _ = conn
+                        .write_all(
+                            format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n").as_bytes(),
+                        )
+                        .await;
+                    return None;
+                }
+            }
+        }
+    };
+    tokio::time::timeout(limit, read).await.ok().flatten()
+}
+
 const MAX_HEAD: usize = 64 << 10;
 const MAX_HEADERS: usize = 100;
 
@@ -477,6 +494,38 @@ mod tests {
         assert_eq!(parse_head(&many), Head::Refused(TOO_LARGE));
     }
 
+    /// A client that sends its head one byte at a time, `every` apart.
+    fn trickle(every: Duration) -> tokio::io::DuplexStream {
+        let (mut client, server) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            for b in b"GET / HTTP/1.1\r\nHost: a.example\r\n\r\n" {
+                tokio::time::sleep(every).await;
+                if client.write_all(&[*b]).await.is_err() {
+                    return;
+                }
+            }
+            // Held open, as a slow client would.
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        server
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_head_slower_than_the_deadline_is_dropped() {
+        // Each byte comes well within any per-read timeout; the whole head does not.
+        let mut conn = trickle(Duration::from_secs(1));
+        let t = tokio::time::Instant::now();
+        assert!(read_head(&mut conn, HEAD_TIMEOUT).await.is_none());
+        assert_eq!(t.elapsed().as_secs(), HEAD_TIMEOUT.as_secs());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_head_within_the_deadline_is_read() {
+        let mut conn = trickle(Duration::from_millis(100));
+        let (head, host) = read_head(&mut conn, HEAD_TIMEOUT).await.unwrap();
+        assert_eq!(host, "a.example");
+        assert!(head.ends_with(b"\r\n\r\n"));
+    }
     #[tokio::test]
     async fn a_counted_connection_adds_both_ways_as_bytes_pass() {
         let (client, near) = tokio::io::duplex(64);
