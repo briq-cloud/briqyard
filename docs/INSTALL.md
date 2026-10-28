@@ -62,6 +62,8 @@ briqyard host ls
 briqyard host upgrade <id> --release <version or URL>   # drained, upgraded, back; its machines keep running
 ```
 
+The fleet buys no server. When a create finds no room, it says where and what ran out on its `/metrics` ([OPERATIONS.md, Capacity signals](OPERATIONS.md#capacity-signals-adr-0042)); you, or a scaler of yours, buy a server and add it.
+
 A first dedicated server with a private network, step by step: [OPERATIONS.md, First OVH host](OPERATIONS.md#first-ovh-host).
 
 ## On a Mac, for development

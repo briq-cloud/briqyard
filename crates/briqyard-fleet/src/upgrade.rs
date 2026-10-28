@@ -36,13 +36,13 @@ pub async fn upgrade_host(
             ),
         )
     })?;
-    let key = &st.cfg.provisioner.bootstrap.ssh_key;
+    let key = &st.cfg.bootstrap.ssh_key;
     if !key.exists() {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "invalid",
             format!(
-                "no SSH key at {} (provisioner.bootstrap.ssh_key): the fleet installs over SSH",
+                "no SSH key at {} (bootstrap.ssh_key): the fleet installs over SSH",
                 key.display()
             ),
         ));
@@ -108,7 +108,7 @@ async fn run(
     // own, the API on the private network.
     let ip = bootstrap::ssh_address(was).to_string();
     tracing::info!(host = was.id, release, "host upgrade");
-    let env = bootstrap::upgrade_env(release, &st.cfg.provisioner.bootstrap.release_token);
+    let env = bootstrap::upgrade_env(release, &st.cfg.bootstrap.release_token);
     let installed = bootstrap::install(st, &was.id, &ip, &env)
         .await
         .map_err(|e| format!("install: {e:#}"))?;

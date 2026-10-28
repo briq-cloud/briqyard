@@ -1,6 +1,6 @@
 # ADR 0025: Placement by region, label selectors, quotas per tenant, logs follow
 
-Date: 2026-10-21 · Status: accepted; amends ADR 0019 (`quota_exceeded`); amended by ADR 0040 (a volume's growth is held to `disk_gb`)
+Date: 2026-10-21 · Status: accepted; amends ADR 0019 (`quota_exceeded`); amended by ADR 0040 (a volume's growth is held to `disk_gb`); ADR 0042 removed the autoscaler: a scaler outside the fleet reads each region's room
 
 ## Context
 

@@ -418,7 +418,7 @@ paths:
       responses:
         "200": { description: hosts, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Host" } } } } }
     post:
-      summary: "Add a server bought by hand (fleet only, ADR 0028): recorded `provisioning` with a fresh token, then bootstrapped over SSH and pinned (SSH key, API certificate) as an ordered server is"
+      summary: "Add a server (fleet only, ADR 0028; Kubernetes's `kubeadm join`): recorded `provisioning` with a fresh token, then bootstrapped over SSH and pinned (SSH key, API certificate). The fleet buys no server (ADR 0042)"
       requestBody:
         required: true
         content:
@@ -426,8 +426,8 @@ paths:
             schema: { $ref: "#/components/schemas/AddHostRequest" }
       responses:
         "202": { description: added, bootstrapped within two minutes, content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
-        "400": { description: "`invalid`: an SSH address that is not one, an API address that is not an IPv4 address, or apart from the SSH address but outside `provisioner.bootstrap.private_network`" }
-        "409": { description: "`conflict`: a host has that id or address; `bootstrap_off`: `provisioner.bootstrap.enabled` is false" }
+        "400": { description: "`invalid`: an SSH address that is not one, an API address that is not an IPv4 address, or apart from the SSH address but outside `bootstrap.private_network`" }
+        "409": { description: "`conflict`: a host has that id or address; `bootstrap_off`: `bootstrap.enabled` is false" }
   /v1/hosts/register:
     post:
       summary: A daemon's heartbeat (fleet only), with the host's own API token as the bearer, taken for the one host record that expects that token at the daemon's address
@@ -455,23 +455,12 @@ paths:
         "404": { description: "with `key_id`: the fleet holds no pool key of that id (`no_key`)" }
         "500": { description: the registry could not be written (`registry`); no key is handed out unwritten }
         "503": { description: "the registry's backup could not be written (`backup`, ADR 0032); no key is handed out before the backup holds it" }
-  /v1/hosts/order:
-    post:
-      summary: Order a host from the provisioner now (fleet only; dry-run unless configured otherwise)
-      requestBody:
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/OrderHostRequest" }
-      responses:
-        "202": { description: ordered, content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
-        "409": { description: the fleet is at max_hosts }
-        "502": { description: the provisioner refused }
   /v1/hosts/{id}/retire:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Take no new tenant on a host and release it at its provider once nothing runs on it (fleet only)
+      summary: Take no new tenant on a host and forget it once nothing runs on it (fleet only); the server is the operator's to give back
       responses:
-        "200": { description: retiring, or released when it was already empty, content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
+        "200": { description: "`retiring`, or `retired` (forgotten) when it was already empty", content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
         "409": { description: the host is upgrading (`conflict`) }
   /v1/hosts/{id}/drain:
     parameters: [{ $ref: "#/components/parameters/id" }]
@@ -498,7 +487,7 @@ paths:
             schema: { $ref: "#/components/schemas/UpgradeHostRequest" }
       responses:
         "200": { description: "upgraded; the note says to what and how many machines were handed over", content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
-        "400": { description: "a release that is neither a URL nor a version, or no SSH key (`provisioner.bootstrap.ssh_key`)" }
+        "400": { description: "a release that is neither a URL nor a version, or no SSH key (`bootstrap.ssh_key`)" }
         "404": { description: no such host }
         "409": { description: "another upgrade under way, or the host is neither ready nor draining (`conflict`)" }
         "502": { description: "the upgrade failed (`upgrade_failed`): the host is `draining`, the reason in its note" }
@@ -1077,15 +1066,15 @@ components:
         url: { type: string }
         ssh: { type: string, description: "where the fleet reaches the server over SSH, when not at the API's address (its API on the private network); absent otherwise" }
         region: { type: string }
-        provider: { type: string }
-        state: { type: string, enum: [ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed, dry-run, released], description: "`draining` takes no new tenant; `retiring` neither, and is released once empty; `upgrading` while `host upgrade` runs" }
+        provider: { type: string, description: "how the host came: `static` (the fleet's `hosts:`) or `manual` (`POST /v1/hosts`)" }
+        state: { type: string, enum: [ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed, retired], description: "`draining` takes no new tenant; `retiring` neither, and is forgotten once empty (`retired` in the answer to the retire that forgets it); `upgrading` while `host upgrade` runs" }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer }
         tenants: { type: array, items: { type: string } }
         last_seen: { type: string, format: date-time }
         version: { type: string }
-        note: { type: string, description: What the provisioner, the bootstrap or the last upgrade said }
+        note: { type: string, description: What the bootstrap or the last upgrade said }
         tls_fingerprint: { type: string, description: "SHA-256 of the host's API certificate, pinned by the fleet; empty on plain HTTP" }
         public_tcp_ports: { type: array, items: { type: integer }, description: "ports its public interface takes besides SSH, from its bootstrap (ADR 0028); absent: none" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" }, description: from its last heartbeat }
@@ -1098,11 +1087,7 @@ components:
         address: { type: string, description: "the API's IPv4 address, on the fleet's private network when it has one (the vRack address); default: `ssh`" }
         region: { type: string }
         id: { type: string, description: "default: `h_` and the address, dots as dashes" }
-        public_tcp_ports: { type: array, items: { type: integer }, description: "ports its public interface takes besides SSH, and its machines reach on it (an edge's on the host); absent: the fleet's `provisioner.bootstrap.public_tcp_ports`, empty: none. Kept on the host for every later bootstrap" }
-    OrderHostRequest:
-      type: object
-      properties:
-        reason: { type: string }
+        public_tcp_ports: { type: array, items: { type: integer }, description: "ports its public interface takes besides SSH, and its machines reach on it (an edge's on the host); absent: the fleet's `bootstrap.public_tcp_ports`, empty: none. Kept on the host for every later bootstrap" }
     RegisterHostRequest:
       type: object
       required: [id, url, capacity, used, machines]

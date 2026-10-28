@@ -41,7 +41,7 @@ Every region a host is in has every series, zeros included, so `increase()` work
 
 ## The second change: what goes, what stays
 
-This change only adds the signals. The next one removes the autoscaler:
+The first change added the signals. The second removed the autoscaler:
 
 | Goes | Stays |
 |---|---|
@@ -52,6 +52,14 @@ This change only adds the signals. The next one removes the autoscaler:
 | releasing a server at its provider | |
 
 `provisioner.bootstrap` becomes a top-level `bootstrap:`. `retire` still takes a host out once it is empty; giving the server back to its provider is the operator's (or the scaler's).
+
+Decided with the second change:
+
+**v0.1.1's configuration is read for one release, with a warning.** Fleets run `provisioner: { kind: static, bootstrap: … }`, as `OPERATIONS.md` said to write it. The fleet reads that `bootstrap` as a top-level `bootstrap:` and logs a `warn` naming the new place. Anything else under `provisioner:` (another `kind`, `enabled`, `dry_run`, `slot_mb`, a provider's section) is refused at start, the key named: it set something that is gone, and a fleet started without it would let its operator believe it still scales. Both places at once are refused. The release after that refuses `provisioner:` as any unknown key.
+
+**A retire forgets, and says `retired`.** It said `released`, the provider call that is gone. The record's `provider_id` and `empty_since` went with the release decision; a registry that has them keeps them as unknown fields, written back. `provider` is `static` (`hosts:`) or `manual` (`host add`). A record an earlier fleet ordered (`dry-run`, or `provisioning` with no address) stays as it is: `host rm` removes it.
+
+**`/v1/status` drops `provisioner` and `dry_run`.** They were not in the OpenAPI document.
 
 ## Consequences
 

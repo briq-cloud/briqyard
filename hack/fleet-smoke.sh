@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Drives the whole machine flow through a briqyard-fleet ($BRIQYARD_URL, default
 # http://127.0.0.1:7430, with $BRIQYARD_TOKEN) that fronts at least one daemon. Makes and removes
-# one machine in the tenant "fleet-smoke". The hosts part orders and retires only through a
-# dry-run provisioner, and drains and forgets only the dev fleet's own host `local` (it comes
-# back on the next poll): against a real fleet, it leaves its hosts alone.
+# one machine in the tenant "fleet-smoke". The hosts part drains and forgets only the dev fleet's
+# own host `local` (it comes back on the next poll): against a real fleet, it leaves its hosts
+# alone. `/metrics` is read with $BRIQYARD_METRICS_TOKEN when the fleet has a metrics_token.
 # With the release directory hack/vm.sh installs, it also upgrades the VM's own host through the
 # fleet (the same build again, over SSH to itself) with a machine running.
 set -euo pipefail
@@ -31,6 +31,18 @@ check "status"          'api "/v1/status" | jq -e ".hosts >= 1" >/dev/null'
 # listing fails whole while one does not answer (ADR 0006).
 for i in $(seq 1 60); do api "/v1/hosts" | jq -e 'length > 0 and all(.state == "ready" and .capacity.memory_mb > 0)' >/dev/null 2>&1 && break; sleep 1; done
 check "a ready host"    'api "/v1/hosts" | jq -e ".[] | select(.state == \"ready\" and .capacity.memory_mb > 0)" >/dev/null'
+# The capacity signals (ADR 0042): every region a host is in has the room and the refusals.
+mtoken=${BRIQYARD_METRICS_TOKEN:-${BRIQYARD_TOKEN:-}}
+mauth=(); [ -n "$mtoken" ] && mauth=(-H "Authorization: Bearer $mtoken")
+metrics=$(curl -sS ${mauth[@]+"${mauth[@]}"} -w '\n%{http_code}' "$BRIQYARD_URL/metrics" || true)
+check "metrics: 200, ready hosts" '[ "$(tail -n1 <<<"$metrics")" = 200 ] && grep -Eq "^briqyard_fleet_hosts\{state=\"ready\"\} [1-9]" <<<"$metrics"'
+check "metrics: the room" 'grep -q "^briqyard_fleet_free_mb{resource=\"memory\"" <<<"$metrics" && grep -q "^briqyard_fleet_largest_slot_mb{resource=\"memory\"" <<<"$metrics"'
+check "metrics: the refusals" 'grep -q "^briqyard_fleet_unschedulable_total{resource=\"memory\"" <<<"$metrics"'
+# A fleet that asks a token for its API and is reached over TLS asks one for /metrics too (on
+# a loopback listener with tls unset, /metrics is open, as the daemon's).
+if [[ $BRIQYARD_URL == https://* ]] && [ "$(curl -s -o /dev/null -w '%{http_code}' "$BRIQYARD_URL/v1/status")" = 401 ]; then
+  check "metrics: 401 without a token" '[ "$(curl -s -o /dev/null -w "%{http_code}" "$BRIQYARD_URL/metrics")" = 401 ]'
+fi
 M=$(briqyard machine run --image alpine:3.20 --name viafleet --tenant "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
 check "created, placed" '[ -n "$(briqyard machine get "$M" | jq -r .host)" ]'
 check "running"         '[ "$(briqyard machine get "$M" | jq -r .state)" = running ]'
@@ -50,13 +62,6 @@ briqyard machine destroy "$M"
 check "destroyed"       '! briqyard machine get "$M" >/dev/null 2>&1'
 briqyard tenant rm "$T"
 check "tenant unpinned" '! briqyard tenant ls | jq -e ".[] | select(.id == \"$T\")" >/dev/null 2>&1'
-if [ "$(api /v1/status | jq -r '.dry_run and .provisioner != "static"')" = true ]; then
-  echo "== hosts: order and retire (dry run)"
-  H=$(briqyard host order --reason smoke | jq -r .id)
-  check "ordered (dry-run)" '[ "$(host_field "$H" .state)" = dry-run ]'
-  check "retired at once"   '[ "$(briqyard host retire "$H" | jq -r .state)" = released ]'
-  check "gone"              '! briqyard host ls | grep -q "$H"'
-fi
 # The fleet's own static host of hack/fleet.dev.yaml, never another: forgetting a host drops
 # its pool key with its record (ADR 0026); a second host (fc2) is refused, and drained it would
 # take no tenant.

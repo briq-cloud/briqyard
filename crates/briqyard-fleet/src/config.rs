@@ -22,7 +22,8 @@ pub struct Config {
     /// Hosts you manage yourself: polled, and expected to register with their token.
     pub hosts: Vec<StaticHost>,
     pub placement: Placement,
-    pub provisioner: Provisioner,
+    /// Installing briqyardd on a server added with `briqyard host add` (ADR 0028).
+    pub bootstrap: Bootstrap,
     /// The registry's backup (ADR 0032): off until `store` is set.
     pub backup: Backup,
 }
@@ -107,32 +108,13 @@ impl Default for Placement {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Provisioner {
-    /// static, hetzner-robot, scaleway, ovh
-    pub kind: String,
-    /// Says what it would do and does nothing. The default.
-    pub dry_run: bool,
-    pub enabled: bool,
-    pub min_hosts: usize,
-    pub max_hosts: usize,
-    /// Add a host when no ready host can take a machine of this size.
-    pub slot_mb: u32,
-    pub idle_grace: String,
-    pub hetzner: Hetzner,
-    pub scaleway: Scaleway,
-    pub ovh: Ovh,
-    pub bootstrap: Bootstrap,
-}
-
-/// Installing briqyardd on a server the provisioner delivered, over SSH.
+/// Installing briqyardd on a server over SSH: at `host add`, and at `host upgrade`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Bootstrap {
     pub enabled: bool,
     pub ssh_user: String,
-    /// The private key the provider installed on the server.
+    /// The private key the server takes for `ssh_user`.
     pub ssh_key: PathBuf,
     /// The script to run; empty runs the hack/bootstrap-host.sh this build ships.
     pub script: PathBuf,
@@ -189,82 +171,6 @@ impl Default for Bootstrap {
     }
 }
 
-impl Default for Provisioner {
-    fn default() -> Self {
-        Self {
-            kind: "static".into(),
-            dry_run: true,
-            enabled: false,
-            min_hosts: 1,
-            max_hosts: 3,
-            slot_mb: 8192,
-            idle_grace: "2h".into(),
-            hetzner: Hetzner::default(),
-            scaleway: Scaleway::default(),
-            ovh: Ovh::default(),
-            bootstrap: Bootstrap::default(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Hetzner {
-    /// Robot credentials; `HETZNER_ROBOT_USER` / `HETZNER_ROBOT_PASSWORD` override these.
-    pub user: String,
-    pub password: String,
-    pub product: String,
-    pub location: String,
-    pub ssh_key_fingerprint: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Scaleway {
-    /// `SCW_SECRET_KEY` overrides this.
-    pub secret_key: String,
-    pub project_id: String,
-    pub zone: String,
-    pub offer_id: String,
-    pub os_id: String,
-}
-
-/// OVHcloud dedicated servers, ordered through the API's cart.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Ovh {
-    /// API credentials; `OVH_APPLICATION_KEY` / `OVH_APPLICATION_SECRET` / `OVH_CONSUMER_KEY`
-    /// override these.
-    pub application_key: String,
-    pub application_secret: String,
-    pub consumer_key: String,
-    /// The plan code of the server to order (`25risem01-v2` for example).
-    pub plan_code: String,
-    /// `eco` (Kimsufi, So you Start, Rise) or `baremetal` (Advance, Scale).
-    pub range: String,
-    /// The data center the server is ordered in (`gra`, `rbx`, `sbg`...).
-    pub datacenter: String,
-    /// The name of an SSH key already in the account (`/me/sshKey`), installed with Ubuntu.
-    pub ssh_key_name: String,
-    /// The OVH subsidiary the order is made under.
-    pub subsidiary: String,
-}
-
-impl Default for Ovh {
-    fn default() -> Self {
-        Self {
-            application_key: String::new(),
-            application_secret: String::new(),
-            consumer_key: String::new(),
-            plan_code: String::new(),
-            range: "eco".into(),
-            datacenter: String::new(),
-            ssh_key_name: String::new(),
-            subsidiary: "FR".into(),
-        }
-    }
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -275,7 +181,7 @@ impl Default for Config {
             state_dir: "/var/lib/briqyard-fleet".into(),
             hosts: vec![],
             placement: Placement::default(),
-            provisioner: Provisioner::default(),
+            bootstrap: Bootstrap::default(),
             backup: Backup::default(),
         }
     }
@@ -288,30 +194,20 @@ impl Config {
             Some(p) => {
                 let text = std::fs::read_to_string(p)
                     .with_context(|| format!("read config {}", p.display()))?;
-                serde_yaml::from_str(&text)
-                    .with_context(|| format!("parse config {}", p.display()))?
+                let parse = || format!("parse config {}", p.display());
+                let mut doc: serde_yaml::Value = serde_yaml::from_str(&text).with_context(parse)?;
+                match old_provisioner(&mut doc).with_context(parse)? {
+                    // From the text, so that an error says where.
+                    None => serde_yaml::from_str(&text).with_context(parse)?,
+                    Some(warning) => {
+                        tracing::warn!(config = %p.display(), "{warning}");
+                        serde_yaml::from_value(doc).with_context(parse)?
+                    }
+                }
             }
         };
-        if let Ok(v) = std::env::var("HETZNER_ROBOT_USER") {
-            cfg.provisioner.hetzner.user = v;
-        }
-        if let Ok(v) = std::env::var("HETZNER_ROBOT_PASSWORD") {
-            cfg.provisioner.hetzner.password = v;
-        }
-        if let Ok(v) = std::env::var("SCW_SECRET_KEY") {
-            cfg.provisioner.scaleway.secret_key = v;
-        }
-        if let Ok(v) = std::env::var("OVH_APPLICATION_KEY") {
-            cfg.provisioner.ovh.application_key = v;
-        }
-        if let Ok(v) = std::env::var("OVH_APPLICATION_SECRET") {
-            cfg.provisioner.ovh.application_secret = v;
-        }
-        if let Ok(v) = std::env::var("OVH_CONSUMER_KEY") {
-            cfg.provisioner.ovh.consumer_key = v;
-        }
         if let Ok(v) = std::env::var("BRIQYARD_RELEASE_TOKEN") {
-            cfg.provisioner.bootstrap.release_token = v;
+            cfg.bootstrap.release_token = v;
         }
         cfg.validate()?;
         Ok(cfg)
@@ -343,16 +239,16 @@ impl Config {
                 listen.ip()
             );
         }
-        let b = &self.provisioner.bootstrap;
+        let b = &self.bootstrap;
         if !b.private_network.is_empty() {
             crate::bootstrap::Network::parse(&b.private_network)
-                .map_err(|e| anyhow::anyhow!("provisioner.bootstrap.private_network {e}"))?;
+                .map_err(|e| anyhow::anyhow!("bootstrap.private_network {e}"))?;
         }
         if !b.fleet_address.is_empty()
             && crate::bootstrap::private_address(b, &b.fleet_address).is_none()
         {
             bail!(
-                "provisioner.bootstrap.fleet_address {:?}: want an IPv4 address in private_network ({:?})",
+                "bootstrap.fleet_address {:?}: want an IPv4 address in private_network ({:?})",
                 b.fleet_address,
                 b.private_network
             );
@@ -389,20 +285,58 @@ impl Config {
     }
 }
 
+/// v0.1.1 kept the bootstrap under `provisioner:`, beside the settings of the provisioners and
+/// the autoscaler that ADR 0042 removed. For one release, `provisioner: { kind: static,
+/// bootstrap: … }` is read as a top-level `bootstrap:`, and the warning to log is returned
+/// (`None`: no `provisioner:`). Any other setting there configured something that is gone, and
+/// is refused by name.
+fn old_provisioner(doc: &mut serde_yaml::Value) -> Result<Option<&'static str>> {
+    use serde_yaml::Value;
+    let Some(top) = doc.as_mapping_mut() else {
+        return Ok(None);
+    };
+    let mut old = match top.remove("provisioner") {
+        None => return Ok(None),
+        Some(Value::Mapping(m)) => m,
+        Some(Value::Null) => Default::default(),
+        Some(_) => bail!("provisioner: removed (ADR 0042): delete it"),
+    };
+    let move_it = "move provisioner.bootstrap to a top-level bootstrap: and delete provisioner:";
+    match old.remove("kind") {
+        None => {}
+        Some(Value::String(k)) if k == "static" => {}
+        Some(k) => bail!(
+            "provisioner.kind {}: the fleet no longer orders servers (ADR 0042): buy one \
+             yourself and add it with `briqyard host add`; {move_it}",
+            k.as_str().unwrap_or("?")
+        ),
+    }
+    let bootstrap = old.remove("bootstrap");
+    if let Some((key, _)) = old.into_iter().next() {
+        bail!(
+            "provisioner.{}: removed with the autoscaler and the provisioners (ADR 0042); {move_it}",
+            key.as_str().unwrap_or("?")
+        );
+    }
+    let Some(bootstrap) = bootstrap else {
+        return Ok(Some("provisioner: is no longer read (ADR 0042): delete it"));
+    };
+    if top.contains_key("bootstrap") {
+        bail!("provisioner.bootstrap and bootstrap: both set: keep bootstrap: alone (ADR 0042)");
+    }
+    top.insert("bootstrap".into(), bootstrap);
+    Ok(Some(
+        "provisioner.bootstrap is read as bootstrap: for this release only (ADR 0042): move it \
+         to the top level and delete provisioner:",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    const ENV_VARS: [&str; 7] = [
-        "HETZNER_ROBOT_USER",
-        "HETZNER_ROBOT_PASSWORD",
-        "SCW_SECRET_KEY",
-        "OVH_APPLICATION_KEY",
-        "OVH_APPLICATION_SECRET",
-        "OVH_CONSUMER_KEY",
-        "BRIQYARD_RELEASE_TOKEN",
-    ];
+    const ENV_VARS: [&str; 1] = ["BRIQYARD_RELEASE_TOKEN"];
 
     /// `load` reads the process environment, which every test shares: one at a time, and each
     /// one puts the variables back as it found them.
@@ -447,20 +381,7 @@ mod tests {
         assert!(cfg.hosts.is_empty());
         assert_eq!(cfg.placement.fill_ceiling, 0.85);
         assert_eq!(cfg.placement.down_after_sec, 60);
-        let p = &cfg.provisioner;
-        assert_eq!(p.kind, "static");
-        assert!(p.dry_run, "a provisioner orders nothing unless told to");
-        assert!(!p.enabled);
-        assert_eq!((p.min_hosts, p.max_hosts), (1, 3));
-        assert_eq!(p.slot_mb, 8192);
-        assert_eq!(p.idle_grace, "2h");
-        assert_eq!(p.hetzner.user, "");
-        assert_eq!(p.scaleway.secret_key, "");
-        assert_eq!(p.ovh.application_key, "");
-        assert_eq!(p.ovh.plan_code, "");
-        assert_eq!(p.ovh.range, "eco");
-        assert_eq!(p.ovh.subsidiary, "FR");
-        let b = &p.bootstrap;
+        let b = &cfg.bootstrap;
         assert!(!b.enabled);
         assert_eq!(b.ssh_user, "root");
         assert_eq!(b.ssh_key, PathBuf::from("/etc/briqyard/fleet_ssh_key"));
@@ -493,49 +414,20 @@ hosts:
 placement:
   fill_ceiling: 0.9
   down_after_sec: 30
-provisioner:
-  kind: scaleway
-  dry_run: false
+bootstrap:
   enabled: true
-  min_hosts: 2
-  max_hosts: 5
-  slot_mb: 4096
-  idle_grace: 30m
-  hetzner:
-    user: '#ws+u'
-    password: p
-    product: AX102
-    location: FSN1
-    ssh_key_fingerprint: 'ab:cd'
-  scaleway:
-    secret_key: s
-    project_id: proj
-    zone: fr-par-2
-    offer_id: offer
-    os_id: os
-  ovh:
-    application_key: ak
-    application_secret: as
-    consumer_key: ck
-    plan_code: 25risem01-v2
-    range: baremetal
-    datacenter: gra
-    ssh_key_name: fleet
-    subsidiary: IE
-  bootstrap:
-    enabled: true
-    ssh_user: ubuntu
-    ssh_key: /etc/briqyard/key
-    script: /opt/bootstrap.sh
-    release: https://example/v1
-    release_token: ghp-file
-    pool_device: /dev/nvme0n1,/dev/nvme1n1
-    private_network: 10.42.0.0/16
-    private_interface: enp3s0f1
-    public_tcp_ports: [7430, 80]
-    fleet_url: https://fleet.example
-    fleet_address: 10.42.0.11
-    max_attempts: 3
+  ssh_user: ubuntu
+  ssh_key: /etc/briqyard/key
+  script: /opt/bootstrap.sh
+  release: https://example/v1
+  release_token: ghp-file
+  pool_device: /dev/nvme0n1,/dev/nvme1n1
+  private_network: 10.42.0.0/16
+  private_interface: enp3s0f1
+  public_tcp_ports: [7430, 80]
+  fleet_url: https://fleet.example
+  fleet_address: 10.42.0.11
+  max_attempts: 3
 "#,
         );
         let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
@@ -565,32 +457,7 @@ provisioner:
         assert_eq!(cfg.hosts[1].url, "http://10.0.0.2:7420");
         assert_eq!(cfg.placement.fill_ceiling, 0.9);
         assert_eq!(cfg.placement.down_after_sec, 30);
-        let p = &cfg.provisioner;
-        assert_eq!(p.kind, "scaleway");
-        assert!(!p.dry_run);
-        assert!(p.enabled);
-        assert_eq!((p.min_hosts, p.max_hosts), (2, 5));
-        assert_eq!(p.slot_mb, 4096);
-        assert_eq!(p.idle_grace, "30m");
-        assert_eq!(p.hetzner.user, "#ws+u");
-        assert_eq!(p.hetzner.password, "p");
-        assert_eq!(p.hetzner.product, "AX102");
-        assert_eq!(p.hetzner.location, "FSN1");
-        assert_eq!(p.hetzner.ssh_key_fingerprint, "ab:cd");
-        assert_eq!(p.scaleway.secret_key, "s");
-        assert_eq!(p.scaleway.project_id, "proj");
-        assert_eq!(p.scaleway.zone, "fr-par-2");
-        assert_eq!(p.scaleway.offer_id, "offer");
-        assert_eq!(p.scaleway.os_id, "os");
-        assert_eq!(p.ovh.application_key, "ak");
-        assert_eq!(p.ovh.application_secret, "as");
-        assert_eq!(p.ovh.consumer_key, "ck");
-        assert_eq!(p.ovh.plan_code, "25risem01-v2");
-        assert_eq!(p.ovh.range, "baremetal");
-        assert_eq!(p.ovh.datacenter, "gra");
-        assert_eq!(p.ovh.ssh_key_name, "fleet");
-        assert_eq!(p.ovh.subsidiary, "IE");
-        let b = &p.bootstrap;
+        let b = &cfg.bootstrap;
         assert!(b.enabled);
         assert_eq!(b.ssh_user, "ubuntu");
         assert_eq!(b.ssh_key, PathBuf::from("/etc/briqyard/key"));
@@ -609,17 +476,13 @@ provisioner:
     #[test]
     fn a_partial_file_keeps_the_other_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(&dir, "token: t\nprovisioner:\n  kind: hetzner-robot\n");
+        let path = write(&dir, "token: t\nbootstrap:\n  enabled: true\n");
         let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
         assert_eq!(cfg.token, "t");
         assert_eq!(cfg.listen, "127.0.0.1:7430");
-        assert_eq!(cfg.provisioner.kind, "hetzner-robot");
-        assert!(
-            cfg.provisioner.dry_run,
-            "dry_run stays on when the file is silent"
-        );
-        assert_eq!(cfg.provisioner.max_hosts, 3);
-        assert_eq!(cfg.provisioner.bootstrap.max_attempts, 90);
+        assert!(cfg.bootstrap.enabled);
+        assert_eq!(cfg.bootstrap.ssh_user, "root");
+        assert_eq!(cfg.bootstrap.max_attempts, 90);
     }
 
     #[test]
@@ -630,10 +493,8 @@ provisioner:
             ("tokne: t\n", "tokne"),
             ("host_token: t\n", "host_token"),
             ("placement:\n  fill_ceilling: 0.5\n", "fill_ceilling"),
-            ("provisioner:\n  dry: false\n", "dry"),
+            ("bootstrap:\n  enable: true\n", "enable"),
             ("provisioner:\n  bootstrap:\n    enable: true\n", "enable"),
-            ("provisioner:\n  scaleway:\n    secret: s\n", "secret"),
-            ("provisioner:\n  ovh:\n    plan: x\n", "plan"),
             ("hosts:\n  - url: http://h\n    tokn: t\n", "tokn"),
             ("tls:\n  cert: a\n  keys: b\n", "keys"),
         ] {
@@ -714,17 +575,14 @@ provisioner:
     fn the_private_network_is_a_cidr() {
         let dir = tempfile::tempdir().unwrap();
         let load = |net: &str| {
-            let path = write(
-                &dir,
-                &format!("provisioner:\n  bootstrap:\n    private_network: \"{net}\"\n"),
-            );
+            let path = write(&dir, &format!("bootstrap:\n  private_network: \"{net}\"\n"));
             with_env(&[], || Config::load(Some(&path)))
         };
         load("10.42.0.0/16").unwrap();
         for bad in ["10.42.0.0", "10.42.0.0/33", "fd00::/8", "vrack"] {
             let err = load(bad).unwrap_err().to_string();
             assert!(
-                err.starts_with("provisioner.bootstrap.private_network "),
+                err.starts_with("bootstrap.private_network "),
                 "{bad}: {err}"
             );
         }
@@ -737,7 +595,7 @@ provisioner:
             let path = write(
                 &dir,
                 &format!(
-                    "provisioner:\n  bootstrap:\n    private_network: 10.42.0.0/16\n    fleet_address: \"{addr}\"\n"
+                    "bootstrap:\n  private_network: 10.42.0.0/16\n  fleet_address: \"{addr}\"\n"
                 ),
             );
             with_env(&[], || Config::load(Some(&path)))
@@ -746,10 +604,7 @@ provisioner:
         load("").unwrap();
         for bad in ["10.43.0.1", "fleet.example.com", "fd00::1"] {
             let err = load(bad).unwrap_err().to_string();
-            assert!(
-                err.starts_with("provisioner.bootstrap.fleet_address "),
-                "{bad}: {err}"
-            );
+            assert!(err.starts_with("bootstrap.fleet_address "), "{bad}: {err}");
         }
     }
 
@@ -773,47 +628,112 @@ provisioner:
     }
 
     #[test]
-    fn the_environment_overrides_the_credentials() {
+    fn the_environment_overrides_the_release_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "bootstrap:\n  release_token: file-gh\n");
+        let set = [("BRIQYARD_RELEASE_TOKEN", "env-gh")];
+        let cfg = with_env(&set, || Config::load(Some(&path)).unwrap());
+        assert_eq!(cfg.bootstrap.release_token, "env-gh");
+        let cfg = with_env(&set, || Config::load(None).unwrap());
+        assert_eq!(cfg.bootstrap.release_token, "env-gh");
+        let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
+        assert_eq!(cfg.bootstrap.release_token, "file-gh");
+    }
+
+    #[test]
+    fn hosts_and_a_bootstrap_are_a_whole_fleet() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(
             &dir,
-            "provisioner:\n  hetzner:\n    user: file-user\n    password: file-pass\n  scaleway:\n    secret_key: file-key\n  ovh:\n    application_key: file-ak\n    application_secret: file-as\n    consumer_key: file-ck\n",
+            "hosts:\n  - id: h1\n    url: http://10.0.0.1:7420\n    token: t1\nbootstrap:\n  enabled: true\n  ssh_key: /etc/briqyard/key\n  release: \"0.1.1\"\n",
         );
-        let set = [
-            ("HETZNER_ROBOT_USER", "env-user"),
-            ("HETZNER_ROBOT_PASSWORD", "env-pass"),
-            ("SCW_SECRET_KEY", "env-key"),
-            ("OVH_APPLICATION_KEY", "env-ak"),
-            ("OVH_APPLICATION_SECRET", "env-as"),
-            ("OVH_CONSUMER_KEY", "env-ck"),
-            ("BRIQYARD_RELEASE_TOKEN", "env-gh"),
-        ];
-        let cfg = with_env(&set, || Config::load(Some(&path)).unwrap());
-        assert_eq!(cfg.provisioner.bootstrap.release_token, "env-gh");
-        assert_eq!(cfg.provisioner.hetzner.user, "env-user");
-        assert_eq!(cfg.provisioner.hetzner.password, "env-pass");
-        assert_eq!(cfg.provisioner.scaleway.secret_key, "env-key");
-        assert_eq!(cfg.provisioner.ovh.application_key, "env-ak");
-        assert_eq!(cfg.provisioner.ovh.application_secret, "env-as");
-        assert_eq!(cfg.provisioner.ovh.consumer_key, "env-ck");
-        let cfg = with_env(&set, || Config::load(None).unwrap());
-        assert_eq!(cfg.provisioner.hetzner.user, "env-user");
-        assert_eq!(cfg.provisioner.scaleway.secret_key, "env-key");
-        assert_eq!(cfg.provisioner.ovh.consumer_key, "env-ck");
-        // One variable set leaves the others to the file.
-        let cfg = with_env(&[("SCW_SECRET_KEY", "env-key")], || {
-            Config::load(Some(&path)).unwrap()
-        });
-        assert_eq!(cfg.provisioner.hetzner.user, "file-user");
-        assert_eq!(cfg.provisioner.hetzner.password, "file-pass");
-        assert_eq!(cfg.provisioner.scaleway.secret_key, "env-key");
-        assert_eq!(cfg.provisioner.ovh.application_key, "file-ak");
-        assert_eq!(cfg.provisioner.ovh.application_secret, "file-as");
-        assert_eq!(cfg.provisioner.ovh.consumer_key, "file-ck");
-        // Without any, the file stands.
         let cfg = with_env(&[], || Config::load(Some(&path)).unwrap());
-        assert_eq!(cfg.provisioner.hetzner.user, "file-user");
-        assert_eq!(cfg.provisioner.scaleway.secret_key, "file-key");
-        assert_eq!(cfg.provisioner.ovh.application_secret, "file-as");
+        assert_eq!(cfg.hosts.len(), 1);
+        assert!(cfg.bootstrap.enabled);
+        assert_eq!(cfg.bootstrap.ssh_key, PathBuf::from("/etc/briqyard/key"));
+        assert_eq!(cfg.bootstrap.release, "0.1.1");
+    }
+
+    /// v0.1.1's `provisioner: { kind: static, bootstrap }` (ADR 0042): read for one release,
+    /// with a warning; what configured the provisioners or the autoscaler is refused by name.
+    #[test]
+    fn the_bootstrap_of_v0_1_1_is_read_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |text: &str| {
+            let path = write(&dir, text);
+            with_env(&[], || Config::load(Some(&path)))
+        };
+        let old = "token: t\nprovisioner:\n  kind: static\n  bootstrap:\n    enabled: true\n    private_network: 10.42.0.0/16\n    fleet_address: 10.42.0.11\n    max_attempts: 3\n";
+        let cfg = load(old).unwrap();
+        assert_eq!(cfg.token, "t");
+        assert!(cfg.bootstrap.enabled);
+        assert_eq!(cfg.bootstrap.private_network, "10.42.0.0/16");
+        assert_eq!(cfg.bootstrap.fleet_address, "10.42.0.11");
+        assert_eq!(cfg.bootstrap.max_attempts, 3);
+        assert_eq!(
+            cfg.bootstrap.ssh_user, "root",
+            "the rest defaults as at the top level"
+        );
+        load("provisioner:\n  bootstrap:\n    enabled: true\n").unwrap();
+        load("provisioner:\n  kind: static\n").unwrap();
+
+        let mut doc: serde_yaml::Value = serde_yaml::from_str(old).unwrap();
+        let warning = old_provisioner(&mut doc).unwrap().unwrap();
+        assert!(
+            warning
+                .starts_with("provisioner.bootstrap is read as bootstrap: for this release only"),
+            "{warning}"
+        );
+        let mut doc: serde_yaml::Value = serde_yaml::from_str("provisioner: {}\n").unwrap();
+        let warning = old_provisioner(&mut doc).unwrap().unwrap();
+        assert!(
+            warning.starts_with("provisioner: is no longer read"),
+            "{warning}"
+        );
+        let mut doc: serde_yaml::Value =
+            serde_yaml::from_str("bootstrap:\n  enabled: true\n").unwrap();
+        assert_eq!(
+            old_provisioner(&mut doc).unwrap(),
+            None,
+            "the new place: no warning"
+        );
+
+        for (text, msg) in [
+            (
+                "provisioner:\n  kind: ovh\n  bootstrap:\n    enabled: true\n",
+                "provisioner.kind ovh: the fleet no longer orders servers",
+            ),
+            (
+                "provisioner:\n  enabled: true\n",
+                "provisioner.enabled: removed with the autoscaler",
+            ),
+            (
+                "provisioner:\n  kind: static\n  dry_run: true\n",
+                "provisioner.dry_run: removed",
+            ),
+            (
+                "provisioner:\n  slot_mb: 4096\n",
+                "provisioner.slot_mb: removed",
+            ),
+            (
+                "provisioner:\n  hetzner:\n    user: u\n",
+                "provisioner.hetzner: removed",
+            ),
+            (
+                "provisioner:\n  bootstrap:\n    enabled: true\nbootstrap:\n  enabled: true\n",
+                "provisioner.bootstrap and bootstrap: both set",
+            ),
+            ("provisioner: static\n", "provisioner: removed"),
+        ] {
+            let err = format!("{:#}", load(text).unwrap_err());
+            assert!(err.contains(msg), "{text:?}: {err}");
+            assert!(err.contains("ADR 0042"), "{text:?}: {err}");
+        }
+        // A typo in the old place is refused as in the new one.
+        let err = format!(
+            "{:#}",
+            load("provisioner:\n  bootstrap:\n    enable: true\n").unwrap_err()
+        );
+        assert!(err.contains("unknown field `enable`"), "{err}");
     }
 }
