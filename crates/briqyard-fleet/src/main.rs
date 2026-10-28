@@ -7,6 +7,7 @@ mod bootstrap;
 mod config;
 mod provision;
 mod registry;
+mod restores;
 mod upgrade;
 
 use anyhow::{anyhow, Context, Result};
@@ -71,6 +72,8 @@ struct AppState {
     /// Key requests take turns: a key just made is answered, to its host or any other ask,
     /// only once it is written, and taken back when it could not be (ADR 0026).
     key_turn: tokio::sync::Mutex<()>,
+    /// Restores forwarded and not over: what a backup's key is served for (ADR 0035).
+    restores: restores::Restores,
 }
 
 /// Writes a registry file, the fleet's alone (`0600`: it holds every host's token and pool
@@ -241,6 +244,7 @@ async fn run(args: Args) -> Result<()> {
         upgrade: Default::default(),
         backup: backup::Backup::open(&cfg.backup)?,
         key_turn: Default::default(),
+        restores: Default::default(),
     });
     tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));
@@ -314,8 +318,9 @@ fn restored(reg: &Registry, from: &str, path: &std::path::Path) -> String {
         .filter(|h| !h.pool_key.is_empty())
         .count();
     let mut out = format!(
-        "restored {} hosts ({keys} pool keys) and {} tenants from {from} into {}\n",
+        "restored {} hosts ({keys} pool keys, {} retired) and {} tenants from {from} into {}\n",
         reg.hosts.len(),
+        reg.retired_keys.len(),
         reg.tenants.len(),
         path.display()
     );
@@ -642,6 +647,10 @@ async fn host_key(
     Json(req): Json<api::HostKeyRequest>,
 ) -> Result<Response, Refusal> {
     let caller = Caller::of(&st, info, &headers);
+    // A backup's key is only read: it never waits behind a key being made.
+    if let Some(want) = &req.key_id {
+        return backup_key(&st, &req, &headers, caller, want);
+    }
     let _turn = st.key_turn.lock().await;
     let (id, key, made) = {
         let mut reg = st.reg.lock().unwrap();
@@ -679,6 +688,64 @@ async fn host_key(
     }
     let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
     tracing::info!(host = id, made, peer, "pool key served");
+    Ok(Json(api::HostKey {
+        key: key.expose().to_string(),
+    })
+    .into_response())
+}
+
+/// The pool key of a backup (ADR 0035), for the host the fleet forwarded a restore to, once
+/// per restore: the key of that id, a live host's or a forgotten one's. A raw stream opens
+/// only with the pool key of the host that sent it, so that is what is served. Never made
+/// here; another host's key is a `warn` line.
+fn backup_key(
+    st: &AppState,
+    req: &api::HostKeyRequest,
+    headers: &HeaderMap,
+    caller: Caller,
+    key_id: &str,
+) -> Result<Response, Refusal> {
+    let reg = st.reg.lock().unwrap();
+    let host = the_host(&reg, &req.url, headers, caller, "backup key")?
+        .id
+        .clone();
+    let Some((owner, key)) = reg.key_by_id(key_id) else {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "no_key",
+            format!("the fleet holds no pool key {key_id}: the backup was made on a host with a key file, or on a host forgotten before ADR 0035"),
+        ));
+    };
+    // The last check: a refusal above leaves the restore's ask to it.
+    let open = req
+        .restore
+        .as_ref()
+        .is_some_and(|rs| st.restores.take(&host, rs, std::time::Instant::now()));
+    if !open {
+        let what = req
+            .restore
+            .as_ref()
+            .map(|rs| format!("{}/{}", rs.machine_id, rs.backup))
+            .unwrap_or_else(|| "none named".into());
+        tracing::warn!(
+            host,
+            key_id,
+            restore = what,
+            "backup key refused: no restore open"
+        );
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "no_restore",
+            format!("a backup's key is served once, for a restore the fleet forwarded to this host: none open for {host} ({what})"),
+        ));
+    }
+    let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
+    // Its own key is routine; another host's is the hand-out worth a look.
+    if owner == host {
+        tracing::info!(host, owner, key_id, peer, "backup key served");
+    } else {
+        tracing::warn!(host, owner, key_id, peer, "backup key served");
+    }
     Ok(Json(api::HostKey {
         key: key.expose().to_string(),
     })
@@ -1049,7 +1116,7 @@ async fn release_host(st: &AppState, h: &HostRec) -> Result<api::Host> {
 
 /// What a forget of a host that holds a pool key costs, said by its refusal and by `force`.
 const FORGET_KEYED: &str =
-    "its pool key goes with the record: the pool is unreadable at the host's next restart; retire it, or --force";
+    "its pool key leaves the record and is kept only for its backups: the pool is unreadable at the host's next restart; retire it, or --force";
 
 #[derive(serde::Deserialize, Default)]
 struct ForgetQuery {
@@ -1505,7 +1572,15 @@ async fn create_machine(
     };
     let host = host.ok_or_else(|| no_room(&req.region, "this machine"))?;
     st.save().map_err(registry_error)?;
+    // A restore may ask for its backup's key while this forward lasts (ADR 0035).
+    let restoring = req
+        .restore
+        .as_ref()
+        .map(|rs| st.restores.open(&host.id, rs, std::time::Instant::now()));
     let resp = forward(&st, &host, Method::POST, "/v1/machines", &headers, body).await;
+    if let Some(f) = restoring {
+        st.restores.close(f);
+    }
     let (parts, data) = read(resp).await;
     if parts.status.is_success() {
         if let Ok(m) = serde_json::from_slice::<api::Machine>(&data) {

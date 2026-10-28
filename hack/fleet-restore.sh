@@ -58,7 +58,7 @@ check "a restore never writes over a registry" '! on_fleet "briqyard-fleet --con
 on_fleet "systemctl stop briqyard-fleet && mv $STATE/registry.json $STATE/registry.json.lost"
 out=$(on_fleet "briqyard-fleet --config $CFG restore --identity $ID" || true)
 echo "       $out"
-check "restored from the backup"       'echo "$out" | grep -q "^restored [1-9][0-9]* hosts ([1-9][0-9]* pool keys)"'
+check "restored from the backup"       'echo "$out" | grep -q "^restored [1-9][0-9]* hosts ([1-9][0-9]* pool keys, [0-9]* retired)"'
 check "written 0600"                   '[ "$(on_fleet "stat -c %a $STATE/registry.json")" = 600 ]'
 on_fleet "systemctl start briqyard-fleet"
 for i in $(seq 1 30); do hosts >/dev/null 2>&1 && break; sleep 1; done

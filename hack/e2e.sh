@@ -42,7 +42,7 @@ cleanup() {
       handover
     fi
   fi
-  for t in "$T" "$T-eg" "$T-gw" "$T-q"; do
+  for t in "$T" "$T-eg" "$T-gw" "$T-ip" "$T-q"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
     for i in $(seq 1 10); do
@@ -74,6 +74,14 @@ check "put/get file" 'briqyard machine put "$A" /tmp/by-e2e.txt /root/f.txt && [
 check "own name"     'briqyard machine exec "$A" -- nslookup alp.internal 2>&1 | grep -q "10\.6[4-9]\."'
 check "egress"       'briqyard machine exec "$A" -- wget -qO- -T 10 https://example.com | grep -qi "example domain"'
 check "logs"         'briqyard machine logs "$A" --limit 5000 | grep -q "\[briqyard\] started"'
+
+echo "== image layers: hard links, merged /usr (ADR 0039)"
+BB=$(briqyard machine run --image busybox:1.37 --name bb --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+check "busybox: 400 applets, one file"   '[ "$(briqyard machine exec "$BB" -- stat -c %h /bin/busybox)" -gt 400 ]'
+DB=$(briqyard machine run --image debian:bookworm-slim --name deb --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+check "debian: /bin a link to usr/bin"   '[ "$(briqyard machine exec "$DB" -- readlink /bin)" = usr/bin ]'
+check "debian: a command through it"     '[ "$(briqyard machine exec "$DB" -- /bin/sh -c "echo ok")" = ok ]'
+briqyard machine rm "$BB" >/dev/null; briqyard machine rm "$DB" >/dev/null
 
 echo "== exec sessions: stdin streamed, a terminal, the client's close (ADR 0029)"
 TTY="python3 $(dirname "$0")/exec-tty.py"
@@ -259,6 +267,74 @@ briqyard machine rm "$C" >/dev/null
 check "tenant removed"              'briqyard tenant rm "$GT" && ! briqyard tenant get "$GT" >/dev/null 2>&1'
 check "gateway gone with it"        '! briqyard machine get "$GW" >/dev/null 2>&1'
 
+echo "== iron-proxy as the tenant gateway: a stock image, a header injected, a token swapped (ADR 0016)"
+IT="$T-ip" IRON=ironsh/iron-proxy:0.54.0@sha256:6d074be2de9188f88d08013788d5500fb4de8557f16c2e5b27af4d8d2cb1e3fb
+D=$(mktemp -d)
+# One CA: iron-proxy signs its leaves with it, and it signed the echo server's certificate, which
+# iron-proxy trusts upstream (SSL_CERT_FILE). The echo server is a sibling: no third party.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=e2e iron CA" -keyout "$D/ca.key" -out "$D/ca.crt" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" 2>/dev/null
+openssl req -newkey rsa:2048 -nodes -subj "/CN=echo.internal" -keyout "$D/echo.key" -out "$D/echo.csr" 2>/dev/null
+printf 'subjectAltName=DNS:echo.internal\n' > "$D/san"
+openssl x509 -req -in "$D/echo.csr" -CA "$D/ca.crt" -CAkey "$D/ca.key" -CAcreateserial -days 1 -extfile "$D/san" -out "$D/echo.crt" 2>/dev/null
+cat > "$D/echo.py" <<'PY'
+import http.server, json, ssl
+class Echo(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({k.lower(): v for k, v in self.headers.items()}).encode()
+        self.send_response(200)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+s = http.server.HTTPServer(("0.0.0.0", 443), Echo)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain("/srv/echo.crt", "/srv/echo.key")
+s.socket = ctx.wrap_socket(s.socket, server_side=True)
+s.serve_forever()
+PY
+cat > "$D/proxy.yaml" <<'YAML'
+dns:
+  enabled: false
+proxy:
+  tunnel_listen: ":3128"
+tls:
+  ca_cert: /etc/iron-proxy/ca.crt
+  ca_key: /etc/iron-proxy/ca.key
+transforms:
+  - name: allowlist
+    config:
+      domains: ["echo.internal"]
+  - name: secrets
+    config:
+      secrets:
+        - source: { type: env, var: INJECTED }
+          inject: { header: X-Injected }
+          rules: [{ host: echo.internal, methods: [GET] }]
+        # The CONNECT carries no header: a rule on every method would refuse the tunnel itself.
+        - source: { type: env, var: API_KEY }
+          replace: { proxy_value: proxy-tok, match_headers: [X-Api-Key], require: true }
+          rules: [{ host: echo.internal, methods: [GET] }]
+YAML
+ECHO=$(briqyard machine run --image python:3.12-alpine --name echo --tenant "$IT" --memory 128 --file /srv/echo.py="$D/echo.py" \
+  --file /srv/echo.crt="$D/echo.crt" --file /srv/echo.key="$D/echo.key" -- python3 /srv/echo.py | jq -r .id)
+check "iron: the gateway set, a stock image with its files" 'briqyard tenant gateway set "$IT" --image "$IRON" --port 3128 -e INJECTED=inj-s3cret -e API_KEY=real-s3cret -e SSL_CERT_FILE=/etc/iron-proxy/ca.crt \
+  --file /etc/iron-proxy/proxy.yaml="$D/proxy.yaml" --file /etc/iron-proxy/ca.crt="$D/ca.crt" --file /etc/iron-proxy/ca.key="$D/ca.key" -- -config /etc/iron-proxy/proxy.yaml >/dev/null'
+IC=$(briqyard machine run --image python:3.12-alpine --name agent --tenant "$IT" --memory 128 --egress via:gateway --file /etc/ca.crt="$D/ca.crt" -- sleep 3600 | jq -r .id)
+check "iron: its consumer's start runs it" '[ "$(briqyard tenant get "$IT" | jq -r .gateway.state)" = running ]'
+get='import sys, urllib.request; print(urllib.request.urlopen(urllib.request.Request(sys.argv[1], headers={"X-Api-Key": sys.argv[2]}), timeout=10).read().decode())'
+through() { briqyard machine exec "$IC" -- env https_proxy=http://gateway.internal:3128 SSL_CERT_FILE=/etc/ca.crt python3 -c "$get" "$1" "${2:-proxy-tok}" 2>&1; }
+seen=$(through https://echo.internal/ || true)
+check "iron: an allowed host through it, the header injected" 'echo "$seen" | jq -e ".[\"x-injected\"] == \"inj-s3cret\"" >/dev/null'
+check "iron: the proxy token swapped for the secret" 'echo "$seen" | jq -e ".[\"x-api-key\"] == \"real-s3cret\"" >/dev/null'
+check "iron: a request without the proxy token refused" 'out=$(through https://echo.internal/ another-key); echo "$out" | grep -q "HTTP Error 403"'
+check "iron: a host off its list refused" 'out=$(through https://example.com/); echo "$out" | grep -q "Tunnel connection failed: 403"'
+check "iron: the consumer holds no secret" '! briqyard machine exec "$IC" -- env | grep -q s3cret'
+briqyard machine rm "$IC" >/dev/null
+briqyard machine rm "$ECHO" >/dev/null
+briqyard tenant rm "$IT" >/dev/null 2>&1 || true
+check "iron: gone with its tenant" '! briqyard tenant get "$IT" >/dev/null 2>&1'
+rm -rf "$D"
+
 echo "== stop, start, exit handling"
 briqyard machine stop "$A" >/dev/null
 check "stopped (user)" '[ "$(briqyard machine get "$A" | jq -r .stopped_reason)" = user ]'
@@ -428,6 +504,39 @@ R1=$(briqyard machine restore --from "$F" --backup "$B1" --tenant "$T" --name re
 for i in $(seq 1 60); do briqyard machine exec "$R1" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "restored the first backup" '[ "$(briqyard machine exec "$R1" -- psql -U postgres -tAc "select sum(x) from t")" = 85 ]'
 briqyard machine destroy "$R1" >/dev/null
+
+echo "== backups hold ciphertext; a backup in clear still restores (ADR 0035)"
+CONF=/etc/briqyard/config.yaml
+STORE=$(sudo sed -n 's|^  store: file://||p' $CONF)
+POOL=$(sudo sed -n 's/^  pool: //p' $CONF); POOL=${POOL:-byard}
+KF=$(sudo sed -n 's/^  key: file://p' $CONF); KF=${KF:-/etc/briqyard/pool.key}
+# A file of random text on its root disk, whose blocks lz4 cannot shrink and ZFS keeps as they
+# are (a short line would be hidden by compression alone), and a random value in its env.
+ENVMARK=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+DATA=$(sudo sed -n 's/^data_dir: //p' $CONF); DATA=${DATA:-/var/lib/briqyard}
+K=$(briqyard machine run --image alpine:3.20 --name rawmark --tenant "$T" --memory 128 -e "RAWMARK=$ENVMARK" -- sleep 3600 | jq -r .id)
+briqyard machine exec "$K" -- sh -c "head -c 98304 /dev/urandom | base64 -w 0 > /root/mark; sync" >/dev/null
+MARK=$(briqyard machine exec "$K" -- head -c 48 /root/mark)
+KB=$(briqyard machine backup "$K" | jq -r .id)
+KS="$STORE/backups/$K/root/$KB.zfs"
+check "its record says the key's id, never the key" '[ "$(briqyard machine backups "$K" | jq -r ".[0].key_id | length")" = 32 ] && ! sudo grep -rqF "$(sudo cat "$KF" | tr -d " \n")" "$STORE/backups/$K"'
+check "its stream and its record hold no plaintext" 'sudo test -s "$KS" && ! sudo grep -rqaF -e "$MARK" -e "$ENVMARK" -- "$STORE/backups/$K"'
+RK=$(briqyard machine restore --from "$K" --tenant "$T" --name rawback | jq -r .id)
+for i in $(seq 1 30); do [ "$(briqyard machine get "$RK" | jq -r .state)" = running ] && break; sleep 1; done
+check "restored, its env opened, its disk on the pool's key" '[ "$(briqyard machine exec "$RK" -- sh -c "head -c 48 /root/mark; echo; echo \$RAWMARK" | paste -sd, -)" = "$MARK,$ENVMARK" ] && [ "$(sudo zfs get -H -o value encryptionroot "$POOL/m/$RK/root")" = "$POOL" ]'
+# The same snapshot sent in clear, its record beside it with the machine open, as a backup
+# made before ADR 0035.
+OLD=m_clear$(date +%s)
+sudo mkdir -p "$STORE/backups/$OLD/root"
+sudo sh -c "zfs send -c $POOL/m/$K/root@bk-$KB > $STORE/backups/$OLD/root/$KB.zfs"
+sudo cat "$STORE/backups/$K/$KB.json" | jq --arg m "$OLD" --arg k "backups/$OLD/root/$KB.zfs" --slurpfile spec <(sudo cat "$DATA/state/machines/$K.json") \
+  '.machine_id = $m | .machine = $spec[0] | del(.key_id, .sealed) | .disks = [.disks[] | select(.disk == "root") | .key = $k]' | sudo tee "$STORE/backups/$OLD/$KB.json" >/dev/null
+check "the same in clear shows the plaintext" 'sudo grep -qaF -- "$MARK" "$STORE/backups/$OLD/root/$KB.zfs" && sudo grep -qF "$ENVMARK" "$STORE/backups/$OLD/$KB.json"'
+RC=$(briqyard machine restore --from "$OLD" --backup "$KB" --tenant "$T" --name clearback | jq -r .id)
+for i in $(seq 1 30); do [ "$(briqyard machine get "$RC" | jq -r .state)" = running ] && break; sleep 1; done
+check "a backup in clear still restores" '[ "$(briqyard machine exec "$RC" -- head -c 48 /root/mark)" = "$MARK" ]'
+for id in "$RC" "$RK" "$K"; do briqyard machine destroy "$id" >/dev/null; done
+sudo rm -rf "${STORE:?}/backups/$OLD"
 
 echo "== backups on a schedule: retention, delete, a destroyed machine's"
 # The schedule's own backups are an hour apart: the API's make the points, and retention

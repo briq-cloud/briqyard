@@ -31,6 +31,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 nix = { version = "0.29", features = ["mount", "reboot", "process", "signal", "user", "fs", "ioctl", "hostname", "net", "socket", "term"] }
 libc = "0.2"
+# openat2 and the *at calls image extraction writes through (ADR 0039).
+rustix = { version = "1.1", features = ["fs"] }
 rtnetlink = "0.14"
 futures = "0.3"
 tar = "0.4"
@@ -63,6 +65,8 @@ humantime = "2"
 # TLS on the API (ADR 0020): ring, the provider reqwest already uses; no aws-lc.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+# A backup record's seal (ADR 0035): AES-256-GCM and HKDF from the ring TLS already uses.
+ring = "0.17"
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 # DNS wire format for the tenant resolver (ADR 0033): the protocol crate only, no resolver or server.
 hickory-proto = { version = "0.26.3", default-features = false }

@@ -586,32 +586,39 @@ enum TenantCmd {
 
 #[derive(Subcommand)]
 enum GatewayCmd {
-    /// Make or replace it: briqyard tenant gateway set TENANT --image I --port P [-e K=V] [--start] [-- cmd...]
-    Set {
-        tenant: String,
-        /// Through a fleet: where to place a tenant that has no host yet
-        #[arg(long)]
-        region: Option<String>,
-        /// Start it now and wait for its port (a running one is left as is)
-        #[arg(long)]
-        start: bool,
-        #[arg(long)]
-        image: String,
-        /// The port its program listens on
-        #[arg(long)]
-        port: u16,
-        /// A start that needs it waits for this probe instead of its port: http:PORT[/PATH], tcp:PORT, exec:CMD ARGS
-        #[arg(long, value_parser = probe_arg)]
-        readiness: Option<api::Probe>,
-        /// K=V, repeatable
-        #[arg(long = "env", short = 'e')]
-        envs: Vec<String>,
-        /// The command, after --
-        #[arg(last = true)]
-        cmd: Vec<String>,
-    },
+    /// Make or replace it: briqyard tenant gateway set TENANT --image I --port P [-e K=V] [--file /path=local] [--start] [-- cmd...]
+    Set(Box<GatewaySetArgs>),
     /// Stop and remove it, once no machine runs through it
     Rm { tenant: String },
+}
+
+/// What `tenant gateway set` puts.
+#[derive(Args)]
+struct GatewaySetArgs {
+    tenant: String,
+    /// Through a fleet: where to place a tenant that has no host yet
+    #[arg(long)]
+    region: Option<String>,
+    /// Start it now and wait for its port (a running one is left as is)
+    #[arg(long)]
+    start: bool,
+    #[arg(long)]
+    image: String,
+    /// The port its program listens on
+    #[arg(long)]
+    port: u16,
+    /// A start that needs it waits for this probe instead of its port: http:PORT[/PATH], tcp:PORT, exec:CMD ARGS
+    #[arg(long, value_parser = probe_arg)]
+    readiness: Option<api::Probe>,
+    /// K=V, repeatable
+    #[arg(long = "env", short = 'e')]
+    envs: Vec<String>,
+    /// /guest/path=local/path, repeatable
+    #[arg(long = "file")]
+    files: Vec<String>,
+    /// The command, after --
+    #[arg(last = true)]
+    cmd: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -674,7 +681,8 @@ enum HostCmd {
         id: String,
     },
     /// Forget a host (its machines are not touched). A host with a pool key is refused unless
-    /// --force: the key goes with the record and its pool is unreadable at its next restart
+    /// --force: the key leaves the record, kept only for its backups (ADR 0035), and its pool is
+    /// unreadable at its next restart
     Rm {
         id: String,
         #[arg(long)]
@@ -1384,20 +1392,23 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             TenantCmd::Rm { id } => {
                 c.raw(DELETE, &format!("/v1/tenants/{id}"), NONE).await?;
             }
-            TenantCmd::Gateway(GatewayCmd::Set {
-                tenant,
-                region,
-                start,
-                image,
-                port,
-                readiness,
-                envs,
-                cmd,
-            }) => {
+            TenantCmd::Gateway(GatewayCmd::Set(a)) => {
+                let GatewaySetArgs {
+                    tenant,
+                    region,
+                    start,
+                    image,
+                    port,
+                    readiness,
+                    envs,
+                    files,
+                    cmd,
+                } = *a;
                 let spec = api::GatewaySpec {
                     image,
                     cmd: if cmd.is_empty() { None } else { Some(cmd) },
                     env: env_args(&envs)?,
+                    files: file_args(&files)?,
                     port,
                     probes: api::Probes {
                         readiness,
