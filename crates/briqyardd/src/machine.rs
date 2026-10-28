@@ -2578,7 +2578,7 @@ impl Manager {
         if let Some(rs) = &req.restore {
             let b = self.find_backup(&rs.machine_id, &rs.backup).await?;
             // The key its streams and its record are under (ADR 0035); none in a backup in clear.
-            let key = self.backup_key(&b).await?;
+            let key = self.backup_key(&b, rs).await?;
             let was: Record = serde_json::from_value(backups::spec_of(&b, key.as_deref())?)
                 .map_err(|e| invalid(format!("backup {}: machine record: {e}", b.id)))?;
             // The request says what it says; the backup fills the rest.

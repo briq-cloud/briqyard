@@ -1584,14 +1584,18 @@ pub struct RegisterHostRequest {
 }
 
 /// `POST /v1/hosts/key` (fleet only): a host asks for its pool's key, with its own API token
-/// as the bearer, for the record at the address it advertises (ADR 0026). With `key_id`, the
-/// key of that id instead, whichever host's it is or was: the key a backup's streams are
-/// encrypted under, for a restore (ADR 0035).
+/// as the bearer, for the record at the address it advertises (ADR 0026). With `key_id` and
+/// `restore`, the key of that id instead, whichever host's it is or was: the key a backup's
+/// streams are encrypted under, for a restore the fleet forwarded to the host (ADR 0035).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostKeyRequest {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
+    /// With `key_id`: the restore the key is for, as the fleet forwarded it to this host; a
+    /// backup's key is served only for one, once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<RestoreSpec>,
 }
 
 /// The answer: a pool's key, 64 hex digits (ZFS's `hex` key format).

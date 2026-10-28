@@ -79,9 +79,10 @@ pub async fn pool_key(cfg: &Config) -> Result<String> {
 }
 
 /// The key a backup's streams are encrypted under, by its id (ADR 0035): the pool's own when
-/// its key file has that id, else the fleet's answer, which may be any host's key, a forgotten
-/// host's included. A host with a key file and no fleet restores its own backups only.
-pub async fn by_id(cfg: &Config, key_id: &str) -> Result<String> {
+/// its key file has that id, else the fleet's answer for `restore`, the restore it forwarded
+/// here, which may be any host's key, a forgotten host's included. A host with a key file and
+/// no fleet restores its own backups only.
+pub async fn by_id(cfg: &Config, key_id: &str, restore: &api::RestoreSpec) -> Result<String> {
     if let KeySource::File(p) = cfg.key_source()? {
         let key = from_file(&p)?;
         if api::poolkey::id(&key).as_deref() == Some(key_id) {
@@ -95,7 +96,13 @@ pub async fn by_id(cfg: &Config, key_id: &str) -> Result<String> {
     else {
         bail!("pool key {key_id} is not this host's, and the host has no fleet to ask for it");
     };
-    let key = from_fleet(&fleet.url, &fleet.advertise, &cfg.token, Some(key_id)).await?;
+    let key = from_fleet(
+        &fleet.url,
+        &fleet.advertise,
+        &cfg.token,
+        Some((key_id, restore)),
+    )
+    .await?;
     check(&key)?;
     if api::poolkey::id(&key).as_deref() != Some(key_id) {
         bail!("the fleet answered another key than {key_id}");
@@ -121,12 +128,13 @@ fn from_file(path: &Path) -> Result<String> {
 }
 
 /// `POST /v1/hosts/key` on the fleet, with the host's token, for the record at its address:
-/// the fleet serves a host its own key, or with `key_id` a backup's (ADR 0035).
+/// the fleet serves a host its own key, or with a key id and the restore it is for, a
+/// backup's (ADR 0035).
 async fn from_fleet(
     fleet: &str,
     advertise: &str,
     token: &str,
-    key_id: Option<&str>,
+    backup: Option<(&str, &api::RestoreSpec)>,
 ) -> Result<String> {
     let url = format!("{}/v1/hosts/key", fleet.trim_end_matches('/'));
     let resp = crate::heartbeat::client()
@@ -134,7 +142,8 @@ async fn from_fleet(
         .bearer_auth(token)
         .json(&api::HostKeyRequest {
             url: advertise.to_string(),
-            key_id: key_id.map(String::from),
+            key_id: backup.map(|(id, _)| id.to_string()),
+            restore: backup.map(|(_, rs)| rs.clone()),
         })
         .send()
         .await
@@ -183,6 +192,14 @@ mod tests {
         cfg
     }
 
+    /// The restore the stand-in fleet has open for this host.
+    fn rs() -> api::RestoreSpec {
+        api::RestoreSpec {
+            machine_id: "m_src".into(),
+            backup: "b1".into(),
+        }
+    }
+
     /// Another host's key, which the fleet holds too.
     fn other() -> String {
         "fedcba9876543210".repeat(4)
@@ -190,7 +207,7 @@ mod tests {
 
     /// A stand-in for the fleet's key route: `key()` for the bearer `host-token` asking for
     /// `http://10.0.0.5:7420`, refused otherwise; with a `key_id`, `key()` or `other()` by
-    /// their ids, 404 for any other.
+    /// their ids, for the restore of `m_src` alone (403 otherwise), 404 for any other id.
     async fn fleet() -> String {
         async fn serve(
             headers: HeaderMap,
@@ -206,6 +223,9 @@ mod tests {
             let Some(want) = req.key_id else {
                 return Ok(Json(api::HostKey { key: key() }));
             };
+            if req.restore.map(|r| r.machine_id) != Some("m_src".into()) {
+                return Err(StatusCode::FORBIDDEN);
+            }
             [key(), other()]
                 .into_iter()
                 .find(|k| api::poolkey::id(k).as_deref() == Some(want.as_str()))
@@ -331,19 +351,26 @@ mod tests {
         );
         let alone = with_file(&path);
         assert_eq!(pool_key(&alone).await.unwrap(), key());
-        assert_eq!(by_id(&alone, &own).await.unwrap(), key());
-        let err = by_id(&alone, &theirs).await.unwrap_err();
+        assert_eq!(by_id(&alone, &own, &rs()).await.unwrap(), key());
+        let err = by_id(&alone, &theirs, &rs()).await.unwrap_err();
         assert!(format!("{err:#}").contains("no fleet to ask"), "{err:#}");
         // A key file on a host of a fleet: its own key, or the fleet's for another's.
         let mut filed = with_fleet(&url, "host-token");
         filed.storage.key = format!("file:{}", path.display());
-        assert_eq!(by_id(&filed, &own).await.unwrap(), key());
-        assert_eq!(by_id(&filed, &theirs).await.unwrap(), other());
-        let err = by_id(&filed, &"0".repeat(32)).await.unwrap_err();
+        assert_eq!(by_id(&filed, &own, &rs()).await.unwrap(), key());
+        assert_eq!(by_id(&filed, &theirs, &rs()).await.unwrap(), other());
+        let err = by_id(&filed, &"0".repeat(32), &rs()).await.unwrap_err();
         assert!(format!("{err:#}").contains("404"), "{err:#}");
         // A host keyed by the fleet asks it, for its own id as for another's.
         let keyed = with_fleet(&url, "host-token");
         assert_eq!(pool_key(&keyed).await.unwrap(), key());
-        assert_eq!(by_id(&keyed, &theirs).await.unwrap(), other());
+        assert_eq!(by_id(&keyed, &theirs, &rs()).await.unwrap(), other());
+        // The restore it is for goes with the ask.
+        let elsewhere = api::RestoreSpec {
+            machine_id: "m_other".into(),
+            ..rs()
+        };
+        let err = by_id(&keyed, &theirs, &elsewhere).await.unwrap_err();
+        assert!(format!("{err:#}").contains("403"), "{err:#}");
     }
 }

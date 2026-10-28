@@ -212,8 +212,9 @@ plus `apt-get purge docker.io` and the edge's files.
   stop; `load-key` with the key on stdin; a filesystem never mounted over files; the fleet's
   key route: made at the first ask, the same after, one per host, refused to any other token
   or address, written `0600` before it is answered, in no listing, no longer the host's once
-  it is forgotten but kept for its backups, served by its id to any host and refused for an
-  unknown id (ADR 0035); a backup refused under a key that is not the pool's; a backup raw under its key's id with its record sealed (the env in
+  it is forgotten but kept for its backups, served by its id to the host a restore was forwarded to, once, for that restore
+  only, refused to another host, past its deadline, with no restore open and for an unknown id
+  (ADR 0035); a backup refused under a key that is not the pool's; a backup raw under its key's id with its record sealed (the env in
   no object, a sealed spec that does not open moved to another record), a restore opening it
   with the key of that id and giving its disks the pool's, the key file's own or the fleet's,
   refused with no fleet to ask; a backup in clear restored with no key, the next one whole; a
@@ -300,7 +301,8 @@ plus `apt-get purge docker.io` and the edge's files.
   the fleet's key, the key on none of its files, in its log or in the fleet's host list; and a
   backup there (a directory store for the run when it has none): its key's id, no plaintext in
   its stream, restored through the fleet onto it with the key the fleet served by its id, its
-  disk on the host's pool key. 25 checks.
+  disk on the host's pool key, and its key refused outside a restore the fleet forwarded. 26
+  checks.
 - `hack/fleet-restore.sh` (from the Mac, `FLEET_SH="limactl shell fc sudo" SECOND_HOST_SH="limactl
   shell fc2 sudo"`): the dev fleet backed up to `file:///var/lib/briqyard-fleet-backup` for the
   run (an identity in `/etc/briqyard/fleet-backup.key` on fc, development only), the backup
