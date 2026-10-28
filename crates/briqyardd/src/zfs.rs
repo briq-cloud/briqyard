@@ -390,26 +390,24 @@ impl Zfs {
     /// event that moves its link (ADR 0043), so the link at the volume's name can be missing a
     /// while, or name the device of a disk renamed or destroyed under it. Each device the link
     /// names is asked its dataset (`zvol_id`); a wrong one gets a change event of its own,
-    /// which moves its links. Every zvol's event is replayed, once, when the link is missing
-    /// after that (the volume's own event was lost too) or at the end of the wait.
+    /// which moves its links. Every zvol's event is replayed, once, when the link is still not
+    /// right after that (the volume's own event was lost too) or at the end of the wait.
     async fn wait_device(&self, name: &str) -> Result<PathBuf> {
         self.settle().await?;
         let deadline = tokio::time::Instant::now() + LINK_WAIT;
-        let (mut wrong, mut replayed) = (false, false);
+        let (mut mended, mut replayed) = (false, false);
         loop {
-            // A replay was worked when it returns: a link still wrong had its event dropped
-            // again, and the next is sent a little later.
-            let (last, missing) = match self.link(name).await {
+            let (last, wrong) = match self.link(name).await {
                 Link::Right(dev) => return Ok(dev),
                 Link::Wrong(dev, other) => {
-                    self.replay(Some(&dev)).await?;
-                    wrong = true;
-                    (format!("names {} ({other})", dev.display()), false)
+                    (format!("names {} ({other})", dev.display()), Some(dev))
                 }
-                Link::Missing => ("is missing".to_string(), true),
+                Link::Missing => ("is missing".to_string(), None),
             };
             let over = tokio::time::Instant::now() > deadline;
-            if !replayed && (over || (wrong && missing)) {
+            // A replay was worked when it returns: still not right after one of the wrong
+            // device, the volume's own event was lost too.
+            if !replayed && (over || mended) {
                 self.replay(None).await?;
                 replayed = true;
                 continue;
@@ -422,7 +420,14 @@ impl Zfs {
                     LINK_WAIT.as_secs()
                 ));
             }
-            let pause = if missing { 100 } else { 500 };
+            let pause = match wrong {
+                Some(dev) => {
+                    self.replay(Some(&dev)).await?;
+                    mended = true;
+                    500
+                }
+                None => 100,
+            };
             tokio::time::sleep(Duration::from_millis(pause)).await;
         }
     }

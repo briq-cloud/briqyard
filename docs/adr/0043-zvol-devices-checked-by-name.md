@@ -39,9 +39,9 @@ and `clone_snapshot` resolve the link to `/dev/zdN` and run `zvol_id` on it. The
 volume: `/dev/zdN` is returned, and the jail's node or Firecracker's drive is made from it,
 never from the link. Another dataset, or none: that device gets a change event of its own
 (`udevadm trigger --action=change --settle /dev/zdN`), which makes udev move its links, every
-500 ms while it stays wrong. A link missing after such a repair (the volume's own event was
-lost too), or at the end of the wait, has every zvol's change event replayed once
-(`--subsystem-match=block --sysname-match=zd*`). Still not right after 15 s: an error that names
+500 ms while it stays wrong. A link still not right after one such repair (the volume's own
+event was lost too), or missing at the end of the wait, has every zvol's change event replayed
+once (`--subsystem-match=block --sysname-match=zd*`). Still not right after 15 s: an error that names
 the link and what its device is.
 
 **A rename follows its device.** `Zfs::rename` finds the volume's device first, renames, waits
