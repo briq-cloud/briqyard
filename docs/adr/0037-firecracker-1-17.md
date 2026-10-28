@@ -1,6 +1,6 @@
 # ADR 0037: Firecracker 1.17: deleted blocks go back to the pool; a memory snapshot's files synced after the resume; vsock after a bare pause
 
-Date: 2026-10-27 · Status: proposed; amends ADR 0002 (the disks take discards) and ADR 0031 (a memory snapshot is written unsynced, then synced after the resume)
+Date: 2026-10-27 · Status: accepted; amends ADR 0002 (the disks take discards) and ADR 0031 (a memory snapshot is written unsynced, then synced after the resume)
 
 ## Context
 
