@@ -1,6 +1,6 @@
 # ADR 0042: No autoscaler in the fleet: signals for an external scaler
 
-Date: 2026-10-28 · Status: accepted; supersedes ADR 0007's provisioners, orders and autoscaler (removed in a second change, below)
+Date: 2026-10-28 · Status: accepted; supersedes ADR 0007's provisioners, orders and autoscaler (removed in a second change, below); amended by ADR 0048 (the API's token opens `/metrics` too)
 
 ## Context
 

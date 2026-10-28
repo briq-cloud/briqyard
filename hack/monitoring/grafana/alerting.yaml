@@ -1,0 +1,207 @@
+# Alerts to Slack (ADR 0048), provisioned by hack/install-monitoring.sh when
+# /etc/briqyard-monitoring/alerting.env sets SLACK_WEBHOOK_URL. @LARGEST_SLOT_MB@ is its
+# LARGEST_SLOT_MB (16384 by default): the largest size you offer.
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: briqyard slack
+    receivers:
+      - uid: briqyard-slack
+        type: slack
+        settings:
+          url: $SLACK_WEBHOOK_URL
+policies:
+  - orgId: 1
+    receiver: briqyard slack
+    group_by: [grafana_folder, alertname]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+groups:
+  - orgId: 1
+    name: briqyard
+    folder: briqyard
+    interval: 1m
+    rules:
+      - uid: briqyard-not-answering
+        title: "Not answering"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: briqyard-prometheus
+            model:
+              refId: A
+              expr: 'up'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ .Labels.instance }} has not answered a scrape for two minutes: the host is down, or the fleet cannot reach it."
+      - uid: briqyard-host-condition
+        title: "Host condition"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: briqyard-prometheus
+            model:
+              refId: A
+              expr: 'max by (host, condition) (briqyard_host_condition)'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host {{ .Labels.host }} has {{ .Labels.condition }}: the fleet places no new tenant there."
+      - uid: briqyard-pool-full
+        title: "Pool over 80 %"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: briqyard-prometheus
+            model:
+              refId: A
+              expr: 'max by (host) (briqyard_pool_bytes{kind="used"}) / max by (host) (briqyard_pool_bytes{kind="size"})'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.8] }
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The pool of host {{ .Labels.host }} is over 80 % used; disk_pressure starts under 10 % free."
+      - uid: briqyard-crash-loop
+        title: "Machine in a crash loop"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: briqyard-prometheus
+            model:
+              refId: A
+              expr: 'max by (host, tenant, name, machine) (round(increase(briqyard_machine_restarts_total[10m])))'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [2] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Machine {{ .Labels.name }} ({{ .Labels.machine }}) of tenant {{ .Labels.tenant }} on host {{ .Labels.host }} restarted three times or more in ten minutes."
+      - uid: briqyard-out-of-room
+        title: "Creates refused: no room"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: briqyard-prometheus
+            model:
+              refId: A
+              expr: 'sum by (region, resource) (increase(briqyard_fleet_unschedulable_total{resource=~"memory|disk"}[5m]))'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Creates in region {{ .Labels.region }} were refused for want of {{ .Labels.resource }}: add a host there."
+      - uid: briqyard-host-pressure
+        title: "Creates refused: host under pressure"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: briqyard-prometheus
+            model:
+              refId: A
+              expr: 'sum by (region) (increase(briqyard_fleet_unschedulable_total{resource="pressure"}[5m]))'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "A tenant's create in region {{ .Labels.region }} was refused: its host is under a condition. Free that host or move the tenant."
+      - uid: briqyard-slots-small
+        title: "Largest slot too small"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: briqyard-prometheus
+            model:
+              refId: A
+              expr: 'briqyard_fleet_largest_slot_mb{resource="memory"}'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: ["@LARGEST_SLOT_MB@"] }
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The largest machine region {{ .Labels.region }} still takes is under @LARGEST_SLOT_MB@ MB of memory."

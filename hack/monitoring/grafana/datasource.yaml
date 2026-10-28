@@ -1,0 +1,14 @@
+# Grafana's Prometheus (ADR 0048). Installed by hack/install-monitoring.sh; the address comes
+# from the unit's environment.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: briqyard-prometheus
+    type: prometheus
+    access: proxy
+    url: $PROMETHEUS_URL
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST

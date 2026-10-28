@@ -8,6 +8,7 @@ mod bootstrap;
 mod config;
 mod registry;
 mod restores;
+mod scrape;
 mod signals;
 mod upgrade;
 
@@ -392,6 +393,7 @@ fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/metrics", get(metrics))
+        .route("/v1/metrics/targets", get(scrape::targets))
         .route("/v1/status", get(status))
         .route("/v1/hosts", get(list_hosts).post(add_host))
         .route("/v1/hosts/register", post(register_host))
@@ -400,6 +402,7 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/hosts/:id/undrain", post(undrain_host))
         .route("/v1/hosts/:id/upgrade", post(upgrade::upgrade_host))
         .route("/v1/hosts/:id/retire", post(retire_host))
+        .route("/v1/hosts/:id/metrics", get(scrape::host_metrics))
         .route("/v1/hosts/:id", axum::routing::delete(forget_host))
         .route("/v1/machines", get(list_machines).post(create_machine))
         .route("/v1/endpoints", get(list_endpoints))
@@ -478,15 +481,17 @@ fn bearer(headers: &HeaderMap) -> &str {
         .unwrap_or("")
 }
 
-/// The token a client's path needs (empty: none): the metrics token for `/metrics` when one is
-/// set, so a scraper never holds the API's, and none there on a loopback listener with nothing
-/// in front (`tls` unset), as the daemon's (ADR 0021); else the API's.
-fn token_for<'a>(cfg: &'a config::Config, path: &str) -> &'a str {
-    match path {
-        "/metrics" if cfg.tls == config::Tls::Unset => "",
-        "/metrics" if !cfg.metrics_token.is_empty() => &cfg.metrics_token,
-        _ => &cfg.token,
-    }
+/// The tokens that open a client's path (none set: open). A scraper's path (ADR 0048) takes
+/// the metrics token, so a scraper never holds the API's, or the API's, which reads as much
+/// elsewhere; none there on a loopback listener with nothing in front (`tls` unset), as the
+/// daemon's (ADR 0021). Any other path, the API's.
+fn tokens_for<'a>(cfg: &'a config::Config, path: &str) -> Vec<&'a str> {
+    let tokens = match scrape::is_metrics(path) {
+        true if cfg.tls == config::Tls::Unset => vec![],
+        true => vec![cfg.metrics_token.as_str(), cfg.token.as_str()],
+        false => vec![cfg.token.as_str()],
+    };
+    tokens.into_iter().filter(|t| !t.is_empty()).collect()
 }
 
 async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Response {
@@ -494,11 +499,9 @@ async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Respo
     // A heartbeat and a key request present the host's own token, checked against its record
     // by the handler.
     let open = path == "/healthz" || path == "/v1/hosts/register" || path == "/v1/hosts/key";
-    let token = token_for(&st.cfg, &path);
-    if !open
-        && !token.is_empty()
-        && !api::constant_eq(bearer(req.headers()).as_bytes(), token.as_bytes())
-    {
+    let tokens = tokens_for(&st.cfg, &path);
+    let got = bearer(req.headers()).as_bytes();
+    if !open && !tokens.is_empty() && !tokens.iter().any(|t| api::constant_eq(got, t.as_bytes())) {
         return err(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
@@ -1264,7 +1267,11 @@ async fn relay(resp: reqwest::Response, host: &HostRec) -> Response {
     let status = resp.status();
     let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
     let rid = resp.headers().get("x-request-id").cloned();
-    let data = resp.bytes().await.unwrap_or_default();
+    // A body cut short is a host that did not answer, never its status with half a body.
+    let data = match resp.bytes().await {
+        Ok(data) => data,
+        Err(e) => return unreachable_host(host, e),
+    };
     let mut out = Response::new(Body::from(data));
     *out.status_mut() = status;
     if let Some(ct) = ct {

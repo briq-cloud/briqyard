@@ -1482,6 +1482,8 @@ async fn each_refusal_is_counted_by_what_ran_out_and_the_room_is_shown() {
     for want in [
         r#"briqyard_fleet_hosts{state="ready"} 2"#,
         r#"briqyard_fleet_hosts{state="draining"} 1"#,
+        r#"briqyard_fleet_host_state{host="b",region="gra",state="draining"} 1"#,
+        r#"briqyard_fleet_host_state{host="c",region="gra",state="ready"} 1"#,
         // a and c: b is drained.
         r#"briqyard_fleet_free_mb{resource="memory",region="gra"} 124000"#,
         r#"briqyard_fleet_free_mb{resource="disk",region="gra"} 910000"#,
@@ -1579,14 +1581,22 @@ async fn metrics_take_the_metrics_token_or_the_apis() {
     let (s, _, _) = call(&f.st, "GET", "/metrics", "", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     scrape(&f.st, "api").await;
-    // A metrics token of its own: the scraper's, and the API's no longer opens it.
+    // A metrics token of its own: the scraper's; the API's still opens what it reads anyway
+    // (ADR 0048). The same on every path a scraper reads.
     cfg.metrics_token = "scrape".into();
     let f = fleet(cfg.clone());
     scrape(&f.st, "scrape").await;
-    let (s, _, _) = call(&f.st, "GET", "/metrics", "api", None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    scrape(&f.st, "api").await;
+    for path in ["/metrics", "/v1/metrics/targets", "/v1/hosts/h1/metrics"] {
+        let (s, _, _) = call(&f.st, "GET", path, "", None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{path}");
+        let (s, _, _) = call(&f.st, "GET", path, "other", None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{path}");
+    }
     let (s, _, _) = call(&f.st, "GET", "/v1/status", "scrape", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "it opens nothing else");
+    let (s, _, _) = call(&f.st, "GET", "/v1/hosts/h1/drain", "scrape", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "nor a host's other routes");
     // On loopback with nothing in front (`tls` unset), none, as the daemon's.
     cfg.tls = config::Tls::Unset;
     let f = fleet(cfg);
@@ -1594,6 +1604,205 @@ async fn metrics_take_the_metrics_token_or_the_apis() {
     assert!(lines.contains(&r#"briqyard_fleet_hosts{state="ready"} 0"#.to_string()));
     let (s, _, _) = call(&f.st, "GET", "/v1/status", "", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+// --- what Prometheus scrapes (ADR 0048) ---
+
+#[tokio::test]
+async fn the_targets_are_every_host_through_the_relay_at_the_address_asked() {
+    let f = fleet(config::Config {
+        token: "api".into(),
+        ..Default::default()
+    });
+    seed(&f.st, "a", 64_000, 0, 0, &[]);
+    seed(&f.st, "b", 64_000, 0, 0, &[]);
+    seed(&f.st, "c", 64_000, 0, 0, &[]);
+    seed(&f.st, "new", 64_000, 0, 0, &[]);
+    f.st.reg.lock().unwrap().hosts.get_mut("a").unwrap().region = "gra".into();
+    set_state(&f.st, "b", "down");
+    set_state(&f.st, "c", "draining");
+    set_state(&f.st, "new", "provisioning");
+    let host = [("host", "fleet.example.com")];
+    let peer = std::net::IpAddr::from([127, 0, 0, 1]);
+    let (s, _, body) = call_with(
+        &f.st,
+        peer,
+        &host,
+        "GET",
+        "/v1/metrics/targets",
+        "api",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let want = serde_json::json!([
+        { "targets": ["fleet.example.com"], "labels": { "instance": "fleet" } },
+        { "targets": ["fleet.example.com"], "labels": {
+            "__metrics_path__": "/v1/hosts/a/metrics", "instance": "a", "host": "a", "region": "gra" } },
+        // A down host is still a target: scraped, it is `up == 0`.
+        { "targets": ["fleet.example.com"], "labels": {
+            "__metrics_path__": "/v1/hosts/b/metrics", "instance": "b", "host": "b", "region": "" } },
+        { "targets": ["fleet.example.com"], "labels": {
+            "__metrics_path__": "/v1/hosts/c/metrics", "instance": "c", "host": "c", "region": "" } },
+        // A host still being bootstrapped has no daemon to scrape yet.
+    ]);
+    assert_eq!(json(&body), want);
+    // Retired and forgotten: gone from the next answer.
+    f.st.reg.lock().unwrap().hosts.remove("c");
+    let (_, _, body) = call_with(
+        &f.st,
+        peer,
+        &host,
+        "GET",
+        "/v1/metrics/targets",
+        "api",
+        None,
+    )
+    .await;
+    assert_eq!(json(&body).as_array().unwrap().len(), 3);
+    // No Host header: no address to give.
+    let (s, _, body) = call(&f.st, "GET", "/v1/metrics/targets", "api", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+}
+
+/// A host whose `/metrics` answers its text, over TLS when `cert` is given.
+async fn metrics_host(cert: Option<&rcgen::CertifiedKey>) -> String {
+    async fn text(headers: HeaderMap) -> Response {
+        if headers.get(header::AUTHORIZATION).map(|v| v.as_bytes()) != Some(b"Bearer h-tok") {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        (
+            [(
+                header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )],
+            "briqyard_machines_total 3\n",
+        )
+            .into_response()
+    }
+    let app = Router::new()
+        .route("/metrics", get(text))
+        .into_make_service();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    match cert {
+        None => {
+            tokio::spawn(axum_server::from_tcp(listener).serve(app));
+            format!("http://{addr}")
+        }
+        Some(c) => {
+            let cfg = api::tls::server_config(
+                c.cert.pem().as_bytes(),
+                c.key_pair.serialize_pem().as_bytes(),
+            )
+            .unwrap();
+            let cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(cfg));
+            tokio::spawn(axum_server::from_tcp_rustls(listener, cfg).serve(app));
+            format!("https://{addr}")
+        }
+    }
+}
+
+fn metrics_fleet(url: &str, fingerprint: &str) -> Fleet {
+    fleet(config::Config {
+        token: "api".into(),
+        hosts: vec![config::StaticHost {
+            id: "h1".into(),
+            url: url.into(),
+            token: "h-tok".into(),
+            tls_fingerprint: fingerprint.into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+}
+
+#[tokio::test]
+async fn a_hosts_metrics_are_relayed_over_its_pinned_certificate_with_its_token() {
+    let (cert, fp) = certificate();
+    let url = metrics_host(Some(&cert)).await;
+    let f = metrics_fleet(&url, &fp);
+    let (s, headers, body) = call(&f.st, "GET", "/v1/hosts/h1/metrics", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        body, "briqyard_machines_total 3\n",
+        "the host's text as it is"
+    );
+    assert_eq!(
+        headers[header::CONTENT_TYPE],
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    assert_eq!(headers["x-briqyard-host"], "h1");
+    // Another certificate at that address: not the host, nothing sent to it.
+    let (_, other) = certificate();
+    let f = metrics_fleet(&url, &other);
+    let (s, _, body) = call(&f.st, "GET", "/v1/hosts/h1/metrics", "api", None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(
+        body.contains(&format!("is not the pinned {other}")),
+        "{body}"
+    );
+    // A host's own refusal is relayed as it is: a token the host does not take.
+    let url = metrics_host(None).await;
+    let f = metrics_fleet(&url, "");
+    f.st.reg.lock().unwrap().hosts.get_mut("h1").unwrap().token = "stale".into();
+    let (s, _, _) = call(&f.st, "GET", "/v1/hosts/h1/metrics", "api", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_host_down_or_silent_is_not_scraped_as_up() {
+    let url = metrics_host(None).await;
+    let f = metrics_fleet(&url, "");
+    set_state(&f.st, "h1", "down");
+    let (s, _, body) = call(&f.st, "GET", "/v1/hosts/h1/metrics", "api", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "host_down");
+    // Ready in the registry, nothing listening: it does not answer.
+    let closed = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    let f = metrics_fleet(&format!("http://{closed}"), "");
+    let (s, _, body) = call(&f.st, "GET", "/v1/hosts/h1/metrics", "api", None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(json(&body)["code"], "host_unreachable");
+    assert!(
+        json(&body)["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("host h1: "),
+        "{body}"
+    );
+    let (s, _, body) = call(&f.st, "GET", "/v1/hosts/nope/metrics", "api", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
+async fn a_body_cut_short_is_a_host_that_did_not_answer() {
+    async fn cut() -> Response {
+        let chunks: Vec<std::io::Result<Bytes>> = vec![
+            Ok(Bytes::from_static(b"briqyard_machines_total 3\n")),
+            Err(std::io::Error::other("gone")),
+        ];
+        Body::from_stream(futures::stream::iter(chunks)).into_response()
+    }
+    let app = Router::new()
+        .route("/metrics", get(cut))
+        .into_make_service();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum_server::from_tcp(listener).serve(app));
+    let f = metrics_fleet(&format!("http://{addr}"), "");
+    let (s, _, body) = call(&f.st, "GET", "/v1/hosts/h1/metrics", "api", None).await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_GATEWAY,
+        "a 200 with half a body would read as up: {body}"
+    );
+    assert_eq!(json(&body)["code"], "host_unreachable");
 }
 
 #[tokio::test]

@@ -143,6 +143,8 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | kubelet `/metrics`, cAdvisor (per pod CPU, memory, disk, network) | ✓ per-machine series on `/metrics` from the tick's measure (ADR 0021); disk bytes and throttling from Firecracker (ADR 0030) | | |
 | kube-state-metrics (machines by state, restarts) | ✓ `briqyard_machine_state`, `_restarts_total`, `_boot_seconds` | | |
 | metrics-server, `kubectl top pod` | ✓ `briqyard top`, `GET /v1/top` (the last 15 s) | | |
+| Metrics pipeline (Prometheus finding kubelets through the API server) | ✓ the fleet lists every host for Prometheus's HTTP discovery (`/v1/metrics/targets`) and relays each host's `/metrics` over its pinned TLS; Prometheus beside the fleet, optional, 90 days (ADR 0048) | | |
+| Dashboards and alerts (kube-prometheus-stack's Grafana and rules) | ✓ Grafana with a fleet, a host and a machines and tenants dashboard, alerts to Slack: a host down, a condition, a pool over 80 %, a crash loop, no room (ADR 0048) | | |
 | Usage accounting (OpenCost, outside core) | ★ hourly usage buckets (ADR 0017) | | |
 | Prices, billing | | | briq |
 

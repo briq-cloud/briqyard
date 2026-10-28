@@ -1,0 +1,2446 @@
+{
+  "uid": "briqyard-machines",
+  "title": "briqyard: machines and tenants",
+  "description": "Machines and tenants across the hosts: the busiest, each one's series, restarts and drops, use per tenant.",
+  "tags": [
+    "briqyard"
+  ],
+  "timezone": "browser",
+  "editable": false,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "version": 1,
+  "links": [
+    {
+      "title": "briqyard",
+      "type": "dashboards",
+      "tags": [
+        "briqyard"
+      ],
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": true,
+      "icon": "external link",
+      "targetBlank": false,
+      "tooltip": "",
+      "url": ""
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "host",
+        "label": "Host",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "briqyard-prometheus"
+        },
+        "query": {
+          "qryType": 1,
+          "query": "label_values(up{host!=\"\"}, host)",
+          "refId": "host-var"
+        },
+        "definition": "label_values(up{host!=\"\"}, host)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "hide": 0,
+        "regex": "",
+        "allValue": ".*"
+      },
+      {
+        "type": "query",
+        "name": "tenant",
+        "label": "Tenant",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "briqyard-prometheus"
+        },
+        "query": {
+          "qryType": 1,
+          "query": "label_values(briqyard_machine_state{host=~\"$host\"}, tenant)",
+          "refId": "tenant-var"
+        },
+        "definition": "label_values(briqyard_machine_state{host=~\"$host\"}, tenant)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "hide": 0,
+        "regex": "",
+        "allValue": ".*"
+      },
+      {
+        "type": "query",
+        "name": "machine",
+        "label": "Machine",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "briqyard-prometheus"
+        },
+        "query": {
+          "qryType": 1,
+          "query": "label_values(briqyard_machine_state{host=~\"$host\", tenant=~\"$tenant\"}, machine)",
+          "refId": "machine-var"
+        },
+        "definition": "label_values(briqyard_machine_state{host=~\"$host\", tenant=~\"$tenant\"}, machine)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "hide": 0,
+        "regex": "",
+        "allValue": ".*"
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Machines now",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1
+    },
+    {
+      "type": "stat",
+      "title": "Running",
+      "description": "Machines running among those selected.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "count(briqyard_machine_state{state=\"running\", host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) or vector(0)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2
+    },
+    {
+      "type": "stat",
+      "title": "Asleep or stopped",
+      "description": "Machines stopped among those selected (asleep ones included).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "count(briqyard_machine_state{state=\"stopped\", host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) or vector(0)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "blue"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "id": 3
+    },
+    {
+      "type": "stat",
+      "title": "In error",
+      "description": "Machines in state error among those selected.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "count(briqyard_machine_state{state=\"error\", host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) or vector(0)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 1,
+                "color": "red"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "id": 4
+    },
+    {
+      "type": "stat",
+      "title": "In a crash loop",
+      "description": "Machines restarted three times or more in the last ten minutes by their restart policy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "count(max by (machine, name, tenant) (round(increase(briqyard_machine_restarts_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[10m]))) >= 3) or vector(0)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 1,
+                "color": "red"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "id": 5
+    },
+    {
+      "type": "stat",
+      "title": "Memory in use",
+      "description": "Memory the selected machines' processes hold.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum(briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) or vector(0)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "blue"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "id": 6
+    },
+    {
+      "type": "stat",
+      "title": "CPU in use",
+      "description": "Cores the selected machines use.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum(rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval])) or vector(0)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "blue"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 7
+    },
+    {
+      "type": "table",
+      "title": "Machines",
+      "description": "Each selected machine now: where it is, its state, what it uses.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_machine_state{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine) (briqyard_machine_memory_limit_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m]))",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine) (briqyard_machine_disk_used_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine) (briqyard_machine_restarts_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "blue"
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "State"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "running": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "stopped": {
+                        "color": "blue",
+                        "index": 1
+                      },
+                      "created": {
+                        "color": "light-blue",
+                        "index": 2
+                      },
+                      "starting": {
+                        "color": "light-green",
+                        "index": 3
+                      },
+                      "stopping": {
+                        "color": "super-light-blue",
+                        "index": 4
+                      },
+                      "destroying": {
+                        "color": "#8f8f8f",
+                        "index": 5
+                      },
+                      "error": {
+                        "color": "red",
+                        "index": 6
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Memory|Size|Disk"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CPU (cores)"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Host"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Host dashboard",
+                    "url": "/d/briqyard-host?var-host=${__value.raw}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "machine",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "pattern": "^(machine|name|tenant|host|role|state|Value #[B-F])$"
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "name": 0,
+              "tenant": 1,
+              "machine": 2,
+              "host": 3,
+              "role": 4,
+              "state": 5,
+              "Value #B": 6,
+              "Value #C": 7,
+              "Value #D": 8,
+              "Value #E": 9,
+              "Value #F": 10
+            },
+            "renameByName": {
+              "name": "Name",
+              "tenant": "Tenant",
+              "machine": "Machine",
+              "host": "Host",
+              "role": "Role",
+              "state": "State",
+              "Value #B": "Memory",
+              "Value #C": "Size",
+              "Value #D": "CPU (cores)",
+              "Value #E": "Disk",
+              "Value #F": "Restarts"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Memory",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 8
+    },
+    {
+      "type": "row",
+      "title": "Busiest machines",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 9
+    },
+    {
+      "type": "bargauge",
+      "title": "Top 10 by CPU",
+      "description": "Cores used over the last five minutes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "topk(10, sum by (machine, name, tenant) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m])))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          },
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "namePlacement": "left",
+        "sizing": "auto",
+        "minVizHeight": 16,
+        "maxVizHeight": 24
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 15
+      },
+      "id": 10
+    },
+    {
+      "type": "bargauge",
+      "title": "Top 10 by memory",
+      "description": "Memory their processes hold now.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "topk(10, sum by (machine, name, tenant) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "blue"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "namePlacement": "left",
+        "sizing": "auto",
+        "minVizHeight": 16,
+        "maxVizHeight": 24
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 15
+      },
+      "id": 11
+    },
+    {
+      "type": "bargauge",
+      "title": "Top 10 by network",
+      "description": "Internet and endpoint traffic, both ways, over the last five minutes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "topk(10, sum by (machine, name, tenant) (rate(briqyard_machine_internet_in_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m]) + rate(briqyard_machine_internet_out_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m]) + rate(briqyard_machine_ingress_in_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m]) + rate(briqyard_machine_ingress_out_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m])))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          },
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "purple"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "namePlacement": "left",
+        "sizing": "auto",
+        "minVizHeight": 16,
+        "maxVizHeight": 24
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 15
+      },
+      "id": 12
+    },
+    {
+      "type": "row",
+      "title": "Per machine",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "id": 13
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU",
+      "description": "Cores each machine uses.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "id": 14
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory",
+      "description": "Memory each machine's process holds (its cgroup: guest memory touched plus Firecracker's).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine, name, tenant) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "id": 15
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory against its size",
+      "description": "What it holds over its size. Above 1: Firecracker's own memory on top of a guest that touched all of its own.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine, name, tenant) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) / sum by (machine, name, tenant) (briqyard_machine_memory_limit_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 0.9,
+                "color": "orange"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "id": 16
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk used",
+      "description": "What each machine's disks, their snapshots and its memory snapshot take on the pool.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine, name, tenant) (briqyard_machine_disk_used_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "id": 17
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk throughput",
+      "description": "Bytes each guest read and wrote (a line a minute from Firecracker). Writes below the axis.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_disk_read_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}} read",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_disk_write_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}} write",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": " write$"
+            },
+            "properties": [
+              {
+                "id": "custom.transform",
+                "value": "negative-Y"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
+      "id": 18
+    },
+    {
+      "type": "timeseries",
+      "title": "Network",
+      "description": "Internet traffic through the NAT and endpoint traffic through the ingress, each machine. Outbound below the axis.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_internet_in_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]) + rate(briqyard_machine_ingress_in_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}} in",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_internet_out_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]) + rate(briqyard_machine_ingress_out_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}} out",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": " out$"
+            },
+            "properties": [
+              {
+                "id": "custom.transform",
+                "value": "negative-Y"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
+      "id": 19
+    },
+    {
+      "type": "row",
+      "title": "Restarts, limits, boots",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
+      "id": 20
+    },
+    {
+      "type": "timeseries",
+      "title": "Restarts in ten minutes",
+      "description": "Restarts by its restart policy over the last ten minutes. Three or more is a crash loop (red zone).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "max by (machine, name, tenant) (round(increase(briqyard_machine_restarts_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[10m])))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "area"
+            }
+          },
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "transparent"
+              },
+              {
+                "value": 3,
+                "color": "red"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "id": 21
+    },
+    {
+      "type": "timeseries",
+      "title": "Egress drops",
+      "description": "Packets each machine's egress limits dropped: a blocked port, its connection rate, its bandwidth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_egress_dropped_packets_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "id": 22
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk requests held back",
+      "description": "Requests each machine's disk limits held back.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_disk_throttled_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "iops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "id": 23
+    },
+    {
+      "type": "timeseries",
+      "title": "Boot time",
+      "description": "Each machine's last start, starting to running (a resume included).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "max by (machine, name, tenant) (briqyard_machine_boot_seconds{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "id": 24
+    },
+    {
+      "type": "row",
+      "title": "Tenants",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 66
+      },
+      "id": 25
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU per tenant",
+      "description": "Cores each tenant's machines use.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (tenant) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 67
+      },
+      "id": 26
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory per tenant",
+      "description": "Memory each tenant's machines hold.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (tenant) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "{{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 67
+      },
+      "id": 27
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk per tenant",
+      "description": "What each tenant's machines take on the pools.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (tenant) (briqyard_machine_disk_used_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "{{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 75
+      },
+      "id": 28
+    },
+    {
+      "type": "timeseries",
+      "title": "Internet per tenant",
+      "description": "Internet traffic of each tenant's machines, both ways.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (tenant) (rate(briqyard_machine_internet_in_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]) + rate(briqyard_machine_internet_out_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{tenant}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 75
+      },
+      "id": 29
+    },
+    {
+      "type": "table",
+      "title": "Tenants",
+      "description": "Each tenant now: its machines, how many run, and what they use.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "count by (tenant) (briqyard_machine_state{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "count by (tenant) (briqyard_machine_state{state=\"running\", host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) or (count by (tenant) (briqyard_machine_state{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) * 0)",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (tenant) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m]))",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (tenant) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (tenant) (briqyard_machine_disk_used_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "F",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum by (tenant) (briqyard_machine_restarts_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "blue"
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Memory|Disk"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CPU (cores)"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "tenant": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4,
+              "Value #E": 5,
+              "Value #F": 6
+            },
+            "renameByName": {
+              "tenant": "Tenant",
+              "Value #A": "Machines",
+              "Value #B": "Running",
+              "Value #C": "CPU (cores)",
+              "Value #D": "Memory",
+              "Value #E": "Disk",
+              "Value #F": "Restarts"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "Memory",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 83
+      },
+      "id": 30
+    }
+  ]
+}
