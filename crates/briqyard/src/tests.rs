@@ -838,16 +838,8 @@ fn endpoint_tenant_and_image_commands() {
 #[test]
 fn host_commands() {
     assert!(matches!(parse(&["host", "ls"]).cmd, Cmd::Host(HostCmd::Ls)));
-    match parse(&["host", "order", "--reason", "more capacity"]).cmd {
-        Cmd::Host(HostCmd::Order { reason }) => assert_eq!(reason, "more capacity"),
-        _ => panic!("not an order"),
-    }
-    match parse(&["host", "order"]).cmd {
-        Cmd::Host(HostCmd::Order { reason }) => {
-            assert_eq!(reason, "", "the fleet writes a default")
-        }
-        _ => panic!("not an order"),
-    }
+    // The fleet buys no server (ADR 0042).
+    assert_eq!(fails(&["host", "order"]), ErrorKind::InvalidSubcommand);
     match parse(&["host", "retire", "h_1"]).cmd {
         Cmd::Host(HostCmd::Retire { id }) => assert_eq!(id, "h_1"),
         _ => panic!("not a retire"),
@@ -1275,7 +1267,7 @@ fn the_host_table() {
         url: "https://10.0.0.9:7420".into(),
         ssh: String::new(),
         region: "par".into(),
-        provider: "scaleway".into(),
+        provider: "static".into(),
         state: "ready".into(),
         capacity: api::Capacity {
             memory_mb: 64000,
@@ -1308,7 +1300,7 @@ fn the_host_table() {
         ],
         started: Default::default(),
     };
-    let ordered = api::Host {
+    let pending = api::Host {
         id: "h_srv-9".into(),
         url: String::new(),
         state: "provisioning".into(),
@@ -1331,9 +1323,9 @@ fn the_host_table() {
         region: "gra".into(),
         note: String::new(),
         public_tcp_ports: vec![80, 443, 5432],
-        ..ordered.clone()
+        ..pending.clone()
     };
-    let out = host_table(&[ready, ordered, added]);
+    let out = host_table(&[ready, pending, added]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines.len(),

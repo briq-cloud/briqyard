@@ -27,7 +27,7 @@ briqyard runs any OCI image in a Firecracker microVM on servers you own. Each ma
 | 🗄️ **Backups** | ZFS streams to S3 or a directory: incremental, encrypted, on a schedule, restored on any host |
 | 🔐 **Encrypted at rest** | Every host's pool is encrypted (AES-256-GCM) with a key the fleet holds; no swap |
 | 🛡️ **Isolation** | KVM per machine; Firecracker under its jailer, with a chroot, a uid, a pid namespace, a cgroup and seccomp filters each |
-| 🖥️ **Several hosts** | One API across hosts: placement by region and free memory, hosts added over SSH or ordered from a provider's API (with an autoscaler), upgraded in place while their machines run |
+| 🖥️ **Several hosts** | One API across hosts: placement by region and free memory, a server you bring added and installed over SSH, upgraded in place while its machines run. Capacity signals per region for a scaler of yours |
 | 📈 **Observable** | An event log with a watch, a version per machine (`If-Match`), Prometheus metrics, host conditions, usage per machine |
 
 ## Architecture
@@ -83,7 +83,7 @@ Not there yet: replicas and groups of identical machines, rolling updates, load 
 |---|---|---|
 | `briqyardd` | Every host, as root | Runs the host's machines: their Firecracker processes, disks, networks, endpoints, sleep and backups. Serves the API |
 | `briqyard-init` | Inside every machine, as PID 1 | Starts the image's command and reports when it exits. Answers exec, files and terminal sessions over vsock |
-| `briqyard-fleet` | One server that reaches every host | Serves the same API for the whole fleet: picks a host for each tenant and forwards each call there. Keeps the list of hosts and their disk keys. Installs and upgrades hosts over SSH, and can order servers from Hetzner Robot, Scaleway or OVH (dry run by default) |
+| `briqyard-fleet` | One server that reaches every host | Serves the same API for the whole fleet: picks a host for each tenant and forwards each call there. Keeps the list of hosts and their disk keys. Installs and upgrades hosts over SSH. Says what ran out when a create finds no room |
 | `briqyard` | Anywhere | The CLI, for one host or a fleet |
 
 `hack/bootstrap-host.sh` turns a fresh Ubuntu server into a host; the fleet runs it to install a host and again to upgrade it. Two libraries are shared: `briqyard-api` (the API's types, and the protocol between a host and its machines' init) and `briqyard-objstore` (S3 or a directory, for backups and the fleet's registry).

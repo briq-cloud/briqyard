@@ -228,7 +228,7 @@ it, ADR 0029), `put` and
 them with `waitid(WNOWAIT)` and leaves alone the children it waits for itself, so a command's
 exit status is never stolen. When the main process exits, the init connects out to the host
 (vsock port 7422, which Firecracker brings to the daemon as `<vsock socket>_7422`), sends one
-`ExitReport` frame (code, oom, requested), waits for the daemon's close, and resets the machine,
+`ExitReport` frame (code, oom, requested; with a program it could not start, its reason), waits for the daemon's close, and resets the machine,
 which ends Firecracker; the daemon settles the machine from the report and applies the restart
 policy (ADR 0004). The `[briqyard] exit …` line on the serial console is a trace for a person;
 nothing reads it, so nothing a guest prints can set its exit.
@@ -372,7 +372,7 @@ Hosts report their capacity and tenants (`POST /v1/hosts/register`, every 15 s, 
 daemon's `fleet:` configuration) or are listed in the fleet's configuration and polled. A host
 has one credential, its own API token: the fleet forwards with it and the host's heartbeat
 presents it, and a heartbeat is taken only for the host record that expects that token at that
-address (the record of an order, or a `hosts:` entry); any other is refused. A host silent for
+address (the record of a `host add`, or a `hosts:` entry); any other is refused. A host silent for
 a minute is `down`: its machines' calls answer 503 `host_down` until it is back, and a listing
 of machines or endpoints is never partial (a tenant's listing asks its host alone; a host that
 is down or does not answer fails the listing), since a control plane reads a machine missing
@@ -383,26 +383,20 @@ fails the request that needed it. It is written to the object store once a minut
 changed, encrypted with age to a key kept off the fleet's host, and before any pool key is
 served; `briqyard-fleet restore` brings it back (ADR 0032).
 
-Provisioners add and release hosts through a cloud API: `hetzner-robot` (dedicated servers,
-monthly), `scaleway` (Elastic Metal, hourly), `static` (none). `POST /v1/hosts/order` orders
-a server and `POST /v1/hosts/{id}/retire` makes a host `retiring` and releases it once empty; the
-autoscaler, when `provisioner.enabled` is set, does the same on its own (no slot of `slot_mb`
-left: order one; a provisioned host empty for `idle_grace` above `min_hosts`: release it),
-one change a minute, never past `max_hosts`. Adding a host costs money, so every provisioner
-stays in `dry_run` unless told otherwise. The autoscaler and the provisioners are on their way
-out (ADR 0042): as Kubernetes's scheduler does for the Cluster Autoscaler, placement counts
-each create it refuses for want of room by what ran out (`memory`, `disk`, `pressure`) and
-region, and the fleet's `/metrics` and `/v1/status` show each region's free room and largest
-slot (`signals.rs`); a scaler outside reads them and adds hosts.
+The fleet buys no server (ADR 0042). As Kubernetes's scheduler does for the Cluster
+Autoscaler, placement counts each create it refuses for want of room by what ran out (`memory`,
+`disk`, `pressure`) and region, and the fleet's `/metrics` and `/v1/status` show each region's
+free room and largest slot (`signals.rs`); a scaler outside reads them, buys a server and adds
+it. `POST /v1/hosts/{id}/retire` makes a host `retiring` and forgets it once empty; the server
+is the operator's to give back.
 
-A server becomes a host in three steps: the fleet polls the provider for its address, runs
-`hack/bootstrap-host.sh` on it over SSH (the script on stdin, the fleet's URL and a fresh API
-token in the environment) until it succeeds, and the host turns `ready` on its first heartbeat,
-taken for the record made at the order. A server bought by hand is added (`POST /v1/hosts`,
-`briqyard host add`, its SSH and API addresses) and goes through the last two steps alike. A
-host's API may live on a private network (OVH's vRack, the fleet's `private_network`) while SSH
+A server becomes a host in three steps: it is added (`POST /v1/hosts`, `briqyard host add`, its
+SSH and API addresses), the fleet runs `hack/bootstrap-host.sh` on it over SSH (the script on
+stdin, the fleet's URL and a fresh API token in the environment, the fleet's `bootstrap:`
+settings) until it succeeds, and the host turns `ready` on its first heartbeat, taken for the
+record made at the add. A host's API may live on a private network (OVH's vRack, the fleet's `private_network`) while SSH
 reaches its public address: the script binds the API and the endpoints to the private address
-and closes the public interface to all but SSH (ADR 0028). No provider's API returns the server's SSH host key:
+and closes the public interface to all but SSH (ADR 0028). The fleet is given no SSH host key with the server:
 the key seen at the first successful bootstrap is pinned in `<state_dir>/known_hosts`, its
 fingerprint in the host's note, and later connects are strict against it. An upgrade runs the
 same script over the same connection with another release (ADR 0027).

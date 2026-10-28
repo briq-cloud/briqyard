@@ -1,6 +1,6 @@
 # ADR 0027: Host upgrade and version skew: versions everywhere, an additive wire, a daemon that hands its machines over
 
-Date: 2026-10-21 · Status: accepted; amends ADR 0005 (what a daemon's stop and start do with machines) and ADR 0013 (drain is not retire)
+Date: 2026-10-21 · Status: accepted; amends ADR 0005 (what a daemon's stop and start do with machines) and ADR 0013 (drain is not retire); the bootstrap's settings are under `bootstrap:` since ADR 0042
 
 ## Context
 

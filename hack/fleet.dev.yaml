@@ -18,21 +18,3 @@ hosts:
 placement:
   fill_ceiling: 0.85
   down_after_sec: 60
-# A dry-run Scaleway provisioner: `briqyard host order` records what it would order and makes
-# nothing; `briqyard host retire` releases it the same way.
-provisioner:
-  kind: scaleway
-  enabled: false
-  dry_run: true
-  min_hosts: 1
-  max_hosts: 3
-  slot_mb: 8192
-  idle_grace: 2h
-  # The same with OVHcloud (`kind: ovh`): an Eco or Bare Metal plan in a data center, the
-  # account's SSH key installed with Ubuntu; credentials from OVH_APPLICATION_KEY,
-  # OVH_APPLICATION_SECRET and OVH_CONSUMER_KEY. See docs/OPERATIONS.md.
-  # ovh:
-  #   plan_code: 25risem01-v2
-  #   range: eco
-  #   datacenter: gra
-  #   ssh_key_name: fleet

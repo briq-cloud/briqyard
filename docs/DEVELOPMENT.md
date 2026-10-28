@@ -2,7 +2,9 @@
 
 briqyard is a Rust workspace. The daemon and the init only run on Linux with KVM; the API
 types, the CLI and the unit tests build anywhere; the tests of image extraction and of the init
-run on Linux only.
+run on Linux only. The init's test that changes users needs root, so it is `#[ignore]`d: CI
+runs its test binary as root (`--ignored run_as`, `.github/workflows/ci.yml`); in the VM, the
+same step.
 
 ## On a Linux host with KVM
 
@@ -155,7 +157,7 @@ ssh-keygen -q -t ed25519 -N '' -f /etc/byt-fleet/key && cat /etc/byt-fleet/key.p
 ln -sfn "$PWD/bin" /root/bin       # the binaries hack/vm.sh built, copied out of fc's target-<tree>
 ```
 
-A fleet on fc2 itself (`listen: 0.0.0.0:7431` and `tls: off`, the token alone as in `hack/fleet.dev.yaml`: on loopback with no proxy in front, every host call would be refused for want of a caller address; `provisioner.bootstrap`: `enabled`, `ssh_key:
+A fleet on fc2 itself (`listen: 0.0.0.0:7431` and `tls: off`, the token alone as in `hack/fleet.dev.yaml`: on loopback with no proxy in front, every host call would be refused for want of a caller address; `bootstrap`: `enabled`, `ssh_key:
 /etc/byt-fleet/key`, `pool_device: $D0,$D1`, `fleet_url: http://127.0.0.1:7431`,
 `private_network: 10.99.0.0/24`, `private_interface: byvrack0`, `allowed_clients`), then
 `briqyard host add 192.168.64.2 --address 10.99.0.2`: the fleet bootstraps fc2 over SSH as it
@@ -184,7 +186,8 @@ plus `apt-get purge docker.io` and the edge's files.
   harness over a temp directory, the same fake `zfs` and a mock host (`Vmm`, `Guest`,
   `Net`; ADR 0010): create to running, boot failures, start against destroy, starts past
   capacity, stop and suspend, a caller that hangs up, crash recovery, the orphan sweep,
-  the sleeper's tick, the init's exit report, fork snapshots freed, backups (the schedule due
+  the sleeper's tick, the init's exit report and its reason for a program it could not start,
+  fork snapshots freed, backups (the schedule due
   and not before, at most `at_once`, one per machine, a machine with no process skipped while
   unchanged, retention and its restores, delete and `chain`, a failure and its backoff, a
   refused store leaving nothing, a destroyed machine's held, counted and expired, a backup racing
@@ -249,7 +252,7 @@ plus `apt-get purge docker.io` and the edge's files.
   registry that does not parse refused, never read as empty, and fields it does not know
   written back; a host call from another address than its record's refused unless behind
   `tls: off`; a key whose write failed taken back, never served; a keyed host forgotten only by
-  force; a drained host never released, a retiring one once empty), upgrades (the init's and
+  force; a drained host never forgotten, a retiring one once empty), upgrades (the init's and
   the VMM's versions recorded at boot, a snapshot of another VMM booted cold, a hand-over that
   waits for a stop to settle, touches no machine and lets no transition begin, the adoption
   after it with `gone` apart from `stopped`, the daemon's start booting again what the host
@@ -263,7 +266,9 @@ plus `apt-get purge docker.io` and the edge's files.
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, image layers
-  (busybox's hard links, Debian's merged `/usr`), DNS,
+  (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary group
+  (running, its uid, gid and groups), a program that cannot start (409 `boot_failed` with the
+  init's reason), DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress (two `Host` lines
   refused, an absolute-form target routed by its authority and refused when `Host` names
@@ -315,19 +320,20 @@ plus `apt-get purge docker.io` and the edge's files.
   root disk given back to the pool, exec after a bare pause and resume), a volume grown (ADR
   0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
-  data kept, the next backup incremental and its restore at the grown size). 227 checks, 223
+  data kept, the next backup incremental and its restore at the grown size). 231 checks, 227
   without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7). The mirror section
   runs only where a `briqyard-mirror` unit is active: on a host without one, 5 checks fewer.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
-  daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
+  daemon in the VM), the capacity signals on `/metrics` (ADR 0042), an exec session and a tty
   relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
   machine running (back `ready`, a new start of this version that adopted it, the machine
   answering, never booted again), a volume's growth forwarded. 32 checks. With `BRIQYARD_TOKEN`
-  against a real fleet: it orders only through a dry-run provisioner and drains only the dev
-  fleet's host `local`, so it leaves real hosts alone (16 checks then).
+  against a real fleet: it drains only the dev fleet's host `local`, so it leaves real hosts
+  alone (20 checks then: `/metrics` refused without a token over `https://`;
+  `BRIQYARD_METRICS_TOKEN` when the fleet has a `metrics_token`).
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases

@@ -1,6 +1,6 @@
 # ADR 0007: Hosts from providers: dry-run provisioners, bootstrap over SSH, OVH Eco first
 
-Date: 2026-10-20 · Status: accepted
+Date: 2026-10-20 · Status: accepted; superseded in part by ADR 0042 (the provisioners, `host order`, the release at the provider and the autoscaler removed; the bootstrap over SSH stays, under `bootstrap:`)
 
 ## Context
 

@@ -3109,21 +3109,25 @@ impl Manager {
         );
         let mut exited = live.exited.clone();
         let outcome = tokio::select! {
-            r = ready => r.map_err(|err| format!("the guest did not come up: {err}")),
+            r = ready => r.map_err(|err| (format!("the guest did not come up: {err}"), false)),
             // `exited` is sent once the console is fully written, so the tail is complete.
             _ = exited.changed() => self.ran_before_ready(&live).await,
         };
         if let Ok(init) = &outcome {
             e.rec.lock().unwrap().init_version = init.clone();
         }
-        if let Err(why) = outcome {
+        if let Err((why, said)) = outcome {
             // The image's fault: the process is ended here, under the lock, so the watcher
             // finds nothing to settle and no restart policy applies. The machine stays in
-            // `error`, with the console's last lines, for the caller to read and destroy.
+            // `error`, with the init's reason or else the console's last lines, for the
+            // caller to read and destroy.
             self.end_process(e, &live, Duration::ZERO).await;
             self.inner.stats.starts_failed.fetch_add(1, Relaxed);
-            let tail = self.last_console_lines(&rec, 5);
-            return Err(self.boot_failed(e, format!("{why}: {tail}")));
+            let why = match said {
+                true => why,
+                false => format!("{why}: {}", self.last_console_lines(&rec, 5)),
+            };
+            return Err(self.boot_failed(e, why));
         }
         let (_, _, generation) = self.reset_probes(e);
         e.set_state(state::RUNNING, |r| {
@@ -3163,15 +3167,18 @@ impl Manager {
 
     /// A boot whose process ended before the init's pong: a main process that ran and exited
     /// at once is a boot that came up (the watcher then settles its exit, as any later one),
-    /// with the version its init reported; one the init never started is a failed boot. The
-    /// report is already in or never comes: its channel closes with the process.
-    async fn ran_before_ready(&self, live: &fc::Vm) -> Result<String, String> {
+    /// with the version its init reported; one the init never started is a failed boot, with
+    /// the init's reason when it said one (true). The report is already in or never comes:
+    /// its channel closes with the process.
+    async fn ran_before_ready(&self, live: &fc::Vm) -> Result<String, (String, bool)> {
         let mut exit = live.exit.clone();
         let _ = exit.wait_for(|r| r.is_some()).await;
         let report = exit.borrow().clone();
+        let why = "the machine exited during boot";
         match report {
             Some(r) if r.started => Ok(r.version),
-            _ => Err("the machine exited during boot".to_string()),
+            Some(r) if !r.error.is_empty() => Err((format!("{why}: {}", r.error), true)),
+            _ => Err((why.to_string(), false)),
         }
     }
 
@@ -5629,8 +5636,9 @@ mod tests {
         Ready(Duration),
         /// The init never answers.
         Silent,
-        /// The init fails before the main process starts (a missing program), with its report.
-        Exits(i32),
+        /// The init fails before the main process starts (a missing program), with its report
+        /// and its reason ("" as from an init older than the field).
+        Exits(i32, &'static str),
         /// The main process starts and exits at once, the machine gone before the init answers.
         Runs(i32),
         /// The VMM panics: a bug in a transition.
@@ -5838,12 +5846,15 @@ mod tests {
         /// The process ends as the init would end it: the trace on its console, its report
         /// to the host, then gone.
         fn exit(&self, pid: u32, code: i32, requested: bool) {
-            self.report(pid, code, requested, true);
+            self.report(pid, code, requested, true, "");
         }
 
         /// The init's report and the end of the process; `started` false for a main process
-        /// the init could not start.
-        fn report(&self, pid: u32, code: i32, requested: bool, started: bool) {
+        /// the init could not start, and `error` why.
+        fn report(&self, pid: u32, code: i32, requested: bool, started: bool, error: &str) {
+            if !error.is_empty() {
+                self.say(pid, &format!("[briqyard] {error}"));
+            }
             self.say(
                 pid,
                 &format!("[briqyard] exit code={code} oom=false requested={requested}"),
@@ -5860,6 +5871,7 @@ mod tests {
                     requested,
                     started,
                     version: self.init_version.lock().unwrap().clone(),
+                    error: error.to_string(),
                 }));
             }
             drop(procs);
@@ -5937,7 +5949,7 @@ mod tests {
                 exit: Some(exit_tx),
             });
             match boots {
-                Boots::Exits(code) => self.report(pid, code, false, false),
+                Boots::Exits(code, error) => self.report(pid, code, false, false, error),
                 Boots::Runs(code) => self.exit(pid, code, false),
                 _ => {}
             }
@@ -7220,7 +7232,8 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         // The init's report says its main process never started.
-        h.host.boots(Boots::Exits(137));
+        // An init older than its reason: the console's tail says it.
+        h.host.boots(Boots::Exits(137, ""));
         let err = h.m.create(h.request("web")).await.unwrap_err();
         let m = match err {
             MError::BootFailed(m) => m,
@@ -7246,7 +7259,7 @@ mod tests {
             1
         );
         // `create` with `start: false` leaves it `created`, and a `start` fails the same way.
-        h.host.boots(Boots::Exits(1));
+        h.host.boots(Boots::Exits(1, ""));
         let mut req = h.request("db");
         req.start = Some(false);
         let created = h.m.create(req).await.unwrap();
@@ -7255,6 +7268,23 @@ mod tests {
             h.m.start(&created.id, None).await,
             Err(MError::BootFailed(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_program_the_init_cannot_start_is_boot_failed_with_its_reason() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        // The init's own reason is the machine's error, not the console's last lines.
+        let why = "start \"/run.sh\": Operation not permitted (os error 1)";
+        h.host.boots(Boots::Exits(127, why));
+        let m = match h.m.create(h.request("web")).await {
+            Err(MError::BootFailed(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!((m.state.as_str(), m.exit.is_none()), (state::ERROR, true));
+        assert_eq!(m.error, format!("the machine exited during boot: {why}"));
+        let e = h.events_of(&m.id).pop().unwrap();
+        assert_eq!((e.reason.as_str(), e.message), ("boot_failed", m.error));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -9960,7 +9990,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         // The image's: the guest exited booting; its console's tail is in the message.
-        h.host.boots(Boots::Exits(1));
+        h.host.boots(Boots::Exits(1, ""));
         let m = match h.m.create(h.request("bad")).await {
             Err(MError::BootFailed(m)) => m,
             other => panic!("{other:?}"),

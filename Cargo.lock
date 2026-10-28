@@ -382,7 +382,6 @@ version = "0.1.1"
 dependencies = [
  "age",
  "anyhow",
- "async-trait",
  "axum",
  "axum-server",
  "base64 0.22.1",
@@ -399,7 +398,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha1",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
