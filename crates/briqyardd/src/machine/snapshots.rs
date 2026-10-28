@@ -128,6 +128,35 @@ impl Manager {
             .collect()
     }
 
+    /// Removes the memory files of snapshots the record does not name: what a crash between
+    /// their move into the memory directory and the record's save leaves.
+    fn remove_stray_memory(&self, r: &Record) {
+        let ids: HashSet<&str> = r.snapshots.iter().map(|s| s.id.as_str()).collect();
+        let Ok(dir) = std::fs::read_dir(self.memory_dir(r)) else {
+            return;
+        };
+        for f in dir.flatten() {
+            let name = f.file_name();
+            let Some((id, ext)) = name.to_str().and_then(|n| n.rsplit_once('.')) else {
+                continue;
+            };
+            if !id.starts_with("s_") || !matches!(ext, "state" | "mem") || ids.contains(id) {
+                continue;
+            }
+            match std::fs::remove_file(f.path()) {
+                Ok(()) => tracing::info!(
+                    machine = r.id,
+                    file = %f.path().display(),
+                    why = "named by no snapshot",
+                    "memory file removed"
+                ),
+                Err(err) => {
+                    tracing::warn!(machine = r.id, file = %f.path().display(), err = %err, "memory file not removed")
+                }
+            }
+        }
+    }
+
     pub(super) fn remove_memory(&self, r: &Record, snap: &str) {
         for f in self.memory_files(r, snap) {
             let _ = std::fs::remove_file(f);
@@ -530,17 +559,20 @@ impl Manager {
         ))
     }
 
-    /// Removes what no longer serves, its lock held, until nothing more goes: a snapshot
-    /// nothing clones that is an `s_` the record does not name for that disk, a fork's, or,
-    /// on a retired disk, anything but a named one; then a retired disk that holds neither a
-    /// named snapshot nor one something clones. A retired disk that stays is rolled back to
-    /// its newest snapshot, freeing the state it was retired with. Returns the machines a
-    /// destroyed retired disk was cloned from: their snapshot may be free now.
+    /// Removes what no longer serves, its lock held: memory files no snapshot names, then,
+    /// until nothing more goes, a snapshot nothing clones that is an `s_` the record does not
+    /// name for that disk, a fork's, or, on a retired disk, anything but a named one; then a
+    /// retired disk that holds neither a named snapshot nor one something clones. A retired
+    /// disk that stays is rolled back to its newest snapshot, freeing the state it was retired
+    /// with. Returns the machines a destroyed retired disk was cloned from: their snapshot may
+    /// be free now. A crash that leaves memory files also leaves their unnamed `s_` snapshot
+    /// (the disks are snapshotted first), so the daemon's start tidies that machine.
     pub(super) async fn tidy(&self, e: &Entry) -> Result<Vec<String>> {
         let r = e.snapshot();
         if r.restoring.is_some() {
             return Ok(Vec::new());
         }
+        self.remove_stray_memory(&r);
         let z = &self.inner.zfs;
         let named = named(&r);
         let mut parents = Vec::new();
@@ -1114,6 +1146,28 @@ mod tests {
         std::fs::hard_link(&kept, dir.join("snap.mem")).unwrap();
         h.m.snapshot(&m.id, with_memory()).await.unwrap();
         assert_eq!(std::fs::read(&kept).unwrap(), b"the first one");
+    }
+
+    #[tokio::test]
+    async fn tidy_removes_memory_files_no_snapshot_names() {
+        let h = harness().await;
+        let m = h.m.create(h.request("m")).await.unwrap();
+        let s1 = h.m.snapshot(&m.id, with_memory()).await.unwrap();
+        let rec = h.stored(&m.id).unwrap();
+        let kept = h.m.memory_files(&rec, &s1.id);
+        // What a crash between the move of a memory snapshot's files and the record's save
+        // leaves: files of a snapshot the record does not name.
+        let stray = h.m.memory_files(&rec, "s_crashed");
+        for f in &stray {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let other = h.m.memory_dir(&rec).join("notes");
+        std::fs::write(&other, b"not ours").unwrap();
+        let e = h.m.entry(&m.id).unwrap();
+        h.m.tidy(&e).await.unwrap();
+        assert!(stray.iter().all(|f| !f.exists()), "{stray:?}");
+        assert!(kept.iter().all(|f| f.exists()), "{kept:?}");
+        assert!(other.exists());
     }
 
     #[tokio::test]

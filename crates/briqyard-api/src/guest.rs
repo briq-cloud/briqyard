@@ -145,7 +145,7 @@ pub struct ExitReport {
     #[serde(default)]
     pub started: bool,
     /// The init's version, as in its `pong` (ADR 0027): a process that exits at once may end
-    /// the machine before the host's first ping.
+    /// the machine before the host's first ping. Empty from an init older than this field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
 }

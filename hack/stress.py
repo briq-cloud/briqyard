@@ -391,15 +391,12 @@ class Run:
         if p.returncode != 0:
             self.log(f"   cannot kill the daemon here ({p.stderr.strip()[:80]}); skipped")
             return
+        # Refused while the daemon is down: polled with `request`, which records no failure.
         deadline = time.monotonic() + 90
-        while True:
-            try:
-                self.api.call("GET", "/v1/status", op="status", timeout=5)
-                break
-            except Exception:
-                if time.monotonic() > deadline:
-                    raise RuntimeError("daemon did not come back")
-                time.sleep(1)
+        while self.api.request("GET", "/v1/status", op="status", timeout=5)[0] != 200:
+            if time.monotonic() > deadline:
+                raise RuntimeError("daemon did not come back")
+            time.sleep(1)
         _, errs = parallel(list(self.machines.values()), lambda m: self.exec(m["id"], ["hostname"]), self.a.workers)
         self.report_errors("exec after crash", errs)
         bad = [m["id"] for m in self.machines.values() if self.mget(m["id"])["state"] != "running"]

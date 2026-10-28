@@ -49,6 +49,20 @@ brew install lima
 limactl start --name=fc --vm-type=vz --nested-virt --cpus=6 --memory=16 --disk=60 template://ubuntu
 ```
 
+fc's pool is on a Lima disk of its own, so a full root disk can no longer suspend it:
+
+```bash
+limactl disk create byard-pool --size 40GiB
+limactl stop fc
+limactl edit fc --set '.additionalDisks = [{"name":"byard-pool","format":false}]'
+limactl start fc
+```
+
+then, in fc, the pool as above on the disk instead of a file (`zpool create … byard /dev/vdb
+< /etc/briqyard/pool.key`). A restart of fc gives it a new SSH host key, and the dev fleet has
+the old one pinned for its own host: `hack/vm.sh install` removes that stale `127.0.0.1` line
+from `/var/lib/briqyard-fleet/known_hosts`, so the smoke's `host upgrade` pins the new key.
+
 Inside it, follow the Linux steps (Rust, ZFS, Firecracker). The repository is mounted read-only
 in the VM at the same path; `hack/vm.sh` builds there, installs the binaries, writes the systemd
 unit and restarts the daemon:
@@ -107,7 +121,7 @@ suites stay on `http://`. `hack/vm.sh install` copies the fleet's config every t
 daemon's only when none is there: after a change, copy it by hand and restart the unit. Then
 
 ```bash
-limactl start --name=fc2 --vm-type=vz --nested-virt --cpus=2 --memory=6 --disk=30 --network=vzNAT template://ubuntu
+limactl start --name=fc2 --vm-type=vz --nested-virt --cpus=2 --memory=8 --disk=30 --network=vzNAT template://ubuntu
 limactl shell fc2 sudo bash -c 'cd '"$PWD"' && BRIQYARD_POOL_FILE_GB=15 BRIQYARD_TOKEN=fc2-token \
   FLEET_URL=http://192.168.64.1:7430 ADVERTISE=http://192.168.64.1:27420 bash hack/bootstrap-host.sh'
 cargo build --release -p briqyard   # the CLI, on the Mac
@@ -116,6 +130,13 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" \
   SECOND_HOST_SH="limactl shell fc2 sudo" bash hack/fleet-two-hosts.sh
 ```
+
+Run it once the fleet lists fc's host empty: right after another suite, the fleet still counts
+what fc held, and placement puts the tenants the other way round. A VM that dies with Lima's
+`VirtualMachineStateError` and a `com.apple.Virtualization.VirtualMachine` report in
+`~/Library/Logs/DiagnosticReports` (an assertion in the Hypervisor framework's
+`VcpuStateManager::set_pstate`) is macOS's nested virtualization failing, not the guest:
+`limactl stop fc2 && limactl start fc2`, and the daemon takes its key from the fleet again.
 
 ### fc2 as a real host
 
@@ -286,7 +307,8 @@ plus `apt-get purge docker.io` and the edge's files.
   without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
-  port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).
+  port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7). The mirror section
+  runs only where a `briqyard-mirror` unit is active: on a host without one, 5 checks fewer.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
   daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
   relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a

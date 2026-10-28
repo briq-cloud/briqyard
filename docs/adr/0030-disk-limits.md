@@ -15,7 +15,7 @@ Firecracker has a rate limiter on each drive: a token bucket for bytes and one f
 | Field | Meaning | Host default (`disk_limits`) |
 |---|---|---|
 | `bandwidth_mb` | MB (2^20 bytes) a second, reads and writes together; 0: none; at most 100000 | `bandwidth_mb_per_vcpu`: 32 |
-| `iops` | requests a second (reads, writes, flushes); 0: none; at most 10,000,000 | `iops_per_vcpu`: 4000 |
+| `iops` | requests a second (reads, writes, flushes, discards: Firecracker counts one op per request of any type); 0: none; at most 10,000,000 | `iops_per_vcpu`: 4000 |
 | `burst_sec` | what each limit lets through at full speed once, in seconds at its rate; at most 3600 | `burst_sec`: 10 |
 
 As ADR 0018: a machine's own value overrides the host's, per field, and is absolute; PATCH changes the fields it names; the view shows the values in force. The CLI: `machine run --disk-bw --disk-iops --disk-burst`, `machine set-disk-limits`, a `DISK` column, a `describe` line.
