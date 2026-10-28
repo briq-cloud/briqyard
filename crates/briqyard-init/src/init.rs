@@ -414,7 +414,7 @@ fn read_config_archive<R: Read>(r: R) -> Result<(Config, Vec<BootFile>)> {
 
 /// Mounts the data volumes; a fresh one gets the image directory's owner and content, as
 /// Docker does for a named volume. An ext4 volume is mounted with `discard`, so what the guest
-/// deletes goes back to the host's pool (ADR 0037).
+/// deletes goes back to the host's pool (ADR 0037), and grown to its disk (ADR 0040).
 fn setup_mounts(cfg: &Config) -> Result<()> {
     for m in &cfg.mounts {
         let path = Path::new(&m.path);
@@ -432,9 +432,41 @@ fn setup_mounts(cfg: &Config) -> Result<()> {
             (fstype == "ext4").then_some("discard"),
         )
         .with_context(|| format!("mount {} on {}", m.device, m.path))?;
+        if fstype == "ext4" {
+            match grow_filesystem(&m.device, path) {
+                Ok(Some((was, now))) => log!("volume {}: grown from {was} to {now} MB", m.path),
+                Ok(None) => {}
+                // The volume serves at the size it had; the next boot tries again.
+                Err(e) => log!("volume {}: not grown: {e:#}", m.path),
+            }
+        }
         seed_mount_point(path, seed);
     }
     Ok(())
+}
+
+nix::ioctl_write_ptr!(ext4_resize_fs, b'f', 16, u64);
+
+/// Grows the ext4 filesystem mounted at `path` to the end of `device` (ADR 0040): the disk
+/// grows on the host, the filesystem here, at the next boot. The kernel grows a mounted
+/// filesystem itself (`EXT4_IOC_RESIZE_FS`, what `resize2fs` asks of one), so the image needs
+/// no tool, and it returns at once when the filesystem fills the device already. The sizes
+/// before and after, in MB, when it grew.
+fn grow_filesystem(device: &str, path: &Path) -> Result<Option<(u64, u64)>> {
+    use std::io::{Seek, SeekFrom};
+    let bytes = fs::File::open(device)
+        .and_then(|mut d| d.seek(SeekFrom::End(0)))
+        .with_context(|| format!("size of {device}"))?;
+    let statvfs = || nix::sys::statvfs::statvfs(path).context("statvfs");
+    let mb = |st: &nix::sys::statvfs::Statvfs| (st.blocks() * st.fragment_size()) >> 20;
+    let st = statvfs()?;
+    let blocks: u64 = bytes / st.fragment_size();
+    let dir = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    // SAFETY: the ioctl reads one u64 from the pointer, which outlives the call.
+    unsafe { ext4_resize_fs(dir.as_raw_fd(), &blocks) }
+        .with_context(|| format!("EXT4_IOC_RESIZE_FS to {blocks} blocks"))?;
+    let (was, now) = (mb(&st), mb(&statvfs()?));
+    Ok((now > was).then_some((was, now)))
 }
 
 /// What the image had at a mount path, kept aside while the volume is mounted over it.
@@ -1718,6 +1750,24 @@ mod tests {
     }
 
     // --- the volume ---
+
+    #[test]
+    fn a_filesystem_that_cannot_grow_is_an_error_not_a_failed_boot() {
+        // Not ext4, or not root: the kernel refuses, and the caller logs it and boots on.
+        let dir = tempfile::tempdir().unwrap();
+        let dev = dir.path().join("dev");
+        std::fs::write(&dev, vec![0u8; 1 << 20]).unwrap();
+        let err = grow_filesystem(dev.to_str().unwrap(), dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("EXT4_IOC_RESIZE_FS to "),
+            "{err:#}"
+        );
+        let err = grow_filesystem("/nonexistent", dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("size of /nonexistent"),
+            "{err:#}"
+        );
+    }
 
     fn write(p: &Path, data: &[u8], mode: u32) {
         fs::write(p, data).unwrap();

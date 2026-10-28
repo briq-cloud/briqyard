@@ -115,7 +115,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
 | PV, PVC, StorageClass | ✓ a volume per machine | | |
-| Volume expansion | ✗ | grow the zvol and the filesystem at boot | yard, later |
+| Volume expansion | ✓ a PATCH grows the zvol at once, never smaller, the quota and the pool checked; the init grows the ext4 filesystem online at the next boot, `pending` until then (ADR 0040) | a growth seen by a running guest | |
 | VolumeSnapshot, restore | ★ named snapshots of both disks, restored in place with newer snapshots, forks and the backup chain kept (ADR 0031); fork; backups and restore anywhere | a fork from a named snapshot | yard, later |
 | Scheduled backups and retention (Velero) | ✓ `backup: { every, keep }` run by the daemon, whole chains pruned, delete, a destroyed machine's kept `keep_destroyed_days` (ADR 0023) | | yard (values from briq) |
 | Encryption at rest (CSI, etcd secrets) | ✓ the pool encrypted at its creation (ZFS, AES-256-GCM), one key per host kept by the fleet and handed to that host at start, or a file on a single host; records, config drives, consoles and the image cache on the pool; no swap (ADR 0026); backups raw, ciphertext in the store, the key asked by its id at a restore (ADR 0035) | key rotation | yard |
@@ -174,4 +174,4 @@ Each with an ADR, unit tests, Linux CI and the VM suites: egress controls (ADR 0
 
 Decided 2026-10-20: the daemon runs scheduled backups from a policy the control plane sets; the pool is encrypted with one key per host held by the fleet; events stay per host and are read through the fleet, which keeps nothing; probes run in the daemon and a control plane's healthcheck moves onto them.
 
-Later, in the tables above: groups and load balancing, the mesh, volume expansion, scoped tokens, fleet HA, OS patching through the fleet, evacuation.
+Later, in the tables above: groups and load balancing, the mesh, scoped tokens, fleet HA, OS patching through the fleet, evacuation.

@@ -85,6 +85,13 @@ fn invalid(msg: impl Into<String>) -> MError {
     MError::Invalid(msg.into())
 }
 
+/// A volume asked smaller than the one it has or comes from (ADR 0040).
+fn never_shrinks(asked: u32, held: u32) -> MError {
+    invalid(format!(
+        "volume: {asked} GB asked, {held} GB held: a volume never shrinks"
+    ))
+}
+
 /// A tenant id is checked before it names a file.
 fn check_tenant_id(id: &str) -> Result<(), MError> {
     match api::valid_id(id) {
@@ -2624,6 +2631,9 @@ impl Manager {
                 (Some(a), Some(b)) if a.mount != b.mount => {
                     return Err(invalid("a restore keeps the backup's volume mount"))
                 }
+                (Some(a), Some(b)) if a.size_gb < b.size_gb => {
+                    return Err(never_shrinks(a.size_gb, b.size_gb))
+                }
                 (Some(_), None) => return Err(invalid("the backup has no volume to restore")),
                 _ => {}
             }
@@ -2653,6 +2663,9 @@ impl Manager {
                 (Some(a), Some(b)) if a.mount != b.mount => {
                     return Err(invalid("a fork keeps its source's volume mount"))
                 }
+                (Some(a), Some(b)) if a.size_gb < b.size_gb => {
+                    return Err(never_shrinks(a.size_gb, b.size_gb))
+                }
                 _ => {}
             }
             src = Some(s);
@@ -2666,6 +2679,9 @@ impl Manager {
         if rec.root_key.is_empty() {
             rec.root_key = rec.image_key.clone();
         }
+        if let Some(v) = &rec.volume {
+            self.room_on_pool(v.size_gb).await?;
+        }
         let t = self.ensure_tenant(&req.tenant).await?;
         let e = self.add_machine(rec, &t, req.start.unwrap_or(true))?;
         let _guard = e.lock.lock().await;
@@ -2676,6 +2692,14 @@ impl Manager {
                 Some((b, key)) => self.receive_disks(&e, b, key.as_deref()).await,
                 None => self.make_disks(&e, src.as_deref(), req.fork.as_ref()).await,
             },
+        };
+        // A fork's or a restore's volume larger than its source's: its disk grows to it (ADR
+        // 0040). A new volume is made at its size.
+        let made = match made {
+            Ok(()) if src.is_some() || restore_from.is_some() => {
+                self.fit_volume(&e.snapshot()).await.map(drop)
+            }
+            other => other,
         };
         if let Err(err) = made {
             let rec = e.snapshot();
@@ -3707,7 +3731,7 @@ impl Manager {
     pub async fn update(
         &self,
         id: &str,
-        req: api::UpdateMachineRequest,
+        mut req: api::UpdateMachineRequest,
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
@@ -3729,6 +3753,15 @@ impl Manager {
             return Err(MError::NotFound);
         }
         self.check_version(&e, at)?;
+        // A larger volume grows below, once nothing else can refuse the request (ADR 0040).
+        let grow = match req.spec.volume {
+            Some(v) => volume_growth(&e.snapshot(), v.size_gb)?,
+            None => None,
+        };
+        if grow.is_none() {
+            // The size it has: no change.
+            req.spec.volume = None;
+        }
         // Held until the record says `via: gateway`, as a start holds it.
         let mut gateway_turn = None;
         let reprobe;
@@ -3768,6 +3801,9 @@ impl Manager {
                     .await
                     .context("disk limits")?;
             }
+        }
+        if let Some((from, to)) = grow {
+            self.grow_volume(&e, from, to).await?;
         }
         {
             let mut r = e.rec.lock().unwrap();
@@ -3841,6 +3877,85 @@ impl Manager {
     pub fn touch(&self, id: &str) -> Result<(), MError> {
         self.own_entry(id)?.touch();
         Ok(())
+    }
+
+    /// Grows the machine's volume from `from` to `to` GB now, its lock held (ADR 0040): the
+    /// pool's room checked as a create's, then the growth checked against the tenant's quota
+    /// and the size taken on the record in one step under the map's lock, as a start takes its
+    /// memory (two grows cannot pass the quota together), then the disk grown and the record
+    /// saved; refused there, the record goes back. The guest's filesystem follows at its next
+    /// start.
+    async fn grow_volume(&self, e: &Entry, from: u32, to: u32) -> Result<(), MError> {
+        self.room_on_pool(to - from).await?;
+        let tenant = e.rec.lock().unwrap().tenant.clone();
+        let quota = self
+            .tenant_of(&tenant)
+            .map(|t| t.rec.quota)
+            .unwrap_or_default();
+        let resize = |r: &mut Record, gb: u32| {
+            if let Some(v) = r.volume.as_mut() {
+                v.size_gb = gb;
+            }
+        };
+        let over = {
+            let machines = self.inner.machines.lock().unwrap();
+            let need = api::QuotaUse {
+                disk_gb: to - from,
+                ..Default::default()
+            };
+            let over = over_quota(&tenant, &quota, &tenant_use(&machines, &tenant), &need);
+            if over.is_none() {
+                resize(&mut e.rec.lock().unwrap(), to);
+            }
+            over
+        };
+        if let Some(x) = over {
+            e.note(x.event(format!("volume growth refused: {x}")));
+            let _ = self.save(e);
+            return Err(MError::Quota(x.to_string()));
+        }
+        let ds = e.snapshot().data_dataset();
+        if let Err(err) = self.inner.zfs.grow(&ds, (to as u64) << 30).await {
+            resize(&mut e.rec.lock().unwrap(), from);
+            return Err(err.context(format!("grow the volume to {to} GB")).into());
+        }
+        // On disk with the disk: the stored record is never smaller than the volume.
+        self.save(e)?;
+        Ok(())
+    }
+
+    /// Whether the pool has `gb` free for a volume, a create's or a grow's (ADR 0040): 503
+    /// `capacity` when not. Volumes are thin, so this admits, as the fleet's placement does;
+    /// it reserves nothing.
+    async fn room_on_pool(&self, gb: u32) -> Result<(), MError> {
+        let pool = self
+            .inner
+            .zfs
+            .pool()
+            .await
+            .context("the pool's free space")?;
+        if pool.free < (gb as u64) << 30 {
+            let free = pool.free as f64 / (1u64 << 30) as f64;
+            return Err(MError::Capacity(format!(
+                "the pool has {free:.1} GB free, the volume asks {gb} GB"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Grows the data disk to the record's size when it is smaller (ADR 0040): a disk cloned
+    /// from an older snapshot or received from a backup is never smaller than its record says.
+    /// Whether it grew.
+    pub(super) async fn fit_volume(&self, r: &Record) -> Result<bool> {
+        let Some(v) = &r.volume else {
+            return Ok(false);
+        };
+        let (ds, want) = (r.data_dataset(), (v.size_gb as u64) << 30);
+        if self.inner.zfs.volsize(&ds).await? >= want {
+            return Ok(false);
+        }
+        self.inner.zfs.grow(&ds, want).await?;
+        Ok(true)
     }
 
     /// Every 15 s: what machines used since the last tick is measured, the host's conditions
@@ -4762,8 +4877,32 @@ fn pending_after(r: &Record, change: api::SpecChange) -> Option<api::SpecChange>
         size: change.size.or(p.size).filter(|v| *v != r.size),
         ports: change.ports.or(p.ports).filter(|v| *v != r.ports),
         restart: change.restart.or(p.restart).filter(|v| *v != r.restart),
+        // The record has the new size already, the disk grown at the PATCH (ADR 0040): it
+        // waits for the guest's filesystem, not for the record.
+        volume: change.volume.or(p.volume),
     };
     (!next.is_empty()).then_some(next)
+}
+
+/// What a PATCH of the volume to `gb` grows (ADR 0040): from and to, in GB; None for the
+/// size it has. A machine without a volume, a smaller size, a restore cut short or a destroy
+/// refuse it.
+fn volume_growth(r: &Record, gb: u32) -> Result<Option<(u32, u32)>, MError> {
+    let held = r
+        .volume
+        .as_ref()
+        .ok_or_else(|| invalid("volume: the machine has none; a volume is made at create"))?
+        .size_gb;
+    if gb < held {
+        return Err(never_shrinks(gb, held));
+    }
+    if let Some(snap) = &r.restoring {
+        return Err(snapshots::unfinished(snap));
+    }
+    if r.state == state::DESTROYING {
+        return Err(MError::BadState(r.state.clone()));
+    }
+    Ok((gb > held).then_some((held, gb)))
 }
 
 /// Puts the pending change on the record, in the step that starts the machine (ADR 0024);
@@ -4803,6 +4942,7 @@ fn apply_pending(r: &mut Record, image: Option<image::Image>) -> Option<Vec<&'st
     if let Some(v) = p.restart {
         r.restart = v;
     }
+    // A volume is on the record already: this cold boot's init grows its filesystem.
     Some(fields)
 }
 
@@ -6124,6 +6264,8 @@ mod tests {
         std::fs::write(dir.path().join("pool.key"), &key).unwrap();
         std::fs::write(fake.dev().join("key"), &key).unwrap();
         fake.answer("encryptionroot", "byard\n");
+        // A pool with room: 1 TiB free, what a volume's create or growth is admitted on.
+        fake.answer("used,available", &format!("0\n{}\n", 1u64 << 40));
         let mut cfg = Config {
             data_dir: dir.path().join("data"),
             ..Default::default()
@@ -11999,6 +12141,200 @@ mod tests {
         assert_eq!(starting.data, Some(json!({"resume": false})));
         assert_eq!(evs.last().map(|e| e.reason.as_str()), Some("started"));
         assert_eq!(h.drive(&m.id).0.env.get("V").map(String::as_str), Some("2"));
+    }
+
+    /// A machine of `record()` in `state` with its volume at `gb` GB, its disks made.
+    pub(super) async fn with_volume(h: &Harness, id: &str, state: &str, gb: u32) -> Arc<Entry> {
+        let e = h.add(id, state, 256);
+        e.rec.lock().unwrap().volume.as_mut().unwrap().size_gb = gb;
+        let r = e.snapshot();
+        let z = &h.pool.zfs;
+        z.create(&r.root_dataset(), 1 << 20).await.unwrap();
+        z.create(&r.data_dataset(), (gb as u64) << 30)
+            .await
+            .unwrap();
+        h.pool.calls();
+        e
+    }
+
+    pub(super) fn grow_to(size_gb: u32) -> api::UpdateMachineRequest {
+        spec(|s| s.volume = Some(api::VolumeSize { size_gb }))
+    }
+
+    #[tokio::test]
+    async fn a_volume_grows_at_the_patch_and_its_filesystem_at_the_next_start_cold() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let e = with_volume(&h, "m_v", state::STOPPED, 2).await;
+        // Suspended: the memory holds the guest's view of the smaller disk.
+        e.rec.lock().unwrap().suspended = true;
+        let m = h.m.update("m_v", grow_to(5), None).await.unwrap();
+        // The disk at once, and the record with it: what the quota, usage, forks and backups
+        // read.
+        assert_eq!(
+            h.pool.calls(),
+            [
+                "get -H -p -o value used,available byard",
+                "set volsize=5368709120 byard/m/m_v/data"
+            ]
+        );
+        assert_eq!(h.pool.zfs.volsize("m/m_v/data").await.unwrap(), 5 << 30);
+        assert_eq!(m.volume.map(|v| v.size_gb), Some(5));
+        assert_eq!(h.stored("m_v").unwrap().volume.unwrap().size_gb, 5);
+        assert_eq!(h.m.quota("t1").unwrap().used.disk_gb, 5);
+        let p = m.pending.unwrap();
+        assert_eq!(
+            (p.fields, p.volume),
+            (
+                vec!["volume".to_string()],
+                Some(api::VolumeSize { size_gb: 5 })
+            )
+        );
+        let ev = h.events_of("m_v").pop().unwrap();
+        assert_eq!(
+            (ev.reason.as_str(), ev.data),
+            (
+                "updated",
+                Some(json!({"fields": ["volume"], "pending": true}))
+            )
+        );
+        // The size it has is no change: nothing called, no event.
+        h.pool.calls();
+        let again = h.m.update("m_v", grow_to(5), None).await.unwrap();
+        assert_eq!(again.version, m.version);
+        let calls = h.pool.calls();
+        assert!(calls.is_empty(), "{calls:?}");
+        // The start applies it: the memory snapshot dropped, the boot cold, so the init grows
+        // the filesystem.
+        h.host_calls();
+        let up = h.m.start("m_v", None).await.unwrap();
+        assert!(up.pending.is_none() && !up.suspended);
+        let calls = h.host_calls();
+        assert!(
+            calls.iter().any(|c| c.ends_with(" resume=false")),
+            "{calls:?}"
+        );
+        let applied = h
+            .events_of("m_v")
+            .into_iter()
+            .find(|e| e.reason == "applied");
+        assert_eq!(
+            applied.and_then(|e| e.data),
+            Some(json!({"fields": ["volume"]}))
+        );
+        assert_eq!(h.drive("m_v").0.mounts[0].fstype, "ext4");
+    }
+
+    #[tokio::test]
+    async fn a_grown_volume_is_on_the_stored_record_once_its_disk_grew() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let e = with_volume(&h, "m_v", state::STOPPED, 2).await;
+        h.m.grow_volume(&e, 2, 5).await.unwrap();
+        // Saved with the disk: a crash before the PATCH's own save leaves no record smaller
+        // than its disk.
+        assert_eq!(h.stored("m_v").map(|r| r.volume.unwrap().size_gb), Some(5));
+    }
+
+    #[tokio::test]
+    async fn a_volume_never_shrinks_and_grows_within_the_quota_and_the_pool() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let e = with_volume(&h, "m_v", state::STOPPED, 2).await;
+        let refused = |r: Result<api::Machine, MError>| r.unwrap_err().to_string();
+        assert_eq!(
+            refused(h.m.update("m_v", grow_to(1), None).await),
+            "invalid request: volume: 1 GB asked, 2 GB held: a volume never shrinks"
+        );
+        let n = h.add("m_n", state::STOPPED, 256);
+        n.rec.lock().unwrap().volume = None;
+        assert_eq!(
+            refused(h.m.update("m_n", grow_to(1), None).await),
+            "invalid request: volume: the machine has none; a volume is made at create"
+        );
+        // The tenant's quota counts the growth, as a create counts a volume.
+        let quota = api::Quota {
+            disk_gb: Some(4),
+            ..Default::default()
+        };
+        h.m.set_quota("t1", quota).await.unwrap();
+        h.pool.calls();
+        assert_eq!(
+            refused(h.m.update("m_v", grow_to(5), None).await),
+            "tenant t1's quota: disk_gb 2 of 4 used, 3 more asked"
+        );
+        let last = h.events_of("m_v").pop().unwrap();
+        assert_eq!(last.reason, "quota_exceeded");
+        h.m.set_quota("t1", api::Quota::default()).await.unwrap();
+        // The pool's room, as at a create.
+        h.pool
+            .answer("used,available", &format!("0\n{}\n", 1u64 << 30));
+        assert_eq!(
+            refused(h.m.update("m_v", grow_to(4), None).await),
+            "the host is full: the pool has 1.0 GB free, the volume asks 2 GB"
+        );
+        h.pool
+            .answer("used,available", &format!("0\n{}\n", 1u64 << 40));
+        // ZFS refuses: the record goes back.
+        let data = h.pool.dev().join("byard/m/m_v/data");
+        std::fs::rename(&data, data.with_extension("away")).unwrap();
+        let err = refused(h.m.update("m_v", grow_to(3), None).await);
+        assert!(err.contains("grow the volume to 3 GB"), "{err}");
+        std::fs::rename(data.with_extension("away"), &data).unwrap();
+        // A restore cut short, a destroy under way.
+        e.rec.lock().unwrap().restoring = Some("s_1".into());
+        assert!(refused(h.m.update("m_v", grow_to(3), None).await).contains("unfinished"));
+        e.rec.lock().unwrap().restoring = None;
+        let r = h.stored("m_v").unwrap();
+        assert_eq!((r.volume.unwrap().size_gb, r.pending), (2, None));
+        assert!(
+            !h.pool
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("set volsize=") && !c.starts_with("set volsize=3221225472")),
+            "only the refused one was asked"
+        );
+        assert_eq!(h.pool.zfs.volsize("m/m_v/data").await.unwrap(), 2 << 30);
+        e.rec.lock().unwrap().state = state::DESTROYING.into();
+        assert!(matches!(
+            h.m.update("m_v", grow_to(3), None).await,
+            Err(MError::BadState(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_fork_takes_a_larger_volume_never_a_smaller_one() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        with_volume(&h, "m_v", state::STOPPED, 2).await;
+        let fork = |gb: u32, name: &str| api::CreateMachineRequest {
+            fork: Some(api::ForkSpec {
+                machine_id: "m_v".into(),
+                copy: String::new(),
+            }),
+            volume: Some(api::VolumeSpec {
+                size_gb: gb,
+                mount: "/data".into(),
+            }),
+            image: String::new(),
+            start: Some(false),
+            ..h.request(name)
+        };
+        let err = h.m.create(fork(1, "small")).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid request: volume: 1 GB asked, 2 GB held: a volume never shrinks"
+        );
+        let f = h.m.create(fork(6, "big")).await.unwrap();
+        assert_eq!(f.volume.map(|v| v.size_gb), Some(6));
+        let ds = format!("m/{}/data", f.id);
+        assert_eq!(h.pool.zfs.volsize(&ds).await.unwrap(), 6 << 30);
+        assert_eq!(h.pool.zfs.volsize("m/m_v/data").await.unwrap(), 2 << 30);
+        // The source's own size: its clone is that size already.
+        h.pool.calls();
+        let same = h.m.create(fork(2, "same")).await.unwrap();
+        assert!(!h.pool.calls().iter().any(|c| c.starts_with("set ")));
+        assert_eq!(same.volume.map(|v| v.size_gb), Some(2));
     }
 
     #[tokio::test]

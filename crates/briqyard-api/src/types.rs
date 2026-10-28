@@ -31,6 +31,13 @@ pub struct VolumeSpec {
     pub mount: String,
 }
 
+/// A volume's new size, as a PATCH grows it (ADR 0040): its mount is fixed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VolumeSize {
+    pub size_gb: u32,
+}
+
 /// A boot file: written before the process starts, and again at every cold start.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct File {
@@ -537,6 +544,10 @@ impl CreateMachineRequest {
             size: Some(self.size),
             ports: Some(self.ports.clone()),
             restart: self.restart.clone(),
+            volume: self
+                .volume
+                .as_ref()
+                .map(|v| VolumeSize { size_gb: v.size_gb }),
         }
     }
 }
@@ -853,6 +864,10 @@ pub struct SpecChange {
     pub ports: Option<Vec<u16>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<RestartPolicy>,
+    /// A larger data volume (ADR 0040): the disk grows at once, the guest's filesystem at the
+    /// next start, cold. Never smaller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<VolumeSize>,
 }
 
 impl SpecChange {
@@ -889,11 +904,14 @@ impl SpecChange {
                 return Err("restart.policy must be no, on-failure or always".into());
             }
         }
+        if self.volume.is_some_and(|v| v.size_gb < 1) {
+            return Err("volume.size_gb must be 1 or more".into());
+        }
         Ok(())
     }
 
     /// Each field: its name, whether it is set here, and whether `other` has the same.
-    fn each(&self, other: &Self) -> [(&'static str, bool, bool); 8] {
+    fn each(&self, other: &Self) -> [(&'static str, bool, bool); 9] {
         [
             ("image", self.image.is_some(), self.image == other.image),
             (
@@ -911,6 +929,7 @@ impl SpecChange {
                 self.restart.is_some(),
                 self.restart == other.restart,
             ),
+            ("volume", self.volume.is_some(), self.volume == other.volume),
         ]
     }
 
@@ -935,7 +954,8 @@ impl SpecChange {
     }
 
     /// Whether a memory snapshot of the machine holds what it changes: everything but the
-    /// ports and the restart policy, which are the daemon's.
+    /// ports and the restart policy, which are the daemon's (a volume's size is its block
+    /// device's, as the guest read it at boot).
     pub fn touches_snapshot(&self) -> bool {
         self.fields()
             .iter()
@@ -950,12 +970,14 @@ impl SpecChange {
             size: self.size,
             ports: self.ports.clone(),
             restart: self.restart.clone(),
+            volume: self.volume,
         }
     }
 }
 
 /// A change a PATCH left for the next start (ADR 0024): the fields it changes, with the new
-/// values of those a machine's view shows (env, files, cmd and entrypoint by name only).
+/// values of those a machine's view shows (env, files, cmd and entrypoint by name only). A
+/// volume's disk has grown already; its filesystem grows at that start (ADR 0040).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending {
     pub fields: Vec<String>,
@@ -967,6 +989,8 @@ pub struct Pending {
     pub ports: Option<Vec<u16>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<RestartPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<VolumeSize>,
 }
 
 /// Changes a machine: the sleep window, metadata, egress, limits, disk limits and probes at
@@ -998,7 +1022,8 @@ pub struct UpdateMachineRequest {
     /// Replaces the probes; a running machine's start over at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probes: Option<Probes>,
-    /// The image, command, env, files, size, ports and restart policy, at the next start.
+    /// The image, command, env, files, size, ports and restart policy, at the next start; a
+    /// larger volume (ADR 0040).
     #[serde(flatten)]
     pub spec: SpecChange,
 }
@@ -2185,7 +2210,7 @@ mod tests {
             "cmd": ["-c", "x"], "env": {"V": "2"},
             "files": [{"path": "/a", "base64": "aGk="}],
             "size": {"vcpus": 2, "memory_mb": 1024}, "ports": [8080],
-            "restart": {"policy": "always", "max_retries": 3}
+            "restart": {"policy": "always", "max_retries": 3}, "volume": {"size_gb": 20}
         }));
         assert_eq!(u.sleep.as_deref(), Some("1h"));
         assert_eq!(
@@ -2198,10 +2223,18 @@ mod tests {
                 "files",
                 "size",
                 "ports",
-                "restart"
+                "restart",
+                "volume"
             ]
         );
         assert_eq!(u.spec.ports, Some(vec![8080]));
+        assert_eq!(u.spec.volume, Some(VolumeSize { size_gb: 20 }));
+        // A volume's mount is fixed: a PATCH that names one is refused, not ignored.
+        let err = serde_json::from_value::<UpdateMachineRequest>(
+            json!({"volume": {"size_gb": 20, "mount": "/other"}}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field `mount`"), "{err}");
     }
 
     #[test]
@@ -2238,6 +2271,10 @@ mod tests {
                 json!({"restart": {"policy": "sometimes"}}),
                 "restart.policy must be no, on-failure or always",
             ),
+            (
+                json!({"volume": {"size_gb": 0}}),
+                "volume.size_gb must be 1 or more",
+            ),
         ] {
             assert_eq!(s(v.clone()).check(), Err(want.to_string()), "{v}");
         }
@@ -2253,15 +2290,16 @@ mod tests {
         assert_eq!(now.changed_from(&was), ["env", "ports"]);
         assert!(now.touches_snapshot());
         assert!(!s(json!({"ports": [1], "restart": {}})).touches_snapshot());
+        assert!(s(json!({"volume": {"size_gb": 2}})).touches_snapshot());
         assert!(SpecChange::default().is_empty() && SpecChange::default().fields().is_empty());
         // As the view shows it: env and files by name only.
-        let v = s(
-            json!({"image": "y", "env": {"SECRET": "s"}, "size": {"vcpus": 1, "memory_mb": 256}}),
-        )
+        let v = s(json!({"image": "y", "env": {"SECRET": "s"},
+            "size": {"vcpus": 1, "memory_mb": 256}, "volume": {"size_gb": 20}}))
         .view();
         assert_eq!(
             serde_json::to_value(&v).unwrap(),
-            json!({"fields": ["image", "env", "size"], "image": "y", "size": {"vcpus": 1, "memory_mb": 256}})
+            json!({"fields": ["image", "env", "size", "volume"], "image": "y",
+                "size": {"vcpus": 1, "memory_mb": 256}, "volume": {"size_gb": 20}})
         );
         // A create is checked as the same spec: its image only when it names one.
         let c = CreateMachineRequest {

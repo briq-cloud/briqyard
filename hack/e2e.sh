@@ -435,6 +435,33 @@ check "a new image: python 3.13"       'briqyard machine exec "$AP" -- python3 -
 check "a new image: the volume kept"   '[ "$(briqyard machine exec "$AP" -- cat /data/mark)" = kept ]'
 briqyard machine rm "$AP" >/dev/null
 
+echo "== a volume grows: its disk at once, its filesystem at the next boot (ADR 0040)"
+VG=$(briqyard machine run --image alpine:3.20 --name grow --tenant "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
+fs_mb() { briqyard machine exec "$1" -- df -m /data | awk 'NR == 2 { print $2 }'; }
+VPOOL=$(sudo sed -n 's/^  pool: //p' /etc/briqyard/config.yaml); VPOOL=${VPOOL:-byard}
+briqyard machine exec "$VG" -- sh -c 'echo kept > /data/mark; sync' >/dev/null
+small=$(fs_mb "$VG")
+VB1=$(briqyard machine backup "$VG" | jq -r .id)
+check "grown to 3 GB, its filesystem pending" '[ "$(briqyard machine set "$VG" --volume-gb 3 | jq -r "[.volume.size_gb, (.pending.fields | join(\",\")), .pending.volume.size_gb] | join(\" \")")" = "3 volume 3" ]'
+check "the disk grew at once"            '[ "$(sudo zfs get -Hp -o value volsize "$VPOOL/m/$VG/data")" = $((3 << 30)) ]'
+check "the running guest keeps its size" '[ "$(fs_mb "$VG")" = "$small" ]'
+check "the same size is no change"       'v=$(briqyard machine get "$VG" | jq .version); [ "$(briqyard machine set "$VG" --volume-gb 3 | jq .version)" = "$v" ]'
+check "a smaller size is refused"        'out=$(briqyard machine set "$VG" --volume-gb 2 2>&1); [ $? != 0 ] && echo "$out" | grep -q "a volume never shrinks"'
+briqyard machine stop --suspend "$VG" >/dev/null
+check "suspended with the growth pending" '[ "$(briqyard machine get "$VG" | jq -r "[.suspended, .pending.fields[0]] | join(\" \")")" = "true volume" ]'
+briqyard machine start "$VG" >/dev/null
+check "the start boots it cold"          '[ "$(briqyard machine logs "$VG" --limit 5000 | grep -c "\[briqyard\] started")" = 2 ] && [ "$(briqyard machine get "$VG" | jq -r .pending)" = null ]'
+grown=$(fs_mb "$VG")
+check "its filesystem fills the disk ($small -> $grown MB)" '[ "$grown" -gt $((small * 2)) ]'
+check "the init says it grew it"         'briqyard machine logs "$VG" --limit 5000 | grep -q "volume /data: grown from"'
+check "the data kept"                    '[ "$(briqyard machine exec "$VG" -- cat /data/mark)" = kept ]'
+VB2=$(briqyard machine backup "$VG" | jq -r .id)
+check "the next backup continues the chain" '[ "$(briqyard machine backups "$VG" | jq -r ".[] | select(.id == \"$VB2\") | .disks[] | select(.disk == \"data\") | .from")" = "$VB1" ]'
+VR=$(briqyard machine restore --from "$VG" --backup "$VB2" --tenant "$T" --name growback | jq -r .id)
+check "restored from the chain: 3 GB, the data" '[ "$(briqyard machine get "$VR" | jq .volume.size_gb)" = 3 ] && [ "$(fs_mb "$VR")" = "$grown" ] && [ "$(briqyard machine exec "$VR" -- cat /data/mark)" = kept ]'
+briqyard machine destroy "$VR" >/dev/null
+briqyard machine destroy "$VG" >/dev/null
+
 echo "== postgres with a volume, endpoint, wake on connect"
 P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m --readiness "exec:pg_isready -h 127.0.0.1 -U postgres" | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done

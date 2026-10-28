@@ -1133,7 +1133,7 @@ fn backup_chain<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{at, harness_config, Harness};
+    use super::super::tests::{at, grow_to, harness_config, with_volume, Harness};
     use super::*;
     use tokio::task::JoinHandle;
 
@@ -1295,6 +1295,11 @@ mod tests {
             req.backup = backup;
             req.start = Some(start);
             self.m.create(req).await.unwrap()
+        }
+
+        async fn volsize_gb(&self, id: &str) -> u64 {
+            let ds = format!("m/{id}/data");
+            self.pool.zfs.volsize(&ds).await.unwrap() >> 30
         }
 
         fn ids(&self, bs: &[api::Backup]) -> Vec<String> {
@@ -1521,6 +1526,41 @@ mod tests {
             start: Some(false),
             ..Default::default()
         }
+    }
+
+    /// A growth between two backups: the chain goes on (a stream carries the volume's size),
+    /// and a restore asks for the backup's volume size or more (ADR 0040).
+    #[tokio::test]
+    async fn a_chain_goes_on_across_a_growth_and_a_restore_never_shrinks_the_volume() {
+        let h = harness(|_| {}).await;
+        with_volume(&h, "m_v", state::STOPPED, 2).await;
+        let b1 = h.m.backup("m_v").await.unwrap();
+        h.m.update("m_v", grow_to(5), None).await.unwrap();
+        let b2 = h.m.backup("m_v").await.unwrap();
+        let data = b2.disks.iter().find(|d| d.disk == "data").unwrap();
+        assert_eq!(data.from.as_deref(), Some(b1.id.as_str()));
+        let r = h.m.create(restore_of("m_v", &b2.id, "r2")).await.unwrap();
+        assert_eq!(
+            (r.volume.map(|v| v.size_gb), h.volsize_gb(&r.id).await),
+            (Some(5), 5)
+        );
+        let with = |gb: u32, name: &str| api::CreateMachineRequest {
+            volume: Some(api::VolumeSpec {
+                size_gb: gb,
+                mount: "/data".into(),
+            }),
+            ..restore_of("m_v", &b1.id, name)
+        };
+        let err = h.m.create(with(1, "small")).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid request: volume: 1 GB asked, 2 GB held: a volume never shrinks"
+        );
+        let r = h.m.create(with(8, "big")).await.unwrap();
+        assert_eq!(
+            (r.volume.map(|v| v.size_gb), h.volsize_gb(&r.id).await),
+            (Some(8), 8)
+        );
     }
 
     /// A backup is sent raw and its record says the id of the pool's key, never the key; a

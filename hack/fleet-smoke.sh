@@ -31,7 +31,7 @@ check "status"          'api "/v1/status" | jq -e ".hosts >= 1" >/dev/null'
 # listing fails whole while one does not answer (ADR 0006).
 for i in $(seq 1 60); do api "/v1/hosts" | jq -e 'length > 0 and all(.state == "ready" and .capacity.memory_mb > 0)' >/dev/null 2>&1 && break; sleep 1; done
 check "a ready host"    'api "/v1/hosts" | jq -e ".[] | select(.state == \"ready\" and .capacity.memory_mb > 0)" >/dev/null'
-M=$(briqyard machine run --image alpine:3.20 --name viafleet --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
+M=$(briqyard machine run --image alpine:3.20 --name viafleet --tenant "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
 check "created, placed" '[ -n "$(briqyard machine get "$M" | jq -r .host)" ]'
 check "running"         '[ "$(briqyard machine get "$M" | jq -r .state)" = running ]'
 check "exec forwarded"  '[ "$(briqyard machine exec "$M" -- hostname)" = viafleet ]'
@@ -43,6 +43,7 @@ check "endpoint forwarded" 'briqyard endpoint ls | grep -q "$EP"'
 check "endpoint by id"  'api "/v1/endpoints/$EP" | jq -e .address >/dev/null'
 check "tenant pinned"   'briqyard tenant ls | jq -e ".[] | select(.id == \"$T\") | .host" >/dev/null'
 check "logs forwarded"  'briqyard machine logs "$M" --limit 5000 | grep -q "\[briqyard\] started"'
+check "a volume's growth forwarded" '[ "$(briqyard machine set "$M" --volume-gb 2 | jq -r "[.volume.size_gb, .pending.fields[0]] | join(\" \")")" = "2 volume" ]'
 briqyard machine stop "$M" >/dev/null
 check "stop forwarded"  '[ "$(briqyard machine get "$M" | jq -r .state)" = stopped ]'
 briqyard machine destroy "$M"
