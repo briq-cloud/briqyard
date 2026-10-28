@@ -1,6 +1,6 @@
 # ADR 0008: Backups: ZFS streams to an object store, incremental, restore is a create
 
-Date: 2026-10-20 · Status: accepted; scheduling, retention and delete by ADR 0023; the store's client by ADR 0034; raw sends by ADR 0035
+Date: 2026-10-20 · Status: accepted; scheduling, retention and delete by ADR 0023; the store's client by ADR 0034; raw sends by ADR 0035; credentials from an environment file by ADR 0041
 
 ## Context
 
