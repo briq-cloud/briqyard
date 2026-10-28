@@ -66,11 +66,21 @@ So ZFS never destroys a zvol something holds; the hazard is the other order: a d
 an open of its device before ZFS removed it. The removal then waits for that holder, and every
 minor after it waits too. That is the RISE-M hang.
 
-**The daemon on the VM.** 45 snapshot restores of three running machines (one loop each) and
-a chaos run on `fc2` (2 vCPUs) did not reproduce the failures; the chaos run took the VM down
-(macOS's nested virtualization, `DEVELOPMENT.md`). The VM has fewer cores and slower disks than
-the RISE-M, so fewer operations overlap. The unit tests make the lost events deterministic
-instead (a fake udev that drops them).
+**The daemon on the VMs.** The chaos driver straight to the daemon (6 tenants × 3 machines,
+8 racers, backups, 8 minutes, seed 5101) on `fc` (6 vCPUs), main and this change, a look every
+10 s at every disk's link and what each Firecracker holds:
+
+| Build | Snapshot restores | Forks | Backup restores | Links wrong | Firecracker on another disk | API errors (all the driver's racing stops) |
+|---|---|---|---|---|---|---|
+| main (`20522dd`) | 34 | 35 | 16 | 0 of 76 looks | 0 | 1 |
+| this change | 33 | 35 | 24 | 0 of 117 looks | 0 | 3 |
+
+Neither reproduced the RISE-M failures: the VM overlaps fewer operations than the 24-thread
+host. On `fc2` (2 vCPUs) the chaos run took the VM down twice (macOS's nested
+virtualization, `DEVELOPMENT.md`); 40 restores there with this change went right. The unit
+tests make the lost events deterministic instead (a fake udev that drops them), and
+`real_pool_links_follow_renames_and_wrong_ones_are_mended` mends RISE-M's state against the
+real kernel and udev in 1.2 s.
 
 ## Scripts
 

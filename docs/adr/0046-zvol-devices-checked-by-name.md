@@ -83,5 +83,6 @@ an exec, a session or a file call answers 409 `not_running`, not 500.
   (`udev.drop`): a device per volume file, kept through a rename, outliving a destroy until
   udev next looks. `real_pool_links_follow_renames_and_wrong_ones_are_mended` runs the same
   repair against the kernel and udev (ignored; a host with ZFS, as root).
-- Not reproduced on the dev VM through the daemon: 45 restores went right and the chaos run took
-  the 2-vCPU VM down. The mechanism is measured on raw `zfs` instead.
+- Not reproduced on the dev VMs through the daemon (main and this change alike: no wrong link in
+  8 minutes of chaos on `fc`); the mechanism is measured on raw `zfs` instead. The first real
+  host's chaos run is the check that counts.
