@@ -15,6 +15,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The init's test that changes users needs root: its test binary, as built above, as root.
+      - run: sudo "$(cargo test --workspace --no-run --message-format=json | jq -r 'select(.profile.test and .target.name == "briqyard-init") | .executable')" --ignored run_as
       # The fuzz targets run by hand on nightly (ADR 0033); this checks they still build.
       - run: cargo check --manifest-path fuzz/Cargo.toml --locked
         env:

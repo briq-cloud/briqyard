@@ -151,27 +151,26 @@ async fn send_exit<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Boots the guest and runs the main process to its end. A failure before the process
-/// starts reports as a code of its own, not `started`: 125 the drive or the disks, 126 the
-/// command, 127 its program.
+/// starts reports as a code of its own, not `started`, with why: 125 the drive or the disks,
+/// 126 the command, 127 its program.
 async fn run() -> ExitReport {
-    let failed = |code: i32| ExitReport {
-        code,
-        ..Default::default()
+    let failed = |code: i32, error: String| {
+        log!("{error}");
+        ExitReport {
+            code,
+            error,
+            ..Default::default()
+        }
     };
     let (cfg, files) = match read_config_drive() {
         Ok(v) => v,
-        Err(e) => {
-            log!("config drive: {e:#}");
-            return failed(125);
-        }
+        Err(e) => return failed(125, format!("config drive: {e:#}")),
     };
     if let Err(e) = setup_mounts(&cfg) {
-        log!("mounts: {e:#}");
-        return failed(125);
+        return failed(125, format!("mounts: {e:#}"));
     }
     if let Err(e) = write_files(&files) {
-        log!("boot files: {e:#}");
-        return failed(125);
+        return failed(125, format!("boot files: {e:#}"));
     }
     setup_names(&cfg);
     if let Err(e) = setup_network(&cfg).await {
@@ -187,10 +186,7 @@ async fn run() -> ExitReport {
     });
     let mut cmd = match main_command(&st) {
         Ok(c) => c,
-        Err(e) => {
-            log!("command: {e:#}");
-            return failed(126);
-        }
+        Err(e) => return failed(126, format!("command: {e:#}")),
     };
     let mut child = {
         let mut tracked = TRACKED.lock().unwrap();
@@ -200,8 +196,7 @@ async fn run() -> ExitReport {
                 c
             }
             Err(e) => {
-                log!("start {:?}: {e}", cmd.as_std().get_program());
-                return failed(127);
+                return failed(127, format!("start {:?}: {e}", cmd.as_std().get_program()));
             }
         }
     };
@@ -721,22 +716,33 @@ fn main_command(st: &State) -> Result<Command> {
     cmd.process_group(0);
     if !cfg.user.is_empty() {
         let (uid, gid, home) = lookup_user(&cfg.user)?;
-        let groups = supplementary_groups(uid);
-        cmd.uid(uid).gid(gid);
-        if !groups.is_empty() {
-            unsafe {
-                cmd.pre_exec(move || {
-                    nix::unistd::setgroups(&groups.iter().map(|g| (*g).into()).collect::<Vec<_>>())
-                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
-                });
-            }
-        }
+        run_as(cmd.as_std_mut(), uid, gid, supplementary_groups(uid));
         if let Some(h) = home {
             cmd.env("HOME", h);
         }
     }
     cmd.kill_on_drop(false);
     Ok(cmd)
+}
+
+/// Runs the command as `uid`, `gid` and `groups` (none clears root's own). The child drops
+/// root itself, in the only order that works: `setgroups` and `setgid` while still root,
+/// `setuid` last. Not std's `Command::uid` and `gid`: std switches to the user before any
+/// `pre_exec`, where a `setgroups` then fails with EPERM; std's own `groups` is unstable (#90747).
+fn run_as(cmd: &mut std::process::Command, uid: u32, gid: u32, groups: Vec<u32>) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: only async-signal-safe calls between fork and exec; `groups` is built before.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setgroups(groups.len(), groups.as_ptr()) < 0
+                || libc::setgid(gid) < 0
+                || libc::setuid(uid) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 fn look_path(name: &str, env: &[(String, String)]) -> Result<String> {
@@ -2036,6 +2042,44 @@ mod tests {
                 .collect(),
         );
         assert!(supplementary_groups_in(2000, &p, &groups).is_empty());
+    }
+
+    /// The user, group and groups a process started by `run_as` has, from its
+    /// `/proc/self/status`.
+    fn ids_run_as(uid: u32, gid: u32, groups: Vec<u32>) -> [String; 3] {
+        let mut cmd = std::process::Command::new("cat");
+        cmd.arg("/proc/self/status").stdout(Stdio::piped());
+        run_as(&mut cmd, uid, gid, groups);
+        let child = spawn_tracked(&mut cmd);
+        let pid = child.id() as i32;
+        let out = child.wait_with_output();
+        untrack(pid);
+        let status = String::from_utf8(out.expect("started").stdout).unwrap();
+        ["Uid:", "Gid:", "Groups:"].map(|k| {
+            let line = status.lines().find(|l| l.starts_with(k)).unwrap();
+            line[k.len()..]
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    }
+
+    /// v0.1.1 could not start a user with supplementary groups (grafana, n8n): the groups
+    /// were set after the user, as the user. Changing users needs root:
+    /// `sudo <test binary> --ignored run_as` (CI runs it).
+    #[test]
+    #[ignore = "needs root"]
+    fn run_as_sets_the_groups_before_the_user() {
+        assert_eq!(
+            ids_run_as(65534, 65534, vec![100, 65534]),
+            [
+                "65534 65534 65534 65534",
+                "65534 65534 65534 65534",
+                "100 65534"
+            ]
+        );
+        // No supplementary group: root's own are dropped.
+        assert_eq!(ids_run_as(65534, 100, vec![])[1..], ["100 100 100 100", ""]);
     }
 
     // --- the environment and the command ---

@@ -83,6 +83,19 @@ check "debian: /bin a link to usr/bin"   '[ "$(briqyard machine exec "$DB" -- re
 check "debian: a command through it"     '[ "$(briqyard machine exec "$DB" -- /bin/sh -c "echo ok")" = ok ]'
 briqyard machine rm "$BB" >/dev/null; briqyard machine rm "$DB" >/dev/null
 
+echo "== an image's user, and a program that cannot start"
+# USER 101, listed in its own group in /etc/group: the groups are set before the user (v0.1.1
+# could not start such an image).
+NU=$(briqyard machine run --image nginxinc/nginx-unprivileged:1.28-alpine-slim --name nginxu --tenant "$T" --memory 128 2>/dev/null | jq -r .id || true)
+check "a user with a supplementary group: running" '[ "$(briqyard machine get "$NU" | jq -r .state)" = running ]'
+IDS='s=$(grep -lE "^Uid:[[:space:]]+101[[:space:]]" /proc/[0-9]*/status | head -1); grep -E "^(Uid|Gid|Groups):" "$s" | awk "{print \$2}" | xargs'
+check "its uid, gid and groups" '[ "$(briqyard machine exec "$NU" -- sh -c "$IDS")" = "101 101 101" ]'
+briqyard machine rm "$NU" >/dev/null 2>&1 || true
+nostart=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"tenant\":\"$T\",\"name\":\"nostart\",\"image\":\"alpine:3.20\",\"cmd\":[\"/no/such/program\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines")
+check "no program: 409 boot_failed" '[ "${nostart##* }" = 409 ] && [ "$(echo "${nostart% *}" | jq -r .code)" = boot_failed ]'
+check "no program: the init's reason" '[ "$(echo "${nostart% *}" | jq -r .machine.error)" = "the machine exited during boot: start \"/no/such/program\": No such file or directory (os error 2)" ]'
+briqyard machine rm "$(echo "${nostart% *}" | jq -r .machine.id)" >/dev/null 2>&1 || true
+
 echo "== exec sessions: stdin streamed, a terminal, the client's close (ADR 0029)"
 TTY="python3 $(dirname "$0")/exec-tty.py"
 running() { briqyard machine exec "$A" -- pgrep -f "$1" >/dev/null 2>&1; }
