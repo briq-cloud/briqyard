@@ -224,8 +224,14 @@ impl ObjectStore {
 struct Connector;
 
 impl HttpConnector for Connector {
-    fn connect(&self, _: &ClientOptions) -> object_store::Result<HttpClient> {
+    /// Of the builder's options, `allow_http` is the one that applies: plain HTTP only to an
+    /// `http://` endpoint (MinIO in development), HTTPS everywhere else.
+    fn connect(&self, options: &ClientOptions) -> object_store::Result<HttpClient> {
+        let allow_http = options
+            .get_config_value(&object_store::ClientConfigKey::AllowHttp)
+            .is_some_and(|v| v == "true");
         let client = reqwest::Client::builder()
+            .https_only(!allow_http)
             .connect_timeout(Duration::from_secs(20))
             .read_timeout(STALL)
             .build()
@@ -275,12 +281,15 @@ impl HttpService for Http {
 
 /// A reqwest error as `object_store` reads it, without the request's URL. The kind decides the
 /// retry: a connection that never opened is tried again; a timeout or a cut connection only
-/// when the request is idempotent (a part, a get, a list), never a multipart completion.
+/// when the request is idempotent, which every S3 request is in `object_store`, a multipart
+/// completion included: one re-sent after its answer was lost fails with `NoSuchUpload`, and
+/// the backup is made again. A connection that timed out opening is a connect error (reqwest
+/// reports it as both).
 fn transport(e: reqwest::Error) -> HttpError {
-    let kind = if e.is_timeout() {
-        HttpErrorKind::Timeout
-    } else if e.is_connect() {
+    let kind = if e.is_connect() {
         HttpErrorKind::Connect
+    } else if e.is_timeout() {
+        HttpErrorKind::Timeout
     } else if e.is_decode() {
         HttpErrorKind::Decode
     } else {

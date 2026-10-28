@@ -1,6 +1,6 @@
 # ADR 0011: Transitions run detached from the request; a boot the image fails is 409 `boot_failed`
 
-Date: 2026-10-20 · Status: accepted
+Date: 2026-10-20 · Status: accepted; amended 2026-10-28 (a command that exits at once is an exit, not a failed boot)
 
 ## Context
 
@@ -26,3 +26,7 @@ What the control plane does with each code: `boot_failed` → the briq ends in `
 - `ApiError` has an optional `machine`; the provider reads it on `boot_failed`.
 - The fleet forwards the status and body as they are; it needs no change.
 - Reopen when a transition must be cancelled on purpose (a long image pull the caller gave up on): that would be a request of its own, not a dropped connection.
+
+## Amended 2026-10-28
+
+**A boot fails only when the init never started the main process.** When the process ends before the first pong, the host reads the init's exit report: `started` (with the init's version) means the boot came up and the exit settles as any later one (`stopped`, reason `exit`, the restart policy); no report, or the init's own 125/126/127, is `boot_failed`. The init answers ping only once the main process runs, so either order gives the same result. A root disk older than the field keeps the old answer until its image changes.

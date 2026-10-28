@@ -440,7 +440,7 @@ paths:
         "403": { description: no host is expected at this address (`unknown_host`) }
   /v1/hosts/key:
     post:
-      summary: "A host's pool key (fleet only, ADR 0026): with the host's own API token as the bearer, for the one host record at the address it advertises; made at the first ask, the same after"
+      summary: "A host's pool key (fleet only, ADR 0026): with the host's own API token as the bearer, for the one host record at the address it advertises; made at the first ask, the same after. With `key_id` and `restore`, the key of that id, a live or forgotten host's: the key a backup is encrypted under, served once for a restore the fleet forwarded to this host (ADR 0035)"
       requestBody:
         required: true
         content:
@@ -449,7 +449,8 @@ paths:
       responses:
         "200": { description: the key, content: { application/json: { schema: { $ref: "#/components/schemas/HostKey" } } } }
         "401": { description: not the token the fleet holds for the host at this address }
-        "403": { description: no host is expected at this address (`unknown_host`) }
+        "403": { description: "no host is expected at this address (`unknown_host`); with `key_id`, no restore open for this host as named (`no_restore`)" }
+        "404": { description: "with `key_id`: the fleet holds no pool key of that id (`no_key`)" }
         "500": { description: the registry could not be written (`registry`); no key is handed out unwritten }
         "503": { description: "the registry's backup could not be written (`backup`, ADR 0032); no key is handed out before the backup holds it" }
   /v1/hosts/order:
@@ -594,6 +595,7 @@ components:
               key: { type: string }
               bytes: { type: integer }
               from: { type: string, description: the backup this stream continues from }
+        key_id: { type: string, description: "the id of the pool key the streams are encrypted under (raw sends, ADR 0035): a hash, never the key; absent: streams in clear, made before ADR 0035" }
         deletes_at: { type: string, format: date-time, description: "a destroyed machine's backup: when the host deletes it (`backup.keep_destroyed_days` after the destroy)" }
     ForkSpec:
       type: object
@@ -921,6 +923,7 @@ components:
         image: { type: string }
         cmd: { type: array, items: { type: string }, description: replaces the image's command }
         env: { type: object, additionalProperties: { type: string }, description: write-only, as a machine's }
+        files: { type: array, items: { $ref: "#/components/schemas/File" }, description: "boot files, as a machine's (a proxy's configuration, its CA); write-only" }
         size: { allOf: [{ $ref: "#/components/schemas/Size" }], description: "default 1 vCPU, 256 MB" }
         port: { type: integer, minimum: 1, maximum: 65535, description: "the port its program listens on: a start waits for it, within `boot_timeout_sec`" }
         volume_gb: { type: integer, minimum: 1, description: "a data volume at `/data`, fixed for the gateway's life" }
@@ -1090,6 +1093,8 @@ components:
       required: [url]
       properties:
         url: { type: string, description: "The URL the host advertises (`fleet.advertise`): the fleet finds the host's record by its address" }
+        key_id: { type: string, description: "a backup's `key_id`: the key of that id instead of the host's own (ADR 0035)" }
+        restore: { $ref: "#/components/schemas/RestoreSpec", description: "with `key_id`: the restore the key is for, as the fleet forwarded it to this host; served once" }
     HostKey:
       type: object
       required: [key]

@@ -22,8 +22,8 @@ working days and say what we will do and when. Do not open a public issue for a 
   reach unless that list is set or `ingress.allow_public` says a firewall of your own does
   it (ADR 0012).
 - **The host from images.** Image layers are extracted into a directory the host controls, with
-  every path resolved inside it (symlinks never lead outside, the last component is never
-  followed) and device nodes skipped; the disk is built with `mkfs.ext4 -d`. The host never
+  every path resolved inside it by the kernel (`openat2` with `RESOLVE_IN_ROOT`: symlinks never
+  lead outside, the last component is never followed) and device nodes skipped; the disk is built with `mkfs.ext4 -d`. The host never
   mounts a guest filesystem.
 - **Secrets.** Environment values reach the guest on its config drive, inside its jail, and are
   never returned by the API.
