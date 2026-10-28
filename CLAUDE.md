@@ -19,7 +19,7 @@ crates/briqyard-api      API types and the host–guest protocol (shared by ever
 crates/briqyardd         the daemon: config, store, zfs, netw (bridge, nft, dns), fc, image, guestc, machine, ingress, api
 crates/briqyard-init     PID 1 inside the guest, static musl
 crates/briqyard          the CLI
-crates/briqyard-fleet    placement, forwarding, host registry, provisioners, bootstrap, the registry's backup
+crates/briqyard-fleet    placement, forwarding, host registry, bootstrap, capacity signals, the registry's backup
 crates/briqyard-objstore the object store (S3 or a directory): machine backups, the registry's backup
 api/openapi.yaml         the API, served at /v1/openapi.yaml
 fuzz/                    cargo fuzz targets for what untrusted parties write (nightly, by hand)
@@ -51,7 +51,7 @@ docs/                    architecture, operations, development, mesh design, adr
 - Errors carry what failed and what was being done. The daemon logs one JSON line per event, nothing else on stdout. Never log a token or a secret.
 - Lima and Mac specifics live only in `hack/config.dev.yaml`, `hack/vm.sh` and `docs/DEVELOPMENT.md`.
 - **Native primitives, not another platform's workarounds.** Nothing here exists to match another platform's limitation or to keep a workaround for one working; when the control plane above carries such a workaround, briqyard offers the native primitive and the control plane drops it.
-- **This repo is public: no strategy, marketing, competitor names or business internals** in files, comments, commit messages, PR titles or PR bodies. No pricing, plans, billing or cost decisions, rollout plans, or another platform named as a comparison: describe the technique or the number instead of who does it. No personal paths or private locations. Open-source components (Firecracker, ZFS, Cloud Hypervisor, Kubernetes as the reference model) and the hosting providers a provisioner integrates (OVH, Scaleway, Hetzner) may be named.
+- **This repo is public: no strategy, marketing, competitor names or business internals** in files, comments, commit messages, PR titles or PR bodies. No pricing, plans, billing or cost decisions, rollout plans, or another platform named as a comparison: describe the technique or the number instead of who does it. No personal paths or private locations. Open-source components (Firecracker, ZFS, Cloud Hypervisor, Kubernetes as the reference model) may be named, and a hosting provider in a factual runbook step (a server bought by hand, OVH's vRack).
 
 ## Git
 

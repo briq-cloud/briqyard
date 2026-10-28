@@ -1,6 +1,6 @@
 # ADR 0028: A real host: the pool mirrored on the OS's disks, a server added by hand, the API on the private network
 
-Date: 2026-10-21 · Status: accepted; amends ADR 0007 (the OVH install), ADR 0013 (a host added by hand is bootstrapped and pinned like an ordered one)
+Date: 2026-10-21 · Status: accepted; amends ADR 0007 (the OVH install), ADR 0013 (a host added by hand is bootstrapped and pinned like an ordered one); ADR 0042 removed ordering: `host add` is how a server joins, the bootstrap's settings under `bootstrap:`
 
 ## Context
 

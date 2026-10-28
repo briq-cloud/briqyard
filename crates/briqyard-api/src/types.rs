@@ -1494,9 +1494,11 @@ pub struct Host {
     pub ssh: String,
     #[serde(default)]
     pub region: String,
+    /// How the host came: `static` (the fleet's `hosts:`) or `manual` (`POST /v1/hosts`).
     #[serde(default)]
     pub provider: String,
-    /// ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed, dry-run
+    /// ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed; `retired`
+    /// in the answer to a retire that forgot it
     pub state: String,
     pub capacity: Capacity,
     pub used: Capacity,
@@ -1506,7 +1508,7 @@ pub struct Host {
     pub last_seen: DateTime<Utc>,
     #[serde(default)]
     pub version: String,
-    /// The last thing the provisioner or the bootstrap said about this host.
+    /// The last thing the bootstrap or an upgrade said about this host.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
     /// The SHA-256 of the host's API certificate, pinned by the fleet; empty for a host on
@@ -1550,7 +1552,7 @@ pub struct UpgradeHostRequest {
     pub release: String,
 }
 
-/// POST /v1/hosts (fleet only): a server bought by hand, bootstrapped as an ordered one is.
+/// POST /v1/hosts (fleet only): a server bought by hand, for the fleet to bootstrap.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AddHostRequest {
     /// The server's address for SSH (its public address).
@@ -1565,17 +1567,9 @@ pub struct AddHostRequest {
     #[serde(default)]
     pub id: String,
     /// Ports its public interface takes besides SSH (an edge's on it); absent: the fleet's
-    /// `provisioner.bootstrap.public_tcp_ports`.
+    /// `bootstrap.public_tcp_ports`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_tcp_ports: Option<Vec<u16>>,
-}
-
-/// POST /v1/hosts/order (fleet only).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct OrderHostRequest {
-    /// Why; kept in the host's note.
-    #[serde(default)]
-    pub reason: String,
 }
 
 /// What a daemon sends the fleet every 15 s, with its own API token as the bearer: the fleet
@@ -2764,10 +2758,10 @@ mod tests {
         let h: Host = round_trip(input, expected);
         assert_eq!(h.note, "");
         let h: Host = same(json!({
-            "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1", "provider": "hetzner-robot",
+            "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1", "provider": "manual",
             "state": "draining", "capacity": {"memory_mb": 65536, "vcpus": 16},
             "used": {"memory_mb": 1024, "vcpus": 2}, "machines": 2, "tenants": ["t1", "t2"],
-            "last_seen": "2026-01-02T03:04:05Z", "version": "0.1.0", "note": "ordered",
+            "last_seen": "2026-01-02T03:04:05Z", "version": "0.1.0", "note": "bootstrapped",
             "tls_fingerprint": "ab01",
             "conditions": [{"type": "disk_pressure", "status": true,
                 "since": "2026-01-02T03:04:05Z", "message": "pool 4% free"}],
@@ -2783,8 +2777,6 @@ mod tests {
 
     #[test]
     fn host_requests() {
-        let o: OrderHostRequest = round_trip(json!({}), json!({"reason": ""}));
-        assert_eq!(o.reason, "");
         let r: RegisterHostRequest = round_trip(
             json!({
                 "id": "h1", "url": "http://10.0.0.5:7420",

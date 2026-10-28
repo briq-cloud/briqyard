@@ -1,14 +1,13 @@
-//! Turns a server into a host: one the provisioner delivered (its address found first) or one
-//! added by hand (`POST /v1/hosts`, its SSH and API addresses given), the same way: runs
-//! `hack/bootstrap-host.sh` on it over SSH with this fleet's details, every two minutes until
-//! it works or the attempts run out. The host turns `ready` on its first heartbeat.
+//! Turns a server into a host (Kubernetes's `kubeadm join`): one added with `POST /v1/hosts`,
+//! its SSH and API addresses given. Runs `hack/bootstrap-host.sh` on it over SSH with this
+//! fleet's details, every two minutes until it works or the attempts run out. The host turns
+//! `ready` on its first heartbeat.
 //!
 //! A host's API may live on a private network (OVH's vRack, `private_network`) while SSH
 //! reaches its public address: the script is told its private address, binds the API and the
 //! endpoints there and closes the public interface to all but SSH (ADR 0028).
 //!
-//! The server's SSH host key: no provider the fleet orders from gives it through its API, so
-//! the key seen at the first connect is pinned in `<state_dir>/known_hosts` once the bootstrap
+//! The server's SSH host key: the fleet is given none with the server, so the key seen at the first connect is pinned in `<state_dir>/known_hosts` once the bootstrap
 //! has succeeded, its fingerprint written into the host's note for the operator to check; a
 //! later connect (an upgrade) is strict against it.
 //!
@@ -51,7 +50,7 @@ pub fn release_url(release: &str) -> Option<String> {
     ok.then(|| format!("{RELEASES}/v{v}"))
 }
 
-/// An ordered host's API URL: TLS, with the certificate the bootstrap pins.
+/// An added host's API URL: TLS, with the certificate the bootstrap pins.
 pub fn host_url(ip: &str) -> String {
     format!("https://{ip}:7420")
 }
@@ -70,24 +69,7 @@ pub async fn run(st: Arc<AppState>) {
         tokio::time::sleep(Duration::from_secs(120)).await;
         let pending = to_install(&st.reg.lock().unwrap());
         for h in pending {
-            // 1. The address, once the provider has one.
-            if h.url.is_empty() {
-                match st.prov.lookup(&h.provider_id).await {
-                    Ok(Some(ip)) => {
-                        tracing::info!(host = h.id, ip, "server delivered");
-                        if let Some(r) = st.reg.lock().unwrap().hosts.get_mut(&h.id) {
-                            r.url = host_url(&ip);
-                            r.note = format!("delivered at {ip}");
-                        }
-                        let _ = st.save();
-                    }
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!(host = h.id, err = %e, "lookup"),
-                }
-                continue;
-            }
-            // 2. The install.
-            let b = &st.cfg.provisioner.bootstrap;
+            let b = &st.cfg.bootstrap;
             if !b.enabled {
                 continue;
             }
@@ -127,12 +109,11 @@ pub async fn run(st: Arc<AppState>) {
     }
 }
 
-/// The hosts the bootstrap works on: `provisioning`, with a server behind them, ordered (a
-/// provider id, its address looked up first) or added by hand (its address given).
+/// The hosts the bootstrap works on: `provisioning`, with the address `host add` gave.
 pub fn to_install(reg: &crate::registry::Registry) -> Vec<crate::registry::HostRec> {
     reg.hosts
         .values()
-        .filter(|h| h.state == "provisioning" && !(h.provider_id.is_empty() && h.url.is_empty()))
+        .filter(|h| h.state == "provisioning" && !h.url.is_empty())
         .cloned()
         .collect()
 }
@@ -191,7 +172,7 @@ pub fn bootstrapped(r: &mut crate::registry::HostRec, note: String, fingerprint:
 /// The host's API certificate fingerprint, read over SSH against the key just pinned. A host
 /// that answers none serves plain HTTP: not one the fleet forwards secrets to.
 async fn api_fingerprint(st: &AppState, ip: &str) -> anyhow::Result<String> {
-    let b = &st.cfg.provisioner.bootstrap;
+    let b = &st.cfg.bootstrap;
     let known_hosts = st.cfg.state_dir.join("known_hosts");
     let mut args = ssh_base(b, ip, &known_hosts, true);
     args.push(FINGERPRINT_CMD.into());
@@ -208,7 +189,7 @@ async fn api_fingerprint(st: &AppState, ip: &str) -> anyhow::Result<String> {
 
 /// The daemon's version installed on the host, read over the pinned SSH key.
 pub async fn installed_version(st: &AppState, ip: &str) -> anyhow::Result<String> {
-    let b = &st.cfg.provisioner.bootstrap;
+    let b = &st.cfg.bootstrap;
     let known_hosts = st.cfg.state_dir.join("known_hosts");
     let mut args = ssh_base(b, ip, &known_hosts, true);
     args.push(VERSION_CMD.into());
@@ -235,7 +216,7 @@ fn parse_version(out: &str) -> Option<String> {
 fn parse_api_fingerprint(out: &str) -> anyhow::Result<String> {
     if out.trim().is_empty() {
         anyhow::bail!(
-            "the host's API serves plain HTTP (a loopback listen or api_tls: false): an ordered host must serve TLS"
+            "the host's API serves plain HTTP (a loopback listen or api_tls: false): an added host must serve TLS"
         );
     }
     briqyard_api::tls::parse_fingerprint(out)
@@ -287,7 +268,7 @@ fn tail(b: &[u8]) -> String {
 /// server's other users could see. Answers the note for the host: when it was bootstrapped,
 /// and the host key pinned.
 pub async fn install(st: &AppState, host: &str, ip: &str, env: &str) -> anyhow::Result<String> {
-    let b = &st.cfg.provisioner.bootstrap;
+    let b = &st.cfg.bootstrap;
     let script = if b.script.as_os_str().is_empty() {
         SCRIPT.to_string()
     } else {
@@ -295,7 +276,7 @@ pub async fn install(st: &AppState, host: &str, ip: &str, env: &str) -> anyhow::
     };
     // A host whose key is pinned is checked against it. A new one connects to whatever key it
     // presents, into a file of its own: the key is pinned only once the bootstrap has succeeded,
-    // so an attempt made while the provider is still installing the OS pins nothing.
+    // so an attempt made while the server is still installing its OS pins nothing.
     let pinned_file = st.cfg.state_dir.join("known_hosts");
     let pinned = has_host(
         &std::fs::read_to_string(&pinned_file).unwrap_or_default(),
@@ -345,7 +326,7 @@ pub async fn install(st: &AppState, host: &str, ip: &str, env: &str) -> anyhow::
                     anyhow::anyhow!("pin the host key in {}: {e}", pinned_file.display())
                 })?;
             Ok(format!(
-                "bootstrapped at {when}; ssh host key {key} pinned at first connect: check it against the provider's console"
+                "bootstrapped at {when}; ssh host key {key} pinned at first connect: check it on the server (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub)"
             ))
         }
         Some(_) => Ok(format!("bootstrapped at {when}; no ssh host key recorded")),
@@ -634,7 +615,7 @@ mod tests {
             "{}",
             args[13]
         );
-        // An API outside the private network (an ordered host on its public address): no
+        // An API outside the private network (a host on its public address): no
         // private settings, the public interface stays as it is.
         let env = bootstrap_env(
             &b,
@@ -674,9 +655,9 @@ mod tests {
     }
 
     #[test]
-    fn ordered_and_added_hosts_are_installed_alike() {
+    fn added_hosts_are_installed() {
         let now = Utc::now();
-        let rec = |id: &str, state: &str, url: &str, provider_id: &str, ssh: &str| {
+        let rec = |id: &str, state: &str, url: &str, ssh: &str| {
             let mut r = crate::static_host(
                 &crate::config::StaticHost {
                     id: id.into(),
@@ -686,29 +667,27 @@ mod tests {
                 now,
             );
             r.state = state.into();
-            r.provider_id = provider_id.into();
             r.ssh = ssh.into();
             r
         };
         let mut reg = crate::registry::Registry::default();
         for r in [
-            rec("ordered", "provisioning", "", "order:1", ""),
             rec(
                 "added",
                 "provisioning",
                 "https://10.42.0.11:7420",
-                "",
                 "51.68.1.2",
             ),
-            rec("nothing", "provisioning", "", "", ""),
-            rec("ready", "ready", "https://10.42.0.12:7420", "", ""),
-            rec("dry", "dry-run", "", "dry-run-1", ""),
+            rec("public", "provisioning", "https://51.68.1.3:7420", ""),
+            rec("nothing", "provisioning", "", ""),
+            rec("ready", "ready", "https://10.42.0.12:7420", ""),
+            rec("failed", "failed", "https://10.42.0.13:7420", ""),
         ] {
             reg.hosts.insert(r.id.clone(), r);
         }
         let mut ids: Vec<String> = to_install(&reg).into_iter().map(|h| h.id).collect();
         ids.sort();
-        assert_eq!(ids, ["added", "ordered"]);
+        assert_eq!(ids, ["added", "public"]);
         assert_eq!(ssh_address(&reg.hosts["added"]), "51.68.1.2");
         assert_eq!(
             ssh_address(&reg.hosts["ready"]),

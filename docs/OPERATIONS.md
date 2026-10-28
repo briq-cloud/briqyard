@@ -189,7 +189,7 @@ What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it i
 | Step | |
 |---|---|
 | `upgrading` | Placement stops; the host's machines are served |
-| Install | `hack/bootstrap-host.sh` over SSH with the release (`provisioner.bootstrap.ssh_key`, the pinned host key), as at a bootstrap: packages, Firecracker and kernel pins, the binaries put in place by a rename, the unit |
+| Install | `hack/bootstrap-host.sh` over SSH with the release (`bootstrap.ssh_key`, the pinned host key), as at a bootstrap: packages, Firecracker and kernel pins, the binaries put in place by a rename, the unit |
 | Hand-over | The script sends the running daemon SIGUSR2: it exits and leaves every machine running; `systemctl start` brings the new one, which adopts them |
 | Back | `briqyardd --version` over SSH, then a heartbeat from a new start of that version that stopped nothing, within 5 minutes |
 | Undrained | The host is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
@@ -198,11 +198,11 @@ A failure leaves the host `draining` with the reason in its note: fix it, then
 `briqyard host undrain <id>`. `--all` stops at the first failure and names the hosts left. One
 upgrade at a time per fleet. A static host (`hosts:`) needs the fleet's SSH key in root's
 `authorized_keys`; its host key is pinned at its first upgrade. After a roll, set
-`provisioner.bootstrap.release` to the release, for the hosts ordered next.
+`bootstrap.release` to the release, for the hosts added next.
 
 A release is a URL where `<binary>-linux-<arch>` are (`briqyardd`, `briqyard-init`, `briqyard`,
 `briqyard-fleet`) with their `SHA256SUMS-<arch>`, or a version of the project's releases; a
-private repository's is read with `provisioner.bootstrap.release_token`. Without a fleet, on the host:
+private repository's is read with `bootstrap.release_token`. Without a fleet, on the host:
 `BRIQYARD_RELEASE=<url> bash bootstrap-host.sh` does the same install and hand-over.
 
 What the machines see:
@@ -362,14 +362,15 @@ snapshot, or is whole.
 | `startup_failed` then `error` | The startup probe did not pass within `failure_threshold` × `period_sec` of a start: the boot failed, as `boot_failed` does. On a restart it is a crash instead, restarted by the policy |
 | `the guest did not come up` | The kernel booted but the init did not answer on vsock within `boot_timeout_sec`: console log, then the kernel (`kernel`) and init (`init`) paths |
 | `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk, conditions, and per region what ran out (`UNSCHEDULABLE`, ADR 0042). `used` counts what placement reserved until the next heartbeat |
-| `no host in region … has room` (fleet) | No ready host of that region under the ceiling: `briqyard host ls`, the `REGION` column; order or add one there |
+| `no host in region … has room` (fleet) | No ready host of that region under the ceiling: `briqyard host ls`, the `REGION` column; add one there |
 | `tenant … is in region …, not …` (fleet, 400) | The tenant lives on a host of another region. A team that changes region moves: backups, destroy, `tenant unpin`, restores with the new region |
 | 403 `quota` | The tenant is at a limit of its quota: `briqyard tenant quota <tenant>` shows the limit and the use |
 | `host h_… is under disk_pressure` (fleet, 503 `capacity`) | The tenant's host takes nothing new until the condition clears. Disk: `zfs list -o space byard`; unused images go by themselves, then backups and destroys of what is left. Memory: stop machines, or move the tenant (below) |
 | `host h_… is down` (fleet, 503) | The host missed its heartbeats for `placement.down_after_sec`: its machines answer again once it is back. `briqyard host ls`, then the host's `journalctl -u briqyardd` |
-| `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just ordered gets this until its bootstrap has pinned it |
+| `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just added gets this until its bootstrap has pinned it |
 | `host …: … is not the pinned …` (fleet, 502 `host_unreachable`) | The host presents another certificate than its record's `tls_fingerprint`: reinstalled (pin the new one), or not the host |
 | `write registry …` (fleet, 500 `registry`) | The fleet's `state_dir` is full or not writable; nothing is recorded until it is |
+| `provisioner.bootstrap is read as bootstrap:` (fleet, `warn` at start), a `provisioner.…` error (the fleet does not start) | A v0.1.1 configuration: move `provisioner.bootstrap` to a top-level `bootstrap:` and delete `provisioner:` with all else under it (ADR 0042). A `dry-run` host left by an older fleet: `briqyard host rm <id>` |
 | `registry backup` (fleet, `error`), 503 `backup` on `/v1/hosts/key` | The registry could not be written to `backup.store`: credentials, endpoint, the bucket. Hosts whose key the store holds are served; new keys wait for the store |
 | `read the registry …` (the fleet does not start) | `registry.json` does not parse: restore the file (fields a fleet does not know are kept, not refused). Never remove it: every host's pool key is in it (ADR 0026) |
 | `bootstrap attempt N: … host key …` in a host's note | The server's SSH key is not the one pinned in `<state_dir>/known_hosts`: reinstalled, remove its line; not reinstalled, do not connect |
@@ -395,8 +396,7 @@ daemon's; `briqyard host ls` shows the hosts.
 
 A host has one credential, its own API token, and the fleet must hold it before the host can
 be anything to it: it forwards with it and takes the host's heartbeats (`fleet:` in the host's
-config) only with it. A host the fleet orders or adds (`briqyard host add`) gets its token from
-the bootstrap. A host you install yourself is listed under `hosts:` with it:
+config) only with it. A host added with `briqyard host add` gets its token from the bootstrap. A host you install yourself is listed under `hosts:` with it:
 
 ```yaml
 hosts:
@@ -408,14 +408,14 @@ hosts:
 ```
 
 `region` is what a create's `region` names: a new tenant goes to a host of it, and stays in it
-(ADR 0025). A host ordered by the fleet takes the region its daemon's `fleet.region` reports.
+(ADR 0025). A host added takes the region `host add` gives it.
 
 The fleet polls it every 15 s and accepts its heartbeats; without a `token` it is polled only.
 An `https://` URL needs its `tls_fingerprint` and a fingerprint needs `https://` (refused at
 start otherwise): the fleet accepts that one certificate from the host and nothing else, no CA,
 and refuses a heartbeat reporting another (`tls_mismatch`). A host on plain HTTP (a loopback
 daemon you forwarded) has neither.
-A heartbeat from an address no entry or order expects is refused (`unknown_host`), so no host
+A heartbeat from an address no entry or `host add` expects is refused (`unknown_host`), so no host
 can speak for another. The registry is `<state_dir>/registry.json` (`0600`, its directory
 `0700`); a write that fails is an `error` in the fleet's log and a 500 `registry` on the
 request that needed it.
@@ -425,7 +425,7 @@ Each host's pool key is in its record (ADR 0026): made at the host's first `POST
 address, as a heartbeat), never listed, gone when the host is retired or forgotten. `briqyard
 host rm` refuses a host that holds a key (409 `pool_key`) unless `--force`: its pool is
 unreadable at its next restart, and a static host polled back gets a key its pool does not open.
-A drained host stays drained; a retiring host is released once empty. **Losing the
+A drained host stays drained; a retiring host is forgotten once empty. **Losing the
 registry loses every key**: a host keeps running while its key is loaded, and cannot read its
 pool after its next reboot. Back the registry up before a host holds anything that matters
 (below); a host still up can be re-keyed with `zfs change-key`. The fleet's `state_dir` must be
@@ -463,8 +463,8 @@ briqyard-fleet restore --identity fleet-backup.key        # --from fleet/registr
 which writes the registry (`0600`), refuses to write over one, and prints what the fleet will
 trust: each host's id, url, pin prefix, token and pool key there or not, and the newest
 heartbeat in the backup. Check them, then start the fleet and remove the identity from the
-host. From the backup's last minute, a restore does not bring back an ordered host not yet
-keyed (order it again), a rotated token (put it in the record), a drain, or a forget. Placements made since the backup come back from the hosts' heartbeats.
+host. From the backup's last minute, a restore does not bring back an added host not yet
+keyed (add it again), a rotated token (put it in the record), a drain, or a forget. Placements made since the backup come back from the hosts' heartbeats.
 `age -d -i fleet-backup.key registry.json.age` reads a backup without us.
 
 Where the fleet terminates the connection (its `tls`, or plain on loopback), a host's
@@ -475,7 +475,7 @@ the last `X-Forwarded-For` value, which the proxy writes, and a call without one
 Behind `tls: off` on any other address only the token is checked. **Retire or forget a host
 before its server or a disk leaves our hands.** A disk the provider swaps while the host stays
 carries the host's token: rotate it (a static host: a new `token` in its `hosts:` entry and in
-its `/etc/briqyard/config.yaml`, then restart the fleet and the daemon; an ordered host: no
+its `/etc/briqyard/config.yaml`, then restart the fleet and the daemon; an added host: no
 route yet, the same edit in `registry.json` with the fleet stopped).
 
 The fleet's own listener serves TLS with a certificate of yours: `tls: { cert, key }`, PEM
@@ -529,57 +529,23 @@ groups:
 
 ### Adding and removing hosts
 
-Hosts come and go through the API, by hand or from the autoscaler; both use the same
-provisioner (`kind: hetzner-robot`, `scaleway` or `ovh`, credentials through `HETZNER_ROBOT_USER` /
-`HETZNER_ROBOT_PASSWORD`, `SCW_SECRET_KEY`, or `OVH_APPLICATION_KEY` / `OVH_APPLICATION_SECRET` /
-`OVH_CONSUMER_KEY`). Every provisioner is `dry_run: true` until the configuration says
-otherwise: it records what it would order and orders nothing. Turn it off only once a dry run
-has shown the right product, location and count.
+The fleet buys no server (ADR 0042): you, or a scaler of yours reading the signals above, buy
+one and add it.
 
 ```bash
 briqyard host add 51.68.1.2 --address 10.42.0.11 --region gra   # POST /v1/hosts: a server you bought, bootstrapped
                                              # --public-tcp-ports 80,443,… (or none): its own, else the fleet's
-briqyard host order --reason "first host"    # POST /v1/hosts/order: a server, state provisioning
-briqyard host ls                             # its note says what the provider and the bootstrap last did
-briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: retiring, released once empty
+briqyard host ls                             # its note says what the bootstrap last did
+briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: retiring, forgotten once empty
 briqyard host drain h_123456                 # draining: no new tenant on it, kept
 briqyard host undrain h_123456               # ready again, from draining or retiring
 briqyard host rm h_123456                    # forget it (its machines are not touched)
 ```
 
-**OVHcloud** (`kind: ovh`) orders a dedicated server from the Eco range (Kimsufi, So you
-Start, Rise; `ovh.range: eco`) or the Bare Metal range (Advance, Scale; `ovh.range: baremetal`)
-through the API's cart: `ovh.plan_code` (`25risem01-v2` for example, from the catalog), in
-`ovh.datacenter` (`gra`, `rbx`, `sbg`...), one month at a time, paid with the account's
-preferred payment method and the retraction period waived, with the cheapest option of each
-mandatory family (memory, disks, bandwidth: the plan's base configuration) and no OS.
-`ovh.subsidiary` is the OVH company the order is made under (`FR` by default). The credentials
-are an API application (`application_key`, `application_secret`) and a consumer key with
-rights on `/order/*`, `/me/order/*`, `/me/sshKey/*`, `/dedicated/server/*` and `GET /me`; every
-request is signed with them and OVH's own clock (`/auth/time`). The provider id is
-`order:<orderId>` until delivery. Every two minutes the fleet reads the order's status; once
-it is `delivered`, it assumes one of the order's details (`/me/order/<id>/details/<detail>`)
-carries the server's service name as `domain` (a placeholder like `*001` before), checks that
-name against the account's server list (`GET /dedicated/server`), reads the server for its
-address, and starts an Ubuntu 26.04 install (`POST /dedicated/server/<name>/reinstall`,
-`ubuntu2604-server_64`, the OS on a RAID 1 of `/boot` 1 GiB and `/` 100 GiB, the rest of the
-disks left for the pool, ADR 0028) with the SSH key named `ovh.ssh_key_name`, which must
-already be in the account (`/me/sshKey`); the bootstrap then fails every two minutes until the
-install is done, which is expected. A delivered order whose details name no server of the
-account is an error in the host's note: add the host by hand. A retire terminates the server
-(`POST /dedicated/server/<name>/terminate`): OVH then emails a confirmation to accept, and the
-server is billed to the end of its period; a retire before delivery is refused (cancel the
-order in the OVH manager). This provisioner has not run against the real API yet: the request
-shapes follow OVH's published schemas (ADR 0028 lists what is still assumed), and the delivery
-assumption above is the one to check first. An ordered host keeps its public address for its
-API: the vRack address of a server is not in OVH's API, so a vRack host is added by hand.
-
-A server the fleet ordered or added becomes a host on its own when
-`provisioner.bootstrap.enabled` is set: every two minutes the fleet asks the provider for an
-ordered server's address, then runs `hack/bootstrap-host.sh` on it over SSH (`ssh_user`,
-`ssh_key`: the key the provider installed, or yours on a server you bought; `release`,
-`release_token`, `pool_device`, `fleet_url`, `allowed_clients` for the script), with a token
-of its own for the host's API. A host whose API address is in `private_network` (a CIDR, the
+A server added becomes a host on its own when the fleet's `bootstrap.enabled` is set: within
+two minutes the fleet runs `hack/bootstrap-host.sh` on it over SSH (`ssh_user`, `ssh_key`: a
+key the server takes for that user; `release`, `release_token`, `pool_device`, `fleet_url`,
+`allowed_clients` for the script), with a token of its own for the host's API. A host whose API address is in `private_network` (a CIDR, the
 vRack) is reached over SSH at its own address (`host add`'s first argument) and told its
 private address: `private_interface` gets it when the server does not have it yet, and its
 public interface takes SSH and `public_tcp_ports` only (ADR 0028). With `fleet_address` (the
@@ -597,16 +563,18 @@ that cannot be installed after `max_attempts` is `failed`, with the last error i
 Without the bootstrap, run the script yourself with `FLEET_URL`, `ADVERTISE` and the
 `BRIQYARD_TOKEN` the fleet holds for the host (an entry under `hosts:`).
 
-No provider's API returns the server's SSH host key, so the bootstrap pins the key it sees:
+The fleet is given no SSH host key with the server, so the bootstrap pins the key it sees:
 the first attempt that succeeds appends it to `<state_dir>/known_hosts` and writes its
 fingerprint into the host's note (`ssh host key SHA256:… ed25519 pinned at first connect`);
-compare it with the provider's console. Every later connect is strict against that file. A
-server reinstalled by the provider has a new key: remove its line from the file.
+compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server. Every later
+connect is strict against that file. A server reinstalled has a new key: remove its line from
+the file.
 
-A retire makes the host `retiring` (no new tenant lands on it) and releases it at the provider
-once it runs nothing: at once when it is already empty, else from the hourly pass as soon as
-its last machine is destroyed. A host from the `hosts:` list is retired by removing it from
-the configuration; forgotten through the API, it is back on the next poll.
+A retire makes the host `retiring` (no new tenant lands on it) and forgets it once it runs
+nothing: at once when it is already empty (the answer says `retired`), else within a minute of
+its last machine's destroy. The server stays yours: give it back to its provider yourself. A
+host from the `hosts:` list is retired by removing it from the configuration; forgotten through
+the API, it is back on the next poll.
 
 ### Moving a tenant
 
@@ -630,11 +598,6 @@ the host, for a host that is down for good or a pin left on a full host. A tenan
 while it still has machines on a host is pinned back there by the host's next heartbeat, and a
 machine created in between lands on another host, where it cannot reach the others: unpin
 once the tenant has nothing left on the host, or mean to abandon what is there.
-
-The autoscaler (`provisioner.enabled: true`) orders a host when no ready host has a slot of
-`slot_mb` left and releases a provisioned host empty for `idle_grace`, between `min_hosts` and
-`max_hosts`, one change a minute. It is on its way out (ADR 0042): scale from the capacity
-signals above.
 
 ## First OVH host
 
@@ -671,7 +634,7 @@ If the manager makes the last partition fill the disk, reinstall through the API
 (`POST /dedicated/server/{serviceName}/reinstall`) with `operatingSystem: ubuntu2604-server_64`,
 your key as `customizations.sshKey`, and `storage: [{partitioning: {layout: [{mountPoint:
 "/boot", fileSystem: ext4, raidLevel: 1, size: 1024}, {mountPoint: "/", fileSystem: ext4,
-raidLevel: 1, size: 102400}]}}]`, the provisioner's own body.
+raidLevel: 1, size: 102400}]}}]`.
 
 Then, on the server, what the suites ran on:
 
@@ -716,21 +679,22 @@ listen: 127.0.0.1:7430                     # loopback, plain HTTP: the edge term
 tls: off
 token: <openssl rand -hex 24: what the control plane and the CLI present>
 state_dir: /var/lib/briqyard-fleet
-provisioner:
-  kind: static
-  bootstrap:
-    enabled: true
-    ssh_key: /etc/briqyard/fleet_ssh_key
-    release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.1
-    pool_device: /dev/nvme0n1,/dev/nvme1n1
-    fleet_url: https://fleet.example.com
-    fleet_address: 10.42.0.11                # this server on the vRack: hosts reach fleet_url here
-    private_network: 10.42.0.0/16
-    private_interface: enp3s0f1
-    allowed_clients: [10.42.0.0/16]
-    # Hosts without an edge open nothing more than SSH; the edge's host says its own (step 5).
-    public_tcp_ports: []
+bootstrap:
+  enabled: true
+  ssh_key: /etc/briqyard/fleet_ssh_key
+  release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.1
+  pool_device: /dev/nvme0n1,/dev/nvme1n1
+  fleet_url: https://fleet.example.com
+  fleet_address: 10.42.0.11                # this server on the vRack: hosts reach fleet_url here
+  private_network: 10.42.0.0/16
+  private_interface: enp3s0f1
+  allowed_clients: [10.42.0.0/16]
+  # Hosts without an edge open nothing more than SSH; the edge's host says its own (step 5).
+  public_tcp_ports: []
 ```
+
+v0.1.1 reads these settings only as `provisioner: { kind: static, bootstrap: … }`; later
+releases read `bootstrap:`, and the old place for one release with a warning (ADR 0042).
 
 The fleet's state (`/var/lib/briqyard-fleet`: the registry with every host's token and pool
 key, the pinned SSH keys) is on this server alone: give the fleet a `backup:` ("The registry's

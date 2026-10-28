@@ -612,18 +612,13 @@ struct Fleet {
 }
 
 /// A fleet on a fresh state directory, with the hosts of the configuration seeded as `run` does.
-fn fleet(cfg: config::Config, prov: Box<dyn provision::Provisioner>) -> Fleet {
+fn fleet(cfg: config::Config) -> Fleet {
     let dir = tempfile::tempdir().unwrap();
     let state_path = dir.path().join("registry.json");
-    fleet_at(cfg, prov, dir, state_path)
+    fleet_at(cfg, dir, state_path)
 }
 
-fn fleet_at(
-    mut cfg: config::Config,
-    prov: Box<dyn provision::Provisioner>,
-    dir: tempfile::TempDir,
-    state_path: PathBuf,
-) -> Fleet {
+fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf) -> Fleet {
     cfg.state_dir = dir.path().to_path_buf();
     let backup = backup::Backup::open(&cfg.backup).unwrap();
     let mut reg = Registry::default();
@@ -641,7 +636,6 @@ fn fleet_at(
         reg: Mutex::new(reg),
         http: reqwest::Client::new(),
         pinned: Mutex::new(HashMap::new()),
-        prov,
         upgrade: Default::default(),
         backup,
         key_turn: Default::default(),
@@ -649,13 +643,6 @@ fn fleet_at(
         refusals: Default::default(),
     });
     Fleet { st, _dir: dir }
-}
-
-fn dry_scaleway() -> Box<dyn provision::Provisioner> {
-    provision::build(&config::Provisioner {
-        kind: "scaleway".into(),
-        ..Default::default()
-    })
 }
 
 /// A ready host in the registry, with no daemon behind it.
@@ -710,7 +697,7 @@ async fn fleet_in_regions(regions: &[&str]) -> (Fleet, Vec<Running>) {
         });
         daemons.push(d);
     }
-    let f = fleet(cfg, Box::new(provision::Static));
+    let f = fleet(cfg);
     poll_static_hosts_once(&f.st).await;
     (f, daemons)
 }
@@ -878,13 +865,10 @@ fn with_host_marks_a_machine_body_and_leaves_the_rest() {
 
 #[tokio::test]
 async fn a_bearer_token_guards_every_route_but_healthz_and_register() {
-    let f = fleet(
-        config::Config {
-            token: "api".into(),
-            ..Default::default()
-        },
-        Box::new(provision::Static),
-    );
+    let f = fleet(config::Config {
+        token: "api".into(),
+        ..Default::default()
+    });
     let (s, _, body) = call(&f.st, "GET", "/healthz", "", None).await;
     assert_eq!((s, body.as_str()), (StatusCode::OK, "ok\n"));
     let (s, _, body) = call(&f.st, "GET", "/v1/status", "", None).await;
@@ -902,34 +886,31 @@ async fn a_bearer_token_guards_every_route_but_healthz_and_register() {
     assert_eq!(json(&body)["code"], "unknown_host");
 
     // No token configured: nothing is asked of API clients.
-    let open = fleet(config::Config::default(), Box::new(provision::Static));
+    let open = fleet(config::Config::default());
     let (s, _, _) = call(&open.st, "GET", "/v1/hosts", "", None).await;
     assert_eq!(s, StatusCode::OK);
 }
 
 #[tokio::test]
 async fn a_registration_is_taken_only_for_the_host_that_expects_it() {
-    let f = fleet(
-        config::Config {
-            token: "api".into(),
-            hosts: vec![
-                config::StaticHost {
-                    id: "s1".into(),
-                    url: "http://10.0.0.1:7420".into(),
-                    token: "s1-token".into(),
-                    region: "fsn".into(),
-                    ..Default::default()
-                },
-                config::StaticHost {
-                    id: "open".into(),
-                    url: "http://10.0.0.2:7420".into(),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        },
-        Box::new(provision::Static),
-    );
+    let f = fleet(config::Config {
+        token: "api".into(),
+        hosts: vec![
+            config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "s1-token".into(),
+                region: "fsn".into(),
+                ..Default::default()
+            },
+            config::StaticHost {
+                id: "open".into(),
+                url: "http://10.0.0.2:7420".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
     // An address no record expects: refused whatever it presents.
     let (s, _, body) = call(
         &f.st,
@@ -1007,14 +988,11 @@ async fn a_host_gets_its_own_pool_key_and_no_other() {
         token: format!("{id}-token"),
         ..Default::default()
     };
-    let f = fleet(
-        config::Config {
-            token: "api".into(),
-            hosts: vec![host("s1", 1), host("s2", 2)],
-            ..Default::default()
-        },
-        Box::new(provision::Static),
-    );
+    let f = fleet(config::Config {
+        token: "api".into(),
+        hosts: vec![host("s1", 1), host("s2", 2)],
+        ..Default::default()
+    });
     let ask = |n: u8| Some(serde_json::json!({ "url": format!("http://10.0.0.{n}:7420") }));
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(9)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
@@ -1067,14 +1045,11 @@ async fn a_host_gets_the_key_of_a_backup_for_a_restore_it_was_given() {
         token: format!("{id}-token"),
         ..Default::default()
     };
-    let f = fleet(
-        config::Config {
-            token: "api".into(),
-            hosts: vec![host("s1", 1), host("s2", 2)],
-            ..Default::default()
-        },
-        Box::new(provision::Static),
-    );
+    let f = fleet(config::Config {
+        token: "api".into(),
+        hosts: vec![host("s1", 1), host("s2", 2)],
+        ..Default::default()
+    });
     let rs = api::RestoreSpec {
         machine_id: "m_src".into(),
         backup: "b1".into(),
@@ -1195,23 +1170,20 @@ async fn a_pool_key_is_in_the_backup_before_it_is_served() {
     let identity = dir.path().join("backup.key");
     let recipient = backup::keygen(&identity).unwrap();
     let store = dir.path().join("store");
-    let f = fleet(
-        config::Config {
-            hosts: vec![config::StaticHost {
-                id: "s1".into(),
-                url: "http://10.0.0.1:7420".into(),
-                token: "s1-token".into(),
-                ..Default::default()
-            }],
-            backup: config::Backup {
-                store: format!("file://{}", store.display()),
-                recipient,
-                ..Default::default()
-            },
+    let f = fleet(config::Config {
+        hosts: vec![config::StaticHost {
+            id: "s1".into(),
+            url: "http://10.0.0.1:7420".into(),
+            token: "s1-token".into(),
+            ..Default::default()
+        }],
+        backup: config::Backup {
+            store: format!("file://{}", store.display()),
+            recipient,
             ..Default::default()
         },
-        Box::new(provision::Static),
-    );
+        ..Default::default()
+    });
     let ask = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
     // The store's directory turned into a file: no write can make its `fleet/`, whoever runs.
     let aside = dir.path().join("store.aside");
@@ -1256,13 +1228,10 @@ async fn a_host_call_must_come_from_the_host() {
             ..Default::default()
         },
     ];
-    let f = fleet(
-        config::Config {
-            hosts: hosts.clone(),
-            ..Default::default()
-        },
-        Box::new(provision::Static),
-    );
+    let f = fleet(config::Config {
+        hosts: hosts.clone(),
+        ..Default::default()
+    });
     let ask = |u: &str| Some(serde_json::json!({ "url": u }));
     let elsewhere = std::net::IpAddr::from([203, 0, 113, 7]);
     for path in ["/v1/hosts/key", "/v1/hosts/register"] {
@@ -1305,15 +1274,12 @@ async fn a_host_call_must_come_from_the_host() {
     assert_eq!(s, StatusCode::OK, "{text}");
 
     // tls: off on a public address: whatever is in front is unknown, the token alone.
-    let behind = fleet(
-        config::Config {
-            hosts: hosts.clone(),
-            listen: "0.0.0.0:7430".into(),
-            tls: config::Tls::Off,
-            ..Default::default()
-        },
-        Box::new(provision::Static),
-    );
+    let behind = fleet(config::Config {
+        hosts: hosts.clone(),
+        listen: "0.0.0.0:7430".into(),
+        tls: config::Tls::Off,
+        ..Default::default()
+    });
     let (s, _, text) = call_from(
         &behind.st,
         elsewhere,
@@ -1326,15 +1292,12 @@ async fn a_host_call_must_come_from_the_host() {
     assert_eq!(s, StatusCode::OK, "tls: off checks the token alone: {text}");
 
     // tls: off on loopback: a proxy of ours in front; its last X-Forwarded-For is the caller.
-    let local = fleet(
-        config::Config {
-            hosts,
-            listen: "127.0.0.1:7430".into(),
-            tls: config::Tls::Off,
-            ..Default::default()
-        },
-        Box::new(provision::Static),
-    );
+    let local = fleet(config::Config {
+        hosts,
+        listen: "127.0.0.1:7430".into(),
+        tls: config::Tls::Off,
+        ..Default::default()
+    });
     let proxy = std::net::IpAddr::from([127, 0, 0, 1]);
     let key = |xff: &'static [(&'static str, &'static str)]| {
         let st = local.st.clone();
@@ -1366,19 +1329,18 @@ async fn a_host_call_must_come_from_the_host() {
 }
 
 #[tokio::test]
-async fn a_heartbeat_lands_on_the_record_ordered_for_its_address() {
-    let f = fleet(config::Config::default(), dry_scaleway());
+async fn a_heartbeat_lands_on_the_record_added_for_its_address() {
+    let f = fleet(config::Config::default());
     {
         let mut reg = f.st.reg.lock().unwrap();
-        let mut ordered = static_host(&config::StaticHost::default(), Utc::now());
-        ordered.id = "h_srv-9".into();
-        ordered.url = "http://10.0.0.9:7420".into();
-        ordered.state = "provisioning".into();
-        ordered.provider = "scaleway".into();
-        ordered.provider_id = "srv-9".into();
-        ordered.token = "t0k".into();
-        ordered.note = "bootstrapped at 2026-10-20".into();
-        reg.hosts.insert(ordered.id.clone(), ordered);
+        let mut added = static_host(&config::StaticHost::default(), Utc::now());
+        added.id = "h_srv-9".into();
+        added.url = "http://10.0.0.9:7420".into();
+        added.state = "provisioning".into();
+        added.provider = "manual".into();
+        added.token = "t0k".into();
+        added.note = "bootstrapped at 2026-10-20".into();
+        reg.hosts.insert(added.id.clone(), added);
     }
     // The token the bootstrap gave it is its credential; the fleet's API needs none here.
     let mut hb = heartbeat("http://10.0.0.9:7420", 64_000, &["t1"]);
@@ -1400,7 +1362,7 @@ async fn a_heartbeat_lands_on_the_record_ordered_for_its_address() {
     let h = &hs[0];
     assert_eq!(h.id, "h_srv-9", "the fleet's id for it, not the daemon's");
     assert_eq!(h.state, "ready");
-    assert_eq!(h.provider, "scaleway");
+    assert_eq!(h.provider, "manual");
     assert_eq!(h.region, "par");
     assert_eq!(h.capacity.memory_mb, 64_000);
     assert_eq!(h.machines, 1);
@@ -1413,7 +1375,6 @@ async fn a_heartbeat_lands_on_the_record_ordered_for_its_address() {
     {
         let reg = f.st.reg.lock().unwrap();
         let rec = &reg.hosts["h_srv-9"];
-        assert_eq!(rec.provider_id, "srv-9");
         assert_eq!(rec.token, "t0k");
         assert_eq!(reg.tenants.get("t1").map(String::as_str), Some("h_srv-9"));
     }
@@ -1427,7 +1388,7 @@ async fn a_heartbeat_lands_on_the_record_ordered_for_its_address() {
 
 #[tokio::test]
 async fn status_sums_the_ready_hosts_and_hosts_are_sorted() {
-    let f = fleet(config::Config::default(), Box::new(provision::Static));
+    let f = fleet(config::Config::default());
     seed(&f.st, "b", 64_000, 8_000, 3, &["t1", "t2"]);
     seed(&f.st, "a", 32_000, 1_000, 1, &["t3"]);
     seed(&f.st, "c", 16_000, 0, 0, &[]);
@@ -1446,8 +1407,10 @@ async fn status_sums_the_ready_hosts_and_hosts_are_sorted() {
         v["tenants"], 3,
         "pins are counted whatever the host's state"
     );
-    assert_eq!(v["provisioner"], "static");
-    assert_eq!(v["dry_run"], true);
+    assert!(
+        v.get("provisioner").is_none(),
+        "no provisioner (ADR 0042): {v}"
+    );
     let (s, _, body) = call(&f.st, "GET", "/v1/hosts", "", None).await;
     assert_eq!(s, StatusCode::OK);
     let hs: Vec<api::Host> = serde_json::from_str(&body).unwrap();
@@ -1484,7 +1447,7 @@ async fn scrape(st: &Arc<AppState>, token: &str) -> Vec<String> {
 
 #[tokio::test]
 async fn each_refusal_is_counted_by_what_ran_out_and_the_room_is_shown() {
-    let f = fleet(config::Config::default(), Box::new(provision::Static));
+    let f = fleet(config::Config::default());
     seed(&f.st, "a", 64_000, 4_000, 1, &["t0"]);
     seed(&f.st, "b", 64_000, 0, 0, &[]);
     seed(&f.st, "c", 64_000, 0, 0, &[]);
@@ -1606,13 +1569,13 @@ async fn metrics_take_the_metrics_token_or_the_apis() {
         tls: config::Tls::Off,
         ..Default::default()
     };
-    let f = fleet(cfg.clone(), Box::new(provision::Static));
+    let f = fleet(cfg.clone());
     let (s, _, _) = call(&f.st, "GET", "/metrics", "", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     scrape(&f.st, "api").await;
     // A metrics token of its own: the scraper's, and the API's no longer opens it.
     cfg.metrics_token = "scrape".into();
-    let f = fleet(cfg.clone(), Box::new(provision::Static));
+    let f = fleet(cfg.clone());
     scrape(&f.st, "scrape").await;
     let (s, _, _) = call(&f.st, "GET", "/metrics", "api", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
@@ -1620,7 +1583,7 @@ async fn metrics_take_the_metrics_token_or_the_apis() {
     assert_eq!(s, StatusCode::UNAUTHORIZED, "it opens nothing else");
     // On loopback with nothing in front (`tls` unset), none, as the daemon's.
     cfg.tls = config::Tls::Unset;
-    let f = fleet(cfg, Box::new(provision::Static));
+    let f = fleet(cfg);
     let lines = scrape(&f.st, "").await;
     assert!(lines.contains(&r#"briqyard_fleet_hosts{state="ready"} 0"#.to_string()));
     let (s, _, _) = call(&f.st, "GET", "/v1/status", "", None).await;
@@ -1629,18 +1592,15 @@ async fn metrics_take_the_metrics_token_or_the_apis() {
 
 #[tokio::test]
 async fn a_keyed_host_is_forgotten_only_by_force() {
-    let f = fleet(
-        config::Config {
-            hosts: vec![config::StaticHost {
-                id: "s1".into(),
-                url: "http://10.0.0.1:7420".into(),
-                token: "s1-token".into(),
-                ..Default::default()
-            }],
+    let f = fleet(config::Config {
+        hosts: vec![config::StaticHost {
+            id: "s1".into(),
+            url: "http://10.0.0.1:7420".into(),
+            token: "s1-token".into(),
             ..Default::default()
-        },
-        Box::new(provision::Static),
-    );
+        }],
+        ..Default::default()
+    });
     seed(&f.st, "plain", 64_000, 0, 0, &[]);
     let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/plain", "", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "no key: forgotten as before");
@@ -1679,7 +1639,6 @@ async fn a_key_that_could_not_be_written_is_not_served() {
             }],
             ..Default::default()
         },
-        Box::new(provision::Static),
         dir,
         nowhere.clone(),
     );
@@ -1710,21 +1669,14 @@ async fn a_key_that_could_not_be_written_is_not_served() {
 async fn a_registry_that_cannot_be_written_fails_the_request() {
     let dir = tempfile::tempdir().unwrap();
     let nowhere = dir.path().join("missing").join("registry.json");
-    let f = fleet_at(
-        config::Config::default(),
-        dry_scaleway(),
-        dir,
-        nowhere.clone(),
-    );
+    let f = fleet_at(config::Config::default(), dir, nowhere.clone());
     seed(&f.st, "h_a", 64_000, 0, 0, &[]);
     for (method, path) in [
         ("POST", "/v1/hosts/h_a/drain"),
-        ("POST", "/v1/hosts/order"),
         ("POST", "/v1/tenants/t1/unpin"),
         ("DELETE", "/v1/hosts/h_a"),
     ] {
-        let body = (path == "/v1/hosts/order").then(|| serde_json::json!({}));
-        let (s, _, text) = call(&f.st, method, path, "", body).await;
+        let (s, _, text) = call(&f.st, method, path, "", None).await;
         assert_eq!(
             s,
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1756,7 +1708,6 @@ async fn a_registry_that_cannot_be_written_fails_the_request() {
             }],
             ..Default::default()
         },
-        Box::new(provision::Static),
         dir,
         nowhere,
     );
@@ -1775,11 +1726,12 @@ async fn a_registry_that_cannot_be_written_fails_the_request() {
     assert_eq!(d.stub.calls().len(), before, "the host was not asked");
 }
 
-// --- ordering, retiring, draining, forgetting ---
+// --- adding, retiring, draining, forgetting ---
 
+/// The fleet buys no server (ADR 0042): the order route is gone, and nothing is recorded.
 #[tokio::test]
-async fn the_static_provisioner_cannot_order() {
-    let f = fleet(config::Config::default(), Box::new(provision::Static));
+async fn there_is_no_order() {
+    let f = fleet(config::Config::default());
     let (s, _, body) = call(
         &f.st,
         "POST",
@@ -1788,67 +1740,20 @@ async fn the_static_provisioner_cannot_order() {
         Some(serde_json::json!({"reason": "x"})),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_GATEWAY);
-    let v = json(&body);
-    assert_eq!(v["code"], "provisioner");
     assert!(
-        v["error"].as_str().unwrap().contains("cannot add hosts"),
-        "{v}"
+        matches!(s, StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED),
+        "{s}: {body}"
     );
     assert!(hosts(&f.st).is_empty(), "nothing recorded");
-}
-
-#[tokio::test]
-async fn an_order_in_dry_run_records_a_dry_run_host() {
-    let f = fleet(config::Config::default(), dry_scaleway());
-    let (s, _, body) = call(
-        &f.st,
-        "POST",
-        "/v1/hosts/order",
-        "",
-        Some(serde_json::json!({"reason": "more capacity"})),
-    )
-    .await;
-    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
-    let h: api::Host = serde_json::from_str(&body).unwrap();
-    assert!(h.id.starts_with("h_dry-run-byard-"), "{}", h.id);
-    assert_eq!(h.state, "dry-run");
-    assert_eq!(h.provider, "scaleway");
-    assert_eq!(h.url, "", "no address yet");
-    assert!(h.note.starts_with("DRY RUN: would create"), "{}", h.note);
-    assert!(h.note.ends_with("(more capacity)"), "{}", h.note);
-    let listed = hosts(&f.st);
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].id, h.id);
-    {
-        let reg = f.st.reg.lock().unwrap();
-        let rec = &reg.hosts[&h.id];
-        assert!(rec.provider_id.starts_with("dry-run-"));
-        assert_eq!(rec.token.len(), 32, "a token of its own for its API");
-        assert!(rec.empty_since.is_some());
-    }
-    assert!(saved(&f.st).hosts.contains_key(&h.id), "written");
-    // No reason: a default one in the note.
-    let (s, _, body) = call(
-        &f.st,
-        "POST",
-        "/v1/hosts/order",
-        "",
-        Some(serde_json::json!({})),
-    )
-    .await;
-    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
-    let h: api::Host = serde_json::from_str(&body).unwrap();
-    assert!(h.note.ends_with("(ordered through the API)"), "{}", h.note);
 }
 
 /// A fleet that bootstraps the hosts added to it, its APIs on the 10.42.0.0/16 vRack.
 fn bootstrapping_fleet() -> Fleet {
     let mut cfg = config::Config::default();
-    cfg.provisioner.bootstrap.enabled = true;
-    cfg.provisioner.bootstrap.private_network = "10.42.0.0/16".into();
-    cfg.provisioner.bootstrap.public_tcp_ports = vec![80, 443];
-    fleet(cfg, Box::new(provision::Static))
+    cfg.bootstrap.enabled = true;
+    cfg.bootstrap.private_network = "10.42.0.0/16".into();
+    cfg.bootstrap.public_tcp_ports = vec![80, 443];
+    fleet(cfg)
 }
 
 #[tokio::test]
@@ -1873,24 +1778,16 @@ async fn a_server_bought_by_hand_is_added_for_the_bootstrap() {
         (h.state.as_str(), h.provider.as_str(), h.region.as_str()),
         ("provisioning", "manual", "gra")
     );
-    assert_eq!(
-        h.tls_fingerprint, "",
-        "pinned by the bootstrap, as an ordered host's"
-    );
+    assert_eq!(h.tls_fingerprint, "", "pinned by the bootstrap");
     {
         let reg = f.st.reg.lock().unwrap();
         let rec = &reg.hosts["h_10-42-0-11"];
         assert_eq!(rec.token.len(), 32, "a token of its own for its API");
-        assert_eq!(rec.provider_id, "");
         let picked: Vec<String> = bootstrap::to_install(&reg)
             .into_iter()
             .map(|h| h.id)
             .collect();
-        assert_eq!(
-            picked,
-            ["h_10-42-0-11"],
-            "the bootstrap takes it as it takes an order"
-        );
+        assert_eq!(picked, ["h_10-42-0-11"], "the bootstrap takes it");
     }
     assert!(saved(&f.st).hosts.contains_key("h_10-42-0-11"), "written");
     assert_eq!(
@@ -1949,7 +1846,7 @@ async fn a_server_bought_by_hand_is_added_for_the_bootstrap() {
         ),
         (
             serde_json::json!({"ssh": "51.68.1.2", "address": "192.168.1.5"}),
-            "is not in provisioner.bootstrap.private_network",
+            "is not in bootstrap.private_network",
         ),
         (
             serde_json::json!({"ssh": "51.68.1.4", "id": "Gra 1"}),
@@ -1967,7 +1864,7 @@ async fn a_server_bought_by_hand_is_added_for_the_bootstrap() {
     }
     assert_eq!(hosts(&f.st).len(), 2, "nothing recorded for a refusal");
     // A fleet that bootstraps nothing adds nothing.
-    let off = fleet(config::Config::default(), Box::new(provision::Static));
+    let off = fleet(config::Config::default());
     let (s, _, text) = call(
         &off.st,
         "POST",
@@ -2020,66 +1917,11 @@ async fn an_added_host_turns_ready_at_its_first_heartbeat_on_its_private_address
 }
 
 #[tokio::test]
-async fn an_order_past_max_hosts_is_refused() {
-    let f = fleet(
-        config::Config {
-            provisioner: config::Provisioner {
-                kind: "scaleway".into(),
-                max_hosts: 2,
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-        dry_scaleway(),
-    );
-    seed(&f.st, "a", 1000, 0, 0, &[]);
-    seed(&f.st, "b", 1000, 0, 0, &[]);
-    let (s, _, body) = call(
-        &f.st,
-        "POST",
-        "/v1/hosts/order",
-        "",
-        Some(serde_json::json!({})),
-    )
-    .await;
-    assert_eq!(s, StatusCode::CONFLICT, "{body}");
-    let v = json(&body);
-    assert_eq!(v["code"], "max_hosts");
-    assert_eq!(v["error"], "the fleet has 2 hosts, its maximum");
-    assert_eq!(hosts(&f.st).len(), 2);
-    // A host that is down does not hold a place.
-    set_state(&f.st, "b", "down");
-    let (s, _, body) = call(
-        &f.st,
-        "POST",
-        "/v1/hosts/order",
-        "",
-        Some(serde_json::json!({})),
-    )
-    .await;
-    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
-    assert_eq!(hosts(&f.st).len(), 3);
-    // Now 2 are counted again (a and the dry-run one): the next order is refused.
-    let (s, _, _) = call(
-        &f.st,
-        "POST",
-        "/v1/hosts/order",
-        "",
-        Some(serde_json::json!({})),
-    )
-    .await;
-    assert_eq!(s, StatusCode::CONFLICT);
-}
-
-#[tokio::test]
-async fn retire_releases_an_empty_host_at_once() {
-    let f = fleet(config::Config::default(), dry_scaleway());
+async fn retire_forgets_an_empty_host_at_once() {
+    let f = fleet(config::Config::default());
     seed(&f.st, "h_a", 1000, 0, 0, &[]);
     {
         let mut reg = f.st.reg.lock().unwrap();
-        let h = reg.hosts.get_mut("h_a").unwrap();
-        h.provider = "scaleway".into();
-        h.provider_id = "dry-run-x".into();
         // Stale index entries from a machine long gone and a tenant never confirmed.
         reg.machines.insert("m9".into(), "h_a".into());
         reg.endpoints.insert("e9".into(), "h_a".into());
@@ -2089,8 +1931,9 @@ async fn retire_releases_an_empty_host_at_once() {
     assert_eq!(s, StatusCode::OK, "{body}");
     let h: api::Host = serde_json::from_str(&body).unwrap();
     assert_eq!(h.id, "h_a");
-    assert_eq!(h.state, "released");
-    assert!(hosts(&f.st).is_empty(), "released and forgotten");
+    assert_eq!(h.state, "retired");
+    assert!(hosts(&f.st).is_empty(), "forgotten");
+    assert!(!saved(&f.st).hosts.contains_key("h_a"), "and written");
     {
         let reg = f.st.reg.lock().unwrap();
         assert!(reg.machines.is_empty(), "its index goes with it");
@@ -2099,24 +1942,12 @@ async fn retire_releases_an_empty_host_at_once() {
     }
     let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_a/retire", "", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-
-    // A static host (no provider id) is forgotten without a provider call: with the static
-    // provisioner, a release call would fail the request.
-    let g = fleet(config::Config::default(), Box::new(provision::Static));
-    seed(&g.st, "h_s", 1000, 0, 0, &[]);
-    let (s, _, body) = call(&g.st, "POST", "/v1/hosts/h_s/retire", "", None).await;
-    assert_eq!(s, StatusCode::OK, "{body}");
-    assert!(hosts(&g.st).is_empty());
 }
 
 #[tokio::test]
 async fn retire_keeps_a_busy_host_until_it_empties() {
-    let f = fleet(config::Config::default(), dry_scaleway());
+    let f = fleet(config::Config::default());
     seed(&f.st, "h_b", 64_000, 4_000, 2, &["t1"]);
-    {
-        let mut reg = f.st.reg.lock().unwrap();
-        reg.hosts.get_mut("h_b").unwrap().provider_id = "dry-run-b".into();
-    }
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_b/retire", "", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     let h: api::Host = serde_json::from_str(&body).unwrap();
@@ -2126,11 +1957,11 @@ async fn retire_keeps_a_busy_host_until_it_empties() {
     assert_eq!(listed.len(), 1, "still here");
     assert_eq!(listed[0].state, "retiring");
     assert!(f.st.reg.lock().unwrap().retirable().is_empty());
-    // Asked again while busy: still retiring, not released.
+    // Asked again while busy: still retiring, not forgotten.
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_b/retire", "", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(json(&body)["state"], "retiring");
-    // Its last machine goes (a heartbeat says so): the scaler's pass would release it.
+    // Its last machine goes (a heartbeat says so): `forget_retired`'s pass would forget it.
     {
         let mut reg = f.st.reg.lock().unwrap();
         let mut empty = reg.hosts["h_b"].clone();
@@ -2142,13 +1973,13 @@ async fn retire_keeps_a_busy_host_until_it_empties() {
     }
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_b/retire", "", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
-    assert_eq!(json(&body)["state"], "released");
+    assert_eq!(json(&body)["state"], "retired");
     assert!(hosts(&f.st).is_empty());
 }
 
 #[tokio::test]
 async fn drain_and_forget() {
-    let f = fleet(config::Config::default(), Box::new(provision::Static));
+    let f = fleet(config::Config::default());
     seed(&f.st, "h_a", 64_000, 0, 1, &["t1"]);
     seed(&f.st, "h_b", 64_000, 0, 1, &["t2"]);
     f.st.reg
@@ -2211,7 +2042,7 @@ async fn the_poll_fills_a_static_host_in_and_marks_a_silent_one_down() {
         ],
         ..Default::default()
     };
-    let f = fleet(cfg, Box::new(provision::Static));
+    let f = fleet(cfg);
     assert_eq!(
         hosts(&f.st)[0].capacity.memory_mb,
         0,
@@ -3359,24 +3190,23 @@ fn certificate() -> (rcgen::CertifiedKey, String) {
 }
 
 #[tokio::test]
-async fn an_ordered_host_is_pinned_at_bootstrap_then_forwarded_to_over_tls() {
+async fn an_added_host_is_pinned_at_bootstrap_then_forwarded_to_over_tls() {
     let (cert, fp) = certificate();
     let d = start_daemon_on("d1", "tok", Some(&cert)).await;
     assert!(d.url.starts_with("https://127.0.0.1:"));
-    let f = fleet(config::Config::default(), dry_scaleway());
+    let f = fleet(config::Config::default());
     {
-        let mut ordered = static_host(&config::StaticHost::default(), Utc::now());
-        ordered.id = "h_srv-9".into();
-        ordered.url = d.url.clone();
-        ordered.state = "provisioning".into();
-        ordered.provider = "scaleway".into();
-        ordered.provider_id = "srv-9".into();
-        ordered.token = "tok".into();
+        let mut added = static_host(&config::StaticHost::default(), Utc::now());
+        added.id = "h_srv-9".into();
+        added.url = d.url.clone();
+        added.state = "provisioning".into();
+        added.provider = "manual".into();
+        added.token = "tok".into();
         f.st.reg
             .lock()
             .unwrap()
             .hosts
-            .insert(ordered.id.clone(), ordered);
+            .insert(added.id.clone(), added);
     }
     let mut hb = heartbeat(&d.url, 64_000, &[]);
     hb["tls_fingerprint"] = fp.clone().into();
@@ -3434,19 +3264,16 @@ async fn a_host_presenting_another_certificate_is_not_forwarded_to() {
     let (_, pinned) = certificate();
     let d = start_daemon_on("d1", "tok", Some(&served)).await;
     d.stub.add("t1", "web", 512);
-    let f = fleet(
-        config::Config {
-            hosts: vec![config::StaticHost {
-                id: "d1".into(),
-                url: d.url.clone(),
-                token: "tok".into(),
-                tls_fingerprint: pinned.clone(),
-                ..Default::default()
-            }],
+    let f = fleet(config::Config {
+        hosts: vec![config::StaticHost {
+            id: "d1".into(),
+            url: d.url.clone(),
+            token: "tok".into(),
+            tls_fingerprint: pinned.clone(),
             ..Default::default()
-        },
-        Box::new(provision::Static),
-    );
+        }],
+        ..Default::default()
+    });
     let (s, _, body) = call(&f.st, "GET", "/v1/machines", "", None).await;
     assert_eq!(s, StatusCode::BAD_GATEWAY, "{body}");
     let v = json(&body);
@@ -3694,14 +3521,14 @@ async fn a_logs_follow_is_streamed_through_as_it_comes() {
 // --- drain, undrain, upgrade (ADR 0027) ---
 
 #[tokio::test]
-async fn a_drained_host_is_never_released_and_undrains() {
-    let f = fleet(config::Config::default(), dry_scaleway());
+async fn a_drained_host_is_never_forgotten_and_undrains() {
+    let f = fleet(config::Config::default());
     seed(&f.st, "h_a", 64_000, 0, 0, &[]);
     let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_a/drain", "", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert!(
         f.st.reg.lock().unwrap().retirable().is_empty(),
-        "an empty drained host is kept: only a retire releases"
+        "an empty drained host is kept: only a retire forgets"
     );
     // A heartbeat keeps the drain.
     let h = f.st.reg.lock().unwrap().hosts["h_a"].clone();
@@ -3729,8 +3556,8 @@ async fn a_drained_host_is_never_released_and_undrains() {
 /// key is only read by `ssh`).
 fn fleet_with_key() -> Fleet {
     let mut cfg = config::Config::default();
-    cfg.provisioner.bootstrap.ssh_key = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into();
-    fleet(cfg, Box::new(provision::Static))
+    cfg.bootstrap.ssh_key = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into();
+    fleet(cfg)
 }
 
 #[tokio::test]
@@ -3738,8 +3565,8 @@ async fn an_upgrade_refuses_what_it_cannot_do() {
     let up = |r: &str| Some(serde_json::json!({ "release": r }));
     // No SSH key: nothing can be installed. Named, not the default: a dev VM has that one.
     let mut cfg = config::Config::default();
-    cfg.provisioner.bootstrap.ssh_key = "/nonexistent/briqyard-fleet-key".into();
-    let f = fleet(cfg, Box::new(provision::Static));
+    cfg.bootstrap.ssh_key = "/nonexistent/briqyard-fleet-key".into();
+    let f = fleet(cfg);
     seed(&f.st, "h_a", 64_000, 0, 0, &[]);
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/upgrade", "", up("0.2.0")).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
@@ -3747,7 +3574,7 @@ async fn an_upgrade_refuses_what_it_cannot_do() {
         json(&body)["error"]
             .as_str()
             .unwrap()
-            .contains("provisioner.bootstrap.ssh_key"),
+            .contains("(bootstrap.ssh_key)"),
         "{body}"
     );
     let f = fleet_with_key();
@@ -3897,7 +3724,7 @@ async fn an_upgrade_ends_in_the_hosts_state_or_drained() {
 
 #[tokio::test]
 async fn a_heartbeat_carries_the_daemons_start() {
-    let f = fleet(config::Config::default(), Box::new(provision::Static));
+    let f = fleet(config::Config::default());
     let mut h = static_host(
         &config::StaticHost {
             id: "h_a".into(),

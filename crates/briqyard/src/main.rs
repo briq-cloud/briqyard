@@ -655,11 +655,6 @@ enum HostCmd {
         #[arg(long)]
         public_tcp_ports: Option<String>,
     },
-    /// Order a host from the fleet's provisioner now (dry-run unless the fleet says otherwise)
-    Order {
-        #[arg(long, default_value = "")]
-        reason: String,
-    },
     /// Place no new tenant on a host
     Drain {
         id: String,
@@ -680,7 +675,8 @@ enum HostCmd {
         #[arg(long)]
         release: String,
     },
-    /// Take no new tenant on a host and release it at its provider once nothing runs on it
+    /// Take no new tenant on a host and forget it once nothing runs on it (the server is yours
+    /// to give back)
     Retire {
         id: String,
     },
@@ -1561,13 +1557,6 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 };
                 print_json(&c.call::<api::Host>(POST, "/v1/hosts", Some(&req)).await?)
             }
-            HostCmd::Order { reason } => {
-                let req = api::OrderHostRequest { reason };
-                print_json(
-                    &c.call::<api::Host>(POST, "/v1/hosts/order", Some(&req))
-                        .await?,
-                )
-            }
             HostCmd::Drain { id } => {
                 c.raw(POST, &format!("/v1/hosts/{id}/drain"), NONE).await?;
             }
@@ -1996,7 +1985,7 @@ fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, String)>) {
 }
 
 /// `host ls`: a line per host, and under it its SSH address when it is not the API's, its pin,
-/// each condition that is true and its note when the provisioner or the bootstrap left one.
+/// each condition that is true and its note when the bootstrap or an upgrade left one.
 fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
         "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {:<20} LAST SEEN\n",

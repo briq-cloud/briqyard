@@ -155,7 +155,7 @@ ssh-keygen -q -t ed25519 -N '' -f /etc/byt-fleet/key && cat /etc/byt-fleet/key.p
 ln -sfn "$PWD/bin" /root/bin       # the binaries hack/vm.sh built, copied out of fc's target-<tree>
 ```
 
-A fleet on fc2 itself (`listen: 0.0.0.0:7431` and `tls: off`, the token alone as in `hack/fleet.dev.yaml`: on loopback with no proxy in front, every host call would be refused for want of a caller address; `provisioner.bootstrap`: `enabled`, `ssh_key:
+A fleet on fc2 itself (`listen: 0.0.0.0:7431` and `tls: off`, the token alone as in `hack/fleet.dev.yaml`: on loopback with no proxy in front, every host call would be refused for want of a caller address; `bootstrap`: `enabled`, `ssh_key:
 /etc/byt-fleet/key`, `pool_device: $D0,$D1`, `fleet_url: http://127.0.0.1:7431`,
 `private_network: 10.99.0.0/24`, `private_interface: byvrack0`, `allowed_clients`), then
 `briqyard host add 192.168.64.2 --address 10.99.0.2`: the fleet bootstraps fc2 over SSH as it
@@ -244,7 +244,7 @@ plus `apt-get purge docker.io` and the edge's files.
   registry that does not parse refused, never read as empty, and fields it does not know
   written back; a host call from another address than its record's refused unless behind
   `tls: off`; a key whose write failed taken back, never served; a keyed host forgotten only by
-  force; a drained host never released, a retiring one once empty), upgrades (the init's and
+  force; a drained host never forgotten, a retiring one once empty), upgrades (the init's and
   the VMM's versions recorded at boot, a snapshot of another VMM booted cold, a hand-over that
   waits for a stop to settle, touches no machine and lets no transition begin, the adoption
   after it with `gone` apart from `stopped`, the daemon's start booting again what the host
@@ -317,12 +317,13 @@ plus `apt-get purge docker.io` and the edge's files.
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7). The mirror section
   runs only where a `briqyard-mirror` unit is active: on a host without one, 5 checks fewer.
 - `hack/fleet-smoke.sh`: the same flow through a fleet (`hack/fleet.dev.yaml` fronts the local
-  daemon in the VM, a dry-run provisioner for order and retire), an exec session and a tty
+  daemon in the VM), the capacity signals on `/metrics` (ADR 0042), an exec session and a tty
   relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
   machine running (back `ready`, a new start of this version that adopted it, the machine
   answering, never booted again), a volume's growth forwarded. 32 checks. With `BRIQYARD_TOKEN`
-  against a real fleet: it orders only through a dry-run provisioner and drains only the dev
-  fleet's host `local`, so it leaves real hosts alone (16 checks then).
+  against a real fleet: it drains only the dev fleet's host `local`, so it leaves real hosts
+  alone (20 checks then: `/metrics` refused without a token over `https://`;
+  `BRIQYARD_METRICS_TOKEN` when the fleet has a `metrics_token`).
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases

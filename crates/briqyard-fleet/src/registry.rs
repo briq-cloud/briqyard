@@ -54,7 +54,7 @@ pub struct HostRec {
     #[serde(default)]
     pub ssh: String,
     /// The host's API token: what the fleet forwards with, and what the host's heartbeats
-    /// present. Set at the order (the bootstrap writes it into the host) or by `hosts:`.
+    /// present. Made at `host add` (the bootstrap writes it into the host) or set by `hosts:`.
     #[serde(default)]
     pub token: String,
     /// The SHA-256 of the host's API certificate: the only certificate the fleet accepts from
@@ -64,13 +64,10 @@ pub struct HostRec {
     pub tls_fingerprint: String,
     #[serde(default)]
     pub region: String,
+    /// How the host came: `static` (`hosts:`) or `manual` (`host add`).
     #[serde(default)]
     pub provider: String,
-    /// The provider's own id for the server, when the fleet provisioned it.
-    #[serde(default)]
-    pub provider_id: String,
-    /// ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed,
-    /// dry-run
+    /// ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed
     pub state: String,
     #[serde(default)]
     pub capacity: Capacity,
@@ -87,17 +84,14 @@ pub struct HostRec {
     /// Free space for disks, in MB, from the last heartbeat, less what placement reserved since.
     #[serde(default)]
     pub disk_free_mb: u64,
-    /// When the host last had a machine, for the release decision.
-    #[serde(default)]
-    pub empty_since: Option<DateTime<Utc>>,
-    /// The last thing the provisioner or the bootstrap said.
+    /// The last thing the bootstrap or an upgrade said.
     #[serde(default)]
     pub note: String,
     #[serde(default)]
     pub bootstrap_attempts: u32,
     /// `PUBLIC_TCP_PORTS` for this host's bootstrap (ADR 0028): what its public interface takes
-    /// besides SSH, and its machines reach on it. Set when the fleet adds or orders it, from the
-    /// request or `provisioner.bootstrap.public_tcp_ports`, so a later change of either leaves
+    /// besides SSH, and its machines reach on it. Set when the fleet adds it, from the request or
+    /// `bootstrap.public_tcp_ports`, so a later change of either leaves
     /// it; absent (a record from before): that fleet-wide value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_tcp_ports: Option<Vec<u16>>,
@@ -117,7 +111,7 @@ pub struct HostRec {
 }
 
 /// Whether a host in this state serves its machines. Placement takes only `ready`; a host
-/// `draining` (taking nothing new), `retiring` (released once empty) or `upgrading` (ADR
+/// `draining` (taking nothing new), `retiring` (forgotten once empty) or `upgrading` (ADR
 /// 0027) still answers for what it has.
 pub fn serving(state: &str) -> bool {
     matches!(state, "ready" | "draining" | "retiring" | "upgrading")
@@ -310,7 +304,6 @@ impl Registry {
     pub fn heartbeat(&mut self, h: HostRec, now: DateTime<Utc>) {
         let entry = self.hosts.entry(h.id.clone()).or_insert_with(|| HostRec {
             state: "ready".into(),
-            empty_since: Some(now),
             ..h.clone()
         });
         entry.url = h.url;
@@ -332,16 +325,11 @@ impl Registry {
         entry.conditions = h.conditions.clone();
         entry.started = h.started;
         entry.last_seen = now;
-        // A host that answers is ready, whatever it was (down, ordered, failed to bootstrap);
+        // A host that answers is ready, whatever it was (down, added, failed to bootstrap);
         // only what an operator asked is kept: a drain, a retire, an upgrade under way.
         if !serving(&entry.state) {
             entry.state = "ready".into();
         }
-        entry.empty_since = if h.machines == 0 {
-            entry.empty_since.or(Some(now))
-        } else {
-            None
-        };
         // The host's list is the truth for the tenants pinned to it: a pin whose tenant the host
         // no longer has (removed on the host, or a leftover) goes, so the name can be placed again.
         // A pin made at placement is younger than the machine it placed: the host lists the
@@ -399,7 +387,7 @@ impl Registry {
         self.pinned_at.retain(|t, _| self.tenants.contains_key(t));
     }
 
-    /// Retiring hosts that have nothing left on them: ready to be released. A drained host
+    /// Retiring hosts that have nothing left on them: ready to be forgotten. A drained host
     /// stays drained, whoever gave it (ADR 0027).
     pub fn retirable(&self) -> Vec<HostRec> {
         self.hosts
@@ -501,21 +489,6 @@ impl Registry {
         v
     }
 
-    /// Memory free across the hosts that take new tenants, and the largest single slot.
-    pub fn free(&self, policy: &Policy) -> (u32, u32) {
-        let mut total = 0;
-        let mut largest = 0;
-        for h in self.hosts.values() {
-            if !h.takes_new_tenants(policy) {
-                continue;
-            }
-            let f = h.free_memory_mb();
-            total += f;
-            largest = largest.max(f);
-        }
-        (total, largest)
-    }
-
     /// What ran out when `place` found no host for a new tenant's machine: memory when no host
     /// of the region is ready and under its ceiling with `need_mb` free; else disk when none of
     /// those has `need_disk_mb`; else (those that have both are under a condition) what the
@@ -595,53 +568,6 @@ impl Resource {
     }
 }
 
-/// What the autoscaler may do.
-#[derive(Clone, Debug)]
-pub struct ScalePolicy {
-    pub min_hosts: usize,
-    pub max_hosts: usize,
-    /// Add a host when no ready host can take a machine of this size.
-    pub slot_mb: u32,
-    /// Release a host that has been empty for this long.
-    pub idle_grace: Duration,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Decision {
-    Nothing,
-    AddHost,
-    ReleaseHost(String),
-}
-
-/// Decides one step. Provisioning hosts count toward the maximum so one scale-up at a time.
-pub fn decide(
-    reg: &Registry,
-    placement: &Policy,
-    scale: &ScalePolicy,
-    now: DateTime<Utc>,
-) -> Decision {
-    let counted = reg.hosts.values().filter(|h| h.state != "down").count();
-    let provisioning = reg.hosts.values().any(|h| h.state == "provisioning");
-    let (_, largest) = reg.free(placement);
-    if largest < scale.slot_mb && counted < scale.max_hosts && !provisioning {
-        return Decision::AddHost;
-    }
-    if counted > scale.min_hosts {
-        let mut idle: Vec<&HostRec> = reg
-            .hosts
-            .values()
-            .filter(|h| h.state == "ready" && h.machines == 0 && h.tenants.is_empty())
-            .filter(|h| matches!(h.empty_since, Some(t) if now - t > scale.idle_grace))
-            .filter(|h| !h.provider_id.is_empty())
-            .collect();
-        idle.sort_by_key(|h| h.empty_since);
-        if let Some(h) = idle.first() {
-            return Decision::ReleaseHost(h.id.clone());
-        }
-    }
-    Decision::Nothing
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,7 +581,6 @@ mod tests {
             tls_fingerprint: String::new(),
             region: "fsn".into(),
             provider: "static".into(),
-            provider_id: String::new(),
             state: "ready".into(),
             capacity: Capacity {
                 memory_mb: cap,
@@ -670,7 +595,6 @@ mod tests {
             last_seen: Utc::now(),
             version: "0.1".into(),
             disk_free_mb: 0,
-            empty_since: None,
             note: String::new(),
             bootstrap_attempts: 0,
             public_tcp_ports: None,
@@ -741,8 +665,9 @@ mod tests {
             Some("host a is under disk_pressure: pool 4.0 GB free of 100.0 (4%), under 10%")
         );
         assert_eq!(reg.hosts["b"].pressure(), None);
-        // Nor does the scaler count its memory as free.
-        assert_eq!(reg.free(&p), (49_488, 49_488));
+        // Nor do the capacity signals count its memory as free.
+        let (free, largest) = reg.room(&p)["fsn"];
+        assert_eq!((free.memory_mb, largest.memory_mb), (49_488, 49_488));
         // The heartbeat that clears it lets it take tenants again.
         let mut cleared = host("a", 100_000, 0, 1);
         cleared.conditions = vec![condition(api::condition::DISK_PRESSURE, false)];
@@ -873,14 +798,13 @@ mod tests {
     fn a_heartbeat_lands_on_the_record_at_its_address() {
         let now = Utc::now();
         let mut reg = Registry::default();
-        let mut ordered = host("h_srv-9", 0, 0, 0);
-        ordered.url = "http://10.0.0.9:7420".into();
-        ordered.state = "bootstrapped".into();
-        ordered.provider = "scaleway".into();
-        ordered.provider_id = "srv-9".into();
-        ordered.token = "t0k".into();
-        ordered.tls_fingerprint = "ab".repeat(32);
-        reg.hosts.insert(ordered.id.clone(), ordered);
+        let mut added = host("h_srv-9", 0, 0, 0);
+        added.url = "http://10.0.0.9:7420".into();
+        added.state = "bootstrapped".into();
+        added.provider = "manual".into();
+        added.token = "t0k".into();
+        added.tls_fingerprint = "ab".repeat(32);
+        reg.hosts.insert(added.id.clone(), added);
         assert_eq!(
             reg.expecting("http://10.0.0.9:7421/")
                 .map(|h| h.id.as_str()),
@@ -888,7 +812,7 @@ mod tests {
             "the address, whatever the port"
         );
         assert_eq!(reg.expecting("http://10.0.0.8:7420").map(|h| &h.id), None);
-        // The daemon reports under its own id; the fleet applies it to the record it ordered.
+        // The daemon reports under its own id; the fleet applies it to the record it added.
         let mut hb = host("h_srv-9", 64_000, 0, 0);
         hb.url = "http://10.0.0.9:7420".into();
         hb.token.clear();
@@ -898,13 +822,9 @@ mod tests {
         let h = &reg.hosts["h_srv-9"];
         assert_eq!(
             h.state, "ready",
-            "an ordered host is ready at its first heartbeat"
+            "an added host is ready at its first heartbeat"
         );
-        assert_eq!(
-            h.provider, "scaleway",
-            "a heartbeat does not touch the provider fields"
-        );
-        assert_eq!(h.provider_id, "srv-9");
+        assert_eq!(h.provider, "manual", "a heartbeat does not touch it");
         assert_eq!(h.token, "t0k", "nor the token");
         assert_eq!(h.tls_fingerprint, "ab".repeat(32), "nor the pin");
         assert_eq!(h.capacity.memory_mb, 64_000);
@@ -983,7 +903,6 @@ mod tests {
         let mut reg = Registry::default();
         let mut busy = host("a", 1000, 100, 1);
         busy.tenants = vec!["t".into()];
-        busy.provider_id = "srv-a".into();
         reg.heartbeat(busy, now);
         reg.hosts.get_mut("a").unwrap().state = "retiring".into();
         assert!(reg.retirable().is_empty());
@@ -996,7 +915,7 @@ mod tests {
             "a heartbeat keeps a retire"
         );
         assert_eq!(reg.retirable().len(), 1);
-        // A drained host stays drained, empty or not, static or ordered: only a retire releases.
+        // A drained host stays drained, empty or not: only a retire forgets.
         let mut fixed = host("s", 1000, 0, 0);
         fixed.tenants.clear();
         reg.heartbeat(fixed, now);
@@ -1013,7 +932,7 @@ mod tests {
             None,
             "no placement on a retiring host"
         );
-        // A drain, an upgrade: kept by a heartbeat, never released, nothing placed.
+        // A drain, an upgrade: kept by a heartbeat, never forgotten, nothing placed.
         for state in ["draining", "upgrading"] {
             reg.hosts.get_mut("a").unwrap().state = state.into();
             reg.heartbeat(host("a", 1000, 0, 0), now);
@@ -1074,10 +993,11 @@ mod tests {
         assert_eq!(reg.place("t1", "", 10_000, 4000, &p).as_deref(), Some("a"));
         assert_eq!(reg.hosts["a"].used.memory_mb, 70_000);
         assert_eq!(reg.hosts["a"].disk_free_mb, 6000);
+        let (free, largest) = reg.room(&p)["fsn"];
         assert_eq!(
-            reg.free(&p),
+            (free.memory_mb, largest.memory_mb),
             (70_000, 40_000),
-            "the scaler sees the reservations too"
+            "the capacity signals see the reservations too"
         );
         // A fork reserves on the source's host without a placement.
         reg.reserve("b", 5000, 0);
@@ -1163,44 +1083,5 @@ mod tests {
         assert_eq!(reg.hosts["a"].state, "down");
         reg.heartbeat(host("a", 1000, 0, 0), now);
         assert_eq!(reg.hosts["a"].state, "ready");
-    }
-
-    #[test]
-    fn scaling_decisions() {
-        let now = Utc::now();
-        let p = Policy::default();
-        let scale = ScalePolicy {
-            min_hosts: 1,
-            max_hosts: 3,
-            slot_mb: 8192,
-            idle_grace: Duration::hours(2),
-        };
-        let mut reg = Registry::default();
-        reg.heartbeat(host("a", 100_000, 95_000, 20), now);
-        assert_eq!(
-            decide(&reg, &p, &scale, now),
-            Decision::AddHost,
-            "no slot left"
-        );
-        reg.heartbeat(host("b", 100_000, 0, 0), now);
-        assert_eq!(
-            decide(&reg, &p, &scale, now),
-            Decision::Nothing,
-            "b has room and is young"
-        );
-        // A heartbeat never changes who provisioned a host; that is set when the fleet orders it.
-        reg.hosts.get_mut("b").unwrap().provider_id = "srv-2".into();
-        reg.hosts.get_mut("b").unwrap().empty_since = Some(now - Duration::hours(3));
-        assert_eq!(
-            decide(&reg, &p, &scale, now),
-            Decision::ReleaseHost("b".into()),
-            "b idle past the grace"
-        );
-        reg.hosts.get_mut("b").unwrap().provider_id.clear();
-        assert_eq!(
-            decide(&reg, &p, &scale, now),
-            Decision::Nothing,
-            "a static host is never released"
-        );
     }
 }
