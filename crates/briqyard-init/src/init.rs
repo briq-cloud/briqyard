@@ -458,7 +458,7 @@ fn grow_filesystem(device: &str, path: &Path) -> Result<Option<(u64, u64)>> {
         .and_then(|mut d| d.seek(SeekFrom::End(0)))
         .with_context(|| format!("size of {device}"))?;
     let statvfs = || nix::sys::statvfs::statvfs(path).context("statvfs");
-    let mb = |st: &nix::sys::statvfs::Statvfs| st.blocks() * st.fragment_size() >> 20;
+    let mb = |st: &nix::sys::statvfs::Statvfs| (st.blocks() * st.fragment_size()) >> 20;
     let st = statvfs()?;
     let blocks: u64 = bytes / st.block_size();
     let dir = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
