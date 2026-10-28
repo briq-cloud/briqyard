@@ -68,7 +68,10 @@ step that reserves the memory, so a new size is reserved there (`capacity` past 
 then a new image's root disk is cloned again from its `@base` (forks of the old one promoted,
 as at a destroy) and the boot reads the record. The data volume is never touched. A change to
 anything a memory snapshot holds (all but `ports` and `restart`) makes that start cold.
-`updated` (`pending: true`) marks the PATCH, `applied` the start.
+`updated` (`pending: true`) marks the PATCH, `applied` the start. A larger `volume` (ADR 0040) is
+the exception that moves at once: its zvol grows at the PATCH (the quota and the pool checked,
+never smaller), the record with it, and it is `pending` until the next boot, cold, where the
+init grows the ext4 filesystem online.
 
 ### Probes and restarts
 
@@ -209,7 +212,8 @@ port reads the first request head with `httparse` and routes by its one `Host` (
 `briqyard-init` is PID 1. It mounts `/proc`, `/sys`, `/dev` (plus `/dev/fd` and friends, which
 bash's `<(...)` needs), reads the config drive (`/dev/vdb`, a tar stream), mounts the data
 volume (`/dev/vdc`) at its mount path (a fresh one gets the image directory's owner and content
-and loses `lost+found`, so a database accepts it), writes the boot files, sets the hostname,
+and loses `lost+found`, so a database accepts it; a grown one's filesystem is grown to the disk,
+`EXT4_IOC_RESIZE_FS`), writes the boot files, sets the hostname,
 `/etc/hosts` and `/etc/resolv.conf`, configures `eth0` over netlink, then runs the image's
 entrypoint and command with its environment and user. It listens on vsock port 7421 for the
 host: `exec` (a command with stdin, streamed stdout and stderr, exit code, timeout; on a
@@ -305,7 +309,8 @@ command (SIGKILL to its group; SIGHUP first on a terminal); the daemon pings the
 A machine's `metadata` is its labels: `GET /v1/machines?label=k=v&label=k` keeps the machines
 every selector matches (`api::Label`, equality and existence, ADR 0025). A tenant's quota
 (`TenantRec.quota`, `PUT /v1/tenants/{id}/quota`) limits its machines and the volumes' sizes,
-checked in `add_machine` under the map's lock (a create, a fork, a restore, the gateway), and
+checked in `add_machine` under the map's lock (a create, a fork, a restore, the gateway) and in
+`grow_volume` (a volume's growth, ADR 0040), and
 its machines' memory and vCPUs, checked in `reserve` with the host's own memory, so two starts
 cannot pass it together. A refusal is 403 `quota` and a `quota_exceeded` event.
 

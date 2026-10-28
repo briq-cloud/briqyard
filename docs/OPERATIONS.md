@@ -335,7 +335,8 @@ snapshot, or is whole.
 - What a machine runs (ADR 0024): `briqyard machine set <id> --image … --memory … -e K=V -- cmd…`
   is `pending` (in `get`, `describe`, the `PENDING` column) until its next start; `briqyard
   machine restart <id>` applies it now. A new image is pulled at that start and the root disk
-  made again from it; the data volume stays.
+  made again from it; the data volume stays. `--volume-gb N` grows the volume (ADR 0040): the
+  disk at once, its filesystem at the next start (cold); never smaller.
 - `briqyard usage --from <hour> --to <hour> [--tenant T] [--json]`: what each machine used
   per hour (ADR 0017); `nft list set inet briqyard internet_out` shows the raw counters.
 - Egress limits (ADR 0018): `briqyard machine get <id>` shows `limits` and `egress_drops`;

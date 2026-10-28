@@ -48,10 +48,22 @@ impl SnapshotRec {
 }
 
 /// What a memory snapshot holds of the machine's spec, as a digest: its image, command, env,
-/// files and size (what makes a resume cold under ADR 0024).
+/// files and size (what makes a resume cold under ADR 0024), and its volume's size as the
+/// guest booted with it: the record's, unless a growth waits for the next boot (ADR 0040).
 fn memory_spec(r: &Record) -> String {
     use sha2::{Digest, Sha256};
-    let held = json!([r.image_key, r.entrypoint, r.cmd, r.env, r.files, r.size]);
+    let volume = r.volume.as_ref().map(|v| v.size_gb);
+    let growing = r.pending.as_ref().is_some_and(|p| p.volume.is_some());
+    let held = json!([
+        r.image_key,
+        r.entrypoint,
+        r.cmd,
+        r.env,
+        r.files,
+        r.size,
+        volume,
+        growing
+    ]);
     hex::encode(Sha256::digest(held.to_string()))
 }
 
@@ -444,6 +456,8 @@ impl Manager {
                 .ok_or_else(|| anyhow!("snapshot {} of the {disk} disk is gone", s.id))?;
             self.swap(&r, disk, &from, &s.id).await?;
         }
+        // A volume grown since the snapshot keeps its size (ADR 0040).
+        let grew = s.disks.iter().any(|d| d == "data") && self.fit_volume(&r).await?;
         let kept = self.memory_files(&r, &s.id);
         let resume = s.memory.as_deref() == Some(memory_spec(&r).as_str())
             && kept.iter().all(|f| f.exists());
@@ -462,6 +476,17 @@ impl Manager {
             let mut rec = e.rec.lock().unwrap();
             rec.restoring = None;
             rec.suspended = resume;
+            // Its filesystem is the snapshot's: it grows at the next boot, cold since the
+            // memory of a smaller disk is not resumed. A start under way is that boot.
+            if grew && rec.state != state::STARTING {
+                let mut p = rec.pending.take().unwrap_or_default();
+                p.volume = rec
+                    .volume
+                    .as_ref()
+                    .map(|v| api::VolumeSize { size_gb: v.size_gb });
+                rec.pending = Some(p);
+                rec.pending_since.get_or_insert(Utc::now());
+            }
             if resume {
                 // What took the memory: the start resumes it only under the same (ADR 0027).
                 rec.vmm_version = s.vmm_version.clone();
@@ -725,7 +750,7 @@ impl Manager {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{harness_config, Harness};
+    use super::super::tests::{grow_to, harness_config, with_volume, Harness};
     use super::*;
 
     const IMAGE3: &str =
@@ -1021,6 +1046,45 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(r.state, state::CREATED);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restore_keeps_a_grown_volume_and_never_resumes_the_smaller_disks_memory() {
+        let h = harness().await;
+        with_volume(&h, "m_v", state::STOPPED, 2).await;
+        h.m.start("m_v", None).await.unwrap();
+        h.m.snapshot("m_v", named("small")).await.unwrap();
+        h.m.snapshot("m_v", with_memory()).await.unwrap();
+        let warm = h.snapshot_ids("m_v")[1].clone();
+        h.m.update("m_v", grow_to(5), None).await.unwrap();
+        // Taken while the growth waits for a boot: its memory is the smaller disk's too.
+        h.m.snapshot("m_v", with_memory()).await.unwrap();
+        let waiting = h.snapshot_ids("m_v")[2].clone();
+        h.m.restart("m_v", None).await.unwrap();
+        h.m.stop("m_v", Duration::ZERO, false, None).await.unwrap();
+        assert!(h.m.get("m_v").unwrap().pending.is_none());
+        // Back to a snapshot of the smaller disk: the volume keeps its size, its filesystem
+        // is the snapshot's until the next boot.
+        let m = h.m.restore_snapshot("m_v", "small", None).await.unwrap();
+        assert_eq!(h.pool.zfs.volsize("m/m_v/data").await.unwrap(), 5 << 30);
+        assert_eq!(m.volume.map(|v| v.size_gb), Some(5));
+        assert_eq!(
+            m.pending.and_then(|p| p.volume),
+            Some(api::VolumeSize { size_gb: 5 })
+        );
+        h.m.start("m_v", None).await.unwrap();
+        // A running machine's restore boots it, cold: that boot grows the filesystem.
+        for snap in [&warm, &waiting] {
+            h.host_calls();
+            let m = h.m.restore_snapshot("m_v", snap, None).await.unwrap();
+            assert!(m.pending.is_none(), "{snap}");
+            let calls = h.host_calls();
+            assert!(
+                calls.iter().any(|c| c.ends_with(" resume=false")),
+                "{snap}: {calls:?}"
+            );
+            assert_eq!(h.restored_data("m_v")["memory"], false, "{snap}");
         }
     }
 

@@ -1,6 +1,6 @@
 # ADR 0031: Snapshots and restore in place: each disk swapped for a clone of its snapshot, the memory with it when asked
 
-Date: 2026-10-21 · Status: accepted; amended by ADR 0037 (a memory snapshot written unsynced, synced after the resume); amends ADR 0019 (`restored` for a snapshot, `snapshot_taken`, `snapshot_deleted`), ADR 0024 (a new image's root disk is swapped, not destroyed)
+Date: 2026-10-21 · Status: accepted; amended by ADR 0037 (a memory snapshot written unsynced, synced after the resume); amends ADR 0019 (`restored` for a snapshot, `snapshot_taken`, `snapshot_deleted`), ADR 0024 (a new image's root disk is swapped, not destroyed); amended by ADR 0040 (a restore keeps a grown volume's size; a memory snapshot holds the volume's size)
 
 ## Context
 

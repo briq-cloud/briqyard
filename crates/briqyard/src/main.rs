@@ -224,7 +224,7 @@ enum MachineCmd {
         #[arg(long, default_value = "")]
         sleep: String,
     },
-    /// Change what it runs, at its next start (restart to apply now): briqyard machine set ID --image python:3.13-alpine -e V=2 -- cmd...
+    /// Change what it runs, at its next start (restart to apply now): briqyard machine set ID --image python:3.13-alpine -e V=2 -- cmd...; --volume-gb grows the volume
     Set(Box<SetArgs>),
     /// Change the backup schedule: briqyard machine set-backup ID --every 6h --keep 4, or --off
     SetBackup {
@@ -413,6 +413,9 @@ struct SetArgs {
     /// no, always, on-failure or on-failure:MAX_RETRIES
     #[arg(long, value_parser = restart_arg)]
     restart: Option<api::RestartPolicy>,
+    /// A larger volume, in GB: its disk at once, its filesystem at the next start
+    #[arg(long)]
+    volume_gb: Option<u32>,
     /// The command, after --
     #[arg(last = true)]
     cmd: Vec<String>,
@@ -444,9 +447,10 @@ impl SetArgs {
             size,
             ports: (!self.ports.is_empty()).then(|| self.ports.clone()),
             restart: self.restart.clone(),
+            volume: self.volume_gb.map(|size_gb| api::VolumeSize { size_gb }),
         };
         if spec.is_empty() {
-            bail!("name a change: --image, --vcpus, --memory, -e, --file, -p, --entrypoint, --restart or a command after --");
+            bail!("name a change: --image, --vcpus, --memory, -e, --file, -p, --entrypoint, --restart, --volume-gb or a command after --");
         }
         if let Err(e) = spec.check() {
             bail!("{e}");
@@ -2266,9 +2270,10 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
         let changes: Vec<String> = p
             .fields
             .iter()
-            .map(|f| match (f.as_str(), &p.image, p.size) {
-                ("image", Some(image), _) => format!("image {image}"),
-                ("size", _, Some(s)) => format!("size {} vCPU, {} MB", s.vcpus, s.memory_mb),
+            .map(|f| match (f.as_str(), &p.image, p.size, p.volume) {
+                ("image", Some(image), _, _) => format!("image {image}"),
+                ("size", _, Some(s), _) => format!("size {} vCPU, {} MB", s.vcpus, s.memory_mb),
+                ("volume", _, _, Some(v)) => format!("volume's filesystem to {} GB", v.size_gb),
                 _ => f.clone(),
             })
             .collect();

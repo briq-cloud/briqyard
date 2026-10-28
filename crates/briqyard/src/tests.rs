@@ -440,6 +440,8 @@ fn machine_set_changes_what_it_runs() {
         "8080",
         "--restart",
         "on-failure:5",
+        "--volume-gb",
+        "20",
         "--",
         "python3",
         "-m",
@@ -455,7 +457,8 @@ fn machine_set_changes_what_it_runs() {
             "env": {"V": "2", "W": "a=b"},
             "size": {"vcpus": 2, "memory_mb": 1024},
             "ports": [8080],
-            "restart": {"policy": "on-failure", "max_retries": 5}
+            "restart": {"policy": "on-failure", "max_retries": 5},
+            "volume": {"size_gb": 20}
         }),
         "only what was named; the size whole"
     );
@@ -484,6 +487,10 @@ fn machine_set_changes_what_it_runs() {
         .request(None)
         .unwrap_err();
     assert_eq!(err.to_string(), "ports: 0 is not a port");
+    let err = set(&["m", "set", "m1", "--volume-gb", "0"])
+        .request(None)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "volume.size_gb must be 1 or more");
     // A restart policy, Docker's way.
     assert_eq!(restart_arg("always").unwrap().policy, "always");
     assert_eq!(restart_arg("on-failure").unwrap().max_retries, 3);
@@ -2022,12 +2029,13 @@ fn describe_shows_the_machine_then_its_events() {
         created_at: ts(),
         version: 12,
         pending: Some(api::Pending {
-            fields: vec!["image".into(), "env".into(), "size".into()],
+            fields: vec!["image".into(), "env".into(), "size".into(), "volume".into()],
             image: Some("nginx:1.28".into()),
             size: Some(api::Size {
                 vcpus: 2,
                 memory_mb: 512,
             }),
+            volume: Some(api::VolumeSize { size_gb: 20 }),
             ..Default::default()
         }),
         pending_since: Some(ts()),
@@ -2105,7 +2113,7 @@ fn describe_shows_the_machine_then_its_events() {
             "               ep_2 tcp 5432 -> 10.0.0.5:20001",
             "Sleep:         30m",
             "Backup:        every 6h, keep 4; last 2026-10-19 08:30:00, next 2026-10-19 14:30:00",
-            "Pending:       image nginx:1.28, env, size 2 vCPU, 512 MB, at the next start (since 2026-10-19 08:30:00)",
+            "Pending:       image nginx:1.28, env, size 2 vCPU, 512 MB, volume's filesystem to 20 GB, at the next start (since 2026-10-19 08:30:00)",
             "Version:       12",
             "Created:       2026-10-19 08:30:00",
             "Events:",

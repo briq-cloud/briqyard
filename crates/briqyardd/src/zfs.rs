@@ -354,6 +354,24 @@ impl Zfs {
         }
     }
 
+    /// A volume's size, in bytes.
+    pub async fn volsize(&self, name: &str) -> Result<u64> {
+        let out = self
+            .run(&["get", "-H", "-p", "-o", "value", "volsize", &self.ds(name)])
+            .await?;
+        out.trim()
+            .parse()
+            .map_err(|_| anyhow!("zfs get volsize {name}: {:?}", out.trim()))
+    }
+
+    /// Grows a volume to `bytes` (ADR 0040). Never called smaller: ZFS would cut the volume's
+    /// end off, and the filesystem with it.
+    pub async fn grow(&self, name: &str, bytes: u64) -> Result<()> {
+        self.run(&["set", &format!("volsize={bytes}"), &self.ds(name)])
+            .await?;
+        Ok(())
+    }
+
     pub async fn device(&self, name: &str) -> Result<PathBuf> {
         if !self.exists(name).await? {
             return Err(anyhow!("volume {name} does not exist"));
@@ -782,7 +800,8 @@ pub(crate) mod fake {
     /// `hold.send` file is there; a receive makes the dataset and the snapshot, and refuses
     /// an increment whose base the dataset lacks, as ZFS does; `load-key` takes the line on its
     /// stdin when it is the `key` file's and answers `keystatus` `available` from then on;
-    /// `change-key` needs the dataset.
+    /// `change-key` needs the dataset. A volume's file holds its `volsize`: set by `create -V`
+    /// and `set volsize=`, kept by its snapshots, clones and streams, answered by `get`.
     /// Error texts are the real ones,
     /// since the code matches on them.
     const FAKE: &str = r#"#!/bin/sh
@@ -833,16 +852,25 @@ case "$1" in
   create)
     case "$*" in *mountpoint=*) mkdir -p "$DEV/$last"; exit 0;; esac
     if [ "$2" = "-p" ]; then mkdir -p "$DEV/$last"; exit 0; fi
-    mkdir -p "$(dirname "$DEV/$last")"; : > "$DEV/$last"; exit 0;;
+    size=; [ "$3" = "-V" ] && size="$4"
+    mkdir -p "$(dirname "$DEV/$last")"; printf '%s' "$size" > "$DEV/$last"; exit 0;;
+  set)
+    case "$2" in volsize=*)
+      [ -f "$DEV/$last" ] || missing "$last"; printf '%s' "${2#volsize=}" > "$DEV/$last";;
+    esac; exit 0;;
   clone)
     [ -e "$DEV/$2" ] || missing "$2"
-    mkdir -p "$(dirname "$DEV/$3")"; : > "$DEV/$3"; echo "$2" > "$DEV/$3.origin"; exit 0;;
+    mkdir -p "$(dirname "$DEV/$3")"; cat "$DEV/$2" > "$DEV/$3" 2>/dev/null || : > "$DEV/$3"
+    echo "$2" > "$DEV/$3.origin"; exit 0;;
   snapshot)
     shift
     for t in "$@"; do
       if [ -e "$DEV/$t" ]; then echo "cannot create snapshot '$t': dataset already exists" >&2; echo "no snapshots were created" >&2; exit 1; fi
     done
-    for t in "$@"; do : > "$DEV/$t"; echo "$t" >> "$DEV/snapshots.order"; done; exit 0;;
+    for t in "$@"; do
+      if [ -f "$DEV/${t%@*}" ]; then cat "$DEV/${t%@*}" > "$DEV/$t"; else : > "$DEV/$t"; fi
+      echo "$t" >> "$DEV/snapshots.order"
+    done; exit 0;;
   rename)
     [ -e "$DEV/$2" ] || missing "$2"
     if [ -e "$DEV/$3" ]; then echo "cannot create '$3': dataset already exists" >&2; exit 1; fi
@@ -901,13 +929,13 @@ case "$1" in
     if [ "$base" != - ] && [ ! -e "$DEV/${last%@*}@$base" ]; then
       echo "cannot send '$last': incremental source $base is not a snapshot of it" >&2; exit 1
     fi
-    echo "stream ${last#*@} $base"; exit 0;;
+    echo "stream ${last#*@} $base $(cat "$DEV/$last" 2>/dev/null)"; exit 0;;
   receive)
-    read -r _ snap base
+    read -r _ snap base size
     if [ "$base" != - ] && [ ! -e "$DEV/$last@$base" ]; then
       echo "cannot receive incremental stream: most recent snapshot of $last does not match incremental source" >&2; exit 1
     fi
-    mkdir -p "$(dirname "$DEV/$last")"; : > "$DEV/$last"; : > "$DEV/$last@$snap"
+    mkdir -p "$(dirname "$DEV/$last")"; printf '%s' "$size" > "$DEV/$last"; printf '%s' "$size" > "$DEV/$last@$snap"
     echo "$last@$snap" >> "$DEV/snapshots.order"; exit 0;;
   load-key)
     read -r key
@@ -928,6 +956,9 @@ case "$1" in
         [ -e "$DEV/$last" ] || missing "$last"
         find "$DEV" -name '*.origin' -exec grep -lx "$last" {} + 2>/dev/null | sed "s|^$DEV/||; s|\.origin$||" | sort | paste -sd, -
         exit 0;;
+      volsize)
+        [ -f "$DEV/$last" ] || missing "$last"
+        cat "$DEV/$last"; echo; exit 0;;
     esac
     exit 0;;
 esac
@@ -1208,6 +1239,28 @@ mod tests {
         let again = f.zfs.create("m/x/data", 2 << 30).await.unwrap();
         assert_eq!(again, dev);
         assert_eq!(f.calls(), vec!["list -H -o name byard/m/x/data", SETTLE]);
+    }
+
+    #[tokio::test]
+    async fn a_volume_grows_and_its_snapshots_and_clones_keep_their_size() {
+        let f = Fake::open("byard").await.unwrap();
+        f.zfs.create("m/x/data", 1 << 30).await.unwrap();
+        f.zfs.snapshot("m/x/data", "a").await.unwrap();
+        f.calls();
+        f.zfs.grow("m/x/data", 2 << 30).await.unwrap();
+        assert_eq!(f.calls(), vec!["set volsize=2147483648 byard/m/x/data"]);
+        assert_eq!(f.zfs.volsize("m/x/data").await.unwrap(), 2 << 30);
+        assert_eq!(f.calls(), vec!["get -H -p -o value volsize byard/m/x/data"]);
+        // A snapshot from before the grow, and a clone of it, are the old size.
+        f.zfs
+            .clone_snapshot("m/x/data", "a", "m/y/data")
+            .await
+            .unwrap();
+        assert_eq!(f.zfs.volsize("m/y/data").await.unwrap(), 1 << 30);
+        let err = f.zfs.grow("m/z/data", 2 << 30).await.unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+        let err = f.zfs.volsize("m/z/data").await.unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
     }
 
     #[tokio::test]
