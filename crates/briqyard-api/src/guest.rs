@@ -148,6 +148,11 @@ pub struct ExitReport {
     /// the machine before the host's first ping. Empty from an init older than this field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
+    /// Why the init could not start the main process, with `started` false: its own console
+    /// line, e.g. `start "/run.sh": Operation not permitted (os error 1)`. Empty once it
+    /// started, and from an init older than this field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
 }
 
 impl Response {
@@ -434,7 +439,17 @@ mod tests {
                 requested: false,
                 started: true,
                 version: "0.1.0".into(),
+                error: String::new(),
             }
+        );
+        // A program the init could not start: why, in its own words.
+        let r: ExitReport = same(json!({
+            "code": 127, "oom": false, "requested": false, "started": false, "version": "0.1.2",
+            "error": "start \"/run.sh\": Operation not permitted (os error 1)"
+        }));
+        assert_eq!(
+            r.error,
+            "start \"/run.sh\": Operation not permitted (os error 1)"
         );
         assert!(serde_json::from_value::<ExitReport>(json!({"code": 1})).is_err());
         // One frame, read back by the sync reader the way the host reads it.
@@ -469,11 +484,15 @@ mod tests {
             serde_json::from_value(json!({"type": "pong", "uptime": 3.5, "main_pid": 9})).unwrap();
         assert_eq!((r.version.as_str(), r.main_pid), ("", 9));
         // The first exit report, and one with a field a later init adds.
-        // An init older than `started` and `version`: not said to have started, version unknown.
+        // An init older than `started`, `version` and `error`: not said to have started,
+        // version unknown, no reason.
         let r: ExitReport =
             serde_json::from_value(json!({"code": 1, "oom": false, "requested": true})).unwrap();
         assert!(r.requested);
-        assert_eq!((r.started, r.version.as_str()), (false, ""));
+        assert_eq!(
+            (r.started, r.version.as_str(), r.error.as_str()),
+            (false, "", "")
+        );
         let r: ExitReport = serde_json::from_value(
             json!({"code": 2, "oom": true, "requested": false, "signal": 9}),
         )

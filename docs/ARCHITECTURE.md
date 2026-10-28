@@ -223,7 +223,7 @@ it, ADR 0029), `put` and
 them with `waitid(WNOWAIT)` and leaves alone the children it waits for itself, so a command's
 exit status is never stolen. When the main process exits, the init connects out to the host
 (vsock port 7422, which Firecracker brings to the daemon as `<vsock socket>_7422`), sends one
-`ExitReport` frame (code, oom, requested), waits for the daemon's close, and resets the machine,
+`ExitReport` frame (code, oom, requested; with a program it could not start, its reason), waits for the daemon's close, and resets the machine,
 which ends Firecracker; the daemon settles the machine from the report and applies the restart
 policy (ADR 0004). The `[briqyard] exit …` line on the serial console is a trace for a person;
 nothing reads it, so nothing a guest prints can set its exit.
