@@ -4,7 +4,8 @@
 # land on different hosts, every call is forwarded to the right one, a host that stops
 # answering is marked down and its tenant's calls fail cleanly while the other goes on.
 # With SECOND_HOST_SH (a root shell on the second host), its pool is locked while it is down,
-# as a reboot leaves it, and must come back with its key from the fleet (ADR 0026).
+# as a reboot leaves it, and must come back with its key from the fleet (ADR 0026); and a
+# backup there is ciphertext and restores through the fleet (ADR 0035).
 #   SECOND_HOST_STOP="limactl shell fc2 sudo systemctl stop briqyardd" \
 #   SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" \
 #   SECOND_HOST_SH="limactl shell fc2 sudo" bash hack/fleet-two-hosts.sh
@@ -17,11 +18,17 @@ bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
 hosts() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/hosts"; }
+CONF2=/etc/briqyard/config.yaml
 cleanup() {
   for t in "$T-a" "$T-b"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
     briqyard tenant rm "$t" >/dev/null 2>&1 || true
   done
+  # The second host as it was, when the backup section gave it a store for the run.
+  if [ -n "${SECOND_HOST_SH:-}" ] && $SECOND_HOST_SH test -f "$CONF2.two-hosts"; then
+    $SECOND_HOST_SH sh -c "mv $CONF2.two-hosts $CONF2 && rm -rf /var/lib/briqyard/backups && systemctl restart briqyardd" || true
+    for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
+  fi
 }
 trap cleanup EXIT
 
@@ -91,6 +98,37 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
   fi
   for i in $(seq 1 30); do briqyard machine exec "$B" -- hostname >/dev/null 2>&1 && break; sleep 2; done
   check "b answers again"       '[ "$(briqyard machine exec "$B" -- hostname)" = b ]'
+fi
+if [ -n "${SECOND_HOST_SH:-}" ]; then
+  echo "== a backup on the second host: ciphertext, restored through the fleet (ADR 0035)"
+  # The second host's key comes from the fleet, so its restore asks the fleet for the key of
+  # the backup's id. Without a store it gets a directory for the run (put back at the end).
+  on_second() { $SECOND_HOST_SH sh -c "$1"; }
+  if ! on_second "grep -q '^backup:' $CONF2"; then
+    on_second "cp $CONF2 $CONF2.two-hosts && printf 'backup:\n  store: file:///var/lib/briqyard/backups\n' >> $CONF2 && systemctl restart briqyardd"
+    for i in $(seq 1 45); do briqyard machine exec "$B" -- hostname >/dev/null 2>&1 && break; sleep 2; done
+  fi
+  STORE2=$(on_second "sed -n 's|^  store: file://||p' $CONF2")
+  # Random text lz4 cannot shrink, so only encryption can hide it (as in hack/e2e.sh).
+  briqyard machine exec "$B" -- sh -c "head -c 98304 /dev/urandom | base64 -w 0 > /root/mark; sync" >/dev/null
+  MARK=$(briqyard machine exec "$B" -- head -c 48 /root/mark)
+  BK=$(briqyard machine backup "$B" | jq -r .id)
+  check "backed up with its key's id" '[ "$(briqyard machine backups "$B" | jq -r ".[-1].key_id | length")" = 32 ]'
+  check "its stream holds no plaintext" 'on_second "test -s $STORE2/backups/$B/root/$BK.zfs && ! grep -qaF -- $MARK $STORE2/backups/$B/root/$BK.zfs"'
+  RB=$(briqyard machine restore --from "$B" --backup "$BK" --tenant "$T-b" --name b-back | jq -r .id)
+  for i in $(seq 1 45); do [ "$(briqyard machine get "$RB" | jq -r .state)" = running ] && break; sleep 2; done
+  check "restored through the fleet, on the second host" '[ "$(briqyard machine get "$RB" | jq -r .host)" = "$HB" ] && [ "$(briqyard machine exec "$RB" -- head -c 48 /root/mark)" = "$MARK" ]'
+  check "its disk on the host's pool key" '[ "$(on_second "zfs get -H -o value encryptionroot byard/m/$RB/root")" = byard ]'
+  # The key of a backup, asked as the host asks it but with no restore forwarded: refused.
+  KID=$(briqyard machine backups "$B" | jq -r '.[-1].key_id')
+  conf2=$(on_second "cat $CONF2")
+  token2=$(echo "$conf2" | sed -n 's/^token: "\(.*\)"$/\1/p')
+  advertise2=$(echo "$conf2" | sed -n 's/^  advertise: //p')
+  refused=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $token2" -H 'Content-Type: application/json' \
+    -d "{\"url\": \"$advertise2\", \"key_id\": \"$KID\", \"restore\": {\"machine_id\": \"$B\", \"backup\": \"$BK\"}}" "$BRIQYARD_URL/v1/hosts/key")
+  check "its key refused outside a restore the fleet forwarded" '[ "$refused" = 403 ]'
+  briqyard machine destroy "$RB" >/dev/null
+  briqyard backup rm "$B" "$BK" >/dev/null
 fi
 echo
 echo "passed $pass, failed $fail"

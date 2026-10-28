@@ -105,7 +105,10 @@ pub fn main() {
         .enable_all()
         .build()
         .expect("runtime");
-    let report = rt.block_on(run());
+    let report = ExitReport {
+        version: briqyard_api::VERSION.into(),
+        ..rt.block_on(run())
+    };
     log!("{}", exit_line(&report));
     rt.block_on(report_exit(&report));
     halt();
@@ -148,8 +151,8 @@ async fn send_exit<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Boots the guest and runs the main process to its end. A failure before the process
-/// starts reports as a code of its own: 125 the drive or the disks, 126 the command, 127 its
-/// program.
+/// starts reports as a code of its own, not `started`: 125 the drive or the disks, 126 the
+/// command, 127 its program.
 async fn run() -> ExitReport {
     let failed = |code: i32| ExitReport {
         code,
@@ -182,7 +185,6 @@ async fn run() -> ExitReport {
         main_done: Notify::new(),
         requested: Mutex::new(false),
     });
-    tokio::spawn(serve(st.clone()));
     let mut cmd = match main_command(&st) {
         Ok(c) => c,
         Err(e) => {
@@ -205,6 +207,9 @@ async fn run() -> ExitReport {
     };
     let pid = child.id().unwrap_or(0) as i32;
     *st.main_pid.lock().unwrap() = Some(pid);
+    // The host's first pong means the main process runs: a guest that fails before it is a
+    // failed boot, whichever of the pong and the exit report the host sees first.
+    tokio::spawn(serve(st.clone()));
     log!("started pid={pid} {}", argv_string(cmd.as_std()));
     let status = child.wait().await;
     TRACKED.lock().unwrap().remove(pid);
@@ -222,6 +227,8 @@ async fn run() -> ExitReport {
         code,
         oom: code == 137 && saw_oom(),
         requested,
+        started: true,
+        ..Default::default()
     }
 }
 
@@ -1466,6 +1473,7 @@ mod tests {
             code,
             oom,
             requested,
+            ..Default::default()
         }
     }
 

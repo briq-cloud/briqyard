@@ -801,9 +801,18 @@ pub struct Backup {
     /// Sent as a change since the previous backup, or whole.
     pub incremental: bool,
     pub disks: Vec<BackupDisk>,
-    /// The machine as it was: what a restore makes.
+    /// The id of the pool key its streams are encrypted under (raw sends, ADR 0035): a hash,
+    /// never the key. Absent: streams in clear, made before ADR 0035.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// The machine as it was: what a restore makes. In the store's record only, and in clear
+    /// only in a backup made before ADR 0035.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<serde_json::Value>,
+    /// The machine as it was, sealed under the pool key of `key_id` (ADR 0035): its env and
+    /// files are a tenant's secrets. In the store's record only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<String>,
     /// For a destroyed machine's backup: when the host deletes it (ADR 0023). Not stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletes_at: Option<DateTime<Utc>>,
@@ -1112,6 +1121,10 @@ pub struct GatewaySpec {
     /// Write-only, like a machine's.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Boot files, as a machine's: a stock proxy reads its configuration and its CA from
+    /// files. Write-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<File>,
     /// Default 1 vCPU, 256 MB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<Size>,
@@ -1571,13 +1584,21 @@ pub struct RegisterHostRequest {
 }
 
 /// `POST /v1/hosts/key` (fleet only): a host asks for its pool's key, with its own API token
-/// as the bearer, for the record at the address it advertises (ADR 0026).
+/// as the bearer, for the record at the address it advertises (ADR 0026). With `key_id` and
+/// `restore`, the key of that id instead, whichever host's it is or was: the key a backup's
+/// streams are encrypted under, for a restore the fleet forwarded to the host (ADR 0035).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostKeyRequest {
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// With `key_id`: the restore the key is for, as the fleet forwarded it to this host; a
+    /// backup's key is served only for one, once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<RestoreSpec>,
 }
 
-/// The answer: the key of the host's pool, 64 hex digits (ZFS's `hex` key format).
+/// The answer: a pool's key, 64 hex digits (ZFS's `hex` key format).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct HostKey {
     pub key: String,

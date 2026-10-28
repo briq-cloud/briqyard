@@ -141,6 +141,13 @@ pub struct ExitReport {
     pub oom: bool,
     /// The host asked for the stop (`shutdown`).
     pub requested: bool,
+    /// The main process ran: false when the init failed before it (its own 125, 126, 127).
+    #[serde(default)]
+    pub started: bool,
+    /// The init's version, as in its `pong` (ADR 0027): a process that exits at once may end
+    /// the machine before the host's first ping.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 impl Response {
@@ -416,13 +423,17 @@ mod tests {
     #[test]
     fn exit_report_on_the_wire() {
         // Every field is written, and a report from an init that knows fewer still reads.
-        let r: ExitReport = same(json!({"code": 137, "oom": true, "requested": false}));
+        let r: ExitReport = same(json!({
+            "code": 137, "oom": true, "requested": false, "started": true, "version": "0.1.0"
+        }));
         assert_eq!(
             r,
             ExitReport {
                 code: 137,
                 oom: true,
-                requested: false
+                requested: false,
+                started: true,
+                version: "0.1.0".into(),
             }
         );
         assert!(serde_json::from_value::<ExitReport>(json!({"code": 1})).is_err());
@@ -458,9 +469,11 @@ mod tests {
             serde_json::from_value(json!({"type": "pong", "uptime": 3.5, "main_pid": 9})).unwrap();
         assert_eq!((r.version.as_str(), r.main_pid), ("", 9));
         // The first exit report, and one with a field a later init adds.
+        // An init older than `started` and `version`: not said to have started, version unknown.
         let r: ExitReport =
             serde_json::from_value(json!({"code": 1, "oom": false, "requested": true})).unwrap();
         assert!(r.requested);
+        assert_eq!((r.started, r.version.as_str()), (false, ""));
         let r: ExitReport = serde_json::from_value(
             json!({"code": 2, "oom": true, "requested": false, "signal": 9}),
         )
