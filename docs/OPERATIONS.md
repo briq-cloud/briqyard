@@ -350,7 +350,7 @@ snapshot, or is whole.
 
 | Symptom | Look at |
 |---|---|
-| A create or start answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the last console lines. `briqyard machine logs`, then destroy it |
+| A create or start answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the init's reason (`start "/run.sh": …`) or else the last console lines. `briqyard machine logs`, then destroy it |
 | A start after `machine set --image` answers 409 `boot_failed`, `error: image …` | The new image could not be pulled or built; the change is still `pending`. `machine set` another image (or the one it runs, which drops the change) and start again |
 | A start after `machine set --memory` answers 503 `capacity` | The host has no room for the new size; the change is still `pending`. Through a fleet, the tenant stays on its host: move it (backups, `tenant unpin`, restores) |
 | A machine is `stopped (host)` | The daemon stopped it: its stop, or a crashed daemon's leftover. The next start boots it again unless its sleep window had run out; else the next use wakes it |

@@ -2,7 +2,9 @@
 
 briqyard is a Rust workspace. The daemon and the init only run on Linux with KVM; the API
 types, the CLI and the unit tests build anywhere; the tests of image extraction and of the init
-run on Linux only.
+run on Linux only. The init's test that changes users needs root, so it is `#[ignore]`d: CI
+runs its test binary as root (`--ignored run_as`, `.github/workflows/ci.yml`); in the VM, the
+same step.
 
 ## On a Linux host with KVM
 
@@ -182,7 +184,8 @@ plus `apt-get purge docker.io` and the edge's files.
   harness over a temp directory, the same fake `zfs` and a mock host (`Vmm`, `Guest`,
   `Net`; ADR 0010): create to running, boot failures, start against destroy, starts past
   capacity, stop and suspend, a caller that hangs up, crash recovery, the orphan sweep,
-  the sleeper's tick, the init's exit report, fork snapshots freed, backups (the schedule due
+  the sleeper's tick, the init's exit report and its reason for a program it could not start,
+  fork snapshots freed, backups (the schedule due
   and not before, at most `at_once`, one per machine, a machine with no process skipped while
   unchanged, retention and its restores, delete and `chain`, a failure and its backoff, a
   refused store leaving nothing, a destroyed machine's held, counted and expired), the tenant's gateway
@@ -258,7 +261,9 @@ plus `apt-get purge docker.io` and the edge's files.
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, image layers
-  (busybox's hard links, Debian's merged `/usr`), DNS,
+  (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary group
+  (running, its uid, gid and groups), a program that cannot start (409 `boot_failed` with the
+  init's reason), DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress (two `Host` lines
   refused, an absolute-form target routed by its authority and refused when `Host` names
@@ -310,7 +315,7 @@ plus `apt-get purge docker.io` and the edge's files.
   root disk given back to the pool, exec after a bare pause and resume), a volume grown (ADR
   0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
-  data kept, the next backup incremental and its restore at the grown size). 227 checks, 223
+  data kept, the next backup incremental and its restore at the grown size). 231 checks, 227
   without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
