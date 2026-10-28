@@ -338,7 +338,9 @@ class Run:
         def one(kv):
             (t, n), m = kv
             self.exec(m["id"], ["sh", "-c", "echo forked > /root/forked; sync"])
-            f = self.api.call("POST", "/v1/machines", {"tenant": t, "name": f"{n}-fork", "fork": {"machine_id": m["id"], "copy": "disk"}, "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="fork", timeout=600)
+            # A fork takes its source's disks and image, not its command: without one it runs
+            # the image's, which may exit at once.
+            f = self.api.call("POST", "/v1/machines", {"tenant": t, "name": f"{n}-fork", "fork": {"machine_id": m["id"], "copy": "disk"}, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="fork", timeout=600)
             try:
                 f = self.wait_state(f["id"], {"running"}, timeout=self.a.boot_timeout)
                 assert self.exec(f["id"], ["cat", "/root/forked"]).strip() == "forked"
@@ -495,6 +497,8 @@ class Run:
         made, errs = parallel([f"cap{i}" for i in range(n)], lambda name: self.api.call("POST", "/v1/machines", dict(body, name=name), op="create (stopped)", timeout=600), n)
         self.report_errors("create stopped", errs)
         ids = [m["id"] for m in made.values()]
+        # A start refused leaves a machine as it was: `created`, never started.
+        was = {m["id"]: m["state"] for m in made.values()}
 
         # Live memory, sampled through the race: it must never exceed the host's.
         worst = {"mb": 0}
@@ -523,8 +527,8 @@ class Run:
                 problems[ids[i]] = f"answered {st} {text[:80]}"
         for mid in refused:
             state = self.mget(mid)["state"]
-            if state != "stopped":
-                problems[mid] = f"refused, yet {state}"
+            if state != was[mid]:
+                problems[mid] = f"refused, yet {state} (was {was[mid]})"
         if not started:
             problems["none"] = "no start was accepted"
         if not refused:

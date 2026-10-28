@@ -1,6 +1,6 @@
 # ADR 0023: Scheduled backups and retention, run by the host
 
-Date: 2026-10-21 · Status: accepted
+Date: 2026-10-21 · Status: accepted; amended by ADR 0045 (through the fleet, a destroyed machine's backups are reached on the host that holds them, and a tenant's listing asks every host)
 
 ## Context
 

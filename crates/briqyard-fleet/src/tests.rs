@@ -641,6 +641,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         key_turn: Default::default(),
         restores: Default::default(),
         refusals: Default::default(),
+        written: Default::default(),
     });
     Fleet { st, _dir: dir }
 }
@@ -1069,6 +1070,11 @@ async fn a_host_gets_the_key_of_a_backup_for_a_restore_it_was_given() {
     let k1 = json(&body)["key"].as_str().unwrap().to_string();
     let id1 = briqyard_api::poolkey::id(&k1).unwrap();
 
+    // Its own, by id: served without a restore, as without the id (ADR 0045).
+    let mine = Some(serde_json::json!({ "url": "http://10.0.0.1:7420", "key_id": id1 }));
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", mine).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(json(&body)["key"], k1.as_str());
     // No restore forwarded to s2: refused, with or without one named.
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2, &id1)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
@@ -1076,10 +1082,10 @@ async fn a_host_gets_the_key_of_a_backup_for_a_restore_it_was_given() {
     let bare = Some(serde_json::json!({ "url": "http://10.0.0.2:7420", "key_id": id1 }));
     let (s, _, _) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", bare).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
-    // One forwarded to s2: served to s2 once, never to s1.
+    // One forwarded to s2: served to s2 once. s1's ask for its own key leaves it open.
     opened("s2");
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(1, &id1)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "another host's restore: {body}");
+    assert_eq!(s, StatusCode::OK, "its own: {body}");
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2, &id1)).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(
@@ -1726,6 +1732,120 @@ async fn a_registry_that_cannot_be_written_fails_the_request() {
     assert_eq!(d.stub.calls().len(), before, "the host was not asked");
 }
 
+/// ADR 0043: writes take turns, each writing the registry as it is when its turn comes.
+/// Hundreds at once all succeed, every read of the file in between parses, and the file
+/// ends with every change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn writes_at_once_all_land_and_the_file_ends_with_every_change() {
+    use std::sync::atomic::AtomicBool;
+    let f = fleet(config::Config::default());
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let (path, stop) = (f.st.state_path.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut reads = 0;
+            while !stop.load(Ordering::SeqCst) {
+                if let Ok(data) = std::fs::read(&path) {
+                    serde_json::from_slice::<Registry>(&data).expect("a read parses");
+                    reads += 1;
+                }
+            }
+            reads
+        })
+    };
+    let writes: Vec<_> = (0..300)
+        .map(|i| {
+            let st = f.st.clone();
+            tokio::spawn(async move {
+                st.reg
+                    .lock()
+                    .unwrap()
+                    .tenants
+                    .insert(format!("t{i}"), "h_a".into());
+                st.save().await
+            })
+        })
+        .collect();
+    for w in writes {
+        w.await.unwrap().expect("a write");
+    }
+    stop.store(true, Ordering::SeqCst);
+    assert!(reader.join().unwrap() > 0);
+    assert_eq!(
+        saved(&f.st).tenants.len(),
+        300,
+        "the last write holds them all"
+    );
+    assert!(!f.st.state_path.with_extension("json.tmp").exists());
+}
+
+/// Creates at once never fail on the registry's write, and each machine is in the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn creates_at_once_all_land_in_the_registry() {
+    let (f, _ds) = fleet_with_daemons(2).await;
+    let creates: Vec<_> = (0..64)
+        .map(|i| {
+            let st = f.st.clone();
+            tokio::spawn(async move {
+                let body = create_body(&format!("t{i}"), "web", 256);
+                call(&st, "POST", "/v1/machines", "api", Some(body)).await
+            })
+        })
+        .collect();
+    for c in creates {
+        let (s, _, body) = c.await.unwrap();
+        assert_eq!(s, StatusCode::CREATED, "{body}");
+    }
+    let reg = saved(&f.st);
+    assert_eq!((reg.machines.len(), reg.tenants.len()), (64, 64));
+}
+
+/// A machine the host made is the caller's answer even when the write after it fails: a 500
+/// there would leave a machine nobody knows the id of. The next write records it.
+#[tokio::test]
+async fn a_machine_made_is_answered_when_the_write_after_it_fails() {
+    let d = start_daemon("d1", "tok").await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let g = fleet_at(
+        config::Config {
+            hosts: vec![config::StaticHost {
+                id: "d1".into(),
+                url: d.url.clone(),
+                token: "tok".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        dir,
+        state.join("registry.json"),
+    );
+    poll_static_hosts_once(&g.st).await;
+    // The host makes it; meanwhile the fleet's state directory goes.
+    let gone = state.with_extension("gone");
+    {
+        let (state, gone) = (state.clone(), gone.clone());
+        *d.stub.on_create.lock().unwrap() =
+            Some(Box::new(move || std::fs::rename(&state, &gone).unwrap()));
+    }
+    let (s, _, body) = call(
+        &g.st,
+        "POST",
+        "/v1/machines",
+        "",
+        Some(create_body("t1", "web", 512)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    let id = json(&body)["id"].as_str().unwrap().to_string();
+    assert_eq!(g.st.reg.lock().unwrap().machines[&id], "d1");
+    std::fs::rename(&gone, &state).unwrap();
+    assert!(!saved(&g.st).machines.contains_key(&id));
+    poll_static_hosts_once(&g.st).await;
+    assert_eq!(saved(&g.st).machines[&id], "d1", "the next write has it");
+}
+
 // --- adding, retiring, draining, forgetting ---
 
 /// The fleet buys no server (ADR 0042): the order route is gone, and nothing is recorded.
@@ -2191,6 +2311,93 @@ async fn a_burst_of_creates_is_spread_by_what_each_one_reserved() {
     assert_eq!(used, [30_000, 40_000, 40_000]);
 }
 
+/// ADR 0044: what a create held is given back when the host does not make it, and what a
+/// destroy freed is room at once, not at the host's next heartbeat.
+#[tokio::test]
+async fn room_comes_back_at_a_failed_create_and_at_a_destroy() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let used = |f: &Fleet| f.st.reg.lock().unwrap().hosts["d1"].used.memory_mb;
+    // The host refuses (a bad name): nothing stays held.
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t0", "Bad Name", 30_000)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(used(&f), 0);
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t1", "big", 50_000)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    let big = json(&body)["id"].as_str().unwrap().to_string();
+    assert_eq!(used(&f), 50_000, "held until a report counts it");
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t2", "web", 20_000)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "no room: {body}");
+    // The destroy answers once the host has freed it: the next create fits, no poll between.
+    let path = format!("/v1/machines/{big}");
+    let (s, _, body) = call(&f.st, "DELETE", &path, "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(used(&f), 0, "the host's figure, asked after the destroy");
+    let (free, _) = f.st.reg.lock().unwrap().room(&f.st.policy)["fsn"];
+    assert_eq!(free.memory_mb, DAEMON_MEMORY_MB as u64, "the signals' too");
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t2", "web", 20_000)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(used(&f), 20_000);
+    assert_eq!(ds[0].stub.used_mb(), 20_000);
+}
+
+/// A caller that hangs up mid-create drops its handler, and the hold with it (ADR 0044).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_whose_caller_hangs_up_gives_its_hold_back() {
+    use std::sync::atomic::AtomicBool;
+    let (f, ds) = fleet_with_daemons(1).await;
+    let go = Arc::new(AtomicBool::new(false));
+    {
+        let go = go.clone();
+        *ds[0].stub.on_create.lock().unwrap() = Some(Box::new(move || {
+            while !go.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }));
+    }
+    let used = |f: &Fleet| f.st.reg.lock().unwrap().hosts["d1"].used.memory_mb;
+    let st = f.st.clone();
+    let create = tokio::spawn(async move {
+        let body = create_body("t1", "web", 20_000);
+        call(&st, "POST", "/v1/machines", "api", Some(body)).await
+    });
+    while !ds[0].stub.calls().iter().any(|c| c == "POST /v1/machines") {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(used(&f), 20_000, "held while the host makes it");
+    create.abort();
+    assert!(create.await.unwrap_err().is_cancelled());
+    assert_eq!(used(&f), 0, "given back");
+    go.store(true, Ordering::SeqCst);
+}
+
 #[tokio::test]
 async fn a_capacity_answer_unpins_a_tenants_first_machine_only() {
     let (f, ds) = fleet_with_daemons(1).await;
@@ -2228,8 +2435,7 @@ async fn a_capacity_answer_unpins_a_tenants_first_machine_only() {
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(pinned(&f.st, "t0").as_deref(), Some("d1"), "still pinned");
     // A refusal that is not `capacity` leaves a first machine's pin: the host had room, the
-    // request was wrong. (The host's report first: the refused machine was reserved.)
-    poll_static_hosts_once(&f.st).await;
+    // request was wrong.
     let (s, _, body) = call(
         &f.st,
         "POST",
@@ -2353,10 +2559,16 @@ async fn a_machine_is_found_through_the_index_then_by_searching() {
         .stub
         .calls()
         .contains(&"GET /v1/machines/m_nope".to_string())));
-    // A delete drops the index entry.
-    let (s, _, _) = call(&f.st, "DELETE", &path, "api", None).await;
+    // A query changes nothing of what the call is: a get carries the host, a delete drops
+    // the index entry.
+    let with_tenant = format!("{path}?tenant=t1");
+    let (s, _, body) = call(&f.st, "GET", &with_tenant, "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(json(&body)["host"], "d2");
+    let (s, _, _) = call(&f.st, "DELETE", &with_tenant, "api", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert_eq!(f.st.reg.lock().unwrap().machines.get(&m.id), None);
+    assert!(!saved(&f.st).machines.contains_key(&m.id), "written");
 }
 
 #[tokio::test]
@@ -2676,7 +2888,7 @@ async fn backups_are_listed_from_any_host_that_is_up() {
 }
 
 #[tokio::test]
-async fn every_backup_is_listed_from_the_tenants_host_or_every_host() {
+async fn every_backup_is_listed_from_every_host() {
     let (f, ds) = fleet_with_daemons(2).await;
     let (s, _, body) = call(&f.st, "GET", "/v1/backups", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
@@ -2686,46 +2898,68 @@ async fn every_backup_is_listed_from_the_tenants_host_or_every_host() {
         .map(|b| b.machine_id)
         .collect();
     assert_eq!(ids, ["m_d1", "m_d2"]);
-    // A tenant's: its host alone, the query as it came.
+    // A tenant's: every host too, the query as it came. Its host is d2, and the host it moved
+    // from still holds the backups of what was destroyed there (ADR 0045).
     f.st.reg
         .lock()
         .unwrap()
         .tenants
         .insert("t1".into(), "d2".into());
-    let before = ds[0].stub.calls().len();
     let (s, _, body) = call(&f.st, "GET", "/v1/backups?tenant=t1", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
-    assert_eq!(json(&body).as_array().unwrap().len(), 1);
-    assert_eq!(
-        ds[1].stub.calls().last().unwrap(),
-        "GET /v1/backups?tenant=t1"
-    );
-    assert_eq!(ds[0].stub.calls().len(), before);
+    assert_eq!(json(&body).as_array().unwrap().len(), 2);
+    for d in &ds {
+        assert_eq!(d.stub.calls().last().unwrap(), "GET /v1/backups?tenant=t1");
+    }
     // Every host or nothing: one down fails the listing.
     set_state(&f.st, "d1", "down");
-    let (s, _, body) = call(&f.st, "GET", "/v1/backups", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/backups?tenant=t1", "api", None).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
 }
 
 #[tokio::test]
-async fn a_destroyed_machine_s_backup_is_deleted_through_its_tenant() {
+async fn a_destroyed_machine_s_backup_is_deleted_on_the_host_that_holds_it() {
     let (f, ds) = fleet_with_daemons(2).await;
+    // Its tenant moved to d2 (ADR 0045): the backups of m_d1 stay held on d1.
     f.st.reg
         .lock()
         .unwrap()
         .tenants
         .insert("t1".into(), "d2".into());
-    // On no host any more: without its tenant, not found.
-    let path = "/v1/machines/m_gone/backups/b1?chain=true";
-    let (s, _, _) = call(&f.st, "DELETE", path, "api", None).await;
+    for query in ["chain=true&tenant=t1", "chain=true"] {
+        let path = format!("/v1/machines/m_d1/backups/b1?{query}");
+        let (s, _, body) = call(&f.st, "DELETE", &path, "api", None).await;
+        assert_eq!(s, StatusCode::NO_CONTENT, "{query}: {body}");
+        assert_eq!(
+            ds[0].stub.calls().last().unwrap(),
+            &format!("DELETE {path}"),
+            "{query}"
+        );
+        assert!(!ds[1].stub.calls().iter().any(|c| c.starts_with("DELETE")));
+    }
+    // Held nowhere: not found, and no host is asked to delete.
+    let (s, _, _) = call(
+        &f.st,
+        "DELETE",
+        "/v1/machines/m_gone/backups/b1",
+        "api",
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-    let path = format!("{path}&tenant=t1");
-    let (s, _, body) = call(&f.st, "DELETE", &path, "api", None).await;
-    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
-    assert_eq!(
-        ds[1].stub.calls().last().unwrap(),
-        &format!("DELETE {path}")
-    );
+    // A host that cannot say what it holds fails the search with its answer.
+    set_state(&f.st, "d1", "down");
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/machines/m_d2/backups/b1", "api", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "host_down");
+    // Only a backup's path searches: anything else about a machine no host has is a 404.
+    set_state(&f.st, "d1", "ready");
+    let before = ds[0].stub.calls().len();
+    let (s, _, _) = call(&f.st, "POST", "/v1/machines/m_d1/start", "api", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(!ds[0].stub.calls()[before..]
+        .iter()
+        .any(|c| c.starts_with("GET /v1/backups")));
 }
 
 #[tokio::test]
@@ -3682,7 +3916,9 @@ async fn an_upgrade_ends_in_the_hosts_state_or_drained() {
         stopped: 0,
         gone: 0,
     };
-    let h = upgrade::finish(&f.st, &was, "file:///r", Ok(("0.2.0+b".into(), started))).unwrap();
+    let h = upgrade::finish(&f.st, &was, "file:///r", Ok(("0.2.0+b".into(), started)))
+        .await
+        .unwrap();
     assert_eq!(h.state, "ready");
     assert!(h.note.starts_with("upgraded to 0.2.0+b at "), "{}", h.note);
     assert!(h.note.ends_with("; machines handed over: 3"), "{}", h.note);
@@ -3694,6 +3930,7 @@ async fn an_upgrade_ends_in_the_hosts_state_or_drained() {
         "file:///r",
         Err("install: ssh exited 255".into()),
     )
+    .await
     .unwrap_err();
     assert_eq!(err, "install: ssh exited 255");
     let h = &hosts(&f.st)[0];
