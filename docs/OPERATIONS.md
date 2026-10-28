@@ -5,8 +5,8 @@ live, how to upgrade, what to watch, and what to do when something is off.
 
 ## Install
 
-A Linux server with KVM (`/dev/kvm`), Ubuntu 26.04 (every suite runs there; 24.04 is untested). Through a fleet, `briqyard host
-add` runs the script for you (below, and "First OVH host"). By hand, as root:
+A Linux server with KVM (`/dev/kvm`), Ubuntu 26.04 (every suite runs there; 24.04 is untested).
+Through a fleet, `briqyard host add` runs the script for you (below, and "First OVH host"). By hand, as root:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/bootstrap-host.sh
