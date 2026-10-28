@@ -1,7 +1,8 @@
 # Development
 
 briqyard is a Rust workspace. The daemon and the init only run on Linux with KVM; the API
-types, the CLI and the unit tests build anywhere.
+types, the CLI and the unit tests build anywhere; the tests of image extraction and of the init
+run on Linux only.
 
 ## On a Linux host with KVM
 
@@ -153,7 +154,7 @@ plus `apt-get purge docker.io` and the edge's files.
 
 ## Tests
 
-- `cargo test --workspace`: unit tests, which run anywhere (extraction and whiteouts, DNS
+- `cargo test --workspace`: unit tests, which run anywhere (extraction and whiteouts on Linux, DNS
   packets, the guest protocol, address allocation, the store, the configuration, the ZFS
   backend against a fake `zfs`, the Firecracker and guest clients against in-test sockets,
   the config drive, restart and sleep decisions, and the manager's transitions through a
@@ -231,7 +232,8 @@ plus `apt-get purge docker.io` and the edge's files.
   its end states, drain apart from retire). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
-- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
+- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, image layers
+  (busybox's hard links, Debian's merged `/usr`), DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
   backups to a directory store and a restore, egress policies (`via` a gateway machine, `none`,
@@ -277,7 +279,7 @@ plus `apt-get purge docker.io` and the edge's files.
   logged), raw backups (ADR 0035: the record names the key's id, never the key; no plaintext
   marker of a file or the env in the stream or the record, while the same snapshot sent in
   clear shows it; a raw restore with the marker back and its disk on the pool's key; a backup
-  in clear, as made before, restored). 206 checks, 202 without host ports.
+  in clear, as made before, restored). 209 checks, 205 without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).
