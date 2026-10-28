@@ -709,6 +709,14 @@ fn backup_key(
     let host = the_host(&reg, &req.url, headers, caller, "backup key")?
         .id
         .clone();
+    let Some((owner, key)) = reg.key_by_id(key_id) else {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "no_key",
+            format!("the fleet holds no pool key {key_id}: the backup was made on a host with a key file, or on a host forgotten before ADR 0035"),
+        ));
+    };
+    // The last check: a refusal above leaves the restore's ask to it.
     let open = req
         .restore
         .as_ref()
@@ -731,13 +739,6 @@ fn backup_key(
             format!("a backup's key is served once, for a restore the fleet forwarded to this host: none open for {host} ({what})"),
         ));
     }
-    let Some((owner, key)) = reg.key_by_id(key_id) else {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            "no_key",
-            format!("the fleet holds no pool key {key_id}: the backup was made on a host with a key file, or on a host forgotten before ADR 0035"),
-        ));
-    };
     let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
     // Its own key is routine; another host's is the hand-out worth a look.
     if owner == host {
@@ -1572,12 +1573,13 @@ async fn create_machine(
     let host = host.ok_or_else(|| no_room(&req.region, "this machine"))?;
     st.save().map_err(registry_error)?;
     // A restore may ask for its backup's key while this forward lasts (ADR 0035).
-    if let Some(rs) = &req.restore {
-        st.restores.open(&host.id, rs, std::time::Instant::now());
-    }
+    let restoring = req
+        .restore
+        .as_ref()
+        .map(|rs| st.restores.open(&host.id, rs, std::time::Instant::now()));
     let resp = forward(&st, &host, Method::POST, "/v1/machines", &headers, body).await;
-    if let Some(rs) = &req.restore {
-        st.restores.close(&host.id, rs);
+    if let Some(f) = restoring {
+        st.restores.close(f);
     }
     let (parts, data) = read(resp).await;
     if parts.status.is_success() {

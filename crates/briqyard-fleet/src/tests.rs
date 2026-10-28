@@ -34,6 +34,8 @@ struct Daemon {
     conditions: Mutex<Vec<api::Condition>>,
     /// Tenants' quotas (ADR 0025).
     quotas: Mutex<Vec<(String, api::Quota)>>,
+    /// Run by a create before it answers: a test's look at the fleet mid-forward.
+    on_create: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl Daemon {
@@ -145,6 +147,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             .unwrap_or_default(),
         conditions: Mutex::new(vec![]),
         quotas: Mutex::new(vec![]),
+        on_create: Mutex::new(None),
     });
     type D = State<Arc<Daemon>>;
     async fn status(State(d): D) -> Json<api::Status> {
@@ -358,6 +361,9 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
                 "the host has no room",
             )
             .into_response();
+        }
+        if let Some(f) = d.on_create.lock().unwrap().as_ref() {
+            f();
         }
         let m = d.add(&req.tenant, &req.name, req.size.memory_mb);
         (StatusCode::CREATED, Json(m)).into_response()
@@ -1078,7 +1084,9 @@ async fn a_host_gets_the_key_of_a_backup_for_a_restore_it_was_given() {
             "restore": { "machine_id": "m_src", "backup": "b1" },
         }))
     };
-    let opened = |host: &str| f.st.restores.open(host, &rs, std::time::Instant::now());
+    let opened = |host: &str| {
+        f.st.restores.open(host, &rs, std::time::Instant::now());
+    };
     let own = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
     let (_, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", own).await;
     let k1 = json(&body)["key"].as_str().unwrap().to_string();
@@ -1119,9 +1127,9 @@ async fn a_host_gets_the_key_of_a_backup_for_a_restore_it_was_given() {
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(json(&body)["code"], "no_key");
-    opened("s2");
     let (s, _, _) = call(&f.st, "POST", "/v1/hosts/key", "api", ask(2, &id1)).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "a host's token only");
+    // Neither refusal took the restore: it is the last check.
 
     // s1 forgotten: its key stays, for its backups, and for nothing else.
     let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/s1?force=true", "api", None).await;
@@ -1130,7 +1138,7 @@ async fn a_host_gets_the_key_of_a_backup_for_a_restore_it_was_given() {
     assert_eq!(
         s,
         StatusCode::OK,
-        "the restore opened above is still open: {body}"
+        "the restore opened before the 404, still open: {body}"
     );
     assert_eq!(json(&body)["key"], k1.as_str());
     let retired = &saved(&f.st).retired_keys;
@@ -3857,5 +3865,40 @@ async fn a_host_unreachable_never_shows_the_sessions_query() {
     assert!(
         !body.contains("hunter2") && !body.contains("exec?"),
         "{body}"
+    );
+}
+
+/// A create with `restore` opens that restore for its host while the forward lasts, and closes
+/// it after: a backup's key is asked for during the create, never after it (ADR 0035).
+#[tokio::test]
+async fn a_forwarded_restore_is_open_during_its_create_alone() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let rs = api::RestoreSpec {
+        machine_id: "m_src".into(),
+        backup: "b1".into(),
+    };
+    let restore = |name: &str| {
+        let mut body = create_body("t1", name, 256);
+        body["restore"] = serde_json::to_value(&rs).unwrap();
+        Some(body)
+    };
+    let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (st, seen, rs) = (f.st.clone(), seen.clone(), rs.clone());
+        *ds[0].stub.on_create.lock().unwrap() = Some(Box::new(move || {
+            let open = st.restores.take("d1", &rs, std::time::Instant::now());
+            seen.store(open, Ordering::SeqCst);
+        }));
+    }
+    let (s, _, body) = call(&f.st, "POST", "/v1/machines", "api", restore("r1")).await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert!(seen.load(Ordering::SeqCst), "open while the host made it");
+    // A forward that never asked: closed once it is over.
+    *ds[0].stub.on_create.lock().unwrap() = None;
+    let (s, _, body) = call(&f.st, "POST", "/v1/machines", "api", restore("r2")).await;
+    assert_eq!(s, StatusCode::CREATED, "{body}");
+    assert!(
+        !f.st.restores.take("d1", &rs, std::time::Instant::now()),
+        "closed after"
     );
 }
