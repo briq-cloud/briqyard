@@ -42,7 +42,10 @@ never from the link. Another dataset, or none: that device gets a change event o
 500 ms while it stays wrong. A link still not right after one such repair (the volume's own
 event was lost too), or missing at the end of the wait, has every zvol's change event replayed
 once (`--subsystem-match=block --sysname-match=zd*`). Still not right after 15 s: an error that names
-the link and what its device is.
+the link and what its device is. Every `udevadm` and `zvol_id` call is bounded by what is left
+of the 15 s (`udevadm settle` by 5 s of it), in real time, and killed past it: a udevd wedged,
+as a stalled pool can leave it, still ends the wait on time. A call cut short counts as not
+right.
 
 **A rename follows its device.** `Zfs::rename` finds the volume's device first, renames, waits
 until `zvol_id` names it `to` (the kernel's rename lands after `zfs` returned), then sends its
@@ -62,7 +65,10 @@ until it exits. A task apart from the tick (which a stuck command would hold too
 15 s: a command running for over 60 s makes `storage_stalled` true, its message the command and
 how long; it clears when no command is past that. It is in `/v1/status`, the heartbeat and
 `/metrics`, a `host_condition` event, and the fleet places nothing new on the host, as for any
-condition (ADR 0021). Commands are not timed out: one stuck in the kernel cannot be killed, and
+condition (ADR 0021). So a refusal for a stalled host counts as `pressure` for a tenant bound
+to it, and as `memory` for a new tenant whose only host with room is stalled (ADR 0042): an
+external scaler reads the latter as "add a host" though the fix is the operator's; the
+`host_condition` event, `storage_stalled`, names it. Commands are not timed out: one stuck in the kernel cannot be killed, and
 one that is only slow would finish after its caller was told it failed, leaving the record and
 the pool apart.
 
@@ -78,6 +84,8 @@ an exec, a session or a file call answers 409 `not_running`, not 500.
 - A stuck `zfs` command still holds the turns behind it; the host says so and takes nothing new.
   The operator's fix is the holder (`OPERATIONS.md`): with the device check, the daemon should
   never make one.
+- `LINK_WAIT` (15 s) and `STALL_AFTER` (60 s) are chosen, not measured; the first real host's
+  chaos run revisits them.
 - `zvol_id` is `/usr/lib/udev/zvol_id`, from the ZFS packages (Ubuntu's `zfsutils-linux`).
 - The unit tests' udev is a script over the fake's state that can drop events
   (`udev.drop`): a device per volume file, kept through a rename, outliving a destroy until

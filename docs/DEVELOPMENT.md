@@ -180,8 +180,9 @@ plus `apt-get purge docker.io` and the edge's files.
 - `cargo test --workspace`: unit tests, which run anywhere (extraction and whiteouts on Linux, DNS
   packets, the guest protocol, address allocation, the store, the configuration, the ZFS
   backend against a fake `zfs`, `udevadm` and `zvol_id` (a device per volume through renames;
-  links udev left wrong, or never made, mended; a command running past its time stalled; ADR
-  0046), the Firecracker and guest clients against in-test sockets,
+  links udev left wrong, or never made, mended; a wedged udev ending the wait on time; a command
+  running past its time stalled; ADR 0046), the Firecracker and guest clients against in-test
+  sockets,
   the config drive, restart and sleep decisions, and the manager's transitions through a
   harness over a temp directory, the same fake `zfs` and a mock host (`Vmm`, `Guest`,
   `Net`; ADR 0010): create to running, boot failures, start against destroy, starts past

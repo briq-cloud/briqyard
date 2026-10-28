@@ -13,6 +13,8 @@ use tokio::process::Command;
 pub const STALL_AFTER: Duration = Duration::from_secs(60);
 /// How long a volume's device link may take to be right (ADR 0046).
 const LINK_WAIT: Duration = Duration::from_secs(15);
+/// The part of it `udevadm settle` may take.
+const SETTLE_WAIT: Duration = Duration::from_secs(5);
 
 /// A command the backend runs: a program and the arguments that come before the backend's own.
 /// On a host it is the program alone; a test's stand-in is `sh <script>`, so the script is read,
@@ -393,22 +395,23 @@ impl Zfs {
     /// which moves its links. Every zvol's event is replayed, once, when the link is still not
     /// right after that (the volume's own event was lost too) or at the end of the wait.
     async fn wait_device(&self, name: &str) -> Result<PathBuf> {
-        self.settle().await?;
+        let until = Instant::now() + LINK_WAIT;
+        self.settle(until).await?;
         let deadline = tokio::time::Instant::now() + LINK_WAIT;
         let (mut mended, mut replayed) = (false, false);
         loop {
-            let (last, wrong) = match self.link(name).await {
+            let (last, wrong) = match self.link(name, until).await {
                 Link::Right(dev) => return Ok(dev),
                 Link::Wrong(dev, other) => {
                     (format!("names {} ({other})", dev.display()), Some(dev))
                 }
                 Link::Missing => ("is missing".to_string(), None),
             };
-            let over = tokio::time::Instant::now() > deadline;
+            let over = tokio::time::Instant::now() > deadline || Instant::now() > until;
             // A replay was worked when it returns: still not right after one of the wrong
             // device, the volume's own event was lost too.
             if !replayed && (over || mended) {
-                self.replay(None).await?;
+                self.replay(None, until).await?;
                 replayed = true;
                 continue;
             }
@@ -422,7 +425,7 @@ impl Zfs {
             }
             let pause = match wrong {
                 Some(dev) => {
-                    self.replay(Some(&dev)).await?;
+                    self.replay(Some(&dev), until).await?;
                     mended = true;
                     500
                 }
@@ -433,11 +436,11 @@ impl Zfs {
     }
 
     /// What the link at a volume's name says now.
-    async fn link(&self, name: &str) -> Link {
+    async fn link(&self, name: &str, until: Instant) -> Link {
         let Ok(dev) = tokio::fs::canonicalize(self.dev(name)).await else {
             return Link::Missing;
         };
-        match self.zvol_name(&dev).await {
+        match self.zvol_name(&dev, until).await {
             Ok(n) if n == self.ds(name) => Link::Right(dev),
             Ok(n) => Link::Wrong(dev, n),
             Err(err) => Link::Wrong(dev, err),
@@ -445,42 +448,48 @@ impl Zfs {
     }
 
     /// The dataset a zvol device is now, as the kernel says; a device being removed has none.
-    async fn zvol_name(&self, dev: &Path) -> Result<String, String> {
-        match self.tools.zvol_id.command().arg(dev).output().await {
-            Ok(o) if o.status.success() => {
+    async fn zvol_name(&self, dev: &Path, until: Instant) -> Result<String, String> {
+        let mut cmd = self.tools.zvol_id.command();
+        cmd.arg(dev);
+        match bounded(cmd, until).await {
+            Some(Ok(o)) if o.status.success() => {
                 Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
             }
-            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
-            Err(e) => Err(format!("run zvol_id: {e}")),
+            Some(Ok(o)) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            Some(Err(e)) => Err(format!("run zvol_id: {e}")),
+            None => Err("zvol_id: no answer".into()),
         }
     }
 
-    /// Waits, bounded, for the events udev holds.
-    async fn settle(&self) -> Result<()> {
-        self.udevadm(&["settle", "--timeout=15"]).await
+    /// Waits for the events udev holds, 5 s at most: the link is polled for after it, so a udevd
+    /// slow to settle leaves the rest of the wait to that.
+    async fn settle(&self, until: Instant) -> Result<()> {
+        let until = until.min(Instant::now() + SETTLE_WAIT);
+        self.udevadm(&["settle", "--timeout=5"], until).await
     }
 
     /// Sends a change event for one zvol device, or for every zvol device, and waits for it to
     /// be worked: udev's rule then links each device at the name `zvol_id` gives it now.
-    async fn replay(&self, dev: Option<&Path>) -> Result<()> {
+    async fn replay(&self, dev: Option<&Path>, until: Instant) -> Result<()> {
         let mut args = vec!["trigger", "--action=change", "--settle"];
         let dev = dev.map(|d| d.display().to_string());
         match &dev {
             Some(d) => args.push(d),
             None => args.extend(["--subsystem-match=block", "--sysname-match=zd*"]),
         }
-        self.udevadm(&args).await
+        self.udevadm(&args, until).await
     }
 
-    async fn udevadm(&self, args: &[&str]) -> Result<()> {
-        let out = self
-            .tools
-            .udevadm
-            .command()
-            .args(args)
-            .output()
-            .await
-            .context("run udevadm")?;
+    /// Runs `udevadm` until `until`. One that has not answered by then (a udevd wedged, as a
+    /// stalled pool can leave it) is killed and counts as done: the link the caller reads next
+    /// says whether it worked.
+    async fn udevadm(&self, args: &[&str], until: Instant) -> Result<()> {
+        let mut cmd = self.tools.udevadm.command();
+        cmd.args(args);
+        let Some(out) = bounded(cmd, until).await else {
+            return Ok(());
+        };
+        let out = out.context("run udevadm")?;
         if !out.status.success() {
             return Err(anyhow!(
                 "udevadm {}: {}",
@@ -547,19 +556,20 @@ impl Zfs {
         let dev = self.device(name).await?;
         self.run(&["rename", &self.ds(name), &self.ds(to)]).await?;
         let want = self.ds(to);
+        let until = Instant::now() + LINK_WAIT;
         let deadline = tokio::time::Instant::now() + LINK_WAIT;
         let mut named = false;
         loop {
             if !named {
-                named = self.zvol_name(&dev).await.as_deref() == Ok(want.as_str());
+                named = self.zvol_name(&dev, until).await.as_deref() == Ok(want.as_str());
             }
             if named {
-                self.replay(Some(&dev)).await?;
-                if matches!(self.link(to).await, Link::Right(at) if at == dev) {
+                self.replay(Some(&dev), until).await?;
+                if matches!(self.link(to, until).await, Link::Right(at) if at == dev) {
                     return Ok(());
                 }
             }
-            if tokio::time::Instant::now() > deadline {
+            if tokio::time::Instant::now() > deadline || Instant::now() > until {
                 return Err(anyhow!(
                     "rename {} to {want}: {} {} after {} s",
                     self.ds(name),
@@ -893,6 +903,30 @@ impl Zfs {
     }
 }
 
+/// Runs a command until `until`, real time: past it the command is killed (`kill_on_drop`) and
+/// the answer is `None`. Not tokio's clock, which a test can pause: a paused clock jumps to the
+/// next timer whenever the runtime waits, and a command would time out at once.
+async fn bounded(
+    mut cmd: Command,
+    until: Instant,
+) -> Option<std::io::Result<std::process::Output>> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+    let (fire, fired) = tokio::sync::oneshot::channel::<()>();
+    let left = until.saturating_duration_since(Instant::now());
+    std::thread::spawn(move || {
+        if cancelled.recv_timeout(left) == Err(RecvTimeoutError::Timeout) {
+            let _ = fire.send(());
+        }
+    });
+    let out = tokio::select! {
+        out = cmd.kill_on_drop(true).output() => Some(out),
+        _ = fired => None,
+    };
+    drop(cancel);
+    out
+}
+
 /// A snapshot and the datasets cloned from it, relative to the pool.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapshotOf {
@@ -1141,9 +1175,11 @@ exit 0
     /// kernel's part); `settle` then links every device at its volume's name, unless
     /// `udev.drop` is in the state (udev dropped the events); `trigger` links the device given,
     /// or all of them, dropped or not. A device whose volume is gone loses its links and goes.
+    /// Each waits while `hang.udevadm` (`hang.zvol_id`) is in the state: a udevd wedged.
     const FAKE_UDEVADM: &str = r#"#!/bin/sh
 DEV="__DEV__"; LINKS="__LINKS__"; DEVS="__DEVS__"
 printf 'udevadm %s\n' "$*" >> "__LOG__"
+while [ -f "$DEV/hang.udevadm" ]; do sleep 0.1; done
 for a in "$@"; do last="$a"; done
 # Each volume's inode and name; the kernel's part: a device for each volume that has none.
 find "$DEV" -mindepth 2 -type f ! -name '*@*' ! -name '*.origin' -exec ls -i {} + |
@@ -1181,6 +1217,7 @@ exit 0
 
     const FAKE_ZVOL_ID: &str = r#"#!/bin/sh
 DEV="__DEV__"
+while [ -f "$DEV/hang.zvol_id" ]; do sleep 0.1; done
 i=$(ls -i "$1" 2>/dev/null | awk '{ print $1 }')
 n=$(find "$DEV" -mindepth 2 -type f ! -name '*@*' ! -name '*.origin' -exec ls -i {} + |
   awk -v i="$i" -v d="$DEV/" '$1 == i { sub(d, "", $2); print $2; exit }')
@@ -1309,7 +1346,7 @@ mod tests {
     use super::fake::{Fake, Scripts};
     use super::*;
 
-    const SETTLE: &str = "udevadm settle --timeout=15";
+    const SETTLE: &str = "udevadm settle --timeout=5";
 
     /// Whether `dev` is the device of the fake's volume file `file`: the same inode.
     fn device_of(dev: &Path, file: PathBuf) -> bool {
@@ -1606,6 +1643,38 @@ mod tests {
             msg.contains("(No such device or address) after 15 s"),
             "{msg}"
         );
+    }
+
+    /// A udevd wedged, as a stalled pool can leave it, and a `zvol_id` that never answers: the
+    /// wait still ends by its deadline, with an error, and the commands are killed.
+    #[tokio::test]
+    async fn a_wedged_udev_ends_the_wait_by_its_deadline() {
+        let f = Fake::open("byard").await.unwrap();
+        f.zfs.create("m/x/root", 1 << 20).await.unwrap();
+        std::fs::write(f.dev().join("hang.udevadm"), "").unwrap();
+        std::fs::write(f.dev().join("hang.zvol_id"), "").unwrap();
+        let t0 = Instant::now();
+        let err = f.zfs.device("m/x/root").await.unwrap_err();
+        assert!(
+            t0.elapsed() < LINK_WAIT + Duration::from_secs(3),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert!(
+            format!("{err:#}").contains("(zvol_id: no answer) after 15 s"),
+            "{err:#}"
+        );
+        // A rename: its device found once udev's settle was given up, then the new link
+        // never made.
+        std::fs::remove_file(f.dev().join("hang.zvol_id")).unwrap();
+        let t0 = Instant::now();
+        let err = f.zfs.rename("m/x/root", "m/x/root.r_1").await.unwrap_err();
+        assert!(
+            t0.elapsed() < 2 * LINK_WAIT + Duration::from_secs(3),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert!(format!("{err:#}").contains("not linked at"), "{err:#}");
     }
 
     /// A `zfs` command is counted as running until it exits: past the time given, it is the
