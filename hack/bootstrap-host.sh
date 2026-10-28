@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Turns a fresh Ubuntu 24.04+ server with KVM into a briqyard host: packages, a ZFS pool on one
+# Turns a fresh Ubuntu 26.04 server with KVM into a briqyard host: packages, a ZFS pool on one
 # or two drives (or a file), Firecracker and a guest kernel, the briqyard binaries, the config,
 # the systemd unit. Idempotent: run again with another BRIQYARD_RELEASE, it is the upgrade (the
 # fleet's `host upgrade` does that, ADR 0027): a running daemon hands its machines over to the new
