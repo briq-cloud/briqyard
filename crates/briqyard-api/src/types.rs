@@ -1661,6 +1661,46 @@ pub struct Status {
     /// release (ADR 0027).
     #[serde(default)]
     pub vmm_version: String,
+    /// A fleet's only: the room in each region, what an external scaler reads (ADR 0042).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<RegionRoom>,
+}
+
+/// A region's room, as a fleet sees it (ADR 0042). Free space counts the hosts that take a new
+/// tenant: `ready`, under the fill ceiling, no condition true.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegionRoom {
+    /// The hosts' `region`; empty for hosts with none, and for refusals of creates that asked
+    /// for none. `other` counts refusals in a region no host is in.
+    pub region: String,
+    /// Free on those hosts, summed.
+    pub free: Room,
+    /// The most free on one of them: the largest machine (memory) or volume plus headroom
+    /// (disk) the region still takes.
+    pub largest_slot: Room,
+    /// Creates refused 503 `capacity` since the fleet started, by what ran out.
+    pub unschedulable: Unschedulable,
+}
+
+/// Memory and disk, in MB.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Room {
+    pub memory_mb: u64,
+    pub disk_mb: u64,
+}
+
+/// Creates refused for want of room, by what ran out (ADR 0042).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unschedulable {
+    /// No host of the region had the memory free under its fill ceiling, or those that had it
+    /// and the disk are under `memory_pressure`. A new host fixes it.
+    pub memory: u64,
+    /// Hosts had the memory, none the disk, or those that had both are under `disk_pressure`.
+    /// A new host fixes it.
+    pub disk: u64,
+    /// The host the create is bound to (the tenant's, a fork's source's) is under a condition
+    /// (ADR 0021). A new host does not fix it: that host must be freed.
+    pub pressure: u64,
 }
 
 /// Every error response's body.

@@ -1541,7 +1541,9 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
         Cmd::Host(h) => match h {
             HostCmd::Ls => {
                 let hs: Vec<api::Host> = c.call(GET, "/v1/hosts", NONE).await?;
+                let st: api::Status = c.call(GET, "/v1/status", NONE).await?;
                 print!("{}", host_table(&hs));
+                print!("{}", region_table(&st.regions));
             }
             HostCmd::Add {
                 ssh,
@@ -2040,6 +2042,30 @@ fn host_table(hs: &[api::Host]) -> String {
         if !h.note.is_empty() {
             out.push_str(&format!("{:<16} note: {}\n", "", h.note));
         }
+    }
+    out
+}
+
+/// `host ls`'s summary: each region's room and the creates refused for want of it (ADR 0042).
+fn region_table(rs: &[api::RegionRoom]) -> String {
+    if rs.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "\n{:<8} {:<20} {:<20} UNSCHEDULABLE MEM/DISK/PRESSURE\n",
+        "REGION", "FREE MB MEM/DISK", "LARGEST MB MEM/DISK"
+    );
+    for r in rs {
+        let u = r.unschedulable;
+        out.push_str(&format!(
+            "{:<8} {:<20} {:<20} {}/{}/{}\n",
+            if r.region.is_empty() { "-" } else { &r.region },
+            format!("{}/{}", r.free.memory_mb, r.free.disk_mb),
+            format!("{}/{}", r.largest_slot.memory_mb, r.largest_slot.disk_mb),
+            u.memory,
+            u.disk,
+            u.pressure
+        ));
     }
     out
 }

@@ -382,7 +382,11 @@ a server and `POST /v1/hosts/{id}/retire` makes a host `retiring` and releases i
 autoscaler, when `provisioner.enabled` is set, does the same on its own (no slot of `slot_mb`
 left: order one; a provisioned host empty for `idle_grace` above `min_hosts`: release it),
 one change a minute, never past `max_hosts`. Adding a host costs money, so every provisioner
-stays in `dry_run` unless told otherwise.
+stays in `dry_run` unless told otherwise. The autoscaler and the provisioners are on their way
+out (ADR 0042): as Kubernetes's scheduler does for the Cluster Autoscaler, placement counts
+each create it refuses for want of room by what ran out (`memory`, `disk`, `pressure`) and
+region, and the fleet's `/metrics` and `/v1/status` show each region's free room and largest
+slot (`signals.rs`); a scaler outside reads them and adds hosts.
 
 A server becomes a host in three steps: the fleet polls the provider for its address, runs
 `hack/bootstrap-host.sh` on it over SSH (the script on stdin, the fleet's URL and a fresh API

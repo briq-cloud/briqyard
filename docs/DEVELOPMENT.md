@@ -250,7 +250,11 @@ plus `apt-get purge docker.io` and the edge's files.
   after it with `gone` apart from `stopped`, the daemon's start booting again what the host
   stopped within its window, a record keeping a newer daemon's fields, an old init's unknown op
   named, old and new wire shapes decoding, the fleet's refusals, its wait for a new start and
-  its end states, drain apart from retire). What still needs the host: a tenant's first create (its bridge and
+  its end states, drain apart from retire), capacity signals (ADR 0042: each refusal counted by
+  what ran out and its region, hosts under a condition named by it, a pinned tenant's host
+  under pressure, a region no host is in; the room of the hosts that take a tenant, drained,
+  down and pressured ones left out; the fleet's `/metrics` against the format, and its
+  token). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, image layers

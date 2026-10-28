@@ -183,7 +183,18 @@ impl HostRec {
 
     /// Whether a new tenant may be placed here: ready, under the ceiling, no pressure.
     fn takes_new_tenants(&self, policy: &Policy) -> bool {
-        self.state == "ready" && self.fill() < policy.fill_ceiling && self.pressure().is_none()
+        self.has_memory_for_tenants(policy) && self.pressure().is_none()
+    }
+
+    /// Ready and under the fill ceiling: what `takes_new_tenants` asks but the conditions.
+    fn has_memory_for_tenants(&self, policy: &Policy) -> bool {
+        self.state == "ready" && self.fill() < policy.fill_ceiling
+    }
+
+    /// Whether `need_disk_mb` fits in its pool: a host that reports no disk figure is not held
+    /// to it.
+    fn has_disk(&self, need_disk_mb: u64) -> bool {
+        self.disk_free_mb == 0 || self.disk_free_mb >= need_disk_mb
     }
 }
 
@@ -432,7 +443,7 @@ impl Registry {
                         h.takes_new_tenants(policy)
                             && (region.is_empty() || h.region == region)
                             && h.free_memory_mb() >= need_mb
-                            && (h.disk_free_mb == 0 || h.disk_free_mb >= need_disk_mb)
+                            && h.has_disk(need_disk_mb)
                     })
                     .max_by_key(|h| h.free_memory_mb())?;
                 let id = best.id.clone();
@@ -503,6 +514,84 @@ impl Registry {
             largest = largest.max(f);
         }
         (total, largest)
+    }
+
+    /// What ran out when `place` found no host for a new tenant's machine: memory when no host
+    /// of the region is ready and under its ceiling with `need_mb` free; else disk when none of
+    /// those has `need_disk_mb`; else (those that have both are under a condition) what the
+    /// condition of the one with the most memory free says: disk for `disk_pressure`, memory
+    /// otherwise. Never `Pressure`: a new host fixes each of these.
+    pub fn shortage(
+        &self,
+        region: &str,
+        need_mb: u32,
+        need_disk_mb: u64,
+        policy: &Policy,
+    ) -> Resource {
+        let roomy: Vec<&HostRec> = self
+            .hosts
+            .values()
+            .filter(|h| {
+                h.has_memory_for_tenants(policy)
+                    && (region.is_empty() || h.region == region)
+                    && h.free_memory_mb() >= need_mb
+            })
+            .collect();
+        if roomy.is_empty() {
+            return Resource::Memory;
+        }
+        let Some(pressed) = roomy
+            .iter()
+            .filter(|h| h.has_disk(need_disk_mb))
+            .max_by_key(|h| h.free_memory_mb())
+        else {
+            return Resource::Disk;
+        };
+        match api::under_pressure(&pressed.conditions) {
+            Some(c) if c.kind == api::condition::DISK_PRESSURE => Resource::Disk,
+            _ => Resource::Memory,
+        }
+    }
+
+    /// Each region a host is in, with what its hosts that take a new tenant have free: the
+    /// sum, and the most on one host (`(free, largest_slot)`). A host that reports no disk
+    /// figure adds none.
+    pub fn room(&self, policy: &Policy) -> BTreeMap<String, (api::Room, api::Room)> {
+        let mut out: BTreeMap<String, (api::Room, api::Room)> = BTreeMap::new();
+        for h in self.hosts.values() {
+            let (free, largest) = out.entry(h.region.clone()).or_default();
+            if !h.takes_new_tenants(policy) {
+                continue;
+            }
+            let (memory, disk) = (h.free_memory_mb() as u64, h.disk_free_mb);
+            free.memory_mb += memory;
+            free.disk_mb += disk;
+            largest.memory_mb = largest.memory_mb.max(memory);
+            largest.disk_mb = largest.disk_mb.max(disk);
+        }
+        out
+    }
+}
+
+/// What a create found missing when no host took it (ADR 0042).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Resource {
+    Memory,
+    Disk,
+    /// The host the create is bound to (a pinned tenant's, a fork's source's) is under a
+    /// condition (ADR 0021): a new host does not fix it.
+    Pressure,
+}
+
+impl Resource {
+    pub const ALL: [Resource; 3] = [Resource::Memory, Resource::Disk, Resource::Pressure];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Resource::Memory => "memory",
+            Resource::Disk => "disk",
+            Resource::Pressure => "pressure",
+        }
     }
 }
 
@@ -659,6 +748,83 @@ mod tests {
         cleared.conditions = vec![condition(api::condition::DISK_PRESSURE, false)];
         reg.heartbeat(cleared, now);
         assert_eq!(reg.place("t2", "", 512, 0, &p).as_deref(), Some("a"));
+    }
+
+    /// A host of `region` with `free` MB of memory and `disk` MB of disk free.
+    fn roomy(id: &str, region: &str, free: u32, disk: u64) -> HostRec {
+        let mut h = host(id, 100_000, 100_000 - free, 1);
+        h.region = region.into();
+        h.disk_free_mb = disk;
+        h
+    }
+
+    #[test]
+    fn room_counts_the_hosts_that_take_a_new_tenant() {
+        let mut reg = Registry::default();
+        let mut hosts = vec![
+            roomy("a", "gra", 40_000, 500_000),
+            roomy("b", "gra", 30_000, 900_000),
+            // Its memory is free, it is not placed on: none of it counts.
+            roomy("drained", "gra", 90_000, 900_000),
+            roomy("down", "gra", 90_000, 900_000),
+            roomy("pressed", "gra", 90_000, 900_000),
+            roomy("full", "gra", 10_000, 900_000),
+            // Reports no disk figure: its memory counts, no disk.
+            roomy("v", "vin", 20_000, 0),
+            roomy("gone", "sgp", 90_000, 900_000),
+        ];
+        hosts[2].state = "draining".into();
+        hosts[3].state = "down".into();
+        hosts[4].conditions = vec![condition(api::condition::DISK_PRESSURE, true)];
+        hosts[7].state = "retiring".into();
+        for h in hosts {
+            reg.hosts.insert(h.id.clone(), h);
+        }
+        let room = reg.room(&Policy::default());
+        let r = |memory_mb, disk_mb| api::Room { memory_mb, disk_mb };
+        assert_eq!(room["gra"], (r(70_000, 1_400_000), r(40_000, 900_000)));
+        assert_eq!(room["vin"], (r(20_000, 0), r(20_000, 0)));
+        assert_eq!(
+            room["sgp"],
+            (r(0, 0), r(0, 0)),
+            "a region whose hosts take nothing is listed, with nothing"
+        );
+        assert_eq!(room.len(), 3);
+    }
+
+    #[test]
+    fn a_shortage_names_what_ran_out() {
+        let mut reg = Registry::default();
+        let mut pressed = roomy("pressed", "gra", 60_000, 900_000);
+        pressed.conditions = vec![condition(api::condition::MEMORY_PRESSURE, true)];
+        for h in [
+            roomy("a", "gra", 40_000, 5_000),
+            pressed,
+            roomy("v", "vin", 20_000, 0),
+        ] {
+            reg.hosts.insert(h.id.clone(), h);
+        }
+        let p = Policy::default();
+        let short = |region, mb, disk| reg.shortage(region, mb, disk, &p);
+        // No host of gra under its ceiling has 70 GB.
+        assert_eq!(short("gra", 70_000, 0), Resource::Memory);
+        assert_eq!(short("sgp", 512, 0), Resource::Memory, "no host there");
+        // a has the memory, not the disk; pressed has both, under memory pressure: memory.
+        assert_eq!(short("gra", 50_000, 10_000), Resource::Memory);
+        assert_eq!(short("gra", 30_000, 1_000_000), Resource::Disk);
+        // Under disk pressure: disk.
+        reg.hosts.get_mut("pressed").unwrap().conditions =
+            vec![condition(api::condition::DISK_PRESSURE, true)];
+        let short = |region, mb, disk| reg.shortage(region, mb, disk, &p);
+        assert_eq!(short("gra", 50_000, 10_000), Resource::Disk);
+        // No region asked: every region's hosts, and none has 1 TB.
+        assert_eq!(short("", 30_000, 1_000_000), Resource::Disk);
+        // What place refuses, shortage names; what it takes, it would not be asked about.
+        assert_eq!(reg.place("t1", "gra", 30_000, 10_000, &p), None);
+        assert_eq!(
+            reg.place("t2", "gra", 30_000, 2_000, &p).as_deref(),
+            Some("a")
+        );
     }
 
     #[test]

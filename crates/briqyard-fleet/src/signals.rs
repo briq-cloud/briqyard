@@ -1,0 +1,152 @@
+//! What an external scaler reads (ADR 0042), as the Cluster Autoscaler reads the scheduler's
+//! unschedulable pods: each region's room, and every create refused for want of room, counted
+//! by what ran out. On `/metrics` and in `/v1/status`.
+
+use crate::registry::{Policy, Registry, Resource};
+use briqyard_api::metrics::{family, label_value};
+use briqyard_api::{RegionRoom, Unschedulable};
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+/// The region a refusal is counted in when no host is in the region it asked: a caller's typo
+/// never makes a new series.
+pub const OTHER: &str = "other";
+
+/// Creates refused 503 `capacity` since the fleet started, by region and what ran out.
+#[derive(Default)]
+pub struct Refusals(Mutex<BTreeMap<(String, Resource), u64>>);
+
+impl Refusals {
+    /// Counts one refusal in `region` (a host's, empty, or `OTHER`).
+    pub fn count(&self, region: &str, resource: Resource) {
+        *self
+            .0
+            .lock()
+            .unwrap()
+            .entry((region.to_string(), resource))
+            .or_default() += 1;
+    }
+}
+
+/// The region a refusal is counted in: the one asked when a host is in it or none was asked,
+/// else `OTHER`.
+pub fn counted_region<'a>(reg: &Registry, asked: &'a str) -> &'a str {
+    match asked.is_empty() || reg.hosts.values().any(|h| h.region == asked) {
+        true => asked,
+        false => OTHER,
+    }
+}
+
+/// Each region a host is in, and each a refusal was counted in, by name.
+pub fn regions(reg: &Registry, policy: &Policy, refusals: &Refusals) -> Vec<RegionRoom> {
+    let mut out: BTreeMap<String, RegionRoom> = reg
+        .room(policy)
+        .into_iter()
+        .map(|(region, (free, largest_slot))| {
+            let room = RegionRoom {
+                region: region.clone(),
+                free,
+                largest_slot,
+                unschedulable: Unschedulable::default(),
+            };
+            (region, room)
+        })
+        .collect();
+    for ((region, resource), n) in refusals.0.lock().unwrap().iter() {
+        let room = out.entry(region.clone()).or_insert_with(|| RegionRoom {
+            region: region.clone(),
+            ..Default::default()
+        });
+        let u = &mut room.unschedulable;
+        match resource {
+            Resource::Memory => u.memory = *n,
+            Resource::Disk => u.disk = *n,
+            Resource::Pressure => u.pressure = *n,
+        }
+    }
+    out.into_values().collect()
+}
+
+/// The fleet's `/metrics`: hosts by state, then each region's room and refusals. Every region
+/// has every series, zeros included, so a rate is defined from the first scrape.
+pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
+    let mut out = String::new();
+    let o = &mut out;
+    let mut states: BTreeMap<&str, usize> = BTreeMap::from([("ready", 0)]);
+    for h in reg.hosts.values() {
+        *states.entry(h.state.as_str()).or_default() += 1;
+    }
+    let states = states
+        .into_iter()
+        .map(|(s, n)| (format!("state=\"{}\"", label_value(s)), n.to_string()))
+        .collect();
+    family(
+        o,
+        "briqyard_fleet_hosts",
+        "gauge",
+        "Hosts in the registry, by state.",
+        states,
+    );
+    let per_resource = |pick: fn(&RegionRoom) -> [(&'static str, u64); 2]| {
+        regions
+            .iter()
+            .flat_map(|r| {
+                pick(r).map(|(resource, v)| {
+                    let region = label_value(&r.region);
+                    (
+                        format!("resource=\"{resource}\",region=\"{region}\""),
+                        v.to_string(),
+                    )
+                })
+            })
+            .collect()
+    };
+    family(
+        o,
+        "briqyard_fleet_free_mb",
+        "gauge",
+        "Free memory and disk, in MB, summed over the region's hosts that take a new tenant.",
+        per_resource(|r| [("memory", r.free.memory_mb), ("disk", r.free.disk_mb)]),
+    );
+    family(
+        o,
+        "briqyard_fleet_largest_slot_mb",
+        "gauge",
+        "The most free memory and disk, in MB, on one of the region's hosts that take a new tenant.",
+        per_resource(|r| {
+            [
+                ("memory", r.largest_slot.memory_mb),
+                ("disk", r.largest_slot.disk_mb),
+            ]
+        }),
+    );
+    let refused = regions
+        .iter()
+        .flat_map(|r| {
+            let u = r.unschedulable;
+            Resource::ALL.map(|resource| {
+                let n = match resource {
+                    Resource::Memory => u.memory,
+                    Resource::Disk => u.disk,
+                    Resource::Pressure => u.pressure,
+                };
+                (
+                    format!(
+                        "resource=\"{}\",region=\"{}\"",
+                        resource.as_str(),
+                        label_value(&r.region)
+                    ),
+                    n.to_string(),
+                )
+            })
+        })
+        .collect();
+    family(
+        o,
+        "briqyard_fleet_unschedulable_total",
+        "counter",
+        "Creates refused 503 capacity since the fleet started, by what ran out.",
+        refused,
+    );
+    out
+}

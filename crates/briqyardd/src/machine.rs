@@ -8316,7 +8316,7 @@ mod tests {
         // A new process starts its counters at zero; the machine's go on.
         io.add(&line(1 << 20, 4));
         let text = h.m.metrics();
-        crate::metrics::check_exposition(&text);
+        briqyard_api::metrics::check_exposition(&text);
         let l = format!(r#"machine="{}",tenant="t1",name="web""#, m.id);
         for want in [
             format!("briqyard_machine_disk_write_bytes_total{{{l}}} 2097152"),
@@ -11218,7 +11218,7 @@ mod tests {
         run.set_state(state::STARTING, |_| None);
         run.set_state(state::RUNNING, |_| None);
         let text = h.m.metrics();
-        crate::metrics::check_exposition(&text);
+        briqyard_api::metrics::check_exposition(&text);
         let lines: Vec<&str> = text.lines().collect();
         let db = r#"machine="m_run",tenant="t1",name="db""#;
         for want in [

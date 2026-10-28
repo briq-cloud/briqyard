@@ -1228,6 +1228,42 @@ fn the_machine_table() {
 }
 
 #[test]
+fn the_region_table() {
+    assert_eq!(region_table(&[]), "", "a daemon has no regions");
+    let gra = api::RegionRoom {
+        region: "gra".into(),
+        free: api::Room {
+            memory_mb: 120_000,
+            disk_mb: 800_000,
+        },
+        largest_slot: api::Room {
+            memory_mb: 60_000,
+            disk_mb: 400_000,
+        },
+        unschedulable: api::Unschedulable {
+            memory: 3,
+            disk: 0,
+            pressure: 1,
+        },
+    };
+    let other = api::RegionRoom {
+        region: String::new(),
+        ..Default::default()
+    };
+    let out = region_table(&[gra, other]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "",
+            "REGION   FREE MB MEM/DISK     LARGEST MB MEM/DISK  UNSCHEDULABLE MEM/DISK/PRESSURE",
+            "gra      120000/800000        60000/400000         3/0/1",
+            "-        0/0                  0/0                  0/0/0",
+        ]
+    );
+}
+
+#[test]
 fn the_host_table() {
     let ready = api::Host {
         id: "h_byard-1".into(),

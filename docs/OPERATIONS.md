@@ -361,7 +361,7 @@ snapshot, or is whole.
 | `/wait` answers 409 `not_ready`, or the ingress 502 after a wait | The program runs but its readiness or startup probe does not pass: `briqyard machine describe` shows each probe's last result. A TCP or HTTP probe needs the program on the machine's address, not only `127.0.0.1` |
 | `startup_failed` then `error` | The startup probe did not pass within `failure_threshold` × `period_sec` of a start: the boot failed, as `boot_failed` does. On a restart it is a crash instead, restarted by the policy |
 | `the guest did not come up` | The kernel booted but the init did not answer on vsock within `boot_timeout_sec`: console log, then the kernel (`kernel`) and init (`init`) paths |
-| `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk, conditions. `used` counts what placement reserved until the next heartbeat |
+| `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk, conditions, and per region what ran out (`UNSCHEDULABLE`, ADR 0042). `used` counts what placement reserved until the next heartbeat |
 | `no host in region … has room` (fleet) | No ready host of that region under the ceiling: `briqyard host ls`, the `REGION` column; order or add one there |
 | `tenant … is in region …, not …` (fleet, 400) | The tenant lives on a host of another region. A team that changes region moves: backups, destroy, `tenant unpin`, restores with the new region |
 | 403 `quota` | The tenant is at a limit of its quota: `briqyard tenant quota <tenant>` shows the limit and the use |
@@ -485,6 +485,46 @@ files, a chain for the fleet's name (Let's Encrypt in production: `certbot certo
 and refuses a non-loopback `listen` unless `tls: off` says something in front terminates TLS.
 Hosts check the fleet against the web PKI roots.
 
+### Capacity signals (ADR 0042)
+
+When placement refuses a create for want of room, the fleet says where and what ran out. A
+scaler of yours (or an alert and a person) reads it and adds a host with `briqyard host add`,
+as Kubernetes's Cluster Autoscaler reads unschedulable pods. `GET /metrics` on the fleet,
+Prometheus text:
+
+| Series | Labels | What |
+|---|---|---|
+| `briqyard_fleet_hosts` | `state` | hosts in the registry |
+| `briqyard_fleet_free_mb` | `resource="memory\|disk"`, `region` | free on the region's hosts that take a new tenant (ready, under `fill_ceiling`, no condition), summed |
+| `briqyard_fleet_largest_slot_mb` | same | the most free on one of them: the largest machine (memory) or volume plus 2 GB (disk) the region still takes |
+| `briqyard_fleet_unschedulable_total` | `resource="memory\|disk\|pressure"`, `region` | creates refused 503 `capacity` since the fleet started |
+
+`memory`: no host had the memory free, or those with the room are under `memory_pressure`;
+`disk`: hosts had the memory, none the disk, or those with both are under `disk_pressure`. A
+new host fixes both. `pressure`: the tenant's own host (or a fork's source's) is under a
+condition; a new host does not help, that host must be freed (or the tenant moved, below). A
+region no host is in counts as `region="other"`; a create that asked for none, as `region=""`.
+Counters start at 0 when the fleet starts. The token: `metrics_token` in the fleet's config
+when set (then only it), else the API's; none on a loopback `listen` with `tls` unset.
+
+`GET /v1/status` has the same per region (`regions`: `free`, `largest_slot`,
+`unschedulable`), and `briqyard host ls` prints them under the hosts. Each refusal is a `warn`
+line `unschedulable` with `resource`, `region`, `tenant`, `host` (the tenant's), `memory_mb`,
+`disk_mb` (asked) and `largest_memory_mb`, `largest_disk_mb` (the region's).
+
+```yaml
+groups:
+  - name: briqyard-fleet
+    rules:
+      - alert: FleetOutOfRoom          # creates refused: add a host in the region
+        expr: increase(briqyard_fleet_unschedulable_total{resource=~"memory|disk"}[5m]) > 0
+      - alert: FleetHostUnderPressure  # a tenant's host takes nothing new: free it
+        expr: increase(briqyard_fleet_unschedulable_total{resource="pressure"}[5m]) > 0
+      - alert: FleetSlotsSmall         # the largest size you offer no longer fits (16 GB here)
+        expr: briqyard_fleet_largest_slot_mb{resource="memory"} < 16384
+        for: 10m
+```
+
 ### Adding and removing hosts
 
 Hosts come and go through the API, by hand or from the autoscaler; both use the same
@@ -591,7 +631,8 @@ once the tenant has nothing left on the host, or mean to abandon what is there.
 
 The autoscaler (`provisioner.enabled: true`) orders a host when no ready host has a slot of
 `slot_mb` left and releases a provisioned host empty for `idle_grace`, between `min_hosts` and
-`max_hosts`, one change a minute.
+`max_hosts`, one change a minute. It is on its way out (ADR 0042): scale from the capacity
+signals above.
 
 ## First OVH host
 

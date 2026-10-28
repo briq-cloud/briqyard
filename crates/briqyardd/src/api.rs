@@ -310,6 +310,7 @@ async fn status(State(st): S) -> Json<api::Status> {
         conditions: st.mgr.conditions(),
         started: Some(st.mgr.started()),
         vmm_version: st.mgr.vmm_version(),
+        regions: Vec::new(),
     })
 }
 

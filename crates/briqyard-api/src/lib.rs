@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod guest;
+pub mod metrics;
 #[cfg(feature = "tls")]
 pub mod poolkey;
 pub mod session;
