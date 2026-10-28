@@ -1112,6 +1112,10 @@ pub struct GatewaySpec {
     /// Write-only, like a machine's.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Boot files, as a machine's: a stock proxy reads its configuration and its CA from
+    /// files. Write-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<File>,
     /// Default 1 vCPU, 256 MB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<Size>,

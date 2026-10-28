@@ -184,8 +184,8 @@ three counter sets count what they drop. The policy is set at every start
 right after the pin, taken out with it, swapped live on a running machine in one transaction, and rendered from
 the running records at daemon start.
 
-A tenant may have a gateway (ADR 0016): `PUT /v1/tenants/{id}/gateway` makes a machine of the
-daemon (`role: gateway` on its record) on the tenant's bridge, named `gateway.internal`, absent
+A tenant may have a gateway (ADR 0016): `PUT /v1/tenants/{id}/gateway` (an image, its command,
+env and boot files, a port) makes a machine of the daemon (`role: gateway` on its record) on the tenant's bridge, named `gateway.internal`, absent
 from the tenant's listing and counts, destroyed with the tenant. `via: gateway` names it. A
 start of such a machine (a wake too) first starts the gateway and waits for its port, under the
 tenant's lock, held until the machine is `starting`; the sleeper stops the gateway once no such
