@@ -2574,10 +2574,12 @@ impl Manager {
         };
         self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
         let mut src: Option<Arc<Entry>> = None;
-        let mut restore_from: Option<api::Backup> = None;
+        let mut restore_from: Option<(api::Backup, Option<String>)> = None;
         if let Some(rs) = &req.restore {
             let b = self.find_backup(&rs.machine_id, &rs.backup).await?;
-            let was: Record = serde_json::from_value(b.machine.clone().unwrap_or_default())
+            // The key its streams and its record are under (ADR 0035); none in a backup in clear.
+            let key = self.backup_key(&b, rs).await?;
+            let was: Record = serde_json::from_value(backups::spec_of(&b, key.as_deref())?)
                 .map_err(|e| invalid(format!("backup {}: machine record: {e}", b.id)))?;
             // The request says what it says; the backup fills the rest.
             rec.image = was.image;
@@ -2629,7 +2631,7 @@ impl Manager {
                 return Err(invalid("the backup's disks and the volume do not match"));
             }
             check_size(&rec.size)?;
-            restore_from = Some(b);
+            restore_from = Some((b, key));
         } else if let Some(fork) = &req.fork {
             let s = self.own_entry(&fork.machine_id).map_err(|e| match e {
                 MError::NotFound => invalid("fork source not found"),
@@ -2671,7 +2673,7 @@ impl Manager {
         let made = match self.inner.net.count(&ip).await.context("usage counters") {
             Err(err) => Err(err),
             Ok(()) => match &restore_from {
-                Some(b) => self.receive_disks(&e, b).await,
+                Some((b, key)) => self.receive_disks(&e, b, key.as_deref()).await,
                 None => self.make_disks(&e, src.as_deref(), req.fork.as_ref()).await,
             },
         };
@@ -2683,7 +2685,7 @@ impl Manager {
             return Err(err.into());
         }
         e.note(match (&restore_from, &req.fork) {
-            (Some(b), _) => Ev::normal(
+            (Some((b, _)), _) => Ev::normal(
                 reason::RESTORED,
                 format!("restored from backup {} of {}", b.id, b.machine_id),
             )
@@ -3074,7 +3076,7 @@ impl Manager {
         let outcome = tokio::select! {
             r = ready => r.map_err(|err| format!("the guest did not come up: {err}")),
             // `exited` is sent once the console is fully written, so the tail is complete.
-            _ = exited.changed() => Err("the machine exited during boot".to_string()),
+            _ = exited.changed() => self.ran_before_ready(&live).await,
         };
         if let Ok(init) = &outcome {
             e.rec.lock().unwrap().init_version = init.clone();
@@ -3122,6 +3124,20 @@ impl Manager {
             self.inner.stats.boots.fetch_add(1, Relaxed);
         }
         Ok(())
+    }
+
+    /// A boot whose process ended before the init's pong: a main process that ran and exited
+    /// at once is a boot that came up (the watcher then settles its exit, as any later one),
+    /// with the version its init reported; one the init never started is a failed boot. The
+    /// report is already in or never comes: its channel closes with the process.
+    async fn ran_before_ready(&self, live: &fc::Vm) -> Result<String, String> {
+        let mut exit = live.exit.clone();
+        let _ = exit.wait_for(|r| r.is_some()).await;
+        let report = exit.borrow().clone();
+        match report {
+            Some(r) if r.started => Ok(r.version),
+            _ => Err("the machine exited during boot".to_string()),
+        }
     }
 
     /// A boot the machine's spec fails (ADR 0011): the machine left in `error` with why, a
@@ -5428,8 +5444,10 @@ mod tests {
         Ready(Duration),
         /// The init never answers.
         Silent,
-        /// The process exits before the init answers, with the init's exit report.
+        /// The init fails before the main process starts (a missing program), with its report.
         Exits(i32),
+        /// The main process starts and exits at once, the machine gone before the init answers.
+        Runs(i32),
         /// The VMM panics: a bug in a transition.
         Panics,
     }
@@ -5632,6 +5650,12 @@ mod tests {
         /// The process ends as the init would end it: the trace on its console, its report
         /// to the host, then gone.
         fn exit(&self, pid: u32, code: i32, requested: bool) {
+            self.report(pid, code, requested, true);
+        }
+
+        /// The init's report and the end of the process; `started` false for a main process
+        /// the init could not start.
+        fn report(&self, pid: u32, code: i32, requested: bool, started: bool) {
             self.say(
                 pid,
                 &format!("[briqyard] exit code={code} oom=false requested={requested}"),
@@ -5646,6 +5670,8 @@ mod tests {
                     code,
                     oom: false,
                     requested,
+                    started,
+                    version: self.init_version.lock().unwrap().clone(),
                 }));
             }
             drop(procs);
@@ -5718,8 +5744,10 @@ mod tests {
                 exited,
                 exit: Some(exit_tx),
             });
-            if let Boots::Exits(code) = boots {
-                self.exit(pid, code, false);
+            match boots {
+                Boots::Exits(code) => self.report(pid, code, false, false),
+                Boots::Runs(code) => self.exit(pid, code, false),
+                _ => {}
             }
             Ok(fc::Vm {
                 pid,
@@ -6091,10 +6119,16 @@ mod tests {
         let fake = crate::zfs::fake::Fake::open("byard").await.unwrap();
         let init = dir.path().join("init");
         std::fs::write(&init, b"init").unwrap();
+        // The pool's key, in a file as on a host alone: the one the fake's `load-key` takes.
+        let key = "0123456789abcdef".repeat(4);
+        std::fs::write(dir.path().join("pool.key"), &key).unwrap();
+        std::fs::write(fake.dev().join("key"), &key).unwrap();
+        fake.answer("encryptionroot", "byard\n");
         let mut cfg = Config {
             data_dir: dir.path().join("data"),
             ..Default::default()
         };
+        cfg.storage.key = format!("file:{}", dir.path().join("pool.key").display());
         f(&mut cfg);
         let zfs = fake.zfs.clone();
         let mut images = Builder::new(zfs.clone(), cfg.image_dir(), init, 8, vec![]).unwrap();
@@ -6933,10 +6967,60 @@ mod tests {
         assert_eq!(h.m.inner.stats.starts_failed.load(Relaxed), 1);
     }
 
+    /// A command that ends at once ends the machine at once: whichever the host sees first,
+    /// the init's pong or the process gone, the machine was created, then stopped with its
+    /// exit, as any later exit is.
+    #[tokio::test(start_paused = true)]
+    async fn a_command_that_exits_at_once_is_an_exit_in_either_order() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let once = |name: &str| {
+            let mut req = h.request(name);
+            req.restart = Some(api::RestartPolicy {
+                policy: "no".into(),
+                max_retries: 0,
+            });
+            req
+        };
+        // The pong first, then the exit.
+        let a = h.m.create(once("pong-first")).await.unwrap();
+        h.host.exit(1000, 7, false);
+        // The process gone first: no pong ever came.
+        h.host.boots(Boots::Runs(7));
+        let b = h.m.create(once("exit-first")).await.unwrap();
+        for m in [&a, &b] {
+            let r = settled(&h.m.entry(&m.id).unwrap()).await;
+            assert_eq!(
+                (
+                    r.state.as_str(),
+                    r.stopped_reason.as_str(),
+                    r.error.as_str()
+                ),
+                (state::STOPPED, stop::EXIT, ""),
+                "{}",
+                m.name
+            );
+            assert_eq!(r.exit.as_ref().map(|x| x.code), Some(7), "{}", m.name);
+            assert_eq!(r.init_version, "0.1.0+init", "{}", m.name);
+            assert_eq!(
+                h.reasons(&m.id),
+                ["created", "starting", "started", "exited"],
+                "{}",
+                m.name
+            );
+        }
+        // Two boots, no failed start, and nothing left running.
+        use std::sync::atomic::Ordering::Relaxed;
+        assert_eq!(h.m.inner.stats.boots.load(Relaxed), 2);
+        assert_eq!(h.m.inner.stats.starts_failed.load(Relaxed), 0);
+        assert!(h.host.alive().is_empty());
+    }
+
     #[tokio::test]
     async fn a_machine_that_exits_during_boot_is_boot_failed_with_its_console() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
+        // The init's report says its main process never started.
         h.host.boots(Boots::Exits(137));
         let err = h.m.create(h.request("web")).await.unwrap_err();
         let m = match err {

@@ -236,9 +236,10 @@ machines suspended then boot cold.
 
 With `backup.store` set, `briqyard machine backup <id>` (`POST /v1/machines/{id}/backups`)
 snapshots the machine's disks and streams them to the store: whole the first time, then only
-what changed since the last backup whose snapshot is still on the host (`zfs send -c -i`).
-Each backup is a record (`backups/<machine>/<id>.json`, the machine's spec included, secrets
-included: the store is as sensitive as the host) plus one object per disk. A backup of a
+what changed since the last backup whose snapshot is still on the host (`zfs send -w -i`: raw,
+the pool's ciphertext, ADR 0035).
+Each backup is a record (`backups/<machine>/<id>.json`: ids, names, sizes, the chain in clear;
+the machine's spec, its env and files, sealed under the pool's key) plus one object per disk. A backup of a
 running machine is crash-consistent, what a power cut would leave; stop the machine first for
 a clean one, or let the application do its own consistency (Postgres does). A stream goes up
 in 32 MB parts, four at a time, each request tried again with backoff for up to 10 minutes

@@ -49,8 +49,8 @@ state, a setting), never with a use: `last_used_at` is kept in memory and reache
 with the next change or the sleeper's tick, so a busy machine does not rewrite its record on
 every connection. The record on disk says what the machine is, not when it was last touched.
 
-A boot the guest does not survive (the image's fault: no init to run, a command that exits
-at once) leaves the machine in `error` with the console's last lines, and the request answers
+A boot the guest does not survive (the image's fault: no init to run, a command the init
+cannot start) leaves the machine in `error` with the console's last lines, and the request answers
 409 `boot_failed` with the machine in the body; nothing restarts it, the caller reads and
 destroys it. The host's own faults answer 500. Every transition (create, start, stop, destroy,
 backup) runs in a task of its own that the request only waits on: a client that hangs up
@@ -146,9 +146,10 @@ through a pipe in the jail, a line a minute: disk bytes and throttled requests p
 
 The root disk is not mounted by the host, ever: the host writes nothing into guest filesystems.
 Image extraction happens once per image into a directory the host controls: layers in manifest
-order, whiteouts applied, every path resolved inside the directory (a symlink in a layer never
-leads outside, and the last component is never followed, so a rewritten link replaces the link
-rather than its target), devices skipped; then `mkfs.ext4 -d` builds the disk.
+order, whiteouts applied, every path resolved inside the directory by the kernel (`openat2` with
+`RESOLVE_IN_ROOT` from the directory held open, then `*at` writes, ADR 0039: a symlink in a layer
+never leads outside, and the last component is never followed, so a rewritten link replaces the
+link rather than its target), devices skipped; then `mkfs.ext4 -d` builds the disk.
 
 A tag is resolved by its registry (a `HEAD`, remembered 10 minutes, ADR 0009); the content is
 then pulled by that digest, from the registry's mirror first when `registry_mirrors` names one

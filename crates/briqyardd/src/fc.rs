@@ -1688,8 +1688,8 @@ mod tests {
         let mut s = UnixStream::connect(exit_socket(&vsock)).await.unwrap();
         let report = guest::ExitReport {
             code: 7,
-            oom: false,
             requested: true,
+            ..Default::default()
         };
         s.write_all(&guest::encode_frame(&report).unwrap())
             .await
