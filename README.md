@@ -143,10 +143,10 @@ AGPL-3.0, see [LICENSE](LICENSE). Contributions need a signed CLA, see [CONTRIBU
 
 | Rust crates | Use |
 |---|---|
-| [axum](https://github.com/tokio-rs/axum), [hyper](https://hyper.rs/) | The HTTP API, the ingress and the fleet's forwarding |
+| [axum](https://github.com/tokio-rs/axum), [hyper](https://hyper.rs/) | The HTTP API and the fleet's forwarding |
 | [rustls](https://github.com/rustls/rustls), [rcgen](https://github.com/rustls/rcgen) | TLS for the API and its self-signed certificate |
 | [oci-client](https://github.com/oras-project/rust-oci-client) | Pulling images from registries |
 | [object_store](https://github.com/apache/arrow-rs-object-store) | S3 and directory storage for backups |
 | [hickory-proto](https://github.com/hickory-dns/hickory-dns), [httparse](https://github.com/seanmonstar/httparse) | Parsing the DNS and HTTP that guests and clients send |
 | [age](https://github.com/str4d/rage) | Encrypting the fleet's registry backup |
-| [rtnetlink](https://github.com/rust-netlink/rtnetlink), [tokio-vsock](https://github.com/rust-vsock/tokio-vsock) | Network devices through netlink; the host–guest channel over vsock |
+| [rtnetlink](https://github.com/rust-netlink/rtnetlink), [tokio-vsock](https://github.com/rust-vsock/tokio-vsock) | In the init: the guest's network interface through netlink, and its end of the vsock channel |
