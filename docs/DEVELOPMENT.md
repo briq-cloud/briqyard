@@ -49,6 +49,20 @@ brew install lima
 limactl start --name=fc --vm-type=vz --nested-virt --cpus=6 --memory=16 --disk=60 template://ubuntu
 ```
 
+fc's pool is on a Lima disk of its own, so a full root disk can no longer suspend it:
+
+```bash
+limactl disk create byard-pool --size 40GiB
+limactl stop fc
+limactl edit fc --set '.additionalDisks = [{"name":"byard-pool","format":false}]'
+limactl start fc
+```
+
+then, in fc, the pool as above on the disk instead of a file (`zpool create … byard /dev/vdb
+< /etc/briqyard/pool.key`). A restart of fc gives it a new SSH host key, and the dev fleet has
+the old one pinned for its own host: `hack/vm.sh install` removes that stale `127.0.0.1` line
+from `/var/lib/briqyard-fleet/known_hosts`, so the smoke's `host upgrade` pins the new key.
+
 Inside it, follow the Linux steps (Rust, ZFS, Firecracker). The repository is mounted read-only
 in the VM at the same path; `hack/vm.sh` builds there, installs the binaries, writes the systemd
 unit and restarts the daemon:
