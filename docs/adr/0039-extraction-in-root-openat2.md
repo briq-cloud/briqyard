@@ -14,7 +14,7 @@ The daemon extracts image layers, as root, into a directory it controls (ADR 000
 
 | Entry | Calls |
 |---|---|
-| Regular file | `unlinkat`, `openat(O_WRONLY \| O_CREAT \| O_EXCL \| O_NOFOLLOW)`; owner (`fchownat`), mode and mtime on the descriptor |
+| Regular file | `unlinkat`, `openat(O_WRONLY \| O_CREAT \| O_EXCL \| O_NOFOLLOW)`; owner by `fchownat(AT_SYMLINK_NOFOLLOW)` on the directory, then mode and mtime on the file's descriptor |
 | Directory | `mkdirat` unless a directory is there, opened `O_NOFOLLOW`; owner and mode through it |
 | Symlink | `unlinkat`, `symlinkat` (target kept as is), `fchownat(AT_SYMLINK_NOFOLLOW)` |
 | Hard link | `linkat` without `AT_SYMLINK_FOLLOW`, after every other entry, its source's directory resolved the same way then |
@@ -47,4 +47,4 @@ Decompression is most of a build's extraction; the file system's share is a quar
 
 - Containment no longer rests on our resolver matching the kernel's: the kernel resolves the path it writes, from the root's descriptor.
 - What changes for a layer: a hard link to a symlink links the symlink, as link(2) and tar do (it linked the symlink's target); an entry that is skipped (a device) or made later (a hard link) no longer makes its directories when read; `prepare_root` replaces whatever a layer left at a mount point (`/tmp`, `/etc`…), not only a symlink.
-- `RESOLVE_IN_ROOT` needs Linux 5.6; a host below it fails every build with `ENOSYS`.
+- `RESOLVE_IN_ROOT` needs Linux 5.6; on a host below it every build fails with "image extraction needs openat2 (Linux 5.6)", checked once when the root is opened.

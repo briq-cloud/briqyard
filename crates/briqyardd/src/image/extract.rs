@@ -23,7 +23,15 @@ impl Root {
         let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
         let fd = fs::open(path, flags, Mode::empty())
             .with_context(|| format!("open {}", path.display()))?;
-        Ok(Self(fd))
+        let root = Self(fd);
+        // A kernel without openat2 is said once, not as every entry's ENOSYS.
+        match root.dir("") {
+            Err(Errno::NOSYS) => Err(anyhow!("image extraction needs openat2 (Linux 5.6)")),
+            r => {
+                r.with_context(|| format!("resolve {} in itself", path.display()))?;
+                Ok(root)
+            }
+        }
     }
 
     /// Opens what `rel` resolves to inside the root, an absolute path or a link's target taken
@@ -755,5 +763,42 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[test]
+    fn a_relative_link_to_a_missing_directory_is_made_from_its_own() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("usr/local")).unwrap();
+        std::os::unix::fs::symlink("../sbin", root.path().join("usr/local/sbin")).unwrap();
+        let r = Root::open(root.path()).unwrap();
+        let (dir, name) = r.parent("usr/local/sbin/x").unwrap();
+        let sbin = root.path().join("usr/sbin");
+        assert_eq!((id(&dir), name), (id_of(&sbin), Some("x")));
+        assert!(
+            std::fs::symlink_metadata(root.path().join("usr/local/sbin"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn links_that_never_end_are_refused() {
+        // Two links to each other: the kernel's own count (ELOOP) refuses it.
+        let root = tempfile::tempdir().unwrap();
+        for (link, target) in [("a", "b"), ("b", "a")] {
+            std::os::unix::fs::symlink(target, root.path().join(link)).unwrap();
+        }
+        let r = Root::open(root.path()).unwrap();
+        let err = format!("{:#}", r.parent("a/x").unwrap_err());
+        assert!(err.contains("make the directory of a/x"), "{err}");
+        // Each link through a directory not made yet: the kernel follows one link a call, and
+        // the walk's own count stops it.
+        for i in 0..41 {
+            let target = format!("m{i}/../l{}", i + 1);
+            std::os::unix::fs::symlink(target, root.path().join(format!("l{i}"))).unwrap();
+        }
+        let err = format!("{:#}", r.parent("l0/x").unwrap_err());
+        assert!(err.contains("too many links"), "{err}");
     }
 }
