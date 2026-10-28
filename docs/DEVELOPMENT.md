@@ -65,6 +65,15 @@ tree's builds. Delete it when the worktree goes.
 Everything under nested virtualization is slower than on a real server; the timings are not a
 benchmark.
 
+`hack/vm.sh install` also runs `hack/install-mirror.sh` in fc: Zot on `127.0.0.1:7440`, the
+registry mirror of ADR 0036, which `hack/config.dev.yaml` names for Docker Hub. Lima forwards
+it to the Mac's loopback, which fc2 reaches as `host.lima.internal` (Lima's user network, no
+port forward to add), so fc2's `/etc/briqyard/config.yaml` says
+`registry_mirrors: {docker.io: "http://host.lima.internal:7440"}`. A host configured before
+then: add the line and hand over (`systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd`,
+then `systemctl start briqyardd`); the e2e suite adds it on fc for its mirror section and takes
+it out after.
+
 `hack/vm.sh install` also lays out what `hack/fleet-smoke.sh` upgrades the VM's own host to
 (ADR 0027): this build's binaries under a release's names in `/var/lib/briqyard-fleet/release`
 (`file://` for `--release`), and the fleet's SSH key (`/etc/briqyard/fleet_ssh_key`, made once)
@@ -226,7 +235,10 @@ plus `apt-get purge docker.io` and the edge's files.
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
   backups to a directory store and a restore, egress policies (`via` a gateway machine, `none`,
   back to `open`), a tenant gateway (a forward proxy its consumer's start boots, HTTPS through
-  it and nothing around it, stopped by the sleeper, gone with the tenant), egress limits (port
+  it and nothing around it, stopped by the sleeper, gone with the tenant), iron-proxy as a tenant
+  gateway (a stock image with its config and CA as boot files: a header injected and a proxy
+  token swapped on the way to a sibling's HTTPS echo, a request without the token and a host off
+  its list refused, no secret in the consumer), egress limits (port
   25 refused at once while 443 connects, 6 connections a minute then the 7th dropped, lifted
   live, drops shown, a download capped at 2 Mbit/s), usage (running seconds, internet and
   ingress bytes, a stopped machine's disk hours), events (a watch from before a stop gets it,
@@ -259,10 +271,12 @@ plus `apt-get purge docker.io` and the edge's files.
   event; a machine with a session open kept awake past its window, asleep once it closed),
   versions and a hand-over (status and the init say the build, `vmm_version` the host's;
   SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start: running
-  again unasked, resumed), raw backups (ADR 0035: the record names the key's id, never the
-  key; no plaintext marker of a file or the env in the stream or the record, while the same
-  snapshot sent in clear shows it; a raw restore with the marker back and its disk on the
-  pool's key; a backup in clear, as made before, restored). 193 checks, 189 without host ports.
+  again unasked, resumed), a registry mirror (a pull through fc's Zot, the mirror then holding
+  the digest; with Zot stopped, the same image and digest from Docker Hub and the fallback
+  logged), raw backups (ADR 0035: the record names the key's id, never the key; no plaintext
+  marker of a file or the env in the stream or the record, while the same snapshot sent in
+  clear shows it; a raw restore with the marker back and its disk on the pool's key; a backup
+  in clear, as made before, restored). 206 checks, 202 without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).

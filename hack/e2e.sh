@@ -34,7 +34,15 @@ cleanup() {
     sudo mv "$KEY_FILE.e2e" "$KEY_FILE"
     for i in $(seq 1 60); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
   fi
-  for t in "$T" "$T-eg" "$T-gw" "$T-q"; do
+  # The mirror section stops the mirror and names it in the configuration for a moment.
+  if [ -n "${MIRROR:-}" ]; then
+    sudo systemctl start briqyard-mirror || true
+    if sudo test -f /etc/briqyard/config.yaml.e2e; then
+      sudo mv /etc/briqyard/config.yaml.e2e /etc/briqyard/config.yaml
+      handover
+    fi
+  fi
+  for t in "$T" "$T-eg" "$T-gw" "$T-ip" "$T-q"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
     for i in $(seq 1 10); do
@@ -250,6 +258,74 @@ GW=$(setgw)
 briqyard machine rm "$C" >/dev/null
 check "tenant removed"              'briqyard tenant rm "$GT" && ! briqyard tenant get "$GT" >/dev/null 2>&1'
 check "gateway gone with it"        '! briqyard machine get "$GW" >/dev/null 2>&1'
+
+echo "== iron-proxy as the tenant gateway: a stock image, a header injected, a token swapped (ADR 0016)"
+IT="$T-ip" IRON=ironsh/iron-proxy:0.54.0@sha256:6d074be2de9188f88d08013788d5500fb4de8557f16c2e5b27af4d8d2cb1e3fb
+D=$(mktemp -d)
+# One CA: iron-proxy signs its leaves with it, and it signed the echo server's certificate, which
+# iron-proxy trusts upstream (SSL_CERT_FILE). The echo server is a sibling: no third party.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=e2e iron CA" -keyout "$D/ca.key" -out "$D/ca.crt" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" 2>/dev/null
+openssl req -newkey rsa:2048 -nodes -subj "/CN=echo.internal" -keyout "$D/echo.key" -out "$D/echo.csr" 2>/dev/null
+printf 'subjectAltName=DNS:echo.internal\n' > "$D/san"
+openssl x509 -req -in "$D/echo.csr" -CA "$D/ca.crt" -CAkey "$D/ca.key" -CAcreateserial -days 1 -extfile "$D/san" -out "$D/echo.crt" 2>/dev/null
+cat > "$D/echo.py" <<'PY'
+import http.server, json, ssl
+class Echo(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({k.lower(): v for k, v in self.headers.items()}).encode()
+        self.send_response(200)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+s = http.server.HTTPServer(("0.0.0.0", 443), Echo)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain("/srv/echo.crt", "/srv/echo.key")
+s.socket = ctx.wrap_socket(s.socket, server_side=True)
+s.serve_forever()
+PY
+cat > "$D/proxy.yaml" <<'YAML'
+dns:
+  enabled: false
+proxy:
+  tunnel_listen: ":3128"
+tls:
+  ca_cert: /etc/iron-proxy/ca.crt
+  ca_key: /etc/iron-proxy/ca.key
+transforms:
+  - name: allowlist
+    config:
+      domains: ["echo.internal"]
+  - name: secrets
+    config:
+      secrets:
+        - source: { type: env, var: INJECTED }
+          inject: { header: X-Injected }
+          rules: [{ host: echo.internal, methods: [GET] }]
+        # The CONNECT carries no header: a rule on every method would refuse the tunnel itself.
+        - source: { type: env, var: API_KEY }
+          replace: { proxy_value: proxy-tok, match_headers: [X-Api-Key], require: true }
+          rules: [{ host: echo.internal, methods: [GET] }]
+YAML
+ECHO=$(briqyard machine run --image python:3.12-alpine --name echo --tenant "$IT" --memory 128 --file /srv/echo.py="$D/echo.py" \
+  --file /srv/echo.crt="$D/echo.crt" --file /srv/echo.key="$D/echo.key" -- python3 /srv/echo.py | jq -r .id)
+check "iron: the gateway set, a stock image with its files" 'briqyard tenant gateway set "$IT" --image "$IRON" --port 3128 -e INJECTED=inj-s3cret -e API_KEY=real-s3cret -e SSL_CERT_FILE=/etc/iron-proxy/ca.crt \
+  --file /etc/iron-proxy/proxy.yaml="$D/proxy.yaml" --file /etc/iron-proxy/ca.crt="$D/ca.crt" --file /etc/iron-proxy/ca.key="$D/ca.key" -- -config /etc/iron-proxy/proxy.yaml >/dev/null'
+IC=$(briqyard machine run --image python:3.12-alpine --name agent --tenant "$IT" --memory 128 --egress via:gateway --file /etc/ca.crt="$D/ca.crt" -- sleep 3600 | jq -r .id)
+check "iron: its consumer's start runs it" '[ "$(briqyard tenant get "$IT" | jq -r .gateway.state)" = running ]'
+get='import sys, urllib.request; print(urllib.request.urlopen(urllib.request.Request(sys.argv[1], headers={"X-Api-Key": sys.argv[2]}), timeout=10).read().decode())'
+through() { briqyard machine exec "$IC" -- env https_proxy=http://gateway.internal:3128 SSL_CERT_FILE=/etc/ca.crt python3 -c "$get" "$1" "${2:-proxy-tok}" 2>&1; }
+seen=$(through https://echo.internal/ || true)
+check "iron: an allowed host through it, the header injected" 'echo "$seen" | jq -e ".[\"x-injected\"] == \"inj-s3cret\"" >/dev/null'
+check "iron: the proxy token swapped for the secret" 'echo "$seen" | jq -e ".[\"x-api-key\"] == \"real-s3cret\"" >/dev/null'
+check "iron: a request without the proxy token refused" 'out=$(through https://echo.internal/ another-key); echo "$out" | grep -q "HTTP Error 403"'
+check "iron: a host off its list refused" 'out=$(through https://example.com/); echo "$out" | grep -q "Tunnel connection failed: 403"'
+check "iron: the consumer holds no secret" '! briqyard machine exec "$IC" -- env | grep -q s3cret'
+briqyard machine rm "$IC" >/dev/null
+briqyard machine rm "$ECHO" >/dev/null
+briqyard tenant rm "$IT" >/dev/null 2>&1 || true
+check "iron: gone with its tenant" '! briqyard tenant get "$IT" >/dev/null 2>&1'
+rm -rf "$D"
 
 echo "== stop, start, exit handling"
 briqyard machine stop "$A" >/dev/null
@@ -604,6 +680,49 @@ briqyard machine rm "$DK" >/dev/null
 check "status: no condition true"         'briqyard status | jq -e "(.conditions | map(.type) | sort) == [\"disk_pressure\", \"memory_pressure\"] and all(.conditions[]; .status == false)" >/dev/null'
 briqyard machine rm "$M" >/dev/null
 
+# What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start. The
+# machines carry on; the new daemon reads the configuration again.
+handover() {
+  local pid
+  pid=$(systemctl show -p MainPID --value briqyardd)
+  sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
+  for i in $(seq 1 100); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
+  sudo systemctl start briqyardd
+  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+}
+
+if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1 && systemctl is-active briqyard-mirror >/dev/null 2>&1; then
+  echo "== a registry mirror: pulls through it, from the registry when it is down (ADR 0036)"
+  MIRROR=127.0.0.1:7440 IMG=busybox:1.37.0-musl
+  # The dev host's configuration names the mirror, or names it for this section.
+  if ! sudo grep -q '^registry_mirrors:' /etc/briqyard/config.yaml; then
+    sudo cp /etc/briqyard/config.yaml /etc/briqyard/config.yaml.e2e
+    printf 'registry_mirrors:\n  docker.io: http://%s\n' "$MIRROR" | sudo tee -a /etc/briqyard/config.yaml >/dev/null
+    handover
+  fi
+  drop_image() { for k in $(briqyard image ls | awk -v r="$IMG" '$2 == r { print $1 }'); do briqyard image rm "$k" >/dev/null; done; }
+  last_pull() { briqyard events 2>/dev/null | awk '$4 == "image_pulled"' | grep -F "pulled $IMG " | tail -1; }
+  drop_image
+  MR=$(briqyard machine run --image "$IMG" --name mirrored --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+  digest=$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/images" | jq -r --arg r "$IMG" '.[] | select(.ref == $r) | .digest')
+  check "mirror: a pull goes through it"      '[ "$(briqyard machine get "$MR" | jq -r .state)" = running ] && last_pull | grep -qF "through $MIRROR"'
+  check "mirror: it holds the image by digest" 'curl -fsS -o /dev/null -I -H "Accept: application/vnd.oci.image.index.v1+json" "http://$MIRROR/v2/library/busybox/manifests/$digest"'
+  briqyard machine rm "$MR" >/dev/null
+  drop_image
+  sudo systemctl stop briqyard-mirror
+  since=$(date +%s)
+  MR=$(briqyard machine run --image "$IMG" --name unmirrored --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+  check "mirror down: the registry serves the pull" '[ "$(briqyard machine get "$MR" | jq -r .state)" = running ] && last_pull | grep -q . && ! last_pull | grep -qF through'
+  check "mirror down: the same digest"        '[ "$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/images" | jq -r --arg r "$IMG" ".[] | select(.ref == \$r) | .digest")" = "$digest" ]'
+  check "mirror down: the fallback logged"    'sudo journalctl -u briqyardd --since "@$since" -o cat | grep -F "mirror failed" | grep -qF "$IMG"'
+  sudo systemctl start briqyard-mirror
+  briqyard machine rm "$MR" >/dev/null
+  if sudo test -f /etc/briqyard/config.yaml.e2e; then
+    sudo mv /etc/briqyard/config.yaml.e2e /etc/briqyard/config.yaml
+    handover
+  fi
+fi
+
 if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then
   echo "== daemon crash: running machines are adopted"
   K=$(briqyard machine run --image alpine:3.20 --name survivor --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
@@ -626,12 +745,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   check "status says the build"      '[ "$(briqyard status | jq -r .version)" = "$build" ]'
   check "the init says its version"  '[ "$(briqyard machine get "$V" | jq -r .init_version)" = "$build" ]'
   check "what ran it is the host's"  '[ "$(briqyard machine get "$V" | jq -r .vmm_version)" = "$(briqyard status | jq -r .vmm_version)" ]'
-  # What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start.
-  pid=$(systemctl show -p MainPID --value briqyardd)
-  sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
-  for i in $(seq 1 100); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
-  sudo systemctl start briqyardd
-  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+  handover
   check "handed over: still running" '[ "$(briqyard machine get "$V" | jq -r .state)" = running ]'
   check "the new daemon adopted it"  'briqyard status | jq -e ".started.adopted >= 1 and .started.stopped == 0" >/dev/null'
   check "exec after the hand-over"   '[ "$(briqyard machine exec "$V" -- hostname)" = handover ]'
