@@ -34,13 +34,13 @@ Only the first request of a connection is read; the rest is spliced, as before.
 
 **What stays ours is fuzzed here**: `cargo fuzz` targets in `fuzz/` (its own workspace, nightly only, run by hand, `../DEVELOPMENT.md`) for every decoder an untrusted party feeds. `briqyardd` is a library plus its binary so the targets reach them. A crash's input becomes a unit test with its fix. Not in CI: the stable job cannot run them, and a nightly job is minutes billed for a run too short to find much.
 
-| Target | What it feeds | Checks | 2026-10-27, 600 s each, aarch64 VM |
+| Target | What it feeds | Checks | Last run: 2026-10-28, 300 s each on the corpus of a 600 s run, aarch64 VM |
 |---|---|---|---|
-| `guest_frames` | the init's frames: exec output to its exit, the exit report, an answer | no panic | 7.0 M runs, cov 1697, no crash |
-| `session_input` | an exec session's query and client messages | no panic | 6.8 M runs, cov 1577, no crash |
-| `layer_extract` | tar entries built from the input (any name, type, link, mode), raw names | nothing beside the root changes | 0.9 M runs, cov 1104, no crash |
-| `dns_query` | a guest's query | every answer parses back | 5.7 M runs, cov 2836, no crash |
-| `ingress_head` | a public request head | a routed host is non-empty and lowercase | 8.9 M runs, cov 518, no crash |
+| `guest_frames` | the init's frames: exec output to its exit, the exit report, an answer | no panic | 4.0 M runs, cov 1732, no crash |
+| `session_input` | an exec session's query and client messages | no panic | 4.0 M runs, cov 1619, no crash |
+| `layer_extract` | tar entries built from the input (any name, type, link, mode), raw names | nothing beside the root changes | 0.46 M runs, cov 1416 (the `openat2` extractor, ADR 0039), no crash |
+| `dns_query` | a guest's query | every answer parses back | 3.3 M runs, cov 2860, no crash |
+| `ingress_head` | a public request head | a routed host is non-empty and lowercase | 4.8 M runs, cov 525, no crash |
 
 ## Rejected
 
