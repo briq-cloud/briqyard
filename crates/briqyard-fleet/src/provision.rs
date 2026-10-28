@@ -396,7 +396,7 @@ pub struct Ovh {
 }
 
 /// The OS installed on a delivered server.
-const OVH_TEMPLATE: &str = "ubuntu2404-server_64";
+const OVH_TEMPLATE: &str = "ubuntu2604-server_64";
 
 #[derive(Deserialize)]
 struct OvhCart {
@@ -1163,7 +1163,7 @@ mod tests {
         assert_eq!(s.ip, None);
         assert_eq!(
             s.note,
-            "DRY RUN: would order 25risem01-v2 (eco range) in gra with the plan's default options, ubuntu2404-server_64 with key fleet (more capacity)"
+            "DRY RUN: would order 25risem01-v2 (eco range) in gra with the plan's default options, ubuntu2604-server_64 with key fleet (more capacity)"
         );
         o.release(&s.provider_id).await.unwrap();
         o.release("order:123").await.unwrap();
@@ -1734,7 +1734,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&seen[10].body).unwrap(),
             serde_json::json!({
-                "operatingSystem": "ubuntu2404-server_64",
+                "operatingSystem": "ubuntu2604-server_64",
                 "customizations": {"sshKey": "ssh-ed25519 AAAAC3Nz fleet"},
                 "storage": [{"partitioning": {"layout": [
                     {"mountPoint": "/boot", "fileSystem": "ext4", "raidLevel": 1, "size": 1024},

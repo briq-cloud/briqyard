@@ -52,7 +52,7 @@ reported as `error` (there is no live migration; the disks are on that host).
 ## What it costs
 
 A WireGuard hop between two hosts in one data center adds under a millisecond and runs at
-line rate on ChaCha20; the kernel module needs nothing installed on Ubuntu 24.04. The fleet
+line rate on ChaCha20; the kernel module needs nothing installed on Ubuntu. The fleet
 becomes a dependency for a new tenant slice and for cross-host DNS, not for anything running.
 
 ## In what order

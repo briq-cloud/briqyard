@@ -5,8 +5,8 @@ live, how to upgrade, what to watch, and what to do when something is off.
 
 ## Install
 
-A Linux server with KVM (`/dev/kvm`), Ubuntu 24.04 or newer. Through a fleet, `briqyard host
-add` runs the script for you (below, and "First OVH host"). By hand, as root:
+A Linux server with KVM (`/dev/kvm`), Ubuntu 26.04 (every suite runs there; 24.04 is untested).
+Through a fleet, `briqyard host add` runs the script for you (below, and "First OVH host"). By hand, as root:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/bootstrap-host.sh
@@ -518,8 +518,8 @@ request is signed with them and OVH's own clock (`/auth/time`). The provider id 
 it is `delivered`, it assumes one of the order's details (`/me/order/<id>/details/<detail>`)
 carries the server's service name as `domain` (a placeholder like `*001` before), checks that
 name against the account's server list (`GET /dedicated/server`), reads the server for its
-address, and starts an Ubuntu 24.04 install (`POST /dedicated/server/<name>/reinstall`,
-`ubuntu2404-server_64`, the OS on a RAID 1 of `/boot` 1 GiB and `/` 100 GiB, the rest of the
+address, and starts an Ubuntu 26.04 install (`POST /dedicated/server/<name>/reinstall`,
+`ubuntu2604-server_64`, the OS on a RAID 1 of `/boot` 1 GiB and `/` 100 GiB, the rest of the
 disks left for the pool, ADR 0028) with the SSH key named `ovh.ssh_key_name`, which must
 already be in the account (`/me/sshKey`); the bootstrap then fails every two minutes until the
 install is done, which is expected. A delivered order whose details name no server of the
@@ -608,7 +608,7 @@ yours.
 | Memory | 64 GB or more: machines get memory − 3 GB (the host and the edge) − the ZFS cache's cap (10 %) |
 | Disks | 2 × NVMe of one size |
 | Options | the vRack (private bandwidth) |
-| OS | Ubuntu Server 24.04 LTS |
+| OS | Ubuntu Server 26.04 LTS (what every suite runs on) |
 
 **2. Install layout** (Install, "Customise the partition configuration"), on both disks:
 
@@ -624,10 +624,19 @@ After the install, `sgdisk -p /dev/nvme0n1` ends with the free space (`Total fre
 On a UEFI server (`ls /sys/firmware/efi` lists something), `findmnt /boot/efi` must show the
 EFI partition OVH adds on its own; none there: reinstall before going on.
 If the manager makes the last partition fill the disk, reinstall through the API console
-(`POST /dedicated/server/{serviceName}/reinstall`) with `operatingSystem: ubuntu2404-server_64`,
+(`POST /dedicated/server/{serviceName}/reinstall`) with `operatingSystem: ubuntu2604-server_64`,
 your key as `customizations.sshKey`, and `storage: [{partitioning: {layout: [{mountPoint:
 "/boot", fileSystem: ext4, raidLevel: 1, size: 1024}, {mountPoint: "/", fileSystem: ext4,
 raidLevel: 1, size: 102400}]}}]`, the provisioner's own body.
+
+Then, on the server, what the suites ran on:
+
+```bash
+grep VERSION= /etc/os-release; uname -r     # 26.04, kernel 7.0
+modprobe zfs && zfs version                 # 2.4
+ls /dev/kvm && stat -fc %T /sys/fs/cgroup   # cgroup2fs
+swapon --show                               # nothing
+```
 
 **3. The vRack**: Network, vRack private network, add the server. Its private interface is
 the one whose MAC the manager shows as Private (server, Network interfaces): `ip -br link |
