@@ -2368,34 +2368,34 @@ async fn room_comes_back_at_a_failed_create_and_at_a_destroy() {
     assert_eq!(ds[0].stub.used_mb(), 20_000);
 }
 
-/// A caller that hangs up mid-create drops its handler, and the hold with it (ADR 0044).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// A caller that hangs up mid-create drops its handler, and the hold with it (ADR 0044). The
+/// host takes the connection and never answers.
+#[tokio::test]
 async fn a_create_whose_caller_hangs_up_gives_its_hold_back() {
-    use std::sync::atomic::AtomicBool;
-    let (f, ds) = fleet_with_daemons(1).await;
-    let go = Arc::new(AtomicBool::new(false));
-    {
-        let go = go.clone();
-        *ds[0].stub.on_create.lock().unwrap() = Some(Box::new(move || {
-            while !go.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }));
-    }
-    let used = |f: &Fleet| f.st.reg.lock().unwrap().hosts["d1"].used.memory_mb;
+    let f = fleet(config::Config::default());
+    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    f.st.reg.lock().unwrap().hosts.get_mut("h_a").unwrap().url =
+        format!("http://{}", listener.local_addr().unwrap());
+    let (asked, mut forwarded) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((conn, _)) = listener.accept().await {
+            open.push(conn);
+            let _ = asked.try_send(());
+        }
+    });
+    let used = |f: &Fleet| f.st.reg.lock().unwrap().hosts["h_a"].used.memory_mb;
     let st = f.st.clone();
     let create = tokio::spawn(async move {
         let body = create_body("t1", "web", 20_000);
-        call(&st, "POST", "/v1/machines", "api", Some(body)).await
+        call(&st, "POST", "/v1/machines", "", Some(body)).await
     });
-    while !ds[0].stub.calls().iter().any(|c| c == "POST /v1/machines") {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    forwarded.recv().await.unwrap();
     assert_eq!(used(&f), 20_000, "held while the host makes it");
     create.abort();
     assert!(create.await.unwrap_err().is_cancelled());
     assert_eq!(used(&f), 0, "given back");
-    go.store(true, Ordering::SeqCst);
 }
 
 #[tokio::test]
