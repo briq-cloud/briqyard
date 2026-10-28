@@ -121,7 +121,7 @@ suites stay on `http://`. `hack/vm.sh install` copies the fleet's config every t
 daemon's only when none is there: after a change, copy it by hand and restart the unit. Then
 
 ```bash
-limactl start --name=fc2 --vm-type=vz --nested-virt --cpus=2 --memory=6 --disk=30 --network=vzNAT template://ubuntu
+limactl start --name=fc2 --vm-type=vz --nested-virt --cpus=2 --memory=8 --disk=30 --network=vzNAT template://ubuntu
 limactl shell fc2 sudo bash -c 'cd '"$PWD"' && BRIQYARD_POOL_FILE_GB=15 BRIQYARD_TOKEN=fc2-token \
   FLEET_URL=http://192.168.64.1:7430 ADVERTISE=http://192.168.64.1:27420 bash hack/bootstrap-host.sh'
 cargo build --release -p briqyard   # the CLI, on the Mac
@@ -130,6 +130,13 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" \
   SECOND_HOST_SH="limactl shell fc2 sudo" bash hack/fleet-two-hosts.sh
 ```
+
+Run it once the fleet lists fc's host empty: right after another suite, the fleet still counts
+what fc held, and placement puts the tenants the other way round. A VM that dies with Lima's
+`VirtualMachineStateError` and a `com.apple.Virtualization.VirtualMachine` report in
+`~/Library/Logs/DiagnosticReports` (an assertion in the Hypervisor framework's
+`VcpuStateManager::set_pstate`) is macOS's nested virtualization failing, not the guest:
+`limactl stop fc2 && limactl start fc2`, and the daemon takes its key from the fleet again.
 
 ### fc2 as a real host
 
