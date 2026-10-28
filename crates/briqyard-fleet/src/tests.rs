@@ -638,6 +638,7 @@ fn fleet_at(
         upgrade: Default::default(),
         backup,
         key_turn: Default::default(),
+        restores: Default::default(),
     });
     Fleet { st, _dir: dir }
 }
@@ -1047,11 +1048,11 @@ async fn a_host_gets_its_own_pool_key_and_no_other() {
     assert!(!body.contains(&key));
 }
 
-/// A backup's key (ADR 0035): any host of the fleet gets the key of a backup's `key_id`, a
-/// live host's or a forgotten one's (kept as a retired key), never one the fleet does not
-/// hold, and the fleet makes none for it.
+/// A backup's key (ADR 0035): the key of a backup's `key_id`, a live host's or a forgotten
+/// one's (kept as a retired key), served to the host the fleet forwarded a restore to, for
+/// that restore, once; refused with no restore open, and never made for the ask.
 #[tokio::test]
-async fn a_host_gets_the_key_of_a_backup_by_its_id() {
+async fn a_host_gets_the_key_of_a_backup_for_a_restore_it_was_given() {
     let host = |id: &str, n: u8| config::StaticHost {
         id: id.into(),
         url: format!("http://10.0.0.{n}:7420"),
@@ -1066,14 +1067,34 @@ async fn a_host_gets_the_key_of_a_backup_by_its_id() {
         },
         Box::new(provision::Static),
     );
-    let ask = |n: u8, id: &str| {
-        Some(serde_json::json!({ "url": format!("http://10.0.0.{n}:7420"), "key_id": id }))
+    let rs = api::RestoreSpec {
+        machine_id: "m_src".into(),
+        backup: "b1".into(),
     };
+    let ask = |n: u8, id: &str| {
+        Some(serde_json::json!({
+            "url": format!("http://10.0.0.{n}:7420"),
+            "key_id": id,
+            "restore": { "machine_id": "m_src", "backup": "b1" },
+        }))
+    };
+    let opened = |host: &str| f.st.restores.open(host, &rs, std::time::Instant::now());
     let own = Some(serde_json::json!({ "url": "http://10.0.0.1:7420" }));
     let (_, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", own).await;
     let k1 = json(&body)["key"].as_str().unwrap().to_string();
     let id1 = briqyard_api::poolkey::id(&k1).unwrap();
 
+    // No restore forwarded to s2: refused, with or without one named.
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2, &id1)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(json(&body)["code"], "no_restore");
+    let bare = Some(serde_json::json!({ "url": "http://10.0.0.2:7420", "key_id": id1 }));
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", bare).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // One forwarded to s2: served to s2 once, never to s1.
+    opened("s2");
+    let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s1-token", ask(1, &id1)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "another host's restore: {body}");
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2, &id1)).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(
@@ -1081,10 +1102,13 @@ async fn a_host_gets_the_key_of_a_backup_by_its_id() {
         k1.as_str(),
         "s1's key, for s2's restore"
     );
+    let (s, _, _) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2, &id1)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "served once");
     assert!(
         f.st.reg.lock().unwrap().hosts["s2"].pool_key.is_empty(),
         "no key made for s2 by an ask for another's"
     );
+    opened("s2");
     let (s, _, body) = call(
         &f.st,
         "POST",
@@ -1095,6 +1119,7 @@ async fn a_host_gets_the_key_of_a_backup_by_its_id() {
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(json(&body)["code"], "no_key");
+    opened("s2");
     let (s, _, _) = call(&f.st, "POST", "/v1/hosts/key", "api", ask(2, &id1)).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "a host's token only");
 
@@ -1102,7 +1127,11 @@ async fn a_host_gets_the_key_of_a_backup_by_its_id() {
     let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/s1?force=true", "api", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/key", "s2-token", ask(2, &id1)).await;
-    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "the restore opened above is still open: {body}"
+    );
     assert_eq!(json(&body)["key"], k1.as_str());
     let retired = &saved(&f.st).retired_keys;
     assert_eq!(retired.len(), 1);

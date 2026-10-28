@@ -119,6 +119,14 @@ if [ -n "${SECOND_HOST_SH:-}" ]; then
   for i in $(seq 1 45); do [ "$(briqyard machine get "$RB" | jq -r .state)" = running ] && break; sleep 2; done
   check "restored through the fleet, on the second host" '[ "$(briqyard machine get "$RB" | jq -r .host)" = "$HB" ] && [ "$(briqyard machine exec "$RB" -- head -c 48 /root/mark)" = "$MARK" ]'
   check "its disk on the host's pool key" '[ "$(on_second "zfs get -H -o value encryptionroot byard/m/$RB/root")" = byard ]'
+  # The key of a backup, asked as the host asks it but with no restore forwarded: refused.
+  KID=$(briqyard machine backups "$B" | jq -r '.[-1].key_id')
+  conf2=$(on_second "cat $CONF2")
+  token2=$(echo "$conf2" | sed -n 's/^token: "\(.*\)"$/\1/p')
+  advertise2=$(echo "$conf2" | sed -n 's/^  advertise: //p')
+  refused=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $token2" -H 'Content-Type: application/json' \
+    -d "{\"url\": \"$advertise2\", \"key_id\": \"$KID\", \"restore\": {\"machine_id\": \"$B\", \"backup\": \"$BK\"}}" "$BRIQYARD_URL/v1/hosts/key")
+  check "its key refused outside a restore the fleet forwarded" '[ "$refused" = 403 ]'
   briqyard machine destroy "$RB" >/dev/null
   briqyard backup rm "$B" "$BK" >/dev/null
 fi

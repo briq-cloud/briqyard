@@ -305,12 +305,17 @@ impl Manager {
         Ok(Seal::of(&key)?)
     }
 
-    /// The key a backup is encrypted under, asked by its id; none for a backup in clear.
-    pub(super) async fn backup_key(&self, b: &api::Backup) -> Result<Option<String>, MError> {
+    /// The key a backup is encrypted under, asked by its id for the restore `rs`; none for a
+    /// backup in clear.
+    pub(super) async fn backup_key(
+        &self,
+        b: &api::Backup,
+        rs: &api::RestoreSpec,
+    ) -> Result<Option<String>, MError> {
         let Some(id) = &b.key_id else {
             return Ok(None);
         };
-        let key = crate::poolkey::by_id(&self.inner.cfg, id)
+        let key = crate::poolkey::by_id(&self.inner.cfg, id, rs)
             .await
             .with_context(|| format!("the key of backup {}", b.id))?;
         Ok(Some(key))

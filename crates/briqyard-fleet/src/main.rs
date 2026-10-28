@@ -7,6 +7,7 @@ mod bootstrap;
 mod config;
 mod provision;
 mod registry;
+mod restores;
 mod upgrade;
 
 use anyhow::{anyhow, Context, Result};
@@ -71,6 +72,8 @@ struct AppState {
     /// Key requests take turns: a key just made is answered, to its host or any other ask,
     /// only once it is written, and taken back when it could not be (ADR 0026).
     key_turn: tokio::sync::Mutex<()>,
+    /// Restores forwarded and not over: what a backup's key is served for (ADR 0035).
+    restores: restores::Restores,
 }
 
 /// Writes a registry file, the fleet's alone (`0600`: it holds every host's token and pool
@@ -241,6 +244,7 @@ async fn run(args: Args) -> Result<()> {
         upgrade: Default::default(),
         backup: backup::Backup::open(&cfg.backup)?,
         key_turn: Default::default(),
+        restores: Default::default(),
     });
     tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));
@@ -645,7 +649,7 @@ async fn host_key(
     let caller = Caller::of(&st, info, &headers);
     // A backup's key is only read: it never waits behind a key being made.
     if let Some(want) = &req.key_id {
-        return backup_key(&st, &req.url, &headers, caller, want);
+        return backup_key(&st, &req, &headers, caller, want);
     }
     let _turn = st.key_turn.lock().await;
     let (id, key, made) = {
@@ -690,21 +694,43 @@ async fn host_key(
     .into_response())
 }
 
-/// The pool key of a backup (ADR 0035), for any host of the fleet: the key of that id, a live
-/// host's or a forgotten one's. Every host reads every backup's streams (a restore lands
-/// anywhere); a raw stream opens only with the pool key of the host that sent it, so that is
-/// what is served. Never made here; another host's key is a `warn` line.
+/// The pool key of a backup (ADR 0035), for the host the fleet forwarded a restore to, once
+/// per restore: the key of that id, a live host's or a forgotten one's. A raw stream opens
+/// only with the pool key of the host that sent it, so that is what is served. Never made
+/// here; another host's key is a `warn` line.
 fn backup_key(
     st: &AppState,
-    url: &str,
+    req: &api::HostKeyRequest,
     headers: &HeaderMap,
     caller: Caller,
     key_id: &str,
 ) -> Result<Response, Refusal> {
     let reg = st.reg.lock().unwrap();
-    let host = the_host(&reg, url, headers, caller, "backup key")?
+    let host = the_host(&reg, &req.url, headers, caller, "backup key")?
         .id
         .clone();
+    let open = req
+        .restore
+        .as_ref()
+        .is_some_and(|rs| st.restores.take(&host, rs, std::time::Instant::now()));
+    if !open {
+        let what = req
+            .restore
+            .as_ref()
+            .map(|rs| format!("{}/{}", rs.machine_id, rs.backup))
+            .unwrap_or_else(|| "none named".into());
+        tracing::warn!(
+            host,
+            key_id,
+            restore = what,
+            "backup key refused: no restore open"
+        );
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "no_restore",
+            format!("a backup's key is served once, for a restore the fleet forwarded to this host: none open for {host} ({what})"),
+        ));
+    }
     let Some((owner, key)) = reg.key_by_id(key_id) else {
         return Err(err(
             StatusCode::NOT_FOUND,
@@ -1545,7 +1571,14 @@ async fn create_machine(
     };
     let host = host.ok_or_else(|| no_room(&req.region, "this machine"))?;
     st.save().map_err(registry_error)?;
+    // A restore may ask for its backup's key while this forward lasts (ADR 0035).
+    if let Some(rs) = &req.restore {
+        st.restores.open(&host.id, rs, std::time::Instant::now());
+    }
     let resp = forward(&st, &host, Method::POST, "/v1/machines", &headers, body).await;
+    if let Some(rs) = &req.restore {
+        st.restores.close(&host.id, rs);
+    }
     let (parts, data) = read(resp).await;
     if parts.status.is_success() {
         if let Ok(m) = serde_json::from_slice::<api::Machine>(&data) {
