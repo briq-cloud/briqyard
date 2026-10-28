@@ -217,7 +217,8 @@ plus `apt-get purge docker.io` and the edge's files.
   its end states, drain apart from retire). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
-- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, DNS,
+- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, image layers
+  (busybox's hard links, Debian's merged `/usr`), DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
   backups to a directory store and a restore, egress policies (`via` a gateway machine, `none`,
@@ -255,7 +256,7 @@ plus `apt-get purge docker.io` and the edge's files.
   event; a machine with a session open kept awake past its window, asleep once it closed),
   versions and a hand-over (status and the init say the build, `vmm_version` the host's;
   SIGUSR2 then a start: still running, adopted, no second boot; a stop then a start: running
-  again unasked, resumed). 188 checks, 184 without host ports.
+  again unasked, resumed). 191 checks, 187 without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7).
