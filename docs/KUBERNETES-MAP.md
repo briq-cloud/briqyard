@@ -76,7 +76,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
-| Fit by resources | ✓ memory and disk, reserved at placement | | |
+| Fit by resources | ✓ memory and disk, held at placement until the host reports them, given back when the host refuses, a destroy's at its answer (the scheduler's assume and forget, ADR 0044) | | |
 | Node allocatable (`systemReserved`) | ✓ `capacity.reserved_memory_mb`, `reserved_threads`: what the host keeps for itself and a service beside the daemon (ADR 0028) | | |
 | Node selectors, node affinity, topology | ✓ a create's `region` places a new tenant on a host of it; a tenant never spans regions (ADR 0025); each region's room and refusals on `/metrics` (ADR 0042) | | |
 | Pod affinity | ◐ a tenant's machines share a host, forced | | — |

@@ -225,7 +225,7 @@ paths:
       - { $ref: "#/components/parameters/id" }
       - { name: backup, in: path, required: true, schema: { type: string } }
       - { name: chain, in: query, description: "also delete every backup that continues from it", schema: { type: boolean, default: false } }
-      - { name: tenant, in: query, description: "through the fleet, for a machine destroyed: its tenant finds its host", schema: { type: string } }
+      - { name: tenant, in: query, description: "through the fleet, for a machine destroyed: the hosts asked which holds its backups list only this tenant's (ADR 0045); without it, every backup they hold", schema: { type: string } }
     delete:
       summary: "Delete a backup of a machine of this host, or of one destroyed here (ADR 0023): its streams, then its record; a `backup_deleted` event"
       responses:
@@ -234,7 +234,7 @@ paths:
         "409": { description: "`conflict`: other backups continue from it, named in `error`; `?chain=true` deletes them too" }
   /v1/backups:
     get:
-      summary: "Every backup of the host's machines, destroyed ones' included, by machine then age (ADR 0023); a destroyed machine's carry `deletes_at`. Through the fleet: with `tenant`, the tenant's host; else every host, never partial"
+      summary: "Every backup of the host's machines, destroyed ones' included, by machine then age (ADR 0023); a destroyed machine's carry `deletes_at`. Through the fleet: every host, never partial, with `tenant` too (a host the tenant moved from holds the backups of what was destroyed there, ADR 0045)"
       parameters:
         - { name: tenant, in: query, schema: { type: string } }
       responses:

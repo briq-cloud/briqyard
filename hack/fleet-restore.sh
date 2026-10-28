@@ -69,7 +69,9 @@ on_second "systemctl stop briqyardd && zfs list -H -o name,mounted -t filesystem
 check "its pool locked"                '[ "$(on_second "zfs get -H -o value keystatus byard")" = unavailable ]'
 started=$(on_second "date +%s")
 on_second "systemctl start briqyardd"
-for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HOST\") | .state")" = ready ] && [ "$(on_second "zfs get -H -o value keystatus byard")" = available ] && break; sleep 2; done
+# Its API listening, which it does once the key is loaded and logged: a host down for less
+# than a minute is still `ready` in the fleet, and the key loads before its log line is read.
+for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HOST\") | .state")" = ready ] && on_second "journalctl -u briqyardd --since @$started -o cat" | grep -q "briqyardd listening" && break; sleep 2; done
 check "back, its pool unlocked"        '[ "$(on_second "zfs get -H -o value keystatus byard")" = available ]'
 check "with the key of the restored registry" 'on_second "journalctl -u briqyardd --since @$started -o cat" | grep "pool key loaded" | grep -q "\"from\":\"fleet\""'
 check "ready in the fleet"             '[ "$(hosts | jq -r ".[] | select(.id == \"$HOST\") | .state")" = ready ]'

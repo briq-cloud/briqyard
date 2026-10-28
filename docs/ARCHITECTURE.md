@@ -360,8 +360,10 @@ ceiling, with no condition true and of the create's `region` when it names one, 
 most free memory; a fork lands where its source is, and a tenant's host or a fork's source's
 with a condition true answers 503 `capacity` before it is asked. A tenant's region is its host's:
 a create naming another answers 400 (ADR 0025). What a placement
-puts on a host is counted as used there until the host's next heartbeat, so a burst of creates
-spreads; a host that answers `capacity` for a tenant's first machine loses the pin, so the
+puts on a host is held there (counted as used) until a report of the host counts it, so a burst
+of creates spreads; a create the host refuses gives its hold back at once, and a destroy's
+answer waits for the host's figures, so the room it freed is there for the next create (ADR
+0044); a host that answers `capacity` for a tenant's first machine loses the pin, so the
 retry is placed afresh. A tenant's gateway goes to the tenant's host (`GET /v1/tenants/{id}`
 and `/gateway` are forwarded there); a PUT for a tenant with no host places it as a first machine
 would, the gateway's size as the need, in `?region=`; a quota PUT does the same with no need.
@@ -378,8 +380,11 @@ of machines or endpoints is never partial (a tenant's listing asks its host alon
 is down or does not answer fails the listing), since a control plane reads a machine missing
 from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host (`draining`),
 `undrain` resumes it; a host `upgrading` or `retiring` takes nothing new either. The registry
-(hosts, tenant → host, machine → host, endpoint → host) is one JSON file; a write that fails
-fails the request that needed it. It is written to the object store once a minute when it
+(hosts, tenant → host, machine → host, endpoint → host) is one JSON file, written one write at
+a time, each with the registry as it is when its turn comes; a write that fails before a host is
+asked fails the request, one after the host acted is logged and the host's answer stands (ADR
+0043). A destroyed machine's backups are reached on the host that holds them, wherever its
+tenant is now (ADR 0045). It is written to the object store once a minute when it
 changed, encrypted with age to a key kept off the fleet's host, and before any pool key is
 served; `briqyard-fleet restore` brings it back (ADR 0032).
 

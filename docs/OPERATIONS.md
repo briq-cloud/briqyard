@@ -362,7 +362,7 @@ snapshot, or is whole.
 | `/wait` answers 409 `not_ready`, or the ingress 502 after a wait | The program runs but its readiness or startup probe does not pass: `briqyard machine describe` shows each probe's last result. A TCP or HTTP probe needs the program on the machine's address, not only `127.0.0.1` |
 | `startup_failed` then `error` | The startup probe did not pass within `failure_threshold` × `period_sec` of a start: the boot failed, as `boot_failed` does. On a restart it is a crash instead, restarted by the policy |
 | `the guest did not come up` | The kernel booted but the init did not answer on vsock within `boot_timeout_sec`: console log, then the kernel (`kernel`) and init (`init`) paths |
-| `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk, conditions, and per region what ran out (`UNSCHEDULABLE`, ADR 0042). `used` counts what placement reserved until the next heartbeat |
+| `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk, conditions, and per region what ran out (`UNSCHEDULABLE`, ADR 0042). `used` counts the creates placement sent that the host has not reported yet (ADR 0044) |
 | `no host in region … has room` (fleet) | No ready host of that region under the ceiling: `briqyard host ls`, the `REGION` column; add one there |
 | `tenant … is in region …, not …` (fleet, 400) | The tenant lives on a host of another region. A team that changes region moves: backups, destroy, `tenant unpin`, restores with the new region |
 | 403 `quota` | The tenant is at a limit of its quota: `briqyard tenant quota <tenant>` shows the limit and the use |
@@ -420,8 +420,9 @@ and refuses a heartbeat reporting another (`tls_mismatch`). A host on plain HTTP
 daemon you forwarded) has neither.
 A heartbeat from an address no entry or `host add` expects is refused (`unknown_host`), so no host
 can speak for another. The registry is `<state_dir>/registry.json` (`0600`, its directory
-`0700`); a write that fails is an `error` in the fleet's log and a 500 `registry` on the
-request that needed it.
+`0700`); a write that fails is an `error` in the fleet's log, and a 500 `registry` on a request
+that had not reached a host yet; once a host acted, its answer stands and the next write (a
+heartbeat's) carries the change (ADR 0043).
 
 Each host's pool key is in its record (ADR 0026): made at the host's first `POST
 /v1/hosts/key` (its bootstrap creating the pool), served to that host alone (its token, at its
@@ -591,6 +592,10 @@ briqyard machine destroy <id>                      # each one, once its backup i
 briqyard tenant rm <tenant>                        # its network and gateway on the old host; unpins it
 briqyard machine restore --from <id> --tenant <tenant> --name <name>   # placed afresh
 ```
+
+The old host keeps the destroyed machines' backups for `backup.keep_destroyed_days` (ADR
+0023): `briqyard backups --tenant <tenant>` lists them with the new ones, and `briqyard backup
+rm <id> <backup> --tenant <tenant>` deletes them on the host that holds them (ADR 0045).
 
 A tenant's gateway (ADR 0016) is not backed up: `briqyard tenant gateway set` it again once the
 tenant is unpinned (the fleet places the tenant with it), before the restores of its
@@ -785,8 +790,11 @@ BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN=<the fleet's token> hack/f
 
 e2e runs on the host (endpoints are vRack addresses, and it needs GNU tools) and needs a
 `backup.store` in the host's config: the real bucket (its test backups go, destroyed machines'
-after `keep_destroyed_days`), or `file:///var/lib/briqyard/backups` for this run. On the host
-it checks the host ports too (the edge's port 80 from a machine, the API dropped). The fleet
+after `keep_destroyed_days`), or `file:///var/lib/briqyard/backups` for this run. With the
+bucket, the raw-backups section (it reads and writes the store's files) is skipped: 5 checks
+fewer. With `storage.key: fleet`, the encryption section skips the 3 checks of a key file (the
+key's absence from files and log, a start without it). On the host it checks the host ports
+too (the edge's port 80 from a machine, the API dropped). The fleet
 smoke runs from anywhere that reaches the fleet and touches no real host.
 
 **8. The first day**, what to watch:

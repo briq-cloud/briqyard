@@ -19,6 +19,16 @@ check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
 hosts() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/hosts"; }
 CONF2=/etc/briqyard/config.yaml
+# A script run on the second host as root with `ask_key BODY` (a POST /v1/hosts/key to the
+# fleet in its config, with its token) and `$adv` (its advertised URL); stdin and arguments
+# passed on.
+as_second() {
+  $SECOND_HOST_SH bash -c 'c='"$CONF2"'
+    tok=$(sed -n "s/^token: *\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" $c); adv=$(sed -n "s/^  advertise: //p" $c)
+    fleet=$(sed -n "/^fleet:/,/^[^ ]/s/^  url: //p" $c)
+    ask_key() { curl -fsS -X POST -H "Authorization: Bearer $tok" -H "Content-Type: application/json" -d "$1" "$fleet/v1/hosts/key"; }
+    '"$1" _ "${@:2}"
+}
 cleanup() {
   for t in "$T-a" "$T-b"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
@@ -85,16 +95,13 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
   if [ -n "${SECOND_HOST_SH:-}" ]; then
     check "with its pool encrypted and unlocked" '[ "$(on_second "zfs get -H -o value encryption,keystatus byard" | tr "\n" " ")" = "aes-256-gcm available " ]'
     check "by the fleet's key"    'on_second "journalctl -u briqyardd --since @$started -o cat" | grep "pool key loaded" | grep -q "\"from\":\"fleet\""'
-    # The key, asked of the fleet as the host does; it must be nowhere on the host's disk or
-    # in its log, and in none of the fleet's answers but this one.
-    conf=$(on_second "cat /etc/briqyard/config.yaml")
-    token=$(echo "$conf" | sed -n 's/^token: "\(.*\)"$/\1/p')
-    advertise=$(echo "$conf" | sed -n 's/^  advertise: //p')
-    key=$(curl -fsS -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-      -d "{\"url\": \"$advertise\"}" "$BRIQYARD_URL/v1/hosts/key" | jq -r .key)
-    found() { echo "$key" | $SECOND_HOST_SH sh -c 'k=$(cat); grep -rlsF -D skip "$k" /etc/briqyard /var/lib/briqyard --exclude=pool.img; journalctl -u briqyardd -b -o cat | grep -cF "$k"'; }
-    check "its key on none of its files nor in its log" '[ "${#key}" = 64 ] && [ "$(found)" = 0 ]'
-    check "nor in the fleet host list" '! hosts | grep -qF "$key"'
+    # The key, asked of the fleet as the host does, from the host (the fleet checks a host's
+    # calls by its address): nowhere on its disk or in its log, in none of the fleet's answers
+    # but this one. Only counts leave the host.
+    seen=$(hosts | as_second 'list=$(cat); key=$(ask_key "{\"url\": \"$adv\"}" | jq -r .key)
+      echo "${#key} $(grep -rlsF -D skip "$key" /etc/briqyard /var/lib/briqyard --exclude=pool.img | wc -l) $(journalctl -u briqyardd -b -o cat | grep -cF "$key") $(echo "$list" | grep -cF "$key")"')
+    check "its key on none of its files nor in its log" '[ "$(echo "$seen" | cut -d" " -f1-3)" = "64 0 0" ]'
+    check "nor in the fleet host list" '[ "$(echo "$seen" | cut -d" " -f4)" = 0 ]'
   fi
   for i in $(seq 1 30); do briqyard machine exec "$B" -- hostname >/dev/null 2>&1 && break; sleep 2; done
   check "b answers again"       '[ "$(briqyard machine exec "$B" -- hostname)" = b ]'
@@ -119,14 +126,12 @@ if [ -n "${SECOND_HOST_SH:-}" ]; then
   for i in $(seq 1 45); do [ "$(briqyard machine get "$RB" | jq -r .state)" = running ] && break; sleep 2; done
   check "restored through the fleet, on the second host" '[ "$(briqyard machine get "$RB" | jq -r .host)" = "$HB" ] && [ "$(briqyard machine exec "$RB" -- head -c 48 /root/mark)" = "$MARK" ]'
   check "its disk on the host's pool key" '[ "$(on_second "zfs get -H -o value encryptionroot byard/m/$RB/root")" = byard ]'
-  # The key of a backup, asked as the host asks it but with no restore forwarded: refused.
+  # Its own key by the backup's id, asked from the host with no restore forwarded: served,
+  # as without the id (ADR 0045). Another host's needs a restore the fleet forwarded (the
+  # fleet's unit tests).
   KID=$(briqyard machine backups "$B" | jq -r '.[-1].key_id')
-  conf2=$(on_second "cat $CONF2")
-  token2=$(echo "$conf2" | sed -n 's/^token: "\(.*\)"$/\1/p')
-  advertise2=$(echo "$conf2" | sed -n 's/^  advertise: //p')
-  refused=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $token2" -H 'Content-Type: application/json' \
-    -d "{\"url\": \"$advertise2\", \"key_id\": \"$KID\", \"restore\": {\"machine_id\": \"$B\", \"backup\": \"$BK\"}}" "$BRIQYARD_URL/v1/hosts/key")
-  check "its key refused outside a restore the fleet forwarded" '[ "$refused" = 403 ]'
+  own=$(as_second 'ask_key "{\"url\": \"$adv\", \"key_id\": \"$1\"}" | jq -r ".key | length"' "$KID")
+  check "its own key served by its id outside a restore" '[ "$own" = 64 ]'
   briqyard machine destroy "$RB" >/dev/null
   briqyard backup rm "$B" "$BK" >/dev/null
 fi

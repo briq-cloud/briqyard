@@ -1,6 +1,6 @@
 # ADR 0013: Fleet: one token per host, capacity reserved at placement, a tenant released by hand
 
-Date: 2026-10-20 · Status: accepted; amended by ADR 0027 (`draining` takes nothing new and is never released, `retiring` is; `undrain`); ADR 0042 removed ordering: a host gets its token and pins from the bootstrap of `host add`
+Date: 2026-10-20 · Status: accepted; amended by ADR 0027 (`draining` takes nothing new and is never released, `retiring` is; `undrain`); ADR 0042 removed ordering: a host gets its token and pins from the bootstrap of `host add`; ADR 0044 (a reservation is a hold: given back when the host does not make the machine, kept through a report until the create's answer, a destroy's room at its answer)
 
 ## Context
 

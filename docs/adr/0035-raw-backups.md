@@ -1,6 +1,6 @@
 # ADR 0035: Backups are raw sends: the bucket holds ciphertext, a restore asks for the key by its id
 
-Date: 2026-10-27 · Status: accepted (the key gated to forwarded restores since 2026-10-28); amends ADR 0008 (the send), ADR 0026 (a forgotten host's key is kept) and ADR 0023 (the first backup after it is whole)
+Date: 2026-10-27 · Status: accepted (the key gated to forwarded restores since 2026-10-28); amends ADR 0008 (the send), ADR 0026 (a forgotten host's key is kept) and ADR 0023 (the first backup after it is whole); amended by ADR 0045 (a host's own key needs no restore)
 
 ## Context
 

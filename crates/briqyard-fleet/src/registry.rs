@@ -71,7 +71,7 @@ pub struct HostRec {
     pub state: String,
     #[serde(default)]
     pub capacity: Capacity,
-    /// What the host reported last, plus what placement reserved on it since.
+    /// What the host reported last, plus what its holds took since (ADR 0044).
     #[serde(default)]
     pub used: Capacity,
     #[serde(default)]
@@ -81,7 +81,7 @@ pub struct HostRec {
     pub last_seen: DateTime<Utc>,
     #[serde(default)]
     pub version: String,
-    /// Free space for disks, in MB, from the last heartbeat, less what placement reserved since.
+    /// Free space for disks, in MB, from the last report, less what its holds took since.
     #[serde(default)]
     pub disk_free_mb: u64,
     /// The last thing the bootstrap or an upgrade said.
@@ -108,6 +108,23 @@ pub struct HostRec {
     /// The daemon's last start, from the last heartbeat (ADR 0027).
     #[serde(default)]
     pub started: Option<DaemonStart>,
+    /// What placement counted on the host that its last report did not (ADR 0044). In memory
+    /// only: the next report after a restart is the truth.
+    #[serde(skip)]
+    pub holds: Vec<Hold>,
+}
+
+/// A create (or a gateway) placed on a host, counted in its `used` and `disk_free_mb` until a
+/// report counts it instead (ADR 0044).
+#[derive(Clone, Debug, Default)]
+pub struct Hold {
+    id: u64,
+    memory_mb: u32,
+    disk_mb: u64,
+    /// What it took from `disk_free_mb`: less than `disk_mb` when the host had less.
+    took_disk_mb: u64,
+    /// When the host answered the create: a report received after that counts the machine.
+    made: Option<DateTime<Utc>>,
 }
 
 /// Whether a host in this state serves its machines. Placement takes only `ready`; a host
@@ -127,6 +144,26 @@ pub fn url_host(url: &str) -> &str {
 impl HostRec {
     pub fn free_memory_mb(&self) -> u32 {
         self.capacity.memory_mb.saturating_sub(self.used.memory_mb)
+    }
+
+    /// Takes what a hold asks from the host's figures and keeps it.
+    fn take(&mut self, mut hold: Hold) {
+        self.used.memory_mb = self.used.memory_mb.saturating_add(hold.memory_mb);
+        hold.took_disk_mb = hold.disk_mb.min(self.disk_free_mb);
+        self.disk_free_mb -= hold.took_disk_mb;
+        self.holds.push(hold);
+    }
+
+    /// The host's own figures, received at `at`: they replace what the fleet had, and the holds
+    /// they do not count yet (a create not answered by then) are taken from them again.
+    pub fn report(&mut self, used: Capacity, disk_free_mb: u64, at: DateTime<Utc>) {
+        self.used = used;
+        self.disk_free_mb = disk_free_mb;
+        for hold in std::mem::take(&mut self.holds) {
+            if hold.made.is_none_or(|made| made > at) {
+                self.take(hold);
+            }
+        }
     }
 
     pub fn fill(&self) -> f64 {
@@ -268,6 +305,9 @@ pub struct Registry {
     /// Fields this fleet does not know, written back as they were.
     #[serde(flatten)]
     pub unknown: Unknown,
+    /// The id of the last hold made (ADR 0044).
+    #[serde(skip)]
+    last_hold: u64,
 }
 
 /// A forgotten host's pool key, kept for its backups.
@@ -317,11 +357,10 @@ impl Registry {
             entry.region = h.region;
         }
         entry.capacity = h.capacity;
-        entry.used = h.used;
+        entry.report(h.used, h.disk_free_mb, now);
         entry.machines = h.machines;
         entry.tenants = h.tenants.clone();
         entry.version = h.version;
-        entry.disk_free_mb = h.disk_free_mb;
         entry.conditions = h.conditions.clone();
         entry.started = h.started;
         entry.last_seen = now;
@@ -409,10 +448,10 @@ impl Registry {
     /// The host of a tenant, or the best host for a new one: of `region` when one is asked
     /// (ADR 0025), the readiest with the most free memory under the ceiling and no pressure,
     /// with room for `need_mb` of memory and `need_disk_mb` of disk (a host that reports no
-    /// disk figure is not held to it). What the machine needs is reserved on the host until
-    /// its next heartbeat, so a burst of creates does not all land on the host the last
-    /// heartbeat showed emptiest. A pinned tenant's host under pressure or in another region
-    /// is the caller's to refuse (`HostRec::pressure`, `other_region`).
+    /// disk figure is not held to it). The caller then holds the need on the host (`hold`),
+    /// so a burst of creates does not all land on the host the last report showed emptiest.
+    /// A pinned tenant's host under pressure or in another region is the caller's to refuse
+    /// (`HostRec::pressure`, `other_region`).
     pub fn place(
         &mut self,
         tenant: &str,
@@ -440,16 +479,50 @@ impl Registry {
                 id
             }
         };
-        self.reserve(&id, need_mb, need_disk_mb);
         Some(id)
     }
 
-    /// Counts a machine about to be created on a host as used, until the host reports.
-    pub fn reserve(&mut self, host: &str, need_mb: u32, need_disk_mb: u64) {
-        if let Some(h) = self.hosts.get_mut(host) {
-            h.used.memory_mb = h.used.memory_mb.saturating_add(need_mb);
-            h.disk_free_mb = h.disk_free_mb.saturating_sub(need_disk_mb);
+    /// Counts a machine about to be created on a host as used (ADR 0044): its id, for the
+    /// caller to `made` once the host made it, or to `release` when it did not. 0: no such
+    /// host, nothing held.
+    pub fn hold(&mut self, host: &str, need_mb: u32, need_disk_mb: u64) -> u64 {
+        let Some(h) = self.hosts.get_mut(host) else {
+            return 0;
+        };
+        self.last_hold += 1;
+        h.take(Hold {
+            id: self.last_hold,
+            memory_mb: need_mb,
+            disk_mb: need_disk_mb,
+            ..Default::default()
+        });
+        self.last_hold
+    }
+
+    /// The host made what hold `id` held, at `at`: the next report received after that counts
+    /// it, and the hold goes then.
+    pub fn made(&mut self, host: &str, id: u64, at: DateTime<Utc>) {
+        if let Some(hold) = self
+            .hosts
+            .get_mut(host)
+            .and_then(|h| h.holds.iter_mut().find(|x| x.id == id))
+        {
+            hold.made = Some(at);
         }
+    }
+
+    /// The host did not make what hold `id` held (it refused, or did not answer): what it took
+    /// is given back at once.
+    pub fn release(&mut self, host: &str, id: u64) {
+        let Some(h) = self.hosts.get_mut(host) else {
+            return;
+        };
+        let Some(i) = h.holds.iter().position(|x| x.id == id) else {
+            return;
+        };
+        let hold = h.holds.remove(i);
+        h.used.memory_mb = h.used.memory_mb.saturating_sub(hold.memory_mb);
+        h.disk_free_mb += hold.took_disk_mb;
     }
 
     /// Releases a tenant from its host: its next machine is placed afresh. The host's next
@@ -602,6 +675,7 @@ mod tests {
             started: Default::default(),
             pool_key: PoolKey::default(),
             unknown: Unknown::new(),
+            holds: Vec::new(),
         }
     }
 
@@ -659,7 +733,7 @@ mod tests {
         reg.heartbeat(host("b", 100_000, 50_000, 5), now);
         let p = Policy::default();
         // The emptiest host is under pressure: the new tenant goes to the other one.
-        assert_eq!(reg.place("t1", "", 512, 0, &p).as_deref(), Some("b"));
+        assert_eq!(placed(&mut reg, "t1", 512, 0).unwrap().0, "b");
         assert_eq!(
             reg.hosts["a"].pressure().as_deref(),
             Some("host a is under disk_pressure: pool 4.0 GB free of 100.0 (4%), under 10%")
@@ -977,36 +1051,72 @@ mod tests {
         assert_eq!(reg.place("t5", "", 512, 500, &p).as_deref(), Some("c"));
     }
 
+    /// `place` and `hold`, as a create does them.
+    fn placed(reg: &mut Registry, tenant: &str, mb: u32, disk: u64) -> Option<(String, u64)> {
+        let host = reg.place(tenant, "", mb, disk, &Policy::default())?;
+        let hold = reg.hold(&host, mb, disk);
+        Some((host, hold))
+    }
+
     #[test]
-    fn placement_reserves_until_the_next_heartbeat() {
-        let now = Utc::now();
+    fn a_hold_counts_until_a_report_after_the_create_or_its_failure() {
+        let t0 = Utc::now();
         let mut reg = Registry::default();
-        reg.heartbeat(host("a", 100_000, 0, 0), now);
-        reg.heartbeat(host("b", 100_000, 10_000, 1), now);
+        reg.heartbeat(host("a", 100_000, 0, 0), t0);
+        reg.heartbeat(host("b", 100_000, 10_000, 1), t0);
         let p = Policy::default();
         // A burst: the second tenant sees the first one's memory taken on a.
-        assert_eq!(reg.place("t1", "", 60_000, 3000, &p).as_deref(), Some("a"));
+        let (a, t1) = placed(&mut reg, "t1", 60_000, 3000).unwrap();
+        assert_eq!(a, "a");
         assert_eq!(reg.hosts["a"].used.memory_mb, 60_000);
-        assert_eq!(reg.place("t2", "", 50_000, 0, &p).as_deref(), Some("b"));
-        // A pinned tenant's machine counts too, and the reservation is memory and disk.
+        assert_eq!(placed(&mut reg, "t2", 50_000, 0).unwrap().0, "b");
+        // A pinned tenant's machine holds too, memory and disk.
         reg.hosts.get_mut("a").unwrap().disk_free_mb = 10_000;
-        assert_eq!(reg.place("t1", "", 10_000, 4000, &p).as_deref(), Some("a"));
+        let (_, t1b) = placed(&mut reg, "t1", 10_000, 4000).unwrap();
         assert_eq!(reg.hosts["a"].used.memory_mb, 70_000);
         assert_eq!(reg.hosts["a"].disk_free_mb, 6000);
         let (free, largest) = reg.room(&p)["fsn"];
         assert_eq!(
             (free.memory_mb, largest.memory_mb),
             (70_000, 40_000),
-            "the capacity signals see the reservations too"
+            "the capacity signals see the holds too"
         );
-        // A fork reserves on the source's host without a placement.
-        reg.reserve("b", 5000, 0);
-        assert_eq!(reg.hosts["b"].used.memory_mb, 65_000);
-        reg.reserve("nobody", 5000, 0);
-        // The host's report replaces the reservation: the create failed, nothing is used.
-        reg.heartbeat(host("a", 100_000, 0, 0), now);
-        assert_eq!(reg.hosts["a"].used.memory_mb, 0);
-        assert_eq!(reg.place("t3", "", 90_000, 0, &p).as_deref(), Some("a"));
+        assert_eq!(reg.hold("nobody", 5000, 0), 0, "no host, nothing held");
+        // A report while both creates are under way: they still count, on its figures.
+        let t2 = t0 + Duration::seconds(15);
+        let mut report = host("a", 100_000, 1000, 0);
+        report.disk_free_mb = 20_000;
+        reg.heartbeat(report, t2);
+        assert_eq!(reg.hosts["a"].used.memory_mb, 71_000);
+        assert_eq!(reg.hosts["a"].disk_free_mb, 13_000);
+        // The first failed: what it held is back at once, not at the next report.
+        reg.release("a", t1);
+        reg.release("a", t1);
+        assert_eq!(reg.hosts["a"].used.memory_mb, 11_000, "released once");
+        assert_eq!(reg.hosts["a"].disk_free_mb, 16_000);
+        // The second was made: counted until a report received after it, then the host's.
+        reg.made("a", t1b, t2 + Duration::seconds(1));
+        let mut report = host("a", 100_000, 1000, 0);
+        report.disk_free_mb = 20_000;
+        reg.heartbeat(report.clone(), t2 + Duration::milliseconds(500));
+        assert_eq!(
+            reg.hosts["a"].used.memory_mb, 11_000,
+            "a report from before"
+        );
+        report.used.memory_mb = 11_000;
+        report.disk_free_mb = 16_000;
+        reg.heartbeat(report, t2 + Duration::seconds(2));
+        assert_eq!(
+            reg.hosts["a"].used.memory_mb, 11_000,
+            "the host's figure, once"
+        );
+        assert_eq!(reg.hosts["a"].disk_free_mb, 16_000);
+        assert!(reg.hosts["a"].holds.is_empty());
+        // A hold never takes disk a host does not report, nor gives back more than it took.
+        let t3 = reg.hold("b", 1000, 50_000);
+        assert_eq!(reg.hosts["b"].disk_free_mb, 0, "b reports no disk figure");
+        reg.release("b", t3);
+        assert_eq!(reg.hosts["b"].disk_free_mb, 0);
     }
 
     #[test]
@@ -1015,14 +1125,13 @@ mod tests {
         let mut reg = Registry::default();
         reg.heartbeat(host("a", 100_000, 0, 0), now);
         reg.heartbeat(host("b", 100_000, 0, 0), now);
-        let p = Policy::default();
-        let first = reg.place("t1", "", 60_000, 0, &p).unwrap();
+        let first = placed(&mut reg, "t1", 60_000, 0).unwrap().0;
         assert!(reg.pinned_at.contains_key("t1"));
         reg.unpin("t1");
         assert_eq!(reg.tenants.get("t1"), None);
         assert!(!reg.pinned_at.contains_key("t1"));
         assert_ne!(
-            reg.place("t1", "", 10_000, 0, &p).unwrap(),
+            placed(&mut reg, "t1", 10_000, 0).unwrap().0,
             first,
             "placed afresh, on the host with the most room"
         );

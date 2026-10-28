@@ -75,7 +75,7 @@ pub async fn upgrade_host(
         h.note = format!("upgrading to {release}");
         was
     };
-    if let Err(e) = st.save() {
+    if let Err(e) = st.save().await {
         // Not recorded: nothing starts, and the host is as it was.
         if let Some(h) = st.reg.lock().unwrap().hosts.get_mut(&id) {
             (h.state, h.note) = (was.state.clone(), was.note.clone());
@@ -85,7 +85,7 @@ pub async fn upgrade_host(
     let task = tokio::spawn(async move {
         let _turn = turn;
         let outcome = run(&st, &was, &release).await;
-        finish(&st, &was, &release, outcome)
+        finish(&st, &was, &release, outcome).await
     });
     match task.await {
         Ok(Ok(host)) => Ok(Json(host).into_response()),
@@ -173,7 +173,7 @@ pub async fn come_back(
 }
 
 /// The host back in the state it had, or `draining` with why.
-pub fn finish(
+pub async fn finish(
     st: &AppState,
     was: &crate::registry::HostRec,
     release: &str,
@@ -209,7 +209,7 @@ pub fn finish(
         }
         h.to_api()
     };
-    st.save().map_err(|e| format!("{e:#}"))?;
+    st.save().await.map_err(|e| format!("{e:#}"))?;
     outcome.map(|_| host)
 }
 

@@ -243,7 +243,8 @@ plus `apt-get purge docker.io` and the edge's files.
   or address, written `0600` before it is answered, in no listing, no longer the host's once
   it is forgotten but kept for its backups, served by its id to the host a restore was forwarded to, once, for that restore
   only, refused to another host, past its deadline, with no restore open and for an unknown id
-  (ADR 0035); a backup refused under a key that is not the pool's; a backup raw under its key's id with its record sealed (the env in
+  (ADR 0035), a host's own by its id at any ask, by the fleet and from the daemon's source
+  (ADR 0045); a backup refused under a key that is not the pool's; a backup raw under its key's id with its record sealed (the env in
   no object, a sealed spec that does not open moved to another record), a restore opening it
   with the key of that id and giving its disks the pool's, the key file's own or the fleet's,
   refused with no fleet to ask; a backup in clear restored with no key, the next one whole; a
@@ -252,7 +253,14 @@ plus `apt-get purge docker.io` and the edge's files.
   registry that does not parse refused, never read as empty, and fields it does not know
   written back; a host call from another address than its record's refused unless behind
   `tls: off`; a key whose write failed taken back, never served; a keyed host forgotten only by
-  force; a drained host never forgotten, a retiring one once empty), upgrades (the init's and
+  force; a drained host never forgotten, a retiring one once empty; the registry written by
+  300 writers at once, every read of the file parsing and the last write holding every change,
+  64 creates at once all in it, a machine the host made answered when the write after it fails
+  (ADR 0043); a create's hold given back when the host refuses and when its caller hangs up,
+  kept through a report before its answer and dropped by one after, a destroy's room back at
+  its answer (ADR 0044); a
+  destroyed machine's backup deleted on the host that holds it, a tenant's backups listed from
+  every host (ADR 0045); a delete with a query dropping the index entry), upgrades (the init's and
   the VMM's versions recorded at boot, a snapshot of another VMM booted cold, a hand-over that
   waits for a stop to settle, touches no machine and lets no transition begin, the adoption
   after it with `gone` apart from `stopped`, the daemon's start booting again what the host
@@ -321,7 +329,9 @@ plus `apt-get purge docker.io` and the edge's files.
   0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
   data kept, the next backup incremental and its restore at the grown size). 231 checks, 227
-  without host ports.
+  without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
+  key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
   port 8080), run on the host (`OPERATIONS.md`, "First OVH host", step 7). The mirror section
@@ -337,16 +347,17 @@ plus `apt-get purge docker.io` and the edge's files.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
   destroy, more starts at once than the host has memory for), host invariants between phases
-  (ADR 0010). `--tenants 6 --per-tenant 4 --rounds 2 --crash`.
+  (ADR 0010). `--tenants 6 --per-tenant 4 --rounds 2 --crash`. Against a daemon on TLS, the
+  invariants' curl trusts the daemon's certificate with `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
 - `hack/fleet-two-hosts.sh`: a fleet with two hosts: tenants placed on different hosts, calls
   forwarded to each, a host that stops answering marked down with its tenant's calls refused
   (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back;
   with `SECOND_HOST_SH`, its pool locked while it is down and back encrypted and unlocked with
   the fleet's key, the key on none of its files, in its log or in the fleet's host list; and a
   backup there (a directory store for the run when it has none): its key's id, no plaintext in
-  its stream, restored through the fleet onto it with the key the fleet served by its id, its
-  disk on the host's pool key, and its key refused outside a restore the fleet forwarded. 26
-  checks.
+  its stream, restored through the fleet onto it, its disk on the host's pool key, and its own
+  key served to it by its id with no restore forwarded (ADR 0045). The key is asked from the
+  second host itself, as the fleet checks a host's calls by its address. 26 checks.
 - `hack/fleet-restore.sh` (from the Mac, `FLEET_SH="limactl shell fc sudo" SECOND_HOST_SH="limactl
   shell fc2 sudo"`): the dev fleet backed up to `file:///var/lib/briqyard-fleet-backup` for the
   run (an identity in `/etc/briqyard/fleet-backup.key` on fc, development only), the backup
