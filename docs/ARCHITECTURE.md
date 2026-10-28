@@ -49,8 +49,8 @@ state, a setting), never with a use: `last_used_at` is kept in memory and reache
 with the next change or the sleeper's tick, so a busy machine does not rewrite its record on
 every connection. The record on disk says what the machine is, not when it was last touched.
 
-A boot the guest does not survive (the image's fault: no init to run, a command that exits
-at once) leaves the machine in `error` with the console's last lines, and the request answers
+A boot the guest does not survive (the image's fault: no init to run, a command the init
+cannot start) leaves the machine in `error` with the console's last lines, and the request answers
 409 `boot_failed` with the machine in the body; nothing restarts it, the caller reads and
 destroys it. The host's own faults answer 500. Every transition (create, start, stop, destroy,
 backup) runs in a task of its own that the request only waits on: a client that hangs up
