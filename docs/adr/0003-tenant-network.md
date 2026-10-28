@@ -10,7 +10,7 @@ Machines of one tenant must reach each other by name and nothing of any other te
 
 **One Linux bridge and one /24 per tenant**, from `10.64.0.0/10` (16,384 tenants per host), the host as gateway at `.1`, one TAP per machine. nftables masquerades egress through the host's default route and drops traffic between tenant ranges.
 
-**The daemon answers DNS on every gateway.** `<alias>.internal` follows a machine's alias (what a sibling's env holds), `<id>.vm.internal` is that exact machine; everything else is forwarded upstream. No dnsmasq, no CoreDNS: a few hundred lines, and the answers follow the store.
+**The daemon answers DNS on every gateway.** `<alias>.internal` follows a machine's alias (what a sibling's env holds), `<id>.vm.internal` is that exact machine; everything else is forwarded upstream. No dnsmasq, no CoreDNS: a few hundred lines, and the answers follow the store. The wire format is `hickory-proto`'s since ADR 0033.
 
 **The guest configures its own interface from the config drive.** The guest kernel needs no `ip=` support.
 

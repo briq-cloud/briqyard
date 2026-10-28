@@ -39,6 +39,7 @@ tokio-util = { workspace = true }
 url = { workspace = true }
 rcgen = { workspace = true }
 axum-server = { workspace = true }
+hickory-proto = { workspace = true }
 httparse = { workspace = true }
 
 # Image extraction (openat2); the daemon runs on Linux alone.
