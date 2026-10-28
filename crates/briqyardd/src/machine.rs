@@ -297,6 +297,15 @@ fn sleep_setting(s: &str) -> String {
 
 /// Whether a machine in this state holds the memory it was given: from the reservation at
 /// `starting` until its process is gone.
+/// A guest call's error: `not_running` when the guest cannot be reached (a machine whose guest
+/// exits as the call comes), else as it is.
+fn not_running_if_unreachable(err: anyhow::Error) -> MError {
+    match err.downcast::<guestc::Unreachable>() {
+        Ok(u) => MError::NotRunning(u.to_string()),
+        Err(err) => MError::Other(err),
+    }
+}
+
 fn holds_memory(state: &str) -> bool {
     matches!(state, state::STARTING | state::RUNNING | state::STOPPING)
 }
@@ -888,6 +897,8 @@ impl Manager {
         m.start_stopped_by_host();
         let sleeper = m.clone();
         tokio::spawn(async move { sleeper.sleeper().await });
+        let watch = m.clone();
+        tokio::spawn(async move { watch.storage_watch().await });
         Ok(m)
     }
 
@@ -4115,32 +4126,60 @@ impl Manager {
             .collect()
         };
         for c in changed {
-            let ev = match c.status {
-                true => Ev::warning(reason::HOST_CONDITION, format!("{}: {}", c.kind, c.message)),
-                false => Ev::normal(
-                    reason::HOST_CONDITION,
-                    format!("{} cleared: {}", c.kind, c.message),
-                ),
-            };
-            if c.status {
-                tracing::warn!(
-                    condition = c.kind,
-                    message = c.message,
-                    "host condition true"
-                );
-            } else {
-                tracing::info!(
-                    condition = c.kind,
-                    message = c.message,
-                    "host condition cleared"
-                );
-            }
-            let data = json!({ "condition": c.kind, "status": c.status });
-            self.inner.events.emit(ev.data(data));
+            self.note_condition(c);
         }
         let short = pool.map_or(0, |p| conditions::disk_short(p, &t));
         if short > 0 {
             self.free_images(short).await;
+        }
+    }
+
+    /// A condition that changed: its event and its log line.
+    fn note_condition(&self, c: api::Condition) {
+        let ev = match c.status {
+            true => Ev::warning(reason::HOST_CONDITION, format!("{}: {}", c.kind, c.message)),
+            false => Ev::normal(
+                reason::HOST_CONDITION,
+                format!("{} cleared: {}", c.kind, c.message),
+            ),
+        };
+        if c.status {
+            tracing::warn!(
+                condition = c.kind,
+                message = c.message,
+                "host condition true"
+            );
+        } else {
+            tracing::info!(
+                condition = c.kind,
+                message = c.message,
+                "host condition cleared"
+            );
+        }
+        let data = json!({ "condition": c.kind, "status": c.status });
+        self.inner.events.emit(ev.data(data));
+    }
+
+    /// Every 15 s, apart from the tick, which a stuck `zfs` command holds too:
+    /// `storage_stalled` while one has run past `zfs::STALL_AFTER` (ADR 0046).
+    async fn storage_watch(self) {
+        let mut tick = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            tick.tick().await;
+            self.assess_storage(crate::zfs::STALL_AFTER, Utc::now());
+        }
+    }
+
+    fn assess_storage(&self, after: Duration, now: DateTime<Utc>) {
+        let found = conditions::storage(self.inner.zfs.stalled(after));
+        let changed =
+            self.inner
+                .conditions
+                .lock()
+                .unwrap()
+                .set(api::condition::STORAGE_STALLED, found, now);
+        if let Some(c) = changed {
+            self.note_condition(c);
         }
     }
 
@@ -4390,7 +4429,7 @@ impl Manager {
             if err.downcast_ref::<guestc::Closed>().is_some() {
                 MError::NotRunning("the machine went down during the command".into())
             } else {
-                MError::Other(self.init_named(id, err))
+                self.init_named(id, err)
             }
         })?;
         Ok(api::ExecResult {
@@ -4402,13 +4441,19 @@ impl Manager {
     }
 
     /// A guest call's error with the machine's init named when it did not know the op (ADR
-    /// 0027): what an exec, a put, a get, and any op added later go through.
-    fn init_named(&self, id: &str, err: anyhow::Error) -> anyhow::Error {
-        let init = self
-            .entry(id)
-            .map(|e| e.snapshot().init_version)
-            .unwrap_or_default();
-        guestc::with_init(err, &init)
+    /// 0027): what an exec, a put, a get, and any op added later go through. A guest that
+    /// cannot be reached is exiting: not running, 409.
+    fn init_named(&self, id: &str, err: anyhow::Error) -> MError {
+        match not_running_if_unreachable(err) {
+            MError::Other(err) => {
+                let init = self
+                    .entry(id)
+                    .map(|e| e.snapshot().init_version)
+                    .unwrap_or_default();
+                MError::Other(guestc::with_init(err, &init))
+            }
+            not_running => not_running,
+        }
     }
 
     /// Starts an exec session (ADR 0029): the command runs once the guest takes it, and the
@@ -4483,7 +4528,7 @@ impl Manager {
         )
         .await
         .map_err(|_| MError::NotRunning("the guest did not take the command".into()))?
-        .map_err(MError::Other)?;
+        .map_err(not_running_if_unreachable)?;
         Ok((conn, InUse::new(e)))
     }
 
@@ -5655,6 +5700,8 @@ mod tests {
         /// The limits each machine's disks have now: given at boot, changed live, and
         /// whether the volume was given them too.
         disks: Mutex<HashMap<String, (fc::DiskRate, bool)>>,
+        /// The root disk's device each machine last booted on.
+        roots: Mutex<HashMap<String, PathBuf>>,
         /// A live change of disk limits fails, as a Firecracker that refuses the PATCH.
         refuse_disk_rate: AtomicBool,
     }
@@ -5683,6 +5730,7 @@ mod tests {
                 vmm_version: Mutex::new("v1.17.0/test".into()),
                 init_version: Mutex::new("0.1.0+init".into()),
                 disks: Mutex::new(HashMap::new()),
+                roots: Mutex::new(HashMap::new()),
                 refuse_disk_rate: AtomicBool::new(false),
             })
         }
@@ -5873,6 +5921,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(b.id.clone(), (b.disk, b.data.is_some()));
+            self.roots
+                .lock()
+                .unwrap()
+                .insert(b.id.clone(), b.root.clone());
             if let Boots::Panics = boots {
                 panic!("the VMM panicked");
             }
@@ -6421,6 +6473,11 @@ mod tests {
         }
 
         /// The host's calls so far (boots, snapshots, kills), then forgets them.
+        /// The root disk's device the machine last booted on.
+        pub(super) fn booted_root(&self, id: &str) -> PathBuf {
+            self.host.roots.lock().unwrap()[id].clone()
+        }
+
         pub(super) fn host_calls(&self) -> Vec<String> {
             self.host.calls()
         }
@@ -11366,6 +11423,59 @@ mod tests {
         h.m.assess(t1).await;
         assert!(h.m.conditions()[1].status, "kept");
         assert_eq!(h.host_events(reason::HOST_CONDITION).len(), 3);
+    }
+
+    /// An exec as the guest exits (a fork whose command ends at once): Firecracker's socket
+    /// refuses, which is a machine not running, 409, not an internal error.
+    #[test]
+    fn a_guest_that_cannot_be_reached_is_not_running() {
+        let refused = guestc::Unreachable("vsock /x/vsock.sock: Connection refused".into());
+        let err = not_running_if_unreachable(refused.into());
+        assert!(
+            matches!(&err, MError::NotRunning(m) if m.ends_with("Connection refused")),
+            "{err:?}"
+        );
+        let other = not_running_if_unreachable(anyhow!("frame too large"));
+        assert!(matches!(other, MError::Other(_)));
+    }
+
+    /// A `zfs` command that does not come back (ADR 0046): `storage_stalled` while it runs,
+    /// decided apart from the tick it holds, and cleared once it exits.
+    #[tokio::test]
+    async fn a_stuck_zfs_command_is_storage_stalled_until_it_exits() {
+        let h = harness("10.64.0.0/22", 1000).await;
+        let t0 = at("2026-10-28T18:44:47Z");
+        h.m.assess_storage(Duration::ZERO, t0);
+        assert!(!h.m.conditions()[2].status);
+        let hold = h.pool.dev().join("hold.snapshot");
+        std::fs::write(&hold, "").unwrap();
+        let z = h.pool.zfs.clone();
+        let snap = tokio::spawn(async move { z.snapshot("m/x/root", "fork-y").await });
+        while h.pool.zfs.stalled(Duration::ZERO).is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        h.m.assess_storage(Duration::ZERO, t0);
+        let c = &h.m.conditions()[2];
+        assert_eq!(
+            (c.kind.as_str(), c.status, c.since),
+            ("storage_stalled", true, t0)
+        );
+        assert!(
+            c.message
+                .starts_with("zfs snapshot byard/m/x/root@fork-y running for "),
+            "{}",
+            c.message
+        );
+        let evs = h.host_events(reason::HOST_CONDITION);
+        assert_eq!(evs.len(), 1);
+        assert!(evs[0].message.starts_with("storage_stalled: zfs snapshot"));
+        std::fs::remove_file(&hold).unwrap();
+        let _ = snap.await.unwrap();
+        let t1 = t0 + chrono::Duration::seconds(15);
+        h.m.assess_storage(Duration::ZERO, t1);
+        let c = &h.m.conditions()[2];
+        assert_eq!((c.status, c.since), (false, t1));
+        assert_eq!(c.message, "no zfs command running for over 60 s");
     }
 
     #[tokio::test]

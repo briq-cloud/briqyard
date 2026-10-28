@@ -1038,7 +1038,7 @@ components:
       description: "A host condition (ADR 0021), decided by the daemon's tick. Each is a pressure: the fleet places nothing new on a host while one is true"
       required: [type, status, since, message]
       properties:
-        type: { type: string, enum: [memory_pressure, disk_pressure], description: "`memory_pressure`: committed memory over `conditions.memory_pct` of capacity; `disk_pressure`: the pool's free space under `conditions.disk_free_pct` of its size" }
+        type: { type: string, enum: [memory_pressure, disk_pressure, storage_stalled], description: "`memory_pressure`: committed memory over `conditions.memory_pct` of capacity; `disk_pressure`: the pool's free space under `conditions.disk_free_pct` of its size; `storage_stalled`: a `zfs` command of the daemon's running for over a minute (ADR 0046)" }
         status: { type: boolean }
         since: { type: string, format: date-time, description: "when `status` last changed; the daemon's start until it does" }
         message: { type: string, description: the figures it was decided on }

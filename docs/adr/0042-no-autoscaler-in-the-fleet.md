@@ -18,7 +18,7 @@ Before this change the fleet's only capacity signal was a 503 `capacity` answer 
 
 | `resource` | When | A new host fixes it |
 |---|---|---|
-| `memory` | A new tenant: no host of the region is ready and under its fill ceiling with the memory free (no host at all included), or those with the room are under `memory_pressure` | yes |
+| `memory` | A new tenant: no host of the region is ready and under its fill ceiling with the memory free (no host at all included), or those with the room are under `memory_pressure` (or `storage_stalled`, ADR 0046: then the fix is the operator's, which the `host_condition` event names) | yes |
 | `disk` | A new tenant: hosts have the memory, none the disk (a volume plus 2 GB), or those with both are under `disk_pressure` | yes |
 | `pressure` | The host the create is bound to (a pinned tenant's, a fork's source's) is under a condition (ADR 0021) | no: the tenant's machines stay on its host (ADR 0006), so that host must be freed |
 

@@ -361,6 +361,11 @@ impl Manager {
         }
         let (b, mut all) = match self.send_backup(store, &rec).await {
             Ok(made) => made,
+            // A destroy took the disks from under it: the destroy is the answer, not a failure.
+            Err(_) if !self.holds(e) => return Err(MError::NotFound),
+            Err(_) if e.snapshot().state == state::DESTROYING => {
+                return Err(MError::BadState(state::DESTROYING.into()))
+            }
             Err(err) => {
                 self.backup_failed(e, &err, now).await;
                 return Err(err);
@@ -1454,6 +1459,30 @@ mod tests {
             h.stored(&m.id).unwrap().backup_bytes,
             all.iter().map(|b| b.bytes).sum::<u64>()
         );
+    }
+
+    /// A destroy while a backup sends (the chaos run of 2026-10-28): the backup answers the
+    /// destroy, 404, never a 500 about a dataset that is gone.
+    #[tokio::test]
+    async fn a_backup_racing_a_destroy_answers_not_found() {
+        let h = harness(|_| {}).await;
+        let m = h.machine("db", every("1h", 3), true).await;
+        let hold = h.pool.dev().join("hold.snapshot");
+        std::fs::write(&hold, "").unwrap();
+        let (mm, id) = (h.m.clone(), m.id.clone());
+        let backup = tokio::spawn(async move { mm.backup(&id).await });
+        while h.pool.zfs.stalled(Duration::ZERO).is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (mm, id) = (h.m.clone(), m.id.clone());
+        let destroy = tokio::spawn(async move { mm.destroy(&id, None).await });
+        while h.pool.dev().join(format!("byard/m/{}", m.id)).exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        std::fs::remove_file(&hold).unwrap();
+        destroy.await.unwrap().unwrap();
+        let err = backup.await.unwrap().unwrap_err();
+        assert!(matches!(err, MError::NotFound), "{err:?}");
     }
 
     #[tokio::test]
