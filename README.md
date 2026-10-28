@@ -1,3 +1,5 @@
+<img src="docs/images/hero.png" alt="Bots laid into a brick wall, each running machines: postgres and its fork, redis, web, and a sandbox asleep. Beside them: briqyard, open-source microVMs for sandboxes and services that sleep, wake and fork." width="830">
+
 # briqyard
 
 **Open-source microVMs for sandboxes and services that sleep, wake and fork.**
@@ -42,45 +44,11 @@ briqyard runs any OCI image in a Firecracker microVM on servers you own. Each ma
 
 Across servers. The fleet speaks the daemon's API, so a client talks to either the same way. A tenant lives on one host, so its network needs no overlay.
 
-```mermaid
-flowchart LR
-  client["Control plane or CLI"] -->|HTTPS API| fleet["briqyard-fleet<br/>placement, registry, pool keys"]
-  fleet -->|"TLS, certificate pinned"| h1["briqyardd<br/>host 1"]
-  fleet -->|"TLS, certificate pinned"| h2["briqyardd<br/>host 2"]
-  fleet -.->|"SSH: install, upgrade"| h2
-  h1 -.->|heartbeat| fleet
-  h2 -.->|heartbeat| fleet
-  edge["Edge or router"] -->|"TCP and HTTP endpoints"| h1
-  edge --> h2
-  h1 -->|"encrypted backups"| s3[("S3 bucket")]
-  h2 --> s3
-  fleet -->|"registry, encrypted"| s3
-```
+<img src="docs/images/architecture.png" alt="Across servers: a control plane or the CLI calls briqyard-fleet (placement, registry, pool keys) over HTTPS. The fleet calls briqyardd on host 1 and host 2 over TLS with the certificate pinned, installs and upgrades host 2 over SSH, and gets a heartbeat back from each. An edge or router reaches the TCP and HTTP endpoints on both hosts. The hosts send encrypted backups, and the fleet its encrypted registry, to an S3 bucket." width="830">
 
 On one server. Each machine is a Firecracker process with its disks on the pool and a TAP device on its tenant's bridge.
 
-```mermaid
-flowchart TB
-  api["HTTP API :7420"] --> d
-  ing["Endpoints: TCP :30000-32767, HTTP :8080"] --> d
-  subgraph host["Host: Linux with KVM"]
-    d["briqyardd"]
-    d --> zfs[("ZFS pool, encrypted<br/>image disks, root and data zvols, snapshots")]
-    d --> net["Bridge per tenant, TAP per machine<br/>nftables, DNS"]
-    d --> fc1["Firecracker under the jailer"]
-    d --> fc2["Firecracker under the jailer"]
-    subgraph vm1["microVM"]
-      init1["briqyard-init, PID 1"] --> app1["the image's command"]
-    end
-    subgraph vm2["microVM"]
-      init2["briqyard-init, PID 1"] --> app2["the image's command"]
-    end
-    fc1 --- vm1
-    fc2 --- vm2
-    d <-->|"vsock: exec, files, exit"| init1
-    d <-->|vsock| init2
-  end
-```
+<img src="docs/images/host.png" alt="One server, a Linux host with KVM: the HTTP API on :7420 and the endpoints (TCP :30000-32767, HTTP :8080) reach briqyardd. briqyardd runs one Firecracker under the jailer per microVM; inside each microVM, briqyard-init runs as PID 1 and starts the image's command, and talks to briqyardd over vsock (exec, files, exit). briqyardd also keeps the encrypted ZFS pool (image disks, root and data zvols, snapshots) and the tenant networks (a bridge per tenant, a TAP per machine, nftables, DNS)." width="830">
 
 A create: the daemon resolves the image, unpacks it once into an image disk, clones that as the machine's root disk, makes the data volume, writes a config drive (env, files, secrets) and starts Firecracker under the jailer. The init boots the image's command and reports when it exits. How each part works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Every decision and its reasons: [docs/adr/](docs/adr/).
 

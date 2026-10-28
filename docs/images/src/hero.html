@@ -1,0 +1,149 @@
+<!-- Renders docs/images/hero.png (1660×556: the 830 px README column at 2×). From the repository root:
+     npx playwright screenshot --viewport-size=1660,556 --wait-for-selector=body.ready "file://$PWD/docs/images/src/hero.html" docs/images/hero.png -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>briqyard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700&family=IBM+Plex+Mono:wght@500&family=Instrument+Sans:wght@400;500&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; background: #141110; }
+  svg { display: block; }
+</style>
+</head>
+<body>
+<svg id="art" xmlns="http://www.w3.org/2000/svg" width="1660" height="556" viewBox="0 0 980 328.24"></svg>
+<script>
+// A wall of 2:1 bricks in running bond, in relief on the kiln ground; laid into it, agents (the
+// bot: a brick head, two cut-out eyes, an antenna) and the machines they run, two bricks long, in
+// block colours, joined by dotted curved links. Units are the wall's: a 64 × 32 brick, a 4 joint.
+const C = {
+  kiln: '#141110', surface: '#1c1815', ink: '#f3eee8', inkMuted: '#a89d92', inkFaint: '#6e645b',
+  brick: '#f06a3c', onBlock: '#17130f',
+  cobalt: '#6b86f5', amber: '#f0b43a', moss: '#4fb47e', plum: '#b48cf0',
+};
+const COURSE = 32, JOINT = 4, BRICK = 64, PY = COURSE + JOINT, PX = BRICK + JOINT;
+const W = 980, COURSES = 9, TOP = JOINT;
+const STOPPED = 0.4;
+
+/** A cell: `col` counts bricks along the course, odd courses set back half a brick. */
+const cell = (course, col, w = 1) => ({
+  x: col * PX - (course % 2 ? PX / 2 : 0), y: TOP + course * PY, w: w * PX - JOINT, h: COURSE,
+});
+const pad = (b, m) => ({ x: b.x - m, y: b.y - m, w: b.w + 2 * m, h: b.h + 2 * m });
+const hits = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+const mid = (b) => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
+
+// The bot on its 16-unit grid (antenna, head, eyes), at BOT_PX per unit.
+const BOT_PX = 6;
+const BOT_ANTENNA = { x: 7, y: 1, width: 2, height: 2 };
+const BOT_HEAD = { x: 1, y: 4, width: 14, height: 10 };
+const BOT_EYES = [{ x: 4, y: 7, width: 2, height: 3 }, { x: 10, y: 7, width: 2, height: 3 }];
+const botPart = (o, r) => ({ x: o.x + r.x * BOT_PX, y: o.y + r.y * BOT_PX, w: r.width * BOT_PX, h: r.height * BOT_PX });
+/** A bot placed by its head's centre. */
+function bot(cx, cy, asleep = false) {
+  const o = { x: cx - 8 * BOT_PX, y: cy - 9 * BOT_PX };
+  const head = botPart(o, BOT_HEAD);
+  const antenna = botPart(o, BOT_ANTENNA);
+  return { head, antenna, asleep, all: { x: head.x, y: antenna.y, w: head.w, h: head.y + head.h - antenna.y },
+    eyes: BOT_EYES.map((e) => botPart(o, e)) };
+}
+
+// ---- the scene -----------------------------------------------------------------------------
+const AGENTS = {
+  a: bot(500, 92),
+  b: bot(500, 236),
+  c: bot(890, 92, true),
+};
+const BRIQS = [
+  { id: 'pg', label: 'postgres', box: cell(1, 9, 2), fill: C.cobalt, from: 'a' },
+  { id: 'fork', label: 'postgres-fork', box: cell(3, 10, 2), fill: C.cobalt, from: 'pg' },
+  { id: 'redis', label: 'redis', box: cell(5, 9, 2), fill: C.amber, from: 'b' },
+  { id: 'web', label: 'web', box: cell(7, 9, 2), fill: C.moss, from: 'b' },
+  { id: 'sandbox', label: 'sandbox', box: cell(5, 12, 2), fill: C.plum, from: 'c', asleep: true },
+];
+const TEXT = { x: 44, y: 96, w: 360, h: 148 };
+
+const boxOf = (id) => (AGENTS[id] ? AGENTS[id].head : BRIQS.find((b) => b.id === id).box);
+
+/** Out of a brick's side when the run is wider than tall, else out of its end. */
+function linkPath(a, b) {
+  const { x: ax, y: ay } = mid(a);
+  const { x: bx, y: by } = mid(b);
+  if (Math.abs(bx - ax) >= Math.abs(by - ay)) {
+    const dir = Math.sign(bx - ax) || 1;
+    const x1 = ax + (dir * a.w) / 2 + dir * 6, x2 = bx - (dir * b.w) / 2 - dir * 6, mx = (x1 + x2) / 2;
+    return `M${x1} ${ay}C${mx} ${ay} ${mx} ${by} ${x2} ${by}`;
+  }
+  const dir = Math.sign(by - ay) || 1;
+  const y1 = ay + (dir * a.h) / 2 + dir * 4, y2 = by - (dir * b.h) / 2 - dir * 4, my = (y1 + y2) / 2;
+  return `M${ax} ${y1}C${ax} ${my} ${bx} ${my} ${bx} ${y2}`;
+}
+
+// ---- the relief: about 80% of the cells, seeded, with gaps for the scene and the words ------
+function mulberry32(seed) {
+  let a = seed;
+  return () => {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const gaps = [
+  pad(TEXT, 8),
+  ...Object.values(AGENTS).map((g) => pad(g.all, 10)),
+  ...BRIQS.map((b) => b.box),
+];
+const rnd = mulberry32(7);
+const relief = [];
+for (let course = 0; course < COURSES; course++)
+  for (let col = 0; col < 16; col++) {
+    const box = cell(course, col);
+    if (rnd() > 0.8) continue;
+    if (!gaps.some((g) => hits(box, g))) relief.push(box);
+  }
+
+// ---- drawing -------------------------------------------------------------------------------
+const r = (b, rx, fill, extra = '') =>
+  `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="${rx}" fill="${fill}" ${extra}/>`;
+const out = [];
+out.push(`<rect width="${W}" height="400" fill="${C.kiln}"/>`);
+for (const b of relief) out.push(r(b, 2, C.surface));
+for (const b of BRIQS)
+  out.push(`<path d="${linkPath(boxOf(b.from), b.box)}" fill="none" stroke="${C.inkFaint}" stroke-width="2.5"
+    stroke-linecap="round" stroke-dasharray="0.1 7" opacity="${b.asleep ? 0.55 : 1}"/>`);
+for (const b of BRIQS) {
+  const { x, y, h } = b.box;
+  out.push(`<g opacity="${b.asleep ? STOPPED : 1}">${r(b.box, 3, b.fill)}
+    <text x="${x + 12}" y="${y + h / 2 + 13 * 0.36}" font-family="IBM Plex Mono" font-weight="500"
+      font-size="13" fill="${C.onBlock}">${b.label}</text></g>`);
+}
+for (const g of Object.values(AGENTS)) {
+  out.push(r(g.antenna, 2, C.brick, g.asleep ? 'opacity="0.35"' : ''));
+  out.push(r(g.head, 3, C.brick));
+  for (const e of g.eyes) {
+    const shut = g.asleep ? { x: e.x, y: e.y + e.h / 2 - 1.5, w: e.w, h: 3 } : e;
+    out.push(r(shut, 1.5, C.kiln));
+  }
+  if (g.asleep)
+    out.push(`<text x="${g.head.x + g.head.w - 6}" y="${g.antenna.y + 4}" font-family="IBM Plex Mono"
+      font-size="14" fill="${C.inkFaint}">z z</text>`);
+}
+out.push(`<text x="${TEXT.x}" y="${TEXT.y + 62}" font-family="Bricolage Grotesque" font-weight="700"
+  font-size="80" letter-spacing="-2" fill="${C.ink}">briqyard</text>`);
+out.push(`<text font-family="Instrument Sans" font-size="20" fill="${C.inkMuted}">
+  <tspan x="${TEXT.x + 3}" y="${TEXT.y + 108}">Open-source microVMs for sandboxes</tspan>
+  <tspan x="${TEXT.x + 3}" y="${TEXT.y + 136}">and services that sleep, wake and fork.</tspan></text>`);
+document.getElementById('art').innerHTML = out.join('');
+
+Promise.all([
+  document.fonts.load('700 80px "Bricolage Grotesque"'),
+  document.fonts.load('500 13px "IBM Plex Mono"'),
+  document.fonts.load('400 20px "Instrument Sans"'),
+]).then(() => document.fonts.ready).then(() => document.body.classList.add('ready'));
+</script>
+</body>
+</html>
