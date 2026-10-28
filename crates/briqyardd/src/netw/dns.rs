@@ -191,20 +191,20 @@ fn system_upstreams() -> Vec<String> {
 
 /// A guest's query, decoded whole by hickory-proto (ADR 0033): anything that does not parse,
 /// is not a query or asks nothing is dropped, never forwarded.
-fn parse_query(q: &[u8]) -> Option<Message> {
+pub fn parse_query(q: &[u8]) -> Option<Message> {
     let m = Message::from_vec(q).ok()?;
     (m.metadata.message_type == MessageType::Query && !m.queries.is_empty()).then_some(m)
 }
 
 /// The first question's name, lowercase, without the trailing dot.
-fn query_name(query: &Message) -> String {
+pub fn query_name(query: &Message) -> String {
     let name = query.queries[0].name().to_lowercase().to_ascii();
     name.trim_end_matches('.').to_string()
 }
 
 /// The answer to the first question: the address for A (and ANY) when the name is known,
 /// NOERROR with no record for another type of a known name, NXDOMAIN otherwise. TTL 5 s.
-fn build_answer(query: &Message, ip: Option<Ipv4Addr>) -> Option<Vec<u8>> {
+pub fn build_answer(query: &Message, ip: Option<Ipv4Addr>) -> Option<Vec<u8>> {
     let question = query.queries[0].clone();
     let mut r = Message::response(query.metadata.id, query.metadata.op_code);
     r.metadata.authoritative = true;

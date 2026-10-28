@@ -236,7 +236,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
     }
 }
 
-/// The longest request head read, and the most header lines in it: beyond either, 431.
 /// How long a client has to send its whole request head.
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -273,12 +272,13 @@ async fn read_head<S: AsyncRead + AsyncWrite + Unpin>(
     tokio::time::timeout(limit, read).await.ok().flatten()
 }
 
-const MAX_HEAD: usize = 64 << 10;
+/// The longest request head read, and the most header lines in it: beyond either, 431.
+pub const MAX_HEAD: usize = 64 << 10;
 const MAX_HEADERS: usize = 100;
 
 /// What the bytes read so far say about a request head, parsed by httparse (ADR 0033).
 #[derive(Debug, PartialEq)]
-enum Head {
+pub enum Head {
     /// The head is not complete yet.
     Partial,
     /// The head is complete and for this host: lowercase, without its port.
@@ -290,7 +290,7 @@ enum Head {
 const TOO_LARGE: &str = "431 Request Header Fields Too Large";
 const BAD_REQUEST: &str = "400 Bad Request";
 
-fn parse_head(buf: &[u8]) -> Head {
+pub fn parse_head(buf: &[u8]) -> Head {
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
     let mut req = httparse::Request::new(&mut headers);
     match req.parse(buf) {

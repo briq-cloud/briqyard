@@ -15,4 +15,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The fuzz targets run by hand on nightly (ADR 0033); this checks they still build.
+      - run: cargo check --manifest-path fuzz/Cargo.toml --locked
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
       - run: cargo build --release --workspace
