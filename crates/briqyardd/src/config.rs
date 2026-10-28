@@ -4,6 +4,7 @@ use crate::{fc, netw};
 use anyhow::{bail, Context, Result};
 use briqyard_api as api;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
@@ -40,8 +41,13 @@ pub struct Config {
     /// The briqyard-init binary copied into every root disk.
     pub init: PathBuf,
     pub storage: Storage,
-    /// Credentials for private registries, by host ("ghcr.io", "registry-1.docker.io").
+    /// Credentials for private registries, by registry as a reference names it ("ghcr.io",
+    /// "docker.io" for Docker Hub).
     pub registries: Vec<Registry>,
+    /// A pull-through mirror per registry (`docker.io: http://10.0.0.2:7440`, ADR 0036): an
+    /// image's content is pulled from it first and from the registry when it fails; a tag is
+    /// always resolved by the registry.
+    pub registry_mirrors: BTreeMap<String, String>,
     pub network: Network,
     /// The limits on every machine's internet traffic, unless the machine sets its own
     /// (ADR 0018).
@@ -385,6 +391,7 @@ impl Default for Config {
             init: "/usr/local/bin/briqyard-init".into(),
             storage: Storage::default(),
             registries: vec![],
+            registry_mirrors: BTreeMap::new(),
             network: Network::default(),
             egress_limits: EgressLimits::default(),
             disk_limits: DiskLimits::default(),
@@ -471,6 +478,7 @@ impl Config {
             bail!("storage.pool is required");
         }
         self.key_source()?;
+        self.mirrors()?;
         if self.root_disk_gb < 1 {
             bail!("root_disk_gb must be at least 1");
         }
@@ -584,6 +592,17 @@ impl Config {
             );
         }
         Ok(())
+    }
+
+    /// The registries' mirrors (`registry_mirrors`), each checked.
+    pub fn mirrors(&self) -> Result<Vec<crate::image::Mirror>> {
+        self.registry_mirrors
+            .iter()
+            .map(|(registry, url)| {
+                crate::image::Mirror::parse(registry, url)
+                    .with_context(|| format!("registry_mirrors.{registry}"))
+            })
+            .collect()
     }
 
     /// Whether the API is served over TLS: `api_tls`, unless `listen` is loopback.
@@ -757,6 +776,7 @@ mod tests {
             KeySource::File("/etc/briqyard/pool.key".into())
         );
         assert!(c.registries.is_empty());
+        assert!(c.registry_mirrors.is_empty());
         assert_eq!(c.network.range, "10.64.0.0/10");
         assert!(c.network.upstream_dns.is_empty());
         assert!(c.network.egress.is_empty());
@@ -907,6 +927,8 @@ registries:
   - host: ghcr.io
     username: bot
     password: pw
+registry_mirrors:
+  docker.io: http://10.0.0.2:7440
 network:
   range: 10.128.0.0/10
   upstream_dns: ["1.1.1.1", "9.9.9.9"]
@@ -967,6 +989,14 @@ console_max_mb: 16
         assert_eq!(c.registries[0].host, "ghcr.io");
         assert_eq!(c.registries[0].username, "bot");
         assert_eq!(c.registries[0].password, "pw");
+        assert_eq!(
+            c.mirrors().unwrap(),
+            [crate::image::Mirror {
+                registry: "docker.io".into(),
+                host: "10.0.0.2:7440".into(),
+                plain_http: true,
+            }]
+        );
         assert_eq!(c.network.range, "10.128.0.0/10");
         assert_eq!(c.network.upstream_dns, vec!["1.1.1.1", "9.9.9.9"]);
         assert_eq!(c.network.egress, "eth0");
@@ -1191,6 +1221,32 @@ console_max_mb: 16
         }
         // The jailer may stay empty (no jail) and is not checked for an absolute path here.
         load("jailer: \"\"\n").unwrap();
+
+        for (yaml, want) in [
+            (
+                "registry_mirrors:\n  docker.io: 10.0.0.2:7440\n",
+                "registry_mirrors.docker.io: \"10.0.0.2:7440\": want http:// or https://",
+            ),
+            (
+                "registry_mirrors:\n  docker.io: https://m.internal/docker\n",
+                "registry_mirrors.docker.io: \"https://m.internal/docker\": a mirror is a host and a port, with no path",
+            ),
+            (
+                "registry_mirrors:\n  https://docker.io: https://m.internal\n",
+                "registry_mirrors.https://docker.io: \"https://docker.io\" is not a registry name (docker.io, ghcr.io)",
+            ),
+        ] {
+            assert_eq!(format!("{:#}", load(yaml).unwrap_err()), want);
+        }
+        let m = load("registry_mirrors:\n  ghcr.io: https://m.internal:5000/\n").unwrap();
+        assert_eq!(
+            m.mirrors().unwrap()[0],
+            crate::image::Mirror {
+                registry: "ghcr.io".into(),
+                host: "m.internal:5000".into(),
+                plain_http: false,
+            }
+        );
     }
 
     #[test]
