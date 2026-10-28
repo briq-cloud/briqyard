@@ -462,6 +462,7 @@ dependencies = [
  "hex",
  "hickory-proto",
  "http",
+ "httparse",
  "libc",
  "nix 0.29.0",
  "oci-client",

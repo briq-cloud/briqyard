@@ -235,7 +235,9 @@ plus `apt-get purge docker.io` and the edge's files.
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, image layers
   (busybox's hard links, Debian's merged `/usr`), DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
-  sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress, a daemon crash,
+  sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress (two `Host` lines
+  refused, an absolute-form target routed by its authority and refused when `Host` names
+  another), a daemon crash,
   backups to a directory store and a restore, egress policies (`via` a gateway machine, `none`,
   back to `open`), a tenant gateway (a forward proxy its consumer's start boots, HTTPS through
   it and nothing around it, stopped by the sleeper, gone with the tenant), iron-proxy as a tenant
@@ -280,7 +282,7 @@ plus `apt-get purge docker.io` and the edge's files.
   marker of a file or the env in the stream or the record, while the same snapshot sent in
   clear shows it; a raw restore with the marker back and its disk on the pool's key; a backup
   in clear, as made before, restored), Firecracker 1.17 (256 MiB deleted on a volume and on a
-  root disk given back to the pool, exec after a bare pause and resume). 212 checks, 208
+  root disk given back to the pool, exec after a bare pause and resume). 215 checks, 211
   without host ports.
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
   calls pin the certificate as the CLI does), `BRIQYARD_INGRESS` (default the API's address,
