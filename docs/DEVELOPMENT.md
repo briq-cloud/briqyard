@@ -93,7 +93,7 @@ it out after.
 (ADR 0027): this build's binaries under a release's names in `/var/lib/briqyard-fleet/release`
 (`file://` for `--release`), and the fleet's SSH key (`/etc/briqyard/fleet_ssh_key`, made once)
 in root's `authorized_keys`, so the fleet runs the bootstrap script on its own VM over SSH. The
-version a build says is `0.1.0+<commit>` of the checkout it was built from (`git` in the VM
+version a build says is `<version>+<commit>` of the checkout it was built from (`git` in the VM
 reads the mount; uncommitted changes say their HEAD's commit).
 
 ### Two hosts on the Mac

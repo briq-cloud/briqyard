@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "hex",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-fleet"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "age",
  "anyhow",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-init"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "briqyard-api",
@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-objstore"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "briqyardd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",

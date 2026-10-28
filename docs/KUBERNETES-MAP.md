@@ -165,7 +165,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Control plane HA (etcd quorum) | ✗ one fleet process, one file | state the fleet can rebuild from the hosts | yard, later |
 | etcd backup | ✓ the registry written to the object store once a minute when it changed and before a key is served, encrypted with age to a key kept offline; `briqyard-fleet restore` (ADR 0032) | | |
 | Cluster provisioning | ✓ bootstrap script, provisioners, `host add`; the pool a mirror, the public interface closed to all but SSH (ADR 0028) | a first real order | yard |
-| Version skew, upgrades | ✓ every binary and the init say `0.1.0+<commit>`; the wire is additive, unknown fields and values ignored; the fleet first, a host never newer (ADR 0027) | the init travels in the root disk: old inits live on until an image change | yard |
+| Version skew, upgrades | ✓ every binary and the init say `<version>+<commit>`; the wire is additive, unknown fields and values ignored; the fleet first, a host never newer (ADR 0027) | the init travels in the root disk: old inits live on until an image change | yard |
 | Multi-cluster | ◐ regions on hosts, placement by region (ADR 0025) | a fleet per region, or one across | yard, later |
 
 ## Built since the map was written
