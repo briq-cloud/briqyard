@@ -76,15 +76,20 @@ struct AppState {
     restores: restores::Restores,
     /// Creates refused for want of room, for an external scaler (ADR 0042).
     refusals: signals::Refusals,
+    /// The registry file's writes take turns (ADR 0043); the digest of what the last one wrote.
+    written: Arc<tokio::sync::Mutex<Option<[u8; 32]>>>,
 }
 
 /// Writes a registry file, the fleet's alone (`0600`: it holds every host's token and pool
-/// key): a temp file made afresh, synced, renamed over the old one, the directory synced.
-fn write_registry(path: &std::path::Path, reg: &Registry) -> std::io::Result<()> {
+/// key): a temp file made afresh, synced, renamed over the old one, the directory synced. One
+/// writer at a time (`AppState::save`, or `restore` with the fleet stopped): the temp file's
+/// name is fixed.
+fn write_registry(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("json.tmp");
-    // A leftover keeps its own mode through `open`: made afresh, it is 0600.
+    // A leftover (a write cut short by a crash) keeps its own mode through `open`: made
+    // afresh, it is 0600.
     match std::fs::remove_file(&tmp) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
         _ => {}
@@ -94,7 +99,7 @@ fn write_registry(path: &std::path::Path, reg: &Registry) -> std::io::Result<()>
         .create_new(true)
         .mode(0o600)
         .open(&tmp)?;
-    f.write_all(&backup::encode(reg))?;
+    f.write_all(data)?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)?;
     // The rename itself reaches the disk with the directory.
@@ -126,15 +131,38 @@ impl AppState {
         Ok(c)
     }
 
-    /// Writes the registry. A failure is logged at `error` and returned: a request answers
-    /// 500 with it, a background task has nothing more to do with it.
-    fn save(&self) -> Result<()> {
-        let reg = self.reg.lock().unwrap().clone();
-        let written = write_registry(&self.state_path, &reg);
+    /// Writes the registry (ADR 0043). Writes take turns, and each encodes the registry when
+    /// its turn comes: what it writes holds every change made before it was called, so a
+    /// later write never lands an older registry. A turn that finds the registry as the last
+    /// write left it writes nothing. The turn is held until the file and its directory are
+    /// synced, even when the caller has gone. A failure is logged at `error` and returned.
+    async fn save(&self) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let mut turn = self.written.clone().lock_owned().await;
+        let data = backup::encode(&self.reg.lock().unwrap());
+        let digest: [u8; 32] = Sha256::digest(&data).into();
+        if *turn == Some(digest) {
+            return Ok(());
+        }
+        let path = self.state_path.clone();
+        let written = tokio::task::spawn_blocking(move || {
+            write_registry(&path, &data)?;
+            *turn = Some(digest);
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
         if let Err(e) = &written {
             tracing::error!(path = %self.state_path.display(), err = %e, "write the registry");
         }
         written.with_context(|| format!("write registry {}", self.state_path.display()))
+    }
+
+    /// Writes the registry after a host acted on a request: the host's answer is the truth
+    /// and is relayed whatever this write does. A failure is logged by `save`, and the next
+    /// write (a heartbeat's, within seconds) carries the change (ADR 0043).
+    async fn save_after_host(&self) {
+        let _ = self.save().await;
     }
 }
 
@@ -191,6 +219,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         started: Default::default(),
         pool_key: Default::default(),
         unknown: Default::default(),
+        holds: Vec::new(),
     }
 }
 
@@ -245,6 +274,7 @@ async fn run(args: Args) -> Result<()> {
         key_turn: Default::default(),
         restores: Default::default(),
         refusals: Default::default(),
+        written: Default::default(),
     });
     tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));
@@ -299,7 +329,8 @@ async fn restore(
     }
     let reg = b.fetch(from, &backup::identity(identity)?).await?;
     std::fs::create_dir_all(&cfg.state_dir)?;
-    write_registry(state_path, &reg).with_context(|| format!("write {}", state_path.display()))?;
+    write_registry(state_path, &backup::encode(&reg))
+        .with_context(|| format!("write {}", state_path.display()))?;
     print!(
         "{}",
         restored(&reg, &format!("{} {from}", b.describe()), state_path)
@@ -688,7 +719,7 @@ async fn host_key(
         (id, key, made)
     };
     if made {
-        if let Err(e) = st.save() {
+        if let Err(e) = st.save().await {
             // Never served, never kept: the next ask makes one again.
             if let Some(h) = st.reg.lock().unwrap().hosts.get_mut(&id) {
                 h.pool_key = Default::default();
@@ -721,10 +752,10 @@ async fn host_key(
     .into_response())
 }
 
-/// The pool key of a backup (ADR 0035), for the host the fleet forwarded a restore to, once
-/// per restore: the key of that id, a live host's or a forgotten one's. A raw stream opens
-/// only with the pool key of the host that sent it, so that is what is served. Never made
-/// here; another host's key is a `warn` line.
+/// The pool key of a backup (ADR 0035): the host's own at any ask, as `host_key` serves it
+/// (ADR 0045); another's, a live host's or a forgotten one's, for the host the fleet forwarded
+/// a restore to, once per restore. A raw stream opens only with the pool key of the host that
+/// sent it, so that is what is served. Never made here; another host's key is a `warn` line.
 fn backup_key(
     st: &AppState,
     req: &api::HostKeyRequest,
@@ -743,11 +774,13 @@ fn backup_key(
             format!("the fleet holds no pool key {key_id}: the backup was made on a host with a key file, or on a host forgotten before ADR 0035"),
         ));
     };
-    // The last check: a refusal above leaves the restore's ask to it.
-    let open = req
-        .restore
-        .as_ref()
-        .is_some_and(|rs| st.restores.take(&host, rs, std::time::Instant::now()));
+    // The last check: a refusal above leaves the restore's ask to it, and so does the host's
+    // own key.
+    let open = owner == host
+        || req
+            .restore
+            .as_ref()
+            .is_some_and(|rs| st.restores.take(&host, rs, std::time::Instant::now()));
     if !open {
         let what = req
             .restore
@@ -834,27 +867,28 @@ async fn register_host(
                 started: req.started,
                 pool_key: Default::default(),
                 unknown: Default::default(),
+                holds: Vec::new(),
             },
             now,
         );
     }
-    st.save().map_err(registry_error)?;
+    st.save().await.map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// Places nothing new on a host (Kubernetes's cordon); its machines go on.
 async fn drain_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
-    set_host_state(&st, &id, "draining", |_| true)
+    set_host_state(&st, &id, "draining", |_| true).await
 }
 
 /// Undoes a drain or a retire: the host takes new tenants again.
 async fn undrain_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
-    set_host_state(&st, &id, "ready", |s| matches!(s, "draining" | "retiring"))
+    set_host_state(&st, &id, "ready", |s| matches!(s, "draining" | "retiring")).await
 }
 
 /// Moves a host from a state `from` accepts to `to`; 409 from any other (an upgrade under way
 /// owns its host's state, ADR 0027).
-fn set_host_state(
+async fn set_host_state(
     st: &AppState,
     id: &str,
     to: &str,
@@ -874,7 +908,7 @@ fn set_host_state(
             None => return Err(err(StatusCode::NOT_FOUND, "not_found", "host not found")),
         }
     }
-    st.save().map_err(registry_error)?;
+    st.save().await.map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -898,7 +932,7 @@ async fn add_host(State(st): S, Json(req): Json<api::AddHostRequest>) -> Result<
         }
         reg.hosts.insert(h.id.clone(), h.clone());
     }
-    st.save().map_err(registry_error)?;
+    st.save().await.map_err(registry_error)?;
     tracing::warn!(
         host = h.id,
         ssh = h.ssh,
@@ -993,6 +1027,7 @@ fn new_added_host(
         started: Default::default(),
         pool_key: Default::default(),
         unknown: Default::default(),
+        holds: Vec::new(),
     })
 }
 
@@ -1021,9 +1056,9 @@ async fn retire_host(State(st): S, Path(id): Path<String>) -> Result<Response, R
     };
     let empty = host.machines == 0 && host.tenants.is_empty();
     if empty || host.state != "retiring" {
-        return Ok(Json(retired(&st, &host).map_err(registry_error)?).into_response());
+        return Ok(Json(retired(&st, &host).await.map_err(registry_error)?).into_response());
     }
-    st.save().map_err(registry_error)?;
+    st.save().await.map_err(registry_error)?;
     tracing::info!(
         host = id,
         machines = host.machines,
@@ -1033,10 +1068,10 @@ async fn retire_host(State(st): S, Path(id): Path<String>) -> Result<Response, R
 }
 
 /// Forgets a retired host: `retired` in the answer.
-fn retired(st: &AppState, h: &HostRec) -> Result<api::Host> {
+async fn retired(st: &AppState, h: &HostRec) -> Result<api::Host> {
     tracing::warn!(host = h.id, "host retired");
     st.reg.lock().unwrap().forget(&h.id);
-    st.save()?;
+    st.save().await?;
     let mut out = h.to_api();
     out.state = "retired".into();
     Ok(out)
@@ -1078,7 +1113,7 @@ async fn forget_host(
         }
         reg.forget(&id);
     }
-    st.save().map_err(registry_error)?;
+    st.save().await.map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1140,7 +1175,7 @@ async fn poll_static_hosts_once(st: &AppState) -> bool {
     }
     st.reg.lock().unwrap().sweep(&st.policy, Utc::now());
     // A background task: a failed write is logged by `save`, and the next round writes again.
-    let _ = st.save();
+    let _ = st.save().await;
     unseen
 }
 
@@ -1151,7 +1186,7 @@ async fn forget_retired(st: Arc<AppState>) {
         let retirable = st.reg.lock().unwrap().retirable();
         for h in retirable {
             // A failed write is logged by `save`; the next pass writes again.
-            let _ = retired(&st, &h);
+            let _ = retired(&st, &h).await;
         }
     }
 }
@@ -1411,6 +1446,35 @@ fn error_code(body: &[u8]) -> String {
         .unwrap_or_default()
 }
 
+/// A create's hold on its host (ADR 0044) while the request lasts: `made` once the host made
+/// the machine; dropped otherwise, the hold given back. A refusal, no answer and a caller that
+/// hung up (its handler dropped mid-forward) all end here.
+struct Held<'a> {
+    st: &'a AppState,
+    host: String,
+    id: u64,
+}
+
+impl Held<'_> {
+    fn made(mut self) {
+        self.st
+            .reg
+            .lock()
+            .unwrap()
+            .made(&self.host, self.id, Utc::now());
+        // Ids start at 1: nothing left to release.
+        self.id = 0;
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut reg) = self.st.reg.lock() {
+            reg.release(&self.host, self.id);
+        }
+    }
+}
+
 async fn create_machine(
     State(st): S,
     headers: HeaderMap,
@@ -1425,7 +1489,7 @@ async fn create_machine(
         disk_mb: disk_need(req.volume.as_ref().map(|v| v.size_gb)),
         what: "machine",
     };
-    let (host, first) = {
+    let (host, first, hold) = {
         let mut reg = st.reg.lock().unwrap();
         let first = !reg.tenants.contains_key(&req.tenant);
         let source = req
@@ -1438,25 +1502,29 @@ async fn create_machine(
             .or_else(|| reg.tenants.get(&req.tenant).cloned());
         refuse_outside(&reg, bound.as_deref(), &req.tenant, &req.region)?;
         refuse_under_pressure(&st, &reg, bound.as_deref(), &ask)?;
-        let chosen = match source {
-            Some(id) => {
-                reg.reserve(&id, ask.memory_mb, ask.disk_mb);
-                Some(id)
-            }
-            None => reg.place(
+        let chosen = source.or_else(|| {
+            reg.place(
                 &req.tenant,
                 &req.region,
                 ask.memory_mb,
                 ask.disk_mb,
                 &st.policy,
-            ),
+            )
+        });
+        let Some(host) = chosen.and_then(|id| reg.hosts.get(&id).cloned()) else {
+            return Err(no_room(&st, &reg, &ask));
         };
-        match chosen.and_then(|id| reg.hosts.get(&id).cloned()) {
-            Some(host) => (host, first),
-            None => return Err(no_room(&st, &reg, &ask)),
-        }
+        let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb);
+        (host, first, id)
     };
-    st.save().map_err(registry_error)?;
+    let hold = Held {
+        st: &st,
+        host: host.id.clone(),
+        id: hold,
+    };
+    // The pin is written before the host makes anything: a fleet restarted after the create
+    // still sends the tenant's next machine there.
+    st.save().await.map_err(registry_error)?;
     // A restore may ask for its backup's key while this forward lasts (ADR 0035).
     let restoring = req
         .restore
@@ -1468,6 +1536,7 @@ async fn create_machine(
     }
     let (parts, data) = read(resp).await;
     if parts.status.is_success() {
+        hold.made();
         if let Ok(m) = serde_json::from_slice::<api::Machine>(&data) {
             st.reg
                 .lock()
@@ -1475,13 +1544,15 @@ async fn create_machine(
                 .machines
                 .insert(m.id, host.id.clone());
         }
-        st.save().map_err(registry_error)?;
+        // The machine exists: its answer is the caller's, whatever this write does.
+        st.save_after_host().await;
         return Ok(Response::from_parts(
             parts,
             Body::from(with_host(data, &host.id)),
         ));
     }
-    first_refused(&st, &req.tenant, first, &data)?;
+    drop(hold);
+    first_refused(&st, &req.tenant, first, &data).await;
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
@@ -1592,12 +1663,11 @@ fn disk_need(volume_gb: Option<u32>) -> u64 {
 
 /// A host with no room for a tenant's first machine (or gateway): the pin the request made
 /// goes, so a retry is placed afresh. A later one keeps it: the tenant's network is there.
-fn first_refused(st: &AppState, tenant: &str, first: bool, answer: &[u8]) -> Result<(), Refusal> {
+async fn first_refused(st: &AppState, tenant: &str, first: bool, answer: &[u8]) {
     if first && error_code(answer) == "capacity" {
         st.reg.lock().unwrap().unpin(tenant);
-        st.save().map_err(registry_error)?;
+        st.save_after_host().await;
     }
-    Ok(())
 }
 
 /// Lists machines. A listing is the truth for whoever reads it (the control plane marks a
@@ -1688,16 +1758,11 @@ async fn list_endpoints(State(st): S, headers: HeaderMap) -> Response {
     Json(all).into_response()
 }
 
-/// The backups of the hosts' machines, destroyed ones' included (ADR 0023): with a tenant,
-/// its host's; else every host's, never partial.
+/// The backups of the hosts' machines, destroyed ones' included (ADR 0023): every host's, the
+/// query as it came, never partial. A tenant's too: a host it moved from still holds the
+/// backups of the machines destroyed there (ADR 0045).
 async fn all_backups(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
-    let hosts: Vec<HostRec> = {
-        let reg = st.reg.lock().unwrap();
-        match query_tenant(&uri).and_then(|t| reg.host_of_tenant(&t).cloned()) {
-            Some(h) => vec![h],
-            None => reg.listed(),
-        }
-    };
+    let hosts = st.reg.lock().unwrap().listed();
     let path = match uri.query() {
         Some(q) => format!("/v1/backups?{q}"),
         None => "/v1/backups".into(),
@@ -1953,7 +2018,7 @@ async fn delete_tenant(
     .await;
     if resp.status().is_success() {
         st.reg.lock().unwrap().unpin(&id);
-        st.save().map_err(registry_error)?;
+        st.save_after_host().await;
     }
     Ok(resp)
 }
@@ -2009,29 +2074,37 @@ async fn put_on_tenant(
         disk_mb: need_disk_mb,
         what,
     };
-    let (host, first) = {
+    let (host, first, hold) = {
         let mut reg = st.reg.lock().unwrap();
         let first = !reg.tenants.contains_key(id);
         let bound = reg.tenants.get(id).cloned();
         refuse_outside(&reg, bound.as_deref(), id, region)?;
         refuse_under_pressure(st, &reg, bound.as_deref(), &ask)?;
         let chosen = reg.place(id, region, need_mb, need_disk_mb, &st.policy);
-        match chosen.and_then(|h| reg.hosts.get(&h).cloned()) {
-            Some(host) => (host, first),
-            None => return Err(no_room(st, &reg, &ask)),
-        }
+        let Some(host) = chosen.and_then(|h| reg.hosts.get(&h).cloned()) else {
+            return Err(no_room(st, &reg, &ask));
+        };
+        let id = reg.hold(&host.id, need_mb, need_disk_mb);
+        (host, first, id)
     };
-    st.save().map_err(registry_error)?;
+    let hold = Held {
+        st,
+        host: host.id.clone(),
+        id: hold,
+    };
+    st.save().await.map_err(registry_error)?;
     let path = format!("/v1/tenants/{id}/{what}");
     let resp = forward(st, &host, Method::PUT, &path, headers, body).await;
     let (parts, data) = read(resp).await;
     if parts.status.is_success() {
+        hold.made();
         return Ok(Response::from_parts(
             parts,
             Body::from(with_host(data, &host.id)),
         ));
     }
-    first_refused(st, id, first, &data)?;
+    drop(hold);
+    first_refused(st, id, first, &data).await;
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
@@ -2095,7 +2168,7 @@ async fn delete_gateway(
 /// one stuck on a host that is full or gone.
 async fn unpin_tenant(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
     st.reg.lock().unwrap().unpin(&id);
-    st.save().map_err(registry_error)?;
+    st.save().await.map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -2189,6 +2262,48 @@ async fn list_backups(
     last
 }
 
+/// The host that holds the backups of a machine no host has (ADR 0045): the one whose
+/// `/v1/backups` lists one of it, of `tenant` when given. Every host is asked, a down one
+/// included, so a backup left on the host a tenant moved from is found; a host that cannot
+/// answer fails the search with its answer rather than letting it name another.
+async fn holder(
+    st: &AppState,
+    id: &str,
+    tenant: Option<&str>,
+) -> Result<Option<HostRec>, Box<Response>> {
+    let path = match tenant.filter(|t| api::valid_id(t)) {
+        Some(t) => format!("/v1/backups?tenant={t}"),
+        None => "/v1/backups".into(),
+    };
+    let hosts = st.reg.lock().unwrap().listed();
+    for h in hosts {
+        let resp = forward(st, &h, Method::GET, &path, &HeaderMap::new(), Bytes::new()).await;
+        if !resp.status().is_success() {
+            return Err(Box::new(resp));
+        }
+        let (_, data) = read(resp).await;
+        let backups: Vec<api::Backup> =
+            serde_json::from_slice(&data).map_err(|e| Box::new(unreadable(&h, e)))?;
+        if backups.iter().any(|b| b.machine_id == id) {
+            return Ok(Some(h));
+        }
+    }
+    Ok(None)
+}
+
+/// A host's memory and disk asked of it now, as its heartbeat would report them (ADR 0044).
+/// Not answering within five seconds is nothing: the heartbeat comes.
+async fn refresh(st: &AppState, host: &HostRec) {
+    let asked = Utc::now();
+    let status = get_json::<api::Status>(st, host, "/v1/status");
+    let within = std::time::Duration::from_secs(5);
+    if let Ok(Some(s)) = tokio::time::timeout(within, status).await {
+        if let Some(h) = st.reg.lock().unwrap().hosts.get_mut(&host.id) {
+            h.report(s.used, s.disk_free_mb, asked);
+        }
+    }
+}
+
 async fn by_machine(
     State(st): S,
     Path(params): Path<Vec<(String, String)>>,
@@ -2202,21 +2317,33 @@ async fn by_machine(
         .find(|(k, _)| k == "id")
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
-    // A destroyed machine (its backups' holder, ADR 0023) is found through its tenant.
+    // A destroyed machine is its backups alone (ADR 0023): reached on the host that holds
+    // them, which a moved tenant left (ADR 0045).
     let host = match locate(&st, Indexed::Machine, &id).await {
         Some(h) => h,
-        None => query_tenant(&uri)
-            .and_then(|t| st.reg.lock().unwrap().host_of_tenant(&t).cloned())
-            .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "machine not found"))?,
+        None if uri
+            .path()
+            .starts_with(&format!("/v1/machines/{id}/backups/")) =>
+        {
+            match holder(&st, &id, query_tenant(&uri).as_deref()).await {
+                Ok(Some(h)) => h,
+                Ok(None) => {
+                    return Err(err(StatusCode::NOT_FOUND, "not_found", "machine not found"))
+                }
+                Err(answer) => return Ok(*answer),
+            }
+        }
+        None => return Err(err(StatusCode::NOT_FOUND, "not_found", "machine not found")),
     };
     let path = uri
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_default();
+    // What the call is, by its path alone: a query (`?tenant=`) changes nothing of it.
     let own = format!("/v1/machines/{id}");
-    let is_delete = method == Method::DELETE && path == own;
-    let plain_get = method == Method::GET && path == own;
-    let adds_endpoint = method == Method::POST && path == format!("{own}/endpoints");
+    let is_delete = method == Method::DELETE && uri.path() == own;
+    let plain_get = method == Method::GET && uri.path() == own;
+    let adds_endpoint = method == Method::POST && uri.path() == format!("{own}/endpoints");
     // A logs follow (ADR 0025) is streamed through, as a watch is.
     let follows = method == Method::GET
         && uri.path() == format!("{own}/logs")
@@ -2232,7 +2359,9 @@ async fn by_machine(
     }
     if is_delete {
         st.reg.lock().unwrap().machines.remove(&id);
-        st.save().map_err(registry_error)?;
+        st.save_after_host().await;
+        // What the machine held is free now, not at the host's next heartbeat (ADR 0044).
+        refresh(&st, &host).await;
     }
     if plain_get {
         let (parts, data) = read(resp).await;
@@ -2249,7 +2378,7 @@ async fn by_machine(
                 .unwrap()
                 .endpoints
                 .insert(e.id, host.id.clone());
-            st.save().map_err(registry_error)?;
+            st.save_after_host().await;
         }
         return Ok(Response::from_parts(parts, Body::from(data)));
     }
@@ -2279,7 +2408,7 @@ async fn by_endpoint(
     let resp = forward(&st, &host, method, &path, &headers, body).await;
     if is_delete && resp.status().is_success() {
         st.reg.lock().unwrap().endpoints.remove(&id);
-        st.save().map_err(registry_error)?;
+        st.save_after_host().await;
     }
     Ok(resp)
 }

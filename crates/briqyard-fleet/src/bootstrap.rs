@@ -79,32 +79,33 @@ pub async fn run(st: Arc<AppState>) {
                 Ok(note) => api_fingerprint(&st, &ip).await.map(|fp| (note, fp)),
                 Err(e) => Err(e),
             };
-            let mut reg = st.reg.lock().unwrap();
-            if let Some(r) = reg.hosts.get_mut(&h.id) {
-                match outcome {
-                    Ok((note, fingerprint)) => {
-                        bootstrapped(r, note, fingerprint);
-                        tracing::info!(
-                            host = h.id,
-                            ip,
-                            note = r.note,
-                            "host bootstrapped; waiting for its heartbeat"
-                        );
-                    }
-                    Err(e) => {
-                        r.bootstrap_attempts += 1;
-                        r.note = format!("bootstrap attempt {}: {e}", r.bootstrap_attempts);
-                        if r.bootstrap_attempts >= b.max_attempts {
-                            r.state = "failed".into();
-                            tracing::error!(host = h.id, ip, attempts = r.bootstrap_attempts, err = %e, "bootstrap gave up");
-                        } else {
-                            tracing::warn!(host = h.id, ip, attempt = r.bootstrap_attempts, err = %e, "bootstrap");
+            {
+                let mut reg = st.reg.lock().unwrap();
+                if let Some(r) = reg.hosts.get_mut(&h.id) {
+                    match outcome {
+                        Ok((note, fingerprint)) => {
+                            bootstrapped(r, note, fingerprint);
+                            tracing::info!(
+                                host = h.id,
+                                ip,
+                                note = r.note,
+                                "host bootstrapped; waiting for its heartbeat"
+                            );
+                        }
+                        Err(e) => {
+                            r.bootstrap_attempts += 1;
+                            r.note = format!("bootstrap attempt {}: {e}", r.bootstrap_attempts);
+                            if r.bootstrap_attempts >= b.max_attempts {
+                                r.state = "failed".into();
+                                tracing::error!(host = h.id, ip, attempts = r.bootstrap_attempts, err = %e, "bootstrap gave up");
+                            } else {
+                                tracing::warn!(host = h.id, ip, attempt = r.bootstrap_attempts, err = %e, "bootstrap");
+                            }
                         }
                     }
                 }
             }
-            drop(reg);
-            let _ = st.save();
+            let _ = st.save().await;
         }
     }
 }
