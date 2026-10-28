@@ -114,7 +114,8 @@ impl Client {
     }
 
     /// `cache` is "Unsafe" (no flush) or "Writeback" (a guest flush is a host fsync); `rate`
-    /// limits what the guest does on it.
+    /// limits what the guest does on it. A writable drive takes the guest's discards (v1.17,
+    /// the default `Sync` engine): the blocks a guest frees go back to the pool (ADR 0037).
     pub async fn drive(
         &self,
         id: &str,
@@ -125,6 +126,9 @@ impl Client {
         rate: Option<&DiskRate>,
     ) -> Result<()> {
         let mut d = json!({"drive_id": id, "path_on_host": path, "is_root_device": root, "is_read_only": read_only, "cache_type": cache});
+        if !read_only {
+            d["discard"] = json!(true);
+        }
         if let Some(r) = rate {
             d["rate_limiter"] = r.rate_limiter();
         }
@@ -175,11 +179,13 @@ impl Client {
             .map(|_| ())
     }
 
-    /// A full snapshot (VM state and memory) of a paused machine.
-    pub async fn snapshot_create(&self, state: &Path, mem: &Path) -> Result<()> {
+    /// A full snapshot (VM state and memory) of a paused machine. `sync`: the files are
+    /// fsynced before the call returns (`sync_snapshot_files`, v1.17); otherwise they are in
+    /// the page cache only, and the caller syncs them before anything names them (ADR 0037).
+    pub async fn snapshot_create(&self, state: &Path, mem: &Path, sync: bool) -> Result<()> {
         self.put(
             "/snapshot/create",
-            &json!({"snapshot_type": "Full", "snapshot_path": state, "mem_file_path": mem}),
+            &json!({"snapshot_type": "Full", "snapshot_path": state, "mem_file_path": mem, "sync_snapshot_files": sync}),
         )
         .await
     }
@@ -760,8 +766,10 @@ pub trait Vmm: Send + Sync {
     async fn disk_rate(&self, vm: &Vm, rate: &DiskRate, volume: bool) -> Result<()>;
 
     /// Pauses the machine and writes its memory and state next to its sockets, for the
-    /// next boot to resume. An error means the VMM refused and the machine runs on.
-    async fn snapshot(&self, vm: &Vm) -> Result<()>;
+    /// next boot to resume. `durable`: the files are on disk when it returns (a suspend);
+    /// otherwise the caller syncs them, after resuming the machine. An error means the VMM
+    /// refused and the machine runs on.
+    async fn snapshot(&self, vm: &Vm, durable: bool) -> Result<()>;
 
     /// Lets a machine `snapshot` paused run on.
     async fn resume(&self, vm: &Vm) -> Result<()>;
@@ -994,11 +1002,11 @@ impl Vmm for Firecracker {
         Ok(())
     }
 
-    async fn snapshot(&self, vm: &Vm) -> Result<()> {
+    async fn snapshot(&self, vm: &Vm, durable: bool) -> Result<()> {
         let c = Client::new(&vm.api);
         c.pause().await.context("pause")?;
         if let Err(err) = c
-            .snapshot_create(&vm.inside("snap.state"), &vm.inside("snap.mem"))
+            .snapshot_create(&vm.inside("snap.state"), &vm.inside("snap.mem"), durable)
             .await
         {
             let _ = c.resume().await;
@@ -1284,7 +1292,7 @@ mod tests {
     #[tokio::test]
     async fn every_call_has_its_path_and_body() {
         let (_dir, path) = socket();
-        let server = serve(&path, vec![NO_CONTENT; 12]);
+        let server = serve(&path, vec![NO_CONTENT; 13]);
         let c = Client::new(&path);
         c.boot_source(Path::new("/vmlinux"), "console=ttyS0")
             .await
@@ -1299,7 +1307,7 @@ mod tests {
         c.start().await.unwrap();
         c.pause().await.unwrap();
         c.resume().await.unwrap();
-        c.snapshot_create(Path::new("/snap.state"), Path::new("/snap.mem"))
+        c.snapshot_create(Path::new("/snap.state"), Path::new("/snap.mem"), false)
             .await
             .unwrap();
         c.snapshot_load(
@@ -1327,6 +1335,16 @@ mod tests {
         .unwrap();
         c.drive_rate("data", &DiskRate::default()).await.unwrap();
         c.metrics(Path::new("/metrics.fifo")).await.unwrap();
+        c.drive(
+            "config",
+            Path::new("/config.tar"),
+            false,
+            true,
+            "Unsafe",
+            None,
+        )
+        .await
+        .unwrap();
         let seen = server.await.unwrap();
         let first = |i: usize| seen[i].lines().next().unwrap().to_string();
         assert_eq!(first(0), "PUT /boot-source HTTP/1.1");
@@ -1337,7 +1355,7 @@ mod tests {
         assert_eq!(first(1), "PUT /drives/rootfs HTTP/1.1");
         assert_eq!(
             body(&seen[1]),
-            serde_json::json!({"drive_id": "rootfs", "path_on_host": "/root", "is_root_device": true, "is_read_only": false, "cache_type": "Writeback"})
+            serde_json::json!({"drive_id": "rootfs", "path_on_host": "/root", "is_root_device": true, "is_read_only": false, "cache_type": "Writeback", "discard": true})
         );
         assert_eq!(first(2), "PUT /network-interfaces/eth0 HTTP/1.1");
         assert_eq!(
@@ -1360,6 +1378,7 @@ mod tests {
         assert_eq!(body(&seen[6]), serde_json::json!({"state": "Resumed"}));
         assert_eq!(first(7), "PUT /snapshot/create HTTP/1.1");
         assert_eq!(body(&seen[7])["snapshot_type"], "Full");
+        assert_eq!(body(&seen[7])["sync_snapshot_files"], false);
         assert_eq!(first(8), "PUT /snapshot/load HTTP/1.1");
         let load = body(&seen[8]);
         assert_eq!(load["resume_vm"], true);
@@ -1387,6 +1406,12 @@ mod tests {
         assert_eq!(
             body(&seen[11]),
             serde_json::json!({"metrics_path": "/metrics.fifo"})
+        );
+        // A writable drive takes discards (ADR 0037); a read-only one cannot.
+        assert_eq!(body(&seen[9])["discard"], true);
+        assert_eq!(
+            body(&seen[12]),
+            serde_json::json!({"drive_id": "config", "path_on_host": "/config.tar", "is_root_device": false, "is_read_only": true, "cache_type": "Unsafe"})
         );
     }
 

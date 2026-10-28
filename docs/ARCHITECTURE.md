@@ -110,7 +110,9 @@ over files. Hosts run without swap, and a Firecracker never dumps core.
 The root disk outlives restarts and stops. Boot files are rewritten at every cold
 start from the config drive, so an edit inside the machine lasts until then. The data volume is
 attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches the host's disk:
-a database on it is as safe as the host's drive. A fork is a clone of a snapshot of both disks,
+a database on it is as safe as the host's drive. Both disks the guest writes take its discards,
+and both are mounted with `discard` (the root by the kernel, the volume by the init): what a guest
+deletes goes back to the pool, unless a snapshot still holds it (ADR 0037). A fork is a clone of a snapshot of both disks,
 taken while the source runs (crash-consistent for the data volume). That snapshot (`@fork-<id>`
 on the source) pins every block the source has since rewritten, so it goes with the last machine
 cloned from it.
@@ -128,7 +130,7 @@ ancestor of what it holds. The disk it replaced is retired: it keeps the snapsho
 one restored and whatever clones them (a fork), and `tidy` (after a restore, a deletion, a fork's
 destroy, a new root disk, the daemon's start) removes it once neither is left, with any snapshot
 nothing names or clones. `memory: true` also keeps a running machine's memory (paused, written by
-Firecracker, the disks flushed and snapshotted, resumed): a restore of it resumes the processes
+Firecracker, the disks flushed and snapshotted, resumed, then the files synced, ADR 0037): a restore of it resumes the processes
 where they were, while the machine's spec is the one it was taken with. A restore writes its
 intent first; one cut short is finished by the next restore, start or daemon start. A new image's
 root disk (ADR 0024) is the same swap, from the image's `@base`.

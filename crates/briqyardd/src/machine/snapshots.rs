@@ -239,9 +239,12 @@ impl Manager {
         for f in &written {
             let _ = std::fs::remove_file(f);
         }
+        // Unsynced: the machine is paused while Firecracker writes, and the sync is the
+        // longest part (ADR 0037). The files are synced below, after the resume and before the
+        // record names the snapshot: a crash before that leaves files nothing names.
         self.inner
             .vmm
-            .snapshot(&live)
+            .snapshot(&live, false)
             .await
             .context("memory snapshot")?;
         let disks = async {
@@ -262,8 +265,14 @@ impl Manager {
             for (from, to) in written.iter().zip(self.memory_files(r, snap)) {
                 if from.exists() {
                     std::fs::rename(from, &to).context("keep the memory snapshot")?;
+                    std::fs::File::open(&to)
+                        .and_then(|f| f.sync_all())
+                        .context("sync the memory snapshot")?;
                 }
             }
+            std::fs::File::open(&dir)
+                .and_then(|d| d.sync_all())
+                .context("sync the memory snapshot directory")?;
             anyhow::Ok(())
         }
         .await;
@@ -1145,7 +1154,11 @@ mod tests {
         assert!(s.memory);
         // Paused for the snapshot, then running on: the same process.
         let calls = h.host_calls();
-        assert_eq!(calls, [format!("snapshot {pid}"), format!("resume {pid}")]);
+        // Unsynced while paused; the files synced by the daemon after the resume.
+        assert_eq!(
+            calls,
+            [format!("snapshot {pid} unsynced"), format!("resume {pid}")]
+        );
         assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
         let rec = h.stored(&m.id).unwrap();
         let mem = h.m.memory_files(&rec, &s.id)[1].clone();
