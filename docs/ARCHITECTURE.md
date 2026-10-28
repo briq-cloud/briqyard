@@ -144,9 +144,10 @@ through a pipe in the jail, a line a minute: disk bytes and throttled requests p
 
 The root disk is not mounted by the host, ever: the host writes nothing into guest filesystems.
 Image extraction happens once per image into a directory the host controls: layers in manifest
-order, whiteouts applied, every path resolved inside the directory (a symlink in a layer never
-leads outside, and the last component is never followed, so a rewritten link replaces the link
-rather than its target), devices skipped; then `mkfs.ext4 -d` builds the disk.
+order, whiteouts applied, every path resolved inside the directory by the kernel (`openat2` with
+`RESOLVE_IN_ROOT` from the directory held open, then `*at` writes, ADR 0039: a symlink in a layer
+never leads outside, and the last component is never followed, so a rewritten link replaces the
+link rather than its target), devices skipped; then `mkfs.ext4 -d` builds the disk.
 
 A tag is resolved by its registry (a `HEAD`, remembered 10 minutes, ADR 0009); the content is
 then pulled by that digest, from the registry's mirror first when `registry_mirrors` names one
