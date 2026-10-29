@@ -4550,7 +4550,7 @@ impl Manager {
             .execs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let e = self.own_entry(id)?;
-        // In use from the call (ADR 0052): the sleeper leaves a machine it wakes for this.
+        // In use from the call (ADR 0053): the sleeper leaves a machine it wakes for this.
         let in_use = InUse::new(e.clone());
         let sock = self.running_vsock(id, wake).await?;
         // An init older than sessions takes the request as a plain exec, its input and terminal
@@ -4848,7 +4848,7 @@ impl Manager {
         Ok(())
     }
 
-    /// Holds the machine in use for a connection the ingress is delivering (ADR 0052): from
+    /// Holds the machine in use for a connection the ingress is delivering (ADR 0053): from
     /// its arrival until it reaches the machine's port, through a wake and the program's start.
     /// The sleeper leaves it running meanwhile, and its last use is the delivery.
     pub fn in_use(&self, id: &str) -> Result<InUse, MError> {

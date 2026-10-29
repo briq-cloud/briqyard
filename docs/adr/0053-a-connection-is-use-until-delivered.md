@@ -1,4 +1,4 @@
-# ADR 0052: A connection is use until it reaches the program
+# ADR 0053: A connection is use until it reaches the program
 
 Date: 2026-10-29 · Status: accepted; amends ADR 0005 (what use is)
 

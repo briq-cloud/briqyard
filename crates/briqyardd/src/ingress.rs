@@ -129,7 +129,7 @@ impl Ingress {
 
     /// Connects to the machine's port, waking it, waiting for it to be ready (ADR 0022) and
     /// for the port to listen, all within the wake timeout. The machine is in use while the
-    /// connection waits (ADR 0052), so it cannot go back to sleep under it; one that stops
+    /// connection waits (ADR 0053), so it cannot go back to sleep under it; one that stops
     /// meanwhile (a stop, an exit) ends the wait.
     pub(crate) async fn dial(&self, ep: &EndpointRec) -> Result<TcpStream> {
         let _waiting = self.mgr.in_use(&ep.machine_id)?;
