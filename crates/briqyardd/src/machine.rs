@@ -2503,6 +2503,9 @@ impl Manager {
                 let r = e.rec.lock().unwrap();
                 let m = e.meter.lock().unwrap();
                 *host.by_state.entry(r.state.clone()).or_default() += 1;
+                if r.state == state::STOPPED {
+                    *host.stopped.entry(r.stopped_reason.clone()).or_default() += 1;
+                }
                 host.suspended += r.suspended as usize;
                 metrics::Machine {
                     id: r.id.clone(),
@@ -10733,6 +10736,45 @@ mod tests {
             assert_eq!(e.code, "invalid", "{q}");
             assert!(e.error.contains(why), "{q}: {}", e.error);
         }
+    }
+
+    #[tokio::test]
+    async fn metrics_open_to_the_metrics_token_or_the_apis_and_nothing_else_to_the_first() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        let st = Arc::new(crate::api::AppState {
+            mgr: h.m.clone(),
+            token: "api".into(),
+            metrics_token: "scrape".into(),
+            loopback: false,
+            openapi: "",
+            tls_fingerprint: String::new(),
+        });
+        let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", ln.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(ln, crate::api::router(st)).await.unwrap() });
+        let client = reqwest::Client::new();
+        let get = |path: &str, token: &str| {
+            let mut r = client.get(format!("{base}{path}"));
+            if !token.is_empty() {
+                r = r.bearer_auth(token);
+            }
+            r.send()
+        };
+        // The fleet relays a host's metrics with the API token it holds (ADR 0054).
+        for token in ["scrape", "api"] {
+            let r = get("/metrics", token).await.unwrap();
+            assert_eq!(r.status(), 200, "{token}");
+            assert!(r.text().await.unwrap().contains("briqyard_machines_total"));
+        }
+        for token in ["", "other"] {
+            assert_eq!(
+                get("/metrics", token).await.unwrap().status(),
+                401,
+                "{token:?}"
+            );
+        }
+        assert_eq!(get("/v1/status", "scrape").await.unwrap().status(), 401);
+        assert_eq!(get("/v1/status", "api").await.unwrap().status(), 200);
     }
 
     // --- events and versions (ADR 0019) ---

@@ -68,7 +68,7 @@ pub fn regions(reg: &Registry, policy: &Policy, refusals: &Refusals) -> Vec<Regi
     out.into_values().collect()
 }
 
-/// The fleet's `/metrics`: hosts by state, then each region's room and refusals. A region a
+/// The fleet's `/metrics`: hosts by state and each host's, then each region's room and refusals. A region a
 /// host is in has every series, zeros included, so a rate is defined from the first scrape; a
 /// region with refusals only has the counter alone.
 pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
@@ -88,6 +88,29 @@ pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
         "gauge",
         "Hosts in the registry, by state.",
         states,
+    );
+    // One series per host, its state now (kube-state-metrics' node shape): a scrape target's
+    // labels stay what does not change, so a drain never starts a host's series over.
+    let mut each: Vec<_> = reg.hosts.values().collect();
+    each.sort_by(|a, b| a.id.cmp(&b.id));
+    let each = each
+        .into_iter()
+        .map(|h| {
+            let labels = format!(
+                "host=\"{}\",region=\"{}\",state=\"{}\"",
+                label_value(&h.id),
+                label_value(&h.region),
+                label_value(&h.state)
+            );
+            (labels, "1".to_string())
+        })
+        .collect();
+    family(
+        o,
+        "briqyard_fleet_host_state",
+        "gauge",
+        "1 for the state each host is in: one series per host.",
+        each,
     );
     let per_resource = |pick: fn(&RegionRoom) -> Option<Room>| {
         regions

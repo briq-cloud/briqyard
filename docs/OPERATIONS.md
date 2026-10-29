@@ -95,7 +95,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `listen` | `127.0.0.1:7420` | The API. A public address is refused without `ingress.allowed_clients` or `ingress.allow_public` (ADR 0012). TLS unless loopback or `api_tls: false`; `/metrics` and `/healthz` too |
 | `api_tls` | `true` | TLS on a non-loopback `listen`, with the daemon's own certificate (`<data_dir>/api-cert.pem`, made once, ADR 0020). `false`: plain HTTP on any address |
 | `token` | none | Required as `Authorization: Bearer` on every request when set |
-| `metrics_token` | none | A token of its own for `/metrics`, so a scraper never holds the API's. On a loopback `listen`, `/metrics` and `/v1/openapi.yaml` need no token at all |
+| `metrics_token` | none | A token of its own for `/metrics`, so a scraper never holds the API's (the API's opens it too: the fleet relays with it, ADR 0054). On a loopback `listen`, `/metrics` and `/v1/openapi.yaml` need no token at all |
 | `data_dir` | `/var/lib/briqyard` | State (`state/`), run files (`run/`), image metadata (`images/`), jails (`jail/`). All of it `0700`, root's: records and config drives hold tenant secrets |
 | `firecracker`, `jailer`, `kernel`, `init` | `/usr/local/bin/...`, `/var/lib/briqyard/vmlinux` | The binaries and the guest kernel. No `jailer`: Firecracker runs as root (development only) |
 | `jail_dir`, `jail_uid_base` | `<data_dir>/jail`, `100000` | Where chroots and memory snapshots go: the daemon mounts `<pool>/jail` there, so they land on the pool, not on `/` (ADR 0014). Each machine gets a uid of its own from this base |
@@ -356,6 +356,7 @@ snapshot, or is whole.
   | Series | Labels | What |
   |---|---|---|
   | `briqyard_machines`, `_total`, `_suspended` | `state` | machines on the host |
+  | `briqyard_machines_stopped` | `reason="user\|idle\|exit\|host"` | stopped machines by why; `idle` is asleep |
   | `briqyard_memory_mb`, `briqyard_vcpus` | `kind="used\|capacity"` | committed to running machines, handed out |
   | `briqyard_pool_bytes`, `briqyard_disk_free_mb` | `kind="size\|used\|free"` | the pool |
   | `briqyard_host_condition` | `condition` | 1 while true |
@@ -581,8 +582,9 @@ new host fixes both. `pressure`: the tenant's own host (or a fork's source's) is
 condition; a new host does not help, that host must be freed (or the tenant moved, below). A
 region no host is in counts as `region="other"`; a create that asked for none, as `region=""`.
 Those two carry `briqyard_fleet_unschedulable_total` only (and `""` the room too when a host
-has no region): no host, no room. Counters start at 0 when the fleet starts. The token: `metrics_token` in the fleet's config
-when set (then only it), else the API's; none on a loopback `listen` with `tls` unset.
+has no region): no host, no room. Counters start at 0 when the fleet starts. The token:
+`metrics_token` in the fleet's config, or the API's; none on a loopback `listen` with `tls`
+unset. `briqyard_fleet_host_state{host, region, state}` is 1 for each host's state.
 
 `GET /v1/status` has the same per region (`regions`: `free`, `largest_slot`,
 `unschedulable`; no `free` or `largest_slot` where no host is), and `briqyard host ls` prints
@@ -590,18 +592,9 @@ them under the hosts (`-` there). Each refusal is a `warn`
 line `unschedulable` with `resource`, `region`, `tenant`, `host` (the tenant's), `memory_mb`,
 `disk_mb` (asked) and `largest_memory_mb`, `largest_disk_mb` (the region's).
 
-```yaml
-groups:
-  - name: briqyard-fleet
-    rules:
-      - alert: FleetOutOfRoom          # creates refused: add a host in the region
-        expr: increase(briqyard_fleet_unschedulable_total{resource=~"memory|disk"}[5m]) > 0
-      - alert: FleetHostUnderPressure  # a tenant's host takes nothing new: free it
-        expr: increase(briqyard_fleet_unschedulable_total{resource="pressure"}[5m]) > 0
-      - alert: FleetSlotsSmall         # the largest size you offer no longer fits (16 GB here)
-        expr: briqyard_fleet_largest_slot_mb{resource="memory"} < 16384
-        for: 10m
-```
+The alerts to watch them are in the monitoring stack (below): creates refused for memory or
+disk (add a host in the region), for pressure (free the tenant's host), a largest slot under the
+largest size you offer.
 
 ### Adding and removing hosts
 
@@ -678,6 +671,81 @@ the host, for a host that is down for good or a pin left on a full host. A tenan
 while it still has machines on a host is pinned back there by the host's next heartbeat, and a
 machine created in between lands on another host, where it cannot reach the others: unpin
 once the tenant has nothing left on the host, or mean to abandon what is there.
+
+## Monitoring (ADR 0054)
+
+Optional: Prometheus and Grafana on the fleet's server, both on loopback, Grafana served by
+your reverse proxy. Prometheus asks the fleet for its targets (`GET /v1/metrics/targets`: the
+fleet's `/metrics` and every host that may run a daemon) and scrapes each host through the
+fleet (`GET /v1/hosts/{id}/metrics`, over the host's pinned TLS with its token). Hosts added or
+retired come and go within 30 s; nothing to edit.
+
+```bash
+ssh root@<public ip> mkdir -p /root/briqyard && scp -r hack root@<public ip>:/root/briqyard/   # the script, hack/monitoring
+ssh root@<public ip>
+install -m 0600 /dev/null /root/grafana-password && nano /root/grafana-password   # one line
+GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitoring.sh < /root/grafana-password
+rm /root/grafana-password
+```
+
+| Setting | Default | |
+|---|---|---|
+| `FLEET_URL` | `http://127.0.0.1:7430` | the fleet as Prometheus reaches it; the targets are at that address |
+| `FLEET_TOKEN_FILE` | `metrics_token`, else `token`, from `/etc/briqyard/fleet.yaml` | a `0600` file with the token Prometheus presents (kept in `/etc/briqyard-monitoring/fleet-token`, `0600`) |
+| `RETENTION` | `90d` | how long Prometheus keeps samples (`/var/lib/briqyard-monitoring/prometheus`; about 20 GB for 10 hosts of 200 machines) |
+| `GRAFANA_URL` | `http://127.0.0.1:3000` | where the proxy serves Grafana (its `root_url`; `https://` makes its cookies secure) |
+| `GRAFANA_PASSWORD_FILE` | stdin | the admin password, needed the first time; given again, it is changed |
+| `PROMETHEUS_LISTEN`, `GRAFANA_LISTEN` | `127.0.0.1:9090`, `127.0.0.1:3000` | loopback only |
+| `LARGEST_SLOT_MB` | `16384` | the alert when a region's largest slot is under it: the largest size you offer |
+
+It takes about 1.5 GB of disk and 700 MB of memory with a few hosts: Grafana 600 MB, Prometheus
+70 MB, growing with series (about 12 per machine). On a server that also runs machines, add the
+memory to `capacity.reserved_memory_mb`.
+
+Grafana, signed in as `admin`: the `briqyard` folder, a fleet overview (hosts by state,
+machines running, asleep and stopped, room per region, events), a host (its machines, memory
+and CPU against capacity, the pool, disks, network, boot times, restarts) and machines and
+tenants (the busiest, each machine's series, crash loops, egress drops, use per tenant). No
+anonymous access, no sign-up; the dashboards are the repository's (`hack/monitoring/dashboards`),
+read-only in Grafana. Point the reverse proxy at `GRAFANA_LISTEN` only after the first run: Grafana
+starts with its default `admin` password, which the script replaces seconds later, on loopback.
+
+**Alerts to Slack**: a webhook in `/etc/briqyard-monitoring/alerting.env` (root's, `0600`,
+written with an editor), then the script again:
+
+```bash
+install -m 0600 /dev/null /etc/briqyard-monitoring/alerting.env && nano /etc/briqyard-monitoring/alerting.env  # SLACK_WEBHOOK_URL=https://hooks.slack.com/services/…
+GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitoring.sh
+```
+
+| Alert | When |
+|---|---|
+| Not answering | a target's `up == 0` for 2 minutes: a host down, or the fleet itself |
+| Host condition | a host condition true for a minute (`memory_pressure`, `disk_pressure`…) |
+| Pool over 80 % | for 5 minutes |
+| Machine in a crash loop | restarted 3 times in 10 minutes by its policy |
+| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|disk"}` grew: add a host in the region |
+| Creates refused: host under pressure | `{resource="pressure"}` grew: free the tenant's host |
+| Largest slot too small | a region's largest memory slot under `LARGEST_SLOT_MB` for 10 minutes |
+
+**The proxy**, beside the fleet's site (step 6 of First OVH host), with a DNS record for the
+name:
+
+```
+grafana.example.com {
+	reverse_proxy 127.0.0.1:3000
+}
+```
+
+**Upgrade**: a release of briqyard that pins newer Prometheus or Grafana versions, or changes
+the dashboards: the script again, from that release's `hack/`. It installs what changed and
+restarts only what needs it; samples, the password and Grafana's database stay. Give it the
+same settings each time: they are read from the environment, never remembered. **Check**:
+`PROMETHEUS_URL=http://127.0.0.1:9090 BRIQYARD_TOKEN=… bash hack/monitoring-check.sh` (with
+`GRAFANA_URL=http://127.0.0.1:3000 GRAFANA_PASSWORD_FILE=…`, every panel's queries).
+**Undo**: `systemctl disable --now briqyard-grafana briqyard-prometheus`, then
+`rm -rf /opt/briqyard-monitoring /etc/briqyard-monitoring /var/lib/briqyard-monitoring
+/etc/systemd/system/briqyard-{grafana,prometheus}.service` and `userdel` both users.
 
 ## First OVH host
 

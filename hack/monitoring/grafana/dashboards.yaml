@@ -1,0 +1,13 @@
+# The briqyard dashboards (hack/monitoring/dashboards), in a folder of their own. Changed only
+# from the repository: a re-run of hack/install-monitoring.sh writes them again.
+apiVersion: 1
+providers:
+  - name: briqyard
+    folder: briqyard
+    folderUid: briqyard
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/briqyard-monitoring/dashboards

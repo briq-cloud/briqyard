@@ -410,6 +410,13 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   sealed (no key, no token in it), a restore refused over a registry, the registry lost and
   restored `0600` with the same key for fc2, then fc2's pool locked and fc2 back with the key
   of the restored registry; the config and the registry put back. 10 checks.
+- `hack/monitoring-check.sh` (in fc, as root, after `hack/install-monitoring.sh`, ADR 0054): the
+  fleet's targets (one per host that may run a daemon, each through its relay, at the address
+  asked), each ready host's metrics relayed, a down host 503, an unknown one 404; with
+  `PROMETHEUS_URL`, every target scraped and up exactly when its host answers; with
+  `GRAFANA_URL` and `GRAFANA_PASSWORD_FILE`, every query of the three dashboards returning data
+  (`CHECK_HOST=local`). 18 checks with fc and fc2 and the stack installed. Changes
+  nothing: start a few machines on `local` first so the per-machine panels have data.
 
 ### Fuzzing
 

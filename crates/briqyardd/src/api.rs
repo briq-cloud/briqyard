@@ -56,19 +56,20 @@ fn log_limit(asked: Option<usize>) -> usize {
 }
 
 /// Which token a path needs: none for liveness; none for `/metrics` and the OpenAPI document
-/// on a loopback listener; the metrics token for `/metrics` when one is set; else the API's.
+/// on a loopback listener; for `/metrics`, the metrics token or the API's (the fleet relays a
+/// host's with the API token it holds, ADR 0054); else the API's.
 #[derive(Debug, PartialEq)]
 enum Bearer {
     None,
     Api,
-    Metrics,
+    MetricsOrApi,
 }
 
-fn bearer_for(path: &str, loopback: bool, metrics_token: bool) -> Bearer {
+fn bearer_for(path: &str, loopback: bool) -> Bearer {
     match path {
         "/healthz" => Bearer::None,
         "/metrics" | "/v1/openapi.yaml" if loopback => Bearer::None,
-        "/metrics" if metrics_token => Bearer::Metrics,
+        "/metrics" => Bearer::MetricsOrApi,
         _ => Bearer::Api,
     }
 }
@@ -250,19 +251,26 @@ async fn auth_and_log(State(st): S, req: Request, next: Next) -> Response {
         });
     let method = req.method().clone();
     let path = req.uri().path().to_string();
-    let expected = match bearer_for(&path, st.loopback, !st.metrics_token.is_empty()) {
-        Bearer::None => "",
-        Bearer::Api => st.token.as_str(),
-        Bearer::Metrics => st.metrics_token.as_str(),
-    };
-    if !expected.is_empty() {
+    // The tokens that open the path; none set, nothing is asked.
+    let accepted: Vec<&str> = match bearer_for(&path, st.loopback) {
+        Bearer::None => vec![],
+        Bearer::Api => vec![st.token.as_str()],
+        Bearer::MetricsOrApi => vec![st.metrics_token.as_str(), st.token.as_str()],
+    }
+    .into_iter()
+    .filter(|t| !t.is_empty())
+    .collect();
+    if !accepted.is_empty() {
         let got = req
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        if !api::constant_eq(got.as_bytes(), expected.as_bytes()) {
+        let known = accepted
+            .iter()
+            .any(|t| api::constant_eq(got.as_bytes(), t.as_bytes()));
+        if !known {
             let mut resp = (
                 StatusCode::UNAUTHORIZED,
                 Json(api::ApiError {
@@ -947,15 +955,14 @@ mod tests {
 
     #[test]
     fn which_bearer_a_path_needs() {
-        assert_eq!(bearer_for("/healthz", false, false), Bearer::None);
-        assert_eq!(bearer_for("/v1/machines", true, true), Bearer::Api);
+        assert_eq!(bearer_for("/healthz", false), Bearer::None);
+        assert_eq!(bearer_for("/v1/machines", true), Bearer::Api);
         // On loopback, a scrape and a browser need no secret.
-        assert_eq!(bearer_for("/metrics", true, false), Bearer::None);
-        assert_eq!(bearer_for("/v1/openapi.yaml", true, false), Bearer::None);
-        // Elsewhere, the metrics token when there is one, else the API's.
-        assert_eq!(bearer_for("/metrics", false, true), Bearer::Metrics);
-        assert_eq!(bearer_for("/metrics", false, false), Bearer::Api);
-        assert_eq!(bearer_for("/v1/openapi.yaml", false, true), Bearer::Api);
+        assert_eq!(bearer_for("/metrics", true), Bearer::None);
+        assert_eq!(bearer_for("/v1/openapi.yaml", true), Bearer::None);
+        // Elsewhere, the metrics token or the API's (the fleet relays with the API's).
+        assert_eq!(bearer_for("/metrics", false), Bearer::MetricsOrApi);
+        assert_eq!(bearer_for("/v1/openapi.yaml", false), Bearer::Api);
     }
 
     #[test]
