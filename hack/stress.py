@@ -11,6 +11,7 @@ no record on disk for a machine the daemon does not hold.
 
     python3 hack/stress.py --tenants 6 --per-tenant 4 --rounds 2
     python3 hack/stress.py --url http://127.0.0.1:7430 --crash  # through the fleet, kill the daemon mid-run
+    python3 hack/stress.py --phases endpoints_all,sleep_wake  # creates, then those phases, then destroys
 
 Exit code 1 when any operation failed or an invariant broke; the report says which.
 """
@@ -20,6 +21,7 @@ import http.client
 import json
 import os
 import random
+import signal
 import socket
 import statistics
 import subprocess
@@ -97,13 +99,21 @@ def parallel(items, fn, workers):
         except Exception as e:  # recorded, never fatal: the report counts them
             errors[i] = e
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
         list(ex.map(one, range(len(items))))
+    finally:
+        # An interrupt drops the calls not started yet; those under way finish.
+        ex.shutdown(cancel_futures=True)
     return results, errors
 
 
 def rand_bytes(n):
     return os.urandom(n)
+
+
+# The phases of a round, in order, between its creates and its destroys (--phases picks some).
+PHASES = ["exec_all", "endpoints_all", "stop_start_all", "fork_some", "crash", "sleep_wake", "hangup_mid_create", "start_vs_destroy", "starts_past_capacity"]
 
 
 class Run:
@@ -132,6 +142,9 @@ class Run:
 
     def mlist(self):
         return self.api.call("GET", "/v1/machines", op="list")
+
+    def mine(self):
+        return [m for m in self.mlist() if m["tenant"].startswith(self.prefix)]
 
     def find_named(self, tenant, name):
         return next((m for m in self.mlist() if m["tenant"] == tenant and m["name"] == name), None)
@@ -187,7 +200,7 @@ class Run:
             self.log(f"   INVARIANT BROKEN after {label}")
 
     def expected(self):
-        mine = [m for m in self.mlist() if m["tenant"].startswith(self.prefix)]
+        mine = self.mine()
         by = {}
         for m in mine:
             by[m["state"]] = by.get(m["state"], 0) + 1
@@ -553,7 +566,7 @@ class Run:
         _, errs = parallel(list(self.machines.values()), one, self.a.workers)
         self.report_errors("destroy", errs)
         # Whatever a failed phase left in these tenants (a fork, a retry's twin) goes too.
-        left = [m for m in self.mlist() if m["tenant"].startswith(self.prefix)]
+        left = self.mine()
         if left:
             self.log(f"   {len(left)} machine(s) left by failed phases, destroying them")
             parallel(left, one, self.a.workers)
@@ -708,24 +721,25 @@ class Run:
     def run(self):
         self.log(f"stress {self.prefix}: {self.a.tenants} tenants × {self.a.per_tenant} machines, {self.a.rounds} round(s), {self.a.workers} workers, {self.a.url}")
         self.invariants("start")
+        want = set(self.a.phases.split(",")) if self.a.phases else set(PHASES)
         for r in range(1, self.a.rounds + 1):
             self.create_all(r)
-            self.exec_all()
-            self.endpoints_all()
-            self.stop_start_all()
-            self.fork_some()
-            if self.a.crash and r == 1:
-                self.crash()
-            self.sleep_wake()
-            self.hangup_mid_create()
-            self.start_vs_destroy()
-            self.starts_past_capacity()
+            for name in PHASES:
+                if name not in want:
+                    continue
+                if name == "crash" and not (self.a.crash and r == 1):
+                    continue
+                getattr(self, name)()
             self.destroy_all()
         if self.a.churn:
             self.churn()
             self.destroy_all()
         self.report()
         return 0 if not self.api.failures and not self.broken else 1
+
+
+def interrupted(signum, frame):
+    raise KeyboardInterrupt
 
 
 def main():
@@ -744,16 +758,33 @@ def main():
     p.add_argument("--crash", action="store_true", help="SIGKILL the daemon in round 1 (needs sudo on the host)")
     p.add_argument("--churn", type=int, default=0, help="then this many cycles of every feature per tenant, the daemon's RSS read after each")
     p.add_argument("--rss-growth-mb", type=float, default=32, help="churn: the most the daemon's RSS may grow over the second half of the cycles")
+    p.add_argument("--phases", default="", help=f"comma-separated, of {','.join(PHASES)} (default: all); endpoints_all relies on exec_all's wait for the web servers")
     p.add_argument("--no-invariants", action="store_true")
     p.add_argument("--invariants-url", default="", help="the daemon to check the host against when --url is a fleet")
     a = p.parse_args()
+    unknown = set(filter(None, a.phases.split(","))) - set(PHASES)
+    if unknown:
+        p.error(f"unknown phases: {','.join(sorted(unknown))}")
     run = Run(a)
+    # A kill or a closed terminal ends the run as Ctrl-C does: with the destroy below.
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
+    code = 1
     try:
-        sys.exit(run.run())
+        code = run.run()
     except KeyboardInterrupt:
-        run.log("interrupted; destroying what was made")
-        run.destroy_all()
-        sys.exit(130)
+        run.log("interrupted")
+        code = 130
+    finally:
+        # Each round destroys what it made; a failed or interrupted one, its tenants included,
+        # leaves it to this. A daemon that does not answer is logged; the run keeps its code.
+        if run.tenants:
+            run.log("destroying what was made")
+            try:
+                run.destroy_all()
+            except ApiError as e:
+                run.log(f"cleanup failed: {e}")
+    sys.exit(code)
 
 
 if __name__ == "__main__":

@@ -103,6 +103,8 @@ impl Daemon {
             tenant: tenant.into(),
             host: String::new(),
             data: None,
+            count: 1,
+            first_at: None,
         };
         evs.push(e.clone());
         e
@@ -634,7 +636,11 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         },
         cfg,
         reg: Mutex::new(reg),
-        http: reqwest::Client::new(),
+        // A stub daemon that never answers fails its test rather than holding it forever.
+        http: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap(),
         pinned: Mutex::new(HashMap::new()),
         upgrade: Default::default(),
         backup,

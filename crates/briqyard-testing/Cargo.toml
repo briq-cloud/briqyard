@@ -1,0 +1,8 @@
+[package]
+name = "briqyard-testing"
+description = "What every test binary of the workspace shares: it ends with its parent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false

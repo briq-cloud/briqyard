@@ -2159,8 +2159,8 @@ fn top_table(mut ms: Vec<api::TopMachine>) -> String {
 /// `events`: the header, then `event_row` per event.
 fn events_table(evs: &[api::Event]) -> String {
     let mut out = format!(
-        "{:<19}  {:<7}  {:<15}  {:<14}  MESSAGE\n",
-        "TIME", "TYPE", "REASON", "MACHINE"
+        "{:<19}  {:<7}  {:<15}  {:<14}  {:>5}  MESSAGE\n",
+        "TIME", "TYPE", "REASON", "MACHINE", "COUNT"
     );
     for e in evs {
         out.push_str(&event_row(e));
@@ -2168,9 +2168,11 @@ fn events_table(evs: &[api::Event]) -> String {
     out
 }
 
+/// An event's line; `TIME` is the last time of a line that folds repeats, the first in the
+/// message.
 fn event_row(e: &api::Event) -> String {
     format!(
-        "{:<19}  {:<7}  {:<15}  {:<14}  {}\n",
+        "{:<19}  {:<7}  {:<15}  {:<14}  {:>5}  {}{}\n",
         e.at.format("%Y-%m-%d %H:%M:%S"),
         e.kind,
         e.reason,
@@ -2179,8 +2181,18 @@ fn event_row(e: &api::Event) -> String {
         } else {
             &e.machine_id
         },
-        e.message
+        e.count,
+        e.message,
+        since_first(e)
     )
+}
+
+/// ` (x4 since 10:02:11)` for a line that folds repeats, as `kubectl describe` says it.
+fn since_first(e: &api::Event) -> String {
+    match e.first_at {
+        Some(t) => format!(" (x{} since {})", e.count, t.format("%H:%M:%S")),
+        None => String::new(),
+    }
 }
 
 /// `machine describe`: the machine as `kubectl describe` shows a pod, then its events.
@@ -2329,11 +2341,12 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
     }
     for e in evs {
         out.push_str(&format!(
-            "  {}  {:<7}  {:<15}  {}\n",
+            "  {}  {:<7}  {:<15}  {}{}\n",
             e.at.format("%Y-%m-%d %H:%M:%S"),
             e.kind,
             e.reason,
-            e.message
+            e.message,
+            since_first(e)
         ));
     }
     out
@@ -2560,3 +2573,10 @@ fn suffix() -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// A test binary ends with its parent, and in bounded time (briqyard-testing).
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn exit_with_parent() {
+    briqyard_testing::exit_with_parent();
+}

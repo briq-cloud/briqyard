@@ -3,7 +3,14 @@
 set -euo pipefail
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7420}
 T=jail-check
-for id in $(briqyard machine ls --tenant "$T" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
+# Run before and on any exit, Ctrl-C or a kill included: the tenant's machines destroyed.
+cleanup() {
+  for id in $(briqyard machine ls --tenant "$T" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
+  briqyard tenant rm "$T" >/dev/null 2>&1 || true
+}
+cleanup
+trap cleanup EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 M=$(briqyard machine run --image alpine:3.20 --name jailed --tenant "$T" --memory 256 -- sleep 3600 2>&1 | jq -r .id)
 echo "machine $M"
 briqyard machine get "$M" | jq -c '{state, error, ip}'

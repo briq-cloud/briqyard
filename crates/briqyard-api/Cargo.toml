@@ -21,4 +21,6 @@ hex = { workspace = true, optional = true }
 tls = ["dep:rustls", "dep:sha2", "dep:hex"]
 
 [dev-dependencies]
+briqyard-testing = { workspace = true }
+ctor = { workspace = true }
 rcgen = { workspace = true }
