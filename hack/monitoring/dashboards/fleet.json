@@ -101,8 +101,8 @@
           },
           "expr": "sum by (state) (briqyard_fleet_host_state{region=~\"$region\"})",
           "legendFormat": "{{state}}",
-          "range": true,
-          "instant": false
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -385,7 +385,7 @@
     {
       "type": "stat",
       "title": "Hosts with a condition",
-      "description": "Hosts with memory_pressure or disk_pressure true: the fleet places no new tenant there.",
+      "description": "Hosts with a condition true (memory_pressure, disk_pressure\u2026): the fleet places no new tenant there.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -845,14 +845,23 @@
                 "id": "mappings",
                 "value": [
                   {
-                    "type": "value",
+                    "type": "range",
                     "options": {
-                      "0": {
+                      "from": -0.5,
+                      "to": 0.5,
+                      "result": {
                         "text": "no",
                         "color": "red",
                         "index": 0
-                      },
-                      "1": {
+                      }
+                    }
+                  },
+                  {
+                    "type": "range",
+                    "options": {
+                      "from": 0.5,
+                      "to": 1.5,
+                      "result": {
                         "text": "yes",
                         "color": "green",
                         "index": 1
@@ -879,14 +888,23 @@
                 "id": "mappings",
                 "value": [
                   {
-                    "type": "value",
+                    "type": "range",
                     "options": {
-                      "0": {
+                      "from": -0.5,
+                      "to": 0.5,
+                      "result": {
                         "text": "false",
                         "color": "green",
                         "index": 0
-                      },
-                      "1": {
+                      }
+                    }
+                  },
+                  {
+                    "type": "range",
+                    "options": {
+                      "from": 0.5,
+                      "to": 1.5,
+                      "result": {
                         "text": "true",
                         "color": "red",
                         "index": 1
@@ -1012,7 +1030,7 @@
     {
       "type": "state-timeline",
       "title": "Host conditions",
-      "description": "memory_pressure and disk_pressure per host over time: red while true.",
+      "description": "Each host condition over time: red while true.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -1051,14 +1069,23 @@
           },
           "mappings": [
             {
-              "type": "value",
+              "type": "range",
               "options": {
-                "0": {
+                "from": -0.5,
+                "to": 0.5,
+                "result": {
                   "text": "false",
                   "color": "green",
                   "index": 0
-                },
-                "1": {
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 0.5,
+                "to": 1.5,
+                "result": {
                   "text": "true",
                   "color": "red",
                   "index": 1
@@ -2184,7 +2211,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (reason) (increase(briqyard_events_total{type=\"warning\", region=~\"$region\"}[$__rate_interval])) or on() vector(0)",
+          "expr": "sum by (reason) (increase(briqyard_events_total{type=\"warning\", region=~\"$region\"}[$__rate_interval])) or on() label_replace(vector(0), \"reason\", \"none\", \"\", \"\")",
           "legendFormat": "{{reason}}",
           "range": true,
           "instant": false
@@ -2262,7 +2289,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sort_desc(sum by (reason) (increase(briqyard_events_total{region=~\"$region\"}[$__range])))",
+          "expr": "sort_desc(round(sum by (reason) (increase(briqyard_events_total{region=~\"$region\"}[$__range]))))",
           "legendFormat": "{{reason}}",
           "instant": true,
           "range": false

@@ -92,8 +92,8 @@
           },
           "expr": "briqyard_fleet_host_state{host=\"$host\"}",
           "legendFormat": "{{state}}",
-          "range": true,
-          "instant": false
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -301,14 +301,23 @@
           },
           "mappings": [
             {
-              "type": "value",
+              "type": "range",
               "options": {
-                "0": {
+                "from": -0.5,
+                "to": 0.5,
+                "result": {
                   "text": "no",
                   "color": "red",
                   "index": 0
-                },
-                "1": {
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 0.5,
+                "to": 1.5,
+                "result": {
                   "text": "yes",
                   "color": "green",
                   "index": 1
@@ -598,7 +607,7 @@
     {
       "type": "state-timeline",
       "title": "Conditions",
-      "description": "memory_pressure: committed memory over 95 % of capacity; disk_pressure: the pool's free space under 10 %. Red while true.",
+      "description": "The host's conditions over time, red while true: memory_pressure (committed memory over 95 % of capacity), disk_pressure (the pool under 10 % free) and any other it reports.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -637,14 +646,23 @@
           },
           "mappings": [
             {
-              "type": "value",
+              "type": "range",
               "options": {
-                "0": {
+                "from": -0.5,
+                "to": 0.5,
+                "result": {
                   "text": "false",
                   "color": "green",
                   "index": 0
-                },
-                "1": {
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 0.5,
+                "to": 1.5,
+                "result": {
                   "text": "true",
                   "color": "red",
                   "index": 1
@@ -1365,8 +1383,8 @@
     },
     {
       "type": "gauge",
-      "title": "Memory committed",
-      "description": "Committed over capacity. memory_pressure at 95 %.",
+      "title": "Committed",
+      "description": "Memory committed over capacity. memory_pressure at 95 %.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
