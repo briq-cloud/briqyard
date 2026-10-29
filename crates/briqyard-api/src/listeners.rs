@@ -15,6 +15,10 @@ use std::sync::Mutex;
 /// out a hand-over. The kernel caps it at `net.core.somaxconn` (4096 by default).
 pub const BACKLOG: i32 = 4096;
 
+/// What systemd tells this process about its store, which a child must not read as its own:
+/// cleared from the environment of the processes the daemon starts.
+pub const ENV: [&str; 4] = ["LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES", "NOTIFY_SOCKET"];
+
 /// The first descriptor systemd passes (`SD_LISTEN_FDS_START`).
 const FIRST_FD: RawFd = 3;
 
@@ -122,10 +126,18 @@ impl Listeners {
             .drain()
             .map(|(n, _)| n)
             .collect();
+        // Every name is removed even when one fails: a name left behind keeps its port bound by
+        // PID 1. The first failure is the answer.
+        let mut first = None;
         for n in &names {
-            self.remove(n)?;
+            if let Err(e) = self.remove(n) {
+                first.get_or_insert(e);
+            }
         }
-        Ok(names)
+        match first {
+            Some(e) => Err(e),
+            None => Ok(names),
+        }
     }
 
     fn store(&self, name: &str, sock: &Socket) -> io::Result<()> {
@@ -148,12 +160,11 @@ impl Listeners {
             return Ok(());
         };
         let addr = notify_addr(path)?;
-        let sock = socket(
-            AddressFamily::Unix,
-            SockType::Datagram,
-            SockFlag::empty(),
-            None,
-        )?;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let flags = SockFlag::SOCK_CLOEXEC;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let flags = SockFlag::empty();
+        let sock = socket(AddressFamily::Unix, SockType::Datagram, flags, None)?;
         let fds = fd.map(|f| [f]);
         let cmsgs: Vec<ControlMessage> = fds.iter().map(|f| ControlMessage::ScmRights(f)).collect();
         sendmsg(
@@ -340,6 +351,25 @@ mod tests {
                 "FDSTOREREMOVE=1\nFDNAME=ep_2\n"
             ]
         );
+    }
+
+    #[test]
+    fn a_failed_removal_goes_on_with_the_others() {
+        let n = Notify::new();
+        let (a, b) = (bind(any_port()).unwrap(), bind(any_port()).unwrap());
+        let ports = [a.local_addr().unwrap(), b.local_addr().unwrap()]
+            .map(|x| x.as_socket().unwrap());
+        let l = Listeners::new(
+            vec![("ep_a".into(), a.into()), ("ep_b".into(), b.into())],
+            Some(n.path.clone()),
+        );
+        // systemd's socket is gone: every removal fails, and each is still tried.
+        std::fs::remove_file(&n.path).unwrap();
+        assert!(l.release_unused().is_err());
+        assert!(l.inherited.lock().unwrap().is_empty());
+        for p in ports {
+            assert!(std::net::TcpStream::connect(p).is_err(), "{p} closed here");
+        }
     }
 
     #[test]
