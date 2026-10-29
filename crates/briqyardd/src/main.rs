@@ -9,9 +9,11 @@ use std::sync::Arc;
 
 const OPENAPI: &str = include_str!("../../../api/openapi.yaml");
 
-/// What a stop or a hand-over gives the requests and the endpoint connections in flight
-/// (ADR 0051): what arrives meanwhile waits in the kernel's queue for the next daemon.
-const DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
+/// What a stop or a hand-over gives the API's requests and the endpoint connections in
+/// flight, one bound for both (ADR 0051): what arrives meanwhile waits in the kernel's queue
+/// for the next daemon, so the bound is paid by every waiting client whenever a connection
+/// that never ends on its own (a pool, a WebSocket) is open. Long enough for a short request.
+const DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How long a stop or a hand-over may take in all.
 const SHUTDOWN: std::time::Duration = std::time::Duration::from_secs(60);

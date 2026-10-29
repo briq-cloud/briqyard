@@ -48,11 +48,11 @@ The rule they share: **the socket, or the data path, does not live in the proces
 
 **The fleet's listener is kept the same way**, across `systemctl restart briqyard-fleet`.
 
-### 2. The old process drains within 10 s
+### 2. The old process drains within 2 s
 
-**At SIGUSR2 the daemon stops accepting at once and finishes what it holds, for 10 s at most**: API requests in flight (30 s before: every queued client now waits that grace too, and briq's adapter gives a call 30 s), and open endpoint connections, which keep splicing and counting their bytes. ADR 0027 rules out two daemons at once, not two phases at once: the machines' locks are taken and the usage written while the connections drain, so the gap is the longer of the drain and the hand-over, not their sum. Once the drain ends (every connection closed, or the bound), the usage is written again with what the connections passed meanwhile. What runs past the bound is cut, as today: a WebSocket, a database connection of a pool, an exec, a session, a log follow, a watch (which resumes from its cursor, ADR 0019). A stop (SIGTERM) drains first, then suspends the machines: suspending them would end the connections.
+**At SIGUSR2 the daemon stops accepting at once and finishes what it holds, for 2 s at most**: API requests in flight (30 s before) and open endpoint connections, one bound for both, since every queued client waits it whichever of the two holds the old daemon. 2 s, not the 10 s first proposed: long-lived connections (Postgres pools, WebSockets) are common in briq's traffic, so the bound is paid on nearly every upgrade by every connection and call made during it (10.2 s measured with 4 connections held, §5), and such a connection is cut at the end whatever the bound; 2 s still lets a short request end. It is adjusted after a measurement on a real host. Open endpoint connections keep splicing and counting their bytes meanwhile. ADR 0027 rules out two daemons at once, not two phases at once: the machines' locks are taken and the usage written while the connections drain, so the gap is the longer of the drain and the hand-over, not their sum. Once the drain ends (every connection closed, or the bound), the usage is written again with what the connections passed meanwhile. What runs past the bound is cut, as today: a WebSocket, a database connection of a pool, an exec, a session, a log follow, a watch (which resumes from its cursor, ADR 0019). A stop (SIGTERM) drains first, then suspends the machines: suspending them would end the connections.
 
-**The fleet gets the graceful stop it lacks**: SIGTERM stops accepting, its calls get 10 s. A `host upgrade` still waiting then leaves its host `draining`, as a fleet restart does today.
+**The fleet gets the graceful stop it lacks**: SIGTERM stops accepting, its calls get the same 2 s. A `host upgrade` still waiting then leaves its host `draining`, as a fleet restart does today.
 
 **The daemon logs the gap a client sees**: the old daemon writes the time of the signal with its hand-over, and the next one logs `serving again` with `gap_ms`, from that signal to its listeners accepting, with what took it (pool, tables, adoption).
 
@@ -92,7 +92,7 @@ Rejected:
 
 The dev VM (fc), 2026-10-29, `main` at 0323a8a against this change. Each probe opens a connection or makes a call every 50 to 100 ms; a cell is what failed of what was tried, then the longest time between two answers.
 
-| Probe | `host upgrade`, before | after | with 4 connections held each way, after | fleet restart, before | after |
+| Probe | `host upgrade`, before | after | with 4 connections held each way, after (10 s bound) | fleet restart, before | after |
 |---|---|---|---|---|---|
 | TCP endpoint, new connections | 23 refused of 348; 1.2 s | none of 397; 0.13 s | none of 259; 10.2 s | none | none |
 | HTTP ingress, new requests | 23 refused of 348; 1.2 s | none of 397; 0.14 s | none of 259; 10.2 s | none | none |
@@ -100,14 +100,14 @@ The dev VM (fc), 2026-10-29, `main` at 0323a8a against this change. Each probe o
 | The daemon's API (`/v1/status`) | 12 refused of 176; 1.3 s | none of 202; 0.23 s | none of 133; 10.2 s | none | none |
 | A call through the fleet | 11 `host_unreachable` of 182; 1.2 s | none of 210; 0.17 s | none of 137; 10.2 s | 1 refused of 99; 0.2 s | none of 99; 0.12 s |
 
-The next daemon's `serving again`: `gap_ms` 129 (its own start 101 ms: 5 ms to the pool, 88 ms to adopt the machines) with nothing long open, 10 158 with the held connections, which kept the old daemon to the drain's bound. The cost is the bound itself: while a connection that never ends on its own is open (a WebSocket, a pool), every new connection and call waits the full 10 s, and that connection is cut all the same. A shorter bound (2 s still lets a short request end) is the lever; 10 s stands until measured on a real host.
+The next daemon's `serving again`: `gap_ms` 129 (its own start 101 ms: 5 ms to the pool, 88 ms to adopt the machines) with nothing long open, 10 158 with the held connections, which kept the old daemon to the drain's bound, then 10 s. That run is why the bound is now 2 s (§2); the numbers with 2 s are below.
 
 ## What stays
 
 | | After this ADR |
 |---|---|
-| A new connection, an API call | waits: the longer of the drain (up to 10 s, less when nothing long is open) and the hand-over, then the next daemon's start |
-| An open connection | survives when it ends within the 10 s; longer ones are reset |
+| A new connection, an API call | waits: the longer of the drain (up to 2 s, less when nothing long is open) and the hand-over, then the next daemon's start |
+| An open connection | survives when it ends within the 2 s; longer ones are reset |
 | A machine whose process exits during the gap | as ADR 0027: its exit report is lost |
 
 Out of scope:

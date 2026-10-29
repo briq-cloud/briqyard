@@ -850,11 +850,11 @@ s.ThreadingTCPServer(("", 9000), H).serve_forever()'
     HO_ECHO=$(briqyard endpoint add "$HO" 9000 | jq -r .address)
     HO_HOST=$(briqyard endpoint add --http --host "e2e-drain-$$" "$HO" 8080 | jq -r .host)
     ing=${INGRESS#*://}; ing=${ing%%/*}
-    # A line each way every 100 ms for 4 s on one connection, each line checked.
+    # A line each way every 100 ms for 2 s on one connection, each line checked.
     held() { python3 - "${1%:*}" "${1##*:}" <<'PY'
 import socket, sys, time
 s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=30)
-f, n, end = s.makefile("rb"), 0, time.time() + 4
+f, n, end = s.makefile("rb"), 0, time.time() + 2
 while time.time() < end:
     n += 1
     line = f"line {n}\n".encode()
@@ -868,7 +868,8 @@ PY
     python3 "$(dirname "$0")/upgrade-probe.py" --long 0 --tcp "$HO_WEB" --http "$ing" --web-host "$HO_HOST" > "$out" &
     probe=$!
     held "$HO_ECHO" & holder=$!
-    sleep 1
+    # Signalled half a second in: the connection ends 1.5 s later, within the 2 s drain.
+    sleep 0.5
     since=$(date +%s)
     handover
     sleep 2

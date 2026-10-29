@@ -172,7 +172,7 @@ type S = State<Arc<AppState>>;
 /// a watch has no end and is not given one.
 /// What a stop gives the calls in flight (ADR 0051): what arrives meanwhile waits in the
 /// kernel's queue for the next process.
-const DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
+const DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
 const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
 fn main() {
