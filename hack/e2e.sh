@@ -738,7 +738,7 @@ throttled() { "${CURL[@]}" -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics" 
 for i in $(seq 1 35); do throttled && break; sleep 2; done
 check "metrics: the disk's throttling counted" 'throttled'
 briqyard machine rm "$DK" >/dev/null
-check "status: no condition true"         'briqyard status | jq -e "(.conditions | map(.type) | sort) == [\"disk_pressure\", \"memory_pressure\"] and all(.conditions[]; .status == false)" >/dev/null'
+check "status: no condition true"         'briqyard status | jq -e "(.conditions | map(.type) | sort) == [\"disk_pressure\", \"memory_pressure\", \"storage_stalled\"] and all(.conditions[]; .status == false)" >/dev/null'
 briqyard machine rm "$M" >/dev/null
 
 # What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start. The

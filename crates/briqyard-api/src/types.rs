@@ -1436,7 +1436,9 @@ pub mod condition {
     pub const MEMORY_PRESSURE: &str = "memory_pressure";
     /// The pool's free space under `conditions.disk_free_pct` of its size.
     pub const DISK_PRESSURE: &str = "disk_pressure";
-    pub const ALL: &[&str] = &[MEMORY_PRESSURE, DISK_PRESSURE];
+    /// A `zfs` command of the daemon's running for over a minute: the pool may be hung.
+    pub const STORAGE_STALLED: &str = "storage_stalled";
+    pub const ALL: &[&str] = &[MEMORY_PRESSURE, DISK_PRESSURE, STORAGE_STALLED];
 }
 
 /// A host condition as the daemon's tick last found it.
@@ -2842,7 +2844,10 @@ mod tests {
             json!({"type": "disk_pressure", "message": ""})
         )
         .is_err());
-        assert_eq!(condition::ALL, ["memory_pressure", "disk_pressure"]);
+        assert_eq!(
+            condition::ALL,
+            ["memory_pressure", "disk_pressure", "storage_stalled"]
+        );
     }
 
     #[test]

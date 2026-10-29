@@ -2372,9 +2372,10 @@ fn doctor() {
             .split(':')
             .any(|d| std::path::Path::new(d).join(b).exists())
     };
+    // `zvol_id` names a zvol's device: the daemon checks every disk with it (ADR 0046).
     check(
         "zfs",
-        on_path("zfs") && on_path("zpool"),
+        on_path("zfs") && on_path("zpool") && exists("/usr/lib/udev/zvol_id"),
         "apt install zfsutils-linux",
     );
     check("nft", on_path("nft"), "apt install nftables");
