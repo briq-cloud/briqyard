@@ -806,6 +806,32 @@ impl Manager {
         self.inner.store.put(HOLDERS, &r.machine_id, &r)
     }
 
+    /// A destroy's holder for the backups the record names. A destroy that found no disks
+    /// may be a second one: a destroy cut short after its disks went, or a record an older
+    /// daemon wrote back after its destroy, whose backups may have been deleted since. Then
+    /// what the store lists is held, nothing when it lists none.
+    pub(super) async fn hold_at_destroy(
+        &self,
+        rec: &Record,
+        had_disks: bool,
+        turn: Turn,
+    ) -> Result<(), MError> {
+        if rec.backup_bytes == 0 && rec.backup.last.is_none() {
+            return Ok(());
+        }
+        let bytes = match (had_disks, self.inner.backups.store.is_some()) {
+            (false, true) => {
+                let listed = self.backups(&rec.id).await?;
+                if listed.is_empty() {
+                    return Ok(());
+                }
+                listed.iter().map(|b| b.bytes).sum()
+            }
+            _ => rec.backup_bytes,
+        };
+        Ok(self.hold(rec, bytes, turn)?)
+    }
+
     /// The tick's backup step: each machine whose next backup is due gets one, and each
     /// holder past `keep_destroyed_days` loses its backups, `backup.at_once` at a time.
     /// Detached, since a backup can take minutes: the turn taken here keeps a machine to one
@@ -1923,6 +1949,48 @@ mod tests {
         let snaps = h.pool.zfs.snapshots(&root).await.unwrap();
         assert!(!snaps.iter().any(|s| s.starts_with("bk-")), "{snaps:?}");
         assert!(h.listed(&m.id).await.is_empty());
+    }
+
+    /// A destroy that finds no disks holds what the store lists, not what the record says:
+    /// a record written back after its destroy names backups deleted since (the upgrade of
+    /// 2026-10-28 held them again), and a destroy cut short after its disks may hold more.
+    #[tokio::test]
+    async fn a_destroy_without_disks_holds_what_the_store_lists() {
+        let h = harness(|_| {}).await;
+        let mut records = Vec::new();
+        for name in ["gone", "kept"] {
+            let m = h.machine(name, every("1h", 3), false).await;
+            h.m.backup(&m.id).await.unwrap();
+            let mut r = h.stored(&m.id).unwrap();
+            h.m.destroy(&m.id, None).await.unwrap();
+            assert!(h.m.holder(&m.id).is_some());
+            r.state = state::DESTROYING.into();
+            records.push(r);
+        }
+        let (gone, kept) = (&records[0], &records[1]);
+        // One's backups deleted since: its holder went with them.
+        let b = &h.listed(&gone.id).await[0];
+        h.m.delete_backup(&gone.id, &b.id, false).await.unwrap();
+        assert!(h.m.holder(&gone.id).is_none());
+        // The other's destroy cut short before its holder, its record a step behind.
+        h.m.inner.backups.holders.lock().unwrap().remove(&kept.id);
+        let listed: u64 = h.listed(&kept.id).await.iter().map(|b| b.bytes).sum();
+        let mut kept = kept.clone();
+        kept.backup_bytes = listed + 1;
+        for r in [gone, &kept] {
+            h.m.inner.store.put("machines", &r.id, r).unwrap();
+        }
+        h.m.load().unwrap();
+        h.m.tick().await;
+        for r in [gone, &kept] {
+            assert!(h.stored(&r.id).is_none());
+        }
+        assert!(
+            h.m.holder(&gone.id).is_none(),
+            "no holder for deleted backups"
+        );
+        let held = h.m.holder(&kept.id).unwrap().rec.lock().unwrap().bytes;
+        assert_eq!(held, listed);
     }
 
     #[tokio::test]
