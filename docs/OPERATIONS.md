@@ -655,9 +655,9 @@ briqyard machine move <id> --namespace <namespace>
 Alone in its namespace and the target new: the namespace is renamed, the machine keeps its
 address and is not restarted. The target exists on the host: the machine is stopped, takes an
 address there and starts again (`restarted: true`, `previous_ip`); a machine that was not
-running stays as it is. Through a fleet, the target pinned to another host: the machine is
-stopped, backed up, restored there and destroyed here, under a new id (`replaces`); a host with
-no room answers 503 `capacity` and the machine runs again where it was. The namespace it left
+running stays as it is. Through a fleet, the target pinned to another host: refused (409 `other_host`) before
+anything happens, naming both hosts; moving across hosts is not supported yet, use the
+procedure below. The namespace it left
 stays until `briqyard namespace rm`. Refused (409): another machine sends its traffic through
 this one, the target has a machine of that name, a snapshot with memory exists (it would resume
 on the old address; delete it), the machine is starting, stopping or destroying. ADR 0056.
