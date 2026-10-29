@@ -102,7 +102,19 @@ The dev VM (fc), 2026-10-29, `main` at 0323a8a against this change. Each probe o
 | The daemon's API (`/v1/status`) | 12 refused of 176; 1.3 s | none of 202; 0.23 s | none of 133; 10.2 s | none | none |
 | A call through the fleet | 11 `host_unreachable` of 182; 1.2 s | none of 210; 0.17 s | none of 137; 10.2 s | 1 refused of 99; 0.2 s | none of 99; 0.12 s |
 
-The next daemon's `serving again`: `gap_ms` 129 (its own start 101 ms: 5 ms to the pool, 88 ms to adopt the machines) with nothing long open, 10 158 with the held connections, which kept the old daemon to the drain's bound, then 10 s. That run is why the bound is now 2 s (§2); the run at 2 s is added here before this ADR is accepted.
+The next daemon's `serving again`: `gap_ms` 129 (its own start 101 ms: 5 ms to the pool, 88 ms to adopt the machines) with nothing long open, 10 158 with the held connections, which kept the old daemon to the drain's bound, then 10 s. That run is why the bound is now 2 s (§2).
+
+At 2 s, the dev VM (fc), 2026-10-29, this change on `main` at 312e39d, readiness carried over the hand-over (§2):
+
+| Probe | `host upgrade` | with 4 connections held each way | fleet restart |
+|---|---|---|---|
+| TCP endpoint, new connections | none of 324; 0.19 s | none of 277; 2.3 s | none of 185; 0.06 s |
+| HTTP ingress, new requests | none of 324; 0.19 s | none of 277; 2.3 s | none of 185; 0.06 s |
+| Long-held TCP and HTTP connections | — | 4 and 4 cut at the bound, reconnected without a refusal | none |
+| The daemon's API (`/v1/status`) | none of 165; 0.22 s | none of 143; 2.2 s | none of 94; 0.11 s |
+| A call through the fleet | none of 173; 0.25 s | none of 149; 2.2 s | none of 99; 0.10 s |
+
+Before readiness was carried over, the same run made new endpoint connections wait up to 8 to 10 s even with nothing held: the next daemon took every probed machine as not ready until its first probe, a period later.
 
 ## What stays
 

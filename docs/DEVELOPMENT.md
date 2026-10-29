@@ -364,7 +364,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   data kept, the next backup incremental and its restore at the grown size), a hand-over
   through systemd's store (ADR 0051: a connection held across it ends whole, the new ones made
   during it all answered, the gap logged; with a unit that has a store, and python3). 244
-  checks predicted (main's 241 and these 3) until a dev VM run confirms them, 240 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  checks, 240 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
