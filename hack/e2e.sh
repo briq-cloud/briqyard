@@ -190,6 +190,7 @@ check "move: booted again, its disk kept" '! briqyard machine exec "$MV" -- test
 check "move: a moved event in each namespace" 'for t in "$T-mv2" "$T-mv3"; do briqyard events --namespace "$t" --machine "$MV" | awk "\$4 == \"moved\"" | grep -q . || exit 1; done'
 MF=$(briqyard machine fork "$MV" --name mvfork --namespace "$T-mv4" | jq -r .id)
 check "fork into another namespace: in it, on a network of its own" '[ "$(briqyard machine get "$MF" | jq -r .namespace)" = "$T-mv4" ] && [ "$(briqyard machine get "$MF" | jq -r .ip | cut -d. -f3)" != "$(briqyard machine get "$MV" | jq -r .ip | cut -d. -f3)" ]'
+briqyard machine set "$MF" -- sleep 3600 >/dev/null && briqyard machine restart "$MF" >/dev/null   # a fork takes the disks, not the command
 check "fork into another namespace: its source's disk" '[ "$(briqyard machine exec "$MF" -- cat /root/moved)" = kept ]'
 for id in "$MF" "$MV" "$MN"; do briqyard machine rm "$id" >/dev/null; done
 for t in mv2 mv3 mv4; do briqyard namespace rm "$T-$t" >/dev/null 2>&1 || true; done
