@@ -985,6 +985,57 @@ mod tests {
         assert_eq!(ino, std::fs::metadata(&root).unwrap().ino());
     }
 
+    /// A chaos run's question: after a restore with memory, the resume and every cold boot
+    /// after it run on the snapshot's disks, never on what the guest wrote since, with a stop
+    /// before the restore, after it, or none. The fake's volume file is the disk: the root's
+    /// holds what the guest wrote; the volume's holds its size, so it is checked by device.
+    #[tokio::test]
+    async fn a_memory_restore_and_the_cold_boots_after_it_run_on_the_snapshots_disks() {
+        use std::os::unix::fs::MetadataExt;
+        let h = harness().await;
+        with_volume(&h, "m_v", state::STOPPED, 1).await;
+        h.m.start("m_v", None).await.unwrap();
+        let ino = |p: &Path| std::fs::metadata(p).unwrap().ino();
+        let data = h.pool.dev().join("byard/m/m_v/data");
+        let on_the_snapshot = |when: &str, written: u64| {
+            let root = h.booted_root("m_v");
+            assert_eq!(std::fs::read_to_string(&root).unwrap(), "5", "{when}");
+            let booted = ino(&h.booted_data("m_v"));
+            assert!(booted == ino(&data) && booted != written, "{when}");
+        };
+        let stop = || h.m.stop("m_v", Duration::ZERO, false, None);
+        for racer in ["none", "before", "after"] {
+            std::fs::write(h.booted_root("m_v"), "5").unwrap();
+            let s = h.m.snapshot("m_v", with_memory()).await.unwrap();
+            // What the guest writes after it.
+            std::fs::write(h.booted_root("m_v"), "6").unwrap();
+            let written = ino(&data);
+            let restore = h.m.restore_snapshot("m_v", &s.id, None);
+            match racer {
+                "none" => drop(restore.await.unwrap()),
+                "before" => drop(tokio::join!(stop(), restore).1.unwrap()),
+                _ => drop(tokio::join!(restore, stop()).0.unwrap()),
+            }
+            // Stopped first, the restore keeps the memory for the start; stopped after, the
+            // resume is over and the start is cold.
+            let m = h.m.get("m_v").unwrap();
+            let want = match racer {
+                "none" => (state::RUNNING, false),
+                "before" => (state::STOPPED, true),
+                _ => (state::STOPPED, false),
+            };
+            assert_eq!((m.state.as_str(), m.suspended), want, "{racer}");
+            if m.state == state::STOPPED {
+                h.m.start("m_v", None).await.unwrap();
+            }
+            on_the_snapshot(&format!("{racer}: back"), written);
+            h.m.restart("m_v", None).await.unwrap();
+            assert_eq!(h.reasons("m_v").last().unwrap(), "started", "{racer}");
+            on_the_snapshot(&format!("{racer}: cold"), written);
+            h.m.delete_snapshot("m_v", &s.id).await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn deleted_snapshots_a_retired_disk_hangs_from_go_with_it() {
         let h = harness().await;

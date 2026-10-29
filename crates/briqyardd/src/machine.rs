@@ -5700,8 +5700,8 @@ mod tests {
         /// The limits each machine's disks have now: given at boot, changed live, and
         /// whether the volume was given them too.
         disks: Mutex<HashMap<String, (fc::DiskRate, bool)>>,
-        /// The root disk's device each machine last booted on.
-        roots: Mutex<HashMap<String, PathBuf>>,
+        /// The devices each machine last booted on: its root disk, its volume.
+        roots: Mutex<HashMap<String, (PathBuf, Option<PathBuf>)>>,
         /// A live change of disk limits fails, as a Firecracker that refuses the PATCH.
         refuse_disk_rate: AtomicBool,
     }
@@ -5924,7 +5924,7 @@ mod tests {
             self.roots
                 .lock()
                 .unwrap()
-                .insert(b.id.clone(), b.root.clone());
+                .insert(b.id.clone(), (b.root.clone(), b.data.clone()));
             if let Boots::Panics = boots {
                 panic!("the VMM panicked");
             }
@@ -6475,7 +6475,12 @@ mod tests {
         /// The host's calls so far (boots, snapshots, kills), then forgets them.
         /// The root disk's device the machine last booted on.
         pub(super) fn booted_root(&self, id: &str) -> PathBuf {
-            self.host.roots.lock().unwrap()[id].clone()
+            self.host.roots.lock().unwrap()[id].0.clone()
+        }
+
+        /// The volume's device the machine last booted on.
+        pub(super) fn booted_data(&self, id: &str) -> PathBuf {
+            self.host.roots.lock().unwrap()[id].1.clone().unwrap()
         }
 
         pub(super) fn host_calls(&self) -> Vec<String> {

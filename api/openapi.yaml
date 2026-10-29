@@ -171,7 +171,7 @@ paths:
             schema: { $ref: "#/components/schemas/ExecRequest" }
       responses:
         "200": { description: output, content: { application/json: { schema: { $ref: "#/components/schemas/ExecResult" } } } }
-        "409": { description: not running (and `wake` was false) }
+        "409": { description: "`not_running`: not running and `wake` was false or it was stopped on request, or it went down during the command, which may then have run" }
   /v1/machines/{id}/files:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
