@@ -113,7 +113,7 @@ The next daemon's `serving again`: `gap_ms` 129 (its own start 101 ms: 5 ms to t
 Out of scope:
 
 - **A reboot** (OS or host kernel): every machine stops. Keeping traffic through it needs another replica or a live move to another host (`../KUBERNETES-MAP.md`, groups, later).
-- A crash: what the process held is reset; its listeners stay in the store, so new connections wait for the restart.
+- A crash: what the process held is reset; its listeners stay in the store, so new connections wait for the restart. A SIGUSR2 that arrives before the daemon registers its handler kills it the same way: `Restart=on-failure` starts it again with the store intact.
 - A Firecracker upgrade for running machines: their process stays until their next start (ADR 0027).
 
 ## Consequences
