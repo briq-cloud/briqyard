@@ -142,6 +142,57 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the default capacity leaves to the host and its other services (an edge: 3072); unused when `memory_mb` or `vcpus` is set |
 | `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start. An `http://` `url` must be a loopback or private address (ADR 0026) |
 
+## A proxy in front
+
+Endpoints are plain TCP and HTTP on the host, with no TLS, public names or access control:
+those are a proxy's, as an ingress controller's in Kubernetes. The smallest setup is a proxy
+on the host itself, the daemon's listeners on loopback. In `config.yaml`, before the first HTTP
+endpoint (an endpoint keeps the name it got), then `systemctl restart briqyardd`:
+
+```yaml
+ingress:
+  http: 127.0.0.1:8080          # the HTTP listener, routed by Host
+  domain: apps.example.com      # an HTTP endpoint labelled web is web.apps.example.com
+```
+
+```bash
+briqyard endpoint add <id> 3000 --http --host web   # web.apps.example.com → port 3000
+briqyard endpoint add <db> 5432                     # a host port, 30000-32767: `endpoint ls`
+```
+
+HTTP, with [Caddy](https://caddyserver.com) on 80 and 443 (`/etc/caddy/Caddyfile`). Caddy
+gets each name's certificate from Let's Encrypt and passes `Host` on as it came, which is what
+the ingress routes by. WebSockets and streaming pass through.
+
+```
+web.apps.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+A site per name, each with its DNS record to the host. For names made on the fly, a wildcard
+record and a wildcard certificate, which needs Caddy built with your DNS provider's module
+(DNS-01), in a `*.apps.example.com` site. Access control goes in the site too (`basic_auth`,
+`forward_auth`): an endpoint answers anyone who reaches it.
+
+TCP is passed as it is: TLS, when wanted, is the protocol's own (Postgres, Redis). Forward a
+public port to the host port the endpoint got, here with nginx's `stream` module
+(`libnginx-mod-stream`; the block is top level in `nginx.conf`, not under `http`):
+
+```
+stream {
+	server { listen 5432; proxy_pass 127.0.0.1:30432; }
+}
+```
+
+With the bootstrap's firewall (`PRIVATE_ADDRESS` set), the public interface takes SSH and
+`PUBLIC_TCP_PORTS` only, set at its first run: `80,443,5432` here, the proxy's ports, never an
+endpoint's own (the daemon refuses 8080 and 30000-32767 there).
+A proxy on another server reaches the daemon over a private network: `ingress.http` and
+`ingress.bind` on the host's private address, `ingress.allowed_clients` the proxy's. With
+several hosts, send each name to the host its machine runs on (`briqyard machine ls`, HOST).
+A connection to a sleeping machine wakes it, and waits for its boot.
+
 ## Where things live
 
 | Path | What |
