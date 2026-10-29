@@ -10,7 +10,7 @@ Through a fleet, `briqyard host add` runs the script for you (below, and "First 
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/bootstrap-host.sh
-BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.2 \
+BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.3 \
 BRIQYARD_POOL_DEVICE=/dev/nvme0n1,/dev/nvme1n1 \
 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
 PRIVATE_ADDRESS=10.42.0.11/16 ALLOWED_CLIENTS=10.42.0.0/16 \
@@ -804,7 +804,7 @@ loopback listener it reads from the edge's `X-Forwarded-For`. The
 repository is private, so the binaries come from your Mac:
 
 ```bash
-gh release download v0.1.2 -R briq-cloud/briqyard -p 'briqyard*-linux-x86_64' -p SHA256SUMS-x86_64 -D /tmp/byard
+gh release download v0.1.3 -R briq-cloud/briqyard -p 'briqyard*-linux-x86_64' -p SHA256SUMS-x86_64 -D /tmp/byard
 (cd /tmp/byard && shasum -a 256 -c SHA256SUMS-x86_64)
 scp /tmp/byard/briqyard-fleet-linux-x86_64 root@<public ip>:/usr/local/bin/briqyard-fleet
 scp /tmp/byard/briqyard-linux-x86_64 root@<public ip>:/usr/local/bin/briqyard
@@ -831,7 +831,7 @@ state_dir: /var/lib/briqyard-fleet
 bootstrap:
   enabled: true
   ssh_key: /etc/briqyard/fleet_ssh_key
-  release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.2
+  release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.3
   pool_device: /dev/nvme0n1,/dev/nvme1n1
   fleet_url: https://fleet.example.com
   fleet_address: 10.42.0.11                # this server on the vRack: hosts reach fleet_url here
