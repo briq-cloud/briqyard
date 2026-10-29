@@ -1,9 +1,10 @@
 //! Events (ADR 0019): what happened on this host, in one append-only log. An event is a line
 //! of `state/events/<hour>.ndjson`, appended and synced under the log's lock, then sent to the
-//! watchers; `seq` is one more per event and never reused.
+//! watchers; `seq` is one more per event and never reused. Repeats of a use, a refusal or a
+//! readiness flip within `FOLD_MINUTES` of its line are folded into one later line.
 
 use anyhow::{Context, Result};
-use briqyard_api::{self as api, event};
+use briqyard_api::{self as api, event, reason};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Seek, Write};
@@ -18,8 +19,21 @@ pub const MAX_EVENTS: u64 = 100_000;
 const MAX_MESSAGE: usize = 1024;
 /// How far a watcher may fall behind the log before it is closed.
 const WATCH_BUFFER: usize = 1024;
-/// A quiet watch sends `{}` this often, so a proxy does not cut it.
+/// A quiet watch sends a bookmark this often, so a proxy does not cut it.
 pub const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long after its line the repeats of an event are folded rather than logged.
+const FOLD_MINUTES: i64 = 10;
+/// The reasons whose repeats fold: uses and refusals, which change nothing, and the readiness
+/// flips, which a probe can make every second.
+const FOLDED: [&str; 4] = [
+    reason::SESSION_OPENED,
+    reason::QUOTA_EXCEEDED,
+    reason::READY,
+    reason::NOT_READY,
+];
+/// Of those, the ones that change the machine: a folded flip still takes a seq, its version,
+/// with no line.
+const FLIPS: [&str; 2] = [reason::READY, reason::NOT_READY];
 
 /// An event about to be logged: what it says, and whom it is about.
 #[derive(Clone, Debug)]
@@ -119,12 +133,62 @@ struct Log {
     dir: PathBuf,
     /// The last seq given.
     seq: u64,
-    /// The files, by hour, with the first seq each holds.
-    files: BTreeMap<String, u64>,
+    /// The files, by hour, with the first and last seqs and the number of lines each holds.
+    files: BTreeMap<String, File>,
+    /// The last seq of the newest file retention removed (at start, the seq before the oldest
+    /// file kept): a cursor before it misses lines; one at or past it misses none, even on a
+    /// seq no line carries.
+    pruned: u64,
     /// The newest file, open for appending.
     open: Option<(String, std::fs::File)>,
-    /// Events logged since the daemon started, by type and reason: `/metrics`.
+    /// Events logged since the daemon started, by type and reason, folded ones included:
+    /// `/metrics`.
     emitted: BTreeMap<(&'static str, &'static str), u64>,
+    /// The repeats folded since an event's line, by tenant, machine and reason.
+    series: BTreeMap<Key, Series>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct File {
+    first: u64,
+    last: u64,
+    lines: u64,
+}
+
+type Key = (String, String, &'static str);
+
+/// An event's line and the repeats folded since, not logged yet.
+struct Series {
+    /// When the line was logged: repeats fold until `FOLD_MINUTES` after it.
+    opened: DateTime<Utc>,
+    folded: Option<Folded>,
+}
+
+/// Repeats folded: the last one, when it was, how many, and when the first was.
+struct Folded {
+    last: Ev,
+    at: DateTime<Utc>,
+    count: u64,
+    first_at: DateTime<Utc>,
+}
+
+impl Series {
+    fn due(&self, now: DateTime<Utc>) -> bool {
+        now >= self.opened + Duration::minutes(FOLD_MINUTES)
+    }
+
+    fn fold(&mut self, ev: Ev, now: DateTime<Utc>) {
+        let (count, first_at) = match &self.folded {
+            Some(f) => (f.count + 1, f.first_at),
+            None => (1, now),
+        };
+        self.folded = Some(Folded {
+            last: ev,
+            at: now,
+            count,
+            first_at,
+        });
+    }
 }
 
 /// An hour's file name without its extension; names sort as their hours do.
@@ -205,17 +269,77 @@ impl Log {
             let _ = f.set_len(len);
             return Err(err.into());
         }
-        self.files.entry(key).or_insert(e.seq);
+        let file = self.files.entry(key).or_insert(File {
+            first: e.seq,
+            last: e.seq,
+            lines: 0,
+        });
+        file.lines += 1;
+        file.last = e.seq;
         Ok(())
     }
 
     fn oldest(&self) -> u64 {
-        self.files.values().next().copied().unwrap_or(self.seq + 1)
+        self.files.values().next().map_or(self.seq + 1, |f| f.first)
+    }
+
+    /// Logs a line with the next seq and sends it to the watchers; its seq. A log that cannot
+    /// be written is warned about and the event still goes out: the seq is not taken back.
+    fn line(
+        &mut self,
+        tx: &broadcast::Sender<api::Event>,
+        ev: Ev,
+        at: DateTime<Utc>,
+        count: u64,
+        first_at: Option<DateTime<Utc>>,
+    ) -> u64 {
+        self.seq += 1;
+        let e = api::Event {
+            seq: self.seq,
+            at,
+            kind: ev.kind.into(),
+            reason: ev.reason.into(),
+            message: bounded(ev.message),
+            machine_id: ev.machine_id,
+            tenant: ev.tenant,
+            host: String::new(),
+            data: ev.data,
+            count,
+            first_at,
+        };
+        if let Err(err) = self.append(&e) {
+            tracing::warn!(seq = e.seq, reason = e.reason, err = %err, "event not written");
+        }
+        // Under the lock: watchers get the events in seq order.
+        let _ = tx.send(e);
+        self.seq
+    }
+
+    /// Logs the folded repeats of the series `pick` selects, each series' as one line, the
+    /// last seen last; the series go on. The last seq given, if any.
+    fn flush(
+        &mut self,
+        tx: &broadcast::Sender<api::Event>,
+        pick: impl Fn(&Key, &Series) -> bool,
+    ) -> Option<u64> {
+        let mut folded: Vec<_> = self
+            .series
+            .iter_mut()
+            .filter(|(k, s)| pick(k, s))
+            .filter_map(|(_, s)| s.folded.take())
+            .collect();
+        folded.sort_by_key(|f| f.at);
+        let mut last = None;
+        for f in folded {
+            last = Some(self.line(tx, f.last, f.at, f.count, Some(f.first_at)));
+        }
+        last
     }
 }
 
-/// Whether the events after `since` are all still in the log: `0` always is.
-fn check_since(since: u64, oldest: u64, last: u64) -> Result<(), Gone> {
+/// Whether the events after `since` are all still in the log: `0` always is; `pruned` is the
+/// last seq retention removed, `oldest` the first kept.
+fn check_since(since: u64, pruned: u64, oldest: u64, last: u64) -> Result<(), Gone> {
     if since > last {
         return Err(Gone {
             oldest,
@@ -224,7 +348,7 @@ fn check_since(since: u64, oldest: u64, last: u64) -> Result<(), Gone> {
             ),
         });
     }
-    if since > 0 && since + 1 < oldest {
+    if since > 0 && since < pruned {
         return Err(Gone {
             oldest,
             message: format!(
@@ -262,11 +386,22 @@ impl Events {
                 std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
                 continue;
             };
-            if newest {
-                seq = events.last().map_or(first.seq, |e| e.seq);
+            // Retention counts lines, not seqs: a folded flip takes a seq with no line.
+            let (mut last, mut lines) = (first.seq, 1);
+            for e in events {
+                (last, lines) = (e.seq, lines + 1);
             }
-            files.insert(key.clone(), first.seq);
+            if newest {
+                seq = last;
+            }
+            let file = File {
+                first: first.seq,
+                last,
+                lines,
+            };
+            files.insert(key.clone(), file);
         }
+        let pruned = files.values().next().map_or(0, |f: &File| f.first - 1);
         let (tx, _) = broadcast::channel(WATCH_BUFFER);
         Ok(Self {
             inner: Arc::new(Shared {
@@ -274,8 +409,10 @@ impl Events {
                     dir: dir.to_path_buf(),
                     seq,
                     files,
+                    pruned,
                     open: None,
                     emitted: BTreeMap::new(),
+                    series: BTreeMap::new(),
                 }),
                 tx,
                 closing: watch::channel(false).0,
@@ -290,29 +427,80 @@ impl Events {
         log.seq = log.seq.max(seq);
     }
 
-    /// Logs an event and sends it to the watchers; its seq. A log that cannot be written is
-    /// warned about and the event still goes out: the seq is not taken back.
-    pub fn emit(&self, ev: Ev) -> u64 {
+    /// Logs an event and sends it to the watchers; its seq, the machine's version when it is
+    /// about one. A repeat of a `FOLDED` reason within `FOLD_MINUTES` of its line is folded,
+    /// no line: a flip still takes a seq (the machine changed), a use or a refusal none. Any
+    /// other line about a machine logs the machine's folded repeats first, so the last line
+    /// about it says what it is now.
+    pub fn emit(&self, ev: Ev) -> Option<u64> {
+        self.emit_at(ev, Utc::now())
+    }
+
+    fn emit_at(&self, ev: Ev, now: DateTime<Utc>) -> Option<u64> {
+        let tx = &self.inner.tx;
         let mut log = self.inner.log.lock().unwrap();
-        log.seq += 1;
         *log.emitted.entry((ev.kind, ev.reason)).or_default() += 1;
-        let e = api::Event {
-            seq: log.seq,
-            at: Utc::now(),
-            kind: ev.kind.into(),
-            reason: ev.reason.into(),
-            message: bounded(ev.message),
-            machine_id: ev.machine_id,
-            tenant: ev.tenant,
-            host: String::new(),
-            data: ev.data,
-        };
-        if let Err(err) = log.append(&e) {
-            tracing::warn!(seq = e.seq, reason = e.reason, err = %err, "event not written");
+        let key: Key = (ev.tenant.clone(), ev.machine_id.clone(), ev.reason);
+        let folds = !(key.0.is_empty() && key.1.is_empty()) && FOLDED.contains(&key.2);
+        let flip = FLIPS.contains(&key.2);
+        if let Some(s) = log.series.get_mut(&key).filter(|s| !s.due(now)) {
+            s.fold(ev, now);
+            if !flip {
+                return None;
+            }
+            log.seq += 1;
+            return Some(log.seq);
         }
-        // Under the lock: watchers get the events in seq order.
-        let _ = self.inner.tx.send(e.clone());
-        e.seq
+        match folds && !flip {
+            true => log.flush(tx, |k, _| *k == key),
+            false if !key.1.is_empty() => log.flush(tx, |k, _| k.1 == key.1),
+            false => None,
+        };
+        if folds {
+            let opened = Series {
+                opened: now,
+                folded: None,
+            };
+            log.series.insert(key, opened);
+        }
+        Some(log.line(tx, ev, now, 1, None))
+    }
+
+    /// Ends the series whose window is over, as of `now`, and logs what they folded: a use's
+    /// or a refusal's here; the machines whose flips are due are named, for `flush_machine`
+    /// under their lock, since those lines move their version.
+    pub fn flush_due(&self, now: DateTime<Utc>) -> Vec<String> {
+        let mut log = self.inner.log.lock().unwrap();
+        log.series
+            .retain(|_, s| !(s.due(now) && s.folded.is_none()));
+        let uses: Vec<Key> = log
+            .series
+            .iter()
+            .filter(|(k, s)| s.due(now) && !FLIPS.contains(&k.2))
+            .map(|(k, _)| k.clone())
+            .collect();
+        log.flush(&self.inner.tx, |k, _| uses.contains(k));
+        log.series.retain(|k, _| !uses.contains(k));
+        let mut machines: Vec<String> = log
+            .series
+            .iter()
+            .filter(|(_, s)| s.due(now))
+            .map(|(k, _)| k.1.clone())
+            .collect();
+        machines.dedup();
+        machines
+    }
+
+    /// Logs what a machine's flips folded, the last seen last, and its uses whose window is
+    /// over, and ends the series whose window is over: the last seq given, its version. The
+    /// caller holds the machine's record. Every flip series is logged, due or not, so the last
+    /// line says what the machine is.
+    pub fn flush_machine(&self, machine: &str, now: DateTime<Utc>) -> Option<u64> {
+        let mut log = self.inner.log.lock().unwrap();
+        let pick = |k: &Key, s: &Series| k.1 == machine && (FLIPS.contains(&k.2) || s.due(now));
+        let last = log.flush(&self.inner.tx, pick);
+        log.series.retain(|k, s| k.1 != machine || !s.due(now));
+        last
     }
 
     /// How many events were logged since the daemon started, by type and reason.
@@ -322,17 +510,17 @@ impl Events {
 
     /// Up to `limit` events after `since` that the filter keeps (blocking: it reads files).
     pub fn read(&self, since: u64, f: &Filter, limit: usize) -> Result<Page> {
-        let (dir, files, last) = {
+        let (dir, files, last, pruned) = {
             let log = self.inner.log.lock().unwrap();
-            (log.dir.clone(), log.files.clone(), log.seq)
+            (log.dir.clone(), log.files.clone(), log.seq, log.pruned)
         };
-        let oldest = files.values().next().copied().unwrap_or(last + 1);
-        check_since(since, oldest, last)?;
-        let files: Vec<(String, u64)> = files.into_iter().collect();
+        let oldest = files.values().next().map_or(last + 1, |f| f.first);
+        check_since(since, pruned, oldest, last)?;
+        let files: Vec<(String, File)> = files.into_iter().collect();
         // From the last file that starts at or before the first event wanted.
         let from = files
             .iter()
-            .rposition(|(_, first)| *first <= since + 1)
+            .rposition(|(_, f)| f.first <= since + 1)
             .unwrap_or(0);
         let mut events = Vec::new();
         for (key, _) in &files[from..] {
@@ -340,8 +528,11 @@ impl Events {
                 Ok(f) => f,
                 // Removed by retention since the list was taken.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    let oldest = self.inner.log.lock().unwrap().oldest();
-                    check_since(since, oldest, last)?;
+                    let (pruned, oldest) = {
+                        let log = self.inner.log.lock().unwrap();
+                        (log.pruned, log.oldest())
+                    };
+                    check_since(since, pruned, oldest, last)?;
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -366,19 +557,15 @@ impl Events {
     }
 
     /// Removes whole hours older than `keep_days`, then the oldest hours while more than `max`
-    /// events are kept; the newest file always stays, so the last seq is never lost.
+    /// lines are kept; the newest file always stays, so the last seq is never lost.
     pub fn prune(&self, now: DateTime<Utc>, keep_days: u32, max: u64) -> Result<usize> {
         let cut = hour_key(now - Duration::days(keep_days as i64));
         let mut log = self.inner.log.lock().unwrap();
         let mut removed = 0;
         while log.files.len() > 1 {
-            let (key, first) = log
-                .files
-                .iter()
-                .next()
-                .map(|(k, f)| (k.clone(), *f))
-                .unwrap();
-            if key >= cut && log.seq + 1 - first <= max {
+            let key = log.files.keys().next().cloned().unwrap();
+            let kept: u64 = log.files.values().map(|f| f.lines).sum();
+            if key >= cut && kept <= max {
                 break;
             }
             let p = path(&log.dir, &key);
@@ -387,14 +574,22 @@ impl Events {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e).with_context(|| format!("remove {}", p.display())),
             }
-            log.files.remove(&key);
+            if let Some(f) = log.files.remove(&key) {
+                log.pruned = f.last;
+            }
             removed += 1;
         }
         Ok(removed)
     }
 
-    /// Ends every watch: the daemon is going down.
+    /// Logs every folded repeat, then ends every watch: the daemon is going down. A machine's
+    /// version stays its last flip's seq, which no line carries: a writer that read the
+    /// summary gets one 409.
     pub fn close(&self) {
+        let mut log = self.inner.log.lock().unwrap();
+        log.flush(&self.inner.tx, |_, _| true);
+        log.series.clear();
+        drop(log);
         self.inner.closing.send_replace(true);
     }
 
@@ -406,8 +601,9 @@ impl Events {
 
     /// A watch from `since`: checked and its first page read now, so a cursor the log cannot
     /// answer is refused before any line goes out; then the lines, one per event (the page,
-    /// the pages after it, then each new event), `{}` every `HEARTBEAT`, and a last error
-    /// line when the watcher fell behind or the daemon goes down. Ends when `tx` is dropped.
+    /// the pages after it, then each new event), a bookmark every `HEARTBEAT` of quiet, and a
+    /// last error line when the watcher fell behind or the daemon goes down. Ends when `tx` is
+    /// dropped.
     pub async fn watch(&self, since: u64, f: Filter, tx: mpsc::Sender<String>) -> Result<()> {
         // Subscribed before the first read: an event logged in between is in one or both,
         // and the seq tells which were sent.
@@ -474,7 +670,8 @@ impl Events {
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
-                _ = beat.tick() => ("{}\n".to_string(), false),
+                // Every event up to `cursor` was looked at: a watch again from it misses nothing.
+                _ = beat.tick() => (bookmark(cursor), false),
                 _ = closing.wait_for(|c| *c) => {
                     // Only if there is room: a daemon going down waits for no reader.
                     let why = format!("the daemon is going down: watch again from since={cursor}");
@@ -499,6 +696,12 @@ pub async fn send(
         r = tx.send(line) => r.is_ok(),
         _ = closing.wait_for(|c| *c) => false,
     }
+}
+
+/// A watch's quiet line: the seq up to which it looked at every event, as a bookmark (no
+/// `seq`: it is not an event).
+pub fn bookmark(cursor: u64) -> String {
+    format!("{{\"bookmark\":{cursor}}}\n")
 }
 
 /// The line a watch ends with: an error body, as the API's.
@@ -548,6 +751,8 @@ mod tests {
                 tenant: String::new(),
                 host: String::new(),
                 data: None,
+                count: 1,
+                first_at: None,
             };
             log.append(&e).unwrap();
         }
@@ -556,17 +761,20 @@ mod tests {
     #[test]
     fn seqs_go_on_across_a_restart_and_from_the_records() {
         let (dir, ev) = open();
-        assert_eq!(ev.emit(Ev::normal(reason::HOST_STARTED, "up")), 1);
+        assert_eq!(ev.emit(Ev::normal(reason::HOST_STARTED, "up")), Some(1));
         let seq = ev.emit(
             Ev::warning(reason::EXITED, "exited with code 7")
                 .of("m_1", "t1")
                 .data(serde_json::json!({"code": 7})),
         );
-        assert_eq!(seq, 2);
+        assert_eq!(seq, Some(2));
         drop(ev);
         // A new daemon goes on from the log.
         let ev = Events::open(dir.path()).unwrap();
-        assert_eq!(ev.emit(Ev::normal(reason::HOST_STARTED, "up again")), 3);
+        assert_eq!(
+            ev.emit(Ev::normal(reason::HOST_STARTED, "up again")),
+            Some(3)
+        );
         // Counted from this daemon's start, by type and reason.
         ev.emit(Ev::warning(reason::EXITED, "exited with code 1"));
         ev.emit(Ev::warning(reason::EXITED, "exited with code 2"));
@@ -585,7 +793,7 @@ mod tests {
         // the seq past it: a version is never handed out twice.
         ev.floor(40);
         ev.floor(10);
-        assert_eq!(ev.emit(Ev::normal(reason::CREATED, "")), 41);
+        assert_eq!(ev.emit(Ev::normal(reason::CREATED, "")), Some(41));
         // The files are the daemon's alone.
         use std::os::unix::fs::PermissionsExt;
         let f = std::fs::read_dir(dir.path())
@@ -614,7 +822,7 @@ mod tests {
             .unwrap();
         f.write_all(br#"{"seq":3,"at":"2026-"#).unwrap();
         let ev = Events::open(dir.path()).unwrap();
-        assert_eq!(ev.emit(Ev::normal(reason::STOPPED, "c")), 3);
+        assert_eq!(ev.emit(Ev::normal(reason::STOPPED, "c")), Some(3));
         assert_eq!(all(&ev, 0), [1, 2, 3]);
         assert!(std::fs::read_to_string(&file).unwrap().ends_with("}\n"));
         // A file a crash left with nothing whole is removed.
@@ -622,7 +830,7 @@ mod tests {
         std::fs::write(dir.path().join("2999-01-01T00.ndjson"), b"{\"seq\":").unwrap();
         let ev = Events::open(dir.path()).unwrap();
         assert!(!dir.path().join("2999-01-01T00.ndjson").exists());
-        assert_eq!(ev.emit(Ev::normal(reason::STOPPED, "d")), 4);
+        assert_eq!(ev.emit(Ev::normal(reason::STOPPED, "d")), Some(4));
     }
 
     #[test]
@@ -694,7 +902,7 @@ mod tests {
         assert_eq!(files, 1);
         drop(ev);
         let ev = Events::open(dir.path()).unwrap();
-        assert_eq!(ev.emit(Ev::normal(reason::CREATED, "")), 10);
+        assert_eq!(ev.emit(Ev::normal(reason::CREATED, "")), Some(10));
     }
 
     #[test]
@@ -719,6 +927,220 @@ mod tests {
         assert!(m.len() <= MAX_MESSAGE, "{}", m.len());
         assert!(m.ends_with('…'));
         assert_eq!(bounded("short".into()), "short");
+    }
+
+    /// What the log holds about a machine: (seq, reason, count).
+    fn lines_of(ev: &Events) -> Vec<(u64, String, u64)> {
+        let p = ev.read(0, &Filter::default(), 5000).unwrap();
+        p.events
+            .into_iter()
+            .map(|e| (e.seq, e.reason, e.count))
+            .collect()
+    }
+
+    fn session(n: u32) -> Ev {
+        Ev::normal(reason::SESSION_OPENED, format!("sh #{n}")).of("m_a", "t1")
+    }
+
+    #[test]
+    fn repeats_of_a_use_fold_into_one_line_after_their_window() {
+        let (_dir, ev) = open();
+        let t0 = t("2026-10-28T10:00:00Z");
+        let s = |m: i64| t0 + Duration::seconds(m);
+        // The first is logged at once; the next ones within 10 minutes are folded, no seq.
+        assert_eq!(ev.emit_at(session(0), s(0)), Some(1));
+        for i in 1..=4 {
+            assert_eq!(ev.emit_at(session(i), s(i as i64 * 60)), None);
+        }
+        // Another machine's, and the host's, are their own.
+        let other = Ev::normal(reason::SESSION_OPENED, "").of("m_b", "t1");
+        assert_eq!(ev.emit_at(other, s(300)), Some(2));
+        assert_eq!(lines_of(&ev).len(), 2);
+        // Nothing due before the window ends; at its end, one line for the four.
+        assert!(ev.flush_due(s(599)).is_empty());
+        assert_eq!(lines_of(&ev).len(), 2);
+        assert!(
+            ev.flush_due(s(600)).is_empty(),
+            "no flips to log under a record"
+        );
+        let p = ev.read(2, &Filter::default(), 10).unwrap();
+        let e = &p.events[0];
+        assert_eq!((e.seq, e.count, e.message.as_str()), (3, 4, "sh #4"));
+        assert_eq!((e.first_at, e.at), (Some(s(60)), s(240)));
+        // The series ended: the next one is logged at once and opens another.
+        assert_eq!(ev.emit_at(session(5), s(700)), Some(4));
+        assert_eq!(ev.emit_at(session(6), s(701)), None);
+        // `/metrics` counts every one, folded or not.
+        assert_eq!(ev.emitted()[&("normal", "session_opened")], 8);
+        // One alone keeps its shape: no count, no first time.
+        let line = serde_json::to_value(&ev.read(0, &Filter::default(), 1).unwrap().events[0]);
+        let line = line.unwrap();
+        assert!(
+            line.get("count").is_none() && line.get("first_at").is_none(),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_change_logs_what_was_folded_first() {
+        let (_dir, ev) = open();
+        let t0 = t("2026-10-28T10:00:00Z");
+        for i in 0..3 {
+            ev.emit_at(session(i), t0 + Duration::seconds(i as i64));
+        }
+        let stopped = Ev::normal(reason::STOPPED, "stopped (user)").of("m_a", "t1");
+        assert_eq!(ev.emit_at(stopped, t0 + Duration::seconds(5)), Some(3));
+        assert_eq!(
+            lines_of(&ev),
+            [
+                (1, "session_opened".into(), 1),
+                (2, "session_opened".into(), 2),
+                (3, "stopped".into(), 1)
+            ]
+        );
+        // The series goes on to its window's end: a session after the stop still folds.
+        assert_eq!(ev.emit_at(session(9), t0 + Duration::seconds(6)), None);
+    }
+
+    #[test]
+    fn folded_flips_take_a_seq_and_the_last_line_says_what_the_machine_is() {
+        let (_dir, ev) = open();
+        let t0 = t("2026-10-28T10:00:00Z");
+        let flip = |ready: bool, sec: i64| {
+            let e = match ready {
+                true => Ev::normal(reason::READY, format!("ready {sec}")),
+                false => Ev::warning(reason::NOT_READY, format!("not ready {sec}")),
+            };
+            ev.emit_at(e.of("m_a", "t1"), t0 + Duration::seconds(sec))
+        };
+        assert_eq!(flip(true, 0), Some(1));
+        assert_eq!(flip(false, 1), Some(2));
+        // Folded: a seq (the machine's version moves), no line.
+        assert_eq!(flip(true, 2), Some(3));
+        assert_eq!(flip(false, 3), Some(4));
+        assert_eq!(flip(true, 4), Some(5));
+        assert_eq!(lines_of(&ev).len(), 2);
+        // A cursor on a seq no line has reads on from it.
+        assert_eq!(all(&ev, 4), Vec::<u64>::new());
+        assert_eq!(ev.read(4, &Filter::default(), 10).unwrap().next, 5);
+        // Due: the machine is named, its flips logged under its lock, the last seen last.
+        let due = t0 + Duration::minutes(10);
+        assert_eq!(ev.flush_due(due), ["m_a"]);
+        assert_eq!(ev.flush_machine("m_a", due), Some(7));
+        let p = ev.read(5, &Filter::default(), 10).unwrap();
+        let got: Vec<_> = p
+            .events
+            .iter()
+            .map(|e| (e.seq, e.reason.as_str(), e.count, e.message.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (6, "not_ready", 1, "not ready 3"),
+                (7, "ready", 2, "ready 4")
+            ]
+        );
+        assert!(ev.flush_due(due).is_empty());
+        // A change of the machine logs its folded flips before itself, whatever their window.
+        assert_eq!(flip(false, 700), Some(8));
+        assert_eq!(flip(true, 701), Some(9));
+        assert_eq!(flip(false, 702), Some(10));
+        let stopping = Ev::normal(reason::STOPPING, "").of("m_a", "t1");
+        assert_eq!(ev.emit_at(stopping, t0 + Duration::seconds(703)), Some(12));
+        let reasons: Vec<String> = lines_of(&ev).into_iter().skip(4).map(|l| l.1).collect();
+        assert_eq!(reasons, ["not_ready", "ready", "not_ready", "stopping"]);
+    }
+
+    #[test]
+    fn a_tenant_refusal_folds_and_the_daemon_going_down_logs_what_was_folded() {
+        let (_dir, ev) = open();
+        let t0 = t("2026-10-28T10:00:00Z");
+        for i in 0..3 {
+            let refused = Ev::warning(reason::QUOTA_EXCEEDED, format!("refused {i}")).tenant("t1");
+            ev.emit_at(refused, t0 + Duration::seconds(i));
+        }
+        // The host's own events never fold.
+        ev.emit_at(Ev::normal(reason::HOST_STARTED, ""), t0);
+        ev.emit_at(Ev::normal(reason::HOST_STARTED, ""), t0);
+        assert_eq!(lines_of(&ev).len(), 3);
+        ev.close();
+        let last = lines_of(&ev).pop().unwrap();
+        assert_eq!(last, (4, "quota_exceeded".into(), 2));
+    }
+
+    #[test]
+    fn retention_counts_lines_not_seqs() {
+        let (dir, ev) = open();
+        logged_at(&ev, "2026-10-20T10:00:00Z", 3);
+        // Seqs a flip took with no line.
+        ev.inner.log.lock().unwrap().seq += 1000;
+        logged_at(&ev, "2026-10-20T11:00:00Z", 3);
+        let now = t("2026-10-20T12:00:00Z");
+        assert_eq!(ev.prune(now, 7, 6).unwrap(), 0);
+        // A cursor in the gap is whole: the lines it lacks are all kept.
+        assert_eq!(all(&ev, 500), [1004, 1005, 1006]);
+        assert_eq!(ev.prune(now, 7, 5).unwrap(), 1);
+        // Pruned up to seq 3: a cursor at or past it misses nothing, even in the gap; one
+        // before it does.
+        assert_eq!(all(&ev, 3), [1004, 1005, 1006]);
+        assert_eq!(all(&ev, 500), [1004, 1005, 1006]);
+        let err = ev.read(2, &Filter::default(), 10).unwrap_err();
+        assert_eq!(err.downcast_ref::<Gone>().map(|g| g.oldest), Some(1004));
+        // Counted again at a start.
+        drop(ev);
+        let ev = Events::open(dir.path()).unwrap();
+        let files: Vec<File> = ev
+            .inner
+            .log
+            .lock()
+            .unwrap()
+            .files
+            .values()
+            .copied()
+            .collect();
+        assert_eq!(
+            files,
+            [File {
+                first: 1004,
+                last: 1006,
+                lines: 3
+            }]
+        );
+    }
+
+    #[test]
+    fn a_due_flip_logs_the_machine_s_flips_not_its_uses_still_in_their_window() {
+        let (_dir, ev) = open();
+        let t0 = t("2026-10-28T10:00:00Z");
+        let at = |s: i64| t0 + Duration::seconds(s);
+        let flip = |reason: &'static str, s: i64| {
+            ev.emit_at(Ev::normal(reason, reason).of("m_a", "t1"), at(s));
+        };
+        flip(reason::READY, 0);
+        flip(reason::READY, 1);
+        // Sessions opened 5 minutes later: their window ends 5 minutes after the flip's.
+        ev.emit_at(session(0), at(300));
+        ev.emit_at(session(1), at(301));
+        let due = at(600);
+        assert_eq!(ev.flush_due(due), ["m_a"]);
+        ev.flush_machine("m_a", due);
+        let got: Vec<(String, u64)> = lines_of(&ev).into_iter().map(|l| (l.1, l.2)).collect();
+        assert_eq!(
+            got,
+            [
+                ("ready".into(), 1),
+                ("session_opened".into(), 1),
+                ("ready".into(), 1)
+            ]
+        );
+        // The sessions' fold comes at the end of their own window.
+        assert!(ev.flush_due(at(899)).is_empty());
+        assert_eq!(lines_of(&ev).len(), 3);
+        ev.flush_due(at(900));
+        assert_eq!(
+            lines_of(&ev).pop().unwrap(),
+            (5, "session_opened".into(), 1)
+        );
     }
 
     /// The next line of a watch, within a second.
@@ -795,6 +1217,7 @@ mod tests {
         assert_eq!(next(&mut rx).await["seq"], 1);
         tokio::time::pause();
         tokio::time::advance(HEARTBEAT + std::time::Duration::from_secs(1)).await;
-        assert_eq!(next(&mut rx).await, serde_json::json!({}));
+        // A bookmark: every event up to it was looked at.
+        assert_eq!(next(&mut rx).await, serde_json::json!({"bookmark": 1}));
     }
 }

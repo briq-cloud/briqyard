@@ -104,7 +104,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `root_disk_gb` | `8` | Size of every root disk (thin) |
 | `image_keep_days` | `14` | An image no machine uses is removed this long after it was built; under disk pressure, sooner (ADR 0021) |
 | `usage_keep_days` | `90` | Closed hours of usage (`GET /v1/usage`) are kept this long, then removed by the tick |
-| `events_keep_days` | `7` | Events (`GET /v1/events`, ADR 0019) are kept this long, and at most 100,000 per host; whole hours go, the newest always stays |
+| `events_keep_days` | `7` | Events (`GET /v1/events`, ADR 0019) are kept this long, and at most 100,000 lines per host; whole hours go, the newest always stays. Repeats of `session_opened`, `quota_exceeded`, `ready` and `not_ready` within 10 minutes of their line are one line with `count` (ADR 0047) |
 | `image_resolve_minutes` | `10` | A tag's digest is reused this long before the registry is asked again (a `HEAD`, which Docker Hub does not count as a pull); when the registry refuses (a rate limit), the image already on the host serves |
 | `conditions.memory_pct` | `95` | `memory_pressure` when committed memory is over this share of capacity (ADR 0021): the fleet places nothing new on the host |
 | `conditions.disk_free_pct` | `10` | `disk_pressure` when the pool's free space is under this share of its size: the fleet places nothing new, and unused images go, oldest first, until it is back. `0`: never |
@@ -359,7 +359,7 @@ snapshot, or is whole.
   | `briqyard_memory_mb`, `briqyard_vcpus` | `kind="used\|capacity"` | committed to running machines, handed out |
   | `briqyard_pool_bytes`, `briqyard_disk_free_mb` | `kind="size\|used\|free"` | the pool |
   | `briqyard_host_condition` | `condition` | 1 while true |
-  | `briqyard_events_total` | `type`, `reason` | events since the daemon started |
+  | `briqyard_events_total` | `type`, `reason` | events since the daemon started, folded repeats included |
   | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_tenants`, `briqyard_endpoints` | | counts (`execs`: exec sessions included) |
   | `briqyard_machine_cpu_seconds_total` | `machine`, `tenant`, `name`, `role` (a gateway's) | its cgroup's CPU time |
   | `briqyard_machine_memory_bytes`, `_memory_limit_bytes` | same | its cgroup's memory, its size |

@@ -213,7 +213,13 @@ plus `apt-get purge docker.io` and the edge's files.
   versions (each transition's event and reason, a boot and a start failure, an exit and its
   restart, suspend and resume, the gateway, PATCH, a stale `If-Match`, the seq past the
   records at load, the route's pages, watch and 410; the log itself: seqs across a restart, a
-  torn line, retention, a watch's backlog, lag, heartbeat and shutdown), metrics and
+  torn line, retention counting lines, a watch's backlog, lag, bookmark and shutdown; repeats
+  folded (ADR 0047): a use's at its window's end, a change logging them first, a tenant's
+  refusal, the shutdown's, flips taking a seq with no line and the last line the machine's
+  state, a due flip leaving uses in their window, a cursor in a gap after retention; a flapping
+  readiness probe whose version is on disk once readable, a stale `If-Match` refused, the
+  tick's line its version, the tick leaving a machine in a transition alone and never writing
+  a destroyed record back), metrics and
   conditions (the exposition of machines in every state checked line by line and against the
   format, no probe per scrape, conditions turning true and clearing with their events, a stuck
   `zfs` command as `storage_stalled` until it exits, a pool
@@ -223,8 +229,9 @@ plus `apt-get purge docker.io` and the edge's files.
   its events, `/wait` for ready and its `not_ready`, a startup failure that fails the boot and
   one that is a crash, liveness under `on-failure` and `no`, the backoff, its reset and
   `crash_loop`, the ingress waiting for a woken machine, the host's turns, a PATCH on a running
-  machine, the gateway waited for ready, an adopted machine; the HTTP client and the TCP
-  connect against loopback servers), changes at the next boot (a PATCH on a running machine
+  machine, the gateway waited for ready, an adopted machine, adopted machines' first probes
+  spread over their period on a paused clock, a slow probe keeping its period; the HTTP client
+  and the TCP connect against loopback servers), changes at the next boot (a PATCH on a running machine
   left pending with its events and `If-Match`, applied by a restart into the config drive, a
   new image's root disk cloned again with the volume untouched and a fork promoted, the root
   made from the cache's image and only once no backup runs, a promoted fork backed up whole
@@ -302,10 +309,11 @@ plus `apt-get purge docker.io` and the edge's files.
   live, drops shown, a download capped at 2 Mbit/s), usage (running seconds, internet and
   ingress bytes, a stopped machine's disk hours), events (a watch from before a stop gets it,
   a stale `If-Match` refused, `describe`, the reasons in order, a cursor past the log
-  refused), metrics (a running machine's CPU and state series, `top` lists it with rates after
+  refused, a quiet watch's bookmark past its cursor), metrics (a running machine's CPU and state series, `top` lists it with rates after
   two ticks, no condition true on a healthy host), probes (an HTTP readiness probe: not ready, then
   ready and its event, `wait`; an exec liveness probe that fails: `liveness_failed`, restarted,
-  running again), backups on a schedule (every second backup whole and a kept one's base kept,
+  running again; a readiness probe flipping every 2 s: two lines, the version past them, the
+  destroy logging the folded flips with their count), backups on a schedule (every second backup whole and a kept one's base kept,
   a base not deleted alone, the oldest kept restored from its chain, retention down to 2, its
   event, a destroyed machine's backups listed then deleted with their chain), changes at the
   next boot (env and a boot file set on a running Python server: pending, still the old values; `machine restart`: the new values and `applied`; a
@@ -339,7 +347,7 @@ plus `apt-get purge docker.io` and the edge's files.
   root disk given back to the pool, exec after a bare pause and resume), a volume grown (ADR
   0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
-  data kept, the next backup incremental and its restore at the grown size). 232 checks, 228
+  data kept, the next backup incremental and its restore at the grown size). 236 checks, 232
   without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
@@ -351,9 +359,10 @@ plus `apt-get purge docker.io` and the edge's files.
   daemon in the VM), the capacity signals on `/metrics` (ADR 0042), an exec session and a tty
   relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
   machine running (back `ready`, a new start of this version that adopted it, the machine
-  answering, never booted again), a volume's growth forwarded. 32 checks. With `BRIQYARD_TOKEN`
+  answering, never booted again), a volume's growth forwarded, a tenant's watch streamed with
+  its bookmark. 33 checks. With `BRIQYARD_TOKEN`
   against a real fleet: it drains only the dev fleet's host `local`, so it leaves real hosts
-  alone (20 checks then: `/metrics` refused without a token over `https://`;
+  alone (21 checks then: `/metrics` refused without a token over `https://`;
   `BRIQYARD_METRICS_TOKEN` when the fleet has a `metrics_token`).
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start and a
