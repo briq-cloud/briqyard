@@ -46,6 +46,6 @@ Three things stand between a Prometheus and the hosts:
 ## Consequences
 
 - Each scrape of a host is a request through the fleet: 15 s × the hosts, each a few kilobytes per machine. A fleet that stops stops the scrapes; the alert says so (the fleet's own target is down too).
-- The stack takes about 1.5 GB of disk (Grafana's release alone is 1.3 GB) plus its samples, and about 400 MB of memory with a few hosts. On a server that also runs machines, `capacity.reserved_memory_mb` grows by that.
+- The stack takes about 1.5 GB of disk (Grafana 13.2.5's release alone is 1.3 GB) plus its samples, and about 700 MB of memory: measured in the development VM with two hosts and about 20 machines, Grafana 534 to 604 MB resident, Prometheus 70 MB, 3 MB of samples after 8 minutes. On a server that also runs machines, `capacity.reserved_memory_mb` grows by that.
 - Counters start at zero with each daemon (ADR 0021): `increase()` and `rate()` handle the reset.
 - Not built: long-term storage, Prometheus served to other tools (point another Prometheus at the targets), alerts other than Slack (Grafana's own contact points do it by hand), a metrics token per host.

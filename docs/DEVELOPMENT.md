@@ -396,7 +396,7 @@ plus `apt-get purge docker.io` and the edge's files.
   asked), each ready host's metrics relayed, a down host 503, an unknown one 404; with
   `PROMETHEUS_URL`, every target scraped and up exactly when its host answers; with
   `GRAFANA_URL` and `GRAFANA_PASSWORD_FILE`, every query of the three dashboards returning data
-  (`CHECK_HOST=local`). @@MONCHECKS@@ checks with fc and fc2 and the stack installed. Changes
+  (`CHECK_HOST=local`). 18 checks with fc and fc2 and the stack installed. Changes
   nothing: start a few machines on `local` first so the per-machine panels have data.
 
 ### Fuzzing

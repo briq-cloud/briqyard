@@ -694,7 +694,7 @@ rm /root/grafana-password
 | `PROMETHEUS_LISTEN`, `GRAFANA_LISTEN` | `127.0.0.1:9090`, `127.0.0.1:3000` | loopback only |
 | `LARGEST_SLOT_MB` | `16384` | the alert when a region's largest slot is under it: the largest size you offer |
 
-It takes about 1.5 GB of disk and 400 MB of memory with a few hosts (Prometheus grows with
+It takes about 1.5 GB of disk and 700 MB of memory with a few hosts (Grafana 600 MB, Prometheus 70 MB in the VM) (Prometheus grows with
 series, about 12 per machine). On a server that also runs machines, add the memory to
 `capacity.reserved_memory_mb`.
 

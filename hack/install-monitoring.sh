@@ -20,8 +20,9 @@
 #   GRAFANA_PASSWORD_FILE  a 0600 file with the admin password, instead of stdin
 #   LARGEST_SLOT_MB        the alert when a region's largest slot is under it (16384)
 #
-# Memory: about 300 MB for both with a few hosts (Prometheus grows with series: about 12 per
-# machine). On a server that also runs machines, add it to capacity.reserved_memory_mb.
+# Memory: about 700 MB for both with a few hosts, Grafana 600 MB of it (Prometheus grows with
+# series: about 12 per machine). On a server that also runs machines, add it to
+# capacity.reserved_memory_mb.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 FLEET_URL=${FLEET_URL:-http://127.0.0.1:7430}
