@@ -2,6 +2,8 @@
 
 One file per decision, numbered, never rewritten: a changed decision is a new ADR that supersedes the old one. Research and measurements that drove a decision are in `../research/`, linked from the ADR.
 
+ADRs before 0055 say "tenant" for what is now a namespace (ADR 0055); they keep their text.
+
 Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a few lines), `## Decisions` (each one bold, then why), `## Consequences` (what it costs, what it rules out, when to reopen).
 
 | ADR | Decision |
@@ -59,3 +61,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0052](0052-daemon-memory-arenas.md) | The daemon's RSS grew with churn from glibc's per-thread arenas (each at least a 2 MB huge page, never unmapped), not from a leak: jemalloc as its allocator and glibc limited to one arena, `process_resident_memory_bytes` on `/metrics`, `hack/stress.py --churn` fails on growth after the first cycles; the ingress resyncs its listeners when it missed endpoint events |
 | [0053](0053-a-connection-is-use-until-delivered.md) | A connection is use from its arrival until it reaches the program (through a wake, readiness and the port); an open connection after that is not; a wait ends when its machine stops; an exec is use from the call |
 | [0054](0054-monitoring-beside-the-fleet.md) | Prometheus and Grafana beside the fleet, optional, on loopback behind the operator's proxy: the fleet lists the hosts for HTTP discovery (`/v1/metrics/targets`, labels that never change with a host's state) and relays each host's `/metrics` over its pinned TLS; the metrics token or the API's opens a scraper's paths; 90 days kept; dashboards and Slack alerts provisioned from the repository |
+| [0055](0055-tenant-is-now-namespace.md) | "Tenant" is now "namespace", the Kubernetes word: one isolated network per group of machines on a host, and several per team; the API, the CLI, the metrics and the docs say it; records, heartbeats and the registry read the old name through serde aliases, the host's `state/tenants/` directory keeps its name, and `tenant` is still accepted as input (body, query, `/v1/tenants`, `--tenant`) until the control plane has moved |
