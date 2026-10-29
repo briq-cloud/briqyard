@@ -14,6 +14,7 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+. "$(dirname "${BASH_SOURCE[0]}")/suite-end.sh"
 on_fleet()  { $FLEET_SH sh -c "$1"; }
 on_second() { $SECOND_HOST_SH sh -c "$1"; }
 # The fleet restarts during the run; the dev VMs reach it through a port forward that comes
@@ -28,6 +29,7 @@ STATE=$(on_fleet "sed -n 's/^state_dir: //p' $CFG"); STATE=${STATE:-/var/lib/bri
 # Run on any exit, a failed check, Ctrl-C or a kill included: the fleet's config and registry
 # put back, then the second host started again if the run left it stopped.
 cleanup() {
+  local rc=$?
   echo "cleanup"
   # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
   set +e
@@ -36,6 +38,7 @@ cleanup() {
     if [ -f $CFG.restore-check ]; then mv $CFG.restore-check $CFG; fi
     systemctl start briqyard-fleet" || true
   on_second "systemctl start briqyardd" || true
+  suite_early_end "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
@@ -82,6 +85,4 @@ check "back, its pool unlocked"        '[ "$(on_second "zfs get -H -o value keys
 check "with the key of the restored registry" 'on_second "journalctl -u briqyardd --since @$started -o cat" | grep "pool key loaded" | grep -q "\"from\":\"fleet\""'
 check "ready in the fleet"             '[ "$(hosts | jq -r ".[] | select(.id == \"$HOST\") | .state")" = ready ]'
 
-echo
-echo "passed $pass, failed $fail"
-[ "$fail" = 0 ]
+suite_summary

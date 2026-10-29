@@ -27,11 +27,13 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+. "$(dirname "${BASH_SOURCE[0]}")/suite-end.sh"
 # The daemon's own unit on this host, which some sections stop, kill or lock for a moment.
 UNIT=; if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then UNIT=briqyardd; fi
 # Run on any exit, a failed check, Ctrl-C or a kill included: what the run started ends, what
 # it changed is put back, what it made is destroyed.
 cleanup() {
+  local rc=$?
   echo "cleanup"
   # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
   set +e
@@ -64,6 +66,7 @@ cleanup() {
       sleep 2
     done
   done
+  suite_early_end "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
@@ -994,6 +997,4 @@ PY
   briqyard machine stop "$K" >/dev/null
 fi
 
-echo
-echo "passed $pass, failed $fail"
-[ "$fail" = 0 ]
+suite_summary

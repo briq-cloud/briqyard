@@ -926,7 +926,7 @@ ssh root@<public ip> nft list table inet briqyard_host # tcp 22, 80, 443 and the
 nc -vz -w 3 <public ip> 7420                            # from the Mac: times out
 scp hack/e2e.sh root@<public ip>:/root/ && ssh root@<public ip> 'apt-get install -y bc postgresql-client'
 ssh root@<public ip> 'export BRIQYARD_URL=https://10.42.0.11:7420 BRIQYARD_TOKEN=$(sed -n "s/^token: \"\(.*\)\"/\1/p" /etc/briqyard/config.yaml) BRIQYARD_TLS_FINGERPRINT=$(briqyardd --config /etc/briqyard/config.yaml tls-fingerprint); bash /root/e2e.sh'
-BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN=<the fleet's token> hack/fleet-smoke.sh
+ALLOW_SKIPPED=1 BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN=<the fleet's token> hack/fleet-smoke.sh
 ```
 
 e2e runs on the host (endpoints are vRack addresses, and it needs GNU tools) and needs a
@@ -936,7 +936,9 @@ bucket, the raw-backups section (it reads and writes the store's files) is skipp
 fewer. With `storage.key: fleet`, the encryption section skips the 3 checks of a key file (the
 key's absence from files and log, a start without it). On the host it checks the host ports
 too (the edge's port 80 from a machine, the API dropped). The fleet
-smoke runs from anywhere that reaches the fleet and touches no real host.
+smoke runs from anywhere that reaches the fleet and touches no real host: on a real fleet it
+skips the sections that drain, forget or upgrade the dev host `local`, says so, and needs
+`ALLOW_SKIPPED=1` to exit 0.
 
 **8. The first day**, what to watch:
 
