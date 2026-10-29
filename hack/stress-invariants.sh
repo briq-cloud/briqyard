@@ -45,6 +45,10 @@ missing=$(comm -13 <(echo "$roots") <(echo "$ids"))
 [ -z "$missing" ] && ok "every machine has its root disk" || fail "machines without a root disk: $(echo "$missing" | tr '\n' ' ')"
 check_eq "data disks == machines with a volume" "$(echo "$datas" | grep -c . || true)" "$(echo "$with_volume" | grep -c . || true)"
 [ -z "$others" ] && ok "no stray dataset under m/" || fail "stray datasets: $(echo "$others" | tr '\n' ' ')"
+# A machine's dataset counts even with no disk in it: a create cut short leaves it empty.
+fss=$(sudo zfs list -H -o name -t filesystem -d 1 "$POOL/m" 2>/dev/null | sed -n "s|^$POOL/m/||p" | sort)
+leaked=$(comm -23 <(echo "$fss") <(echo "$ids"))
+[ -z "$leaked" ] && ok "no machine dataset without a machine" || fail "machine datasets without a machine: $(echo "$leaked" | tr '\n' ' ')"
 
 # --- devices (ADR 0046): each disk's link names it; a Firecracker holds its own disks only ---
 wrong=""
@@ -92,7 +96,14 @@ ports=$(ss -ltnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | awk -v lo=$lo 
 tcp_eps=$(echo "$E" | jq '[.[] | select(.protocol == "tcp")] | length')
 check_eq "listening endpoint ports == tcp endpoints" "$ports" "$tcp_eps"
 
-# --- files: run dirs and jails only for known machines ---
+# --- files: records, run dirs and jails only for known machines ---
+# A record the daemon does not hold is a destroyed machine's written back: the next daemon would
+# load it.
+if sudo test -d "$DATA/state/machines"; then
+  recs=$(sudo ls "$DATA/state/machines" 2>/dev/null | sed -n 's/\.json$//p' | sort)
+  stray=$(comm -23 <(echo "$recs") <(echo "$ids"))
+  [ -z "$stray" ] && ok "no record without a machine" || fail "records without a machine: $(echo "$stray" | tr '\n' ' ')"
+fi
 if [ -d "$DATA/run" ]; then
   runs=$(sudo ls "$DATA/run" 2>/dev/null | sort)
   stray=$(comm -23 <(echo "$runs") <(echo "$ids"))

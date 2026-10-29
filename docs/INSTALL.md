@@ -13,7 +13,7 @@ As root on the server:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/bootstrap-host.sh
-BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.1 \
+BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.2 \
 BRIQYARD_POOL_DEVICE=/dev/nvme1n1 \
 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
 ALLOWED_CLIENTS=203.0.113.0/24 \
@@ -49,7 +49,7 @@ export BRIQYARD_URL=https://<host>:7420 BRIQYARD_TOKEN=<token> BRIQYARD_TLS_FING
 briqyard status
 ```
 
-On the host, `briqyard doctor` checks KVM, ZFS, nftables, Firecracker and the kernel, one line each.
+On the host, `briqyard doctor` checks KVM, ZFS, nftables, Firecracker and the kernel, one line each, and warns about what would restart the daemon or the host on its own.
 
 ## Several hosts
 

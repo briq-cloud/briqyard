@@ -5,6 +5,7 @@
 use super::*;
 use crate::config;
 use crate::objstore::ObjectStore;
+use futures::{StreamExt, TryStreamExt};
 use std::collections::HashSet;
 use tokio::sync::OwnedMutexGuard;
 
@@ -13,6 +14,15 @@ const RETRY_AFTER: chrono::Duration = chrono::Duration::minutes(15);
 
 /// The local store's kind for holders.
 const HOLDERS: &str = "holders";
+/// How long a destroy without disks waits for the store's list of its backups. Past it the
+/// store counts as unreachable, and the machine stays `destroying` for the tick to try again.
+/// The tick resumes destroys one by one, each under its machine's lock, so the store's own
+/// retry budget (minutes) must not hold them.
+const LIST_AT_DESTROY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Store reads that listings make at once, host-wide: a listing of every machine's backups,
+/// and listings asked together, take turns at this many.
+const READS_AT_ONCE: usize = 16;
 
 /// Held by every backup and deletion of one machine's backups: one at a time per machine.
 /// A destroyed machine's holder takes it over.
@@ -134,6 +144,8 @@ impl Holder {
 pub(super) struct Backups {
     store: Option<ObjectStore>,
     gate: tokio::sync::Semaphore,
+    /// Listings' store reads (`READS_AT_ONCE`).
+    reads: tokio::sync::Semaphore,
     holders: Mutex<HashMap<String, Arc<Holder>>>,
 }
 
@@ -246,6 +258,7 @@ impl Backups {
         Ok(Self {
             store,
             gate: tokio::sync::Semaphore::new(cfg.at_once.max(1) as usize),
+            reads: tokio::sync::Semaphore::new(READS_AT_ONCE),
             holders: Mutex::new(holders),
         })
     }
@@ -619,34 +632,71 @@ impl Manager {
             let days = self.inner.cfg.backup.keep_destroyed_days as i64;
             h.rec.lock().unwrap().destroyed_at + chrono::Duration::days(days)
         });
-        let mut out = Vec::new();
-        for key in store.list(&format!("backups/{machine_id}/")).await? {
-            if !key.ends_with(".json") {
-                continue;
-            }
-            let data = store.get_bytes(&key).await?;
-            match serde_json::from_slice::<api::Backup>(&data) {
-                Ok(mut b) => {
-                    b.machine = None;
-                    b.sealed = None;
-                    b.deletes_at = deletes_at;
-                    out.push(b);
-                }
-                Err(err) => tracing::warn!(key, err = %err, "unreadable backup record"),
-            }
+        let keys = {
+            let _read = self.inner.backups.reads.acquire().await;
+            store.list(&format!("backups/{machine_id}/")).await?
+        };
+        let mut out = self.read_backups(store, keys).await?;
+        for b in &mut out {
+            b.deletes_at = deletes_at;
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
     }
 
+    /// The backup records among store keys, read `READS_AT_ONCE` at a time. A record deleted
+    /// since it was listed (a deletion under way) is not a backup any more.
+    async fn read_backups(
+        &self,
+        store: &ObjectStore,
+        keys: Vec<String>,
+    ) -> Result<Vec<api::Backup>> {
+        let reads = &self.inner.backups.reads;
+        let records: Vec<(String, Option<Vec<u8>>)> = futures::stream::iter(keys)
+            .filter(|key| std::future::ready(key.ends_with(".json")))
+            .map(|key| async move {
+                let _read = reads.acquire().await;
+                let data = store.get_bytes_if_present(&key).await?;
+                anyhow::Ok((key, data))
+            })
+            .buffered(READS_AT_ONCE)
+            .try_collect()
+            .await?;
+        let mut out = Vec::new();
+        for (key, data) in records {
+            let Some(data) = data else {
+                continue;
+            };
+            match serde_json::from_slice::<api::Backup>(&data) {
+                Ok(mut b) => {
+                    b.machine = None;
+                    b.sealed = None;
+                    out.push(b);
+                }
+                Err(err) => tracing::warn!(key, err = %err, "unreadable backup record"),
+            }
+        }
+        Ok(out)
+    }
+
     /// Every backup of the host's machines and of its destroyed machines' holders, of one
-    /// tenant or all, by machine then age.
-    pub async fn all_backups(&self, tenant: Option<&str>) -> Result<Vec<api::Backup>, MError> {
+    /// tenant or all, of one machine or all, by machine then age. A machine that is neither
+    /// here nor held here has none, and costs no store read.
+    pub async fn all_backups(
+        &self,
+        tenant: Option<&str>,
+        machine: Option<&str>,
+    ) -> Result<Vec<api::Backup>, MError> {
         if let Some(t) = tenant {
             check_tenant_id(t)?;
         }
+        if machine.is_some_and(|m| !api::valid_id(m)) {
+            return Err(invalid("machine: not a machine id"));
+        }
         self.backup_store()?;
-        let of_tenant = |t: &str| tenant.is_none_or(|want| want == t);
+        let wanted = |t: &str, id: &str| {
+            tenant.is_none_or(|want| want == t) && machine.is_none_or(|want| want == id)
+        };
         let mut ids: Vec<String> = self
             .inner
             .machines
@@ -655,7 +705,7 @@ impl Manager {
             .values()
             .filter_map(|e| {
                 let r = e.rec.lock().unwrap();
-                (r.is_tenants() && of_tenant(&r.tenant)).then(|| r.id.clone())
+                (r.is_tenants() && wanted(&r.tenant, &r.id)).then(|| r.id.clone())
             })
             .collect();
         ids.extend(
@@ -667,17 +717,18 @@ impl Manager {
                 .values()
                 .filter_map(|h| {
                     let r = h.rec.lock().unwrap();
-                    of_tenant(&r.tenant).then(|| r.machine_id.clone())
+                    wanted(&r.tenant, &r.machine_id).then(|| r.machine_id.clone())
                 }),
         );
         // A machine destroyed between the two reads is in both.
         ids.sort();
         ids.dedup();
-        let mut out = Vec::new();
-        for id in ids {
-            out.extend(self.backups(&id).await?);
-        }
-        Ok(out)
+        let lists: Vec<Vec<api::Backup>> = futures::stream::iter(ids)
+            .map(|id| async move { self.backups(&id).await })
+            .buffered(READS_AT_ONCE)
+            .try_collect()
+            .await?;
+        Ok(lists.into_iter().flatten().collect())
     }
 
     /// Deletes a backup of a machine of the host or of a destroyed one's holder. Refused
@@ -807,6 +858,41 @@ impl Manager {
             r.clone()
         };
         self.inner.store.put(HOLDERS, &r.machine_id, &r)
+    }
+
+    /// A destroy's holder for the backups the record names. A destroy that found no disks
+    /// may be a second one: a destroy cut short after its disks went, or a record an older
+    /// daemon wrote back after its destroy, whose backups may have been deleted since. Then
+    /// what the store lists is held, nothing when it lists none; a store that does not list
+    /// them within [`LIST_AT_DESTROY`] fails the destroy.
+    pub(super) async fn hold_at_destroy(
+        &self,
+        rec: &Record,
+        had_disks: bool,
+        turn: Turn,
+    ) -> Result<(), MError> {
+        if rec.backup_bytes == 0 && rec.backup.last.is_none() {
+            return Ok(());
+        }
+        let bytes = match (had_disks, self.inner.backups.store.is_some()) {
+            (false, true) => {
+                let listed = tokio::time::timeout(LIST_AT_DESTROY, self.backups(&rec.id))
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "backups of {} not listed by the store within {} s",
+                            rec.id,
+                            LIST_AT_DESTROY.as_secs()
+                        )
+                    })??;
+                if listed.is_empty() {
+                    return Ok(());
+                }
+                listed.iter().map(|b| b.bytes).sum()
+            }
+            _ => rec.backup_bytes,
+        };
+        Ok(self.hold(rec, bytes, turn)?)
     }
 
     /// The tick's backup step: each machine whose next backup is due gets one, and each
@@ -1480,7 +1566,9 @@ mod tests {
         }
         let (mm, id) = (h.m.clone(), m.id.clone());
         let destroy = tokio::spawn(async move { mm.destroy(&id, None).await });
-        while h.pool.dev().join(format!("byard/m/{}", m.id)).exists() {
+        // Gone from the manager, not only its disks: the backup's failure then reads the
+        // destroy, whatever the destroy still had to do after its disks.
+        while h.m.entry(&m.id).is_ok() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         std::fs::remove_file(&hold).unwrap();
@@ -1938,6 +2026,74 @@ mod tests {
         assert!(h.listed(&m.id).await.is_empty());
     }
 
+    /// A destroy that finds no disks holds what the store lists, not what the record says:
+    /// a record written back after its destroy names backups deleted since (the upgrade of
+    /// 2026-10-28 held them again), and a destroy cut short after its disks may hold more.
+    #[tokio::test]
+    async fn a_destroy_without_disks_holds_what_the_store_lists() {
+        let h = harness(|_| {}).await;
+        let mut records = Vec::new();
+        for name in ["gone", "kept"] {
+            let m = h.machine(name, every("1h", 3), false).await;
+            h.m.backup(&m.id).await.unwrap();
+            let mut r = h.stored(&m.id).unwrap();
+            h.m.destroy(&m.id, None).await.unwrap();
+            assert!(h.m.holder(&m.id).is_some());
+            r.state = state::DESTROYING.into();
+            records.push(r);
+        }
+        let (gone, kept) = (&records[0], &records[1]);
+        // One's backups deleted since: its holder went with them.
+        let b = &h.listed(&gone.id).await[0];
+        h.m.delete_backup(&gone.id, &b.id, false).await.unwrap();
+        assert!(h.m.holder(&gone.id).is_none());
+        // The other's destroy cut short before its holder, its record a step behind.
+        h.m.inner.backups.holders.lock().unwrap().remove(&kept.id);
+        let listed: u64 = h.listed(&kept.id).await.iter().map(|b| b.bytes).sum();
+        let mut kept = kept.clone();
+        kept.backup_bytes = listed + 1;
+        for r in [gone, &kept] {
+            h.m.inner.store.put("machines", &r.id, r).unwrap();
+        }
+        h.m.load().unwrap();
+        h.m.tick().await;
+        for r in [gone, &kept] {
+            assert!(h.stored(&r.id).is_none());
+        }
+        assert!(
+            h.m.holder(&gone.id).is_none(),
+            "no holder for deleted backups"
+        );
+        let held = h.m.holder(&kept.id).unwrap().rec.lock().unwrap().bytes;
+        assert_eq!(held, listed);
+    }
+
+    /// A store that never answers fails a destroy without disks within [`LIST_AT_DESTROY`],
+    /// rather than after its own retries: the machine stays `destroying`, its lock free again,
+    /// for the tick to try again.
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_does_not_answer_fails_a_destroy_without_disks_in_time() {
+        let mut h = harness(|_| {}).await;
+        // Takes connections, never answers.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", silent.local_addr().unwrap());
+        let store = ObjectStore::open("s3://b", &endpoint, "", "key", "secret").unwrap();
+        Arc::get_mut(&mut h.m.inner).unwrap().backups.store = Some(store);
+        let e = h.add("m_s", state::DESTROYING, 256);
+        {
+            let mut r = e.rec.lock().unwrap();
+            r.backup_bytes = 1 << 20;
+            r.backup.last = Some("20261028T183459.168Z".into());
+        }
+        let started = tokio::time::Instant::now();
+        let err = h.m.destroy("m_s", None).await.unwrap_err();
+        assert!(err.to_string().contains("not listed"), "{err}");
+        assert!(started.elapsed() < LIST_AT_DESTROY * 2);
+        assert_eq!(h.stored("m_s").unwrap().state, state::DESTROYING);
+        assert!(e.lock.try_lock().is_ok());
+        assert!(h.m.holder("m_s").is_none());
+    }
+
     #[tokio::test]
     async fn a_destroyed_machine_s_backups_are_listed_counted_then_deleted() {
         let h = harness(|_| {}).await;
@@ -1952,7 +2108,7 @@ mod tests {
         h.m.destroy(&m.id, None).await.unwrap();
         assert!(matches!(h.m.get(&m.id), Err(MError::NotFound)));
         // Listed with the tenant's, each saying when it goes.
-        let all = h.m.all_backups(Some("t1")).await.unwrap();
+        let all = h.m.all_backups(Some("t1"), None).await.unwrap();
         assert_eq!(h.ids(&all), vec![first.id.clone(), second.id.clone()]);
         let deletes_at = all[0].deletes_at.unwrap();
         assert!(deletes_at >= gone + chrono::Duration::days(30));
@@ -1961,8 +2117,8 @@ mod tests {
             h.m.backups(&m.id).await.unwrap()[1].deletes_at,
             Some(deletes_at)
         );
-        assert!(h.m.all_backups(Some("t2")).await.unwrap().is_empty());
-        assert_eq!(h.m.all_backups(None).await.unwrap().len(), 2);
+        assert!(h.m.all_backups(Some("t2"), None).await.unwrap().is_empty());
+        assert_eq!(h.m.all_backups(None, None).await.unwrap().len(), 2);
         // Counted in its own buckets, as it was: what its backups take, nothing else.
         let now = Utc::now();
         h.m.measure(now + chrono::Duration::hours(1)).await;
@@ -2007,7 +2163,7 @@ mod tests {
         let days = |n| gone + chrono::Duration::days(n);
         assert_eq!(run(h.m.backup_step(days(29))).await, 0);
         assert_eq!(run(h.m.backup_step(days(31))).await, 1);
-        assert!(h.m.all_backups(Some("t1")).await.unwrap().is_empty());
+        assert!(h.m.all_backups(Some("t1"), None).await.unwrap().is_empty());
         assert!(h.objects(&m.id).await.is_empty());
         assert!(h.m.holder(&m.id).is_none());
         assert!(h
@@ -2070,22 +2226,75 @@ mod tests {
             .unwrap()
             .error
             .contains("20990101T000000.000Z"));
+        let of = |q: String| {
+            let http = http.clone();
+            async move {
+                let r = http.get(q).send().await.unwrap();
+                assert_eq!(r.status(), 200);
+                r.json::<Vec<api::Backup>>().await.unwrap().len()
+            }
+        };
+        assert_eq!(of(format!("{url}/backups?machine={}", m.id)).await, 2);
         assert_eq!(
-            delete(&format!("{}?chain=true", first.id))
-                .await
-                .unwrap()
-                .status(),
-            204
+            of(format!("{url}/backups?tenant=t1&machine=m_other")).await,
+            0
         );
+        // Two deletes of one chain sent together run one after the other (the machine's turn):
+        // the second finds nothing left and answers 404, never 500. A record deleted under a
+        // listing is `a_listing_by_machine_reads_that_machine_s_backups_alone`.
+        let chain = format!("{}?chain=true", first.id);
+        let (a, b) = tokio::join!(delete(&chain), delete(&chain));
+        let mut codes = [a.unwrap().status(), b.unwrap().status()];
+        codes.sort();
+        assert_eq!(codes, [204, 404]);
         assert!(
             h.listed(&m.id).await.is_empty(),
             "{second:?} went with its base"
         );
-        let r = http
-            .get(format!("{url}/backups?tenant=../x"))
-            .send()
+        for q in ["tenant=../x", "machine=../x"] {
+            let r = http.get(format!("{url}/backups?{q}")).send().await.unwrap();
+            assert_eq!(r.status(), 400, "{q}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_listing_by_machine_reads_that_machine_s_backups_alone() {
+        let h = harness(|_| {}).await;
+        let m = h.machine("db", Some(None), false).await;
+        let other = h.machine("web", Some(None), false).await;
+        let made = h.m.backup(&m.id).await.unwrap();
+        h.m.backup(&other.id).await.unwrap();
+        let store = h.m.backup_store().unwrap();
+        // A record of a machine this host neither has nor holds: not this host's to list.
+        let elsewhere = format!("backups/m_elsewhere/{}.json", made.id);
+        let record = serde_json::to_vec(&made).unwrap();
+        store.put_bytes(&elsewhere, &record).await.unwrap();
+        let mine = h.m.all_backups(None, Some(&m.id)).await.unwrap();
+        assert_eq!(h.ids(&mine), vec![made.id.clone()]);
+        assert_eq!(h.m.all_backups(None, None).await.unwrap().len(), 2);
+        assert!(h
+            .m
+            .all_backups(None, Some("m_elsewhere"))
             .await
-            .unwrap();
-        assert_eq!(r.status(), 400);
+            .unwrap()
+            .is_empty());
+        assert!(h
+            .m
+            .all_backups(Some("t2"), Some(&m.id))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            h.m.all_backups(None, Some("../x")).await,
+            Err(MError::Invalid(_))
+        ));
+        // A record deleted between the list and its read (a deletion under way) is skipped,
+        // not a failure of the whole listing.
+        let listed = vec![
+            format!("backups/{}/{}.json", m.id, made.id),
+            format!("backups/{}/20990101T000000.000Z.json", m.id),
+        ];
+        let read = h.m.read_backups(store, listed).await.unwrap();
+        assert_eq!(h.ids(&read), vec![made.id]);
     }
 }

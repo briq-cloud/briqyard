@@ -103,7 +103,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Service, ClusterIP load balancing | ✗ | with groups | yard, later |
 | Ingress controller | ✓ L4 ingress per host, private to the edge | | |
 | Pods reaching a `hostNetwork` pod (an edge on the node) | ✓ `network.host_ports`, at the host's addresses, for machines with egress (ADR 0028) | | |
-| Ingress auth, TLS, hostnames | the control plane's router and edge | | briq |
+| Ingress auth, TLS, hostnames | a proxy in front (OPERATIONS, "A proxy in front"), or the control plane's router and edge | | briq |
 | NetworkPolicy, egress | ✓ `open`, `via`, `none` | | |
 | NetworkPolicy, by port and CIDR | ◐ blocked ports, a connection rate, a bandwidth cap per machine (ADR 0018) | allow-lists by CIDR | yard, later |
 | NetworkPolicy, ingress between pods | ✗ | | yard, later |

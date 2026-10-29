@@ -171,7 +171,7 @@ paths:
             schema: { $ref: "#/components/schemas/ExecRequest" }
       responses:
         "200": { description: output, content: { application/json: { schema: { $ref: "#/components/schemas/ExecResult" } } } }
-        "409": { description: not running (and `wake` was false) }
+        "409": { description: "`not_running`: not running (`wake` false, or stopped on request); or it went down during the command, which may have run" }
   /v1/machines/{id}/files:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -237,9 +237,10 @@ paths:
       summary: "Every backup of the host's machines, destroyed ones' included, by machine then age (ADR 0023); a destroyed machine's carry `deletes_at`. Through the fleet: every host, never partial, with `tenant` too (a host the tenant moved from holds the backups of what was destroyed there, ADR 0045)"
       parameters:
         - { name: tenant, in: query, schema: { type: string } }
+        - { name: machine, in: query, description: "one machine's alone: none when it is neither on this host nor held here, without reading the store", schema: { type: string } }
       responses:
         "200": { description: backups, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Backup" } } } } }
-        "400": { description: "`invalid`: backups are off on this host, or a bad tenant id" }
+        "400": { description: "`invalid`: backups are off on this host, or a bad tenant or machine id" }
   /v1/machines/{id}/snapshots:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:

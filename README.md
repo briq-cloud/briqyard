@@ -96,7 +96,7 @@ Install a host, as root on the server:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/bootstrap-host.sh
-BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.1 \
+BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.2 \
 BRIQYARD_POOL_DEVICE=/dev/nvme1n1 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
 ALLOWED_CLIENTS=203.0.113.0/24 bash bootstrap-host.sh
 ```
@@ -120,6 +120,7 @@ briqyard host upgrade <id> --release <version or URL>   # its machines keep runn
 ```
 
 Step by step, with every option, a fleet and a Mac for development: [docs/INSTALL.md](docs/INSTALL.md).
+TLS, public names and access control come from a proxy in front: [docs/OPERATIONS.md](docs/OPERATIONS.md#a-proxy-in-front).
 
 ## Tests
 

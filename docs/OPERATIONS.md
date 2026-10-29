@@ -10,7 +10,7 @@ Through a fleet, `briqyard host add` runs the script for you (below, and "First 
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/bootstrap-host.sh
-BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.1 \
+BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.2 \
 BRIQYARD_POOL_DEVICE=/dev/nvme0n1,/dev/nvme1n1 \
 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
 PRIVATE_ADDRESS=10.42.0.11/16 ALLOWED_CLIENTS=10.42.0.0/16 \
@@ -142,6 +142,57 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the default capacity leaves to the host and its other services (an edge: 3072); unused when `memory_mb` or `vcpus` is set |
 | `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start. An `http://` `url` must be a loopback or private address (ADR 0026) |
 
+## A proxy in front
+
+Endpoints are plain TCP and HTTP on the host, with no TLS, public names or access control:
+those are a proxy's, as an ingress controller's in Kubernetes. The smallest setup is a proxy
+on the host itself, the daemon's listeners on loopback. In `config.yaml`, before the first HTTP
+endpoint (an endpoint keeps the name it got), then `systemctl restart briqyardd`:
+
+```yaml
+ingress:
+  http: 127.0.0.1:8080          # the HTTP listener, routed by Host
+  domain: apps.example.com      # an HTTP endpoint labelled web is web.apps.example.com
+```
+
+```bash
+briqyard endpoint add <id> 3000 --http --host web   # web.apps.example.com → port 3000
+briqyard endpoint add <db> 5432                     # a host port, 30000-32767: `endpoint ls`
+```
+
+HTTP, with [Caddy](https://caddyserver.com) on 80 and 443 (`/etc/caddy/Caddyfile`). Caddy
+gets each name's certificate from Let's Encrypt and passes `Host` on as it came, which is what
+the ingress routes by. WebSockets and streaming pass through.
+
+```
+web.apps.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+A site per name, each with its DNS record to the host. For names made on the fly, a wildcard
+record and a wildcard certificate, which needs Caddy built with your DNS provider's module
+(DNS-01), in a `*.apps.example.com` site. Access control goes in the site too (`basic_auth`,
+`forward_auth`): an endpoint answers anyone who reaches it.
+
+TCP is passed as it is: TLS, when wanted, is the protocol's own (Postgres, Redis). Forward a
+public port to the host port the endpoint got, here with nginx's `stream` module
+(`libnginx-mod-stream`; the block is top level in `nginx.conf`, not under `http`):
+
+```
+stream {
+	server { listen 5432; proxy_pass 127.0.0.1:30432; }
+}
+```
+
+With the bootstrap's firewall (`PRIVATE_ADDRESS` set), the public interface takes SSH and
+`PUBLIC_TCP_PORTS` only, set at its first run: `80,443,5432` here, the proxy's ports, never an
+endpoint's own (the daemon refuses 8080 and 30000-32767 there).
+A proxy on another server reaches the daemon over a private network: `ingress.http` and
+`ingress.bind` on the host's private address, `ingress.allowed_clients` the proxy's. With
+several hosts, send each name to the host its machine runs on (`briqyard machine ls`, HOST).
+A connection to a sleeping machine wakes it, and waits for its boot.
+
 ## Where things live
 
 | Path | What |
@@ -228,6 +279,12 @@ changed), and `briqyard host undrain <id>`. `systemctl restart briqyardd` by han
 without the reboot: a quarter-second pause per machine. A daemon that crashes leaves its
 machines running (`KillMode=process`), and the next one adopts them.
 
+**Security updates** (unattended upgrades) land on disk and never restart anything on their
+own (ADR 0050): the bootstrap keeps needrestart off `briqyardd` and `briqyard-fleet`
+(`/etc/needrestart/conf.d/briqyard.conf`), and `Unattended-Upgrade::Automatic-Reboot` stays
+false. The daemon picks an updated library up at its next `host upgrade` (the same release
+again is fine) or reboot. `briqyard doctor` warns when either would happen on its own.
+
 A host from before ADR 0014 (jails on `/`): stop the daemon and empty `jail_dir` before the
 first start that mounts `byard/jail` there, or the old files stay hidden on `/` and the
 machines suspended then boot cold.
@@ -274,9 +331,10 @@ nor a base of one goes (`backup_deleted`, `retention`). The store holds `keep` t
 refused while another continues from it, `--chain` deletes those too.
 
 A destroy keeps the machine's backups for `backup.keep_destroyed_days`: a holder
-(`state/holders/<id>.json`) keeps them listed (`briqyard backups --tenant T`, each with
-`deletes_at`) and counted in the machine's usage buckets (`backup_gb_hours`). Through a fleet,
-`backup rm` of a destroyed machine's backup names its tenant (`--tenant`).
+(`state/holders/<id>.json`) keeps them listed (`briqyard backups --tenant T`, `--machine ID`
+for one machine's, each with `deletes_at`) and counted in the machine's usage buckets
+(`backup_gb_hours`). Through a fleet, `backup rm` of a destroyed machine's backup names its
+tenant (`--tenant`).
 
 In the store, per machine: `backups/<machine>/<id>.json` (the record) and
 `backups/<machine>/<disk>/<id>.zfs` (a stream, `root` or `data`). Ids are times to the
@@ -360,7 +418,8 @@ snapshot, or is whole.
 | A machine is `stopped (host)` | The daemon stopped it: its stop, or a crashed daemon's leftover. The next start boots it again unless its sleep window had run out; else the next use wakes it |
 | `upgrade to … failed` in a host's note, the host `draining` | The step and the reason are in the note: SSH (the key, the pinned host key), the script's last lines, no heartbeat from the new version (`journalctl -u briqyardd` on the host), or a start that stopped machines it could not take over (`briqyard events --machine …`). Fix, then `briqyard host undrain` |
 | `the host now runs …, newer than this fleet` | Upgrade the fleet, then `host undrain` the host |
-| A machine stays `destroying` | Its disks could not be destroyed (`zfs destroy` in the log); the daemon tries again every 15 s |
+| A machine stays `destroying` | Its disks could not be destroyed (`zfs destroy` in the log), or, its disks gone, the backup store did not list its backups within 30 s (`resume destroy`); the daemon tries again every 15 s |
+| `record of a destroyed machine, written back after its destroy: removed` (`warn` at start) | A daemon up to v0.1.2 could write a destroyed machine's record back (a call that waited on the machine during its destroy); the next start destroyed it again. A `destroying` record whose address another machine holds is now deleted at start, nothing else done; another one is finished as a destroy, its holder made from what the backup store lists (30 s at most, else tried again) |
 | The process exits at once (`stopped`, `exit.code`) | `briqyard machine logs`: the image's own output. `restart.policy: on-failure` tries three times, 10 s, 20 s, 40 s apart (`restarting_at`); `crash_loop` events from the third |
 | `/wait` answers 409 `not_ready`, or the ingress 502 after a wait | The program runs but its readiness or startup probe does not pass: `briqyard machine describe` shows each probe's last result. A TCP or HTTP probe needs the program on the machine's address, not only `127.0.0.1` |
 | `startup_failed` then `error` | The startup probe did not pass within `failure_threshold` × `period_sec` of a start: the boot failed, as `boot_failed` does. On a restart it is a crash instead, restarted by the policy |
@@ -399,6 +458,15 @@ snapshot, or is whole.
 `briqyard-fleet` runs anywhere that reaches every host (`/etc/briqyard/fleet.yaml`, unit in
 `hack/briqyard-fleet.service`). Clients use the fleet's URL and `token` as they would a
 daemon's; `briqyard host ls` shows the hosts.
+
+On a server with no host, keep needrestart from restarting the fleet, as the bootstrap does on
+a host (ADR 0050):
+
+```bash
+mkdir -p /etc/needrestart/conf.d && printf '%s\n' \
+  '$nrconf{override_rc}{qr(^briqyardd\.service$)} = 0;' \
+  '$nrconf{override_rc}{qr(^briqyard-fleet\.service$)} = 0;' > /etc/needrestart/conf.d/briqyard.conf
+```
 
 A host has one credential, its own API token, and the fleet must hold it before the host can
 be anything to it: it forwards with it and takes the host's heartbeats (`fleet:` in the host's
@@ -666,7 +734,7 @@ loopback listener it reads from the edge's `X-Forwarded-For`. The
 repository is private, so the binaries come from your Mac:
 
 ```bash
-gh release download v0.1.1 -R briq-cloud/briqyard -p 'briqyard*-linux-x86_64' -p SHA256SUMS-x86_64 -D /tmp/byard
+gh release download v0.1.2 -R briq-cloud/briqyard -p 'briqyard*-linux-x86_64' -p SHA256SUMS-x86_64 -D /tmp/byard
 (cd /tmp/byard && shasum -a 256 -c SHA256SUMS-x86_64)
 scp /tmp/byard/briqyard-fleet-linux-x86_64 root@<public ip>:/usr/local/bin/briqyard-fleet
 scp /tmp/byard/briqyard-linux-x86_64 root@<public ip>:/usr/local/bin/briqyard
@@ -693,7 +761,7 @@ state_dir: /var/lib/briqyard-fleet
 bootstrap:
   enabled: true
   ssh_key: /etc/briqyard/fleet_ssh_key
-  release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.1
+  release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.2
   pool_device: /dev/nvme0n1,/dev/nvme1n1
   fleet_url: https://fleet.example.com
   fleet_address: 10.42.0.11                # this server on the vRack: hosts reach fleet_url here
