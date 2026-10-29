@@ -110,6 +110,3 @@ impl Pty {
         Ok(())
     }
 }
-
-// The init is Linux-only and so are its tests: run them in the dev VM
-// (`cargo test -p briqyard-init` there). Nothing here needs /dev/kvm, a real mount or PID 1.
