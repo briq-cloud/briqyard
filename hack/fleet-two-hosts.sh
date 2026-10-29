@@ -43,7 +43,7 @@ cleanup() {
     eval "$SECOND_HOST_START" || true
     for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
   fi
-  for t in "$T-a" "$T-b"; do
+  for t in "$T-a" "$T-b" "$T-fork"; do
     for id in $(briqyard machine ls --namespace "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
     briqyard namespace rm "$t" >/dev/null 2>&1 || true
   done
@@ -82,6 +82,30 @@ A2=$(briqyard machine run --image alpine:3.20 --name a2 --namespace "$T-a" --mem
 check "a namespace stays on its host" '[ "$(briqyard machine get "$A2" | jq -r .host)" = "$HA" ]'
 check "a2 reaches a by name"  'briqyard machine exec "$A2" -- ping -c1 -W2 a.internal >/dev/null'
 check "machines listed with hosts" '[ "$(briqyard machine ls | awk "NR>1" | wc -l | tr -d " ")" -ge 3 ]'
+
+echo "== move into a namespace on the other host, a fork across hosts (ADR 0056)"
+MC=$(briqyard machine run --image alpine:3.20 --name mvc --namespace "$T-a" --memory 256 -- sleep 3600 | jq -r .id)
+briqyard machine exec "$MC" -- sh -c "echo kept > /root/moved; sync" >/dev/null
+moved=$(briqyard machine move "$MC" --namespace "$T-b")
+MN=$(echo "$moved" | jq -r .machine.id)
+check "move across hosts: made again on the other host, the old id replaced" '[ "$(echo "$moved" | jq -r "[.machine.host, .machine.namespace, .replaces, .restarted] | join(\" \")")" = "$HB $T-b $MC true" ] && [ "$MN" != "$MC" ]'
+check "move across hosts: its disk kept" '[ "$(briqyard machine exec "$MN" -- cat /root/moved)" = kept ]'
+check "move across hosts: the source is gone" '! briqyard machine get "$MC" >/dev/null 2>&1'
+check "move across hosts: it reaches its new neighbour by name" 'briqyard machine exec "$MN" -- ping -c1 -W2 b.internal >/dev/null'
+# A machine larger than the other host has free: refused with `capacity`, running where it was.
+fb=$(hosts | jq ".[] | select(.id == \"$HB\") | .capacity.memory_mb - .used.memory_mb")
+fa=$(hosts | jq ".[] | select(.id == \"$HA\") | .capacity.memory_mb - .used.memory_mb")
+if [ "$fa" -gt $((fb + 512)) ]; then
+  MBIG=$(briqyard machine run --image alpine:3.20 --name mvbig --namespace "$T-a" --memory $((fb + 512)) -- sleep 3600 | jq -r .id)
+  out=$(briqyard machine move "$MBIG" --namespace "$T-b" 2>&1 || true)
+  check "move across hosts without room: capacity, running where it was" 'echo "$out" | grep -q capacity && [ "$(briqyard machine get "$MBIG" | jq -r .state)" = running ] && [ "$(briqyard machine get "$MBIG" | jq -r .host)" = "$HA" ]'
+else
+  echo "       skipped: $HA has no more free memory than $HB"
+fi
+out=$(briqyard machine fork "$A" --namespace "$T-b" 2>&1 || true)
+check "a fork into a namespace of another host is refused" 'echo "$out" | grep -q "source.s host"'
+FN=$(briqyard machine fork "$A" --name afork --namespace "$T-fork" | jq -r .id)
+check "a fork into a new namespace lands on its source's host" '[ "$(briqyard machine get "$FN" | jq -r .host)" = "$HA" ] && [ "$(briqyard namespace get "$T-fork" | jq -r .machines)" = 1 ]'
 
 if [ -n "${SECOND_HOST_STOP:-}" ]; then
   echo "== a host goes silent"

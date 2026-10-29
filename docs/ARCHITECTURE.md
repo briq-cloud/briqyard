@@ -195,6 +195,12 @@ Packets are decoded and encoded by `hickory-proto` (ADR 0033); one that does not
 The guest configures its interface from the config drive (`briqyard-init`), so the guest kernel
 needs no `ip=` support.
 
+A machine changes namespace only through `POST /v1/machines/{id}/move` (ADR 0056): alone in its
+namespace and into a new one, the namespace is renamed (same bridge, same address, no restart);
+into one that exists, the machine is stopped, takes an address of that network and starts again;
+through the fleet, into a namespace pinned to another host, it is backed up, restored there and
+destroyed here. A fork may name another namespace of its source's host.
+
 Each machine has an egress policy (`egress` on create and PATCH, ADR 0015): `open` (the
 default), `none` (its namespace, no internet: `egress_none` in the inet forward chain) or
 `via: <machine>` (only that sibling, any port, and the gateway's DNS: `via_sources` and

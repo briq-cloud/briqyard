@@ -173,6 +173,27 @@ aip=$(briqyard machine get "$A" | jq -r .ip)
 check "other namespace cannot reach" '! briqyard machine exec "$O" -- ping -c1 -W2 "$aip" >/dev/null 2>&1'
 briqyard machine rm "$O" >/dev/null; briqyard namespace rm "$T-other" >/dev/null 2>&1 || true
 
+echo "== move into another namespace, a fork into one (ADR 0056)"
+MV=$(briqyard machine run --image alpine:3.20 --name mv --namespace "$T-mv1" --memory 256 -- sleep 3600 | jq -r .id)
+briqyard machine exec "$MV" -- sh -c "touch /run/moved-marker; echo kept > /root/moved" >/dev/null
+mvip=$(briqyard machine get "$MV" | jq -r .ip)
+moved=$(briqyard machine move "$MV" --namespace "$T-mv2")
+check "move alone: a rename, same address, no restart" '[ "$(echo "$moved" | jq -r "[.restarted, .from, .machine.namespace, .machine.ip] | join(\" \")")" = "false $T-mv1 $T-mv2 $mvip" ]'
+check "move alone: not booted again" 'briqyard machine exec "$MV" -- test -e /run/moved-marker'
+check "move alone: listed in the new namespace only" 'briqyard machine ls --namespace "$T-mv2" | grep -q "$MV" && ! briqyard machine ls --namespace "$T-mv1" | grep -q "$MV"'
+check "move alone: the old namespace is gone" '! briqyard namespace ls | jq -e --arg t "$T-mv1" ".[] | select(.id == \$t)" >/dev/null'
+MN=$(briqyard machine run --image alpine:3.20 --name mvnext --namespace "$T-mv3" --memory 256 -- sleep 3600 | jq -r .id)
+moved=$(briqyard machine move "$MV" --namespace "$T-mv3")
+check "move into a namespace that exists: restarted, a new address" '[ "$(echo "$moved" | jq -r "[.restarted, .previous_ip == \"$mvip\", .machine.ip != \"$mvip\"] | join(\" \")")" = "true true true" ]'
+check "move: it reaches its new neighbour by name" 'briqyard machine exec "$MV" -- ping -c1 -W2 mvnext.internal >/dev/null'
+check "move: booted again, its disk kept" '! briqyard machine exec "$MV" -- test -e /run/moved-marker && [ "$(briqyard machine exec "$MV" -- cat /root/moved)" = kept ]'
+check "move: a moved event in each namespace" 'for t in "$T-mv2" "$T-mv3"; do briqyard events --namespace "$t" --machine "$MV" | awk "\$4 == \"moved\"" | grep -q . || exit 1; done'
+MF=$(briqyard machine fork "$MV" --name mvfork --namespace "$T-mv4" | jq -r .id)
+check "fork into another namespace: in it, on a network of its own" '[ "$(briqyard machine get "$MF" | jq -r .namespace)" = "$T-mv4" ] && [ "$(briqyard machine get "$MF" | jq -r .ip | cut -d. -f3)" != "$(briqyard machine get "$MV" | jq -r .ip | cut -d. -f3)" ]'
+check "fork into another namespace: its source's disk" '[ "$(briqyard machine exec "$MF" -- cat /root/moved)" = kept ]'
+for id in "$MF" "$MV" "$MN"; do briqyard machine rm "$id" >/dev/null; done
+for t in mv2 mv3 mv4; do briqyard namespace rm "$T-$t" >/dev/null 2>&1 || true; done
+
 echo "== egress: via a gateway machine, none, open again"
 E="$T-eg"
 serve() { briqyard machine run --image python:3.12-alpine --name "$1" --namespace "$E" --memory 256 -- python3 -m http.server 8080 | jq -r .id; }

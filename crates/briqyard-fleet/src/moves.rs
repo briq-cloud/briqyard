@@ -87,18 +87,20 @@ async fn call<T: serde::de::DeserializeOwned>(
     path: &str,
     headers: &HeaderMap,
     body: Bytes,
-) -> Result<T, Response> {
+) -> Result<T, Box<Response>> {
     let (parts, data) = read(forward(st, host, method, path, headers, body).await).await;
     if !parts.status.is_success() {
-        return Err(Response::from_parts(parts, Body::from(data)));
+        return Err(Box::new(Response::from_parts(parts, Body::from(data))));
     }
     serde_json::from_slice(&data).map_err(|e| {
-        err(
-            StatusCode::BAD_GATEWAY,
-            "host_unreachable",
-            format!("host {}: {path}: an answer that is not one: {e}", host.id),
+        Box::new(
+            err(
+                StatusCode::BAD_GATEWAY,
+                "host_unreachable",
+                format!("host {}: {path}: an answer that is not one: {e}", host.id),
+            )
+            .into_response(),
         )
-        .into_response()
     })
 }
 
@@ -125,7 +127,7 @@ async fn across(
     let json = json_headers();
     let m: api::Machine = match call(st, &from, Method::GET, &own, &json, Bytes::new()).await {
         Ok(m) => m,
-        Err(why) => return why,
+        Err(why) => return *why,
     };
     let was_running = match m.state.as_str() {
         state::RUNNING => true,
@@ -144,7 +146,7 @@ async fn across(
         if let Err(why) =
             call::<api::Machine>(st, &from, Method::POST, &stop, headers, Bytes::new()).await
         {
-            return why;
+            return *why;
         }
     }
     let undo = Undo {
@@ -157,7 +159,7 @@ async fn across(
     let backup: api::Backup =
         match call(st, &from, Method::POST, &backups, &json, Bytes::new()).await {
             Ok(b) => b,
-            Err(why) => return undo.source(why).await,
+            Err(why) => return undo.source(*why).await,
         };
     let create = api::CreateMachineRequest {
         namespace: req.namespace.clone(),
@@ -189,7 +191,7 @@ async fn across(
     };
     let ready = match settled(st, &to, &new.id).await {
         Ok(m) => m,
-        Err(why) => return undo.copy(&to, &new.id, why).await,
+        Err(why) => return undo.copy(&to, &new.id, *why).await,
     };
     if was_running && ready.state != state::RUNNING {
         let why = err(
@@ -294,7 +296,7 @@ impl Undo<'_> {
 
 /// The restored machine once its create is done: running or created, else the failure. It is
 /// asked for each second, for as long as a restore may take.
-async fn settled(st: &AppState, host: &HostRec, id: &str) -> Result<api::Machine, Response> {
+async fn settled(st: &AppState, host: &HostRec, id: &str) -> Result<api::Machine, Box<Response>> {
     let until = Instant::now() + MADE_WITHIN;
     let json = json_headers();
     loop {
@@ -319,7 +321,8 @@ async fn settled(st: &AppState, host: &HostRec, id: &str) -> Result<api::Machine
                     },
                     format!("machine {id} on host {}: {}", host.id, m.error),
                 )
-                .into_response())
+                .into_response()
+                .into())
             }
             _ => return Ok(m),
         }
@@ -329,7 +332,8 @@ async fn settled(st: &AppState, host: &HostRec, id: &str) -> Result<api::Machine
                 "not_ready",
                 format!("machine {id} on host {} is still {}", host.id, m.state),
             )
-            .into_response());
+            .into_response()
+            .into());
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }

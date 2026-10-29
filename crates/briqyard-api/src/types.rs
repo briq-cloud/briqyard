@@ -1384,6 +1384,7 @@ pub mod reason {
         PULL_FAILED,
         CREATE_FAILED,
         RESTORED,
+        MOVED,
         STARTING,
         STARTED,
         RESUMED,
@@ -3065,7 +3066,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), reason::ALL.len());
-        assert_eq!(all.len(), 39);
+        assert_eq!(all.len(), 40);
         assert!(all
             .iter()
             .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));

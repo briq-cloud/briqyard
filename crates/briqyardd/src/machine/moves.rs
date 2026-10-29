@@ -58,27 +58,30 @@ impl Manager {
         let (ip, left) = {
             let machines = self.inner.machines.lock().unwrap();
             let n = self.slot_in(&machines, &rec, &t, false)?;
+            let ip = t.subnet.host(n)?.to_string();
             let mut r = e.rec.lock().unwrap();
-            let left = r.ip.clone();
+            let left = std::mem::replace(&mut r.ip, ip.clone());
             r.namespace = namespace.into();
             r.subnet_index = t.rec.subnet_index;
             r.host_num = n;
-            r.ip = t.subnet.host(n)?.to_string();
             // A memory snapshot resumes with the old address: the next start is a boot.
             r.suspended = false;
-            (r.ip.clone(), left)
+            (ip, left)
         };
-        // The counters follow the address; the old namespace's names lose the machine.
-        let counted = self.inner.net.count(&ip).await.context("usage counters");
-        let net = self
-            .inner
-            .net
-            .uncount(&left)
-            .await
-            .context("usage counters");
-        if let Err(err) = counted.and(net).and_then(|()| self.rehome_records(&e)) {
+        // The counters follow the address. Refused, the machine is as it was.
+        if let Err(err) = self.inner.net.count(&ip).await.context("usage counters") {
+            let mut r = e.rec.lock().unwrap();
+            r.namespace.clone_from(&from);
+            r.subnet_index = rec.subnet_index;
+            r.host_num = rec.host_num;
+            r.ip = left;
+            r.suspended = rec.suspended;
             return Err(err.into());
         }
+        if let Err(err) = self.inner.net.uncount(&left).await {
+            tracing::warn!(machine = rec.id, ip = left, err = %err, "usage counter of the old address left");
+        }
+        self.rehome_records(&e)?;
         self.after_move(&e, &from, &left, was_running);
         if let Some(old) = self.namespace_of(&from) {
             self.refresh_dns(&old);
@@ -187,6 +190,8 @@ impl Manager {
         let r = e.snapshot();
         self.check_movable(&r, namespace)?;
         let from = r.namespace.clone();
+        // Usage up to now belongs to the name it leaves.
+        self.meter(std::slice::from_ref(e), Utc::now()).await;
         let renamed = {
             let machines = self.inner.machines.lock().unwrap();
             let alone = machines.values().all(|o| {

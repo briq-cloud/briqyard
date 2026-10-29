@@ -38,6 +38,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Labels and selectors (`-l app=web`) | ✓ metadata as labels, `?label=k=v&label=k` on machine listings, `machine ls -l` (ADR 0025) | `!=` and set-based selectors; selectors on events, top, usage | yard, later |
 | Annotations | ✓ metadata | | |
 | Namespaces | ✓ namespaces | | |
+| A pod's namespace is immutable (recreate it) | ★ a machine moves: a namespace alone is renamed, else it restarts on the new network with a new address; across hosts, backup and restore (ADR 0056) | | |
 | Finalizers, owner references, garbage collection | ◐ a namespace takes its gateway; forks are independent | | — |
 | CRDs, admission webhooks, aggregated APIs | ✗ | briq is the extension layer | briq |
 | TLS to the nodes (kubelet serving certificates) | ✓ a self-signed certificate per host, its SHA-256 pinned in the host record at bootstrap (ADR 0020) | | |

@@ -181,10 +181,22 @@ enum MachineCmd {
         follow: bool,
         id: String,
     },
-    /// A new machine from a snapshot of this one, taken now
+    /// A new machine from a snapshot of this one, taken now: briqyard machine fork ID [--name N] [--namespace T]
     Fork {
         #[arg(long)]
         name: Option<String>,
+        /// The namespace the copy joins: this machine's by default (made when it does not exist)
+        #[arg(long)]
+        namespace: Option<String>,
+        id: String,
+    },
+    /// Put the machine in another namespace: briqyard machine move ID --namespace T. Alone in its
+    /// namespace and into a new one: the namespace is renamed, nothing restarts. Into one that
+    /// exists: the machine restarts on its network, with a new address. Through a fleet, into
+    /// a namespace on another host: made again there from a backup, under a new id
+    Move {
+        #[arg(long)]
+        namespace: String,
         id: String,
     },
     /// Write a local file into the machine
@@ -1190,10 +1202,25 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     }
                 }
             }
-            MachineCmd::Fork { name, id } => {
+            MachineCmd::Move { namespace, id } => {
+                let req = api::MoveRequest { namespace };
+                print_json(
+                    &c.call::<api::MoveResult>(
+                        POST,
+                        &format!("/v1/machines/{id}/move"),
+                        Some(&req),
+                    )
+                    .await?,
+                )
+            }
+            MachineCmd::Fork {
+                name,
+                namespace,
+                id,
+            } => {
                 let src: api::Machine = c.call(GET, &format!("/v1/machines/{id}"), NONE).await?;
                 let req = api::CreateMachineRequest {
-                    namespace: src.namespace.clone(),
+                    namespace: namespace.unwrap_or_else(|| src.namespace.clone()),
                     name: name.unwrap_or_else(|| format!("{}-fork", src.name)),
                     size: src.size,
                     ports: src.ports.clone(),

@@ -23,7 +23,7 @@ async fn alone_into_a_new_namespace_is_a_rename() {
         machines: Some(3),
         ..Default::default()
     };
-    h.m.set_quota("t1", q.clone()).await.unwrap();
+    h.m.set_quota("t1", q).await.unwrap();
     let a = h.m.create_made(h.request("a")).await.unwrap();
     assert_eq!(a.state, state::RUNNING);
     let ep = h.m.create_endpoint(&a.id, tcp(8080)).unwrap();
@@ -227,7 +227,6 @@ async fn a_machine_others_send_their_traffic_through_stays() {
     b.egress = Some(api::Egress {
         mode: api::egress::VIA.into(),
         via: Some(a.id.clone()),
-        ..Default::default()
     });
     h.m.create_made(b).await.unwrap();
     let err = h.m.move_machine(&a.id, "t2", None).await.unwrap_err();
