@@ -766,16 +766,21 @@ impl Client {
             return Ok(m);
         }
         let path = format!("/v1/machines/{}/wait?for=running&timeout=600", m.id);
-        loop {
+        let mut done: api::Machine = loop {
             match self.call(reqwest::Method::POST, &path, NONE).await {
                 Err(e) if refused_with(&e, "not_ready") => continue,
                 Err(e) if refused_with(&e, "not_running") => {
                     let path = format!("/v1/machines/{}", m.id);
-                    return self.call(reqwest::Method::GET, &path, NONE).await;
+                    break self.call(reqwest::Method::GET, &path, NONE).await?;
                 }
-                other => return other,
+                other => break other?,
             }
+        };
+        // Through a fleet, the create's answer names the host; a wait's does not.
+        if done.host.is_empty() {
+            done.host = m.host;
         }
+        Ok(done)
     }
 
     /// Every event of a read, page after page, and the cursor after the last.

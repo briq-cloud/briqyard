@@ -408,7 +408,7 @@ class Run:
 
     # ---- the races ----
     def hangup_mid_create(self):
-        self.phase("hang up on a create after 1 s: the machine settles on its own, the image still builds")
+        self.phase("hang up on a create after 1 s: the machine settles on its own, the image still builds (a create answers at once since ADR 0048)")
         t, name = self.tenants[0], "hangup"
         body = {"tenant": t, "name": name, "image": HANGUP_IMAGE, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}
         status, text = self.api.request("POST", "/v1/machines", body, op="create (hang up)", timeout=1)
@@ -418,7 +418,7 @@ class Run:
             # The record, if the create got that far, must leave its pending state by itself.
             deadline = time.monotonic() + self.a.boot_timeout
             m = self.find_named(t, name)
-            while m and m["state"] in ("created", "starting"):
+            while m and m["state"] in ("creating", "created", "starting"):
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"{m['id']} still {m['state']} {self.a.boot_timeout}s after the hang-up")
                 time.sleep(0.5)
