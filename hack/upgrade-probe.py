@@ -9,12 +9,12 @@ ended. Probes, each in its own threads:
 
   tcp        a new connection to a TCP endpoint per attempt, one HTTP/1.0 request through it
   http       a new connection to the HTTP ingress per attempt, one request (Host: --web-host)
-  tcp-long   --long connections to an echo server's TCP endpoint, a line each way every 100 ms
+  tcp-long   --long connections (none with --long 0) to an echo server's TCP endpoint, a line each way every 100 ms
   http-long  the same through the HTTP ingress (Host: --echo-host): the head, then lines
   api:<url>  GET <url> every 100 ms (a daemon's /v1/status, a fleet's machine)
 
 An attempt ends `ok`, `refused` (ECONNREFUSED), `reset` (ECONNRESET, EPIPE, or the connection
-closed before the answer), `timeout` (no answer within 10 s) or `failed` (anything else: a 5xx,
+closed before the answer), `timeout` (no answer within 30 s) or `failed` (anything else: a 5xx,
 a wrong answer). A long connection that breaks counts one `cut` and is opened again; its
 reopening counts as an attempt. `outage_ms` is the longest time between two `ok`s of a probe;
 `slowest_ms` the slowest `ok` (a connection that waited in a listen queue shows here).
@@ -29,7 +29,9 @@ import time
 import urllib.error
 import urllib.request
 
-TIMEOUT = 10.0
+# Over the longest gap a hand-over may hold a queued connection for: the drain, then the next
+# daemon's start.
+TIMEOUT = 30.0
 stop = threading.Event()
 
 
@@ -195,9 +197,9 @@ def main():
     if a.http and a.web_host:
         head = f"GET / HTTP/1.1\r\nHost: {a.web_host}\r\nConnection: close\r\n\r\n".encode()
         run("http", short, a.http, head)
-    if a.echo:
+    if a.echo and a.long > 0:
         run("tcp-long", long_lived, a.echo, b"", copies=a.long)
-    if a.http and a.echo_host:
+    if a.http and a.echo_host and a.long > 0:
         head = f"GET / HTTP/1.1\r\nHost: {a.echo_host}\r\n\r\n".encode()
         run("http-long", long_lived, a.http, head, copies=a.long)
     for url in a.api:

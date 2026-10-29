@@ -7,6 +7,9 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/briqyard-fleet --config /etc/briqyard/fleet.yaml
 Restart=on-failure
 RestartSec=2
+# Its listening socket kept by systemd across a restart: calls made meanwhile wait (ADR 0051).
+NotifyAccess=main
+FileDescriptorStoreMax=1
 Environment=BRIQYARD_LOG=info
 # Credentials (BRIQYARD_RELEASE_TOKEN, BRIQYARD_S3_ACCESS_KEY, BRIQYARD_S3_SECRET_KEY), root's alone,
 # when there is one.

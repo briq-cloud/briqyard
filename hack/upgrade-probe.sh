@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # What a host upgrade and a fleet restart cost the traffic through them: hack/upgrade-probe.py
 # runs through a machine's endpoints and against both APIs while `host upgrade` (the same build
-# again, as hack/fleet-smoke.sh does) and then `systemctl restart briqyard-fleet` run, and each
+# again, as hack/fleet-smoke.sh does, with and without long-held connections) and then `systemctl restart briqyard-fleet` run, and each
 # phase prints what failed and how. Runs in the dev VM, through the fleet ($BRIQYARD_URL, default
 # http://127.0.0.1:7430) and its host whose URL is loopback, with the release directory
 # hack/vm.sh installs. Endpoints are dialled at PROBE_ADDR (default: the VM's own address, not
@@ -54,11 +54,12 @@ for i in $(seq 1 60); do
 done
 echo "machine $M on $UP; endpoints at $ADDR: tcp $WEB_PORT (http), $ECHO_PORT (echo); http $WEB, $ECHO_HOST"
 
-# Runs the probe while "$@" runs, SETTLE seconds on each side, and prints its counts.
+# Runs the probe with LONG long-held connections while "$@" runs, SETTLE seconds on each side,
+# and prints its counts.
 phase() {
-  local name=$1 out started took; shift
+  local name=$1 long=$2 out started took; shift 2
   out=$(mktemp)
-  python3 "$HERE/upgrade-probe.py" --tcp "$ADDR:$WEB_PORT" --echo "$ADDR:$ECHO_PORT" \
+  python3 "$HERE/upgrade-probe.py" --long "$long" --tcp "$ADDR:$WEB_PORT" --echo "$ADDR:$ECHO_PORT" \
     --http "$ADDR:8080" --web-host "$WEB" --echo-host "$ECHO_HOST" \
     --api "$BRIQYARD_URL/v1/machines/$M" --api "$DAEMON/v1/status" > "$out" &
   probe=$!
@@ -74,5 +75,8 @@ phase() {
   rm -f "$out"
 }
 
-phase "host upgrade" briqyard host upgrade "$UP" --release "file://$REL"
-phase "fleet restart" sudo -n systemctl restart briqyard-fleet
+# Without long-held connections, a hand-over's drain ends as soon as the short ones do; with
+# them, it runs to its bound.
+phase "host upgrade, new connections only" 0 briqyard host upgrade "$UP" --release "file://$REL"
+phase "host upgrade, 4 connections held each way" 4 briqyard host upgrade "$UP" --release "file://$REL"
+phase "fleet restart" 4 sudo -n systemctl restart briqyard-fleet

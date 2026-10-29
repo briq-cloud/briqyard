@@ -832,6 +832,54 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   check "the new daemon adopted it"  'briqyard status | jq -e ".started.adopted >= 1 and .started.stopped == 0" >/dev/null'
   check "exec after the hand-over"   '[ "$(briqyard machine exec "$V" -- hostname)" = handover ]'
   check "never booted again"         '[ "$(briqyard machine logs "$V" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
+  # The listeners in systemd's store (ADR 0051): a connection open across a hand-over ends
+  # whole within the drain, and the ones made during it wait for the next daemon.
+  if [ "$(systemctl show -p FileDescriptorStoreMax --value briqyardd)" -gt 0 ] 2>/dev/null && command -v python3 >/dev/null; then
+    echo "== a hand-over refuses nothing: the listeners in systemd's store, a drain (ADR 0051)"
+    ECHO_PY='import socketserver as s
+class H(s.StreamRequestHandler):
+    def handle(self):
+        for line in self.rfile:
+            self.wfile.write(line)
+s.ThreadingTCPServer.allow_reuse_address = True
+s.ThreadingTCPServer(("", 9000), H).serve_forever()'
+    HO=$(briqyard machine run --image python:3.12-alpine --name drain --tenant "$T" --memory 256 -e "ECHO=$ECHO_PY" \
+      --readiness tcp:9000 -- sh -c 'python3 -m http.server 8080 >/dev/null 2>&1 & exec python3 -c "$ECHO"' | jq -r .id)
+    briqyard machine wait "$HO" >/dev/null 2>&1 || true
+    HO_WEB=$(briqyard endpoint add "$HO" 8080 | jq -r .address)
+    HO_ECHO=$(briqyard endpoint add "$HO" 9000 | jq -r .address)
+    HO_HOST=$(briqyard endpoint add --http --host "e2e-drain-$$" "$HO" 8080 | jq -r .host)
+    ing=${INGRESS#*://}; ing=${ing%%/*}
+    # A line each way every 100 ms for 4 s on one connection, each line checked.
+    held() { python3 - "${1%:*}" "${1##*:}" <<'PY'
+import socket, sys, time
+s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=30)
+f, n, end = s.makefile("rb"), 0, time.time() + 4
+while time.time() < end:
+    n += 1
+    line = f"line {n}\n".encode()
+    s.sendall(line)
+    if f.readline() != line:
+        sys.exit(f"line {n}: not echoed")
+    time.sleep(0.1)
+PY
+    }
+    out=$(mktemp)
+    python3 "$(dirname "$0")/upgrade-probe.py" --long 0 --tcp "$HO_WEB" --http "$ing" --web-host "$HO_HOST" > "$out" &
+    probe=$!
+    held "$HO_ECHO" & holder=$!
+    sleep 1
+    since=$(date +%s)
+    handover
+    sleep 2
+    kill -TERM "$probe"; wait "$probe" || true
+    check "a connection open across the hand-over ends whole" 'wait "$holder"'
+    check "new connections during it: every one answered" 'jq -e "[.tcp, .http] | all(.ok > 0 and .refused == 0 and .reset == 0 and .timeout == 0 and .failed == 0)" "$out" >/dev/null'
+    check "the gap the clients saw, logged" 'sudo journalctl -u briqyardd --since "@$since" -o cat | grep -F "serving again" | jq -e ".fields.gap_ms > 0" >/dev/null'
+    jq -c '{tcp: .tcp | {ok, slowest_ms}, http: .http | {ok, slowest_ms}}' "$out" | sed 's/^/       /'
+    rm -f "$out"
+    briqyard machine rm "$HO" >/dev/null
+  fi
   # A stop suspends it; the next start brings it back unasked, from its memory snapshot.
   sudo systemctl stop briqyardd
   sudo systemctl start briqyardd

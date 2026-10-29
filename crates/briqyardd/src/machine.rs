@@ -1291,7 +1291,7 @@ impl Manager {
     }
 
     /// The usage measured up to now, written.
-    async fn write_usage(&self) {
+    pub async fn write_usage(&self) {
         let now = Utc::now();
         self.measure(now).await;
         if let Err(err) = self

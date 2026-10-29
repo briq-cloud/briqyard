@@ -170,6 +170,9 @@ type S = State<Arc<AppState>>;
 
 /// A forwarded call may legitimately run for minutes (an exec, a create pulling an image);
 /// a watch has no end and is not given one.
+/// What a stop gives the calls in flight (ADR 0051): what arrives meanwhile waits in the
+/// kernel's queue for the next process.
+const DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
 const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
 fn main() {
@@ -282,9 +285,33 @@ async fn run(args: Args) -> Result<()> {
     tokio::spawn(bootstrap::run(state.clone()));
     // The peer address is what a host's own calls are checked against (`the_host`).
     let app = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
-    let listener = std::net::TcpListener::bind(&cfg.listen)
+    // Kept in systemd's store across a restart: calls made meanwhile wait (ADR 0051).
+    let listeners = api::listeners::Listeners::from_env();
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(&cfg.listen)
+        .ok()
+        .and_then(|mut a| a.next())
+        .ok_or_else(|| anyhow!("listen {}: want address:port", cfg.listen))?;
+    let listener = listeners
+        .tcp("api", addr)
         .with_context(|| format!("listen {}", cfg.listen))?;
     listener.set_nonblocking(true)?;
+    if let Err(e) = listeners.release_unused() {
+        tracing::warn!(err = %e, "listeners no longer used left in the store");
+    }
+    let handle = axum_server::Handle::new();
+    {
+        let handle = handle.clone();
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            // Nothing accepted from here; the calls in flight get DRAIN, then are cut.
+            tracing::info!("shutting down");
+            handle.graceful_shutdown(Some(DRAIN));
+        });
+    }
     tracing::info!(
         addr = cfg.listen,
         tls = matches!(cfg.tls, config::Tls::Files { .. }),
@@ -300,10 +327,16 @@ async fn run(args: Args) -> Result<()> {
                 .with_context(|| format!("tls: {} and {}", cert.display(), key.display()))?;
             let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
             axum_server::from_tcp_rustls(listener, config)
+                .handle(handle)
                 .serve(app)
                 .await?
         }
-        config::Tls::Unset | config::Tls::Off => axum_server::from_tcp(listener).serve(app).await?,
+        config::Tls::Unset | config::Tls::Off => {
+            axum_server::from_tcp(listener)
+                .handle(handle)
+                .serve(app)
+                .await?
+        }
     }
     Ok(())
 }
