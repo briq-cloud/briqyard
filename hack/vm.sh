@@ -7,6 +7,12 @@ cd "$(dirname "$0")/.."
 VM=${VM:-fc}
 SRC=$PWD
 cmd=${1:-install}
+# What changes the VMs' daemons runs under the shared lock (hack/vm-lock.sh): another session's
+# suite would otherwise run against a daemon restarted under it.
+case "$cmd" in
+  install|restart|stop|e2e|fleet)
+    [ -n "${BRIQYARD_VM_LOCK:-}" ] || exec "$PWD/hack/vm-lock.sh" "$PWD/hack/vm.sh" "$@" ;;
+esac
 VMHOME=$(limactl shell "$VM" sh -c 'echo $HOME' | tr -d '\r')
 # A target dir per tree: cargo hashes a path package relative to its workspace, so trees that
 # shared one would reuse each other's builds. Remove it when the worktree goes.
