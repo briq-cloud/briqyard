@@ -22,8 +22,9 @@ Racers stop, start, restart, snapshot, back up and exec on any machine without c
 They check only that the API never answers 5xx (but 503 `capacity`) or an unexpected 4xx.
 
 A write a racer cuts short (the machine stopped under the command: 409 `not_running`) may
-have run or not. Its owner then holds two candidates, reads the counter once the machine runs
-again, and refuses anything else. Never assume the old value: the command usually ran.
+have run, in full, in part, or not at all. Its owner reads the counters back once the machine
+runs again: each must be its old value or its new one, on its own, since a stop between the two
+disks' writes leaves one of each. Never assume the old value: the command often ran.
 
     python3 hack/chaos.py --minutes 10                        # the VM's daemon
     python3 hack/chaos.py --url http://127.0.0.1:7430 --tenants 8 --racers 8 --backups
@@ -133,7 +134,8 @@ class Chaos:
         vol = slot % 2 == 0
         read_cmd = "cat /root/n 2>/dev/null || echo 0; " + ("cat /data/n 2>/dev/null || echo 0" if vol else "echo 0")
         gen, mid = 0, None
-        # The counters (root, data) when known; else `maybe`, the values they can be.
+        # The counters (root, data) when known; else `maybe`, the values they came from, each
+        # counter any of its own values there.
         val, maybe = (0, 0), set()
 
         def unknown(*values):
@@ -179,8 +181,9 @@ class Chaos:
             got = read(mid)
             if got is None:
                 return False
-            if got not in maybe:
-                fail("cut-write", mid, got, f"one of {sorted(maybe)}")
+            each = [{c[i] for c in maybe} for i in range(2)]
+            if not all(g in e for g, e in zip(got, each)):
+                fail("cut-write", mid, got, f"each counter one of {[sorted(e) for e in each]}")
             self.count("resolved")
             val, maybe = got, set()
             return True
@@ -198,7 +201,8 @@ class Chaos:
                 self.api.note(who, f"write exit {j['exit_code']}: {j.get('stderr', '')[:200]}")
             elif code not in RACE_OK:
                 self.api.note(who, f"write {mid}: {st} {txt[:200]}")
-            # Cut short: the command may have run. Read back once the machine runs.
+            # Cut short: the command may have run, on either disk or both. Read back once the
+            # machine runs.
             self.count("write-cut")
             unknown(val, new)
 

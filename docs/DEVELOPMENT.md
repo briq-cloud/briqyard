@@ -311,9 +311,8 @@ plus `apt-get purge docker.io` and the edge's files.
   still working, a backup after the restore continuing from the one before the snapshot and
   restoring to the machine's content, the newer snapshot restored and the next backup whole, a
   snapshot with memory resumed with `/tmp` and the uptime kept, and its disk the snapshot's
-  after a cold boot), encryption at rest (the pool
-  and every dataset under it encrypted, records, runs, images and jails on it, the key in none
-  of the daemon's files nor its log; the daemon stopped and the pool locked as a reboot leaves
+  after a cold boot), encryption at rest (the pool and every dataset under it encrypted,
+  records, runs, images and jails on it, the key in none of the daemon's files nor its log; the daemon stopped and the pool locked as a reboot leaves
   it: without its key file no API and the reason logged, the file back and it starts, a machine
   of before runs again), exec sessions (`-i` streaming stdin, stderr apart and the code; `-it`
   driven by `hack/exec-tty.py`: a terminal of the size sent, a resize followed, the exit code;
