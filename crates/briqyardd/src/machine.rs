@@ -1085,11 +1085,11 @@ impl Manager {
                 if !known.contains(id) {
                     match self.inner.zfs.destroy(&format!("m/{id}")).await {
                         Ok(()) => {
-                            tracing::warn!(machine = id, "disks with no record, destroyed");
+                            tracing::warn!(machine = id, "dataset with no record, destroyed");
                             swept += 1;
                         }
                         Err(err) => {
-                            tracing::warn!(machine = id, err = %err, "disks with no record")
+                            tracing::warn!(machine = id, err = %err, "dataset with no record")
                         }
                     }
                 }

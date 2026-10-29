@@ -2116,7 +2116,9 @@ mod tests {
             of(format!("{url}/backups?tenant=t1&machine=m_other")).await,
             0
         );
-        // Two deletes of one chain at once: one deletes it, the other finds nothing to delete.
+        // Two deletes of one chain sent together run one after the other (the machine's turn):
+        // the second finds nothing left and answers 404, never 500. A record deleted under a
+        // listing is `a_listing_by_machine_reads_that_machine_s_backups_alone`.
         let chain = format!("{}?chain=true", first.id);
         let (a, b) = tokio::join!(delete(&chain), delete(&chain));
         let mut codes = [a.unwrap().status(), b.unwrap().status()];
