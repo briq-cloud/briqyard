@@ -55,7 +55,7 @@ impl Manager {
         if req.egress.is_some() || req.limits.is_some() {
             let mut r = e.snapshot();
             if let Some(eg) = &req.egress {
-                self.check_egress(eg, &r.tenant, &r.id)?;
+                self.check_egress(eg, &r.namespace, &r.id)?;
                 r.egress = eg.clone();
             }
             if let Some(l) = &req.limits {
@@ -66,7 +66,7 @@ impl Manager {
                 let policy = self.policy_for(&r)?;
                 if req.egress.as_ref().is_some_and(|eg| eg.via_gateway()) {
                     gateway_turn = Some(
-                        self.ensure_gateway(&r.tenant)
+                        self.ensure_gateway(&r.namespace)
                             .await
                             .map_err(|err| self.gateway_failed(&e, err))?,
                     );
@@ -167,16 +167,16 @@ impl Manager {
     }
 
     /// Grows the machine's volume from `from` to `to` GB now, its lock held (ADR 0040): the
-    /// pool's room checked as a create's, then the growth checked against the tenant's quota
+    /// pool's room checked as a create's, then the growth checked against the namespace's quota
     /// and the size taken on the record in one step under the map's lock, as a start takes its
     /// memory (two grows cannot pass the quota together), then the disk grown and the record
     /// saved; refused there, the record goes back. The guest's filesystem follows at its next
     /// start.
     pub(super) async fn grow_volume(&self, e: &Entry, from: u32, to: u32) -> Result<(), MError> {
         self.room_on_pool(to - from).await?;
-        let tenant = e.rec.lock().unwrap().tenant.clone();
+        let namespace = e.rec.lock().unwrap().namespace.clone();
         let quota = self
-            .tenant_of(&tenant)
+            .namespace_of(&namespace)
             .map(|t| t.rec.quota)
             .unwrap_or_default();
         let resize = |r: &mut Record, gb: u32| {
@@ -190,7 +190,12 @@ impl Manager {
                 disk_gb: to - from,
                 ..Default::default()
             };
-            let over = over_quota(&tenant, &quota, &tenant_use(&machines, &tenant), &need);
+            let over = over_quota(
+                &namespace,
+                &quota,
+                &namespace_use(&machines, &namespace),
+                &need,
+            );
             if over.is_none() {
                 resize(&mut e.rec.lock().unwrap(), to);
             }

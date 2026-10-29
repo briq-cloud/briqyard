@@ -96,7 +96,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `api_tls` | `true` | TLS on a non-loopback `listen`, with the daemon's own certificate (`<data_dir>/api-cert.pem`, made once, ADR 0020). `false`: plain HTTP on any address |
 | `token` | none | Required as `Authorization: Bearer` on every request when set |
 | `metrics_token` | none | A token of its own for `/metrics`, so a scraper never holds the API's (the API's opens it too: the fleet relays with it, ADR 0054). On a loopback `listen`, `/metrics` and `/v1/openapi.yaml` need no token at all |
-| `data_dir` | `/var/lib/briqyard` | State (`state/`), run files (`run/`), image metadata (`images/`), jails (`jail/`). All of it `0700`, root's: records and config drives hold tenant secrets |
+| `data_dir` | `/var/lib/briqyard` | State (`state/`), run files (`run/`), image metadata (`images/`), jails (`jail/`). All of it `0700`, root's: records and config drives hold namespace secrets |
 | `firecracker`, `jailer`, `kernel`, `init` | `/usr/local/bin/...`, `/var/lib/briqyard/vmlinux` | The binaries and the guest kernel. No `jailer`: Firecracker runs as root (development only) |
 | `jail_dir`, `jail_uid_base` | `<data_dir>/jail`, `100000` | Where chroots and memory snapshots go: the daemon mounts `<pool>/jail` there, so they land on the pool, not on `/` (ADR 0014). Each machine gets a uid of its own from this base |
 | `kernel_args` | none | Appended to the boot arguments |
@@ -122,10 +122,10 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `storage.key` | `file:/etc/briqyard/pool.key` | Where the pool's key comes from when it is not loaded (after a reboot): `fleet` (`POST /v1/hosts/key` on `fleet.url`, with `token`, as the host at `fleet.advertise`) or `file:<absolute path>` (64 hex digits). Not read while the key is loaded |
 | `registries[]` | none | `{host, username, password}` for private registries, `host` the registry as a reference names it (`ghcr.io`; `docker.io` for Docker Hub) |
 | `registry_mirrors` | none | A pull-through mirror per registry, `{docker.io: http://10.0.0.5:7440}` (ADR 0036): an image's content is pulled from it first, from the registry when it fails; a tag is always resolved by the registry, and everything is checked by digest. The mirror gets no credentials |
-| `network.range` | `10.64.0.0/10` | Tenant subnets, one /24 each (16,384 tenants) |
+| `network.range` | `10.64.0.0/10` | Namespace subnets, one /24 each (16,384 namespaces) |
 | `network.upstream_dns` | the host's, then `1.1.1.1` | Where the gateway forwards DNS |
 | `network.egress` | the default route's interface | Where machines reach the internet |
-| `network.host_ports` | none | TCP ports of the host's own services (an edge beside the daemon, ADR 0028) that machines with egress `open` reach at the host's addresses, as the internet does; never at a tenant's `.1`. Not the daemon's ports, nor 53 |
+| `network.host_ports` | none | TCP ports of the host's own services (an edge beside the daemon, ADR 0028) that machines with egress `open` reach at the host's addresses, as the internet does; never at a namespace's `.1`. Not the daemon's ports, nor 53 |
 | `egress_limits.blocked_ports` | `[25]` | Destination ports no machine reaches on the internet, TCP and UDP (ADR 0018). A machine's own `limits` override each field |
 | `egress_limits.new_connections_per_minute` | `0` (none) | New internet connections a machine may open a minute, as many at once |
 | `egress_limits.bandwidth_mbit` | `0` (none) | A machine's internet bandwidth, in and out together; at most 100000 |
@@ -197,7 +197,7 @@ A connection to a sleeping machine wakes it, and waits for its boot.
 
 | Path | What |
 |---|---|
-| `<data_dir>/state/{machines,tenants,endpoints}/*.json` | The records, one file each, written atomically, on `byard/state` |
+| `<data_dir>/state/{machines,tenants,endpoints}/*.json` | The records, one file each, written atomically, on `byard/state`; the namespaces' directory keeps its former name (ADR 0055) |
 | `<data_dir>/api-cert.pem`, `api-key.pem` | The API's certificate and key (`0600`). Both removed, a new pair is made at the next start: a new fingerprint to pin. The certificate without its key: the daemon refuses to start |
 | `<data_dir>/state/usage/<hour>.json` | Each machine's usage in that UTC hour (ADR 0017); the open hour is rewritten once a minute |
 | `<data_dir>/state/events/<hour>.ndjson` | The host's events of that hour, one JSON line each, appended and synced (ADR 0019) |
@@ -305,7 +305,7 @@ in 32 MB parts, four at a time, each request tried again with backoff for up to 
 day: a daemon cut mid-upload leaves one.
 
 `briqyard machine backups <id>` lists them, from the store, so a machine that no longer exists
-still has them. `briqyard machine restore --from <machine id> [--backup <id>] --tenant T --name
+still has them. `briqyard machine restore --from <machine id> [--backup <id>] --namespace T --name
 N` makes a new machine from one (`POST /v1/machines` with `restore`): the whole chain of
 streams is received into fresh datasets, and the image, command, env, files, size and volume
 come from the record unless the request sets them. Any host that reaches the store can
@@ -332,10 +332,10 @@ nor a base of one goes (`backup_deleted`, `retention`). The store holds `keep` t
 refused while another continues from it, `--chain` deletes those too.
 
 A destroy keeps the machine's backups for `backup.keep_destroyed_days`: a holder
-(`state/holders/<id>.json`) keeps them listed (`briqyard backups --tenant T`, `--machine ID`
+(`state/holders/<id>.json`) keeps them listed (`briqyard backups --namespace T`, `--machine ID`
 for one machine's, each with `deletes_at`) and counted in the machine's usage buckets
 (`backup_gb_hours`). Through a fleet, `backup rm` of a destroyed machine's backup names its
-tenant (`--tenant`).
+namespace (`--namespace`).
 
 In the store, per machine: `backups/<machine>/<id>.json` (the record) and
 `backups/<machine>/<disk>/<id>.zfs` (a stream, `root` or `data`). Ids are times to the
@@ -362,9 +362,9 @@ snapshot, or is whole.
   | `briqyard_pool_bytes`, `briqyard_disk_free_mb` | `kind="size\|used\|free"` | the pool |
   | `briqyard_host_condition` | `condition` | 1 while true |
   | `briqyard_events_total` | `type`, `reason` | events since the daemon started, folded repeats included |
-  | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_tenants`, `briqyard_endpoints` | | counts (`execs`: exec sessions included) |
+  | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_namespaces`, `briqyard_endpoints` | | counts (`execs`: exec sessions included) |
   | `process_resident_memory_bytes` | | the daemon's own resident memory |
-  | `briqyard_machine_cpu_seconds_total` | `machine`, `tenant`, `name`, `role` (a gateway's) | its cgroup's CPU time |
+  | `briqyard_machine_cpu_seconds_total` | `machine`, `namespace`, `name`, `role` (a gateway's) | its cgroup's CPU time |
   | `briqyard_machine_memory_bytes`, `_memory_limit_bytes` | same | its cgroup's memory, its size |
   | `briqyard_machine_disk_used_bytes` | same | its disks, snapshots (retired disks included) and memory snapshots |
   | `briqyard_machine_{internet,ingress}_{in,out}_bytes_total`, `_egress_dropped_packets_total` | same | its traffic |
@@ -374,8 +374,8 @@ snapshot, or is whole.
   | `briqyard_machine_boot_seconds` | same | its last start, `starting` to `running` |
 
   Counters count from the daemon's start. Alert on `briqyard_host_condition == 1`.
-- `briqyard top [--tenant T]`: running machines by CPU, with memory, disk and network rates over
-  the last 15 s (`GET /v1/top`; through the fleet, a tenant's host or every host).
+- `briqyard top [--namespace T]`: running machines by CPU, with memory, disk and network rates over
+  the last 15 s (`GET /v1/top`; through the fleet, a namespace's host or every host).
 - Conditions (ADR 0021): `memory_pressure`, `disk_pressure`, `storage_stalled` (ADR 0046) in
   `/v1/status` and `briqyard host ls`; each change is a `host_condition` event (`briqyard
   events`), a warning when it turns true. Under disk pressure the daemon removes unused images
@@ -385,9 +385,9 @@ snapshot, or is whole.
 - A machine: `briqyard machine get <id>` (state, why it stopped, its process's exit), `briqyard
   machine logs <id>` (its console; `-f` streams each new line until the machine is destroyed).
   `briqyard machine ls -l app=web -l tier` selects by labels (its `metadata`; `run -l K=V` sets them).
-- Quotas (ADR 0025): `briqyard tenant quota <tenant>` shows a tenant's limits and use;
+- Quotas (ADR 0025): `briqyard namespace quota <namespace>` shows a namespace's limits and use;
   `--machines N --memory-mb N --vcpus N --disk-gb N` puts exactly those (the control plane sets
-  them). A refusal is a `quota_exceeded` warning in `briqyard events --tenant <tenant>`.
+  them). A refusal is a `quota_exceeded` warning in `briqyard events --namespace <namespace>`.
 - A shell in a machine (ADR 0029): `briqyard machine exec -it <id> -- sh`; `-i` alone for a pipe.
   Each session is a `session_opened` event (`briqyard events --machine <id>`) and an `exec
   session ended` log line with its code and length. A machine with a session open does not go
@@ -399,7 +399,7 @@ snapshot, or is whole.
   machine restart <id>` applies it now. A new image is pulled at that start and the root disk
   made again from it; the data volume stays. `--volume-gb N` grows the volume (ADR 0040): the
   disk at once, its filesystem at the next start (cold); never smaller.
-- `briqyard usage --from <hour> --to <hour> [--tenant T] [--json]`: what each machine used
+- `briqyard usage --from <hour> --to <hour> [--namespace T] [--json]`: what each machine used
   per hour (ADR 0017); `nft list set inet briqyard internet_out` shows the raw counters.
 - Egress limits (ADR 0018): `briqyard machine get <id>` shows `limits` and `egress_drops`;
   `briqyard machine set-limits <id> --conn-per-min 0` lifts a rate at once. Raw:
@@ -417,7 +417,7 @@ snapshot, or is whole.
 | A machine is `error (create_failed)` | Its disks could not be made (`zfs` in `error` and the log, at `error`), its create's start was refused (its quota, its `via`), or the daemon restarted during a fork's or a restore's create (one from an image is taken up again). No disks: destroy it and create again |
 | A start or a create's `/wait` answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the init's reason (`start "/run.sh": …`) or else the last console lines. `briqyard machine logs`, then destroy it |
 | A start after `machine set --image` answers 409 `boot_failed`, `error: image …` | The new image could not be pulled or built; the change is still `pending`. `machine set` another image (or the one it runs, which drops the change) and start again |
-| A start after `machine set --memory` answers 503 `capacity` | The host has no room for the new size; the change is still `pending`. Through a fleet, the tenant stays on its host: move it (backups, `tenant unpin`, restores) |
+| A start after `machine set --memory` answers 503 `capacity` | The host has no room for the new size; the change is still `pending`. Through a fleet, the namespace stays on its host: move it (backups, `namespace unpin`, restores) |
 | A machine is `stopped (host)` | The daemon stopped it: its stop, or a crashed daemon's leftover. The next start boots it again unless its sleep window had run out; else the next use wakes it |
 | `upgrade to … failed` in a host's note, the host `draining` | The step and the reason are in the note: SSH (the key, the pinned host key), the script's last lines, no heartbeat from the new version (`journalctl -u briqyardd` on the host), or a start that stopped machines it could not take over (`briqyard events --machine …`). Fix, then `briqyard host undrain` |
 | `the host now runs …, newer than this fleet` | Upgrade the fleet, then `host undrain` the host |
@@ -429,9 +429,9 @@ snapshot, or is whole.
 | `the guest did not come up` | The kernel booted but the init did not answer on vsock within `boot_timeout_sec`: console log, then the kernel (`kernel`) and init (`init`) paths |
 | `no host has room` (fleet) | `briqyard host ls`: fill, free memory, free disk, conditions, and per region what ran out (`UNSCHEDULABLE`, ADR 0042). `used` counts the creates placement sent that the host has not reported yet (ADR 0044) |
 | `no host in region … has room` (fleet) | No ready host of that region under the ceiling: `briqyard host ls`, the `REGION` column; add one there |
-| `tenant … is in region …, not …` (fleet, 400) | The tenant lives on a host of another region. A team that changes region moves: backups, destroy, `tenant unpin`, restores with the new region |
-| 403 `quota` | The tenant is at a limit of its quota: `briqyard tenant quota <tenant>` shows the limit and the use |
-| `host h_… is under disk_pressure` (fleet, 503 `capacity`) | The tenant's host takes nothing new until the condition clears. Disk: `zfs list -o space byard`; unused images go by themselves, then backups and destroys of what is left. Memory: stop machines, or move the tenant (below) |
+| `namespace … is in region …, not …` (fleet, 400) | The namespace lives on a host of another region. A team that changes region moves: backups, destroy, `namespace unpin`, restores with the new region |
+| 403 `quota` | The namespace is at a limit of its quota: `briqyard namespace quota <namespace>` shows the limit and the use |
+| `host h_… is under disk_pressure` (fleet, 503 `capacity`) | The namespace's host takes nothing new until the condition clears. Disk: `zfs list -o space byard`; unused images go by themselves, then backups and destroys of what is left. Memory: stop machines, or move the namespace (below) |
 | `host h_… is down` (fleet, 503) | The host missed its heartbeats for `placement.down_after_sec`: its machines answer again once it is back. `briqyard host ls`, then the host's `journalctl -u briqyardd` |
 | `fleet heartbeat refused` in a host's log | `unknown_host`: the fleet has no record at the host's `fleet.advertise` address (list it under `hosts:`). `unauthorized`: the host's `token` is not the one the fleet holds for it. `tls_mismatch`: its certificate is not the pinned one, or none is pinned (set `tls_fingerprint`); a host just added gets this until its bootstrap has pinned it |
 | `host …: … is not the pinned …` (fleet, 502 `host_unreachable`) | The host presents another certificate than its record's `tls_fingerprint`: reinstalled (pin the new one), or not the host |
@@ -484,7 +484,7 @@ hosts:
     region: gra
 ```
 
-`region` is what a create's `region` names: a new tenant goes to a host of it, and stays in it
+`region` is what a create's `region` names: a new namespace goes to a host of it, and stays in it
 (ADR 0025). A host added takes the region `host add` gives it.
 
 The fleet polls it every 15 s and accepts its heartbeats; without a `token` it is polled only.
@@ -573,14 +573,14 @@ Prometheus text:
 | Series | Labels | What |
 |---|---|---|
 | `briqyard_fleet_hosts` | `state` | hosts in the registry |
-| `briqyard_fleet_free_mb` | `resource="memory\|disk"`, `region` | free on the region's hosts that take a new tenant (ready, under `fill_ceiling`, no condition), summed |
+| `briqyard_fleet_free_mb` | `resource="memory\|disk"`, `region` | free on the region's hosts that take a new namespace (ready, under `fill_ceiling`, no condition), summed |
 | `briqyard_fleet_largest_slot_mb` | same | the most free on one of them: the largest machine (memory) or volume plus 2 GB (disk) the region still takes |
 | `briqyard_fleet_unschedulable_total` | `resource="memory\|disk\|pressure"`, `region` | creates refused 503 `capacity` since the fleet started |
 
 `memory`: no host had the memory free, or those with the room are under `memory_pressure`;
 `disk`: hosts had the memory, none the disk, or those with both are under `disk_pressure`. A
-new host fixes both. `pressure`: the tenant's own host (or a fork's source's) is under a
-condition; a new host does not help, that host must be freed (or the tenant moved, below). A
+new host fixes both. `pressure`: the namespace's own host (or a fork's source's) is under a
+condition; a new host does not help, that host must be freed (or the namespace moved, below). A
 region no host is in counts as `region="other"`; a create that asked for none, as `region=""`.
 Those two carry `briqyard_fleet_unschedulable_total` only (and `""` the room too when a host
 has no region): no host, no room. Counters start at 0 when the fleet starts. The token:
@@ -590,11 +590,11 @@ unset. `briqyard_fleet_host_state{host, region, state}` is 1 for each host's sta
 `GET /v1/status` has the same per region (`regions`: `free`, `largest_slot`,
 `unschedulable`; no `free` or `largest_slot` where no host is), and `briqyard host ls` prints
 them under the hosts (`-` there). Each refusal is a `warn`
-line `unschedulable` with `resource`, `region`, `tenant`, `host` (the tenant's), `memory_mb`,
+line `unschedulable` with `resource`, `region`, `namespace`, `host` (the namespace's), `memory_mb`,
 `disk_mb` (asked) and `largest_memory_mb`, `largest_disk_mb` (the region's).
 
 The alerts to watch them are in the monitoring stack (below): creates refused for memory or
-disk (add a host in the region), for pressure (free the tenant's host), a largest slot under the
+disk (add a host in the region), for pressure (free the namespace's host), a largest slot under the
 largest size you offer.
 
 ### Adding and removing hosts
@@ -607,7 +607,7 @@ briqyard host add 51.68.1.2 --address 10.42.0.11 --region gra   # POST /v1/hosts
                                              # --public-tcp-ports 80,443,… (or none): its own, else the fleet's
 briqyard host ls                             # its note says what the bootstrap last did
 briqyard host retire h_123456                # POST /v1/hosts/{id}/retire: retiring, forgotten once empty
-briqyard host drain h_123456                 # draining: no new tenant on it, kept
+briqyard host drain h_123456                 # draining: no new namespace on it, kept
 briqyard host undrain h_123456               # ready again, from draining or retiring
 briqyard host rm h_123456                    # forget it (its machines are not touched)
 ```
@@ -640,38 +640,38 @@ compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server
 connect is strict against that file. A server reinstalled has a new key: remove its line from
 the file.
 
-A retire makes the host `retiring` (no new tenant lands on it) and forgets it once it runs
+A retire makes the host `retiring` (no new namespace lands on it) and forgets it once it runs
 nothing: at once when it is already empty (the answer says `retired`), else within a minute of
 its last machine's destroy. The server stays yours: give it back to its provider yourself. A
 host from the `hosts:` list is retired by removing it from the configuration; forgotten through
 the API, it is back on the next poll.
 
-### Moving a tenant
+### Moving a namespace
 
-Machines do not move between hosts on their own: a draining host keeps its tenants until they
-are removed. To take a tenant off a host (draining, full, or gone):
+Machines do not move between hosts on their own: a draining host keeps its namespaces until they
+are removed. To take a namespace off a host (draining, full, or gone):
 
 ```bash
 briqyard host drain h_old                          # nothing new lands there
-briqyard machine backup <id>                       # each machine of the tenant (ADR 0008)
+briqyard machine backup <id>                       # each machine of the namespace (ADR 0008)
 briqyard machine destroy <id>                      # each one, once its backup is listed
-briqyard tenant rm <tenant>                        # its network and gateway on the old host; unpins it
-briqyard machine restore --from <id> --tenant <tenant> --name <name>   # placed afresh
+briqyard namespace rm <namespace>                        # its network and gateway on the old host; unpins it
+briqyard machine restore --from <id> --namespace <namespace> --name <name>   # placed afresh
 ```
 
 The old host keeps the destroyed machines' backups for `backup.keep_destroyed_days` (ADR
-0023): `briqyard backups --tenant <tenant>` lists them with the new ones, and `briqyard backup
-rm <id> <backup> --tenant <tenant>` deletes them on the host that holds them (ADR 0045).
+0023): `briqyard backups --namespace <namespace>` lists them with the new ones, and `briqyard backup
+rm <id> <backup> --namespace <namespace>` deletes them on the host that holds them (ADR 0045).
 
-A tenant's gateway (ADR 0016) is not backed up: `briqyard tenant gateway set` it again once the
-tenant is unpinned (the fleet places the tenant with it), before the restores of its
+A namespace's gateway (ADR 0016) is not backed up: `briqyard namespace gateway set` it again once the
+namespace is unpinned (the fleet places the namespace with it), before the restores of its
 `via:gateway` machines.
 
-`briqyard tenant unpin <tenant>` (`POST /v1/tenants/{id}/unpin`) drops the pin without asking
-the host, for a host that is down for good or a pin left on a full host. A tenant unpinned
+`briqyard namespace unpin <namespace>` (`POST /v1/namespaces/{id}/unpin`) drops the pin without asking
+the host, for a host that is down for good or a pin left on a full host. A namespace unpinned
 while it still has machines on a host is pinned back there by the host's next heartbeat, and a
 machine created in between lands on another host, where it cannot reach the others: unpin
-once the tenant has nothing left on the host, or mean to abandon what is there.
+once the namespace has nothing left on the host, or mean to abandon what is there.
 
 ## Monitoring (ADR 0054)
 
@@ -706,7 +706,7 @@ memory to `capacity.reserved_memory_mb`.
 Grafana, signed in as `admin`: the `briqyard` folder, a fleet overview (hosts by state,
 machines running, asleep and stopped, room per region, events), a host (its machines, memory
 and CPU against capacity, the pool, disks, network, boot times, restarts) and machines and
-tenants (the busiest, each machine's series, crash loops, egress drops, use per tenant). No
+namespaces (the busiest, each machine's series, crash loops, egress drops, use per namespace). No
 anonymous access, no sign-up; the dashboards are the repository's (`hack/monitoring/dashboards`),
 read-only in Grafana. Point the reverse proxy at `GRAFANA_LISTEN` only after the first run: Grafana
 starts with its default `admin` password, which the script replaces seconds later, on loopback.
@@ -726,7 +726,7 @@ GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitor
 | Pool over 80 % | for 5 minutes |
 | Machine in a crash loop | restarted 3 times in 10 minutes by its policy |
 | Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|disk"}` grew: add a host in the region |
-| Creates refused: host under pressure | `{resource="pressure"}` grew: free the tenant's host |
+| Creates refused: host under pressure | `{resource="pressure"}` grew: free the namespace's host |
 | Largest slot too small | a region's largest memory slot under `LARGEST_SLOT_MB` for 10 minutes |
 
 **The proxy**, beside the fleet's site (step 6 of First OVH host), with a DNS record for the

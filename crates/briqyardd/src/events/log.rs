@@ -15,7 +15,7 @@ pub(super) struct Log {
     /// Events logged since the daemon started, by type and reason, folded ones included:
     /// `/metrics`.
     pub(super) emitted: BTreeMap<(&'static str, &'static str), u64>,
-    /// The repeats folded since an event's line, by tenant, machine and reason.
+    /// The repeats folded since an event's line, by namespace, machine and reason.
     pub(super) series: BTreeMap<Key, Series>,
 }
 
@@ -136,7 +136,7 @@ impl Log {
             reason: ev.reason.into(),
             message: bounded(ev.message),
             machine_id: ev.machine_id,
-            tenant: ev.tenant,
+            namespace: ev.namespace,
             host: String::new(),
             data: ev.data,
             count,

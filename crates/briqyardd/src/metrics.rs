@@ -13,7 +13,7 @@ pub struct Host {
     /// Stopped machines by why they stopped (`idle`: asleep).
     pub stopped: BTreeMap<String, usize>,
     pub suspended: usize,
-    pub tenants: usize,
+    pub namespaces: usize,
     pub endpoints: usize,
     /// Committed to running machines, and what the host hands out.
     pub memory_mb: (u32, u32),
@@ -40,9 +40,9 @@ pub fn resident_bytes() -> Option<u64> {
 /// One machine's figures, as the tick last measured them.
 pub struct Machine {
     pub id: String,
-    pub tenant: String,
+    pub namespace: String,
     pub name: String,
-    /// `gateway` for a tenant's gateway.
+    /// `gateway` for a namespace's gateway.
     pub role: Option<String>,
     pub state: String,
     /// What its counters added up to since the daemon started.
@@ -59,12 +59,12 @@ pub struct Machine {
 }
 
 impl Machine {
-    /// `machine`, `tenant`, `name`, and `role` where it applies.
+    /// `machine`, `namespace`, `name`, and `role` where it applies.
     fn labels(&self) -> String {
         let mut l = format!(
-            "machine=\"{}\",tenant=\"{}\",name=\"{}\"",
+            "machine=\"{}\",namespace=\"{}\",name=\"{}\"",
             label_value(&self.id),
-            label_value(&self.tenant),
+            label_value(&self.namespace),
             label_value(&self.name)
         );
         if let Some(role) = &self.role {
@@ -238,10 +238,10 @@ pub fn render(h: &Host, machines: &[Machine]) -> String {
     );
     family(
         o,
-        "briqyard_tenants",
+        "briqyard_namespaces",
         "gauge",
-        "Tenants on this host.",
-        one(h.tenants),
+        "Namespaces on this host.",
+        one(h.namespaces),
     );
     family(
         o,
@@ -352,7 +352,7 @@ mod tests {
     fn machine(id: &str, state: &str) -> Machine {
         Machine {
             id: id.into(),
-            tenant: "t1".into(),
+            namespace: "t1".into(),
             name: "db".into(),
             role: None,
             state: state.into(),
@@ -405,12 +405,12 @@ mod tests {
             r#"briqyard_pool_bytes{kind="size"} 1000"#,
             "briqyard_boots_total 3",
             "process_resident_memory_bytes 20971520",
-            r#"briqyard_machine_cpu_seconds_total{machine="m_1",tenant="t1",name="db"} 2.5"#,
-            r#"briqyard_machine_boot_seconds{machine="m_1",tenant="t1",name="db"} 1.25"#,
-            r#"briqyard_machine_disk_write_bytes_total{machine="m_1",tenant="t1",name="db"} 67108864"#,
-            r#"briqyard_machine_disk_throttled_total{machine="m_1",tenant="t1",name="db"} 12"#,
-            r#"briqyard_machine_restarts_total{machine="m_2",tenant="t1",name="gate\"way\\",role="gateway"} 1"#,
-            r#"briqyard_machine_state{machine="m_2",tenant="t1",name="gate\"way\\",role="gateway",state="stopped"} 1"#,
+            r#"briqyard_machine_cpu_seconds_total{machine="m_1",namespace="t1",name="db"} 2.5"#,
+            r#"briqyard_machine_boot_seconds{machine="m_1",namespace="t1",name="db"} 1.25"#,
+            r#"briqyard_machine_disk_write_bytes_total{machine="m_1",namespace="t1",name="db"} 67108864"#,
+            r#"briqyard_machine_disk_throttled_total{machine="m_1",namespace="t1",name="db"} 12"#,
+            r#"briqyard_machine_restarts_total{machine="m_2",namespace="t1",name="gate\"way\\",role="gateway"} 1"#,
+            r#"briqyard_machine_state{machine="m_2",namespace="t1",name="gate\"way\\",role="gateway",state="stopped"} 1"#,
         ] {
             assert!(lines.contains(&want), "{want}\n{text}");
         }

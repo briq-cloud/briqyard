@@ -1,5 +1,5 @@
-//! briqyard-fleet: the briqyard API across several hosts. Each tenant lives on one host; the
-//! fleet places new tenants, forwards every machine request to the right daemon, keeps the
+//! briqyard-fleet: the briqyard API across several hosts. Each namespace lives on one host; the
+//! fleet places new namespaces, forwards every machine request to the right daemon, keeps the
 //! registry of hosts from their heartbeats, and bootstraps the servers added to it. It buys no
 //! server: it says what ran out (ADR 0042), and something outside adds hosts.
 
@@ -212,7 +212,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         capacity: Default::default(),
         used: Default::default(),
         machines: 0,
-        tenants: vec![],
+        namespaces: vec![],
         last_seen: now,
         version: String::new(),
         disk_free_mb: 0,
@@ -381,10 +381,10 @@ fn restored(reg: &Registry, from: &str, path: &std::path::Path) -> String {
         .filter(|h| !h.pool_key.is_empty())
         .count();
     let mut out = format!(
-        "restored {} hosts ({keys} pool keys, {} retired) and {} tenants from {from} into {}\n",
+        "restored {} hosts ({keys} pool keys, {} retired) and {} namespaces from {from} into {}\n",
         reg.hosts.len(),
         reg.retired_keys.len(),
-        reg.tenants.len(),
+        reg.namespaces.len(),
         path.display()
     );
     if let Some(newest) = reg.hosts.values().map(|h| h.last_seen).max() {
@@ -422,6 +422,25 @@ fn restored(reg: &Registry, from: &str, path: &std::path::Path) -> String {
 }
 
 /// The HTTP API: every route, behind the bearer check.
+/// The routes of a namespace, under `prefix`.
+fn namespace_routes(prefix: &str) -> Router<Arc<AppState>> {
+    Router::new()
+        .route(prefix, get(list_namespaces))
+        .route(
+            &format!("{prefix}/:id"),
+            get(get_namespace).delete(delete_namespace),
+        )
+        .route(
+            &format!("{prefix}/:id/gateway"),
+            put(set_gateway).delete(delete_gateway),
+        )
+        .route(
+            &format!("{prefix}/:id/quota"),
+            get(get_quota).put(set_quota),
+        )
+        .route(&format!("{prefix}/:id/unpin"), post(unpin_namespace))
+}
+
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -443,14 +462,9 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/backups", get(all_backups))
         .route("/v1/top", get(top))
         .route("/v1/events", get(events))
-        .route("/v1/tenants", get(list_tenants))
-        .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
-        .route(
-            "/v1/tenants/:id/gateway",
-            put(set_gateway).delete(delete_gateway),
-        )
-        .route("/v1/tenants/:id/quota", get(get_quota).put(set_quota))
-        .route("/v1/tenants/:id/unpin", post(unpin_tenant))
+        .merge(namespace_routes("/v1/namespaces"))
+        // The former name (ADR 0055), answered until the control plane has moved.
+        .merge(namespace_routes("/v1/tenants"))
         .route("/v1/machines/:id", any(by_machine))
         // Backups live in a store every host shares: the listing goes to any host, even for
         // a machine that no longer exists anywhere; making one goes to the machine's host.
@@ -589,7 +603,7 @@ async fn status(State(st): S) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version": api::VERSION, "host_id": "fleet",
         "capacity": cap, "used": used, "machines": machines, "running": machines,
-        "hosts": reg.hosts.len(), "ready": ready, "tenants": reg.tenants.len(),
+        "hosts": reg.hosts.len(), "ready": ready, "namespaces": reg.namespaces.len(),
         "regions": signals::regions(&reg, &st.policy, &st.refusals),
     }))
 }
@@ -892,7 +906,7 @@ async fn register_host(
                 capacity: req.capacity,
                 used: req.used,
                 machines: req.machines,
-                tenants: req.tenants,
+                namespaces: req.namespaces,
                 last_seen: now,
                 version: req.version,
                 disk_free_mb: req.disk_free_mb,
@@ -917,7 +931,7 @@ async fn drain_host(State(st): S, Path(id): Path<String>) -> Result<Response, Re
     set_host_state(&st, &id, "draining", |_| true).await
 }
 
-/// Undoes a drain or a retire: the host takes new tenants again.
+/// Undoes a drain or a retire: the host takes new namespaces again.
 async fn undrain_host(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
     set_host_state(&st, &id, "ready", |s| matches!(s, "draining" | "retiring")).await
 }
@@ -1052,7 +1066,7 @@ fn new_added_host(
         capacity: Default::default(),
         used: Default::default(),
         machines: 0,
-        tenants: vec![],
+        namespaces: vec![],
         last_seen: now,
         version: String::new(),
         disk_free_mb: 0,
@@ -1090,7 +1104,7 @@ async fn retire_host(State(st): S, Path(id): Path<String>) -> Result<Response, R
             None => return Err(err(StatusCode::NOT_FOUND, "not_found", "host not found")),
         }
     };
-    let empty = host.machines == 0 && host.tenants.is_empty();
+    let empty = host.machines == 0 && host.namespaces.is_empty();
     if empty || host.state != "retiring" {
         return Ok(Json(retired(&st, &host).await.map_err(registry_error)?).into_response());
     }
@@ -1178,7 +1192,7 @@ async fn poll_static_hosts(st: Arc<AppState>) {
 }
 
 /// One round of the poll: every static host of the configuration is asked for its status and
-/// tenants, then silent hosts are marked down. True when a host has never answered yet.
+/// namespaces, then silent hosts are marked down. True when a host has never answered yet.
 async fn poll_static_hosts_once(st: &AppState) -> bool {
     // From the configuration, not the registry: a static host forgotten through the API
     // is back on the next poll; it leaves the fleet by leaving the configuration.
@@ -1187,7 +1201,7 @@ async fn poll_static_hosts_once(st: &AppState) -> bool {
     let mut unseen = false;
     for h in hosts {
         if let Some(s) = get_json::<api::Status>(st, &h, "/v1/status").await {
-            let tenants: Vec<String> = get_json::<Vec<api::Tenant>>(st, &h, "/v1/tenants")
+            let namespaces: Vec<String> = get_json::<Vec<api::Namespace>>(st, &h, "/v1/namespaces")
                 .await
                 .unwrap_or_default()
                 .into_iter()
@@ -1198,7 +1212,7 @@ async fn poll_static_hosts_once(st: &AppState) -> bool {
             rec.capacity = s.capacity;
             rec.used = s.used;
             rec.machines = s.machines;
-            rec.tenants = tenants;
+            rec.namespaces = namespaces;
             rec.version = s.version;
             rec.disk_free_mb = s.disk_free_mb;
             rec.conditions = s.conditions;
@@ -1523,7 +1537,7 @@ async fn create_machine(
     let req: api::CreateMachineRequest = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
     let ask = Ask {
-        tenant: &req.tenant,
+        namespace: &req.namespace,
         region: &req.region,
         memory_mb: req.size.memory_mb,
         disk_mb: disk_need(req.volume.as_ref().map(|v| v.size_gb)),
@@ -1531,20 +1545,20 @@ async fn create_machine(
     };
     let (host, first, hold) = {
         let mut reg = st.reg.lock().unwrap();
-        let first = !reg.tenants.contains_key(&req.tenant);
+        let first = !reg.namespaces.contains_key(&req.namespace);
         let source = req
             .fork
             .as_ref()
             .and_then(|f| reg.host_of_machine(&f.machine_id).map(|h| h.id.clone()));
-        // The host the request is bound to: a fork's source's, else the tenant's.
+        // The host the request is bound to: a fork's source's, else the namespace's.
         let bound = source
             .clone()
-            .or_else(|| reg.tenants.get(&req.tenant).cloned());
-        refuse_outside(&reg, bound.as_deref(), &req.tenant, &req.region)?;
+            .or_else(|| reg.namespaces.get(&req.namespace).cloned());
+        refuse_outside(&reg, bound.as_deref(), &req.namespace, &req.region)?;
         refuse_under_pressure(&st, &reg, bound.as_deref(), &ask)?;
         let chosen = source.or_else(|| {
             reg.place(
-                &req.tenant,
+                &req.namespace,
                 &req.region,
                 ask.memory_mb,
                 ask.disk_mb,
@@ -1563,7 +1577,7 @@ async fn create_machine(
         id: hold,
     };
     // The pin is written before the host makes anything: a fleet restarted after the create
-    // still sends the tenant's next machine there.
+    // still sends the namespace's next machine there.
     st.save().await.map_err(registry_error)?;
     // A restore may ask for its backup's key while this forward lasts (ADR 0035).
     let restoring = req
@@ -1592,21 +1606,21 @@ async fn create_machine(
         ));
     }
     drop(hold);
-    first_refused(&st, &req.tenant, first, &data).await;
+    first_refused(&st, &req.namespace, first, &data).await;
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
-/// A create bound to a host of another region than it asks: 400, a tenant never spans
+/// A create bound to a host of another region than it asks: 400, a namespace never spans
 /// regions (ADR 0025).
 fn refuse_outside(
     reg: &Registry,
     host: Option<&str>,
-    tenant: &str,
+    namespace: &str,
     region: &str,
 ) -> Result<(), Refusal> {
     match host
         .and_then(|id| reg.hosts.get(id))
-        .and_then(|h| h.outside(tenant, region))
+        .and_then(|h| h.outside(namespace, region))
     {
         Some(why) => Err(err(StatusCode::BAD_REQUEST, "invalid", why)),
         None => Ok(()),
@@ -1615,7 +1629,7 @@ fn refuse_outside(
 
 /// What a placement asks for: what a refusal counts and logs.
 struct Ask<'a> {
-    tenant: &'a str,
+    namespace: &'a str,
     region: &'a str,
     memory_mb: u32,
     disk_mb: u64,
@@ -1623,7 +1637,7 @@ struct Ask<'a> {
     what: &'a str,
 }
 
-/// No host (of the region asked) with room for a new tenant's machine: 503 `capacity`, which a
+/// No host (of the region asked) with room for a new namespace's machine: 503 `capacity`, which a
 /// caller tries again later, counted by what ran out.
 fn no_room(st: &AppState, reg: &Registry, ask: &Ask) -> Refusal {
     let hosts = match ask.region {
@@ -1640,7 +1654,7 @@ fn no_room(st: &AppState, reg: &Registry, ask: &Ask) -> Refusal {
 }
 
 /// A create on a host that takes nothing new while a condition is true (ADR 0021): a pinned
-/// tenant's host, or a fork's source's. 503 `capacity`, which a caller tries again later,
+/// namespace's host, or a fork's source's. 503 `capacity`, which a caller tries again later,
 /// counted as `pressure` in the host's region.
 fn refuse_under_pressure(
     st: &AppState,
@@ -1685,7 +1699,7 @@ fn unschedulable(
     tracing::warn!(
         resource = resource.as_str(),
         region,
-        tenant = ask.tenant,
+        namespace = ask.namespace,
         host,
         memory_mb = ask.memory_mb,
         disk_mb = ask.disk_mb,
@@ -1701,30 +1715,38 @@ fn disk_need(volume_gb: Option<u32>) -> u64 {
     volume_gb.map(|gb| gb as u64 * 1024).unwrap_or(0) + 2048
 }
 
-/// A host with no room for a tenant's first machine (or gateway): the pin the request made
-/// goes, so a retry is placed afresh. A later one keeps it: the tenant's network is there.
-async fn first_refused(st: &AppState, tenant: &str, first: bool, answer: &[u8]) {
+/// A host with no room for a namespace's first machine (or gateway): the pin the request made
+/// goes, so a retry is placed afresh. A later one keeps it: the namespace's network is there.
+async fn first_refused(st: &AppState, namespace: &str, first: bool, answer: &[u8]) {
     if first && error_code(answer) == "capacity" {
-        st.reg.lock().unwrap().unpin(tenant);
+        st.reg.lock().unwrap().unpin(namespace);
         st.save_after_host().await;
     }
 }
 
 /// Lists machines. A listing is the truth for whoever reads it (the control plane marks a
-/// machine missing from it as gone), so it is never partial: a tenant's listing asks the
-/// tenant's host alone, and a host that is down or does not answer fails the whole listing.
-/// The `tenant` of a query.
-fn query_tenant(uri: &Uri) -> Option<String> {
-    uri.query()
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("tenant=")))
+/// machine missing from it as gone), so it is never partial: a namespace's listing asks the
+/// namespace's host alone, and a host that is down or does not answer fails the whole listing.
+/// The `namespace` of a query.
+fn query_namespace(uri: &Uri) -> Option<String> {
+    uri.query().and_then(namespace_param)
+}
+
+/// The `namespace` of a query string; `tenant`, its former name, is read the same.
+fn namespace_param(q: &str) -> Option<String> {
+    q.split('&')
+        .find_map(|kv| {
+            kv.strip_prefix("namespace=")
+                .or_else(|| kv.strip_prefix("tenant="))
+        })
         .map(|t| t.to_string())
 }
 
 async fn list_machines(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
-    let tenant = query_tenant(&uri);
+    let namespace = query_namespace(&uri);
     let hosts: Vec<HostRec> = {
         let reg = st.reg.lock().unwrap();
-        match tenant.as_deref().and_then(|t| reg.host_of_tenant(t)) {
+        match namespace.as_deref().and_then(|t| reg.host_of_namespace(t)) {
             Some(h) => vec![h.clone()],
             None => reg.listed(),
         }
@@ -1799,7 +1821,7 @@ async fn list_endpoints(State(st): S, headers: HeaderMap) -> Response {
 }
 
 /// The backups of the hosts' machines, destroyed ones' included (ADR 0023): every host's, the
-/// query as it came, never partial. A tenant's too: a host it moved from still holds the
+/// query as it came, never partial. A namespace's too: a host it moved from still holds the
 /// backups of the machines destroyed there (ADR 0045).
 async fn all_backups(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
     let hosts = st.reg.lock().unwrap().listed();
@@ -1849,16 +1871,13 @@ async fn usage(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
     Json(all).into_response()
 }
 
-/// The running machines' use (ADR 0021), asked as machines are listed: a tenant's of its
+/// The running machines' use (ADR 0021), asked as machines are listed: a namespace's of its
 /// host, else of every host, never partial, each machine with its host.
 async fn top(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
-    let tenant = uri
-        .query()
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("tenant=")))
-        .map(|t| t.to_string());
+    let namespace = query_namespace(&uri);
     let hosts: Vec<HostRec> = {
         let reg = st.reg.lock().unwrap();
-        match tenant.as_deref().and_then(|t| reg.host_of_tenant(t)) {
+        match namespace.as_deref().and_then(|t| reg.host_of_namespace(t)) {
             Some(h) => vec![h.clone()],
             None => reg.listed(),
         }
@@ -1888,14 +1907,15 @@ async fn top(State(st): S, headers: HeaderMap, uri: Uri) -> Response {
 #[derive(serde::Deserialize)]
 struct EventsQuery {
     since: Option<String>,
-    tenant: Option<String>,
+    #[serde(alias = "tenant")]
+    namespace: Option<String>,
     machine: Option<String>,
     limit: Option<usize>,
     #[serde(default)]
     watch: bool,
 }
 
-/// Events (ADR 0019), which are per host. With a tenant, from the tenant's host; else with a
+/// Events (ADR 0019), which are per host. With a namespace, from the namespace's host; else with a
 /// machine, from the machine's host: the host's own cursor, a watch streamed through. With
 /// neither, every host, never partial, merged by time with each event's host and a cursor of
 /// every host's: `<host>:<seq>,…`. A watch of every host is refused.
@@ -1909,21 +1929,21 @@ async fn events(
         Some(query) => format!("/v1/events?{query}"),
         None => "/v1/events".into(),
     };
-    let host = match (&q.tenant, &q.machine) {
-        (Some(t), _) => st.reg.lock().unwrap().host_of_tenant(t).cloned().ok_or_else(|| {
-            err(StatusCode::NOT_FOUND, "not_found", format!("tenant {t} not found"))
+    let host = match (&q.namespace, &q.machine) {
+        (Some(t), _) => st.reg.lock().unwrap().host_of_namespace(t).cloned().ok_or_else(|| {
+            err(StatusCode::NOT_FOUND, "not_found", format!("namespace {t} not found"))
         }),
         (None, Some(m)) => locate(&st, Indexed::Machine, m).await.ok_or_else(|| {
             err(
                 StatusCode::NOT_FOUND,
                 "not_found",
-                format!("machine {m} not found: a destroyed machine's events are read with its tenant, ?tenant=…&machine={m}"),
+                format!("machine {m} not found: a destroyed machine's events are read with its namespace, ?namespace=…&machine={m}"),
             )
         }),
         (None, None) if q.watch => Err(err(
             StatusCode::BAD_REQUEST,
             "invalid",
-            "a watch through the fleet names a tenant or a machine: events are per host, and a stream of every host would go on without one that drops",
+            "a watch through the fleet names a namespace or a machine: events are per host, and a stream of every host would go on without one that drops",
         )),
         (None, None) => return events_of_every_host(&st, &headers, &uri, q).await,
     };
@@ -2017,12 +2037,12 @@ async fn events_of_every_host(
     .into_response()
 }
 
-async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {
+async fn list_namespaces(State(st): S) -> Json<Vec<api::Namespace>> {
     let reg = st.reg.lock().unwrap();
-    let mut out: Vec<api::Tenant> = reg
-        .tenants
+    let mut out: Vec<api::Namespace> = reg
+        .namespaces
         .iter()
-        .map(|(t, h)| api::Tenant {
+        .map(|(t, h)| api::Namespace {
             id: t.clone(),
             subnet: String::new(),
             router: String::new(),
@@ -2037,12 +2057,12 @@ async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {
     Json(out)
 }
 
-async fn delete_tenant(
+async fn delete_namespace(
     State(st): S,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Refusal> {
-    let host = st.reg.lock().unwrap().host_of_tenant(&id).cloned();
+    let host = st.reg.lock().unwrap().host_of_namespace(&id).cloned();
     let host = match host {
         Some(h) => h,
         None => return Ok(StatusCode::NO_CONTENT.into_response()),
@@ -2051,7 +2071,7 @@ async fn delete_tenant(
         &st,
         &host,
         Method::DELETE,
-        &format!("/v1/tenants/{id}"),
+        &format!("/v1/namespaces/{id}"),
         &headers,
         Bytes::new(),
     )
@@ -2063,15 +2083,16 @@ async fn delete_tenant(
     Ok(resp)
 }
 
-/// A tenant, from its host, with that host and its region.
-async fn get_tenant(
+/// A namespace, from its host, with that host and its region.
+async fn get_namespace(
     State(st): S,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Refusal> {
-    let host = st.reg.lock().unwrap().host_of_tenant(&id).cloned();
-    let host = host.ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "tenant not found"))?;
-    let path = format!("/v1/tenants/{id}");
+    let host = st.reg.lock().unwrap().host_of_namespace(&id).cloned();
+    let host =
+        host.ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "namespace not found"))?;
+    let path = format!("/v1/namespaces/{id}");
     let resp = forward(&st, &host, Method::GET, &path, &headers, Bytes::new()).await;
     let (parts, data) = read(resp).await;
     let data = match parts.status.is_success() {
@@ -2081,17 +2102,17 @@ async fn get_tenant(
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
-/// Where a PUT on a tenant with no host yet places it (ADR 0025).
+/// Where a PUT on a namespace with no host yet places it (ADR 0025).
 #[derive(serde::Deserialize, Default)]
 struct PlaceQuery {
     #[serde(default)]
     region: String,
 }
 
-/// A PUT on a tenant that the tenant's host answers: one with no host yet is placed as its
+/// A PUT on a namespace that the namespace's host answers: one with no host yet is placed as its
 /// first machine would be, in `region`, with `need_mb` and `need_disk_mb` as the need. The
 /// host's answer, with the host.
-async fn put_on_tenant(
+async fn put_on_namespace(
     st: &AppState,
     id: &str,
     what: &str,
@@ -2104,11 +2125,11 @@ async fn put_on_tenant(
         return Err(err(
             StatusCode::BAD_REQUEST,
             "invalid",
-            "tenant must be a-z, 0-9, _ or -, at most 64 characters",
+            "namespace must be a-z, 0-9, _ or -, at most 64 characters",
         ));
     }
     let ask = Ask {
-        tenant: id,
+        namespace: id,
         region,
         memory_mb: need_mb,
         disk_mb: need_disk_mb,
@@ -2116,8 +2137,8 @@ async fn put_on_tenant(
     };
     let (host, first, hold) = {
         let mut reg = st.reg.lock().unwrap();
-        let first = !reg.tenants.contains_key(id);
-        let bound = reg.tenants.get(id).cloned();
+        let first = !reg.namespaces.contains_key(id);
+        let bound = reg.namespaces.get(id).cloned();
         refuse_outside(&reg, bound.as_deref(), id, region)?;
         refuse_under_pressure(st, &reg, bound.as_deref(), &ask)?;
         let chosen = reg.place(id, region, need_mb, need_disk_mb, &st.policy);
@@ -2133,7 +2154,7 @@ async fn put_on_tenant(
         id: hold,
     };
     st.save().await.map_err(registry_error)?;
-    let path = format!("/v1/tenants/{id}/{what}");
+    let path = format!("/v1/namespaces/{id}/{what}");
     let resp = forward(st, &host, Method::PUT, &path, headers, body).await;
     let (parts, data) = read(resp).await;
     if parts.status.is_success() {
@@ -2148,7 +2169,7 @@ async fn put_on_tenant(
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
-/// Puts a tenant's gateway on the tenant's host; a tenant with none yet is placed as its first
+/// Puts a namespace's gateway on the namespace's host; a namespace with none yet is placed as its first
 /// machine would be, the gateway's size as the need.
 async fn set_gateway(
     State(st): S,
@@ -2160,10 +2181,10 @@ async fn set_gateway(
     let spec: api::GatewaySpec = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
     let need = (spec.size().memory_mb, disk_need(spec.volume_gb));
-    put_on_tenant(&st, &id, "gateway", &q.region, need, &headers, body).await
+    put_on_namespace(&st, &id, "gateway", &q.region, need, &headers, body).await
 }
 
-/// Puts a tenant's quota on the tenant's host (ADR 0025); a tenant with none yet is placed,
+/// Puts a namespace's quota on the namespace's host (ADR 0025); a namespace with none yet is placed,
 /// with no need: the quota is what its machines will be held to there.
 async fn set_quota(
     State(st): S,
@@ -2174,39 +2195,40 @@ async fn set_quota(
 ) -> Result<Response, Refusal> {
     serde_json::from_slice::<api::Quota>(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-    put_on_tenant(&st, &id, "quota", &q.region, (0, 0), &headers, body).await
+    put_on_namespace(&st, &id, "quota", &q.region, (0, 0), &headers, body).await
 }
 
-/// A tenant's quota and use, from its host.
+/// A namespace's quota and use, from its host.
 async fn get_quota(
     State(st): S,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Refusal> {
-    let host = st.reg.lock().unwrap().host_of_tenant(&id).cloned();
-    let host = host.ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "tenant not found"))?;
-    let path = format!("/v1/tenants/{id}/quota");
+    let host = st.reg.lock().unwrap().host_of_namespace(&id).cloned();
+    let host =
+        host.ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "namespace not found"))?;
+    let path = format!("/v1/namespaces/{id}/quota");
     Ok(forward(&st, &host, Method::GET, &path, &headers, Bytes::new()).await)
 }
 
-/// Removes a tenant's gateway on its host; a tenant the fleet never placed has none.
+/// Removes a namespace's gateway on its host; a namespace the fleet never placed has none.
 async fn delete_gateway(
     State(st): S,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Refusal> {
-    let host = st.reg.lock().unwrap().host_of_tenant(&id).cloned();
+    let host = st.reg.lock().unwrap().host_of_namespace(&id).cloned();
     let Some(host) = host else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
-    let path = format!("/v1/tenants/{id}/gateway");
+    let path = format!("/v1/namespaces/{id}/gateway");
     Ok(forward(&st, &host, Method::DELETE, &path, &headers, Bytes::new()).await)
 }
 
-/// Releases a tenant from its host without touching the host: its next machine is placed
-/// afresh. For the operator moving a tenant (backups, then a restore elsewhere) or freeing
+/// Releases a namespace from its host without touching the host: its next machine is placed
+/// afresh. For the operator moving a namespace (backups, then a restore elsewhere) or freeing
 /// one stuck on a host that is full or gone.
-async fn unpin_tenant(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
+async fn unpin_namespace(State(st): S, Path(id): Path<String>) -> Result<Response, Refusal> {
     st.reg.lock().unwrap().unpin(&id);
     st.save().await.map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -2303,22 +2325,22 @@ async fn list_backups(
 }
 
 /// The host that holds the backups of a machine no host has (ADR 0045): the one whose
-/// `/v1/backups?machine=` lists one of it, of `tenant` when given. Every host is asked at
-/// once, a down one included, so a backup left on the host a tenant moved from is found; a
+/// `/v1/backups?machine=` lists one of it, of `namespace` when given. Every host is asked at
+/// once, a down one included, so a backup left on the host a namespace moved from is found; a
 /// host that does not hold it answers from memory. With no host listing it, a host that
 /// could not answer fails the search with its answer, since it may be the one. A host older
 /// than the `machine` filter lists all it holds: what is not the machine's is not read.
 async fn holder(
     st: &AppState,
     id: &str,
-    tenant: Option<&str>,
+    namespace: Option<&str>,
 ) -> Result<Option<HostRec>, Box<Response>> {
     if !api::valid_id(id) {
         return Ok(None);
     }
     let mut path = format!("/v1/backups?machine={id}");
-    if let Some(t) = tenant.filter(|t| api::valid_id(t)) {
-        path.push_str(&format!("&tenant={t}"));
+    if let Some(t) = namespace.filter(|t| api::valid_id(t)) {
+        path.push_str(&format!("&namespace={t}"));
     }
     let hosts = st.reg.lock().unwrap().listed();
     let asked = hosts.into_iter().map(|h| {
@@ -2372,14 +2394,14 @@ async fn by_machine(
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
     // A destroyed machine is its backups alone (ADR 0023): reached on the host that holds
-    // them, which a moved tenant left (ADR 0045).
+    // them, which a moved namespace left (ADR 0045).
     let host = match locate(&st, Indexed::Machine, &id).await {
         Some(h) => h,
         None if uri
             .path()
             .starts_with(&format!("/v1/machines/{id}/backups/")) =>
         {
-            match holder(&st, &id, query_tenant(&uri).as_deref()).await {
+            match holder(&st, &id, query_namespace(&uri).as_deref()).await {
                 Ok(Some(h)) => h,
                 Ok(None) => {
                     return Err(err(StatusCode::NOT_FOUND, "not_found", "machine not found"))
@@ -2393,7 +2415,7 @@ async fn by_machine(
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_default();
-    // What the call is, by its path alone: a query (`?tenant=`) changes nothing of it.
+    // What the call is, by its path alone: a query (`?namespace=`) changes nothing of it.
     let own = format!("/v1/machines/{id}");
     let is_delete = method == Method::DELETE && uri.path() == own;
     let plain_get = method == Method::GET && uri.path() == own;

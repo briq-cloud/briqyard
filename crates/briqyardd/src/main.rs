@@ -103,7 +103,7 @@ async fn run(args: Args) -> Result<()> {
         return Ok(());
     }
     // Nothing the daemon writes is for other users: records, config drives and consoles hold
-    // tenant secrets (ADR 0014).
+    // namespace secrets (ADR 0014).
     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
     if !nix::unistd::geteuid().is_root() {
         return Err(anyhow!(

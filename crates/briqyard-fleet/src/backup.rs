@@ -202,13 +202,13 @@ mod tests {
         tokio::task::yield_now().await;
         reg.lock()
             .unwrap()
-            .tenants
+            .namespaces
             .insert("t-newer".into(), "h1".into());
         drop(turn);
         assert!(waiting.await.unwrap().unwrap());
         let back = b.fetch(LATEST, &identity(&key).unwrap()).await.unwrap();
         assert!(
-            back.tenants.contains_key("t-newer"),
+            back.namespaces.contains_key("t-newer"),
             "the registry as it was at the write"
         );
     }

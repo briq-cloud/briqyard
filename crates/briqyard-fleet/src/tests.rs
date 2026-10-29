@@ -18,11 +18,11 @@ struct Daemon {
     calls: Mutex<Vec<String>>,
     machines: Mutex<Vec<api::Machine>>,
     endpoints: Mutex<Vec<api::Endpoint>>,
-    /// Tenants' gateways: the tenant and the memory it takes.
+    /// Namespaces' gateways: the namespace and the memory it takes.
     gateways: Mutex<Vec<(String, u32)>>,
     next: AtomicUsize,
-    /// A tenant the daemon refuses to delete (answers 409), to test a failed forward.
-    keep_tenant: String,
+    /// A namespace the daemon refuses to delete (answers 409), to test a failed forward.
+    keep_namespace: String,
     /// Its event log, and the `If-Match` of each request that had one.
     events: Mutex<Vec<api::Event>>,
     if_match: Mutex<Vec<String>>,
@@ -32,7 +32,7 @@ struct Daemon {
     tls_fingerprint: String,
     /// What its status reports (ADR 0021).
     conditions: Mutex<Vec<api::Condition>>,
-    /// Tenants' quotas (ADR 0025).
+    /// Namespaces' quotas (ADR 0025).
     quotas: Mutex<Vec<(String, api::Quota)>>,
     /// Run by a create before it answers: a test's look at the fleet mid-forward.
     on_create: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -43,12 +43,12 @@ impl Daemon {
         self.calls.lock().unwrap().clone()
     }
 
-    fn machine(&self, tenant: &str, name: &str, memory_mb: u32) -> api::Machine {
+    fn machine(&self, namespace: &str, name: &str, memory_mb: u32) -> api::Machine {
         let n = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         let now = Utc::now();
         api::Machine {
             id: format!("m_{}_{n}", self.id),
-            tenant: tenant.into(),
+            namespace: namespace.into(),
             name: name.into(),
             image: "nginx".into(),
             state: api::state::RUNNING.into(),
@@ -66,8 +66,8 @@ impl Daemon {
     }
 
     /// Adds a machine as if it had been created on this daemon.
-    fn add(&self, tenant: &str, name: &str, memory_mb: u32) -> api::Machine {
-        let m = self.machine(tenant, name, memory_mb);
+    fn add(&self, namespace: &str, name: &str, memory_mb: u32) -> api::Machine {
+        let m = self.machine(namespace, name, memory_mb);
         self.machines.lock().unwrap().push(m.clone());
         m
     }
@@ -89,8 +89,8 @@ impl Daemon {
         e
     }
 
-    /// Logs an event at `at` (seconds past 14:00), about a machine of a tenant.
-    fn log(&self, at: u32, tenant: &str, reason: &str) -> api::Event {
+    /// Logs an event at `at` (seconds past 14:00), about a machine of a namespace.
+    fn log(&self, at: u32, namespace: &str, reason: &str) -> api::Event {
         let mut evs = self.events.lock().unwrap();
         let e = api::Event {
             seq: evs.len() as u64 + 1,
@@ -100,7 +100,7 @@ impl Daemon {
             reason: reason.into(),
             message: String::new(),
             machine_id: format!("m_{}_{}", self.id, evs.len() + 1),
-            tenant: tenant.into(),
+            namespace: namespace.into(),
             host: String::new(),
             data: None,
             count: 1,
@@ -140,7 +140,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         endpoints: Mutex::new(vec![]),
         gateways: Mutex::new(vec![]),
         next: AtomicUsize::new(0),
-        keep_tenant: "kept".into(),
+        keep_namespace: "kept".into(),
         events: Mutex::new(vec![]),
         if_match: Mutex::new(vec![]),
         watcher: Mutex::new(None),
@@ -175,14 +175,14 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             regions: Vec::new(),
         })
     }
-    async fn tenants(State(d): D) -> Json<Vec<api::Tenant>> {
+    async fn namespaces(State(d): D) -> Json<Vec<api::Namespace>> {
         let ms = d.machines.lock().unwrap();
-        let mut ids: Vec<String> = ms.iter().map(|m| m.tenant.clone()).collect();
+        let mut ids: Vec<String> = ms.iter().map(|m| m.namespace.clone()).collect();
         ids.sort();
         ids.dedup();
         Json(
             ids.into_iter()
-                .map(|id| api::Tenant {
+                .map(|id| api::Namespace {
                     id,
                     subnet: "10.1.0.0/24".into(),
                     router: "10.1.0.1".into(),
@@ -195,11 +195,11 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
                 .collect(),
         )
     }
-    fn tenant_of(d: &Daemon, id: &str) -> Option<api::Tenant> {
+    fn namespace_of(d: &Daemon, id: &str) -> Option<api::Namespace> {
         let machines = d.machines.lock().unwrap();
         let gateway = d.gateways.lock().unwrap().iter().any(|(t, _)| t == id);
-        let n = machines.iter().filter(|m| m.tenant == id).count();
-        (gateway || n > 0).then(|| api::Tenant {
+        let n = machines.iter().filter(|m| m.namespace == id).count();
+        (gateway || n > 0).then(|| api::Namespace {
             id: id.into(),
             subnet: "10.1.0.0/24".into(),
             router: "10.1.0.1".into(),
@@ -216,10 +216,10 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             }),
         })
     }
-    async fn get_tenant(State(d): D, Path(id): Path<String>) -> Response {
-        match tenant_of(&d, &id) {
+    async fn get_namespace(State(d): D, Path(id): Path<String>) -> Response {
+        match namespace_of(&d, &id) {
             Some(t) => Json(t).into_response(),
-            None => err(StatusCode::NOT_FOUND, "not_found", "tenant not found").into_response(),
+            None => err(StatusCode::NOT_FOUND, "not_found", "namespace not found").into_response(),
         }
     }
     /// Like the daemon: a gateway that does not fit in what the host has left is refused.
@@ -238,30 +238,30 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             .into_response();
         }
         d.gateways.lock().unwrap().push((id.clone(), need));
-        Json(tenant_of(&d, &id).unwrap()).into_response()
+        Json(namespace_of(&d, &id).unwrap()).into_response()
     }
     async fn delete_gateway(State(d): D, Path(id): Path<String>) -> Response {
-        if id == d.keep_tenant {
+        if id == d.keep_namespace {
             return err(StatusCode::CONFLICT, "gateway_in_use", "in use").into_response();
         }
         d.gateways.lock().unwrap().retain(|(t, _)| *t != id);
         StatusCode::NO_CONTENT.into_response()
     }
-    async fn delete_tenant(State(d): D, Path(id): Path<String>) -> Response {
-        if id == d.keep_tenant {
-            return err(StatusCode::CONFLICT, "busy", "tenant has machines").into_response();
+    async fn delete_namespace(State(d): D, Path(id): Path<String>) -> Response {
+        if id == d.keep_namespace {
+            return err(StatusCode::CONFLICT, "busy", "namespace has machines").into_response();
         }
-        d.machines.lock().unwrap().retain(|m| m.tenant != id);
+        d.machines.lock().unwrap().retain(|m| m.namespace != id);
         StatusCode::NO_CONTENT.into_response()
     }
-    /// Like the daemon: a tenant's or every machine, those every `label` selects.
+    /// Like the daemon: a namespace's or every machine, those every `label` selects.
     async fn list(State(d): D, uri: Uri) -> Json<Vec<api::Machine>> {
         let url = reqwest::Url::parse(&format!("http://stub{uri}")).unwrap();
-        let mut tenant = None;
+        let mut namespace = None;
         let mut labels = vec![];
         for (k, v) in url.query_pairs() {
             match k.as_ref() {
-                "tenant" => tenant = Some(v.into_owned()),
+                "namespace" => namespace = Some(v.into_owned()),
                 "label" => labels.push(api::Label::parse(&v).unwrap()),
                 _ => {}
             }
@@ -269,7 +269,12 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         let ms = d.machines.lock().unwrap();
         Json(
             ms.iter()
-                .filter(|m| tenant.as_deref().map(|t| t == m.tenant).unwrap_or(true))
+                .filter(|m| {
+                    namespace
+                        .as_deref()
+                        .map(|t| t == m.namespace)
+                        .unwrap_or(true)
+                })
                 .filter(|m| labels.iter().all(|l| l.matches(&m.metadata)))
                 .cloned()
                 .collect(),
@@ -279,10 +284,10 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         State(d): D,
         Path(id): Path<String>,
         Json(q): Json<api::Quota>,
-    ) -> Json<api::TenantQuota> {
+    ) -> Json<api::NamespaceQuota> {
         d.quotas.lock().unwrap().push((id.clone(), q));
-        Json(api::TenantQuota {
-            tenant: id,
+        Json(api::NamespaceQuota {
+            namespace: id,
             quota: q,
             used: Default::default(),
         })
@@ -290,13 +295,13 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
     async fn get_quota(State(d): D, Path(id): Path<String>) -> Response {
         let qs = d.quotas.lock().unwrap();
         match qs.iter().rev().find(|(t, _)| *t == id) {
-            Some((t, q)) => Json(api::TenantQuota {
-                tenant: t.clone(),
+            Some((t, q)) => Json(api::NamespaceQuota {
+                namespace: t.clone(),
                 quota: *q,
                 used: Default::default(),
             })
             .into_response(),
-            None => err(StatusCode::NOT_FOUND, "not_found", "tenant not found").into_response(),
+            None => err(StatusCode::NOT_FOUND, "not_found", "namespace not found").into_response(),
         }
     }
     /// A follow (ADR 0025): NDJSON kept open, what the test sends through `watcher`.
@@ -368,7 +373,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         if let Some(f) = d.on_create.lock().unwrap().as_ref() {
             f();
         }
-        let m = d.add(&req.tenant, &req.name, req.size.memory_mb);
+        let m = d.add(&req.namespace, &req.name, req.size.memory_mb);
         (StatusCode::CREATED, Json(m)).into_response()
     }
     async fn get_machine(State(d): D, Path(id): Path<String>) -> Response {
@@ -418,7 +423,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
     /// after the daemon.
     async fn all_backups(State(d): D) -> Json<Vec<serde_json::Value>> {
         Json(vec![serde_json::json!({
-            "id": "20261021T101500.123Z", "machine_id": format!("m_{}", d.id), "tenant": "t1",
+            "id": "20261021T101500.123Z", "machine_id": format!("m_{}", d.id), "namespace": "t1",
             "name": "db", "created_at": "2026-10-21T10:15:00Z", "bytes": 1,
             "incremental": false, "disks": []
         })])
@@ -452,7 +457,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             StatusCode::NO_CONTENT
         }
     }
-    /// A line per machine, the tenant's when asked, as the daemon's top.
+    /// A line per machine, the namespace's when asked, as the daemon's top.
     async fn top(
         State(d): D,
         Query(q): Query<HashMap<String, String>>,
@@ -460,10 +465,10 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         let ms = d.machines.lock().unwrap();
         Json(
             ms.iter()
-                .filter(|m| q.get("tenant").is_none_or(|t| *t == m.tenant))
+                .filter(|m| q.get("namespace").is_none_or(|t| *t == m.namespace))
                 .map(|m| api::TopMachine {
                     machine_id: m.id.clone(),
-                    tenant: m.tenant.clone(),
+                    namespace: m.namespace.clone(),
                     name: m.name.clone(),
                     cpu_percent: 1.5,
                     window_sec: 15.0,
@@ -481,7 +486,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         Json(vec![api::UsageBucket {
             hour: "2026-10-20T14:00:00Z".parse().unwrap(),
             machine_id: format!("m_{}", d.id),
-            tenant: "t1".into(),
+            namespace: "t1".into(),
             closed: true,
             ..Default::default()
         }])
@@ -501,7 +506,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         let mut page: Vec<api::Event> = evs
             .into_iter()
             .filter(|e| e.seq > since)
-            .filter(|e| q.tenant.as_deref().is_none_or(|t| t == e.tenant))
+            .filter(|e| q.namespace.as_deref().is_none_or(|t| t == e.namespace))
             .filter(|e| q.machine.as_deref().is_none_or(|m| m == e.machine_id))
             .collect();
         page.truncate(limit);
@@ -554,10 +559,13 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
     }
     let app = Router::new()
         .route("/v1/status", get(status))
-        .route("/v1/tenants", get(tenants))
-        .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
+        .route("/v1/namespaces", get(namespaces))
         .route(
-            "/v1/tenants/:id/gateway",
+            "/v1/namespaces/:id",
+            get(get_namespace).delete(delete_namespace),
+        )
+        .route(
+            "/v1/namespaces/:id/gateway",
             axum::routing::put(set_gateway).delete(delete_gateway),
         )
         .route("/v1/machines", get(list).post(create))
@@ -565,7 +573,7 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         .route("/v1/machines/:id/start", post(start_machine))
         .route("/v1/machines/:id/logs", get(logs))
         .route("/v1/machines/:id/exec", get(exec_session))
-        .route("/v1/tenants/:id/quota", get(get_quota).put(put_quota))
+        .route("/v1/namespaces/:id/quota", get(get_quota).put(put_quota))
         .route("/v1/machines/:id/backups", get(backups))
         .route(
             "/v1/machines/:id/backups/:backup",
@@ -653,7 +661,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
 }
 
 /// A ready host in the registry, with no daemon behind it.
-fn seed(st: &AppState, id: &str, cap: u32, used: u32, machines: usize, tenants: &[&str]) {
+fn seed(st: &AppState, id: &str, cap: u32, used: u32, machines: usize, namespaces: &[&str]) {
     let now = Utc::now();
     let mut h = static_host(
         &config::StaticHost {
@@ -672,7 +680,7 @@ fn seed(st: &AppState, id: &str, cap: u32, used: u32, machines: usize, tenants: 
         vcpus: 0,
     };
     h.machines = machines;
-    h.tenants = tenants.iter().map(|t| t.to_string()).collect();
+    h.namespaces = namespaces.iter().map(|t| t.to_string()).collect();
     let mut reg = st.reg.lock().unwrap();
     reg.heartbeat(h, now);
 }
@@ -794,13 +802,13 @@ fn saved(st: &AppState) -> Registry {
     serde_json::from_slice(&std::fs::read(&st.state_path).unwrap()).unwrap()
 }
 
-fn pinned(st: &AppState, tenant: &str) -> Option<String> {
-    st.reg.lock().unwrap().tenants.get(tenant).cloned()
+fn pinned(st: &AppState, namespace: &str) -> Option<String> {
+    st.reg.lock().unwrap().namespaces.get(namespace).cloned()
 }
 
-fn create_body(tenant: &str, name: &str, memory_mb: u32) -> serde_json::Value {
+fn create_body(namespace: &str, name: &str, memory_mb: u32) -> serde_json::Value {
     serde_json::to_value(api::CreateMachineRequest {
-        tenant: tenant.into(),
+        namespace: namespace.into(),
         name: name.into(),
         image: "nginx".into(),
         size: api::Size {
@@ -813,11 +821,11 @@ fn create_body(tenant: &str, name: &str, memory_mb: u32) -> serde_json::Value {
 }
 
 /// A daemon's heartbeat body for `url`.
-fn heartbeat(url: &str, memory_mb: u32, tenants: &[&str]) -> serde_json::Value {
+fn heartbeat(url: &str, memory_mb: u32, namespaces: &[&str]) -> serde_json::Value {
     serde_json::json!({
         "id": "h_daemon", "url": url, "region": "par",
         "capacity": {"memory_mb": memory_mb, "vcpus": 32}, "used": {"memory_mb": 512, "vcpus": 1},
-        "machines": tenants.len(), "tenants": tenants, "version": "0.1", "disk_free_mb": 5000
+        "machines": namespaces.len(), "namespaces": namespaces, "version": "0.1", "disk_free_mb": 5000
     })
 }
 
@@ -971,7 +979,7 @@ async fn a_registration_is_taken_only_for_the_host_that_expects_it() {
     assert_eq!(hs[1].id, "s1");
     assert_eq!(hs[1].capacity.memory_mb, 64_000);
     assert_eq!(hs[1].region, "par");
-    assert_eq!(hs[1].tenants, ["t1"]);
+    assert_eq!(hs[1].namespaces, ["t1"]);
     assert_eq!(pinned(&f.st, "t1").as_deref(), Some("s1"));
     assert_eq!(
         f.st.reg.lock().unwrap().hosts["s1"].token,
@@ -1159,7 +1167,7 @@ fn a_restore_says_what_the_fleet_will_trust() {
         "file:///b fleet/registry.json.age",
         std::path::Path::new("/s/registry.json"),
     );
-    assert!(out.starts_with("restored 1 hosts (1 pool keys, 0 retired) and 0 tenants from file:///b fleet/registry.json.age into /s/registry.json\n"), "{out}");
+    assert!(out.starts_with("restored 1 hosts (1 pool keys, 0 retired) and 0 namespaces from file:///b fleet/registry.json.age into /s/registry.json\n"), "{out}");
     assert!(
         out.contains("newest heartbeat in it: 2026-10-21T12:00:00+00:00"),
         "{out}"
@@ -1388,12 +1396,15 @@ async fn a_heartbeat_lands_on_the_record_added_for_its_address() {
         let reg = f.st.reg.lock().unwrap();
         let rec = &reg.hosts["h_srv-9"];
         assert_eq!(rec.token, "t0k");
-        assert_eq!(reg.tenants.get("t1").map(String::as_str), Some("h_srv-9"));
+        assert_eq!(
+            reg.namespaces.get("t1").map(String::as_str),
+            Some("h_srv-9")
+        );
     }
     assert!(saved(&f.st).hosts.contains_key("h_srv-9"));
-    let (s, _, body) = call(&f.st, "GET", "/v1/tenants", "", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/namespaces", "", None).await;
     assert_eq!(s, StatusCode::OK);
-    let ts: Vec<api::Tenant> = serde_json::from_str(&body).unwrap();
+    let ts: Vec<api::Namespace> = serde_json::from_str(&body).unwrap();
     assert_eq!(ts.len(), 1);
     assert_eq!((ts[0].id.as_str(), ts[0].host.as_str()), ("t1", "h_srv-9"));
 }
@@ -1416,7 +1427,7 @@ async fn status_sums_the_ready_hosts_and_hosts_are_sorted() {
     assert_eq!(v["used"]["memory_mb"], 8_000);
     assert_eq!(v["machines"], 3);
     assert_eq!(
-        v["tenants"], 3,
+        v["namespaces"], 3,
         "pins are counted whatever the host's state"
     );
     assert!(
@@ -1430,14 +1441,14 @@ async fn status_sums_the_ready_hosts_and_hosts_are_sorted() {
     assert_eq!(ids, ["a", "b", "c"]);
     let states: Vec<&str> = hs.iter().map(|h| h.state.as_str()).collect();
     assert_eq!(states, ["down", "ready", "draining"]);
-    assert_eq!(hs[1].tenants, ["t1", "t2"]);
+    assert_eq!(hs[1].namespaces, ["t1", "t2"]);
 }
 
 /// Forgetting a host that holds a pool key is refused unless forced: the key goes with the
 /// record, and a static host polled back would get a key its pool does not open.
 /// A create in `region`, of `memory_mb`, with a volume of `volume_gb` when not 0.
-fn ask(tenant: &str, region: &str, memory_mb: u32, volume_gb: u32) -> serde_json::Value {
-    let mut b = create_body(tenant, "web", memory_mb);
+fn ask(namespace: &str, region: &str, memory_mb: u32, volume_gb: u32) -> serde_json::Value {
+    let mut b = create_body(namespace, "web", memory_mb);
     b["region"] = region.into();
     if volume_gb > 0 {
         b["volume"] = serde_json::json!({"size_gb": volume_gb, "mount": "/data"});
@@ -1472,13 +1483,13 @@ async fn each_refusal_is_counted_by_what_ran_out_and_the_room_is_shown() {
         }
     }
     set_state(&f.st, "b", "draining");
-    let refused = |tenant: &'static str, region: &'static str, mb: u32, gb: u32| {
+    let refused = |namespace: &'static str, region: &'static str, mb: u32, gb: u32| {
         let st = f.st.clone();
         async move {
-            let body = ask(tenant, region, mb, gb);
+            let body = ask(namespace, region, mb, gb);
             let (s, _, body) = call(&st, "POST", "/v1/machines", "", Some(body)).await;
-            assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{tenant}: {body}");
-            assert_eq!(json(&body)["code"], "capacity", "{tenant}");
+            assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{namespace}: {body}");
+            assert_eq!(json(&body)["code"], "capacity", "{namespace}");
         }
     };
     // No host of gra has 100 GB of memory; a and c have 512 MB, neither 1000 GB of disk.
@@ -1894,7 +1905,7 @@ async fn a_registry_that_cannot_be_written_fails_the_request() {
     seed(&f.st, "h_a", 64_000, 0, 0, &[]);
     for (method, path) in [
         ("POST", "/v1/hosts/h_a/drain"),
-        ("POST", "/v1/tenants/t1/unpin"),
+        ("POST", "/v1/namespaces/t1/unpin"),
         ("DELETE", "/v1/hosts/h_a"),
     ] {
         let (s, _, text) = call(&f.st, method, path, "", None).await;
@@ -1915,7 +1926,7 @@ async fn a_registry_that_cannot_be_written_fails_the_request() {
     }
     assert!(!nowhere.exists());
     // A create is refused before any host is asked: a pin the fleet would forget on restart
-    // could put the tenant's next machine on another host.
+    // could put the namespace's next machine on another host.
     let d = start_daemon("d1", "tok").await;
     let dir = tempfile::tempdir().unwrap();
     let nowhere = dir.path().join("missing").join("registry.json");
@@ -1975,7 +1986,7 @@ async fn writes_at_once_all_land_and_the_file_ends_with_every_change() {
                 st.reg
                     .lock()
                     .unwrap()
-                    .tenants
+                    .namespaces
                     .insert(format!("t{i}"), "h_a".into());
                 st.save().await
             })
@@ -1987,7 +1998,7 @@ async fn writes_at_once_all_land_and_the_file_ends_with_every_change() {
     stop.store(true, Ordering::SeqCst);
     assert!(reader.join().unwrap() > 0);
     assert_eq!(
-        saved(&f.st).tenants.len(),
+        saved(&f.st).namespaces.len(),
         300,
         "the last write holds them all"
     );
@@ -2012,7 +2023,7 @@ async fn creates_at_once_all_land_in_the_registry() {
         assert_eq!(s, StatusCode::CREATED, "{body}");
     }
     let reg = saved(&f.st);
-    assert_eq!((reg.machines.len(), reg.tenants.len()), (64, 64));
+    assert_eq!((reg.machines.len(), reg.namespaces.len()), (64, 64));
 }
 
 /// A machine the host made is the caller's answer even when the write after it fails: a 500
@@ -2257,10 +2268,10 @@ async fn retire_forgets_an_empty_host_at_once() {
     seed(&f.st, "h_a", 1000, 0, 0, &[]);
     {
         let mut reg = f.st.reg.lock().unwrap();
-        // Stale index entries from a machine long gone and a tenant never confirmed.
+        // Stale index entries from a machine long gone and a namespace never confirmed.
         reg.machines.insert("m9".into(), "h_a".into());
         reg.endpoints.insert("e9".into(), "h_a".into());
-        reg.tenants.insert("t9".into(), "h_a".into());
+        reg.namespaces.insert("t9".into(), "h_a".into());
     }
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_a/retire", "", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
@@ -2273,7 +2284,7 @@ async fn retire_forgets_an_empty_host_at_once() {
         let reg = f.st.reg.lock().unwrap();
         assert!(reg.machines.is_empty(), "its index goes with it");
         assert!(reg.endpoints.is_empty());
-        assert!(reg.tenants.is_empty());
+        assert!(reg.namespaces.is_empty());
     }
     let (s, _, _) = call(&f.st, "POST", "/v1/hosts/h_a/retire", "", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
@@ -2301,9 +2312,9 @@ async fn retire_keeps_a_busy_host_until_it_empties() {
         let mut reg = f.st.reg.lock().unwrap();
         let mut empty = reg.hosts["h_b"].clone();
         empty.machines = 0;
-        empty.tenants.clear();
+        empty.namespaces.clear();
         reg.heartbeat(empty, Utc::now());
-        reg.tenants.clear();
+        reg.namespaces.clear();
         assert_eq!(reg.retirable().len(), 1);
     }
     let (s, _, body) = call(&f.st, "POST", "/v1/hosts/h_b/retire", "", None).await;
@@ -2344,8 +2355,12 @@ async fn drain_and_forget() {
     assert_eq!(ids, ["h_b"]);
     {
         let reg = f.st.reg.lock().unwrap();
-        assert_eq!(reg.tenants.get("t1"), None, "its tenants are unpinned");
-        assert_eq!(reg.tenants.get("t2").map(String::as_str), Some("h_b"));
+        assert_eq!(
+            reg.namespaces.get("t1"),
+            None,
+            "its namespaces are unpinned"
+        );
+        assert_eq!(reg.namespaces.get("t2").map(String::as_str), Some("h_b"));
         assert_eq!(reg.machines.get("m1"), None);
     }
     let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/h_a", "", None).await;
@@ -2391,14 +2406,14 @@ async fn the_poll_fills_a_static_host_in_and_marks_a_silent_one_down() {
     assert_eq!(hs[0].capacity.memory_mb, 64_000);
     assert_eq!(hs[0].used.memory_mb, 512);
     assert_eq!(hs[0].machines, 1);
-    assert_eq!(hs[0].tenants, ["t1"]);
+    assert_eq!(hs[0].namespaces, ["t1"]);
     assert_eq!(hs[0].version, "0.1-stub");
     assert_eq!(hs[1].id, "gone");
     assert_eq!(hs[1].state, "ready", "silent but not yet past the grace");
     assert_eq!(
         d.stub.calls(),
-        ["GET /v1/status", "GET /v1/tenants"],
-        "the poll asks for status and tenants, with the host's token"
+        ["GET /v1/status", "GET /v1/namespaces"],
+        "the poll asks for status and namespaces, with the host's token"
     );
     // Past the grace, a silent host is down; the next answer brings it back.
     {
@@ -2447,7 +2462,7 @@ async fn a_create_is_placed_and_forwarded_with_its_host() {
             Some(host.as_str())
         );
         assert_eq!(
-            reg.tenants.get("t1").map(String::as_str),
+            reg.namespaces.get("t1").map(String::as_str),
             Some(host.as_str())
         );
         assert_eq!(
@@ -2455,7 +2470,7 @@ async fn a_create_is_placed_and_forwarded_with_its_host() {
             "reserved until the host reports"
         );
     }
-    // The tenant's next machine lands on the same host, whatever the other has free.
+    // The namespace's next machine lands on the same host, whatever the other has free.
     let other = if host == "d1" { "d2" } else { "d1" };
     f.st.reg
         .lock()
@@ -2475,7 +2490,7 @@ async fn a_create_is_placed_and_forwarded_with_its_host() {
     .await;
     assert_eq!(s, StatusCode::CREATED);
     assert_eq!(headers["x-briqyard-host"], host.as_str());
-    // A new tenant goes to the emptiest host.
+    // A new namespace goes to the emptiest host.
     let (s, headers, _) = call(
         &f.st,
         "POST",
@@ -2492,7 +2507,7 @@ async fn a_create_is_placed_and_forwarded_with_its_host() {
 #[tokio::test]
 async fn a_burst_of_creates_is_spread_by_what_each_one_reserved() {
     let (f, _ds) = fleet_with_daemons(2).await;
-    // Three tenants, created before any poll could show the first's memory as used: each
+    // Three namespaces, created before any poll could show the first's memory as used: each
     // sees what the ones before it reserved, so the two larger ones land apart.
     let mut on = Vec::new();
     for (t, mb) in [("t1", 30_000), ("t2", 20_000), ("t3", 20_000)] {
@@ -2614,7 +2629,7 @@ async fn a_create_whose_caller_hangs_up_gives_its_hold_back() {
 }
 
 #[tokio::test]
-async fn a_capacity_answer_unpins_a_tenants_first_machine_only() {
+async fn a_capacity_answer_unpins_a_namespaces_first_machine_only() {
     let (f, ds) = fleet_with_daemons(1).await;
     // The host filled up since the fleet last looked: the fleet pins t1 to it and asks; the
     // host refuses; the pin goes, so a retry can be placed where there is room.
@@ -2635,8 +2650,8 @@ async fn a_capacity_answer_unpins_a_tenants_first_machine_only() {
     );
     assert_eq!(ds[0].stub.calls().last().unwrap(), "POST /v1/machines");
     assert_eq!(pinned(&f.st, "t1"), None, "unpinned");
-    assert_eq!(saved(&f.st).tenants.get("t1"), None, "written");
-    // A tenant already on the host keeps its pin through a refusal: its network is there.
+    assert_eq!(saved(&f.st).namespaces.get("t1"), None, "written");
+    // A namespace already on the host keeps its pin through a refusal: its network is there.
     poll_static_hosts_once(&f.st).await;
     assert_eq!(pinned(&f.st, "t0").as_deref(), Some("d1"));
     let (s, _, body) = call(
@@ -2683,13 +2698,13 @@ async fn a_create_without_room_or_sense_is_refused_before_any_host() {
         "POST",
         "/v1/machines",
         "api",
-        Some(serde_json::json!({"tenant": "t1"})),
+        Some(serde_json::json!({"namespace": "t1"})),
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(json(&body)["code"], "invalid");
     assert_eq!(ds[0].stub.calls().len(), before, "no host was asked");
-    assert!(f.st.reg.lock().unwrap().tenants.is_empty());
+    assert!(f.st.reg.lock().unwrap().namespaces.is_empty());
 }
 
 #[tokio::test]
@@ -2701,7 +2716,7 @@ async fn a_fork_lands_where_its_source_is() {
         .unwrap()
         .machines
         .insert(src.id.clone(), "d2".into());
-    // d1 is emptier (d2 has a machine after a poll), and d1 would be the pick for a new tenant.
+    // d1 is emptier (d2 has a machine after a poll), and d1 would be the pick for a new namespace.
     poll_static_hosts_once(&f.st).await;
     let mut body = create_body("t9", "web-fork", 512);
     body["fork"] = serde_json::json!({"machine_id": src.id});
@@ -2776,11 +2791,11 @@ async fn a_machine_is_found_through_the_index_then_by_searching() {
         .contains(&"GET /v1/machines/m_nope".to_string())));
     // A query changes nothing of what the call is: a get carries the host, a delete drops
     // the index entry.
-    let with_tenant = format!("{path}?tenant=t1");
-    let (s, _, body) = call(&f.st, "GET", &with_tenant, "api", None).await;
+    let with_namespace = format!("{path}?namespace=t1");
+    let (s, _, body) = call(&f.st, "GET", &with_namespace, "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(json(&body)["host"], "d2");
-    let (s, _, _) = call(&f.st, "DELETE", &with_tenant, "api", None).await;
+    let (s, _, _) = call(&f.st, "DELETE", &with_namespace, "api", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert_eq!(f.st.reg.lock().unwrap().machines.get(&m.id), None);
     assert!(!saved(&f.st).machines.contains_key(&m.id), "written");
@@ -2839,7 +2854,7 @@ fn pressure(kind: &str, status: bool) -> api::Condition {
 }
 
 #[tokio::test]
-async fn a_host_under_pressure_takes_no_new_tenant_and_refuses_its_own() {
+async fn a_host_under_pressure_takes_no_new_namespace_and_refuses_its_own() {
     let (f, ds) = fleet_with_daemons(2).await;
     let src = ds[0].stub.add("t1", "web", 512);
     ds[1].stub.add("t0", "big", 30_000);
@@ -2854,7 +2869,7 @@ async fn a_host_under_pressure_takes_no_new_tenant_and_refuses_its_own() {
         ds[0].stub.conditions.lock().unwrap()[1],
         "the poll keeps what the host said"
     );
-    // A new tenant goes to d2, though d1 is emptier.
+    // A new namespace goes to d2, though d1 is emptier.
     let (s, headers, body) = call(
         &f.st,
         "POST",
@@ -2865,7 +2880,7 @@ async fn a_host_under_pressure_takes_no_new_tenant_and_refuses_its_own() {
     .await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
     assert_eq!(headers["x-briqyard-host"], "d2");
-    // The tenant on d1: refused before d1 is asked, with the condition, as `capacity`; so is
+    // The namespace on d1: refused before d1 is asked, with the condition, as `capacity`; so is
     // a fork of its machine and its gateway.
     f.st.reg
         .lock()
@@ -2877,7 +2892,7 @@ async fn a_host_under_pressure_takes_no_new_tenant_and_refuses_its_own() {
     for (method, path, body) in [
         ("POST", "/v1/machines", create_body("t1", "db", 512)),
         ("POST", "/v1/machines", fork),
-        ("PUT", "/v1/tenants/t1/gateway", gateway_body()),
+        ("PUT", "/v1/namespaces/t1/gateway", gateway_body()),
     ] {
         let (s, _, body) = call(&f.st, method, path, "api", Some(body)).await;
         assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
@@ -2896,7 +2911,7 @@ async fn a_host_under_pressure_takes_no_new_tenant_and_refuses_its_own() {
         "d1 was not asked"
     );
     assert_eq!(pinned(&f.st, "t1").as_deref(), Some("d1"), "still pinned");
-    // Cleared at the next report: the tenant's create goes through.
+    // Cleared at the next report: the namespace's create goes through.
     ds[0].stub.conditions.lock().unwrap()[1].status = false;
     poll_static_hosts_once(&f.st).await;
     let (s, headers, body) = call(
@@ -2912,13 +2927,13 @@ async fn a_host_under_pressure_takes_no_new_tenant_and_refuses_its_own() {
 }
 
 #[tokio::test]
-async fn top_asks_the_tenants_host_or_every_host_never_partially() {
+async fn top_asks_the_namespaces_host_or_every_host_never_partially() {
     let (f, ds) = fleet_with_daemons(2).await;
     ds[0].stub.add("t1", "web", 512);
     ds[1].stub.add("t2", "db", 512);
     poll_static_hosts_once(&f.st).await;
     let d2_before = ds[1].stub.calls().len();
-    let (s, _, body) = call(&f.st, "GET", "/v1/top?tenant=t1", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/top?namespace=t1", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     let ms: Vec<api::TopMachine> = serde_json::from_str(&body).unwrap();
     let got: Vec<(&str, &str)> = ms
@@ -2926,7 +2941,10 @@ async fn top_asks_the_tenants_host_or_every_host_never_partially() {
         .map(|m| (m.name.as_str(), m.host.as_str()))
         .collect();
     assert_eq!(got, [("web", "d1")]);
-    assert_eq!(ds[0].stub.calls().last().unwrap(), "GET /v1/top?tenant=t1");
+    assert_eq!(
+        ds[0].stub.calls().last().unwrap(),
+        "GET /v1/top?namespace=t1"
+    );
     assert_eq!(ds[1].stub.calls().len(), d2_before, "d2 was not asked");
     let (s, _, body) = call(&f.st, "GET", "/v1/top", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
@@ -2946,7 +2964,7 @@ async fn top_asks_the_tenants_host_or_every_host_never_partially() {
 #[tokio::test]
 async fn usage_asks_every_host_and_is_never_partial() {
     let (f, ds) = fleet_with_daemons(2).await;
-    let q = "/v1/usage?from=2026-10-20T14:00:00Z&to=2026-10-20T15:00:00Z&tenant=t1";
+    let q = "/v1/usage?from=2026-10-20T14:00:00Z&to=2026-10-20T15:00:00Z&namespace=t1";
     let (s, _, body) = call(&f.st, "GET", q, "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     let bs: Vec<api::UsageBucket> = serde_json::from_str(&body).unwrap();
@@ -2983,7 +3001,7 @@ async fn usage_asks_every_host_and_is_never_partial() {
 }
 
 #[tokio::test]
-async fn a_tenant_listing_asks_its_host_alone() {
+async fn a_namespace_listing_asks_its_host_alone() {
     let (f, ds) = fleet_with_daemons(2).await;
     ds[0].stub.add("t1", "web", 512);
     ds[1].stub.add("t2", "db", 512);
@@ -2991,33 +3009,33 @@ async fn a_tenant_listing_asks_its_host_alone() {
     assert_eq!(
         pinned(&f.st, "t1").as_deref(),
         Some("d1"),
-        "the poll pins the tenants the hosts list"
+        "the poll pins the namespaces the hosts list"
     );
     set_state(&f.st, "d2", "down");
     let d2_before = ds[1].stub.calls().len();
-    let (s, _, body) = call(&f.st, "GET", "/v1/machines?tenant=t1", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/machines?namespace=t1", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     let ms: Vec<api::Machine> = serde_json::from_str(&body).unwrap();
     assert_eq!(ms.len(), 1);
-    assert_eq!(ms[0].tenant, "t1");
+    assert_eq!(ms[0].namespace, "t1");
     assert_eq!(ms[0].host, "d1");
     assert_eq!(
         ds[0].stub.calls().last().unwrap(),
-        "GET /v1/machines?tenant=t1",
+        "GET /v1/machines?namespace=t1",
         "the query is passed on"
     );
     assert_eq!(ds[1].stub.calls().len(), d2_before, "d2 was not asked");
-    // Its own host down: the tenant's listing fails, nothing else is asked.
-    let (s, _, body) = call(&f.st, "GET", "/v1/machines?tenant=t2", "api", None).await;
+    // Its own host down: the namespace's listing fails, nothing else is asked.
+    let (s, _, body) = call(&f.st, "GET", "/v1/machines?namespace=t2", "api", None).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    // A tenant the fleet has not pinned: every host, so the answer is still whole.
+    // A namespace the fleet has not pinned: every host, so the answer is still whole.
     set_state(&f.st, "d2", "ready");
-    let (s, _, body) = call(&f.st, "GET", "/v1/machines?tenant=t3", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/machines?namespace=t3", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(json(&body).as_array().unwrap().len(), 0);
     assert_eq!(
         ds[1].stub.calls().last().unwrap(),
-        "GET /v1/machines?tenant=t3"
+        "GET /v1/machines?namespace=t3"
     );
 }
 
@@ -3113,38 +3131,41 @@ async fn every_backup_is_listed_from_every_host() {
         .map(|b| b.machine_id)
         .collect();
     assert_eq!(ids, ["m_d1", "m_d2"]);
-    // A tenant's: every host too, the query as it came. Its host is d2, and the host it moved
+    // A namespace's: every host too, the query as it came. Its host is d2, and the host it moved
     // from still holds the backups of what was destroyed there (ADR 0045).
     f.st.reg
         .lock()
         .unwrap()
-        .tenants
+        .namespaces
         .insert("t1".into(), "d2".into());
-    let (s, _, body) = call(&f.st, "GET", "/v1/backups?tenant=t1", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/backups?namespace=t1", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(json(&body).as_array().unwrap().len(), 2);
     for d in &ds {
-        assert_eq!(d.stub.calls().last().unwrap(), "GET /v1/backups?tenant=t1");
+        assert_eq!(
+            d.stub.calls().last().unwrap(),
+            "GET /v1/backups?namespace=t1"
+        );
     }
     // Every host or nothing: one down fails the listing.
     set_state(&f.st, "d1", "down");
-    let (s, _, body) = call(&f.st, "GET", "/v1/backups?tenant=t1", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/backups?namespace=t1", "api", None).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
 }
 
 #[tokio::test]
 async fn a_destroyed_machine_s_backup_is_deleted_on_the_host_that_holds_it() {
     let (f, ds) = fleet_with_daemons(2).await;
-    // Its tenant moved to d2 (ADR 0045): the backups of m_d1 stay held on d1.
+    // Its namespace moved to d2 (ADR 0045): the backups of m_d1 stay held on d1.
     f.st.reg
         .lock()
         .unwrap()
-        .tenants
+        .namespaces
         .insert("t1".into(), "d2".into());
     for (query, search) in [
         (
-            "chain=true&tenant=t1",
-            "GET /v1/backups?machine=m_d1&tenant=t1",
+            "chain=true&namespace=t1",
+            "GET /v1/backups?machine=m_d1&namespace=t1",
         ),
         ("chain=true", "GET /v1/backups?machine=m_d1"),
     ] {
@@ -3200,17 +3221,20 @@ async fn a_destroyed_machine_s_backup_is_deleted_on_the_host_that_holds_it() {
 }
 
 #[tokio::test]
-async fn deleting_a_tenant_unpins_it() {
+async fn deleting_a_namespace_unpins_it() {
     let (f, ds) = fleet_with_daemons(2).await;
     ds[0].stub.add("t1", "web", 512);
     ds[0].stub.add("kept", "db", 512);
     poll_static_hosts_once(&f.st).await;
-    let (s, _, body) = call(&f.st, "DELETE", "/v1/tenants/t1", "api", None).await;
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/namespaces/t1", "api", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
-    assert_eq!(ds[0].stub.calls().last().unwrap(), "DELETE /v1/tenants/t1");
+    assert_eq!(
+        ds[0].stub.calls().last().unwrap(),
+        "DELETE /v1/namespaces/t1"
+    );
     assert_eq!(pinned(&f.st, "t1"), None);
     // The host refused: the pin stays.
-    let (s, _, body) = call(&f.st, "DELETE", "/v1/tenants/kept", "api", None).await;
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/namespaces/kept", "api", None).await;
     assert_eq!(s, StatusCode::CONFLICT, "{body}");
     assert_eq!(
         json(&body)["code"],
@@ -3218,28 +3242,28 @@ async fn deleting_a_tenant_unpins_it() {
         "the host's answer passes through"
     );
     assert_eq!(pinned(&f.st, "kept").as_deref(), Some("d1"));
-    // A tenant the fleet never placed: nothing to do, no host asked.
+    // A namespace the fleet never placed: nothing to do, no host asked.
     let before: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
-    let (s, _, _) = call(&f.st, "DELETE", "/v1/tenants/nobody", "api", None).await;
+    let (s, _, _) = call(&f.st, "DELETE", "/v1/namespaces/nobody", "api", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     let after: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
     assert_eq!(before, after);
 }
 
 #[tokio::test]
-async fn unpin_releases_a_tenant_without_asking_its_host() {
+async fn unpin_releases_a_namespace_without_asking_its_host() {
     let (f, ds) = fleet_with_daemons(2).await;
     ds[0].stub.add("kept", "db", 512);
     poll_static_hosts_once(&f.st).await;
     assert_eq!(pinned(&f.st, "kept").as_deref(), Some("d1"));
     set_state(&f.st, "d1", "down");
     let before: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
-    let (s, _, body) = call(&f.st, "POST", "/v1/tenants/kept/unpin", "api", None).await;
+    let (s, _, body) = call(&f.st, "POST", "/v1/namespaces/kept/unpin", "api", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
     let after: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
     assert_eq!(before, after, "no host asked, down or not");
     assert_eq!(pinned(&f.st, "kept"), None);
-    assert_eq!(saved(&f.st).tenants.get("kept"), None, "written");
+    assert_eq!(saved(&f.st).namespaces.get("kept"), None, "written");
     // Its next machine is placed afresh: d1 is down, so on d2.
     let (s, headers, body) = call(
         &f.st,
@@ -3251,7 +3275,7 @@ async fn unpin_releases_a_tenant_without_asking_its_host() {
     .await;
     assert_eq!(s, StatusCode::CREATED, "{body}");
     assert_eq!(headers["x-briqyard-host"], "d2");
-    let (s, _, _) = call(&f.st, "POST", "/v1/tenants/nobody/unpin", "api", None).await;
+    let (s, _, _) = call(&f.st, "POST", "/v1/namespaces/nobody/unpin", "api", None).await;
     assert_eq!(
         s,
         StatusCode::NO_CONTENT,
@@ -3360,31 +3384,31 @@ fn gateway_body() -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn a_gateway_places_a_new_tenant_and_is_forwarded_to_its_host() {
+async fn a_gateway_places_a_new_namespace_and_is_forwarded_to_its_host() {
     let (f, ds) = fleet_with_daemons(2).await;
-    // d1 is the fuller: a new tenant's gateway goes to d2, as its first machine would.
+    // d1 is the fuller: a new namespace's gateway goes to d2, as its first machine would.
     ds[0].stub.add("t0", "big", 50_000);
     poll_static_hosts_once(&f.st).await;
     let (s, headers, body) = call(
         &f.st,
         "PUT",
-        "/v1/tenants/t1/gateway",
+        "/v1/namespaces/t1/gateway",
         "api",
         Some(gateway_body()),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(headers["x-briqyard-host"], "d2");
-    let t: api::Tenant = serde_json::from_str(&body).unwrap();
+    let t: api::Namespace = serde_json::from_str(&body).unwrap();
     assert_eq!(t.host, "d2", "the host is added to the body");
     assert_eq!(t.gateway.map(|g| g.port), Some(3128));
     assert_eq!(
         ds[1].stub.calls().last().unwrap(),
-        "PUT /v1/tenants/t1/gateway"
+        "PUT /v1/namespaces/t1/gateway"
     );
     assert_eq!(pinned(&f.st, "t1").as_deref(), Some("d2"));
     assert_eq!(
-        saved(&f.st).tenants.get("t1").map(String::as_str),
+        saved(&f.st).namespaces.get("t1").map(String::as_str),
         Some("d2")
     );
     assert_eq!(
@@ -3392,7 +3416,7 @@ async fn a_gateway_places_a_new_tenant_and_is_forwarded_to_its_host() {
         256,
         "the gateway's size, reserved until the host reports"
     );
-    // The tenant lives there now: its machines follow, its reads and removal go there.
+    // The namespace lives there now: its machines follow, its reads and removal go there.
     let (s, headers, _) = call(
         &f.st,
         "POST",
@@ -3403,24 +3427,31 @@ async fn a_gateway_places_a_new_tenant_and_is_forwarded_to_its_host() {
     .await;
     assert_eq!(s, StatusCode::CREATED);
     assert_eq!(headers["x-briqyard-host"], "d2");
-    let (s, _, body) = call(&f.st, "GET", "/v1/tenants/t1", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/namespaces/t1", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
-    let t: api::Tenant = serde_json::from_str(&body).unwrap();
+    let t: api::Namespace = serde_json::from_str(&body).unwrap();
     assert_eq!((t.host.as_str(), t.machines), ("d2", 1));
     assert!(t.gateway.is_some());
-    assert_eq!(ds[1].stub.calls().last().unwrap(), "GET /v1/tenants/t1");
-    let (s, _, body) = call(&f.st, "DELETE", "/v1/tenants/t1/gateway", "api", None).await;
+    assert_eq!(ds[1].stub.calls().last().unwrap(), "GET /v1/namespaces/t1");
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/namespaces/t1/gateway", "api", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
     assert_eq!(
         ds[1].stub.calls().last().unwrap(),
-        "DELETE /v1/tenants/t1/gateway"
+        "DELETE /v1/namespaces/t1/gateway"
     );
-    // A tenant the fleet never placed: no host is asked.
+    // A namespace the fleet never placed: no host is asked.
     let before: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
-    let (s, _, body) = call(&f.st, "GET", "/v1/tenants/nobody", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/namespaces/nobody", "api", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(json(&body)["code"], "not_found");
-    let (s, _, _) = call(&f.st, "DELETE", "/v1/tenants/nobody/gateway", "api", None).await;
+    let (s, _, _) = call(
+        &f.st,
+        "DELETE",
+        "/v1/namespaces/nobody/gateway",
+        "api",
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     let after: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
     assert_eq!(before, after);
@@ -3434,7 +3465,7 @@ async fn a_gateway_refused_is_answered_as_the_host_said() {
     let (s, _, body) = call(
         &f.st,
         "PUT",
-        "/v1/tenants/t1/gateway",
+        "/v1/namespaces/t1/gateway",
         "api",
         Some(gateway_body()),
     )
@@ -3442,19 +3473,19 @@ async fn a_gateway_refused_is_answered_as_the_host_said() {
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(json(&body)["code"], "capacity");
     assert_eq!(pinned(&f.st, "t1"), None);
-    assert_eq!(saved(&f.st).tenants.get("t1"), None, "written");
+    assert_eq!(saved(&f.st).namespaces.get("t1"), None, "written");
     // A removal the host refuses passes through.
     ds[0].stub.add("kept", "sbx", 10);
     poll_static_hosts_once(&f.st).await;
-    let (s, _, body) = call(&f.st, "DELETE", "/v1/tenants/kept/gateway", "api", None).await;
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/namespaces/kept/gateway", "api", None).await;
     assert_eq!(s, StatusCode::CONFLICT, "{body}");
     assert_eq!(json(&body)["code"], "gateway_in_use");
-    // A bad tenant id or body is refused before any host.
+    // A bad namespace id or body is refused before any host.
     let before = ds[0].stub.calls().len();
     for (path, body) in [
-        ("/v1/tenants/Bad/gateway", gateway_body()),
+        ("/v1/namespaces/Bad/gateway", gateway_body()),
         (
-            "/v1/tenants/t2/gateway",
+            "/v1/namespaces/t2/gateway",
             serde_json::json!({"image": "proxy:1"}),
         ),
     ] {
@@ -3476,8 +3507,9 @@ async fn a_scoped_read_goes_to_one_host_with_its_own_cursor() {
     poll_static_hosts_once(&f.st).await;
     ds[0].stub.log(1, "t1", "created");
     ds[1].stub.log(2, "t2", "created");
-    // A tenant's: its host alone, the query as it came, the host named.
-    let (s, headers, body) = call(&f.st, "GET", "/v1/events?tenant=t1&since=0", "api", None).await;
+    // A namespace's: its host alone, the query as it came, the host named.
+    let (s, headers, body) =
+        call(&f.st, "GET", "/v1/events?namespace=t1&since=0", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(headers["x-briqyard-host"], "d1");
     let page: api::EventsPage = serde_json::from_str(&body).unwrap();
@@ -3488,7 +3520,7 @@ async fn a_scoped_read_goes_to_one_host_with_its_own_cursor() {
     );
     assert_eq!(
         ds[0].stub.calls().last().unwrap(),
-        "GET /v1/events?tenant=t1&since=0"
+        "GET /v1/events?namespace=t1&since=0"
     );
     assert!(!ds[1]
         .stub
@@ -3503,7 +3535,7 @@ async fn a_scoped_read_goes_to_one_host_with_its_own_cursor() {
         (StatusCode::OK, &HeaderValue::from_static("d2"))
     );
     // Neither known: 404, the way to a destroyed machine's events in the message.
-    let (s, _, body) = call(&f.st, "GET", "/v1/events?tenant=nobody", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/events?namespace=nobody", "api", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
     let (s, _, body) = call(&f.st, "GET", "/v1/events?machine=m_gone", "api", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
@@ -3511,11 +3543,11 @@ async fn a_scoped_read_goes_to_one_host_with_its_own_cursor() {
         json(&body)["error"]
             .as_str()
             .unwrap()
-            .contains("?tenant=…&machine=m_gone"),
+            .contains("?namespace=…&machine=m_gone"),
         "{body}"
     );
     // The host's refusal passes through: a cursor past its log.
-    let (s, _, body) = call(&f.st, "GET", "/v1/events?tenant=t1&since=9", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/events?namespace=t1&since=9", "api", None).await;
     assert_eq!(
         (s, json(&body)["code"].as_str()),
         (StatusCode::GONE, Some("gone"))
@@ -3619,7 +3651,7 @@ async fn a_scoped_watch_is_streamed_through_as_it_comes() {
     let app = app(f.st.clone());
     tokio::spawn(async move { axum::serve(ln, app).await.unwrap() });
     let mut w = reqwest::Client::new()
-        .get(format!("{url}/v1/events?tenant=t1&watch=true"))
+        .get(format!("{url}/v1/events?namespace=t1&watch=true"))
         .bearer_auth("api")
         .send()
         .await
@@ -3766,14 +3798,14 @@ async fn a_host_presenting_another_certificate_is_not_forwarded_to() {
 
 // --- placement by region, labels, quotas, logs follow (ADR 0025) ---
 
-fn in_region(tenant: &str, name: &str, region: &str) -> serde_json::Value {
-    let mut b = create_body(tenant, name, 512);
+fn in_region(namespace: &str, name: &str, region: &str) -> serde_json::Value {
+    let mut b = create_body(namespace, name, 512);
     b["region"] = region.into();
     b
 }
 
 #[tokio::test]
-async fn a_tenant_is_placed_in_its_region_and_never_leaves_it() {
+async fn a_namespace_is_placed_in_its_region_and_never_leaves_it() {
     let (f, ds) = fleet_in_regions(&["gra", "vin"]).await;
     // d1 is fuller: by memory alone, t1 would go to d2.
     ds[0].stub.add("t0", "big", 10_000);
@@ -3790,7 +3822,7 @@ async fn a_tenant_is_placed_in_its_region_and_never_leaves_it() {
     assert_eq!(json(&body)["code"], "invalid");
     assert_eq!(
         json(&body)["error"],
-        "tenant t1 is in region \"gra\" (host d1), not \"vin\": a tenant never spans regions"
+        "namespace t1 is in region \"gra\" (host d1), not \"vin\": a namespace never spans regions"
     );
     // A fork is bound to its source's host, so to its region.
     let src = json(&create(in_region("t1", "c", "")).await.2)["id"]
@@ -3803,7 +3835,7 @@ async fn a_tenant_is_placed_in_its_region_and_never_leaves_it() {
     assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
     let after: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
     assert_eq!(after[1], before[1], "d2 was never asked");
-    // No region: any, and a pinned tenant stays.
+    // No region: any, and a pinned namespace stays.
     let (s, headers, _) = create(in_region("t2", "a", "")).await;
     assert_eq!(
         (s, &headers["x-briqyard-host"]),
@@ -3818,18 +3850,18 @@ async fn a_tenant_is_placed_in_its_region_and_never_leaves_it() {
         "no host in region sgp has room for this machine"
     );
     assert_eq!(pinned(&f.st, "t3"), None);
-    // The tenants say where they are.
-    let (_, _, body) = call(&f.st, "GET", "/v1/tenants", "api", None).await;
-    let ts: Vec<api::Tenant> = serde_json::from_str(&body).unwrap();
+    // The namespaces say where they are.
+    let (_, _, body) = call(&f.st, "GET", "/v1/namespaces", "api", None).await;
+    let ts: Vec<api::Namespace> = serde_json::from_str(&body).unwrap();
     let t1 = ts.iter().find(|t| t.id == "t1").unwrap();
     assert_eq!((t1.host.as_str(), t1.region.as_str()), ("d1", "gra"));
-    let (_, _, body) = call(&f.st, "GET", "/v1/tenants/t1", "api", None).await;
+    let (_, _, body) = call(&f.st, "GET", "/v1/namespaces/t1", "api", None).await;
     assert_eq!(json(&body)["region"], "gra");
-    // A gateway places a new tenant in the region its query names.
+    // A gateway places a new namespace in the region its query names.
     let (s, headers, body) = call(
         &f.st,
         "PUT",
-        "/v1/tenants/t4/gateway?region=vin",
+        "/v1/namespaces/t4/gateway?region=vin",
         "api",
         Some(gateway_body()),
     )
@@ -3838,20 +3870,20 @@ async fn a_tenant_is_placed_in_its_region_and_never_leaves_it() {
     assert_eq!(headers["x-briqyard-host"], "d2");
     assert_eq!(
         ds[1].stub.calls().last().unwrap(),
-        "PUT /v1/tenants/t4/gateway",
+        "PUT /v1/namespaces/t4/gateway",
         "where to place is the fleet's: the host gets the spec"
     );
 }
 
 #[tokio::test]
-async fn a_quota_goes_to_the_tenants_host_and_places_a_new_one() {
+async fn a_quota_goes_to_the_namespaces_host_and_places_a_new_one() {
     let (f, ds) = fleet_in_regions(&["gra", "vin"]).await;
     let quota = serde_json::json!({"machines": 3, "memory_mb": 2048});
     // No host yet: placed in the region asked, with no need, and forwarded there.
     let (s, headers, body) = call(
         &f.st,
         "PUT",
-        "/v1/tenants/t1/quota?region=vin",
+        "/v1/namespaces/t1/quota?region=vin",
         "api",
         Some(quota.clone()),
     )
@@ -3860,23 +3892,23 @@ async fn a_quota_goes_to_the_tenants_host_and_places_a_new_one() {
     assert_eq!(headers["x-briqyard-host"], "d2");
     assert_eq!(pinned(&f.st, "t1").as_deref(), Some("d2"));
     assert_eq!(
-        saved(&f.st).tenants.get("t1").map(String::as_str),
+        saved(&f.st).namespaces.get("t1").map(String::as_str),
         Some("d2")
     );
     assert_eq!(f.st.reg.lock().unwrap().hosts["d2"].used.memory_mb, 0);
-    let (s, _, body) = call(&f.st, "GET", "/v1/tenants/t1/quota", "api", None).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/namespaces/t1/quota", "api", None).await;
     assert_eq!(s, StatusCode::OK, "{body}");
-    let q: api::TenantQuota = serde_json::from_str(&body).unwrap();
+    let q: api::NamespaceQuota = serde_json::from_str(&body).unwrap();
     assert_eq!((q.quota.machines, q.quota.memory_mb), (Some(3), Some(2048)));
     assert_eq!(
         ds[1].stub.calls().last().unwrap(),
-        "GET /v1/tenants/t1/quota"
+        "GET /v1/namespaces/t1/quota"
     );
     // Pinned: the next put goes to its host, and another region is refused.
     let (s, _, _) = call(
         &f.st,
         "PUT",
-        "/v1/tenants/t1/quota",
+        "/v1/namespaces/t1/quota",
         "api",
         Some(quota.clone()),
     )
@@ -3886,25 +3918,25 @@ async fn a_quota_goes_to_the_tenants_host_and_places_a_new_one() {
     let (s, _, body) = call(
         &f.st,
         "PUT",
-        "/v1/tenants/t1/quota?region=gra",
+        "/v1/namespaces/t1/quota?region=gra",
         "api",
         Some(quota),
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
-    // A body that is not a quota is refused before anything is placed; a tenant with no host
+    // A body that is not a quota is refused before anything is placed; a namespace with no host
     // has no quota to read.
     let (s, _, _) = call(
         &f.st,
         "PUT",
-        "/v1/tenants/t2/quota",
+        "/v1/namespaces/t2/quota",
         "api",
         Some(serde_json::json!({"machines": -1})),
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert_eq!(pinned(&f.st, "t2"), None);
-    let (s, _, _) = call(&f.st, "GET", "/v1/tenants/t2/quota", "api", None).await;
+    let (s, _, _) = call(&f.st, "GET", "/v1/namespaces/t2/quota", "api", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert!(ds[0].stub.quotas.lock().unwrap().is_empty());
 }
@@ -3912,8 +3944,8 @@ async fn a_quota_goes_to_the_tenants_host_and_places_a_new_one() {
 #[tokio::test]
 async fn labels_are_passed_to_the_hosts_and_a_listing_stays_whole() {
     let (f, ds) = fleet_with_daemons(2).await;
-    let label = |d: &Running, tenant: &str, name: &str, app: &str| {
-        let mut m = d.stub.add(tenant, name, 256);
+    let label = |d: &Running, namespace: &str, name: &str, app: &str| {
+        let mut m = d.stub.add(namespace, name, 256);
         m.metadata.insert("app".into(), app.into());
         let mut ms = d.stub.machines.lock().unwrap();
         *ms.iter_mut().find(|x| x.id == m.id).unwrap() = m.clone();
@@ -3937,12 +3969,12 @@ async fn labels_are_passed_to_the_hosts_and_a_listing_stays_whole() {
             "GET /v1/machines?label=app%3Dweb"
         );
     }
-    // A tenant's: its host alone.
+    // A namespace's: its host alone.
     let before = ds[1].stub.calls().len();
     let (_, _, body) = call(
         &f.st,
         "GET",
-        "/v1/machines?tenant=t1&label=app=web&label=app",
+        "/v1/machines?namespace=t1&label=app=web&label=app",
         "api",
         None,
     )
@@ -4371,4 +4403,31 @@ async fn a_forwarded_restore_is_open_during_its_create_alone() {
         !f.st.restores.take("d1", &rs, std::time::Instant::now()),
         "closed after"
     );
+}
+
+#[tokio::test]
+async fn the_former_names_are_still_answered() {
+    // ADR 0055: `/v1/tenants` is `/v1/namespaces`, and `tenant=` is `namespace=`.
+    let (f, ds) = fleet_with_daemons(1).await;
+    ds[0].stub.add("kept", "db", 512);
+    poll_static_hosts_once(&f.st).await;
+    let (s, _, body) = call(&f.st, "GET", "/v1/tenants", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let (s, _, body) = call(&f.st, "POST", "/v1/tenants/kept/unpin", "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(pinned(&f.st, "kept"), None);
+    for q in ["namespace=kept", "tenant=kept"] {
+        let uri: Uri = format!("/v1/top?{q}").parse().unwrap();
+        assert_eq!(query_namespace(&uri).as_deref(), Some("kept"), "{q}");
+    }
+}
+
+#[test]
+fn a_registry_written_before_the_rename_loads() {
+    let old = r#"{"hosts":{},"tenants":{"t1":"h1"},"machines":{}}"#;
+    let reg: Registry = serde_json::from_str(old).unwrap();
+    assert_eq!(reg.namespaces.get("t1").map(String::as_str), Some("h1"));
+    let now = serde_json::to_value(&reg).unwrap();
+    assert!(now.get("tenants").is_none());
+    assert_eq!(now["namespaces"]["t1"], "h1");
 }

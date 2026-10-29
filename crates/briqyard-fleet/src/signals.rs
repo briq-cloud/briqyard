@@ -130,14 +130,14 @@ pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
         o,
         "briqyard_fleet_free_mb",
         "gauge",
-        "Free memory and disk, in MB, summed over the region's hosts that take a new tenant.",
+        "Free memory and disk, in MB, summed over the region's hosts that take a new namespace.",
         per_resource(|r| r.free),
     );
     family(
         o,
         "briqyard_fleet_largest_slot_mb",
         "gauge",
-        "The most free memory and disk, in MB, on one of the region's hosts that take a new tenant.",
+        "The most free memory and disk, in MB, on one of the region's hosts that take a new namespace.",
         per_resource(|r| r.largest_slot),
     );
     let refused = regions

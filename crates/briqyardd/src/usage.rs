@@ -335,7 +335,7 @@ impl Ledger {
                     ..Default::default()
                 });
             b.machine_id.clone_from(&who.machine_id);
-            b.tenant.clone_from(&who.tenant);
+            b.namespace.clone_from(&who.namespace);
             b.role.clone_from(&who.role);
             b.metadata.clone_from(&who.metadata);
             b.size = who.size;
@@ -391,13 +391,13 @@ impl Ledger {
         &self,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
-        tenant: Option<&str>,
+        namespace: Option<&str>,
     ) -> (Vec<UsageBucket>, BTreeSet<DateTime<Utc>>) {
         let buckets = self
             .hours
             .range(from..to)
             .flat_map(|(_, bs)| bs.values())
-            .filter(|b| tenant.is_none_or(|t| b.tenant == t))
+            .filter(|b| namespace.is_none_or(|t| b.namespace == t))
             .cloned()
             .collect();
         (buckets, self.hours.keys().copied().collect())
@@ -409,7 +409,7 @@ pub fn stored(
     store: &Store,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
-    tenant: Option<&str>,
+    namespace: Option<&str>,
     skip: &BTreeSet<DateTime<Utc>>,
 ) -> Result<Vec<UsageBucket>> {
     let mut out = Vec::new();
@@ -420,7 +420,7 @@ pub fn stored(
             out.extend(
                 buckets
                     .into_iter()
-                    .filter(|b| tenant.is_none_or(|t| b.tenant == t)),
+                    .filter(|b| namespace.is_none_or(|t| b.namespace == t)),
             );
         }
         h += Duration::hours(1);

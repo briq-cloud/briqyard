@@ -45,9 +45,9 @@ enum Cmd {
     /// Endpoints: ways in from outside
     #[command(subcommand, alias = "ep")]
     Endpoint(EndpointCmd),
-    /// Tenants: one private network each
-    #[command(subcommand)]
-    Tenant(TenantCmd),
+    /// Namespaces: one private network each
+    #[command(subcommand, alias = "tenant")]
+    Namespace(NamespaceCmd),
     /// Images built on the host
     #[command(subcommand)]
     Image(ImageCmd),
@@ -57,10 +57,10 @@ enum Cmd {
     /// Backups in the store: delete one
     #[command(subcommand)]
     Backup(BackupCmd),
-    /// Every backup of the host's machines, destroyed ones' included: briqyard backups [--tenant T] [--machine ID]
+    /// Every backup of the host's machines, destroyed ones' included: briqyard backups [--namespace NAME] [--machine ID]
     Backups {
-        #[arg(long)]
-        tenant: Option<String>,
+        #[arg(long, alias = "tenant")]
+        namespace: Option<String>,
         #[arg(long)]
         machine: Option<String>,
     },
@@ -72,16 +72,16 @@ enum Cmd {
         /// The hour after the last (at most 31 days after --from)
         #[arg(long, value_parser = hour_arg)]
         to: chrono::DateTime<chrono::Utc>,
-        #[arg(long)]
-        tenant: Option<String>,
+        #[arg(long, alias = "tenant")]
+        namespace: Option<String>,
         /// Every field, as JSON
         #[arg(long)]
         json: bool,
     },
-    /// What happened, oldest first: briqyard events [--tenant T] [--machine ID] [--since CURSOR] [--watch]
+    /// What happened, oldest first: briqyard events [--namespace NAME] [--machine ID] [--since CURSOR] [--watch]
     Events {
-        #[arg(long)]
-        tenant: Option<String>,
+        #[arg(long, alias = "tenant")]
+        namespace: Option<String>,
         #[arg(long)]
         machine: Option<String>,
         /// Read on from a previous read's cursor (printed at the end)
@@ -91,10 +91,10 @@ enum Cmd {
         #[arg(long)]
         watch: bool,
     },
-    /// Running machines by CPU, over the daemon's last 15 s: briqyard top [--tenant T]
+    /// Running machines by CPU, over the daemon's last 15 s: briqyard top [--namespace NAME]
     Top {
-        #[arg(long)]
-        tenant: Option<String>,
+        #[arg(long, alias = "tenant")]
+        namespace: Option<String>,
         /// Every field, as JSON
         #[arg(long)]
         json: bool,
@@ -105,10 +105,10 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum MachineCmd {
-    /// List machines: briqyard machine ls [--tenant T] [-l app=web] [-l tier]
+    /// List machines: briqyard machine ls [--namespace NAME] [-l app=web] [-l tier]
     Ls {
-        #[arg(long)]
-        tenant: Option<String>,
+        #[arg(long, alias = "tenant")]
+        namespace: Option<String>,
         /// A label selector, repeatable, all ANDed: KEY=VALUE or KEY (has it)
         #[arg(short = 'l', long = "label")]
         labels: Vec<String>,
@@ -213,14 +213,14 @@ enum MachineCmd {
     Backups {
         id: String,
     },
-    /// A new machine from a backup: briqyard machine restore --from MACHINE_ID [--backup ID] --tenant T --name N
+    /// A new machine from a backup: briqyard machine restore --from MACHINE_ID [--backup ID] --namespace T --name N
     Restore {
         #[arg(long)]
         from: String,
         #[arg(long, default_value = "latest")]
         backup: String,
-        #[arg(long)]
-        tenant: String,
+        #[arg(long, alias = "tenant")]
+        namespace: String,
         #[arg(long)]
         name: String,
         #[arg(long, default_value = "")]
@@ -333,9 +333,9 @@ struct RunArgs {
     /// A DNS label; made from the image when absent
     #[arg(long)]
     name: Option<String>,
-    #[arg(long, default_value = "default")]
-    tenant: String,
-    /// Through a fleet: place a new tenant on a host of this region
+    #[arg(long, alias = "tenant", default_value = "default")]
+    namespace: String,
+    /// Through a fleet: place a new namespace on a host of this region
     #[arg(long, default_value = "")]
     region: String,
     /// K=V, repeatable: its metadata, what `machine ls -l` selects on
@@ -349,7 +349,7 @@ struct RunArgs {
     /// Sleep window: 30m, 2h, never
     #[arg(long, default_value = "", value_parser = sleep_arg)]
     sleep: String,
-    /// Where its traffic may go: open (default), none (its tenant only), via:MACHINE_ID, via:gateway (the tenant's)
+    /// Where its traffic may go: open (default), none (its namespace only), via:MACHINE_ID, via:gateway (the namespace's)
     #[arg(long, value_parser = egress_arg)]
     egress: Option<api::Egress>,
     #[command(flatten)]
@@ -475,9 +475,9 @@ enum BackupCmd {
         backup: String,
         #[arg(long)]
         chain: bool,
-        /// The machine's tenant, for a destroyed machine's backup through a fleet
-        #[arg(long)]
-        tenant: Option<String>,
+        /// The machine's namespace, for a destroyed machine's backup through a fleet
+        #[arg(long, alias = "tenant")]
+        namespace: Option<String>,
     },
 }
 
@@ -559,24 +559,24 @@ enum EndpointCmd {
 }
 
 #[derive(Subcommand)]
-enum TenantCmd {
+enum NamespaceCmd {
     Ls,
-    /// Show a tenant, its gateway included
+    /// Show a namespace, its gateway included
     Get {
         id: String,
     },
     Rm {
         id: String,
     },
-    /// The tenant's gateway: a machine the daemon runs while a machine sends via:gateway
+    /// The namespace's gateway: a machine the daemon runs while a machine sends via:gateway
     #[command(subcommand)]
     Gateway(GatewayCmd),
-    /// Release a tenant from its host (fleet): its next machine is placed afresh
+    /// Release a namespace from its host (fleet): its next machine is placed afresh
     Unpin {
         id: String,
     },
-    /// Show the tenant's quota and use; with a limit, put the quota, exactly those limits:
-    /// briqyard tenant quota T [--machines N] [--memory-mb N] [--vcpus N] [--disk-gb N]
+    /// Show the namespace's quota and use; with a limit, put the quota, exactly those limits:
+    /// briqyard namespace quota T [--machines N] [--memory-mb N] [--vcpus N] [--disk-gb N]
     Quota {
         id: String,
         #[arg(long)]
@@ -587,7 +587,7 @@ enum TenantCmd {
         vcpus: Option<u32>,
         #[arg(long)]
         disk_gb: Option<u32>,
-        /// Through a fleet: where to place a tenant that has no host yet
+        /// Through a fleet: where to place a namespace that has no host yet
         #[arg(long)]
         region: Option<String>,
     },
@@ -595,17 +595,17 @@ enum TenantCmd {
 
 #[derive(Subcommand)]
 enum GatewayCmd {
-    /// Make or replace it: briqyard tenant gateway set TENANT --image I --port P [-e K=V] [--file /path=local] [--start] [-- cmd...]
+    /// Make or replace it: briqyard namespace gateway set NAMESPACE --image I --port P [-e K=V] [--file /path=local] [--start] [-- cmd...]
     Set(Box<GatewaySetArgs>),
     /// Stop and remove it, once no machine runs through it
-    Rm { tenant: String },
+    Rm { namespace: String },
 }
 
-/// What `tenant gateway set` puts.
+/// What `namespace gateway set` puts.
 #[derive(Args)]
 struct GatewaySetArgs {
-    tenant: String,
-    /// Through a fleet: where to place a tenant that has no host yet
+    namespace: String,
+    /// Through a fleet: where to place a namespace that has no host yet
     #[arg(long)]
     region: Option<String>,
     /// Start it now and wait for its port (a running one is left as is)
@@ -660,11 +660,11 @@ enum HostCmd {
         #[arg(long)]
         public_tcp_ports: Option<String>,
     },
-    /// Place no new tenant on a host
+    /// Place no new namespace on a host
     Drain {
         id: String,
     },
-    /// Place new tenants on a drained or retiring host again
+    /// Place new namespaces on a drained or retiring host again
     Undrain {
         id: String,
     },
@@ -680,7 +680,7 @@ enum HostCmd {
         #[arg(long)]
         release: String,
     },
-    /// Take no new tenant on a host and forget it once nothing runs on it (the server is yours
+    /// Take no new namespace on a host and forget it once nothing runs on it (the server is yours
     /// to give back)
     Retire {
         id: String,
@@ -889,13 +889,13 @@ fn follow_line(line: &str) -> Result<ControlFlow<String, Option<api::LogLine>>> 
     }
 }
 
-/// `GET /v1/machines` for a tenant or every one, with label selectors.
-fn machines_path(tenant: Option<&str>, labels: &[String]) -> String {
+/// `GET /v1/machines` for a namespace or every one, with label selectors.
+fn machines_path(namespace: Option<&str>, labels: &[String]) -> String {
     let mut u = reqwest::Url::parse("http://briqyard/v1/machines").expect("a URL");
     {
         let mut q = u.query_pairs_mut();
-        if let Some(t) = tenant {
-            q.append_pair("tenant", t);
+        if let Some(t) = namespace {
+            q.append_pair("namespace", t);
         }
         for l in labels {
             q.append_pair("label", l);
@@ -907,11 +907,11 @@ fn machines_path(tenant: Option<&str>, labels: &[String]) -> String {
     }
 }
 
-/// A tenant's PUT route, with where a fleet places a tenant that has no host yet.
-fn tenant_put_path(tenant: &str, what: &str, region: Option<&str>) -> String {
+/// A namespace's PUT route, with where a fleet places a namespace that has no host yet.
+fn namespace_put_path(namespace: &str, what: &str, region: Option<&str>) -> String {
     match region {
-        Some(r) => format!("/v1/tenants/{tenant}/{what}?region={r}"),
-        None => format!("/v1/tenants/{tenant}/{what}"),
+        Some(r) => format!("/v1/namespaces/{namespace}/{what}?region={r}"),
+        None => format!("/v1/namespaces/{namespace}/{what}"),
     }
 }
 
@@ -982,8 +982,8 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
         Cmd::Status => print_json(&c.call::<api::Status>(GET, "/v1/status", NONE).await?),
         Cmd::Openapi => print!("{}", c.raw(GET, "/v1/openapi.yaml", NONE).await?),
         Cmd::Machine(m) => match *m {
-            MachineCmd::Ls { tenant, labels } => {
-                let path = machines_path(tenant.as_deref(), &labels);
+            MachineCmd::Ls { namespace, labels } => {
+                let path = machines_path(namespace.as_deref(), &labels);
                 let ms: Vec<api::Machine> = c.call(GET, &path, NONE).await?;
                 print!("{}", machine_table(&ms));
             }
@@ -1013,7 +1013,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     None => None,
                 };
                 let req = api::CreateMachineRequest {
-                    tenant: a.tenant.clone(),
+                    namespace: a.namespace.clone(),
                     name,
                     image: a.image.clone(),
                     entrypoint: if a.entrypoint.is_empty() {
@@ -1068,8 +1068,8 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             ),
             MachineCmd::Describe { id } => {
                 let m: api::Machine = c.call(GET, &format!("/v1/machines/{id}"), NONE).await?;
-                // By its tenant: through a fleet, that is the machine's host.
-                let path = events_path(Some(&m.tenant), Some(&m.id), false);
+                // By its namespace: through a fleet, that is the machine's host.
+                let path = events_path(Some(&m.namespace), Some(&m.id), false);
                 let (mut evs, _) = c.events(&path, None).await?;
                 let keep = evs.len().saturating_sub(20);
                 print!("{}", describe(&m, &evs.split_off(keep)));
@@ -1193,7 +1193,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::Fork { name, id } => {
                 let src: api::Machine = c.call(GET, &format!("/v1/machines/{id}"), NONE).await?;
                 let req = api::CreateMachineRequest {
-                    tenant: src.tenant.clone(),
+                    namespace: src.namespace.clone(),
                     name: name.unwrap_or_else(|| format!("{}-fork", src.name)),
                     size: src.size,
                     ports: src.ports.clone(),
@@ -1353,12 +1353,12 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::Restore {
                 from,
                 backup,
-                tenant,
+                namespace,
                 name,
                 sleep,
             } => {
                 let req = api::CreateMachineRequest {
-                    tenant,
+                    namespace,
                     name,
                     sleep,
                     restore: Some(api::RestoreSpec {
@@ -1436,20 +1436,21 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 c.raw(DELETE, &format!("/v1/endpoints/{id}"), NONE).await?;
             }
         },
-        Cmd::Tenant(t) => match t {
-            TenantCmd::Ls => {
-                print_json(&c.call::<Vec<api::Tenant>>(GET, "/v1/tenants", NONE).await?)
-            }
-            TenantCmd::Get { id } => print_json(
-                &c.call::<api::Tenant>(GET, &format!("/v1/tenants/{id}"), NONE)
+        Cmd::Namespace(t) => match t {
+            NamespaceCmd::Ls => print_json(
+                &c.call::<Vec<api::Namespace>>(GET, "/v1/namespaces", NONE)
                     .await?,
             ),
-            TenantCmd::Rm { id } => {
-                c.raw(DELETE, &format!("/v1/tenants/{id}"), NONE).await?;
+            NamespaceCmd::Get { id } => print_json(
+                &c.call::<api::Namespace>(GET, &format!("/v1/namespaces/{id}"), NONE)
+                    .await?,
+            ),
+            NamespaceCmd::Rm { id } => {
+                c.raw(DELETE, &format!("/v1/namespaces/{id}"), NONE).await?;
             }
-            TenantCmd::Gateway(GatewayCmd::Set(a)) => {
+            NamespaceCmd::Gateway(GatewayCmd::Set(a)) => {
                 let GatewaySetArgs {
-                    tenant,
+                    namespace,
                     region,
                     start,
                     image,
@@ -1473,23 +1474,23 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     ..Default::default()
                 };
                 print_json(
-                    &c.call::<api::Tenant>(
+                    &c.call::<api::Namespace>(
                         PUT,
-                        &tenant_put_path(&tenant, "gateway", region.as_deref()),
+                        &namespace_put_path(&namespace, "gateway", region.as_deref()),
                         Some(&spec),
                     )
                     .await?,
                 )
             }
-            TenantCmd::Gateway(GatewayCmd::Rm { tenant }) => {
-                c.raw(DELETE, &format!("/v1/tenants/{tenant}/gateway"), NONE)
+            NamespaceCmd::Gateway(GatewayCmd::Rm { namespace }) => {
+                c.raw(DELETE, &format!("/v1/namespaces/{namespace}/gateway"), NONE)
                     .await?;
             }
-            TenantCmd::Unpin { id } => {
-                c.raw(POST, &format!("/v1/tenants/{id}/unpin"), NONE)
+            NamespaceCmd::Unpin { id } => {
+                c.raw(POST, &format!("/v1/namespaces/{id}/unpin"), NONE)
                     .await?;
             }
-            TenantCmd::Quota {
+            NamespaceCmd::Quota {
                 id,
                 machines,
                 memory_mb,
@@ -1503,11 +1504,11 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     vcpus,
                     disk_gb,
                 };
-                let shown: api::TenantQuota = if q == api::Quota::default() {
-                    c.call(GET, &format!("/v1/tenants/{id}/quota"), NONE)
+                let shown: api::NamespaceQuota = if q == api::Quota::default() {
+                    c.call(GET, &format!("/v1/namespaces/{id}/quota"), NONE)
                         .await?
                 } else {
-                    let path = tenant_put_path(&id, "quota", region.as_deref());
+                    let path = namespace_put_path(&id, "quota", region.as_deref());
                     c.call(PUT, &path, Some(&q)).await?
                 };
                 print_json(&shown)
@@ -1517,27 +1518,27 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             machine,
             backup,
             chain,
-            tenant,
+            namespace,
         }) => {
             c.raw(
                 DELETE,
-                &backup_rm_path(&machine, &backup, chain, tenant.as_deref()),
+                &backup_rm_path(&machine, &backup, chain, namespace.as_deref()),
                 NONE,
             )
             .await?;
         }
-        Cmd::Backups { tenant, machine } => {
-            let path = backups_path(tenant.as_deref(), machine.as_deref());
+        Cmd::Backups { namespace, machine } => {
+            let path = backups_path(namespace.as_deref(), machine.as_deref());
             print_json(&c.call::<Vec<api::Backup>>(GET, &path, NONE).await?)
         }
         Cmd::Doctor => doctor(),
         Cmd::Events {
-            tenant,
+            namespace,
             machine,
             since,
             watch,
         } => {
-            let path = events_path(tenant.as_deref(), machine.as_deref(), watch);
+            let path = events_path(namespace.as_deref(), machine.as_deref(), watch);
             print!("{}", events_table(&[]));
             if watch {
                 let path = with_since(&path, since.as_deref().unwrap_or(""));
@@ -1550,9 +1551,9 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 eprintln!("(next: --since {next})");
             }
         }
-        Cmd::Top { tenant, json } => {
-            let path = match &tenant {
-                Some(t) => format!("/v1/top?tenant={t}"),
+        Cmd::Top { namespace, json } => {
+            let path = match &namespace {
+                Some(t) => format!("/v1/top?namespace={t}"),
                 None => "/v1/top".into(),
             };
             let ms: Vec<api::TopMachine> = c.call(GET, &path, NONE).await?;
@@ -1565,11 +1566,11 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
         Cmd::Usage {
             from,
             to,
-            tenant,
+            namespace,
             json,
         } => {
             let bs: Vec<api::UsageBucket> = c
-                .call(GET, &usage_path(from, to, tenant.as_deref()), NONE)
+                .call(GET, &usage_path(from, to, namespace.as_deref()), NONE)
                 .await?;
             if json {
                 print_json(&bs);
@@ -1664,13 +1665,13 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
 }
 
 /// `backup rm`'s request.
-fn backup_rm_path(machine: &str, backup: &str, chain: bool, tenant: Option<&str>) -> String {
+fn backup_rm_path(machine: &str, backup: &str, chain: bool, namespace: Option<&str>) -> String {
     let mut q = Vec::new();
     if chain {
         q.push("chain=true".to_string());
     }
-    if let Some(t) = tenant {
-        q.push(format!("tenant={t}"));
+    if let Some(t) = namespace {
+        q.push(format!("namespace={t}"));
     }
     let path = format!("/v1/machines/{machine}/backups/{backup}");
     match q.is_empty() {
@@ -1804,20 +1805,20 @@ fn hour_arg(s: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
 fn usage_path(
     from: chrono::DateTime<chrono::Utc>,
     to: chrono::DateTime<chrono::Utc>,
-    tenant: Option<&str>,
+    namespace: Option<&str>,
 ) -> String {
     let utc = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut p = format!("/v1/usage?from={}&to={}", utc(from), utc(to));
-    if let Some(t) = tenant {
-        p.push_str(&format!("&tenant={t}"));
+    if let Some(t) = namespace {
+        p.push_str(&format!("&namespace={t}"));
     }
     p
 }
 
-/// `GET /v1/events` for a tenant, a machine, both or neither.
-/// `/v1/backups`, of a tenant, of a machine, or of every one.
-fn backups_path(tenant: Option<&str>, machine: Option<&str>) -> String {
-    let q: Vec<String> = [("tenant", tenant), ("machine", machine)]
+/// `GET /v1/events` for a namespace, a machine, both or neither.
+/// `/v1/backups`, of a namespace, of a machine, or of every one.
+fn backups_path(namespace: Option<&str>, machine: Option<&str>) -> String {
+    let q: Vec<String> = [("namespace", namespace), ("machine", machine)]
         .into_iter()
         .filter_map(|(k, v)| v.map(|v| format!("{k}={v}")))
         .collect();
@@ -1827,10 +1828,10 @@ fn backups_path(tenant: Option<&str>, machine: Option<&str>) -> String {
     }
 }
 
-fn events_path(tenant: Option<&str>, machine: Option<&str>, watch: bool) -> String {
+fn events_path(namespace: Option<&str>, machine: Option<&str>, watch: bool) -> String {
     let mut q = Vec::new();
-    if let Some(t) = tenant {
-        q.push(format!("tenant={t}"));
+    if let Some(t) = namespace {
+        q.push(format!("namespace={t}"));
     }
     if let Some(m) = machine {
         q.push(format!("machine={m}"));
@@ -1921,9 +1922,9 @@ fn reason_of(m: &api::Machine) -> &str {
 
 fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
+        "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
         "ID",
-        "TENANT",
+        "NAMESPACE",
         "NAME",
         "IMAGE",
         "STATE",
@@ -1947,9 +1948,9 @@ fn machine_table(ms: &[api::Machine]) -> String {
             None => "-".into(),
         };
         out.push_str(&format!(
-            "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {}\n",
+            "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {}\n",
             m.id,
-            m.tenant,
+            m.namespace,
             m.name,
             m.image,
             state,
@@ -2059,12 +2060,12 @@ fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, String)>) {
 /// each condition that is true and its note when the bootstrap or an upgrade left one.
 fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
-        "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {:<20} LAST SEEN\n",
-        "ID", "URL", "STATE", "REGION", "MEMORY MB", "VCPUS", "MACHINES", "TENANTS", "VERSION"
+        "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<10} {:<20} LAST SEEN\n",
+        "ID", "URL", "STATE", "REGION", "MEMORY MB", "VCPUS", "MACHINES", "NAMESPACES", "VERSION"
     );
     for h in hs {
         out.push_str(&format!(
-            "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<8} {:<20} {}\n",
+            "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<10} {:<20} {}\n",
             h.id,
             if h.url.is_empty() { "-" } else { &h.url },
             h.state,
@@ -2072,7 +2073,7 @@ fn host_table(hs: &[api::Host]) -> String {
             format!("{}/{}", h.used.memory_mb, h.capacity.memory_mb),
             format!("{}/{}", h.used.vcpus, h.capacity.vcpus),
             h.machines,
-            h.tenants.len(),
+            h.namespaces.len(),
             if h.version.is_empty() {
                 "-"
             } else {
@@ -2139,10 +2140,10 @@ fn region_table(rs: &[api::RegionRoom]) -> String {
 /// every measure.
 fn usage_table(bs: &[api::UsageBucket]) -> String {
     let mut out = format!(
-        "{:<17} {:<16} {:<10} {:>7} {:>8} {:>9} {:>10} {:>12} {:>21} {:>21} HOST\n",
+        "{:<17} {:<16} {:<12} {:>7} {:>8} {:>9} {:>10} {:>12} {:>21} {:>21} HOST\n",
         "HOUR",
         "MACHINE",
-        "TENANT",
+        "NAMESPACE",
         "RUN H",
         "CPU S",
         "MEM GB·H",
@@ -2154,10 +2155,10 @@ fn usage_table(bs: &[api::UsageBucket]) -> String {
     for b in bs {
         let u = &b.usage;
         out.push_str(&format!(
-            "{:<17} {:<16} {:<10} {:>7.2} {:>8.1} {:>9.2} {:>10.2} {:>12.2} {:>21} {:>21} {}\n",
+            "{:<17} {:<16} {:<12} {:>7.2} {:>8.1} {:>9.2} {:>10.2} {:>12.2} {:>21} {:>21} {}\n",
             b.hour.format("%Y-%m-%d %H:00"),
             b.machine_id,
-            b.tenant,
+            b.namespace,
             u.running_seconds / 3600.0,
             u.cpu_seconds,
             u.memory_mb_seconds / 1024.0 / 3600.0,
@@ -2176,14 +2177,14 @@ fn top_table(mut ms: Vec<api::TopMachine>) -> String {
     ms.sort_by(|a, b| {
         b.cpu_percent
             .total_cmp(&a.cpu_percent)
-            .then_with(|| (&a.tenant, &a.name).cmp(&(&b.tenant, &b.name)))
+            .then_with(|| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)))
     });
     let mb = |b: u64| b >> 20;
     let kb = |r: f64| r / 1024.0;
     let mut out = format!(
-        "{:<16} {:<10} {:<14} {:>6} {:>13} {:>9} {:>17} {:>17} HOST\n",
+        "{:<16} {:<12} {:<14} {:>6} {:>13} {:>9} {:>17} {:>17} HOST\n",
         "MACHINE",
-        "TENANT",
+        "NAMESPACE",
         "NAME",
         "CPU %",
         "MEMORY MB",
@@ -2193,9 +2194,9 @@ fn top_table(mut ms: Vec<api::TopMachine>) -> String {
     );
     for m in &ms {
         out.push_str(&format!(
-            "{:<16} {:<10} {:<14} {:>6.1} {:>13} {:>9} {:>17} {:>17} {}\n",
+            "{:<16} {:<12} {:<14} {:>6.1} {:>13} {:>9} {:>17} {:>17} {}\n",
             m.machine_id,
-            m.tenant,
+            m.namespace,
             m.name,
             m.cpu_percent,
             format!("{}/{}", mb(m.memory_bytes), mb(m.memory_limit_bytes)),
@@ -2260,7 +2261,7 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
     let mut lines: Vec<(&str, String)> = vec![
         ("Name", m.name.clone()),
         ("ID", m.id.clone()),
-        ("Tenant", m.tenant.clone()),
+        ("Namespace", m.namespace.clone()),
     ];
     if !m.host.is_empty() {
         lines.push(("Host", m.host.clone()));

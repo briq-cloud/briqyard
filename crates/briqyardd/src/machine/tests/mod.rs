@@ -26,12 +26,12 @@ use sessions::*;
 use units::*;
 use update::*;
 
-/// A machine as the manager would have made it, in the second tenant subnet.
+/// A machine as the manager would have made it, in the second namespace subnet.
 pub(in crate::machine) fn record() -> Record {
     let now = Utc.with_ymd_and_hms(2026, 10, 18, 22, 0, 0).unwrap();
     Record {
         id: "m_abc123".into(),
-        tenant: "t1".into(),
+        namespace: "t1".into(),
         role: None,
         name: "db".into(),
         image: "postgres:17".into(),
@@ -857,11 +857,11 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             host_id: "h_test".into(),
             advertise: "127.0.0.1".into(),
             machines: Mutex::new(HashMap::new()),
-            tenants: Mutex::new(HashMap::new()),
+            namespaces: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
             endpoint_events,
             policies: Mutex::new(HashMap::new()),
-            tenant_create: tokio::sync::Mutex::new(()),
+            namespace_create: tokio::sync::Mutex::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(2),
             probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),
@@ -903,14 +903,14 @@ impl Harness {
         e
     }
 
-    /// A tenant with its network known, as `load` would have it; the first takes subnet
+    /// A namespace with its network known, as `load` would have it; the first takes subnet
     /// index 1, where `record()` puts its machine. Nothing is plumbed: the bridge and the
     /// gateway's DNS listener need the host.
-    pub(in crate::machine) fn tenant(&self, id: &str) -> Tenant {
-        let mut tenants = self.m.inner.tenants.lock().unwrap();
-        let idx = tenants.len() as u32 + 1;
-        let t = Tenant::new(
-            TenantRec {
+    pub(in crate::machine) fn namespace(&self, id: &str) -> Namespace {
+        let mut namespaces = self.m.inner.namespaces.lock().unwrap();
+        let idx = namespaces.len() as u32 + 1;
+        let t = Namespace::new(
+            NamespaceRec {
                 id: id.into(),
                 subnet_index: idx,
                 created_at: Utc::now(),
@@ -918,7 +918,7 @@ impl Harness {
             },
             self.m.inner.range.subnet(idx).unwrap(),
         );
-        tenants.insert(id.into(), t.clone());
+        namespaces.insert(id.into(), t.clone());
         t
     }
 
@@ -932,11 +932,11 @@ impl Harness {
         }
     }
 
-    /// A create request in tenant `t1` from the seeded image, started unless told
+    /// A create request in namespace `t1` from the seeded image, started unless told
     /// otherwise; no volume, since a volume is formatted with the host's `mkfs.ext4`.
     pub(super) fn request(&self, name: &str) -> api::CreateMachineRequest {
         api::CreateMachineRequest {
-            tenant: "t1".into(),
+            namespace: "t1".into(),
             name: name.into(),
             image: IMAGE.into(),
             size: api::Size {
@@ -948,9 +948,9 @@ impl Harness {
         }
     }
 
-    /// Tenant `t1` and the image in place, so a `request` can be created.
+    /// Namespace `t1` and the image in place, so a `request` can be created.
     pub(super) async fn ready(&self) {
-        self.tenant("t1");
+        self.namespace("t1");
         self.m
             .inner
             .images

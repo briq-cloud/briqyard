@@ -1,10 +1,14 @@
 //! State on disk: one JSON file per record, written atomically. Small, readable, no database.
-//! Records hold tenant secrets (a machine's env), so the files are the daemon's alone.
+//! Records hold namespace secrets (a machine's env), so the files are the daemon's alone.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+
+/// The directory of the namespaces' records. It keeps its name from before namespaces were
+/// called tenants (ADR 0055): hosts already hold records there.
+pub const NAMESPACES: &str = "tenants";
 
 #[derive(Clone)]
 pub struct Store {
@@ -44,7 +48,7 @@ impl Store {
         private_dir(root)?;
         for d in [
             "machines",
-            "tenants",
+            NAMESPACES,
             "endpoints",
             "meta",
             "usage",
@@ -166,7 +170,7 @@ mod tests {
         let (dir, _) = open();
         for d in [
             "machines",
-            "tenants",
+            NAMESPACES,
             "endpoints",
             "meta",
             "usage",
@@ -212,7 +216,7 @@ mod tests {
         let (_dir, store) = open();
         assert_eq!(store.get::<Rec>("machines", "nope").unwrap(), None);
         store.delete("machines", "nope").unwrap();
-        let none: Vec<Rec> = store.list("tenants").unwrap();
+        let none: Vec<Rec> = store.list(NAMESPACES).unwrap();
         assert!(none.is_empty());
     }
 
@@ -230,24 +234,24 @@ mod tests {
             ".hidden",
             "a..b",
         ] {
-            let err = store.put("tenants", key, &r).unwrap_err();
+            let err = store.put(NAMESPACES, key, &r).unwrap_err();
             assert!(
                 err.to_string().contains("not a file name"),
                 "{key:?}: {err}"
             );
-            assert!(store.get::<Rec>("tenants", key).is_err(), "{key:?}");
-            assert!(store.delete("tenants", key).is_err(), "{key:?}");
+            assert!(store.get::<Rec>(NAMESPACES, key).is_err(), "{key:?}");
+            assert!(store.delete(NAMESPACES, key).is_err(), "{key:?}");
             assert!(store.get_meta(key).is_err(), "{key:?}");
             assert!(store.put_meta(key, "v").is_err(), "{key:?}");
         }
         // Nothing landed outside the kind's directory, and the kind is still empty.
         assert!(!dir.path().join("etc").exists());
         assert!(!dir.path().join("state/etc").exists());
-        let none: Vec<Rec> = store.list("tenants").unwrap();
+        let none: Vec<Rec> = store.list(NAMESPACES).unwrap();
         assert!(none.is_empty());
         // Ids as the API makes them are fine.
-        store.put("tenants", "t_abc-123", &r).unwrap();
-        assert_eq!(store.get::<Rec>("tenants", "t_abc-123").unwrap(), Some(r));
+        store.put(NAMESPACES, "t_abc-123", &r).unwrap();
+        assert_eq!(store.get::<Rec>(NAMESPACES, "t_abc-123").unwrap(), Some(r));
     }
 
     #[test]
@@ -276,7 +280,7 @@ mod tests {
         assert_eq!(mode(&state), 0o700);
         for d in [
             "machines",
-            "tenants",
+            NAMESPACES,
             "endpoints",
             "meta",
             "usage",

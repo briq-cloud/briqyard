@@ -1,7 +1,7 @@
 # briqyard architecture
 
 briqyard runs services for AI agents in Firecracker microVMs on servers you own: any OCI image,
-a durable disk, a private network per tenant, sleep when idle and wake on the next use. One
+a durable disk, a private network per namespace, sleep when idle and wake on the next use. One
 daemon per server (`briqyardd`), an orchestrator across servers (`briqyard-fleet`), a CLI
 (`briqyard`) and an init that runs inside every microVM (`briqyard-init`). Rust, one workspace;
 the init is a static binary (musl) because the guest has no shared libraries of ours.
@@ -16,7 +16,7 @@ Status: v0, in development. The API is not stable yet.
  ┌──────────────────────┴──────────────────────────────────────────┴─────────────────────┐
  │ briqyardd (root)                                                                        │
  │                                                                                         │
- │  machine manager ── storage (ZFS) ── network (bridge per tenant, TAP per VM, nft, DNS)  │
+ │  machine manager ── storage (ZFS) ── network (bridge per namespace, TAP per VM, nft, DNS)  │
  │        │                                                                                │
  │  firecracker process per machine ─ serial log ─ vsock to and from briqyard-init         │
  └─────────────────────────────────────────────────────────────────────────────────────────┘
@@ -31,14 +31,14 @@ Status: v0, in development. The API is not stable yet.
 A machine is one microVM running one OCI image. `POST /v1/machines` takes the
 image, command, environment, boot files, size (vCPUs, memory), an optional data volume and its
 mount path, the ports the image listens on, and the sleep window. It answers 201 once the
-machine is recorded, in `creating`: its name, an address, its tenant's quota and, when it starts,
+machine is recorded, in `creating`: its name, an address, its namespace's quota and, when it starts,
 the host's memory taken (ADR 0048). Then, in a task of its own, the daemon:
 
 1. pulls the image and turns it into a root disk, once per image digest (`image` package; four
    images at once, the creates of one image sharing its build);
 2. clones that root disk for the machine (ZFS clone: instant, copy-on-write);
 3. makes the data volume (a ZFS zvol with an ext4 filesystem), when asked;
-4. gives the machine an address on its tenant's bridge and a TAP device;
+4. gives the machine an address on its namespace's bridge and a TAP device;
 5. writes a config drive (a tar archive, read raw by the init: `config.json`, the boot files);
 6. starts Firecracker with the kernel, the three drives, the TAP and a vsock, and watches it.
 
@@ -96,7 +96,7 @@ once (ADR 0047). Startup runs first and gates the others; `ready` is true at `ru
 startup or readiness probe, else when they pass; liveness failures end the process as a failure
 for the restart policy. A startup failure on a run a caller asked for is a failed boot (`error`,
 ADR 0011); on a run the policy started, a crash. `/wait` waits for `ready` (`?for=running`
-otherwise), and so do the ingress before it proxies and a start that needs the tenant's gateway
+otherwise), and so do the ingress before it proxies and a start that needs the namespace's gateway
 when the gateway has probes. A start answers at `running`, a create at `creating`. A restart waits 10 s,
 doubling to 5 minutes, reset by a run of 10 minutes; `restarting_at` says when, and the third
 in a row is a `crash_loop` event. Probes are not use: they never keep a machine awake.
@@ -180,15 +180,15 @@ blob is checked against its digest, so a mirror can fail a pull, never change wh
 
 ### Network
 
-One Linux bridge per tenant (`by<n>`), one /24 from `10.64.0.0/10` per tenant, the host as
+One Linux bridge per namespace (`by<n>`), one /24 from `10.64.0.0/10` per namespace, the host as
 gateway (`.1`), one TAP per machine (`bt` + the machine id's 12 hex digits). nftables, two tables
 rendered at start (`nft list table inet briqyard`, `nft list table bridge briqyard`, ADR 0012):
-the forward chain drops by default and accepts only a tenant's way to the internet through the
-egress interface, never to a private network, another tenant or in IPv6; the input chain lets a
-tenant reach its gateway's DNS and ping and nothing else of the host, and lets only
+the forward chain drops by default and accepts only a namespace's way to the internet through the
+egress interface, never to a private network, another namespace or in IPv6; the input chain lets a
+namespace reach its gateway's DNS and ping and nothing else of the host, and lets only
 `ingress.allowed_clients` reach the API, the HTTP ingress and the TCP endpoints; a `bridge`
 family chain pins every TAP to its machine's address (IP and ARP), so a guest that changes its
-address sends nothing. A machine start adds its pin, a stop removes it; a tenant changes no rule.
+address sends nothing. A machine start adds its pin, a stop removes it; a namespace changes no rule.
 The daemon answers DNS on every gateway: `<alias>.internal` follows the machine's alias (what a sibling's
 env holds), `<id>.vm.internal` is that exact machine; everything else is forwarded upstream.
 Packets are decoded and encoded by `hickory-proto` (ADR 0033); one that does not parse is dropped.
@@ -196,7 +196,7 @@ The guest configures its interface from the config drive (`briqyard-init`), so t
 needs no `ip=` support.
 
 Each machine has an egress policy (`egress` on create and PATCH, ADR 0015): `open` (the
-default), `none` (its tenant, no internet: `egress_none` in the inet forward chain) or
+default), `none` (its namespace, no internet: `egress_none` in the inet forward chain) or
 `via: <machine>` (only that sibling, any port, and the gateway's DNS: `via_sources` and
 `via_allowed` in the bridge chain, IP and ARP, before the pins). Under `via` and `none` the
 resolver answers internal names only, NXDOMAIN for the rest. An `open` machine's policy is its
@@ -208,11 +208,11 @@ three counter sets count what they drop. The policy is set at every start
 right after the pin, taken out with it, swapped live on a running machine in one transaction, and rendered from
 the running records at daemon start.
 
-A tenant may have a gateway (ADR 0016): `PUT /v1/tenants/{id}/gateway` (an image, its command,
-env and boot files, a port) makes a machine of the daemon (`role: gateway` on its record) on the tenant's bridge, named `gateway.internal`, absent
-from the tenant's listing and counts, destroyed with the tenant. `via: gateway` names it. A
+A namespace may have a gateway (ADR 0016): `PUT /v1/namespaces/{id}/gateway` (an image, its command,
+env and boot files, a port) makes a machine of the daemon (`role: gateway` on its record) on the namespace's bridge, named `gateway.internal`, absent
+from the namespace's listing and counts, destroyed with the namespace. `via: gateway` names it. A
 start of such a machine (a wake too) first starts the gateway and waits for its port, under the
-tenant's lock, held until the machine is `starting`; the sleeper stops the gateway once no such
+namespace's lock, held until the machine is `starting`; the sleeper stops the gateway once no such
 machine runs or starts. A gateway that does not come up fails that start with `boot_failed`,
 the machine unmoved, the gateway's reason and console in its `error`. Its program is restarted
 whenever it ends on its own (`restart: always`), and a daemon start that adopts a machine
@@ -297,14 +297,14 @@ of quiet, and closes a watcher that falls 1,024 events behind. Repeats of `sessi
 `quota_exceeded`, `ready` and `not_ready` within 10 minutes of their line are folded (ADR 0047):
 the log keeps the first and, at the window's end (the tick, the next one, any other line about
 the machine, the shutdown), one line with `count` and `first_at`; a folded flip still takes a
-seq, its machine's version, with no line. Retention is `events_keep_days` and 100,000 lines. The fleet sends a tenant's or a machine's
+seq, its machine's version, with no line. Retention is `events_keep_days` and 100,000 lines. The fleet sends a namespace's or a machine's
 read to its host and merges a read of every host, never partial, with a cursor per host.
 
 ### Metrics and conditions
 
 The tick's measure is also what the host shows (ADR 0021): each machine's meter keeps its
 counters' totals since the daemon started, the cgroup's memory and the last two readings, and
-`/metrics` formats them with each machine's `machine`, `tenant`, `name` and `role` labels, so a
+`/metrics` formats them with each machine's `machine`, `namespace`, `name` and `role` labels, so a
 scrape probes nothing. `GET /v1/top` takes CPU percent and network rates from the last two
 readings, 15 s apart. After the measure the tick reads the pool once and decides the host's
 conditions (`conditions.rs`): `memory_pressure`, committed memory over `memory_pct` of
@@ -332,8 +332,8 @@ command (SIGKILL to its group; SIGHUP first on a terminal); the daemon pings the
 ### Labels and quotas
 
 A machine's `metadata` is its labels: `GET /v1/machines?label=k=v&label=k` keeps the machines
-every selector matches (`api::Label`, equality and existence, ADR 0025). A tenant's quota
-(`TenantRec.quota`, `PUT /v1/tenants/{id}/quota`) limits its machines and the volumes' sizes,
+every selector matches (`api::Label`, equality and existence, ADR 0025). A namespace's quota
+(`NamespaceRec.quota`, `PUT /v1/namespaces/{id}/quota`) limits its machines and the volumes' sizes,
 checked in `add_machine` under the map's lock (a create, a fork, a restore, the gateway) and in
 `grow_volume` (a volume's growth, ADR 0040), and
 its machines' memory and vCPUs, checked in `reserve` with the host's own memory, so two starts
@@ -373,37 +373,37 @@ installed version that stopped no machine, and puts the host back; the fleet is 
 ## Several servers
 
 `briqyard-fleet` offers the same machine API as a daemon and forwards each request to the host
-that runs the machine. It places each tenant on one host: a tenant's machines share a host, so
+that runs the machine. It places each namespace on one host: a namespace's machines share a host, so
 its private network needs no overlay. Placement picks, among ready hosts under the fill
 ceiling, with no condition true and of the create's `region` when it names one, the one with the
-most free memory; a fork lands where its source is, and a tenant's host or a fork's source's
-with a condition true answers 503 `capacity` before it is asked. A tenant's region is its host's:
+most free memory; a fork lands where its source is, and a namespace's host or a fork's source's
+with a condition true answers 503 `capacity` before it is asked. A namespace's region is its host's:
 a create naming another answers 400 (ADR 0025). What a placement
 puts on a host is held there (counted as used) until a report of the host counts it, so a burst
 of creates spreads; a create the host refuses gives its hold back at once, and a destroy's
 answer waits for the host's figures, so the room it freed is there for the next create (ADR
-0044); a host that answers `capacity` for a tenant's first machine loses the pin, so the
-retry is placed afresh. A tenant's gateway goes to the tenant's host (`GET /v1/tenants/{id}`
-and `/gateway` are forwarded there); a PUT for a tenant with no host places it as a first machine
+0044); a host that answers `capacity` for a namespace's first machine loses the pin, so the
+retry is placed afresh. A namespace's gateway goes to the namespace's host (`GET /v1/namespaces/{id}`
+and `/gateway` are forwarded there); a PUT for a namespace with no host places it as a first machine
 would, the gateway's size as the need, in `?region=`; a quota PUT does the same with no need.
 A logs follow is streamed through as an events watch is; an exec session's WebSocket is
-relayed as bytes once the host answered its upgrade (ADR 0029). `POST /v1/tenants/{id}/unpin` releases a tenant by hand (ADR 0013).
+relayed as bytes once the host answered its upgrade (ADR 0029). `POST /v1/namespaces/{id}/unpin` releases a namespace by hand (ADR 0013).
 
-Hosts report their capacity and tenants (`POST /v1/hosts/register`, every 15 s, from the
+Hosts report their capacity and namespaces (`POST /v1/hosts/register`, every 15 s, from the
 daemon's `fleet:` configuration) or are listed in the fleet's configuration and polled. A host
 has one credential, its own API token: the fleet forwards with it and the host's heartbeat
 presents it, and a heartbeat is taken only for the host record that expects that token at that
 address (the record of a `host add`, or a `hosts:` entry); any other is refused. A host silent for
 a minute is `down`: its machines' calls answer 503 `host_down` until it is back, and a listing
-of machines or endpoints is never partial (a tenant's listing asks its host alone; a host that
+of machines or endpoints is never partial (a namespace's listing asks its host alone; a host that
 is down or does not answer fails the listing), since a control plane reads a machine missing
 from a listing as gone. `POST /v1/hosts/{id}/drain` stops placing on a host (`draining`),
 `undrain` resumes it; a host `upgrading` or `retiring` takes nothing new either. The registry
-(hosts, tenant → host, machine → host, endpoint → host) is one JSON file, written one write at
+(hosts, namespace → host, machine → host, endpoint → host) is one JSON file, written one write at
 a time, each with the registry as it is when its turn comes; a write that fails before a host is
 asked fails the request, one after the host acted is logged and the host's answer stands (ADR
 0043). A destroyed machine's backups are reached on the host that holds them, wherever its
-tenant is now (ADR 0045). It is written to the object store once a minute when it
+namespace is now (ADR 0045). It is written to the object store once a minute when it
 changed, encrypted with age to a key kept off the fleet's host, and before any pool key is
 served; `briqyard-fleet restore` brings it back (ADR 0032).
 
@@ -433,7 +433,7 @@ reporting another fingerprint, or reporting one for a host with none pinned, is 
 CLI pins a daemon the same way (`--tls-fingerprint`, the same verifier in `briqyard-api`). The
 ingress and TCP endpoints are not covered by TLS: they ride the private network (ADR 0028; across networks, `MESH.md`).
 
-A WireGuard mesh between hosts, so a tenant can span several, is the next step after that: `MESH.md` is its design.
+A WireGuard mesh between hosts, so a namespace can span several, is the next step after that: `MESH.md` is its design.
 
 ## Security
 
@@ -441,9 +441,9 @@ Every machine is a KVM virtual machine: its own kernel, its own memory, three vi
 a vsock. With `jailer` configured (every deployment; only development runs without it), the
 daemon launches Firecracker through Firecracker's jailer: a chroot per machine under `jail_dir`
 holding only the kernel, the config drive, the machine's block device nodes and its sockets; a
-uid and gid of its own (`jail_uid_base` plus its place in the tenant's network, so no two
+uid and gid of its own (`jail_uid_base` plus its place in the namespace's network, so no two
 machines share one); a new pid namespace; a cgroup v2 of its own; and Firecracker's seccomp
-filters. The daemon never mounts a guest filesystem. Guests reach only their tenant's bridge,
+filters. The daemon never mounts a guest filesystem. Guests reach only their namespace's bridge,
 the gateway's DNS, and the internet through NAT; nothing reaches a guest but the ingress.
 Secrets reach the guest on its config drive and never through the API's responses. At rest
 everything of a machine (disks, records, config drives, consoles, memory snapshots) is on the
@@ -453,11 +453,11 @@ the host (ADR 0026).
 The daemon runs as root (ZFS, TAP devices, nftables, mknod in the jails). Its API and its
 endpoints listen on loopback unless told otherwise; on an address the internet could reach it
 refuses to start until `ingress.allowed_clients` says who may connect (ADR 0012). Off
-loopback the API is TLS with the host's own certificate (ADR 0020). Every id a caller sends (a tenant, a machine id
+loopback the API is TLS with the host's own certificate (ADR 0020). Every id a caller sends (a namespace, a machine id
 in a path) is checked (`a-z`, `0-9`, `_`, `-`, 64 at most) before it names a file or an object.
 A pid in a record is signalled only when `/proc` shows it is the Firecracker of that machine:
 after a reboot, the number is someone else's. What it writes is its own: umask `077`,
 `data_dir` and everything under it `0700`, records and config drives `0600`, the drive's copy
 in the jail `0400` for the jail's user, so no other local uid (another machine's Firecracker
-included) reads a tenant's secrets (ADR 0014). A state key is a file name: `Store::path`
+included) reads a namespace's secrets (ADR 0014). A state key is a file name: `Store::path`
 refuses a key that would leave its directory, behind the API's own validation of ids.

@@ -51,7 +51,7 @@ async fn a_machine_running_across_an_hour_has_two_buckets_that_split_its_seconds
     assert_eq!(
         (
             b.machine_id.as_str(),
-            b.tenant.as_str(),
+            b.namespace.as_str(),
             &b.role,
             b.size.memory_mb
         ),
@@ -210,7 +210,7 @@ async fn internet_and_ingress_bytes_land_on_their_machine() {
     };
     assert_eq!(net(&ua.usage), (1001, 100, 0, 0));
     assert_eq!(net(&ub.usage), (0, 0, 7, 70));
-    // The tenant's gateway is a machine of the daemon: its bucket says so.
+    // The namespace's gateway is a machine of the daemon: its bucket says so.
     assert_eq!(ub.role.as_deref(), Some("gateway"));
     assert_eq!(ua.role, None);
     drop(a);
@@ -255,7 +255,7 @@ async fn a_restart_reads_the_open_hour_back_and_closes_one_left_open() {
     let left = api::UsageBucket {
         hour: at("2026-10-20T12:00:00Z"),
         machine_id: "m_old".into(),
-        tenant: "t1".into(),
+        namespace: "t1".into(),
         ..Default::default()
     };
     h.m.inner
@@ -392,7 +392,7 @@ async fn the_usage_route_checks_its_range() {
     let bs: Vec<api::UsageBucket> = r.json().await.unwrap();
     assert_eq!(bs.len(), 1);
     assert_eq!(bs[0].usage.running_seconds, 600.0);
-    let r = get("?from=2026-10-20T14:00:00Z&to=2026-10-20T15:00:00Z&tenant=t2")
+    let r = get("?from=2026-10-20T14:00:00Z&to=2026-10-20T15:00:00Z&namespace=t2")
         .await
         .unwrap();
     assert_eq!(r.json::<Vec<api::UsageBucket>>().await.unwrap().len(), 0);

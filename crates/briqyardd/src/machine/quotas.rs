@@ -1,4 +1,4 @@
-//! A tenant's quota (ADR 0025) and the host's committed memory.
+//! A namespace's quota (ADR 0025) and the host's committed memory.
 
 use super::*;
 
@@ -10,10 +10,10 @@ pub(super) fn admit(used: u32, cap: u32, need: u32) -> Result<(), MError> {
     }
 }
 
-/// A limit of a tenant's quota that a create or a start would pass (ADR 0025).
+/// A limit of a namespace's quota that a create or a start would pass (ADR 0025).
 #[derive(Debug, PartialEq)]
 pub(super) struct Exceeded {
-    pub(super) tenant: String,
+    pub(super) namespace: String,
     pub(super) resource: &'static str,
     pub(super) limit: u32,
     pub(super) used: u32,
@@ -24,8 +24,8 @@ impl std::fmt::Display for Exceeded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "tenant {}'s quota: {} {} of {} used, {} more asked",
-            self.tenant, self.resource, self.used, self.limit, self.need
+            "namespace {}'s quota: {} {} of {} used, {} more asked",
+            self.namespace, self.resource, self.used, self.limit, self.need
         )
     }
 }
@@ -41,7 +41,7 @@ impl Exceeded {
 /// The first limit of `quota` that `need` more would pass next to `used`; a resource the
 /// request does not ask for is never refused, even past a limit lowered under the use.
 pub(super) fn over_quota(
-    tenant: &str,
+    namespace: &str,
     quota: &api::Quota,
     used: &api::QuotaUse,
     need: &api::QuotaUse,
@@ -56,7 +56,7 @@ pub(super) fn over_quota(
     .find_map(|(resource, limit, used, need)| {
         let limit = limit?;
         (need > 0 && used.saturating_add(need) > limit).then(|| Exceeded {
-            tenant: tenant.into(),
+            namespace: namespace.into(),
             resource,
             limit,
             used,
@@ -65,7 +65,7 @@ pub(super) fn over_quota(
     })
 }
 
-/// What a machine of this record counts toward its tenant's quota: itself, its volume, and
+/// What a machine of this record counts toward its namespace's quota: itself, its volume, and
 /// its size while it holds memory, or when `starting` it is about to.
 pub(super) fn quota_need(r: &Record, starting: bool) -> api::QuotaUse {
     let runs = starting || commits_memory(r);
@@ -77,12 +77,15 @@ pub(super) fn quota_need(r: &Record, starting: bool) -> api::QuotaUse {
     }
 }
 
-/// What a tenant's machines hold, its gateway included: its quota's use.
-pub(super) fn tenant_use(machines: &HashMap<String, Arc<Entry>>, tenant: &str) -> api::QuotaUse {
+/// What a namespace's machines hold, its gateway included: its quota's use.
+pub(super) fn namespace_use(
+    machines: &HashMap<String, Arc<Entry>>,
+    namespace: &str,
+) -> api::QuotaUse {
     let mut u = api::QuotaUse::default();
     for e in machines.values() {
         let r = e.rec.lock().unwrap();
-        if r.tenant == tenant {
+        if r.namespace == namespace {
             let n = quota_need(&r, false);
             u.machines += n.machines;
             u.memory_mb += n.memory_mb;
@@ -96,33 +99,39 @@ pub(super) fn tenant_use(machines: &HashMap<String, Arc<Entry>>, tenant: &str) -
 impl Manager {
     // --- quotas (ADR 0025) ---
 
-    /// The tenant's quota and what it holds.
-    pub fn quota(&self, tenant: &str) -> Result<api::TenantQuota, MError> {
-        let quota = self.tenant_of(tenant).ok_or(MError::NotFound)?.rec.quota;
-        let used = tenant_use(&self.inner.machines.lock().unwrap(), tenant);
-        Ok(api::TenantQuota {
-            tenant: tenant.into(),
+    /// The namespace's quota and what it holds.
+    pub fn quota(&self, namespace: &str) -> Result<api::NamespaceQuota, MError> {
+        let quota = self
+            .namespace_of(namespace)
+            .ok_or(MError::NotFound)?
+            .rec
+            .quota;
+        let used = namespace_use(&self.inner.machines.lock().unwrap(), namespace);
+        Ok(api::NamespaceQuota {
+            namespace: namespace.into(),
             quota,
             used,
         })
     }
 
-    /// Puts the tenant's quota, the tenant made when it has nothing yet (as a gateway is), so
+    /// Puts the namespace's quota, the namespace made when it has nothing yet (as a gateway is), so
     /// its first create is held to it. A quota under the use stops nothing: what comes next
     /// is refused.
     pub async fn set_quota(
         &self,
-        tenant: &str,
+        namespace: &str,
         quota: api::Quota,
-    ) -> Result<api::TenantQuota, MError> {
-        check_tenant_id(tenant)?;
-        let mut t = self.ensure_tenant(tenant).await?;
+    ) -> Result<api::NamespaceQuota, MError> {
+        check_namespace_id(namespace)?;
+        let mut t = self.ensure_namespace(namespace).await?;
         t.rec.quota = quota;
-        self.inner.store.put("tenants", tenant, &t.rec)?;
-        if let Some(kept) = self.inner.tenants.lock().unwrap().get_mut(tenant) {
+        self.inner
+            .store
+            .put(crate::store::NAMESPACES, namespace, &t.rec)?;
+        if let Some(kept) = self.inner.namespaces.lock().unwrap().get_mut(namespace) {
             kept.rec.quota = quota;
         }
-        self.quota(tenant)
+        self.quota(namespace)
     }
 }
 

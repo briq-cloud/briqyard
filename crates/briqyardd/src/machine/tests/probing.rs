@@ -489,7 +489,7 @@ async fn a_gateway_with_a_readiness_probe_is_waited_for_ready_not_its_port() {
     };
     assert!(
         m.error
-            .starts_with("the tenant's gateway did not come up: not ready: "),
+            .starts_with("the namespace's gateway did not come up: not ready: "),
         "{}",
         m.error
     );
@@ -512,7 +512,7 @@ async fn a_gateway_with_a_readiness_probe_is_waited_for_ready_not_its_port() {
 #[tokio::test(start_paused = true)]
 async fn an_adopted_machine_runs_its_probes_again() {
     let h = harness("10.64.0.0/22", 4096).await;
-    h.tenant("t1");
+    h.namespace("t1");
     let e = h.add("m_ours", state::RUNNING, 256);
     let pid = h
         .host
@@ -596,7 +596,7 @@ async fn a_flapping_readiness_probe_is_folded_and_its_version_still_moves() {
 #[tokio::test(start_paused = true)]
 async fn probes_of_machines_adopted_at_a_start_are_spread_over_their_period() {
     let h = harness("10.64.0.0/22", 4096).await;
-    h.tenant("t1");
+    h.namespace("t1");
     let p = api::Probe {
         tcp: Some(80),
         ..Default::default()

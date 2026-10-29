@@ -1,33 +1,33 @@
-//! A tenant's bridge and rules, and the egress policy of each machine.
+//! A namespace's bridge and rules, and the egress policy of each machine.
 
 use super::*;
 
 impl Manager {
-    // --- tenants ---
+    // --- namespaces ---
 
-    pub(super) async fn plumb_tenant(&self, t: &Tenant) -> Result<()> {
+    pub(super) async fn plumb_namespace(&self, t: &Namespace) -> Result<()> {
         self.inner.net.ensure_bridge(&t.subnet).await?;
         self.inner.dns.listen(t.subnet.gateway()).await?;
         Ok(())
     }
 
-    pub(super) async fn ensure_tenant(&self, id: &str) -> Result<Tenant> {
-        if let Some(t) = self.inner.tenants.lock().unwrap().get(id) {
+    pub(super) async fn ensure_namespace(&self, id: &str) -> Result<Namespace> {
+        if let Some(t) = self.inner.namespaces.lock().unwrap().get(id) {
             return Ok(t.clone());
         }
-        // One tenant is made at a time: two made together would read the same free subnet
+        // One namespace is made at a time: two made together would read the same free subnet
         // index before either had taken it, and share a bridge.
-        let _creating = self.inner.tenant_create.lock().await;
-        if let Some(t) = self.inner.tenants.lock().unwrap().get(id) {
+        let _creating = self.inner.namespace_create.lock().await;
+        if let Some(t) = self.inner.namespaces.lock().unwrap().get(id) {
             return Ok(t.clone());
         }
         let t = {
-            let tenants = self.inner.tenants.lock().unwrap();
-            let used: Vec<u32> = tenants.values().map(|t| t.rec.subnet_index).collect();
+            let namespaces = self.inner.namespaces.lock().unwrap();
+            let used: Vec<u32> = namespaces.values().map(|t| t.rec.subnet_index).collect();
             let idx = netw::first_free(used, 0, self.inner.range.count() - 1)
-                .ok_or_else(|| anyhow!("no tenant subnet left"))?;
-            Tenant::new(
-                TenantRec {
+                .ok_or_else(|| anyhow!("no namespace subnet left"))?;
+            Namespace::new(
+                NamespaceRec {
                     id: id.to_string(),
                     subnet_index: idx,
                     created_at: Utc::now(),
@@ -36,10 +36,10 @@ impl Manager {
                 self.inner.range.subnet(idx)?,
             )
         };
-        self.plumb_tenant(&t).await?;
-        self.inner.store.put("tenants", id, &t.rec)?;
+        self.plumb_namespace(&t).await?;
+        self.inner.store.put(crate::store::NAMESPACES, id, &t.rec)?;
         self.inner
-            .tenants
+            .namespaces
             .lock()
             .unwrap()
             .insert(id.to_string(), t.clone());
@@ -108,26 +108,26 @@ impl Manager {
 
     // --- egress (ADR 0015) ---
 
-    /// An egress policy a machine of `tenant` may take: one of the modes, and for `via` a
-    /// machine of the same tenant other than `me`, or the tenant's gateway.
+    /// An egress policy a machine of `namespace` may take: one of the modes, and for `via` a
+    /// machine of the same namespace other than `me`, or the namespace's gateway.
     pub(super) fn check_egress(
         &self,
         e: &api::Egress,
-        tenant: &str,
+        namespace: &str,
         me: &str,
     ) -> Result<(), MError> {
         e.check().map_err(invalid)?;
         if e.mode == api::egress::VIA {
-            self.via_target(e, tenant, me)?;
+            self.via_target(e, namespace, me)?;
         }
         Ok(())
     }
 
     /// The address of the machine a `via` policy names: fixed for that machine's life.
-    fn via_target(&self, e: &api::Egress, tenant: &str, me: &str) -> Result<String, MError> {
+    fn via_target(&self, e: &api::Egress, namespace: &str, me: &str) -> Result<String, MError> {
         let id = if e.via_gateway() {
-            self.gateway_of(tenant)
-                .ok_or_else(|| no_gateway(tenant))?
+            self.gateway_of(namespace)
+                .ok_or_else(|| no_gateway(namespace))?
                 .snapshot()
                 .id
         } else {
@@ -145,15 +145,15 @@ impl Manager {
             .map(|e| e.snapshot())
             .filter(|r| r.state != state::DESTROYING)
             .ok_or_else(|| invalid(format!("egress.via {id}: no such machine")))?;
-        if target.tenant != tenant {
+        if target.namespace != namespace {
             return Err(invalid(format!(
-                "egress.via {id}: a machine of another tenant"
+                "egress.via {id}: a machine of another namespace"
             )));
         }
         Ok(target.ip)
     }
 
-    /// The policy a record asks for, resolved against its tenant, with the tenant's gateway:
+    /// The policy a record asks for, resolved against its namespace, with the namespace's gateway:
     /// `None` for open with nothing to limit. An open machine's limits are its own over the
     /// host's (ADR 0018); `via` and `none` never reach the NAT, so they carry none.
     pub(super) fn policy_for(&self, r: &Record) -> Result<Option<(Ipv4Addr, nft::Policy)>, MError> {
@@ -162,15 +162,15 @@ impl Manager {
             return Ok(None);
         }
         let t = self
-            .tenant_of(&r.tenant)
-            .ok_or_else(|| anyhow!("tenant network is gone"))?;
+            .namespace_of(&r.namespace)
+            .ok_or_else(|| anyhow!("namespace network is gone"))?;
         let gateway = t.subnet.gateway();
         let ip = r.ip.clone();
         let p = match r.egress.mode.as_str() {
             api::egress::OPEN => nft::Policy::Open { ip, limits },
             api::egress::VIA => nft::Policy::Via {
                 ip,
-                to: self.via_target(&r.egress, &r.tenant, &r.id)?,
+                to: self.via_target(&r.egress, &r.namespace, &r.id)?,
                 host: gateway.to_string(),
             },
             _ => nft::Policy::None { ip },
@@ -288,12 +288,12 @@ impl Manager {
         }
     }
 
-    /// Republishes a tenant's names on its gateway.
-    pub(super) fn refresh_dns(&self, t: &Tenant) {
+    /// Republishes a namespace's names on its gateway.
+    pub(super) fn refresh_dns(&self, t: &Namespace) {
         let mut names: HashMap<String, Ipv4Addr> = HashMap::new();
         for e in self.inner.machines.lock().unwrap().values() {
             let r = e.rec.lock().unwrap();
-            if r.tenant != t.rec.id {
+            if r.namespace != t.rec.id {
                 continue;
             }
             if let Ok(ip) = r.ip.parse::<Ipv4Addr>() {

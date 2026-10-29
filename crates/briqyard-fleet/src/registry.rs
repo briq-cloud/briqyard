@@ -1,4 +1,4 @@
-//! The hosts the fleet knows, where each tenant lives, and the decisions made from that:
+//! The hosts the fleet knows, where each namespace lives, and the decisions made from that:
 //! placement, and when to add or release a host. Pure logic, tested without a network.
 
 use briqyard_api::{self as api, Capacity, Condition, DaemonStart, Host};
@@ -77,7 +77,8 @@ pub struct HostRec {
     #[serde(default)]
     pub machines: usize,
     #[serde(default)]
-    pub tenants: Vec<String>,
+    #[serde(alias = "tenants")]
+    pub namespaces: Vec<String>,
     pub last_seen: DateTime<Utc>,
     #[serde(default)]
     pub version: String,
@@ -184,7 +185,7 @@ impl HostRec {
             capacity: self.capacity,
             used: self.used,
             machines: self.machines,
-            tenants: self.tenants.clone(),
+            namespaces: self.namespaces.clone(),
             last_seen: self.last_seen,
             version: self.version.clone(),
             note: self.note.clone(),
@@ -201,24 +202,24 @@ impl HostRec {
             .map(|c| format!("host {} is under {}: {}", self.id, c.kind, c.message))
     }
 
-    /// Why a machine asked in `region` cannot join `tenant` on this host: a tenant never spans
+    /// Why a machine asked in `region` cannot join `namespace` on this host: a namespace never spans
     /// regions (ADR 0025). No region asked: any.
-    pub fn outside(&self, tenant: &str, region: &str) -> Option<String> {
+    pub fn outside(&self, namespace: &str, region: &str) -> Option<String> {
         (!region.is_empty() && self.region != region).then(|| {
             format!(
-                "tenant {tenant} is in region {:?} (host {}), not {region:?}: a tenant never spans regions",
+                "namespace {namespace} is in region {:?} (host {}), not {region:?}: a namespace never spans regions",
                 self.region, self.id
             )
         })
     }
 
-    /// Whether a new tenant may be placed here: ready, under the ceiling, no pressure.
-    fn takes_new_tenants(&self, policy: &Policy) -> bool {
-        self.has_memory_for_tenants(policy) && self.pressure().is_none()
+    /// Whether a new namespace may be placed here: ready, under the ceiling, no pressure.
+    fn takes_new_namespaces(&self, policy: &Policy) -> bool {
+        self.has_memory_for_namespaces(policy) && self.pressure().is_none()
     }
 
-    /// Ready and under the fill ceiling: what `takes_new_tenants` asks but the conditions.
-    fn has_memory_for_tenants(&self, policy: &Policy) -> bool {
+    /// Ready and under the fill ceiling: what `takes_new_namespaces` asks but the conditions.
+    fn has_memory_for_namespaces(&self, policy: &Policy) -> bool {
         self.state == "ready" && self.fill() < policy.fill_ceiling
     }
 
@@ -270,7 +271,7 @@ pub fn tls_matches(pinned: &str, reported: &str, url: &str) -> Result<(), String
 /// Placement settings.
 #[derive(Clone, Debug)]
 pub struct Policy {
-    /// A host above this share of its memory takes no new tenant.
+    /// A host above this share of its memory takes no new namespace.
     pub fill_ceiling: f64,
     /// A host silent for this long is down.
     pub down_after: Duration,
@@ -288,14 +289,15 @@ impl Default for Policy {
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Registry {
     pub hosts: HashMap<String, HostRec>,
-    /// tenant → host id. A tenant's machines share a host, so its network needs no overlay.
-    pub tenants: HashMap<String, String>,
+    /// namespace → host id. A namespace's machines share a host, so its network needs no overlay.
+    #[serde(alias = "tenants")]
+    pub namespaces: HashMap<String, String>,
     /// machine id → host id, learned from creates and listings.
     pub machines: HashMap<String, String>,
     /// endpoint id → host id, learned the same way.
     #[serde(default)]
     pub endpoints: HashMap<String, String>,
-    /// When each tenant was pinned by a placement (not by a heartbeat).
+    /// When each namespace was pinned by a placement (not by a heartbeat).
     #[serde(default)]
     pub pinned_at: HashMap<String, DateTime<Utc>>,
     /// The pool keys of forgotten hosts (ADR 0035): a host's backups are encrypted under its
@@ -359,7 +361,7 @@ impl Registry {
         entry.capacity = h.capacity;
         entry.report(h.used, h.disk_free_mb, now);
         entry.machines = h.machines;
-        entry.tenants = h.tenants.clone();
+        entry.namespaces = h.namespaces.clone();
         entry.version = h.version;
         entry.conditions = h.conditions.clone();
         entry.started = h.started;
@@ -369,24 +371,25 @@ impl Registry {
         if !serving(&entry.state) {
             entry.state = "ready".into();
         }
-        // The host's list is the truth for the tenants pinned to it: a pin whose tenant the host
+        // The host's list is the truth for the namespaces pinned to it: a pin whose namespace the host
         // no longer has (removed on the host, or a leftover) goes, so the name can be placed again.
         // A pin made at placement is younger than the machine it placed: the host lists the
-        // tenant only once the create has landed, so a fresh pin is kept whatever the host says.
+        // namespace only once the create has landed, so a fresh pin is kept whatever the host says.
         let id = entry.id.clone();
         let pinned_at = &self.pinned_at;
-        self.tenants.retain(|t, host| {
+        self.namespaces.retain(|t, host| {
             *host != id
-                || h.tenants.contains(t)
+                || h.namespaces.contains(t)
                 || pinned_at
                     .get(t)
                     .map(|at| now - *at < Duration::minutes(10))
                     .unwrap_or(false)
         });
-        for t in h.tenants {
-            self.tenants.entry(t).or_insert_with(|| id.clone());
+        for t in h.namespaces {
+            self.namespaces.entry(t).or_insert_with(|| id.clone());
         }
-        self.pinned_at.retain(|t, _| self.tenants.contains_key(t));
+        self.pinned_at
+            .retain(|t, _| self.namespaces.contains_key(t));
     }
 
     /// The pool key of a host, made now when it has none (`true` then): the caller writes the
@@ -420,10 +423,11 @@ impl Registry {
                 retired_at: Utc::now(),
             });
         }
-        self.tenants.retain(|_, h| h != id);
+        self.namespaces.retain(|_, h| h != id);
         self.machines.retain(|_, h| h != id);
         self.endpoints.retain(|_, h| h != id);
-        self.pinned_at.retain(|t, _| self.tenants.contains_key(t));
+        self.pinned_at
+            .retain(|t, _| self.namespaces.contains_key(t));
     }
 
     /// Retiring hosts that have nothing left on them: ready to be forgotten. A drained host
@@ -431,7 +435,7 @@ impl Registry {
     pub fn retirable(&self) -> Vec<HostRec> {
         self.hosts
             .values()
-            .filter(|h| h.state == "retiring" && h.machines == 0 && h.tenants.is_empty())
+            .filter(|h| h.state == "retiring" && h.machines == 0 && h.namespaces.is_empty())
             .cloned()
             .collect()
     }
@@ -445,37 +449,37 @@ impl Registry {
         }
     }
 
-    /// The host of a tenant, or the best host for a new one: of `region` when one is asked
+    /// The host of a namespace, or the best host for a new one: of `region` when one is asked
     /// (ADR 0025), the readiest with the most free memory under the ceiling and no pressure,
     /// with room for `need_mb` of memory and `need_disk_mb` of disk (a host that reports no
     /// disk figure is not held to it). The caller then holds the need on the host (`hold`),
     /// so a burst of creates does not all land on the host the last report showed emptiest.
-    /// A pinned tenant's host under pressure or in another region is the caller's to refuse
+    /// A pinned namespace's host under pressure or in another region is the caller's to refuse
     /// (`HostRec::pressure`, `other_region`).
     pub fn place(
         &mut self,
-        tenant: &str,
+        namespace: &str,
         region: &str,
         need_mb: u32,
         need_disk_mb: u64,
         policy: &Policy,
     ) -> Option<String> {
-        let id = match self.tenants.get(tenant) {
+        let id = match self.namespaces.get(namespace) {
             Some(h) => h.clone(),
             None => {
                 let best = self
                     .hosts
                     .values()
                     .filter(|h| {
-                        h.takes_new_tenants(policy)
+                        h.takes_new_namespaces(policy)
                             && (region.is_empty() || h.region == region)
                             && h.free_memory_mb() >= need_mb
                             && h.has_disk(need_disk_mb)
                     })
                     .max_by_key(|h| h.free_memory_mb())?;
                 let id = best.id.clone();
-                self.tenants.insert(tenant.to_string(), id.clone());
-                self.pinned_at.insert(tenant.to_string(), Utc::now());
+                self.namespaces.insert(namespace.to_string(), id.clone());
+                self.pinned_at.insert(namespace.to_string(), Utc::now());
                 id
             }
         };
@@ -525,20 +529,22 @@ impl Registry {
         h.disk_free_mb += hold.took_disk_mb;
     }
 
-    /// Releases a tenant from its host: its next machine is placed afresh. The host's next
-    /// heartbeat pins it again if the tenant still has machines there.
-    pub fn unpin(&mut self, tenant: &str) {
-        self.tenants.remove(tenant);
-        self.pinned_at.remove(tenant);
+    /// Releases a namespace from its host: its next machine is placed afresh. The host's next
+    /// heartbeat pins it again if the namespace still has machines there.
+    pub fn unpin(&mut self, namespace: &str) {
+        self.namespaces.remove(namespace);
+        self.pinned_at.remove(namespace);
     }
 
-    pub fn host_of_tenant(&self, tenant: &str) -> Option<&HostRec> {
-        self.tenants.get(tenant).and_then(|id| self.hosts.get(id))
+    pub fn host_of_namespace(&self, namespace: &str) -> Option<&HostRec> {
+        self.namespaces
+            .get(namespace)
+            .and_then(|id| self.hosts.get(id))
     }
 
-    /// A tenant's region: its host's. No second record of it, so the two cannot disagree.
-    pub fn region_of(&self, tenant: &str) -> Option<&str> {
-        self.host_of_tenant(tenant).map(|h| h.region.as_str())
+    /// A namespace's region: its host's. No second record of it, so the two cannot disagree.
+    pub fn region_of(&self, namespace: &str) -> Option<&str> {
+        self.host_of_namespace(namespace).map(|h| h.region.as_str())
     }
 
     pub fn host_of_machine(&self, machine: &str) -> Option<&HostRec> {
@@ -562,7 +568,7 @@ impl Registry {
         v
     }
 
-    /// What ran out when `place` found no host for a new tenant's machine: memory when no host
+    /// What ran out when `place` found no host for a new namespace's machine: memory when no host
     /// of the region is ready and under its ceiling with `need_mb` free; else disk when none of
     /// those has `need_disk_mb`; else (those that have both are under a condition) what the
     /// condition of the one with the most memory free says: disk for `disk_pressure`, memory
@@ -578,7 +584,7 @@ impl Registry {
             .hosts
             .values()
             .filter(|h| {
-                h.has_memory_for_tenants(policy)
+                h.has_memory_for_namespaces(policy)
                     && (region.is_empty() || h.region == region)
                     && h.free_memory_mb() >= need_mb
             })
@@ -599,14 +605,14 @@ impl Registry {
         }
     }
 
-    /// Each region a host is in, with what its hosts that take a new tenant have free: the
+    /// Each region a host is in, with what its hosts that take a new namespace have free: the
     /// sum, and the most on one host (`(free, largest_slot)`). A host that reports no disk
     /// figure adds none.
     pub fn room(&self, policy: &Policy) -> BTreeMap<String, (api::Room, api::Room)> {
         let mut out: BTreeMap<String, (api::Room, api::Room)> = BTreeMap::new();
         for h in self.hosts.values() {
             let (free, largest) = out.entry(h.region.clone()).or_default();
-            if !h.takes_new_tenants(policy) {
+            if !h.takes_new_namespaces(policy) {
                 continue;
             }
             let (memory, disk) = (h.free_memory_mb() as u64, h.disk_free_mb);
@@ -624,7 +630,7 @@ impl Registry {
 pub enum Resource {
     Memory,
     Disk,
-    /// The host the create is bound to (a pinned tenant's, a fork's source's) is under a
+    /// The host the create is bound to (a pinned namespace's, a fork's source's) is under a
     /// condition (ADR 0021): a new host does not fix it.
     Pressure,
 }
@@ -664,7 +670,7 @@ mod tests {
                 vcpus: 0,
             },
             machines,
-            tenants: vec![],
+            namespaces: vec![],
             last_seen: Utc::now(),
             version: "0.1".into(),
             disk_free_mb: 0,
@@ -721,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn a_host_under_pressure_takes_no_new_tenant() {
+    fn a_host_under_pressure_takes_no_new_namespace() {
         let now = Utc::now();
         let mut reg = Registry::default();
         let mut full = host("a", 100_000, 0, 1);
@@ -732,7 +738,7 @@ mod tests {
         reg.heartbeat(full, now);
         reg.heartbeat(host("b", 100_000, 50_000, 5), now);
         let p = Policy::default();
-        // The emptiest host is under pressure: the new tenant goes to the other one.
+        // The emptiest host is under pressure: the new namespace goes to the other one.
         assert_eq!(placed(&mut reg, "t1", 512, 0).unwrap().0, "b");
         assert_eq!(
             reg.hosts["a"].pressure().as_deref(),
@@ -742,7 +748,7 @@ mod tests {
         // Nor do the capacity signals count its memory as free.
         let (free, largest) = reg.room(&p)["fsn"];
         assert_eq!((free.memory_mb, largest.memory_mb), (49_488, 49_488));
-        // The heartbeat that clears it lets it take tenants again.
+        // The heartbeat that clears it lets it take namespaces again.
         let mut cleared = host("a", 100_000, 0, 1);
         cleared.conditions = vec![condition(api::condition::DISK_PRESSURE, false)];
         reg.heartbeat(cleared, now);
@@ -758,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn room_counts_the_hosts_that_take_a_new_tenant() {
+    fn room_counts_the_hosts_that_take_a_new_namespace() {
         let mut reg = Registry::default();
         let mut hosts = vec![
             roomy("a", "gra", 40_000, 500_000),
@@ -827,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_tenant_is_placed_in_its_region_and_its_region_is_its_hosts() {
+    fn a_new_namespace_is_placed_in_its_region_and_its_region_is_its_hosts() {
         let now = Utc::now();
         let mut reg = Registry::default();
         let mut gra = host("gra1", 100_000, 50_000, 1);
@@ -852,18 +858,18 @@ mod tests {
             "the region is full, whatever the others have"
         );
         assert_eq!(reg.region_of("t4"), None, "nothing pinned");
-        // Pinned, a tenant's machines go to its host whatever is asked: the caller refuses
+        // Pinned, a namespace's machines go to its host whatever is asked: the caller refuses
         // another region.
         assert_eq!(reg.place("t1", "vin", 512, 0, &p).as_deref(), Some("gra1"));
-        let h = reg.host_of_tenant("t1").unwrap();
+        let h = reg.host_of_namespace("t1").unwrap();
         assert_eq!(h.outside("t1", "gra"), None);
         assert_eq!(h.outside("t1", ""), None, "no region asked");
         assert_eq!(
             h.outside("t1", "vin").as_deref(),
-            Some("tenant t1 is in region \"gra\" (host gra1), not \"vin\": a tenant never spans regions")
+            Some("namespace t1 is in region \"gra\" (host gra1), not \"vin\": a namespace never spans regions")
         );
-        // A tenant a heartbeat pins is in its host's region.
-        vin.tenants = vec!["t9".into()];
+        // A namespace a heartbeat pins is in its host's region.
+        vin.namespaces = vec!["t9".into()];
         reg.heartbeat(vin, now);
         assert_eq!(reg.region_of("t9"), Some("vin"));
     }
@@ -937,21 +943,21 @@ mod tests {
         let now = Utc::now();
         let mut reg = Registry::default();
         let mut a = host("a", 1000, 0, 1);
-        a.tenants = vec!["t1".into(), "t2".into()];
+        a.namespaces = vec!["t1".into(), "t2".into()];
         reg.heartbeat(a, now);
         reg.heartbeat(host("b", 1000, 500, 0), now);
-        reg.tenants.insert("tb".into(), "b".into());
+        reg.namespaces.insert("tb".into(), "b".into());
         // A placement just pinned t3 to a (the emptier host); a does not list it yet: the pin stays.
         assert_eq!(
             reg.place("t3", "", 10, 0, &Policy::default()).as_deref(),
             Some("a")
         );
         let mut a = host("a", 1000, 0, 1);
-        a.tenants = vec!["t2".into()];
+        a.namespaces = vec!["t2".into()];
         reg.heartbeat(a.clone(), now);
-        assert_eq!(reg.tenants.get("t1"), None, "t1 left host a");
+        assert_eq!(reg.namespaces.get("t1"), None, "t1 left host a");
         assert_eq!(
-            reg.tenants.get("t3").map(String::as_str),
+            reg.namespaces.get("t3").map(String::as_str),
             Some("a"),
             "a fresh pin stays"
         );
@@ -959,13 +965,13 @@ mod tests {
             .insert("t3".into(), now - Duration::minutes(11));
         reg.heartbeat(a, now);
         assert_eq!(
-            reg.tenants.get("t3"),
+            reg.namespaces.get("t3"),
             None,
             "an old pin the host never confirmed goes"
         );
-        assert_eq!(reg.tenants.get("t2").map(String::as_str), Some("a"));
+        assert_eq!(reg.namespaces.get("t2").map(String::as_str), Some("a"));
         assert_eq!(
-            reg.tenants.get("tb").map(String::as_str),
+            reg.namespaces.get("tb").map(String::as_str),
             Some("b"),
             "another host's pin stays"
         );
@@ -976,14 +982,14 @@ mod tests {
         let now = Utc::now();
         let mut reg = Registry::default();
         let mut busy = host("a", 1000, 100, 1);
-        busy.tenants = vec!["t".into()];
+        busy.namespaces = vec!["t".into()];
         reg.heartbeat(busy, now);
         reg.hosts.get_mut("a").unwrap().state = "retiring".into();
         assert!(reg.retirable().is_empty());
         let mut empty = host("a", 1000, 0, 0);
-        empty.tenants.clear();
+        empty.namespaces.clear();
         reg.heartbeat(empty, now);
-        reg.tenants.clear();
+        reg.namespaces.clear();
         assert_eq!(
             reg.hosts["a"].state, "retiring",
             "a heartbeat keeps a retire"
@@ -991,7 +997,7 @@ mod tests {
         assert_eq!(reg.retirable().len(), 1);
         // A drained host stays drained, empty or not: only a retire forgets.
         let mut fixed = host("s", 1000, 0, 0);
-        fixed.tenants.clear();
+        fixed.namespaces.clear();
         reg.heartbeat(fixed, now);
         reg.hosts.get_mut("s").unwrap().state = "draining".into();
         assert_eq!(
@@ -1025,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_pins_tenants_and_picks_the_emptiest_host() {
+    fn placement_pins_namespaces_and_picks_the_emptiest_host() {
         let now = Utc::now();
         let mut reg = Registry::default();
         reg.heartbeat(host("a", 100_000, 90_000, 10), now);
@@ -1036,7 +1042,7 @@ mod tests {
         assert_eq!(
             reg.place("t1", "", 512, 0, &p).as_deref(),
             Some("b"),
-            "a tenant stays where it is"
+            "a namespace stays where it is"
         );
         // c is next; a is over the ceiling.
         reg.hosts.get_mut("b").unwrap().used.memory_mb = 99_000;
@@ -1052,8 +1058,8 @@ mod tests {
     }
 
     /// `place` and `hold`, as a create does them.
-    fn placed(reg: &mut Registry, tenant: &str, mb: u32, disk: u64) -> Option<(String, u64)> {
-        let host = reg.place(tenant, "", mb, disk, &Policy::default())?;
+    fn placed(reg: &mut Registry, namespace: &str, mb: u32, disk: u64) -> Option<(String, u64)> {
+        let host = reg.place(namespace, "", mb, disk, &Policy::default())?;
         let hold = reg.hold(&host, mb, disk);
         Some((host, hold))
     }
@@ -1065,12 +1071,12 @@ mod tests {
         reg.heartbeat(host("a", 100_000, 0, 0), t0);
         reg.heartbeat(host("b", 100_000, 10_000, 1), t0);
         let p = Policy::default();
-        // A burst: the second tenant sees the first one's memory taken on a.
+        // A burst: the second namespace sees the first one's memory taken on a.
         let (a, t1) = placed(&mut reg, "t1", 60_000, 3000).unwrap();
         assert_eq!(a, "a");
         assert_eq!(reg.hosts["a"].used.memory_mb, 60_000);
         assert_eq!(placed(&mut reg, "t2", 50_000, 0).unwrap().0, "b");
-        // A pinned tenant's machine holds too, memory and disk.
+        // A pinned namespace's machine holds too, memory and disk.
         reg.hosts.get_mut("a").unwrap().disk_free_mb = 10_000;
         let (_, t1b) = placed(&mut reg, "t1", 10_000, 4000).unwrap();
         assert_eq!(reg.hosts["a"].used.memory_mb, 70_000);
@@ -1120,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn unpin_releases_a_tenant_for_a_new_placement() {
+    fn unpin_releases_a_namespace_for_a_new_placement() {
         let now = Utc::now();
         let mut reg = Registry::default();
         reg.heartbeat(host("a", 100_000, 0, 0), now);
@@ -1128,7 +1134,7 @@ mod tests {
         let first = placed(&mut reg, "t1", 60_000, 0).unwrap().0;
         assert!(reg.pinned_at.contains_key("t1"));
         reg.unpin("t1");
-        assert_eq!(reg.tenants.get("t1"), None);
+        assert_eq!(reg.namespaces.get("t1"), None);
         assert!(!reg.pinned_at.contains_key("t1"));
         assert_ne!(
             placed(&mut reg, "t1", 10_000, 0).unwrap().0,
@@ -1143,17 +1149,17 @@ mod tests {
         let now = Utc::now();
         let mut reg = Registry::default();
         let mut a = host("a", 1000, 0, 1);
-        a.tenants = vec!["t1".into()];
+        a.namespaces = vec!["t1".into()];
         reg.heartbeat(a, now);
         reg.heartbeat(host("b", 1000, 0, 0), now);
         reg.machines.insert("m1".into(), "a".into());
         reg.machines.insert("m2".into(), "b".into());
         reg.endpoints.insert("e1".into(), "a".into());
-        reg.tenants.insert("t2".into(), "b".into());
+        reg.namespaces.insert("t2".into(), "b".into());
         reg.forget("a");
         assert!(!reg.hosts.contains_key("a"));
-        assert_eq!(reg.tenants.get("t1"), None);
-        assert_eq!(reg.tenants.get("t2").map(String::as_str), Some("b"));
+        assert_eq!(reg.namespaces.get("t1"), None);
+        assert_eq!(reg.namespaces.get("t2").map(String::as_str), Some("b"));
         assert_eq!(reg.machines.get("m1"), None);
         assert_eq!(reg.machines.get("m2").map(String::as_str), Some("b"));
         assert_eq!(reg.endpoints.get("e1"), None);

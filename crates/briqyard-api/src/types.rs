@@ -295,13 +295,13 @@ impl ProbesStatus {
 
 /// Egress modes.
 pub mod egress {
-    /// The tenant, and the internet through NAT (the default).
+    /// The namespace, and the internet through NAT (the default).
     pub const OPEN: &str = "open";
-    /// One machine of the tenant and the gateway's DNS, nothing else.
+    /// One machine of the namespace and the gateway's DNS, nothing else.
     pub const VIA: &str = "via";
-    /// The tenant, no internet.
+    /// The namespace, no internet.
     pub const NONE: &str = "none";
-    /// What `via` takes to name the tenant's gateway (ADR 0016) rather than a machine.
+    /// What `via` takes to name the namespace's gateway (ADR 0016) rather than a machine.
     pub const GATEWAY: &str = "gateway";
 }
 
@@ -311,8 +311,8 @@ pub struct Egress {
     /// "open" (default), "via" or "none".
     #[serde(default = "default_egress_mode")]
     pub mode: String,
-    /// For `via`: the machine of the same tenant that is the only one this machine reaches,
-    /// or `"gateway"` for the tenant's gateway, which then runs while this machine does.
+    /// For `via`: the machine of the same namespace that is the only one this machine reaches,
+    /// or `"gateway"` for the namespace's gateway, which then runs while this machine does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
 }
@@ -331,7 +331,7 @@ impl Default for Egress {
 }
 
 impl Egress {
-    /// Sends through the tenant's gateway.
+    /// Sends through the namespace's gateway.
     pub fn via_gateway(&self) -> bool {
         self.mode == egress::VIA && self.via.as_deref() == Some(egress::GATEWAY)
     }
@@ -345,7 +345,7 @@ impl Egress {
                 Err("egress.via goes with mode \"via\" only".into())
             }
             (egress::VIA, Some(id)) if valid_id(id) => Ok(()),
-            (egress::VIA, _) => Err("egress.via must name a machine of the tenant".into()),
+            (egress::VIA, _) => Err("egress.via must name a machine of the namespace".into()),
             (other, _) => Err(format!(
                 "egress.mode {other:?}: want \"open\", \"via\" or \"none\""
             )),
@@ -470,8 +470,9 @@ impl EgressDrops {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateMachineRequest {
     /// Owns the machine and its network; any string, a team id for briq.
-    pub tenant: String,
-    /// A DNS label, unique in the tenant: `<name>.internal` resolves to the machine.
+    #[serde(alias = "tenant")]
+    pub namespace: String,
+    /// A DNS label, unique in the namespace: `<name>.internal` resolves to the machine.
     pub name: String,
     #[serde(default)]
     pub image: String,
@@ -496,7 +497,7 @@ pub struct CreateMachineRequest {
     /// Kept and returned as is (a briq id, a stack name); the labels `?label=` selects on.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
-    /// Through a fleet: a new tenant is placed on a host of this region, and a tenant's
+    /// Through a fleet: a new namespace is placed on a host of this region, and a namespace's
     /// machines stay in its host's (ADR 0025). Empty: any region. A daemon ignores it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub region: String,
@@ -602,7 +603,8 @@ pub mod stop {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Machine {
     pub id: String,
-    pub tenant: String,
+    #[serde(alias = "tenant")]
+    pub namespace: String,
     pub name: String,
     pub image: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -703,7 +705,7 @@ pub struct Machine {
     pub host: String,
 }
 
-/// A way in from outside the tenant's network.
+/// A way in from outside the namespace's network.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Endpoint {
     pub id: String,
@@ -812,7 +814,8 @@ pub struct Backup {
     /// A timestamp to the millisecond, `20261019T231500.123Z`; later ids sort later.
     pub id: String,
     pub machine_id: String,
-    pub tenant: String,
+    #[serde(alias = "tenant")]
+    pub namespace: String,
     pub name: String,
     pub created_at: DateTime<Utc>,
     /// Bytes sent to the store for this backup.
@@ -829,7 +832,7 @@ pub struct Backup {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<serde_json::Value>,
     /// The machine as it was, sealed under the pool key of `key_id` (ADR 0035): its env and
-    /// files are a tenant's secrets. In the store's record only.
+    /// files are a namespace's secrets. In the store's record only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed: Option<String>,
     /// For a destroyed machine's backup: when the host deletes it (ADR 0023). Not stored.
@@ -1085,30 +1088,30 @@ pub fn check_snapshot_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A tenant's network on a host.
+/// A namespace's network on a host.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Tenant {
+pub struct Namespace {
     pub id: String,
     #[serde(default)]
     pub subnet: String,
-    /// The host's address on the tenant's network (`.1`): the machines' route and DNS.
+    /// The host's address on the namespace's network (`.1`): the machines' route and DNS.
     #[serde(default)]
     pub router: String,
-    /// The tenant's machines, its gateway not counted.
+    /// The namespace's machines, its gateway not counted.
     #[serde(default)]
     pub machines: usize,
     pub created_at: DateTime<Utc>,
-    /// The host the tenant lives on (fleet).
+    /// The host the namespace lives on (fleet).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
-    /// Its host's region: the tenant's (fleet, ADR 0025).
+    /// Its host's region: the namespace's (fleet, ADR 0025).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub region: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayView>,
 }
 
-/// `PUT /v1/tenants/{id}/quota` (ADR 0025): what the tenant may hold. A limit left out is no
+/// `PUT /v1/namespaces/{id}/quota` (ADR 0025): what the namespace may hold. A limit left out is no
 /// limit; set by the control plane, the daemon has no defaults.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quota {
@@ -1126,7 +1129,7 @@ pub struct Quota {
     pub disk_gb: Option<u32>,
 }
 
-/// What a tenant holds now, counted as its quota counts.
+/// What a namespace holds now, counted as its quota counts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuotaUse {
     pub machines: u32,
@@ -1135,16 +1138,17 @@ pub struct QuotaUse {
     pub disk_gb: u32,
 }
 
-/// `GET /v1/tenants/{id}/quota`: the limits and the use.
+/// `GET /v1/namespaces/{id}/quota`: the limits and the use.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TenantQuota {
-    pub tenant: String,
+pub struct NamespaceQuota {
+    #[serde(alias = "tenant")]
+    pub namespace: String,
     pub quota: Quota,
     pub used: QuotaUse,
 }
 
-/// `PUT /v1/tenants/{id}/gateway`: the tenant's gateway, a machine the daemon runs while a
-/// machine of the tenant sends `via: "gateway"` (ADR 0016).
+/// `PUT /v1/namespaces/{id}/gateway`: the namespace's gateway, a machine the daemon runs while a
+/// machine of the namespace sends `via: "gateway"` (ADR 0016).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GatewaySpec {
     pub image: String,
@@ -1186,7 +1190,7 @@ impl GatewaySpec {
     }
 }
 
-/// The tenant's gateway as `GET /v1/tenants/{id}` shows it.
+/// The namespace's gateway as `GET /v1/namespaces/{id}` shows it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GatewayView {
     pub state: String,
@@ -1219,8 +1223,9 @@ pub struct UsageBucket {
     /// The hour's start.
     pub hour: DateTime<Utc>,
     pub machine_id: String,
-    pub tenant: String,
-    /// `gateway` for a tenant's gateway (ADR 0016); absent for the tenant's own machines.
+    #[serde(alias = "tenant")]
+    pub namespace: String,
+    /// `gateway` for a namespace's gateway (ADR 0016); absent for the namespace's own machines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// The machine's metadata (the briq id), as it was last in the hour.
@@ -1340,7 +1345,7 @@ pub mod reason {
     /// A host condition changed (ADR 0021).
     pub const HOST_CONDITION: &str = "host_condition";
     pub const IMAGE_REMOVED: &str = "image_removed";
-    /// A create or a start refused by the tenant's quota (ADR 0025).
+    /// A create or a start refused by the namespace's quota (ADR 0025).
     pub const QUOTA_EXCEEDED: &str = "quota_exceeded";
     /// An exec session began (ADR 0029): someone is in the machine. A use: no new version.
     pub const SESSION_OPENED: &str = "session_opened";
@@ -1402,7 +1407,8 @@ pub struct Event {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub machine_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub tenant: String,
+    #[serde(alias = "tenant")]
+    pub namespace: String,
     /// The host it happened on (set by the fleet on a fleet-wide read).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
@@ -1494,9 +1500,10 @@ pub fn under_pressure(conditions: &[Condition]) -> Option<&Condition> {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TopMachine {
     pub machine_id: String,
-    pub tenant: String,
+    #[serde(alias = "tenant")]
+    pub namespace: String,
     pub name: String,
-    /// `gateway` for a tenant's gateway; absent for the tenant's machines.
+    /// `gateway` for a namespace's gateway; absent for the namespace's machines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// CPU time over the window, in percent of one CPU.
@@ -1536,8 +1543,8 @@ pub struct Host {
     pub capacity: Capacity,
     pub used: Capacity,
     pub machines: usize,
-    #[serde(default)]
-    pub tenants: Vec<String>,
+    #[serde(default, alias = "tenants")]
+    pub namespaces: Vec<String>,
     pub last_seen: DateTime<Utc>,
     #[serde(default)]
     pub version: String,
@@ -1617,8 +1624,8 @@ pub struct RegisterHostRequest {
     pub capacity: Capacity,
     pub used: Capacity,
     pub machines: usize,
-    #[serde(default)]
-    pub tenants: Vec<String>,
+    #[serde(default, alias = "tenants")]
+    pub namespaces: Vec<String>,
     #[serde(default)]
     pub version: String,
     #[serde(default)]
@@ -1694,7 +1701,7 @@ pub struct Status {
 }
 
 /// A region's room, as a fleet sees it (ADR 0042). Free space counts the hosts that take a new
-/// tenant: `ready`, under the fill ceiling, no condition true.
+/// namespace: `ready`, under the fill ceiling, no condition true.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionRoom {
     /// The hosts' `region`; empty for hosts with none, and for refusals of creates that asked
@@ -1728,7 +1735,7 @@ pub struct Unschedulable {
     /// Hosts had the memory, none the disk, or those that had both are under `disk_pressure`.
     /// A new host fixes it.
     pub disk: u64,
-    /// The host the create is bound to (the tenant's, a fork's source's) is under a condition
+    /// The host the create is bound to (the namespace's, a fork's source's) is under a condition
     /// (ADR 0021). A new host does not fix it: that host must be freed.
     pub pressure: u64,
 }
@@ -1789,7 +1796,7 @@ fn duration(s: &str, want: &str) -> Result<std::time::Duration, String> {
     Ok(std::time::Duration::from_secs(secs))
 }
 
-/// An id the API takes from a caller (a tenant, a machine id in a path or a restore): a-z,
+/// An id the API takes from a caller (a namespace, a machine id in a path or a restore): a-z,
 /// 0-9, `_` and `-`, 1 to 64 characters. Ids become file and object names on the host, so
 /// nothing else gets in.
 pub fn valid_id(s: &str) -> bool {
@@ -1992,12 +1999,12 @@ mod tests {
 
     #[test]
     fn create_machine_request_minimal() {
-        // tenant, name and size are enough; the collections come back empty and the
+        // namespace, name and size are enough; the collections come back empty and the
         // optional parts stay out of the output.
         let r: CreateMachineRequest = round_trip(
-            json!({"tenant": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}}),
+            json!({"namespace": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}}),
             json!({
-                "tenant": "t1", "name": "db", "image": "",
+                "namespace": "t1", "name": "db", "image": "",
                 "env": {}, "files": [], "size": {"vcpus": 1, "memory_mb": 256},
                 "ports": [], "sleep": "", "metadata": {}
             }),
@@ -2010,8 +2017,8 @@ mod tests {
         assert!(r.fork.is_none());
         for missing in [
             json!({"name": "db", "size": {"vcpus": 1, "memory_mb": 256}}),
-            json!({"tenant": "t1", "size": {"vcpus": 1, "memory_mb": 256}}),
-            json!({"tenant": "t1", "name": "db"}),
+            json!({"namespace": "t1", "size": {"vcpus": 1, "memory_mb": 256}}),
+            json!({"namespace": "t1", "name": "db"}),
         ] {
             assert!(
                 serde_json::from_value::<CreateMachineRequest>(missing.clone()).is_err(),
@@ -2023,7 +2030,7 @@ mod tests {
     #[test]
     fn create_machine_request_full() {
         let input = json!({
-            "tenant": "t1", "name": "web", "image": "docker.io/library/nginx:1.27",
+            "namespace": "t1", "name": "web", "image": "docker.io/library/nginx:1.27",
             "entrypoint": ["/docker-entrypoint.sh"], "cmd": ["nginx", "-g", "daemon off;"],
             "env": {"A": "1", "B": "2"},
             "files": [{"path": "/etc/motd", "base64": "aGk=", "mode": "0600"}],
@@ -2059,7 +2066,7 @@ mod tests {
     #[test]
     fn machine_minimal() {
         let input = json!({
-            "id": "m1", "tenant": "t1", "name": "db", "image": "postgres:17",
+            "id": "m1", "namespace": "t1", "name": "db", "image": "postgres:17",
             "state": "running", "hostname": "db.internal", "machine_host": "m1.vm.internal",
             "size": {"vcpus": 1, "memory_mb": 512}, "sleep": "never",
             "restart": {"policy": "no", "max_retries": 0},
@@ -2094,7 +2101,7 @@ mod tests {
     #[test]
     fn machine_full() {
         let input = json!({
-            "id": "m1", "tenant": "t1", "name": "db", "image": "postgres:17",
+            "id": "m1", "namespace": "t1", "name": "db", "image": "postgres:17",
             "image_digest": "sha256:abc", "state": "stopped", "stopped_reason": "exit",
             "exit": {"code": 1, "oom_killed": false, "at": "2026-01-02T03:04:05Z", "restarting": true},
             "error": "boom", "ip": "10.64.0.2",
@@ -2400,7 +2407,7 @@ mod tests {
         let e: Egress = same(json!({"mode": "via", "via": "m_gw"}));
         assert_eq!(e.check(), Ok(()));
         assert!(!e.via_gateway());
-        // The tenant's gateway, by the word that names it.
+        // The namespace's gateway, by the word that names it.
         let e: Egress = same(json!({"mode": "via", "via": "gateway"}));
         assert_eq!(e.check(), Ok(()));
         assert!(e.via_gateway());
@@ -2421,7 +2428,7 @@ mod tests {
         ] {
             assert_eq!(
                 bad(v).unwrap_err(),
-                "egress.via must name a machine of the tenant"
+                "egress.via must name a machine of the namespace"
             );
         }
     }
@@ -2521,7 +2528,7 @@ mod tests {
         let u: UpdateMachineRequest = same(json!({"probes": {}}));
         assert_eq!(u.probes, Some(Probes::default()));
         let r: CreateMachineRequest = serde_json::from_value(json!({
-            "tenant": "t1", "name": "web", "size": {"vcpus": 1, "memory_mb": 256},
+            "namespace": "t1", "name": "web", "size": {"vcpus": 1, "memory_mb": 256},
             "probes": {"readiness": {"tcp": 80}}
         }))
         .unwrap();
@@ -2613,7 +2620,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_and_tenant() {
+    fn snapshot_and_namespace() {
         let s: Snapshot = round_trip(
             json!({"id": "snap1", "machine_id": "m1", "created_at": "2026-01-02T03:04:05Z"}),
             json!({
@@ -2637,7 +2644,7 @@ mod tests {
         for bad in ["", "s_abc", "Before", "a/b", "..", &"x".repeat(65)] {
             assert!(check_snapshot_name(bad).is_err(), "{bad}");
         }
-        let t: Tenant = round_trip(
+        let t: Namespace = round_trip(
             json!({"id": "t1", "created_at": "2026-01-02T03:04:05Z"}),
             json!({
                 "id": "t1", "subnet": "", "router": "", "machines": 0,
@@ -2646,7 +2653,7 @@ mod tests {
         );
         assert_eq!(t.host, "");
         assert!(t.gateway.is_none(), "no gateway: none on the wire");
-        let t: Tenant = same(json!({
+        let t: Namespace = same(json!({
             "id": "t1", "subnet": "10.64.1.0/24", "router": "10.64.1.1", "machines": 2,
             "created_at": "2026-01-02T03:04:05Z", "host": "h1", "region": "gra",
             "gateway": {"state": "running", "ip": "10.64.1.2", "port": 3128, "machine_id": "m_1"}
@@ -2670,8 +2677,8 @@ mod tests {
         assert_eq!((q.machines, q.disk_gb), (Some(1), Some(20)));
         let q: Quota = same(json!({"memory_mb": 0}));
         assert_eq!(q.memory_mb, Some(0), "zero is a limit, nothing allowed");
-        let t: TenantQuota = same(json!({
-            "tenant": "t1", "quota": {"machines": 2},
+        let t: NamespaceQuota = same(json!({
+            "namespace": "t1", "quota": {"machines": 2},
             "used": {"machines": 1, "memory_mb": 512, "vcpus": 1, "disk_gb": 0}
         }));
         assert_eq!(t.used.memory_mb, 512);
@@ -2790,7 +2797,7 @@ mod tests {
         let mut expected = input.clone();
         expected["region"] = json!("");
         expected["provider"] = json!("");
-        expected["tenants"] = json!([]);
+        expected["namespaces"] = json!([]);
         expected["version"] = json!("");
         expected["tls_fingerprint"] = json!("");
         expected["conditions"] = json!([]);
@@ -2799,14 +2806,14 @@ mod tests {
         let h: Host = same(json!({
             "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1", "provider": "manual",
             "state": "draining", "capacity": {"memory_mb": 65536, "vcpus": 16},
-            "used": {"memory_mb": 1024, "vcpus": 2}, "machines": 2, "tenants": ["t1", "t2"],
+            "used": {"memory_mb": 1024, "vcpus": 2}, "machines": 2, "namespaces": ["t1", "t2"],
             "last_seen": "2026-01-02T03:04:05Z", "version": "0.1.0", "note": "bootstrapped",
             "tls_fingerprint": "ab01",
             "conditions": [{"type": "disk_pressure", "status": true,
                 "since": "2026-01-02T03:04:05Z", "message": "pool 4% free"}],
             "started": {"at": "2026-01-02T03:04:05Z", "adopted": 2, "stopped": 0, "gone": 1}
         }));
-        assert_eq!(h.tenants, vec!["t1", "t2"]);
+        assert_eq!(h.namespaces, vec!["t1", "t2"]);
         assert_eq!(h.started.map(|s| (s.adopted, s.gone)), Some((2, 1)));
         assert_eq!(
             under_pressure(&h.conditions).map(|c| c.kind.as_str()),
@@ -2825,7 +2832,7 @@ mod tests {
             json!({
                 "id": "h1", "url": "http://10.0.0.5:7420", "region": "",
                 "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 0, "vcpus": 0},
-                "machines": 0, "tenants": [], "version": "", "disk_free_mb": 0,
+                "machines": 0, "namespaces": [], "version": "", "disk_free_mb": 0,
                 "tls_fingerprint": "", "conditions": []
             }),
         );
@@ -2833,7 +2840,7 @@ mod tests {
         let r: RegisterHostRequest = same(json!({
             "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1",
             "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 512, "vcpus": 1},
-            "machines": 1, "tenants": ["t1"], "version": "0.1.0", "disk_free_mb": 100000,
+            "machines": 1, "namespaces": ["t1"], "version": "0.1.0", "disk_free_mb": 100000,
             "tls_fingerprint": "ab01",
             "conditions": [{"type": "memory_pressure", "status": false,
                 "since": "2026-01-02T03:04:05Z", "message": "512 MB of 65536 committed (0%)"}],
@@ -2897,7 +2904,7 @@ mod tests {
     #[test]
     fn top_machine() {
         let t: TopMachine = same(json!({
-            "machine_id": "m_1", "tenant": "t1", "name": "db", "cpu_percent": 12.5,
+            "machine_id": "m_1", "namespace": "t1", "name": "db", "cpu_percent": 12.5,
             "memory_bytes": 104857600, "memory_limit_bytes": 536870912,
             "disk_used_bytes": 2147483648u64, "internet_in_bytes_per_sec": 10.0,
             "internet_out_bytes_per_sec": 2.5, "ingress_in_bytes_per_sec": 0.0,
@@ -2905,7 +2912,7 @@ mod tests {
         }));
         assert_eq!((t.role, t.host.as_str()), (None, ""));
         let g: TopMachine = same(json!({
-            "machine_id": "m_2", "tenant": "t1", "name": "gateway", "role": "gateway",
+            "machine_id": "m_2", "namespace": "t1", "name": "gateway", "role": "gateway",
             "cpu_percent": 0.0, "memory_bytes": 0, "memory_limit_bytes": 268435456,
             "disk_used_bytes": 0, "internet_in_bytes_per_sec": 0.0,
             "internet_out_bytes_per_sec": 0.0, "ingress_in_bytes_per_sec": 0.0,
@@ -2916,10 +2923,10 @@ mod tests {
 
     #[test]
     fn usage_bucket() {
-        // Flat: the identity, every measure by its ADR name, `closed`; no role for a tenant's
+        // Flat: the identity, every measure by its ADR name, `closed`; no role for a namespace's
         // own machine, no host from a daemon.
         let b: UsageBucket = same(json!({
-            "hour": "2026-10-20T14:00:00Z", "machine_id": "m_1", "tenant": "t1",
+            "hour": "2026-10-20T14:00:00Z", "machine_id": "m_1", "namespace": "t1",
             "metadata": {"briq_id": "bq_1"}, "size": {"vcpus": 1, "memory_mb": 512},
             "running_seconds": 3600.0, "suspended_seconds": 0.0, "cpu_seconds": 12.5,
             "memory_mb_seconds": 1843200.0, "root_gb_hours": 8.0, "volume_gb_hours": 2.0,
@@ -2932,7 +2939,7 @@ mod tests {
         assert_eq!(b.usage.ingress_in_bytes, 40);
         assert_eq!(b.role, None);
         let g: UsageBucket = same(json!({
-            "hour": "2026-10-20T15:00:00Z", "machine_id": "m_2", "tenant": "t1",
+            "hour": "2026-10-20T15:00:00Z", "machine_id": "m_2", "namespace": "t1",
             "role": "gateway", "metadata": {}, "size": {"vcpus": 1, "memory_mb": 256},
             "running_seconds": 1.5, "suspended_seconds": 0.0, "cpu_seconds": 0.0,
             "memory_mb_seconds": 384.0, "root_gb_hours": 0.0, "volume_gb_hours": 0.0,
@@ -2947,7 +2954,7 @@ mod tests {
         );
         // A measure left out is refused, not read as zero.
         assert!(serde_json::from_value::<UsageBucket>(json!({
-            "hour": "2026-10-20T15:00:00Z", "machine_id": "m_2", "tenant": "t1",
+            "hour": "2026-10-20T15:00:00Z", "machine_id": "m_2", "namespace": "t1",
             "size": {"vcpus": 1, "memory_mb": 256}, "closed": false
         }))
         .is_err());
@@ -2978,7 +2985,7 @@ mod tests {
         let e: ApiError = same(json!({
             "error": "the guest did not come up", "code": "boot_failed",
             "machine": {
-                "id": "m1", "tenant": "t1", "name": "db", "image": "postgres:17",
+                "id": "m1", "namespace": "t1", "name": "db", "image": "postgres:17",
                 "state": "error", "error": "the guest did not come up",
                 "hostname": "db.internal", "machine_host": "m1.vm.internal",
                 "size": {"vcpus": 1, "memory_mb": 512}, "ports": [], "sleep": "never",
@@ -2998,7 +3005,7 @@ mod tests {
 
     #[test]
     fn event() {
-        // `type` on the wire (a keyword in Rust); a host event has no machine, tenant or data.
+        // `type` on the wire (a keyword in Rust); a host event has no machine, namespace or data.
         let e: Event = same(json!({
             "seq": 1, "at": "2026-10-20T14:00:00Z", "type": "normal", "reason": "host_started",
             "message": "daemon started"
@@ -3009,7 +3016,7 @@ mod tests {
         );
         let e: Event = same(json!({
             "seq": 812, "at": "2026-10-20T14:03:11.204Z", "type": "warning", "reason": "exited",
-            "message": "exited with code 7", "machine_id": "m_1", "tenant": "t1", "host": "h1",
+            "message": "exited with code 7", "machine_id": "m_1", "namespace": "t1", "host": "h1",
             "data": {"code": 7, "oom": false, "restarting": true}
         }));
         assert_eq!(e.reason, reason::EXITED);
@@ -3106,12 +3113,12 @@ mod tests {
     #[test]
     fn a_backup_policy_absent_is_kept_and_null_removes_it() {
         let c: CreateMachineRequest = serde_json::from_value(json!({
-            "tenant": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}
+            "namespace": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}
         }))
         .unwrap();
         assert_eq!(c.backup, None, "absent: the host's default");
         let c: CreateMachineRequest = serde_json::from_value(json!({
-            "tenant": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}, "backup": null
+            "namespace": "t1", "name": "db", "size": {"vcpus": 1, "memory_mb": 256}, "backup": null
         }))
         .unwrap();
         assert_eq!(c.backup, Some(None), "null: none");
@@ -3127,7 +3134,7 @@ mod tests {
     #[test]
     fn backups() {
         let b: Backup = same(json!({
-            "id": "20261021T101500.123Z", "machine_id": "m1", "tenant": "t1", "name": "db",
+            "id": "20261021T101500.123Z", "machine_id": "m1", "namespace": "t1", "name": "db",
             "created_at": "2026-01-02T03:04:05Z", "bytes": 30, "incremental": true,
             "disks": [
                 {"disk": "root", "key": "backups/m1/root/20261021T101500.123Z.zfs", "bytes": 10,
@@ -3141,7 +3148,7 @@ mod tests {
         assert_eq!(b.deletes_at, Some(ts()));
         // A stored record carries the machine and no deletion time.
         let r: Backup = same(json!({
-            "id": "a", "machine_id": "m1", "tenant": "t1", "name": "db",
+            "id": "a", "machine_id": "m1", "namespace": "t1", "name": "db",
             "created_at": "2026-01-02T03:04:05Z", "bytes": 0, "incremental": false,
             "disks": [], "machine": {"id": "m1"}
         }));
@@ -3265,5 +3272,35 @@ mod tests {
         ] {
             assert!(!valid_id(bad), "{bad}");
         }
+    }
+    /// ADR 0055: `tenant` is the former name of `namespace` and still read, in a body, a record
+    /// or a heartbeat; what is written carries `namespace` only.
+    #[test]
+    fn tenant_is_read_as_namespace() {
+        let size = json!({"vcpus": 1, "memory_mb": 256});
+        let r: CreateMachineRequest =
+            serde_json::from_value(json!({"tenant": "t1", "name": "db", "size": size})).unwrap();
+        assert_eq!(r.namespace, "t1");
+        let out = serde_json::to_value(&r).unwrap();
+        assert_eq!(out["namespace"], "t1");
+        assert!(out.get("tenant").is_none());
+        let e: Event = serde_json::from_value(json!({
+            "seq": 1, "at": "2026-10-20T14:00:00Z", "type": "normal", "reason": "created",
+            "message": "", "machine_id": "m_1", "tenant": "t1"
+        }))
+        .unwrap();
+        assert_eq!(e.namespace, "t1");
+        let q: NamespaceQuota = serde_json::from_value(json!({
+            "tenant": "t1", "quota": {"machines": 2},
+            "used": {"machines": 0, "memory_mb": 0, "vcpus": 0, "disk_gb": 0}
+        }))
+        .unwrap();
+        assert_eq!(q.namespace, "t1");
+        let h: RegisterHostRequest = serde_json::from_value(json!({
+            "id": "h1", "url": "https://h1:7420", "capacity": {"memory_mb": 1, "vcpus": 1},
+            "used": {"memory_mb": 0, "vcpus": 0}, "machines": 1, "tenants": ["t1"]
+        }))
+        .unwrap();
+        assert_eq!(h.namespaces, ["t1"]);
     }
 }

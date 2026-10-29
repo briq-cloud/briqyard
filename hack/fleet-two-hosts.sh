@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Checks a fleet ($BRIQYARD_URL, default http://127.0.0.1:7430, with $BRIQYARD_TOKEN) that
-# fronts at least two ready hosts: tenants
+# fronts at least two ready hosts: namespaces
 # land on different hosts, every call is forwarded to the right one, a host that stops
-# answering is marked down and its tenant's calls fail cleanly while the other goes on.
+# answering is marked down and its namespace's calls fail cleanly while the other goes on.
 # With SECOND_HOST_SH (a root shell on the second host), its pool is locked while it is down,
 # as a reboot leaves it, and must come back with its key from the fleet (ADR 0026); and a
 # backup there is ciphertext and restores through the fleet (ADR 0035).
@@ -44,8 +44,8 @@ cleanup() {
     for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
   fi
   for t in "$T-a" "$T-b"; do
-    for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
-    briqyard tenant rm "$t" >/dev/null 2>&1 || true
+    for id in $(briqyard machine ls --namespace "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
+    briqyard namespace rm "$t" >/dev/null 2>&1 || true
   done
   # The second host as it was, when the backup section gave it a store for the run.
   if [ -n "${SECOND_HOST_SH:-}" ] && $SECOND_HOST_SH test -f "$CONF2.two-hosts"; then
@@ -63,23 +63,23 @@ check "two ready hosts" '[ "$(hosts | jq "[.[] | select(.state == \"ready\")] | 
 hosts | jq -r '.[] | "       \(.id)\t\(.state)\t\(.used.memory_mb)/\(.capacity.memory_mb) MB\t\(.url)"'
 
 echo "== placement"
-# Placement picks the host with the most free memory. The first tenant's machine takes enough
-# of the emptiest host that the second tenant lands on the other one: the memory asked is
+# Placement picks the host with the most free memory. The first namespace's machine takes enough
+# of the emptiest host that the second namespace lands on the other one: the memory asked is
 # whatever makes the two hosts' free memory cross (a guest that touches little of it costs
 # little; Firecracker maps pages as they are used).
 free_mb() { hosts | jq "[.[] | select(.state == \"ready\") | .capacity.memory_mb - .used.memory_mb] | sort | reverse | .[$1]"; }
 BIG=$(( $(free_mb 0) - $(free_mb 1) + 512 )); [ "$BIG" -lt 256 ] && BIG=256
-echo "       first machine asks ${BIG} MB so that the second tenant lands elsewhere"
-A=$(briqyard machine run --image alpine:3.20 --name a --tenant "$T-a" --memory "$BIG" -- sleep 3600 | jq -r .id)
+echo "       first machine asks ${BIG} MB so that the second namespace lands elsewhere"
+A=$(briqyard machine run --image alpine:3.20 --name a --namespace "$T-a" --memory "$BIG" -- sleep 3600 | jq -r .id)
 HA=$(briqyard machine get "$A" | jq -r .host)
-B=$(briqyard machine run --image alpine:3.20 --name b --tenant "$T-b" --memory 256 -- sleep 3600 | jq -r .id)
+B=$(briqyard machine run --image alpine:3.20 --name b --namespace "$T-b" --memory 256 -- sleep 3600 | jq -r .id)
 HB=$(briqyard machine get "$B" | jq -r .host)
 echo "       a on $HA, b on $HB"
-check "tenants on different hosts" '[ "$HA" != "$HB" ] && [ -n "$HA" ] && [ -n "$HB" ]'
+check "namespaces on different hosts" '[ "$HA" != "$HB" ] && [ -n "$HA" ] && [ -n "$HB" ]'
 check "exec forwarded to a"  '[ "$(briqyard machine exec "$A" -- hostname)" = a ]'
 check "exec forwarded to b"  '[ "$(briqyard machine exec "$B" -- hostname)" = b ]'
-A2=$(briqyard machine run --image alpine:3.20 --name a2 --tenant "$T-a" --memory 256 -- sleep 3600 | jq -r .id)
-check "a tenant stays on its host" '[ "$(briqyard machine get "$A2" | jq -r .host)" = "$HA" ]'
+A2=$(briqyard machine run --image alpine:3.20 --name a2 --namespace "$T-a" --memory 256 -- sleep 3600 | jq -r .id)
+check "a namespace stays on its host" '[ "$(briqyard machine get "$A2" | jq -r .host)" = "$HA" ]'
 check "a2 reaches a by name"  'briqyard machine exec "$A2" -- ping -c1 -W2 a.internal >/dev/null'
 check "machines listed with hosts" '[ "$(briqyard machine ls | awk "NR>1" | wc -l | tr -d " ")" -ge 3 ]'
 
@@ -93,11 +93,11 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
   check "host marked down"      '[ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = down ]'
   check "b fails cleanly"       '! briqyard machine exec "$B" -- hostname >/dev/null 2>&1'
   check "a still answers"       '[ "$(briqyard machine exec "$A" -- hostname)" = a ]'
-  # A listing is never partial: the down host's tenant and the fleet-wide list refuse.
-  check "listing b's tenant refuses" '! briqyard machine ls --tenant "$T-b" >/dev/null 2>&1'
+  # A listing is never partial: the down host's namespace and the fleet-wide list refuse.
+  check "listing b's namespace refuses" '! briqyard machine ls --namespace "$T-b" >/dev/null 2>&1'
   check "listing everything refuses" '! briqyard machine ls >/dev/null 2>&1'
-  check "listing a's tenant works"   'briqyard machine ls --tenant "$T-a" | grep -q "$A"'
-  check "no placement on a down host" '[ "$(briqyard machine run --image alpine:3.20 --name c --tenant "$T-b" --memory 256 -- true 2>&1 | grep -c "no host\|down\|unavailable")" -ge 1 ]'
+  check "listing a's namespace works"   'briqyard machine ls --namespace "$T-a" | grep -q "$A"'
+  check "no placement on a down host" '[ "$(briqyard machine run --image alpine:3.20 --name c --namespace "$T-b" --memory 256 -- true 2>&1 | grep -c "no host\|down\|unavailable")" -ge 1 ]'
   if [ -n "${SECOND_HOST_SH:-}" ]; then
     # Its pool's filesystems unmounted and its key unloaded: what a reboot leaves.
     on_second() { $SECOND_HOST_SH sh -c "$1"; }
@@ -141,7 +141,7 @@ if [ -n "${SECOND_HOST_SH:-}" ]; then
   BK=$(briqyard machine backup "$B" | jq -r .id)
   check "backed up with its key's id" '[ "$(briqyard machine backups "$B" | jq -r ".[-1].key_id | length")" = 32 ]'
   check "its stream holds no plaintext" 'on_second "test -s $STORE2/backups/$B/root/$BK.zfs && ! grep -qaF -- $MARK $STORE2/backups/$B/root/$BK.zfs"'
-  RB=$(briqyard machine restore --from "$B" --backup "$BK" --tenant "$T-b" --name b-back | jq -r .id)
+  RB=$(briqyard machine restore --from "$B" --backup "$BK" --namespace "$T-b" --name b-back | jq -r .id)
   for i in $(seq 1 45); do [ "$(briqyard machine get "$RB" | jq -r .state)" = running ] && break; sleep 2; done
   check "restored through the fleet, on the second host" '[ "$(briqyard machine get "$RB" | jq -r .host)" = "$HB" ] && [ "$(briqyard machine exec "$RB" -- head -c 48 /root/mark)" = "$MARK" ]'
   check "its disk on the host's pool key" '[ "$(on_second "zfs get -H -o value encryptionroot byard/m/$RB/root")" = byard ]'

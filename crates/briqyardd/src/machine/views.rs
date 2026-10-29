@@ -16,13 +16,13 @@ impl Manager {
     }
 
     /// The machine a call that changes or runs something in it acts on: every such call of
-    /// the API resolves its machine here. A tenant's gateway is read through the machine
-    /// routes (get, logs, stats) and changed only through its tenant's.
+    /// the API resolves its machine here. A namespace's gateway is read through the machine
+    /// routes (get, logs, stats) and changed only through its namespace's.
     pub(super) fn own_entry(&self, id: &str) -> Result<Arc<Entry>, MError> {
         let e = self.entry(id)?;
         let r = e.rec.lock().unwrap();
         if r.is_gateway() {
-            return Err(MError::Gateway(r.tenant.clone()));
+            return Err(MError::Gateway(r.namespace.clone()));
         }
         drop(r);
         Ok(e)
@@ -43,7 +43,7 @@ impl Manager {
         let waiting_restart = r.state == state::STOPPED && r.stopped_reason == stop::EXIT;
         api::Machine {
             id: r.id.clone(),
-            tenant: r.tenant.clone(),
+            namespace: r.namespace.clone(),
             name: r.name.clone(),
             image: r.image.clone(),
             image_digest: r.image_digest.clone(),
@@ -96,9 +96,9 @@ impl Manager {
         Ok(self.view(&e))
     }
 
-    /// The tenant's machines, or every tenant's, those whose labels (`metadata`) match every
+    /// The namespace's machines, or every namespace's, those whose labels (`metadata`) match every
     /// selector (ADR 0025).
-    pub fn list(&self, tenant: Option<&str>, labels: &[api::Label]) -> Vec<api::Machine> {
+    pub fn list(&self, namespace: Option<&str>, labels: &[api::Label]) -> Vec<api::Machine> {
         let entries: Vec<Arc<Entry>> = self
             .inner
             .machines
@@ -111,8 +111,8 @@ impl Manager {
             .iter()
             .filter(|e| {
                 let r = e.rec.lock().unwrap();
-                r.is_tenants()
-                    && tenant.map(|t| r.tenant == t).unwrap_or(true)
+                r.is_namespaces()
+                    && namespace.map(|t| r.namespace == t).unwrap_or(true)
                     && labels.iter().all(|l| l.matches(&r.metadata))
             })
             .map(|e| self.view(e))
@@ -122,28 +122,28 @@ impl Manager {
     }
 
     /// What running machines take (gateways included), how many run, and how many machines
-    /// tenants have (gateways not counted).
+    /// namespaces have (gateways not counted).
     pub fn usage(&self) -> (api::Capacity, usize, usize) {
         let machines = self.inner.machines.lock().unwrap();
         let (used, running) = committed(&machines);
         let total = machines
             .values()
-            .filter(|e| e.rec.lock().unwrap().is_tenants())
+            .filter(|e| e.rec.lock().unwrap().is_namespaces())
             .count();
         (used, running, total)
     }
 
     /// Takes the machine's memory from the host and moves it to `starting`, as one step
     /// under the map's lock: two starts that read the same free memory cannot both take it,
-    /// nor pass their tenant's quota together (ADR 0025). A pending change goes onto the record
+    /// nor pass their namespace's quota together (ADR 0025). A pending change goes onto the record
     /// in that step (ADR 0024), its size the one reserved and counted, with `image` its new
     /// image, resolved. Its events are logged once that lock is let go: the log syncs to disk,
     /// and the map is every request's. Nothing else moves the machine meanwhile: its own lock
     /// is held.
     pub(super) fn reserve(&self, e: &Entry, image: Option<image::Image>) -> Result<(), MError> {
-        let tenant = e.rec.lock().unwrap().tenant.clone();
+        let namespace = e.rec.lock().unwrap().namespace.clone();
         let quota = self
-            .tenant_of(&tenant)
+            .namespace_of(&namespace)
             .map(|t| t.rec.quota)
             .unwrap_or_default();
         let mut applied = None;
@@ -171,10 +171,10 @@ impl Manager {
                 vcpus: size.vcpus,
                 ..Default::default()
             };
-            let mut held = tenant_use(&machines, &tenant);
+            let mut held = namespace_use(&machines, &namespace);
             held.memory_mb = held.memory_mb.saturating_sub(own.memory_mb);
             held.vcpus = held.vcpus.saturating_sub(own.vcpus);
-            match over_quota(&tenant, &quota, &held, &need) {
+            match over_quota(&namespace, &quota, &held, &need) {
                 Some(x) => Some(x),
                 None => {
                     let (used, _) = committed(&machines);

@@ -128,7 +128,7 @@ impl Manager {
     }
 
     /// Leaves every machine as it is for the next daemon to adopt (ADR 0027: an upgrade).
-    /// Takes each machine's lock first, once a stop under way has settled, the tenants'
+    /// Takes each machine's lock first, once a stop under way has settled, the namespaces'
     /// machines before the gateways (a start holds its machine's, then its gateway's): a
     /// transition under way ends before, and none begins while the caller holds what this
     /// answers, until the process ends. Then the last

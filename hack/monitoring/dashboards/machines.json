@@ -1,7 +1,7 @@
 {
   "uid": "briqyard-machines",
-  "title": "briqyard: machines and tenants",
-  "description": "Machines and tenants across the hosts: the busiest, each one's series, restarts and drops, use per tenant.",
+  "title": "briqyard: machines and namespaces",
+  "description": "Machines and namespaces across the hosts: the busiest, each one's series, restarts and drops, use per namespace.",
   "tags": [
     "briqyard"
   ],
@@ -67,18 +67,18 @@
       },
       {
         "type": "query",
-        "name": "tenant",
-        "label": "Tenant",
+        "name": "namespace",
+        "label": "Namespace",
         "datasource": {
           "type": "prometheus",
           "uid": "briqyard-prometheus"
         },
         "query": {
           "qryType": 1,
-          "query": "label_values(briqyard_machine_state{host=~\"$host\"}, tenant)",
-          "refId": "tenant-var"
+          "query": "label_values(briqyard_machine_state{host=~\"$host\"}, namespace)",
+          "refId": "namespace-var"
         },
-        "definition": "label_values(briqyard_machine_state{host=~\"$host\"}, tenant)",
+        "definition": "label_values(briqyard_machine_state{host=~\"$host\"}, namespace)",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -107,10 +107,10 @@
         },
         "query": {
           "qryType": 1,
-          "query": "label_values(briqyard_machine_state{host=~\"$host\", tenant=~\"$tenant\"}, machine)",
+          "query": "label_values(briqyard_machine_state{host=~\"$host\", namespace=~\"$namespace\"}, machine)",
           "refId": "machine-var"
         },
-        "definition": "label_values(briqyard_machine_state{host=~\"$host\", tenant=~\"$tenant\"}, machine)",
+        "definition": "label_values(briqyard_machine_state{host=~\"$host\", namespace=~\"$namespace\"}, machine)",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -163,7 +163,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "count(briqyard_machine_state{state=\"running\", host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) or vector(0)",
+          "expr": "count(briqyard_machine_state{state=\"running\", host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}) or vector(0)",
           "legendFormat": "__auto",
           "range": true,
           "instant": false
@@ -226,7 +226,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "count(briqyard_machine_state{state=\"stopped\", host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) or vector(0)",
+          "expr": "count(briqyard_machine_state{state=\"stopped\", host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}) or vector(0)",
           "legendFormat": "__auto",
           "range": true,
           "instant": false
@@ -289,7 +289,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "count(briqyard_machine_state{state=\"error\", host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) or vector(0)",
+          "expr": "count(briqyard_machine_state{state=\"error\", host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}) or vector(0)",
           "legendFormat": "__auto",
           "range": true,
           "instant": false
@@ -356,7 +356,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "count(max by (machine, name, tenant) (round(increase(briqyard_machine_restarts_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[10m]))) >= 3) or vector(0)",
+          "expr": "count(max by (machine, name, namespace) (round(increase(briqyard_machine_restarts_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[10m]))) >= 3) or vector(0)",
           "legendFormat": "__auto",
           "range": true,
           "instant": false
@@ -423,7 +423,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum(briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) or vector(0)",
+          "expr": "sum(briqyard_machine_memory_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}) or vector(0)",
           "legendFormat": "__auto",
           "range": true,
           "instant": false
@@ -486,7 +486,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum(rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum(rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval])) or vector(0)",
           "legendFormat": "__auto",
           "range": true,
           "instant": false
@@ -549,7 +549,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "briqyard_machine_state{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}",
+          "expr": "briqyard_machine_state{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -561,7 +561,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "expr": "sum by (machine) (briqyard_machine_memory_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -573,7 +573,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine) (briqyard_machine_memory_limit_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "expr": "sum by (machine) (briqyard_machine_memory_limit_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -585,7 +585,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m]))",
+          "expr": "sum by (machine) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[5m]))",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -597,7 +597,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine) (briqyard_machine_disk_used_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "expr": "sum by (machine) (briqyard_machine_disk_used_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -609,7 +609,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine) (briqyard_machine_restarts_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "expr": "sum by (machine) (briqyard_machine_restarts_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -747,7 +747,7 @@
           "id": "filterFieldsByName",
           "options": {
             "include": {
-              "pattern": "^(machine|name|tenant|host|role|state|Value #[B-F])$"
+              "pattern": "^(machine|name|namespace|host|role|state|Value #[B-F])$"
             }
           }
         },
@@ -756,7 +756,7 @@
           "options": {
             "indexByName": {
               "name": 0,
-              "tenant": 1,
+              "namespace": 1,
               "machine": 2,
               "host": 3,
               "role": 4,
@@ -769,7 +769,7 @@
             },
             "renameByName": {
               "name": "Name",
-              "tenant": "Tenant",
+              "namespace": "Namespace",
               "machine": "Machine",
               "host": "Host",
               "role": "Role",
@@ -837,8 +837,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "topk(10, sum by (machine, name, tenant) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m])))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "topk(10, sum by (machine, name, namespace) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[5m])))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "instant": true,
           "range": false
         }
@@ -903,8 +903,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "topk(10, sum by (machine, name, tenant) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "topk(10, sum by (machine, name, namespace) (briqyard_machine_memory_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "instant": true,
           "range": false
         }
@@ -969,8 +969,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "topk(10, sum by (machine, name, tenant) (rate(briqyard_machine_internet_in_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m]) + rate(briqyard_machine_internet_out_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m]) + rate(briqyard_machine_ingress_in_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m]) + rate(briqyard_machine_ingress_out_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m])))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "topk(10, sum by (machine, name, namespace) (rate(briqyard_machine_internet_in_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[5m]) + rate(briqyard_machine_internet_out_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[5m]) + rate(briqyard_machine_ingress_in_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[5m]) + rate(briqyard_machine_ingress_out_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[5m])))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "instant": true,
           "range": false
         }
@@ -1048,8 +1048,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "sum by (machine, name, namespace) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "range": true,
           "instant": false
         }
@@ -1131,8 +1131,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine, name, tenant) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "sum by (machine, name, namespace) (briqyard_machine_memory_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "range": true,
           "instant": false
         }
@@ -1214,8 +1214,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine, name, tenant) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) / sum by (machine, name, tenant) (briqyard_machine_memory_limit_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "sum by (machine, name, namespace) (briqyard_machine_memory_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}) / sum by (machine, name, namespace) (briqyard_machine_memory_limit_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "range": true,
           "instant": false
         }
@@ -1301,8 +1301,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine, name, tenant) (briqyard_machine_disk_used_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "sum by (machine, name, namespace) (briqyard_machine_disk_used_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "range": true,
           "instant": false
         }
@@ -1384,8 +1384,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_disk_read_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}} read",
+          "expr": "sum by (machine, name, namespace) (rate(briqyard_machine_disk_read_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}} read",
           "range": true,
           "instant": false
         },
@@ -1395,8 +1395,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_disk_write_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}} write",
+          "expr": "sum by (machine, name, namespace) (rate(briqyard_machine_disk_write_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}} write",
           "range": true,
           "instant": false
         }
@@ -1490,8 +1490,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_internet_in_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]) + rate(briqyard_machine_ingress_in_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}} in",
+          "expr": "sum by (machine, name, namespace) (rate(briqyard_machine_internet_in_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]) + rate(briqyard_machine_ingress_in_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}} in",
           "range": true,
           "instant": false
         },
@@ -1501,8 +1501,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_internet_out_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]) + rate(briqyard_machine_ingress_out_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}} out",
+          "expr": "sum by (machine, name, namespace) (rate(briqyard_machine_internet_out_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]) + rate(briqyard_machine_ingress_out_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}} out",
           "range": true,
           "instant": false
         }
@@ -1609,8 +1609,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "max by (machine, name, tenant) (round(increase(briqyard_machine_restarts_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[10m])))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "max by (machine, name, namespace) (round(increase(briqyard_machine_restarts_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[10m])))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "range": true,
           "instant": false
         }
@@ -1697,8 +1697,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_egress_dropped_packets_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "sum by (machine, name, namespace) (rate(briqyard_machine_egress_dropped_packets_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "range": true,
           "instant": false
         }
@@ -1780,8 +1780,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (machine, name, tenant) (rate(briqyard_machine_disk_throttled_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "sum by (machine, name, namespace) (rate(briqyard_machine_disk_throttled_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "range": true,
           "instant": false
         }
@@ -1863,8 +1863,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "max by (machine, name, tenant) (briqyard_machine_boot_seconds{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
-          "legendFormat": "{{name}} \u00b7 {{tenant}}",
+          "expr": "max by (machine, name, namespace) (briqyard_machine_boot_seconds{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
+          "legendFormat": "{{name}} \u00b7 {{namespace}}",
           "range": true,
           "instant": false
         }
@@ -1933,7 +1933,7 @@
     },
     {
       "type": "row",
-      "title": "Tenants",
+      "title": "Namespaces",
       "collapsed": false,
       "panels": [],
       "gridPos": {
@@ -1946,8 +1946,8 @@
     },
     {
       "type": "timeseries",
-      "title": "CPU per tenant",
-      "description": "Cores each tenant's machines use.",
+      "title": "CPU per namespace",
+      "description": "Cores each namespace's machines use.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -1959,8 +1959,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (tenant) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
-          "legendFormat": "{{tenant}}",
+          "expr": "sum by (namespace) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{namespace}}",
           "range": true,
           "instant": false
         }
@@ -2023,8 +2023,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Memory per tenant",
-      "description": "Memory each tenant's machines hold.",
+      "title": "Memory per namespace",
+      "description": "Memory each namespace's machines hold.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -2036,8 +2036,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (tenant) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
-          "legendFormat": "{{tenant}}",
+          "expr": "sum by (namespace) (briqyard_machine_memory_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
+          "legendFormat": "{{namespace}}",
           "range": true,
           "instant": false
         }
@@ -2100,8 +2100,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Disk per tenant",
-      "description": "What each tenant's machines take on the pools.",
+      "title": "Disk per namespace",
+      "description": "What each namespace's machines take on the pools.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -2113,8 +2113,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (tenant) (briqyard_machine_disk_used_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
-          "legendFormat": "{{tenant}}",
+          "expr": "sum by (namespace) (briqyard_machine_disk_used_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
+          "legendFormat": "{{namespace}}",
           "range": true,
           "instant": false
         }
@@ -2177,8 +2177,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Internet per tenant",
-      "description": "Internet traffic of each tenant's machines, both ways.",
+      "title": "Internet per namespace",
+      "description": "Internet traffic of each namespace's machines, both ways.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -2190,8 +2190,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (tenant) (rate(briqyard_machine_internet_in_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]) + rate(briqyard_machine_internet_out_bytes_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[$__rate_interval]))",
-          "legendFormat": "{{tenant}}",
+          "expr": "sum by (namespace) (rate(briqyard_machine_internet_in_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]) + rate(briqyard_machine_internet_out_bytes_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[$__rate_interval]))",
+          "legendFormat": "{{namespace}}",
           "range": true,
           "instant": false
         }
@@ -2254,8 +2254,8 @@
     },
     {
       "type": "table",
-      "title": "Tenants",
-      "description": "Each tenant now: its machines, how many run, and what they use.",
+      "title": "Namespaces",
+      "description": "Each namespace now: its machines, how many run, and what they use.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -2267,7 +2267,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "count by (tenant) (briqyard_machine_state{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "expr": "count by (namespace) (briqyard_machine_state{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -2279,7 +2279,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "count by (tenant) (briqyard_machine_state{state=\"running\", host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) or (count by (tenant) (briqyard_machine_state{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}) * 0)",
+          "expr": "count by (namespace) (briqyard_machine_state{state=\"running\", host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}) or (count by (namespace) (briqyard_machine_state{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}) * 0)",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -2291,7 +2291,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (tenant) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"}[5m]))",
+          "expr": "sum by (namespace) (rate(briqyard_machine_cpu_seconds_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"}[5m]))",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -2303,7 +2303,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (tenant) (briqyard_machine_memory_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "expr": "sum by (namespace) (briqyard_machine_memory_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -2315,7 +2315,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (tenant) (briqyard_machine_disk_used_bytes{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "expr": "sum by (namespace) (briqyard_machine_disk_used_bytes{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -2327,7 +2327,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum by (tenant) (briqyard_machine_restarts_total{host=~\"$host\", tenant=~\"$tenant\", machine=~\"$machine\"})",
+          "expr": "sum by (namespace) (briqyard_machine_restarts_total{host=~\"$host\", namespace=~\"$namespace\", machine=~\"$machine\"})",
           "legendFormat": "__auto",
           "instant": true,
           "range": false,
@@ -2396,7 +2396,7 @@
               "Time": true
             },
             "indexByName": {
-              "tenant": 0,
+              "namespace": 0,
               "Value #A": 1,
               "Value #B": 2,
               "Value #C": 3,
@@ -2405,7 +2405,7 @@
               "Value #F": 6
             },
             "renameByName": {
-              "tenant": "Tenant",
+              "namespace": "Namespace",
               "Value #A": "Machines",
               "Value #B": "Running",
               "Value #C": "CPU (cores)",

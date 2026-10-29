@@ -1,8 +1,8 @@
-//! Tests of the tenant's gateway.
+//! Tests of the namespace's gateway.
 
 use super::*;
 
-// --- the tenant's gateway (ADR 0016) ---
+// --- the namespace's gateway (ADR 0016) ---
 
 pub(super) const IMAGE2: &str =
     "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000002";
@@ -17,7 +17,7 @@ pub(super) fn gateway_spec(port: u16) -> api::GatewaySpec {
 }
 
 impl Harness {
-    /// Tenant `t1` with a gateway on port 3128, not started; its machine id.
+    /// Namespace `t1` with a gateway on port 3128, not started; its machine id.
     pub(super) async fn with_gateway(&self) -> String {
         self.ready().await;
         let t = self.m.set_gateway("t1", gateway_spec(3128)).await.unwrap();
@@ -26,13 +26,13 @@ impl Harness {
         t.gateway.unwrap().machine_id
     }
 
-    /// A machine of `t1` that sends through the tenant's gateway.
+    /// A machine of `t1` that sends through the namespace's gateway.
     pub(super) fn consumer(&self, name: &str) -> api::CreateMachineRequest {
         self.request_egress(name, "via", Some("gateway"))
     }
 
     pub(super) fn gateway_view(&self) -> api::GatewayView {
-        self.m.tenant("t1").unwrap().gateway.expect("a gateway")
+        self.m.namespace("t1").unwrap().gateway.expect("a gateway")
     }
 
     fn boots_of(calls: &[String], id: &str) -> usize {
@@ -44,7 +44,7 @@ impl Harness {
 const VIA_GATEWAY: &str = "via 10.64.1.3 to 10.64.1.2 host 10.64.1.1";
 
 #[tokio::test]
-async fn a_gateway_is_a_machine_of_the_daemon_not_of_the_tenant() {
+async fn a_gateway_is_a_machine_of_the_daemon_not_of_the_namespace() {
     let h = harness("10.64.0.0/22", 4096).await;
     h.ready().await;
     let t = h.m.set_gateway("t1", gateway_spec(3128)).await.unwrap();
@@ -61,7 +61,7 @@ async fn a_gateway_is_a_machine_of_the_daemon_not_of_the_tenant() {
         .dev()
         .join(format!("byard/m/{}/root", gw.machine_id))
         .exists());
-    // Its record says what it is; its name in the tenant is `gateway.internal`.
+    // Its record says what it is; its name in the namespace is `gateway.internal`.
     let r = h.stored(&gw.machine_id).unwrap();
     assert_eq!(r.role, Some(Role::Gateway));
     assert_eq!(r.env["TOKEN"], "t0k");
@@ -75,16 +75,16 @@ async fn a_gateway_is_a_machine_of_the_daemon_not_of_the_tenant() {
         ),
         ("never", api::Egress::default(), "always")
     );
-    // Not one of the tenant's machines: not listed, not counted, its console readable.
+    // Not one of the namespace's machines: not listed, not counted, its console readable.
     assert!(h.m.list(None, &[]).is_empty() && h.m.list(Some("t1"), &[]).is_empty());
     assert_eq!(h.m.usage().2, 0);
     assert!(h.m.logs(&gw.machine_id, "", 10).is_ok());
-    // The name is taken in the tenant, like any machine's.
+    // The name is taken in the namespace, like any machine's.
     assert!(matches!(
         h.m.create_made(h.request("gateway")).await,
         Err(MError::NameTaken(_))
     ));
-    assert!(matches!(h.m.tenant("t9"), Err(MError::NotFound)));
+    assert!(matches!(h.m.namespace("t9"), Err(MError::NotFound)));
     // A spec the gateway cannot run is refused before anything is made.
     for bad in [
         gateway_spec(0),
@@ -131,8 +131,8 @@ async fn a_start_through_the_gateway_boots_it_first() {
         ]
     );
     assert_eq!(h.gateway_view().state, state::RUNNING);
-    // The tenant has one machine; the host runs two and commits both.
-    assert_eq!(h.m.tenant("t1").unwrap().machines, 1);
+    // The namespace has one machine; the host runs two and commits both.
+    assert_eq!(h.m.namespace("t1").unwrap().machines, 1);
     let (used, running, total) = h.m.usage();
     assert_eq!((used.memory_mb, running, total), (512, 2, 1));
     // The tables a daemon start renders name the gateway too.
@@ -196,7 +196,7 @@ async fn a_gateway_that_does_not_come_up_fails_the_start_and_says_so() {
     );
     assert!(
         b.error
-            .starts_with("the tenant's gateway did not come up: port 3128 did not answer"),
+            .starts_with("the namespace's gateway did not come up: port 3128 did not answer"),
         "{}",
         b.error
     );
@@ -218,7 +218,7 @@ async fn a_gateway_that_does_not_come_up_fails_the_start_and_says_so() {
     let b = failed(h.m.start(&m.id, None).await);
     assert!(
         b.error
-            .starts_with("the tenant's gateway did not come up: the guest did not come up: "),
+            .starts_with("the namespace's gateway did not come up: the guest did not come up: "),
         "{}",
         b.error
     );
@@ -278,16 +278,16 @@ async fn the_sleeper_stops_the_gateway_once_nothing_needs_it() {
 }
 
 #[tokio::test]
-async fn the_sleeper_leaves_a_gateway_whose_tenant_is_busy() {
+async fn the_sleeper_leaves_a_gateway_whose_namespace_is_busy() {
     let h = harness("10.64.0.0/22", 4096).await;
     let gw = h.with_gateway().await;
     let m = h.m.create_made(h.consumer("sbx")).await.unwrap();
     h.m.stop(&m.id, Duration::from_secs(1), false, None)
         .await
         .unwrap();
-    // A start that needs the gateway holds the tenant's lock until it is `starting`:
+    // A start that needs the gateway holds the namespace's lock until it is `starting`:
     // nothing runs through the gateway yet, and still it is not stopped under that start.
-    let t = h.m.tenant_of("t1").unwrap();
+    let t = h.m.namespace_of("t1").unwrap();
     let held = t.lock.lock().await;
     h.m.tick().await;
     assert_eq!(h.m.get(&gw).unwrap().state, state::RUNNING);
@@ -311,7 +311,7 @@ async fn a_gateway_in_use_is_kept_and_one_unused_removed() {
         .unwrap();
     h.m.delete_gateway("t1").await.unwrap();
     // Stopped and destroyed: no record, no process, no disks.
-    assert!(h.m.tenant("t1").unwrap().gateway.is_none());
+    assert!(h.m.namespace("t1").unwrap().gateway.is_none());
     assert!(matches!(h.m.get(&gw), Err(MError::NotFound)));
     assert!(h.stored(&gw).is_none());
     assert!(h.host.alive().is_empty());
@@ -319,7 +319,7 @@ async fn a_gateway_in_use_is_kept_and_one_unused_removed() {
     // Its consumer's next start is refused, with what to do; none is success.
     assert_eq!(
         refused(h.m.start(&m.id, None).await),
-        "tenant has no gateway: PUT /v1/tenants/t1/gateway first"
+        "namespace has no gateway: PUT /v1/namespaces/t1/gateway first"
     );
     assert_eq!(h.stored(&m.id).unwrap().state, state::STOPPED);
     h.m.delete_gateway("t1").await.unwrap();
@@ -327,28 +327,28 @@ async fn a_gateway_in_use_is_kept_and_one_unused_removed() {
 }
 
 #[tokio::test]
-async fn the_tenants_removal_destroys_its_gateway() {
+async fn the_namespaces_removal_destroys_its_gateway() {
     let h = harness("10.64.0.0/22", 4096).await;
     let gw = h.with_gateway().await;
     let m = h.m.create_made(h.request("web")).await.unwrap();
-    // The tenant's own machine keeps the tenant, and the gateway with it.
+    // The namespace's own machine keeps the namespace, and the gateway with it.
     assert!(matches!(
-        h.m.delete_tenant("t1").await,
-        Err(MError::TenantInUse)
+        h.m.delete_namespace("t1").await,
+        Err(MError::NamespaceInUse)
     ));
     assert!(h.m.get(&gw).is_ok());
     h.m.destroy(&m.id, None).await.unwrap();
-    h.m.delete_tenant("t1").await.unwrap();
+    h.m.delete_namespace("t1").await.unwrap();
     assert!(matches!(h.m.get(&gw), Err(MError::NotFound)));
     assert!(!h.pool.dev().join(format!("byard/m/{gw}")).exists());
-    assert!(h.m.tenants().is_empty());
+    assert!(h.m.namespaces().is_empty());
 }
 
 #[tokio::test]
-async fn via_gateway_needs_the_tenant_to_have_one() {
+async fn via_gateway_needs_the_namespace_to_have_one() {
     let h = harness("10.64.0.0/22", 4096).await;
     h.ready().await;
-    let want = "tenant has no gateway: PUT /v1/tenants/t1/gateway first";
+    let want = "namespace has no gateway: PUT /v1/namespaces/t1/gateway first";
     assert_eq!(refused(h.m.create_made(h.consumer("sbx")).await), want);
     let m = h.m.create_made(h.request("web")).await.unwrap();
     let patch =
@@ -539,7 +539,7 @@ async fn the_gateway_is_read_only_through_the_machine_routes() {
     assert!(h.m.logs(&gw, "", 10).is_ok());
     assert!(h.m.stats(&gw).await.is_ok());
     h.pool.calls();
-    // Everything that changes or runs something in it is the tenant route's.
+    // Everything that changes or runs something in it is the namespace route's.
     let gateway = |r: Result<(), MError>| match r {
         Err(MError::Gateway(t)) => t,
         other => panic!("{other:?}"),
@@ -602,7 +602,7 @@ async fn the_gateway_is_read_only_through_the_machine_routes() {
     assert!(refused.iter().all(|t| t == "t1"), "{refused:?}");
     assert_eq!(
         MError::Gateway("t1".into()).to_string(),
-        "the tenant's gateway: use /v1/tenants/t1/gateway"
+        "the namespace's gateway: use /v1/namespaces/t1/gateway"
     );
     // Untouched: not started, not destroyed, no other machine made, no snapshot taken.
     assert_eq!(h.gateway_view().state, state::CREATED);
@@ -614,23 +614,24 @@ async fn the_gateway_is_read_only_through_the_machine_routes() {
 #[tokio::test]
 async fn recovery_starts_the_gateway_an_adopted_machine_needs() {
     let h = harness("10.64.0.0/22", 4096).await;
-    h.tenant("t1");
-    h.tenant("t2");
-    let gateway = |id: &str, tenant: &str| {
+    h.namespace("t1");
+    h.namespace("t2");
+    let gateway = |id: &str, namespace: &str| {
         // Found running, its process gone with the daemon: nothing to adopt.
         let e = h.add(id, state::RUNNING, 256);
         e.set_state(state::RUNNING, |r| {
-            (r.role, r.tenant, r.name) = (Some(Role::Gateway), tenant.into(), "gateway".into());
+            (r.role, r.namespace, r.name) =
+                (Some(Role::Gateway), namespace.into(), "gateway".into());
             (r.ports, r.pid) = (vec![3128], 4242);
             None
         });
         e
     };
-    let adopted = |id: &str, tenant: &str, n: u8, eg: api::Egress| {
+    let adopted = |id: &str, namespace: &str, n: u8, eg: api::Egress| {
         let e = h.add(id, state::RUNNING, 256);
         let pid = h.host.left_running(id, &h.m.inner.cfg.run_dir().join(id));
         e.set_state(state::RUNNING, |r| {
-            (r.tenant, r.name, r.egress, r.pid) = (tenant.into(), id.into(), eg, pid);
+            (r.namespace, r.name, r.egress, r.pid) = (namespace.into(), id.into(), eg, pid);
             (r.host_num, r.ip) = (n, format!("10.64.1.{n}"));
             None
         });
@@ -639,7 +640,7 @@ async fn recovery_starts_the_gateway_an_adopted_machine_needs() {
     let needed = gateway("m_gw", "t1");
     h.disks(&needed).await;
     let sbx = adopted("m_sbx", "t1", 3, egress("via", Some("gateway")));
-    // A tenant whose adopted machine does not send through its gateway.
+    // A namespace whose adopted machine does not send through its gateway.
     let unneeded = gateway("m_gw2", "t2");
     adopted("m_open", "t2", 4, api::Egress::default());
     h.m.recover().await;

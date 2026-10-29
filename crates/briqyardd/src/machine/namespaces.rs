@@ -1,32 +1,33 @@
-//! Tenants: their view and their removal.
+//! Namespaces: their view and their removal.
 
 use super::*;
 
 impl Manager {
-    pub(super) fn tenant_of(&self, id: &str) -> Option<Tenant> {
-        self.inner.tenants.lock().unwrap().get(id).cloned()
+    pub(super) fn namespace_of(&self, id: &str) -> Option<Namespace> {
+        self.inner.namespaces.lock().unwrap().get(id).cloned()
     }
 
-    pub fn tenants(&self) -> Vec<api::Tenant> {
-        let tenants: Vec<Tenant> = self
+    pub fn namespaces(&self) -> Vec<api::Namespace> {
+        let namespaces: Vec<Namespace> = self
             .inner
-            .tenants
+            .namespaces
             .lock()
             .unwrap()
             .values()
             .cloned()
             .collect();
-        let mut out: Vec<api::Tenant> = tenants.iter().map(|t| self.tenant_view(t)).collect();
+        let mut out: Vec<api::Namespace> =
+            namespaces.iter().map(|t| self.namespace_view(t)).collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
     }
 
-    pub fn tenant(&self, id: &str) -> Result<api::Tenant, MError> {
-        let t = self.tenant_of(id).ok_or(MError::NotFound)?;
-        Ok(self.tenant_view(&t))
+    pub fn namespace(&self, id: &str) -> Result<api::Namespace, MError> {
+        let t = self.namespace_of(id).ok_or(MError::NotFound)?;
+        Ok(self.namespace_view(&t))
     }
 
-    fn tenant_view(&self, t: &Tenant) -> api::Tenant {
+    fn namespace_view(&self, t: &Namespace) -> api::Namespace {
         let machines = self
             .inner
             .machines
@@ -35,7 +36,7 @@ impl Manager {
             .values()
             .filter(|e| {
                 let r = e.rec.lock().unwrap();
-                r.tenant == t.rec.id && r.is_tenants()
+                r.namespace == t.rec.id && r.is_namespaces()
             })
             .count();
         let gateway = self.gateway_of(&t.rec.id).map(|e| {
@@ -48,7 +49,7 @@ impl Manager {
                 error: r.error,
             }
         });
-        api::Tenant {
+        api::Namespace {
             id: t.rec.id.clone(),
             subnet: t.subnet.cidr(),
             router: t.subnet.gateway().to_string(),
@@ -60,20 +61,20 @@ impl Manager {
         }
     }
 
-    /// Removes the network of a tenant with no machine left, and its gateway first. Missing
+    /// Removes the network of a namespace with no machine left, and its gateway first. Missing
     /// is success.
-    pub async fn delete_tenant(&self, id: &str) -> Result<(), MError> {
-        check_tenant_id(id)?;
-        let t = match self.tenant_of(id) {
+    pub async fn delete_namespace(&self, id: &str) -> Result<(), MError> {
+        check_namespace_id(id)?;
+        let t = match self.namespace_of(id) {
             Some(t) => t,
             None => return Ok(()),
         };
         let in_use = self.inner.machines.lock().unwrap().values().any(|e| {
             let r = e.rec.lock().unwrap();
-            r.tenant == id && r.is_tenants()
+            r.namespace == id && r.is_namespaces()
         });
         if in_use {
-            return Err(MError::TenantInUse);
+            return Err(MError::NamespaceInUse);
         }
         {
             let _turn = t.lock.lock().await;
@@ -83,8 +84,8 @@ impl Manager {
         }
         self.inner.dns.unset(t.subnet.gateway());
         self.inner.net.delete_bridge(t.rec.subnet_index).await?;
-        self.inner.tenants.lock().unwrap().remove(id);
-        self.inner.store.delete("tenants", id)?;
+        self.inner.namespaces.lock().unwrap().remove(id);
+        self.inner.store.delete(crate::store::NAMESPACES, id)?;
         Ok(())
     }
 }

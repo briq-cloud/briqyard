@@ -463,7 +463,7 @@ impl Manager {
         self.remove_machine(&e);
         self.inner
             .events
-            .emit(Ev::normal(reason::DESTROYED, "destroyed").of(id, &rec.tenant));
+            .emit(Ev::normal(reason::DESTROYED, "destroyed").of(id, &rec.namespace));
         tracing::info!(machine = id, "machine destroyed");
         others.sort();
         others.dedup();

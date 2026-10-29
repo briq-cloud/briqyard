@@ -36,14 +36,14 @@ impl Manager {
     }
 
     /// The create's first half, what it answers on: the spec checked, the source found (a
-    /// fork's machine, a restore's backup), the name, an address, the tenant's quota and, when
+    /// fork's machine, a restore's backup), the name, an address, the namespace's quota and, when
     /// it starts, the host's memory taken, the record written in `creating`.
     pub(super) async fn record(
         &self,
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
-        check_tenant_id(&req.tenant)?;
+        check_namespace_id(&req.namespace)?;
         if let Some(rs) = &req.restore {
             if !api::valid_id(&rs.machine_id) {
                 return Err(invalid("restore.machine_id is not a machine id"));
@@ -80,13 +80,13 @@ impl Manager {
         let restart = req.restart.clone().unwrap_or_default();
         // A cheap early answer, before a fork's or a restore's lookups; `add_machine` checks
         // again under the map's lock, where it counts.
-        if let Some(e) = self.named(&req.tenant, &req.name) {
+        if let Some(e) = self.named(&req.namespace, &req.name) {
             return Err(MError::NameTaken(Box::new(self.view(&e))));
         }
         let now = Utc::now();
         let mut rec = Record {
             id: new_id("m"),
-            tenant: req.tenant.clone(),
+            namespace: req.namespace.clone(),
             role,
             name: req.name.clone(),
             image: String::new(),
@@ -142,7 +142,7 @@ impl Manager {
             snapshots: Vec::new(),
             restoring: None,
         };
-        self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
+        self.check_egress(&rec.egress, &rec.namespace, &rec.id)?;
         let mut src: Option<(Arc<Entry>, api::ForkSpec)> = None;
         let mut restore_from: Option<(api::Backup, Option<String>)> = None;
         if let Some(rs) = &req.restore {
@@ -175,7 +175,7 @@ impl Manager {
             }
             if req.egress.is_none() {
                 rec.egress = was.egress;
-                self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
+                self.check_egress(&rec.egress, &rec.namespace, &rec.id)?;
             }
             if req.limits.is_none() {
                 rec.limits = was.limits;
@@ -211,8 +211,8 @@ impl Manager {
                 other => other,
             })?;
             let sr = s.snapshot();
-            if sr.tenant != req.tenant {
-                return Err(invalid("fork source belongs to another tenant"));
+            if sr.namespace != req.namespace {
+                return Err(invalid("fork source belongs to another namespace"));
             }
             if !sr.has_disks() {
                 return Err(invalid(format!(
@@ -247,7 +247,7 @@ impl Manager {
         if let Some(v) = &rec.volume {
             self.room_on_pool(v.size_gb).await?;
         }
-        let t = self.ensure_tenant(&req.tenant).await?;
+        let t = self.ensure_namespace(&req.namespace).await?;
         let e = self.add_machine(rec, &t)?;
         let ip = e.snapshot().ip;
         let counted = self.inner.net.count(&ip).await.context("usage counters");
@@ -349,7 +349,7 @@ impl Manager {
         e.note(ev);
         self.save(e)?;
         match self.start_entry(e, true).await {
-            // Refused before anything moved, so no state says it yet: its tenant's gateway did
+            // Refused before anything moved, so no state says it yet: its namespace's gateway did
             // not come up (`boot_failed`, its disks kept for a start), its quota, its `via`.
             Err(err) if e.snapshot().state == state::CREATING => {
                 let (reason, why) = match &err {
@@ -412,25 +412,25 @@ impl Manager {
         }
     }
 
-    /// The tenant's machine of this name: what a create of the name answers, so a create sent
+    /// The namespace's machine of this name: what a create of the name answers, so a create sent
     /// again after no answer finds the one the first made (ADR 0048).
-    pub(super) fn named(&self, tenant: &str, name: &str) -> Option<Arc<Entry>> {
+    pub(super) fn named(&self, namespace: &str, name: &str) -> Option<Arc<Entry>> {
         let machines = self.inner.machines.lock().unwrap();
         let found = machines.values().find(|e| {
             let r = e.rec.lock().unwrap();
-            r.tenant == tenant && r.name == name && r.state != state::DESTROYING
+            r.namespace == namespace && r.name == name && r.state != state::DESTROYING
         });
         found.cloned()
     }
 
-    /// Gives the machine an address and registers it, within its tenant's quota (ADR 0025):
+    /// Gives the machine an address and registers it, within its namespace's quota (ADR 0025):
     /// a machine and its volume, and when its create starts it its size, which the host's
     /// memory must hold too (ADR 0048). Nothing on disk yet.
-    fn add_machine(&self, mut rec: Record, t: &Tenant) -> Result<Arc<Entry>, MError> {
+    fn add_machine(&self, mut rec: Record, t: &Namespace) -> Result<Arc<Entry>, MError> {
         let mut machines = self.inner.machines.lock().unwrap();
         let taken = machines.values().find(|e| {
             let r = e.rec.lock().unwrap();
-            r.tenant == rec.tenant && r.name == rec.name && r.state != state::DESTROYING
+            r.namespace == rec.namespace && r.name == rec.name && r.state != state::DESTROYING
         });
         if let Some(e) = taken.cloned() {
             drop(machines);
@@ -439,15 +439,20 @@ impl Manager {
         let mut used = Vec::new();
         for e in machines.values() {
             let r = e.rec.lock().unwrap();
-            if r.tenant == t.rec.id {
+            if r.namespace == t.rec.id {
                 used.push(r.host_num as u32);
             }
         }
-        let held = tenant_use(&machines, &rec.tenant);
-        if let Some(x) = over_quota(&rec.tenant, &t.rec.quota, &held, &quota_need(&rec, false)) {
+        let held = namespace_use(&machines, &rec.namespace);
+        if let Some(x) = over_quota(
+            &rec.namespace,
+            &t.rec.quota,
+            &held,
+            &quota_need(&rec, false),
+        ) {
             drop(machines);
             let ev = x.event(format!("create of {} refused: {x}", rec.name));
-            self.inner.events.emit(ev.tenant(&rec.tenant));
+            self.inner.events.emit(ev.namespace(&rec.namespace));
             return Err(MError::Quota(x.to_string()));
         }
         if rec.start {
@@ -469,8 +474,9 @@ impl Manager {
                 }
             }
         }
-        let n = netw::first_free(used, 2, 254)
-            .ok_or_else(|| MError::Capacity(format!("tenant {} has no address left", t.rec.id)))?;
+        let n = netw::first_free(used, 2, 254).ok_or_else(|| {
+            MError::Capacity(format!("namespace {} has no address left", t.rec.id))
+        })?;
         rec.subnet_index = t.rec.subnet_index;
         rec.host_num = n as u8;
         rec.ip = t.subnet.host(n as u8)?.to_string();
@@ -486,7 +492,7 @@ impl Manager {
         *e.removed.lock().unwrap() = true;
         let rec = e.snapshot();
         self.inner.machines.lock().unwrap().remove(&rec.id);
-        if let Some(t) = self.tenant_of(&rec.tenant) {
+        if let Some(t) = self.namespace_of(&rec.namespace) {
             self.refresh_dns(&t);
         }
     }

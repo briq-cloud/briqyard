@@ -15,11 +15,11 @@ check_eq() { if [ "$2" = "$3" ]; then ok "$1: $2"; else fail "$1: $2 != $3"; fi;
 api() { curl -fsS -m 20 ${BRIQYARD_TOKEN:+-H "Authorization: Bearer $BRIQYARD_TOKEN"} "$URL$1"; }
 M=$(api /v1/machines) || { fail "api unreachable"; exit 1; }
 E=$(api /v1/endpoints) || E="[]"
-T=$(api /v1/tenants) || T="[]"
-# Tenants' gateways are machines of the daemon, not in /v1/machines: their disks, processes
+T=$(api /v1/namespaces) || T="[]"
+# Namespaces' gateways are machines of the daemon, not in /v1/machines: their disks, processes
 # and TAPs are counted with the rest.
 for g in $(echo "$T" | jq -r '.[].gateway.machine_id // empty'); do
-  # One destroyed since the tenants were read is gone from both.
+  # One destroyed since the namespaces were read is gone from both.
   m=$(api "/v1/machines/$g") && M=$(echo "$M" | jq --argjson g "$m" '. + [$g]')
 done
 
@@ -29,7 +29,7 @@ with_volume=$(echo "$M" | jq -r '.[] | select(.volume != null) | .id' | sort)
 n_machines=$(echo "$ids" | grep -c . || true)
 n_running=$(echo "$running" | grep -c . || true)
 n_endpoints=$(echo "$E" | jq 'length')
-n_tenants=$(echo "$T" | jq 'length')
+n_namespaces=$(echo "$T" | jq 'length')
 errored=$(echo "$M" | jq -r '.[] | select(.state == "error") | "\(.id) \(.error)"')
 [ -z "$errored" ] && ok "no machine in error" || fail "machines in error: $(echo "$errored" | head -3 | tr '\n' ';')"
 
@@ -84,9 +84,9 @@ stray=$(comm -23 <(echo "$fcs") <(echo "$ids"))
 taps=$(ip -o link show type tun 2>/dev/null | awk -F': ' '{print $2}' | grep '^bt' | sort)
 [ "$pending" = 0 ] && check_eq "taps == live machines" "$(echo "$taps" | grep -c . || true)" "$n_running"
 
-# --- tenants: a bridge per tenant the daemon knows, none else ---
+# --- namespaces: a bridge per namespace the daemon knows, none else ---
 bridges=$(ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | grep '^by' | grep -c . || true)
-check_eq "bridges == tenants" "$bridges" "$n_tenants"
+check_eq "bridges == namespaces" "$bridges" "$n_namespaces"
 
 # --- ingress: one listening host port per TCP endpoint ---
 # The host's range (`ingress.tcp_ports`), the daemon's default when its config names none.
@@ -121,6 +121,6 @@ if [ -n "$pid" ] && [ "$pid" != 0 ]; then
   rss=$(awk '/VmRSS/{print $2}' /proc/$pid/status 2>/dev/null || echo 0)
   fds=$(sudo ls /proc/$pid/fd 2>/dev/null | wc -l | tr -d ' ')
   threads=$(awk '/Threads/{print $2}' /proc/$pid/status 2>/dev/null || echo 0)
-  echo "info daemon rss ${rss} kB, ${fds} fds, ${threads} threads; machines ${n_machines} (${n_running} live), endpoints ${n_endpoints}, tenants ${n_tenants}"
+  echo "info daemon rss ${rss} kB, ${fds} fds, ${threads} threads; machines ${n_machines} (${n_running} live), endpoints ${n_endpoints}, namespaces ${n_namespaces}"
 fi
 exit $bad

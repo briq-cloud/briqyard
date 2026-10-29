@@ -81,7 +81,7 @@ impl Events {
         let tx = &self.inner.tx;
         let mut log = self.inner.log.lock().unwrap();
         *log.emitted.entry((ev.kind, ev.reason)).or_default() += 1;
-        let key: Key = (ev.tenant.clone(), ev.machine_id.clone(), ev.reason);
+        let key: Key = (ev.namespace.clone(), ev.machine_id.clone(), ev.reason);
         let folds = !(key.0.is_empty() && key.1.is_empty()) && FOLDED.contains(&key.2);
         let flip = FLIPS.contains(&key.2);
         if let Some(s) = log.series.get_mut(&key).filter(|s| !s.due(now)) {
@@ -402,7 +402,7 @@ mod tests {
         let seqs: Vec<u64> = p.events.iter().map(|e| e.seq).collect();
         assert_eq!((seqs, p.next), (vec![2, 4, 5], 5));
         let warnings = Filter {
-            tenant: Some("t1".into()),
+            namespace: Some("t1".into()),
             kind: Some("warning".into()),
             ..Default::default()
         };
@@ -470,7 +470,7 @@ mod tests {
         ev.emit(Ev::normal(reason::CREATED, "").of("m_b", "t2"));
         let (tx, mut rx) = mpsc::channel(16);
         let f = Filter {
-            tenant: Some("t1".into()),
+            namespace: Some("t1".into()),
             ..Default::default()
         };
         ev.watch(1, f, tx).await.unwrap();

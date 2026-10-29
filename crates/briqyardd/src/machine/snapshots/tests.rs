@@ -391,7 +391,7 @@ async fn a_backup_after_a_restore_continues_from_an_ancestor_or_is_whole() {
     for (name, b) in [("r2", &b2), ("r3", &b3)] {
         let r =
             h.m.create_made(api::CreateMachineRequest {
-                tenant: "t1".into(),
+                namespace: "t1".into(),
                 name: name.into(),
                 restore: Some(api::RestoreSpec {
                     machine_id: m.id.clone(),

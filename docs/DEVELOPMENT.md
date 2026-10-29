@@ -148,7 +148,7 @@ Without the three variables the run is partial: the sections it leaves out are n
 ends before its last check says `ENDED EARLY` and exits non-zero.
 
 Run it once the fleet lists fc's host empty: right after another suite, the fleet still counts
-what fc held, and placement puts the tenants the other way round. A VM that dies with Lima's
+what fc held, and placement puts the namespaces the other way round. A VM that dies with Lima's
 `VirtualMachineStateError` and a `com.apple.Virtualization.VirtualMachine` report in
 `~/Library/Logs/DiagnosticReports` (an assertion in the Hypervisor framework's
 `VcpuStateManager::set_pstate`) is macOS's nested virtualization failing, not the guest:
@@ -198,7 +198,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
 | a test binary | exits within a second of its parent (`cargo test` killed), and after 6 minutes at most (`briqyard-testing`, installed in each crate) |
 | the fake `zfs`, `udevadm`, `zvol_id` | a held one ends with its test (its hold goes with the temp dir) or its parent (`kill -0 "$PPID"`) |
 | the stand-in servers | the CLI's and fleet's test clients time out after 10 s; the Firecracker and vsock stand-ins give up after 10 s |
-| each shell suite | one trap on EXIT, INT, TERM, HUP: ends the shell's children by pid (`pkill -P $$`: sessions, watches, `logs -f`, their `sleep 600`), starts again a daemon it stopped (fc's, fc2's), undrains the hosts it drained, puts back the config, key and registry it moved, destroys its machines and tenants |
+| each shell suite | one trap on EXIT, INT, TERM, HUP: ends the shell's children by pid (`pkill -P $$`: sessions, watches, `logs -f`, their `sleep 600`), starts again a daemon it stopped (fc's, fc2's), undrains the hosts it drained, puts back the config, key and registry it moved, destroys its machines and namespaces |
 | `hack/stress.py` | SIGTERM and SIGHUP as Ctrl-C; a `finally` destroys what a failed or interrupted round left |
 
 - `cargo test --workspace`: unit tests, which run anywhere (extraction and whiteouts on Linux, DNS
@@ -216,7 +216,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   and not before, at most `at_once`, one per machine, a machine with no process skipped while
   unchanged, retention and its restores, delete and `chain`, a failure and its backoff, a
   refused store leaving nothing, a destroyed machine's held, counted and expired, a backup racing
-  a destroy answered 404), the tenant's gateway
+  a destroy answered 404), the namespace's gateway
   (booted once by what needs it, its failure named, slept by the tick, kept while in use),
   usage (hours split, counter resets, suspended and stopped machines, traffic on its machine,
   closed hours, a restart, retention, a destroyed machine, the route's range), egress limits
@@ -228,7 +228,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   restart, suspend and resume, the gateway, PATCH, a stale `If-Match`, the seq past the
   records at load, the route's pages, watch and 410; the log itself: seqs across a restart, a
   torn line, retention counting lines, a watch's backlog, lag, bookmark and shutdown; repeats
-  folded (ADR 0047): a use's at its window's end, a change logging them first, a tenant's
+  folded (ADR 0047): a use's at its window's end, a change logging them first, a namespace's
   refusal, the shutdown's, flips taking a seq with no line and the last line the machine's
   state, a due flip leaving uses in their window, a cursor in a gap after retention; a flapping
   readiness probe whose version is on disk once readable, a stale `If-Match` refused, the
@@ -293,7 +293,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   (ADR 0043); a create's hold given back when the host refuses and when its caller hangs up,
   kept through a report before its answer and dropped by one after, a destroy's room back at
   its answer (ADR 0044); a
-  destroyed machine's backup deleted on the host that holds it, a tenant's backups listed from
+  destroyed machine's backup deleted on the host that holds it, a namespace's backups listed from
   every host (ADR 0045); a delete with a query dropping the index entry), upgrades (the init's and
   the VMM's versions recorded at boot, a snapshot of another VMM booted cold, a hand-over that
   waits for a stop to settle, touches no machine and lets no transition begin, the adoption
@@ -301,10 +301,10 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   stopped within its window, a record keeping a newer daemon's fields, an old init's unknown op
   named, old and new wire shapes decoding, the fleet's refusals, its wait for a new start and
   its end states, drain apart from retire), capacity signals (ADR 0042: each refusal counted by
-  what ran out and its region, hosts under a condition named by it, a pinned tenant's host
-  under pressure, a region no host is in; the room of the hosts that take a tenant, drained,
+  what ran out and its region, hosts under a condition named by it, a pinned namespace's host
+  under pressure, a region no host is in; the room of the hosts that take a namespace, drained,
   down and pressured ones left out; the fleet's `/metrics` against the format, and its
-  token). What still needs the host: a tenant's first create (its bridge and
+  token). What still needs the host: a namespace's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
 - `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, a create
@@ -313,13 +313,13 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   layers (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary
   group (running, its uid, gid and groups), a program that cannot start (its `/wait` 409
   `boot_failed` with the init's reason), DNS,
-  egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
+  egress, namespace isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress (two `Host` lines
   refused, an absolute-form target routed by its authority and refused when `Host` names
   another), a daemon crash,
   backups to a directory store and a restore, egress policies (`via` a gateway machine, `none`,
-  back to `open`), a tenant gateway (a forward proxy its consumer's start boots, HTTPS through
-  it and nothing around it, stopped by the sleeper, gone with the tenant), iron-proxy as a tenant
+  back to `open`), a namespace gateway (a forward proxy its consumer's start boots, HTTPS through
+  it and nothing around it, stopped by the sleeper, gone with the namespace), iron-proxy as a namespace
   gateway (a stock image with its config and CA as boot files: a header injected and a proxy
   token swapped on the way to a sibling's HTTPS echo, a request without the token and a host off
   its list refused, no secret in the consumer), egress limits (port
@@ -379,7 +379,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   daemon in the VM), the capacity signals on `/metrics` (ADR 0042), an exec session and a tty
   relayed, drain and undrain, and a `host upgrade` of the VM's own host to this build with a
   machine running (back `ready`, a new start of this version that adopted it, the machine
-  answering, never booted again), a volume's growth forwarded, a tenant's watch streamed with
+  answering, never booted again), a volume's growth forwarded, a namespace's watch streamed with
   its bookmark. 33 checks. With `BRIQYARD_TOKEN`
   against a real fleet: it drains only the dev fleet's host `local`, so it leaves real hosts
   alone (21 checks then: `/metrics` refused without a token over `https://`;
@@ -388,11 +388,11 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   while the fleet upgrades the VM's host and then restarts, each attempt counted `ok`, `refused`,
   `reset`, `timeout` or `failed` (`hack/upgrade-probe.py`; ADR 0051 keeps the numbers). A
   measure, not a suite: it prints counts and passes nothing.
-- `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
+- `hack/stress.py` with `hack/stress-invariants.sh`: N namespaces through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start and a
   snapshot's delete against a destroy, more starts at once than the host has memory for), host
   invariants between phases (ADR 0010; one is no record on disk the daemon does not hold).
-  `--tenants 6 --per-tenant 4 --rounds 2 --crash`. `--churn N` then runs N cycles per tenant of
+  `--namespaces 6 --per-namespace 4 --rounds 2 --crash`. `--churn N` then runs N cycles per namespace of
   create, files, an endpoint, a snapshot restored, a backup restored, a fork, suspend and
   resume, destroy, and reads the daemon's `process_resident_memory_bytes` 12 s after each:
   growth over the second half past `--rss-growth-mb` (32) is a break (ADR 0052). Through a
@@ -404,9 +404,9 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   while racers stop, start, restart, snapshot and back up any machine at once. It fails on a
   counter that is not what it should be, or an answer a race does not explain. A write cut
   short by a stop (409 `not_running`) may have run: its owner reads it back once the machine
-  runs. `--tenants 4 --racers 4 --minutes 10`; `--backups` with a store; a fleet with `--url`.
-- `hack/fleet-two-hosts.sh`: a fleet with two hosts: tenants placed on different hosts, calls
-  forwarded to each, a host that stops answering marked down with its tenant's calls refused
+  runs. `--namespaces 4 --racers 4 --minutes 10`; `--backups` with a store; a fleet with `--url`.
+- `hack/fleet-two-hosts.sh`: a fleet with two hosts: namespaces placed on different hosts, calls
+  forwarded to each, a host that stops answering marked down with its namespace's calls refused
   (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back;
   with `SECOND_HOST_SH`, its pool locked while it is down and back encrypted and unlocked with
   the fleet's key, the key on none of its files, in its log or in the fleet's host list; and a

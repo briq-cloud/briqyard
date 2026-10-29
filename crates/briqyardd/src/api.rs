@@ -128,15 +128,29 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/usage", get(usage))
         .route("/v1/top", get(top))
         .route("/v1/events", get(events))
-        .route("/v1/tenants", get(list_tenants))
-        .route("/v1/tenants/:id", get(get_tenant).delete(delete_tenant))
-        .route(
-            "/v1/tenants/:id/gateway",
-            put(set_gateway).delete(delete_gateway),
-        )
-        .route("/v1/tenants/:id/quota", get(get_quota).put(set_quota))
+        .merge(namespace_routes("/v1/namespaces"))
+        // The former name (ADR 0055), answered until the control plane has moved.
+        .merge(namespace_routes("/v1/tenants"))
         .layer(middleware::from_fn_with_state(state.clone(), auth_and_log))
         .with_state(state)
+}
+
+/// The routes of a namespace, under `prefix`.
+fn namespace_routes(prefix: &str) -> Router<Arc<AppState>> {
+    Router::new()
+        .route(prefix, get(list_namespaces))
+        .route(
+            &format!("{prefix}/:id"),
+            get(get_namespace).delete(delete_namespace),
+        )
+        .route(
+            &format!("{prefix}/:id/gateway"),
+            put(set_gateway).delete(delete_gateway),
+        )
+        .route(
+            &format!("{prefix}/:id/quota"),
+            get(get_quota).put(set_quota),
+        )
 }
 
 /// Every error response's body, with the status it maps to.
@@ -169,7 +183,7 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::Gone { .. } => (StatusCode::GONE, "gone"),
         MError::Capacity(_) => (StatusCode::SERVICE_UNAVAILABLE, "capacity"),
         MError::Quota(_) => (StatusCode::FORBIDDEN, "quota"),
-        MError::TenantInUse => (StatusCode::CONFLICT, "tenant_in_use"),
+        MError::NamespaceInUse => (StatusCode::CONFLICT, "namespace_in_use"),
         MError::GatewayInUse => (StatusCode::CONFLICT, "gateway_in_use"),
         MError::Gateway(_) => (StatusCode::CONFLICT, "gateway"),
         MError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
@@ -331,28 +345,29 @@ async fn status(State(st): S) -> Json<api::Status> {
 
 #[derive(Deserialize)]
 struct ListQuery {
-    tenant: Option<String>,
+    #[serde(alias = "tenant")]
+    namespace: Option<String>,
 }
 
-/// A listing's query: the tenant, and the label selectors, each `label=` one (ADR 0025).
+/// A listing's query: the namespace, and the label selectors, each `label=` one (ADR 0025).
 fn list_query(query: Option<&str>) -> Result<(Option<String>, Vec<api::Label>), MError> {
-    let (mut tenant, mut labels) = (None, Vec::new());
+    let (mut namespace, mut labels) = (None, Vec::new());
     for (k, v) in url::form_urlencoded::parse(query.unwrap_or("").as_bytes()) {
         match k.as_ref() {
-            "tenant" => tenant = Some(v.into_owned()),
+            "namespace" | "tenant" => namespace = Some(v.into_owned()),
             "label" => labels.push(api::Label::parse(&v).map_err(MError::Invalid)?),
             _ => {}
         }
     }
-    Ok((tenant, labels))
+    Ok((namespace, labels))
 }
 
 async fn list_machines(
     State(st): S,
     RawQuery(query): RawQuery,
 ) -> Result<Json<Vec<api::Machine>>, AppError> {
-    let (tenant, labels) = list_query(query.as_deref())?;
-    Ok(Json(st.mgr.list(tenant.as_deref(), &labels)))
+    let (namespace, labels) = list_query(query.as_deref())?;
+    Ok(Json(st.mgr.list(namespace.as_deref(), &labels)))
 }
 
 // Every transition runs through `detached`: axum drops a handler's future when the client
@@ -640,18 +655,19 @@ async fn delete_backup(
 
 #[derive(Deserialize)]
 struct BackupsQuery {
-    tenant: Option<String>,
+    #[serde(alias = "tenant")]
+    namespace: Option<String>,
     machine: Option<String>,
 }
 
-/// Every backup of the host's machines, destroyed ones' included, of a tenant or all, of a
+/// Every backup of the host's machines, destroyed ones' included, of a namespace or all, of a
 /// machine or all.
 async fn all_backups(
     State(st): S,
     Query(q): Query<BackupsQuery>,
 ) -> Result<Json<Vec<api::Backup>>, AppError> {
-    let (tenant, machine) = (q.tenant.as_deref(), q.machine.as_deref());
-    Ok(Json(st.mgr.all_backups(tenant, machine).await?))
+    let (namespace, machine) = (q.namespace.as_deref(), q.machine.as_deref());
+    Ok(Json(st.mgr.all_backups(namespace, machine).await?))
 }
 
 async fn stats(State(st): S, Path(id): Path<String>) -> Result<Json<api::MachineStats>, AppError> {
@@ -740,14 +756,15 @@ async fn delete_image(State(st): S, Path(key): Path<String>) -> Result<StatusCod
 
 /// The running machines' use over the tick's last window (ADR 0021).
 async fn top(State(st): S, Query(q): Query<ListQuery>) -> Json<Vec<api::TopMachine>> {
-    Json(st.mgr.top(q.tenant.as_deref()))
+    Json(st.mgr.top(q.namespace.as_deref()))
 }
 
 #[derive(Deserialize)]
 struct UsageQuery {
     from: Option<String>,
     to: Option<String>,
-    tenant: Option<String>,
+    #[serde(alias = "tenant")]
+    namespace: Option<String>,
 }
 
 /// The usage buckets of a range of hours (ADR 0017).
@@ -757,13 +774,14 @@ async fn usage(
 ) -> Result<Json<Vec<api::UsageBucket>>, AppError> {
     let (from, to) =
         crate::usage::range(q.from.as_deref(), q.to.as_deref()).map_err(MError::Invalid)?;
-    Ok(Json(st.mgr.usage_buckets(from, to, q.tenant).await?))
+    Ok(Json(st.mgr.usage_buckets(from, to, q.namespace).await?))
 }
 
 #[derive(Deserialize)]
 struct EventsQuery {
     since: Option<String>,
-    tenant: Option<String>,
+    #[serde(alias = "tenant")]
+    namespace: Option<String>,
     machine: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
@@ -780,7 +798,7 @@ fn events_query(q: EventsQuery) -> Result<(u64, Filter), MError> {
             .parse()
             .map_err(|_| MError::Invalid(format!("since {s:?}: want a seq, a page's `next`")))?,
     };
-    for id in [&q.tenant, &q.machine].into_iter().flatten() {
+    for id in [&q.namespace, &q.machine].into_iter().flatten() {
         if !api::valid_id(id) {
             return Err(MError::Invalid(format!("{id:?} is not an id")));
         }
@@ -793,7 +811,7 @@ fn events_query(q: EventsQuery) -> Result<(u64, Filter), MError> {
         }
     }
     let f = Filter {
-        tenant: q.tenant,
+        namespace: q.namespace,
         machine: q.machine,
         kind: q.kind,
     };
@@ -817,17 +835,20 @@ async fn events(State(st): S, Query(q): Query<EventsQuery>) -> Result<Response, 
     Ok(ndjson(rx))
 }
 
-async fn list_tenants(State(st): S) -> Json<Vec<api::Tenant>> {
-    Json(st.mgr.tenants())
+async fn list_namespaces(State(st): S) -> Json<Vec<api::Namespace>> {
+    Json(st.mgr.namespaces())
 }
 
-async fn get_tenant(State(st): S, Path(id): Path<String>) -> Result<Json<api::Tenant>, AppError> {
-    Ok(Json(st.mgr.tenant(&id)?))
+async fn get_namespace(
+    State(st): S,
+    Path(id): Path<String>,
+) -> Result<Json<api::Namespace>, AppError> {
+    Ok(Json(st.mgr.namespace(&id)?))
 }
 
-async fn delete_tenant(State(st): S, Path(id): Path<String>) -> Result<StatusCode, AppError> {
+async fn delete_namespace(State(st): S, Path(id): Path<String>) -> Result<StatusCode, AppError> {
     let m = st.mgr.clone();
-    detached(async move { m.delete_tenant(&id).await }).await?;
+    detached(async move { m.delete_namespace(&id).await }).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -835,7 +856,7 @@ async fn set_gateway(
     State(st): S,
     Path(id): Path<String>,
     Json(spec): Json<api::GatewaySpec>,
-) -> Result<Json<api::Tenant>, AppError> {
+) -> Result<Json<api::Namespace>, AppError> {
     let m = st.mgr.clone();
     Ok(Json(
         detached(async move { m.set_gateway(&id, spec).await }).await?,
@@ -851,7 +872,7 @@ async fn delete_gateway(State(st): S, Path(id): Path<String>) -> Result<StatusCo
 async fn get_quota(
     State(st): S,
     Path(id): Path<String>,
-) -> Result<Json<api::TenantQuota>, AppError> {
+) -> Result<Json<api::NamespaceQuota>, AppError> {
     Ok(Json(st.mgr.quota(&id)?))
 }
 
@@ -859,7 +880,7 @@ async fn set_quota(
     State(st): S,
     Path(id): Path<String>,
     Json(q): Json<api::Quota>,
-) -> Result<Json<api::TenantQuota>, AppError> {
+) -> Result<Json<api::NamespaceQuota>, AppError> {
     let m = st.mgr.clone();
     Ok(Json(
         detached(async move { m.set_quota(&id, q).await }).await?,
@@ -892,6 +913,19 @@ mod tests {
     }
 
     #[test]
+    fn tenant_is_read_as_namespace_in_a_query() {
+        // ADR 0055: the former name of the parameter.
+        for q in ["namespace=t1&label=a", "tenant=t1&label=a"] {
+            let (namespace, labels) = list_query(Some(q)).unwrap();
+            assert_eq!(namespace.as_deref(), Some("t1"), "{q}");
+            assert_eq!(labels.len(), 1, "{q}");
+        }
+        let uri: axum::http::Uri = "/v1/usage?tenant=t1".parse().unwrap();
+        let Query(q) = Query::<UsageQuery>::try_from_uri(&uri).unwrap();
+        assert_eq!(q.namespace.as_deref(), Some("t1"));
+    }
+
+    #[test]
     fn the_description_lists_the_reasons_the_daemon_has() {
         let doc: serde_yaml::Value =
             serde_yaml::from_str(include_str!("../../../api/openapi.yaml")).unwrap();
@@ -906,11 +940,11 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_reads_its_tenant_and_every_label() {
+    fn a_listing_reads_its_namespace_and_every_label() {
         assert_eq!(list_query(None).unwrap(), (None, vec![]));
-        let (tenant, labels) =
-            list_query(Some("tenant=t1&label=app%3Dweb&label=tier&other=x")).unwrap();
-        assert_eq!(tenant.as_deref(), Some("t1"));
+        let (namespace, labels) =
+            list_query(Some("namespace=t1&label=app%3Dweb&label=tier&other=x")).unwrap();
+        assert_eq!(namespace.as_deref(), Some("t1"));
         assert_eq!(
             labels,
             [
@@ -1046,18 +1080,21 @@ mod tests {
         assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "conflict"));
         assert_eq!(e.machine.map(|m| m.id), Some("m_1".to_string()));
         let e = AppError::from(MError::Quota(
-            "tenant t1's quota: machines 1 of 1 used, 1 more asked".into(),
+            "namespace t1's quota: machines 1 of 1 used, 1 more asked".into(),
         ));
         assert_eq!((e.status, e.code), (StatusCode::FORBIDDEN, "quota"));
         assert_eq!(
             e.error,
-            "tenant t1's quota: machines 1 of 1 used, 1 more asked"
+            "namespace t1's quota: machines 1 of 1 used, 1 more asked"
         );
         let e = AppError::from(MError::GatewayInUse);
         assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway_in_use"));
         let e = AppError::from(MError::Gateway("t1".into()));
         assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "gateway"));
-        assert_eq!(e.error, "the tenant's gateway: use /v1/tenants/t1/gateway");
+        assert_eq!(
+            e.error,
+            "the namespace's gateway: use /v1/namespaces/t1/gateway"
+        );
         let e = AppError::from(MError::Capacity("1 MB used of 1".into()));
         assert_eq!(
             (e.status, e.code),

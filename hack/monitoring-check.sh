@@ -76,7 +76,7 @@ if [ -n "${PROMETHEUS_URL:-}" ] && [ -n "${GRAFANA_URL:-}" ] && [ -n "${GRAFANA_
     while IFS=$'\t' read -r title ref instant expr; do
       total=$((total+1))
       expr=${expr//\$__rate_interval/1m}; expr=${expr//\$__range/30m}; expr=${expr//\$host/$host}
-      expr=${expr//\$region/.*}; expr=${expr//\$tenant/.*}; expr=${expr//\$machine/.*}
+      expr=${expr//\$region/.*}; expr=${expr//\$namespace/.*}; expr=${expr//\$machine/.*}
       body=$(jq -n --arg e "$expr" --argjson i "$instant" '{from: "now-30m", to: "now", queries: [{refId: "A",
         datasource: {type: "prometheus", uid: "briqyard-prometheus"}, expr: $e, instant: $i, range: ($i | not),
         intervalMs: 60000, maxDataPoints: 100}]}')

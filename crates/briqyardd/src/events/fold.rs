@@ -179,11 +179,12 @@ mod tests {
     }
 
     #[test]
-    fn a_tenant_refusal_folds_and_the_daemon_going_down_logs_what_was_folded() {
+    fn a_namespace_refusal_folds_and_the_daemon_going_down_logs_what_was_folded() {
         let (_dir, ev) = open();
         let t0 = t("2026-10-28T10:00:00Z");
         for i in 0..3 {
-            let refused = Ev::warning(reason::QUOTA_EXCEEDED, format!("refused {i}")).tenant("t1");
+            let refused =
+                Ev::warning(reason::QUOTA_EXCEEDED, format!("refused {i}")).namespace("t1");
             ev.emit_at(refused, t0 + Duration::seconds(i));
         }
         // The host's own events never fold.

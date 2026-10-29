@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Drives the whole machine flow through a briqyard-fleet ($BRIQYARD_URL, default
 # http://127.0.0.1:7430, with $BRIQYARD_TOKEN) that fronts at least one daemon. Makes and removes
-# one machine in the tenant "fleet-smoke". The hosts part drains and forgets only the dev fleet's
+# one machine in the namespace "fleet-smoke". The hosts part drains and forgets only the dev fleet's
 # own host `local` (it comes back on the next poll): against a real fleet, it leaves its hosts
 # alone. `/metrics` is read with $BRIQYARD_METRICS_TOKEN when the fleet has a metrics_token.
 # With the release directory hack/vm.sh installs, it also upgrades the VM's own host through the
@@ -27,8 +27,8 @@ cleanup() {
   set +e
   for h in $DRAINED; do briqyard host undrain "$h" >/dev/null 2>&1 || true; done
   for t in "$T" "$T-2" "$T-up"; do
-    for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
-    briqyard tenant rm "$t" >/dev/null 2>&1 || true
+    for id in $(briqyard machine ls --namespace "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
+    briqyard namespace rm "$t" >/dev/null 2>&1 || true
   done
   suite_early_end "$rc"
 }
@@ -53,12 +53,12 @@ check "metrics: the refusals" 'grep -q "^briqyard_fleet_unschedulable_total{reso
 if [[ $BRIQYARD_URL == https://* ]] && [ "$(curl -s -o /dev/null -w '%{http_code}' "$BRIQYARD_URL/v1/status")" = 401 ]; then
   check "metrics: 401 without a token" '[ "$(curl -s -o /dev/null -w "%{http_code}" "$BRIQYARD_URL/metrics")" = 401 ]'
 fi
-M=$(briqyard machine run --image alpine:3.20 --name viafleet --tenant "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
+M=$(briqyard machine run --image alpine:3.20 --name viafleet --namespace "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
 check "created, placed" '[ -n "$(briqyard machine get "$M" | jq -r .host)" ]'
 check "running"         '[ "$(briqyard machine get "$M" | jq -r .state)" = running ]'
-# The tenant's watch, streamed from its host as it is: its events, and a bookmark at 30 s.
-since=$(api "/v1/events?tenant=$T" | jq -r .next)
-timeout 90 curl -sN ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/events?tenant=$T&since=$since&watch=true" > /tmp/by-fleet-watch.txt 2>&1 &
+# The namespace's watch, streamed from its host as it is: its events, and a bookmark at 30 s.
+since=$(api "/v1/events?namespace=$T" | jq -r .next)
+timeout 90 curl -sN ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/events?namespace=$T&since=$since&watch=true" > /tmp/by-fleet-watch.txt 2>&1 &
 WATCH=$!
 check "exec forwarded"  '[ "$(briqyard machine exec "$M" -- hostname)" = viafleet ]'
 check "session forwarded" '[ "$(echo hi | briqyard machine exec -i "$M" -- cat)" = hi ]'
@@ -67,22 +67,22 @@ check "listed with host" 'briqyard machine ls | grep "$M" | grep -q "[a-z]"'
 EP=$(briqyard endpoint add "$M" 80 | jq -r .id)
 check "endpoint forwarded" 'briqyard endpoint ls | grep -q "$EP"'
 check "endpoint by id"  'api "/v1/endpoints/$EP" | jq -e .address >/dev/null'
-check "tenant pinned"   'briqyard tenant ls | jq -e ".[] | select(.id == \"$T\") | .host" >/dev/null'
+check "namespace pinned"   'briqyard namespace ls | jq -e ".[] | select(.id == \"$T\") | .host" >/dev/null'
 check "logs forwarded"  'briqyard machine logs "$M" --limit 5000 | grep -q "\[briqyard\] started"'
 check "a volume's growth forwarded" '[ "$(briqyard machine set "$M" --volume-gb 2 | jq -r "[.volume.size_gb, .pending.fields[0]] | join(\" \")")" = "2 volume" ]'
 briqyard machine stop "$M" >/dev/null
 check "stop forwarded"  '[ "$(briqyard machine get "$M" | jq -r .state)" = stopped ]'
 briqyard machine destroy "$M"
 check "destroyed"       '! briqyard machine get "$M" >/dev/null 2>&1'
-briqyard tenant rm "$T"
-check "tenant unpinned" '! briqyard tenant ls | jq -e ".[] | select(.id == \"$T\")" >/dev/null 2>&1'
+briqyard namespace rm "$T"
+check "namespace unpinned" '! briqyard namespace ls | jq -e ".[] | select(.id == \"$T\")" >/dev/null 2>&1'
 watched() { jq -se 'any(.reason == "destroyed") and any(has("bookmark"))' /tmp/by-fleet-watch.txt >/dev/null 2>&1; }
 for i in $(seq 1 60); do watched && break; sleep 1; done
 kill "$WATCH" 2>/dev/null || true; wait "$WATCH" 2>/dev/null || true
-check "a tenant watch: its events, then a bookmark" 'watched'
+check "a namespace watch: its events, then a bookmark" 'watched'
 # The fleet's own static host of hack/fleet.dev.yaml, never another: forgetting a host drops
 # its pool key with its record (ADR 0026); a second host (fc2) is refused, and drained it would
-# take no tenant.
+# take no namespace.
 LOCAL=$(api /v1/hosts | jq -r '.[] | select(.id == "local" and .state == "ready" and .provider == "static") | .id')
 if [ -z "$LOCAL" ]; then
   skip "drain and forget the host local, and the host upgrade (no static host local, ready)"
@@ -93,7 +93,7 @@ DRAINED=$LOCAL
 briqyard host drain "$LOCAL"
 check "draining"          '[ "$(host_field "$LOCAL" .state)" = draining ]'
 # One host: the create is refused. Several: it lands on another one. Never on the draining host.
-check "no placement on a draining host" '[ "$(briqyard machine run --image alpine:3.20 --name nohost --tenant "$T-2" --memory 256 -- true 2>/dev/null | jq -r .host)" != "$LOCAL" ]'
+check "no placement on a draining host" '[ "$(briqyard machine run --image alpine:3.20 --name nohost --namespace "$T-2" --memory 256 -- true 2>/dev/null | jq -r .host)" != "$LOCAL" ]'
 briqyard host undrain "$LOCAL"
 check "undrained"         '[ "$(host_field "$LOCAL" .state)" = ready ]'
 briqyard host drain "$LOCAL"
@@ -111,7 +111,7 @@ if sudo -n test -d "$REL" 2>/dev/null; then
   OTHERS=$(hosts | jq -r ".[] | select(.state == \"ready\" and .id != \"$UP\") | .id")
   DRAINED=$OTHERS
   for h in $OTHERS; do briqyard host drain "$h"; done
-  U=$(briqyard machine run --image alpine:3.20 --name up --tenant "$T-up" --memory 128 -- sleep 3600 | jq -r .id)
+  U=$(briqyard machine run --image alpine:3.20 --name up --namespace "$T-up" --memory 128 -- sleep 3600 | jq -r .id)
   for h in $OTHERS; do briqyard host undrain "$h"; done
   DRAINED=
   before=$(host_field "$UP" .started.at)

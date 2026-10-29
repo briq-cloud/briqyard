@@ -35,7 +35,7 @@ docs/                    architecture, operations, development, mesh design, adr
 - **The VMs are shared by every checkout and session on this Mac: one at a time.** `hack/vm.sh install|restart|stop|e2e|fleet` take the lock themselves; any other suite or anything that restarts a daemon runs under it: `hack/vm-lock.sh bash -c 'hack/vm.sh install && limactl shell fc bash hack/e2e.sh'`. Edit and build outside it; hold it only while the VMs run your build. Never restart a daemon another holder is testing.
 - `hack/vm.sh install` builds in the VM, installs both units, restarts them. **Always after a config field change**: an old binary refuses a new field and systemd's start limit then needs `systemctl reset-failed`.
 - `hack/e2e.sh` (244 checks, one daemon; 240 without `network.host_ports`), `hack/fleet-smoke.sh` (33, through the fleet, a `host upgrade` included), `hack/fleet-two-hosts.sh` (26, needs `fc2`), `hack/fleet-restore.sh` (10, needs `fc2`: the registry's backup and restore). Run the first two on every daemon change; the last two on every fleet change. `hack/monitoring-check.sh` (18, the stack of `hack/install-monitoring.sh` in fc) on a change to the metrics, the dashboards or the stack.
-- `hack/stress.py` with `hack/stress-invariants.sh`: many tenants through every feature, host invariants between phases. Run it after any change to the manager, the network or the store.
+- `hack/stress.py` with `hack/stress-invariants.sh`: many namespaces through every feature, host invariants between phases. Run it after any change to the manager, the network or the store.
 - `hack/chaos.py`: owners that check a counter on their disks through every lifecycle operation, racers that stop, start, snapshot and back up under them. Run it after a change to snapshots, backups or the lifecycle.
 - Coverage: `cargo llvm-cov` in the VM. Last measure in `docs/research/2026-10-19-stress-spike.md`.
 - `limactl stop fc fc2` when done.
@@ -51,7 +51,7 @@ docs/                    architecture, operations, development, mesh design, adr
 - **A test ends what it starts, on any exit** (success, failure, panic, timeout, Ctrl-C; ADR 0049). A suite's one trap on EXIT, INT, TERM and HUP ends its own children by pid and destroys what it made; a test's child ends with the test or its parent, and a wait on a stand-in has a bound. Signal only the pids you recorded, never a name pattern.
 - **Every bug found by a suite gets a unit test** that fails without the fix, before the fix.
 - **Test on the Mac first.** Real servers cost money; a bug found in the VM is a bug not found on a paid host.
-- The API stays briq-shaped (tenant, name, metadata `briq_id`); a new field gets its OpenAPI entry and its CLI column in the same change.
+- The API stays briq-shaped (namespace, name, metadata `briq_id`); a new field gets its OpenAPI entry and its CLI column in the same change.
 - Errors carry what failed and what was being done. The daemon logs one JSON line per event, nothing else on stdout. Never log a token or a secret.
 - Lima and Mac specifics live only in `hack/config.dev.yaml`, `hack/vm.sh` and `docs/DEVELOPMENT.md`.
 - **Native primitives, not another platform's workarounds.** Nothing here exists to match another platform's limitation or to keep a workaround for one working; when the control plane above carries such a workaround, briqyard offers the native primitive and the control plane drops it.

@@ -38,7 +38,7 @@ pub struct Ev {
     reason: &'static str,
     message: String,
     machine_id: String,
-    tenant: String,
+    namespace: String,
     data: Option<serde_json::Value>,
 }
 
@@ -57,7 +57,7 @@ impl Ev {
             reason,
             message,
             machine_id: String::new(),
-            tenant: String::new(),
+            namespace: String::new(),
             data: None,
         }
     }
@@ -67,16 +67,16 @@ impl Ev {
         self
     }
 
-    /// About a tenant, no machine of it: a create refused before it made one.
-    pub fn tenant(mut self, tenant: &str) -> Self {
-        tenant.clone_into(&mut self.tenant);
+    /// About a namespace, no machine of it: a create refused before it made one.
+    pub fn namespace(mut self, namespace: &str) -> Self {
+        namespace.clone_into(&mut self.namespace);
         self
     }
 
-    /// About a machine of a tenant.
-    pub fn of(mut self, machine_id: &str, tenant: &str) -> Self {
+    /// About a machine of a namespace.
+    pub fn of(mut self, machine_id: &str, namespace: &str) -> Self {
         machine_id.clone_into(&mut self.machine_id);
-        tenant.clone_into(&mut self.tenant);
+        namespace.clone_into(&mut self.namespace);
         self
     }
 }
@@ -84,7 +84,7 @@ impl Ev {
 /// What a read keeps: every field given must match.
 #[derive(Clone, Debug, Default)]
 pub struct Filter {
-    pub tenant: Option<String>,
+    pub namespace: Option<String>,
     pub machine: Option<String>,
     pub kind: Option<String>,
 }
@@ -92,7 +92,9 @@ pub struct Filter {
 impl Filter {
     fn matches(&self, e: &api::Event) -> bool {
         let is = |want: &Option<String>, got: &str| want.as_deref().is_none_or(|w| w == got);
-        is(&self.tenant, &e.tenant) && is(&self.machine, &e.machine_id) && is(&self.kind, &e.kind)
+        is(&self.namespace, &e.namespace)
+            && is(&self.machine, &e.machine_id)
+            && is(&self.kind, &e.kind)
     }
 }
 

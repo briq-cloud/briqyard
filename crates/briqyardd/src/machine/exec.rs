@@ -126,15 +126,15 @@ impl Manager {
             ..Default::default()
         };
         let (conn, in_use) = self.start_command(id, req.wake, greq).await?;
-        let (machine, tenant) = {
+        let (machine, namespace) = {
             let r = in_use.0.rec.lock().unwrap();
-            (r.id.clone(), r.tenant.clone())
+            (r.id.clone(), r.namespace.clone())
         };
         // A use, not a change: the machine's version does not move (ADR 0019).
         let tty = if req.tty { " on a terminal" } else { "" };
         self.inner.events.emit(
             Ev::normal(reason::SESSION_OPENED, format!("{program}{tty}"))
-                .of(&machine, &tenant)
+                .of(&machine, &namespace)
                 .data(json!({ "command": program, "tty": req.tty })),
         );
         Ok(Session {

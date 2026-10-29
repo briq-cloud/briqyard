@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stress a briqyard daemon or fleet: many tenants, many machines, every feature at once.
+"""Stress a briqyard daemon or fleet: many namespaces, many machines, every feature at once.
 
 Runs inside the development VM (or anywhere that reaches the API) with the standard library
 only. Each phase runs its operations in parallel across every machine, records latencies and
@@ -9,7 +9,7 @@ races: a client that hangs up mid-create, a start and a snapshot's delete agains
 the same machine, and more starts at once than the host has memory for. The invariants include
 no record on disk for a machine the daemon does not hold.
 
-    python3 hack/stress.py --tenants 6 --per-tenant 4 --rounds 2
+    python3 hack/stress.py --namespaces 6 --per-namespace 4 --rounds 2
     python3 hack/stress.py --url http://127.0.0.1:7430 --crash  # through the fleet, kill the daemon mid-run
     python3 hack/stress.py --phases endpoints_all,sleep_wake  # creates, then those phases, then destroys
 
@@ -122,8 +122,8 @@ class Run:
         self.api = Api(a.url, a.token)
         self.rng = random.Random(a.seed)
         self.prefix = f"st{a.seed % 1000:03d}"
-        self.tenants = [f"{self.prefix}-t{i}" for i in range(a.tenants)]
-        self.machines = {}  # (tenant, name) -> machine dict
+        self.namespaces = [f"{self.prefix}-t{i}" for i in range(a.namespaces)]
+        self.machines = {}  # (namespace, name) -> machine dict
         self.endpoints = {}  # machine id -> endpoint dict
         self.broken = []  # invariant breaks
         self.log_lines = []
@@ -144,10 +144,10 @@ class Run:
         return self.api.call("GET", "/v1/machines", op="list")
 
     def mine(self):
-        return [m for m in self.mlist() if m["tenant"].startswith(self.prefix)]
+        return [m for m in self.mlist() if m["namespace"].startswith(self.prefix)]
 
-    def find_named(self, tenant, name):
-        return next((m for m in self.mlist() if m["tenant"] == tenant and m["name"] == name), None)
+    def find_named(self, namespace, name):
+        return next((m for m in self.mlist() if m["namespace"] == namespace and m["name"] == name), None)
 
     def error_code(self, text):
         try:
@@ -211,20 +211,20 @@ class Run:
             "machines": len(mine),
             "by_state": by,
             "running": by.get("running", 0),
-            "tenants": len({m["tenant"] for m in mine}),
+            "namespaces": len({m["namespace"] for m in mine}),
             "endpoints": len([e for e in eps if e["machine_id"] in mine_ids]),
         }
 
     # ---- phases ----
     def create_all(self, round_no):
-        self.phase(f"round {round_no}: create {self.a.tenants} tenants × {self.a.per_tenant} machines")
-        targets = [(t, f"m{i}") for t in self.tenants for i in range(self.a.per_tenant)]
+        self.phase(f"round {round_no}: create {self.a.namespaces} namespaces × {self.a.per_namespace} machines")
+        targets = [(t, f"m{i}") for t in self.namespaces for i in range(self.a.per_namespace)]
 
         def mk(tn):
             t, n = tn
             i = int(n[1:])
             body = {
-                "tenant": t,
+                "namespace": t,
                 "name": n,
                 "image": self.a.image,
                 # A real threaded web server (Alpine's busybox has no httpd applet).
@@ -250,7 +250,7 @@ class Run:
         self.invariants("create")
 
     def exec_all(self):
-        self.phase("exec, files, names on the tenant network")
+        self.phase("exec, files, names on the namespace network")
         items = list(self.machines.items())
 
         def one(kv):
@@ -262,7 +262,7 @@ class Run:
             assert lines[1] == f"{t}/{n}", f"boot file {lines[1]}"
             # a sibling by name, and its own id name
             # The sibling's web server comes up a moment after its machine reports running.
-            sib = f"m{(int(n[1:]) + 1) % self.a.per_tenant}"
+            sib = f"m{(int(n[1:]) + 1) % self.a.per_namespace}"
             self.exec(mid, ["sh", "-c", f"nslookup {sib}.internal >/dev/null && for i in $(seq 1 60); do wget -qO- -T 5 http://{sib}.internal:8080/ 2>/dev/null | grep -q hello && exit 0; sleep 1; done; exit 1"], timeout_ms=90000)
             # stdin and exit codes
             assert self.exec(mid, ["cat"], stdin="ping") == "ping"
@@ -346,15 +346,15 @@ class Run:
         self.invariants("stop/start")
 
     def fork_some(self):
-        self.phase("fork one machine per tenant, exec in the fork, destroy it")
-        picks = [((t, "m0"), self.machines[(t, "m0")]) for t in self.tenants if (t, "m0") in self.machines]
+        self.phase("fork one machine per namespace, exec in the fork, destroy it")
+        picks = [((t, "m0"), self.machines[(t, "m0")]) for t in self.namespaces if (t, "m0") in self.machines]
 
         def one(kv):
             (t, n), m = kv
             self.exec(m["id"], ["sh", "-c", "echo forked > /root/forked; sync"])
             # A fork takes its source's disks and image, not its command: without one it runs
             # the image's, which may exit at once.
-            f = self.api.call("POST", "/v1/machines", {"tenant": t, "name": f"{n}-fork", "fork": {"machine_id": m["id"], "copy": "disk"}, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="fork", timeout=600)
+            f = self.api.call("POST", "/v1/machines", {"namespace": t, "name": f"{n}-fork", "fork": {"machine_id": m["id"], "copy": "disk"}, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="fork", timeout=600)
             try:
                 f = self.wait_state(f["id"], {"running"}, timeout=self.a.boot_timeout)
                 assert self.exec(f["id"], ["cat", "/root/forked"]).strip() == "forked"
@@ -367,8 +367,8 @@ class Run:
         self.invariants("fork")
 
     def sleep_wake(self):
-        self.phase("sleep on idle (20 s window) on one machine per tenant, wake by exec and by a connection")
-        picks = [self.machines[(t, "m1")] for t in self.tenants if (t, "m1") in self.machines]
+        self.phase("sleep on idle (20 s window) on one machine per namespace, wake by exec and by a connection")
+        picks = [self.machines[(t, "m1")] for t in self.namespaces if (t, "m1") in self.machines]
 
         def one(m):
             mid = m["id"]
@@ -423,8 +423,8 @@ class Run:
     # ---- the races ----
     def hangup_mid_create(self):
         self.phase("hang up on a create after 1 s: the machine settles on its own, the image still builds (a create answers at once since ADR 0048)")
-        t, name = self.tenants[0], "hangup"
-        body = {"tenant": t, "name": name, "image": HANGUP_IMAGE, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}
+        t, name = self.namespaces[0], "hangup"
+        body = {"namespace": t, "name": name, "image": HANGUP_IMAGE, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}
         status, text = self.api.request("POST", "/v1/machines", body, op="create (hang up)", timeout=1)
         self.log(f"   create: {'hung up' if status == 0 else f'answered {status} before the hang-up'}")
         errs = {}
@@ -447,7 +447,7 @@ class Run:
         self.invariants("hang-up")
 
     def start_vs_destroy(self):
-        self.phase("start, destroy and a snapshot's delete on one stopped machine per tenant at the same moment: one wins, none stays destroying")
+        self.phase("start, destroy and a snapshot's delete on one stopped machine per namespace at the same moment: one wins, none stays destroying")
         picks = [(k, m) for k, m in self.machines.items() if k[1] == "m2"]
 
         def one(kv):
@@ -504,12 +504,12 @@ class Run:
 
     def starts_past_capacity(self):
         self.phase("start 4 machines at once that cannot all fit: 503 capacity for the rest, live memory never over the host's")
-        t = self.tenants[0]
+        t = self.namespaces[0]
         s = self.api.call("GET", "/v1/status", op="status")
         cap = s["capacity"]["memory_mb"]
         free = cap - s["used"]["memory_mb"]
         n, mem = 4, free // 3 + 1  # two fit, two do not
-        body = {"tenant": t, "image": self.a.image, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": mem}, "sleep": "never", "start": False}
+        body = {"namespace": t, "image": self.a.image, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": mem}, "sleep": "never", "start": False}
         self.log(f"   {free} MB free of {cap}: {n} machines of {mem} MB")
         made, errs = parallel([f"cap{i}" for i in range(n)], lambda name: self.api.call("POST", "/v1/machines", dict(body, name=name), op="create (stopped)", timeout=600), n)
         self.report_errors("create stopped", errs)
@@ -568,14 +568,14 @@ class Run:
 
         _, errs = parallel(list(self.machines.values()), one, self.a.workers)
         self.report_errors("destroy", errs)
-        # Whatever a failed phase left in these tenants (a fork, a retry's twin) goes too.
+        # Whatever a failed phase left in these namespaces (a fork, a retry's twin) goes too.
         left = self.mine()
         if left:
             self.log(f"   {len(left)} machine(s) left by failed phases, destroying them")
             parallel(left, one, self.a.workers)
-        for t in self.tenants:
+        for t in self.namespaces:
             try:
-                self.api.call("DELETE", f"/v1/tenants/{t}", op="tenant rm", expect={200, 204, 404})
+                self.api.call("DELETE", f"/v1/namespaces/{t}", op="namespace rm", expect={200, 204, 404})
             except ApiError:
                 pass
         self.machines.clear()
@@ -594,7 +594,7 @@ class Run:
         return None
 
     def churn(self):
-        """Cycles of everything a machine goes through, each ending with the tenants empty
+        """Cycles of everything a machine goes through, each ending with the namespaces empty
         again; the daemon's memory is read after each. What the first cycle settles (caches,
         the allocator's pools) is not growth; what keeps growing after it is."""
         self.phase(f"churn: {self.a.churn} cycles of create, exec, files, an endpoint, snapshot and restore, backup and restore, fork, suspend, destroy")
@@ -603,7 +603,7 @@ class Run:
 
         def cycle(c, t, i):
             body = {
-                "tenant": t,
+                "namespace": t,
                 "name": f"c{c}",
                 "image": self.a.image,
                 "cmd": ["sh", "-c", "mkdir -p /www && echo hello > /www/index.html && exec python3 -m http.server 8080 --directory /www"],
@@ -655,11 +655,11 @@ class Run:
                         raise RuntimeError(f"backup answered {st} {text[:120]}")
                     else:
                         b = json.loads(text)
-                        r = self.api.call("POST", "/v1/machines", {"tenant": t, "name": f"r{c}", "restore": {"machine_id": mid, "backup": b["id"]}, "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="restore backup", timeout=600)
+                        r = self.api.call("POST", "/v1/machines", {"namespace": t, "name": f"r{c}", "restore": {"machine_id": mid, "backup": b["id"]}, "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="restore backup", timeout=600)
                         made.append(r["id"])
                         self.wait_state(r["id"], {"running"}, timeout=self.a.boot_timeout)
                         assert self.exec(r["id"], ["cat", "/root/mark"]).strip() == "one", "backup not restored"
-                f = self.api.call("POST", "/v1/machines", {"tenant": t, "name": f"f{c}", "fork": {"machine_id": mid, "copy": "disk"}, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="fork", timeout=600)
+                f = self.api.call("POST", "/v1/machines", {"namespace": t, "name": f"f{c}", "fork": {"machine_id": mid, "copy": "disk"}, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="fork", timeout=600)
                 made.append(f["id"])
                 self.wait_state(f["id"], {"running"}, timeout=self.a.boot_timeout)
                 self.api.call("POST", f"/v1/machines/{mid}/stop", {"suspend": True, "timeout_sec": 10}, op="suspend", timeout=120)
@@ -675,8 +675,8 @@ class Run:
             return True
 
         for c in range(1, self.a.churn + 1):
-            _, errs = parallel(list(enumerate(self.tenants)), lambda it: cycle(c, it[1], it[0]), self.a.workers)
-            self.report_errors(f"churn {c}", errs, self.tenants)
+            _, errs = parallel(list(enumerate(self.namespaces)), lambda it: cycle(c, it[1], it[0]), self.a.workers)
+            self.report_errors(f"churn {c}", errs, self.namespaces)
             # Idle first: jemalloc gives freed pages back after 10 s (ADR 0052).
             time.sleep(12)
             mb = self.rss()
@@ -722,7 +722,7 @@ class Run:
             print(f"   after {label}: {line}")
 
     def run(self):
-        self.log(f"stress {self.prefix}: {self.a.tenants} tenants × {self.a.per_tenant} machines, {self.a.rounds} round(s), {self.a.workers} workers, {self.a.url}")
+        self.log(f"stress {self.prefix}: {self.a.namespaces} namespaces × {self.a.per_namespace} machines, {self.a.rounds} round(s), {self.a.workers} workers, {self.a.url}")
         self.invariants("start")
         want = set(self.a.phases.split(",")) if self.a.phases else set(PHASES)
         for r in range(1, self.a.rounds + 1):
@@ -749,8 +749,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--url", default=os.environ.get("BRIQYARD_URL", "http://127.0.0.1:7420"))
     p.add_argument("--token", default=os.environ.get("BRIQYARD_TOKEN", ""))
-    p.add_argument("--tenants", type=int, default=6)
-    p.add_argument("--per-tenant", type=int, default=4)
+    p.add_argument("--namespaces", type=int, default=6)
+    p.add_argument("--per-namespace", type=int, default=4)
     p.add_argument("--rounds", type=int, default=1)
     p.add_argument("--workers", type=int, default=12)
     p.add_argument("--hits", type=int, default=20, help="connections per endpoint")
@@ -759,7 +759,7 @@ def main():
     p.add_argument("--boot-timeout", type=int, default=300)
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
     p.add_argument("--crash", action="store_true", help="SIGKILL the daemon in round 1 (needs sudo on the host)")
-    p.add_argument("--churn", type=int, default=0, help="then this many cycles of every feature per tenant, the daemon's RSS read after each")
+    p.add_argument("--churn", type=int, default=0, help="then this many cycles of every feature per namespace, the daemon's RSS read after each")
     p.add_argument("--rss-growth-mb", type=float, default=32, help="churn: the most the daemon's RSS may grow over the second half of the cycles")
     p.add_argument("--phases", default="", help=f"comma-separated, of {','.join(PHASES)} (default: all); endpoints_all relies on exec_all's wait for the web servers")
     p.add_argument("--no-invariants", action="store_true")
@@ -779,9 +779,9 @@ def main():
         run.log("interrupted")
         code = 130
     finally:
-        # Each round destroys what it made; a failed or interrupted one, its tenants included,
+        # Each round destroys what it made; a failed or interrupted one, its namespaces included,
         # leaves it to this. A daemon that does not answer is logged; the run keeps its code.
-        if run.tenants:
+        if run.namespaces:
             run.log("destroying what was made")
             try:
                 run.destroy_all()
