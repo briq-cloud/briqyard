@@ -29,6 +29,8 @@ STATE=$(on_fleet "sed -n 's/^state_dir: //p' $CFG"); STATE=${STATE:-/var/lib/bri
 # put back, then the second host started again if the run left it stopped.
 cleanup() {
   echo "cleanup"
+  # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
+  set +e
   on_fleet "systemctl stop briqyard-fleet
     if [ -f $STATE/registry.json.lost ]; then mv $STATE/registry.json.lost $STATE/registry.json; fi
     if [ -f $CFG.restore-check ]; then mv $CFG.restore-check $CFG; fi

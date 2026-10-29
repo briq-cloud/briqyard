@@ -21,6 +21,8 @@ host_field() { hosts | jq -r ".[] | select(.id == \"$1\") | $2"; }
 # what it made is destroyed.
 DRAINED=
 cleanup() {
+  # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
+  set +e
   for h in $DRAINED; do briqyard host undrain "$h" >/dev/null 2>&1 || true; done
   for t in "$T" "$T-2" "$T-up"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done

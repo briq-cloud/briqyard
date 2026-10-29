@@ -33,6 +33,8 @@ as_second() {
 # when the run stopped it, what it made is destroyed, the second host's config put back.
 STOPPED=
 cleanup() {
+  # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
+  set +e
   if [ -n "$STOPPED" ]; then
     eval "$SECOND_HOST_START" || true
     for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done

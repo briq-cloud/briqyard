@@ -650,10 +650,14 @@ def main():
         run.log("interrupted")
         code = 130
     finally:
-        # Each round destroys what it made; a failed or interrupted one leaves it to this.
-        if run.machines or run.mine():
+        # Each round destroys what it made; a failed or interrupted one, its tenants included,
+        # leaves it to this. A daemon that does not answer is logged; the run keeps its code.
+        if run.tenants:
             run.log("destroying what was made")
-            run.destroy_all()
+            try:
+                run.destroy_all()
+            except ApiError as e:
+                run.log(f"cleanup failed: {e}")
     sys.exit(code)
 
 

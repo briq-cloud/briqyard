@@ -29,7 +29,8 @@ that exits (or is killed) runs none: the hold files stay and the fakes spin fore
   passed: five times the slowest binary (`briqyardd`'s: 70 s on CI, 55 s in the dev VM, 61 s
   on a Mac); the tests not reported above the line it prints were still running. Each crate
   installs it from its test root with `#[ctor]` (dev-only): one line per crate covers every
-  test, fixture or none. Linux's
+  test, fixture or none. Not covered: doc-tests (each its own process, built by rustdoc) and
+  `tests/` integration binaries (none today; one would install it the same way). Linux's
   `PR_SET_PDEATHSIG` follows the thread that forked and macOS has no equivalent; a kqueue or
   pidfd watch is two code paths; a cargo `runner` would wrap `cargo run` too.
 - **What a test spawns ends on its own.** The binary's exit runs no destructor, so a child is
@@ -42,12 +43,14 @@ that exits (or is killed) runs none: the hold files stay and the fakes spin fore
   stand-ins give up after 10 s and close their socket. Waits on the code under test keep the
   binary's 6 minutes as their bound.
 - **A suite cleans up in one trap.** `trap cleanup EXIT`, and INT, TERM and HUP end the run
-  through it (`exit 130`/`143`/`129`). The cleanup ends the shell's own children
-  (`pkill -P $$`: a background pipeline's processes are all children of the shell, while
-  `jobs -p` names only the first of each), puts back what the run changed (a key, a config,
+  through it (`exit 130`/`143`/`129`). Every step of it is best-effort (`set +e`): one that
+  fails leaves the others to run and the run's exit status as it was. The cleanup ends the
+  shell's own children (`pkill -P $$`: a background pipeline's processes are all children of
+  the shell, while `jobs -p` names only the first of each), puts back what the run changed (a key, a config,
   a drained host, a stopped daemon) and destroys what it made. A process is signalled by the
   pid the suite recorded, never by a name pattern. `stress.py` turns SIGTERM and SIGHUP into
-  its Ctrl-C path and destroys what is left in a `finally`.
+  its Ctrl-C path and destroys what is left in a `finally`, which logs a daemon that does not
+  answer rather than raising over the run's code.
 
 ## Consequences
 

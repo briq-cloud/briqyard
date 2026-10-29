@@ -33,6 +33,8 @@ UNIT=; if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2
 # it changed is put back, what it made is destroyed.
 cleanup() {
   echo "cleanup"
+  # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
+  set +e
   # The background sessions, watches and their stdin: this shell's children, by its pid.
   pkill -P $$ || true
   # The encryption section moves the pool's key away for a moment: put it back first.
