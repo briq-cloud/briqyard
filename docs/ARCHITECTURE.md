@@ -275,7 +275,7 @@ at most 31 days; the fleet asks every host and fails whole.
 
 ### Events and versions
 
-Each host keeps one event log (ADR 0019, `events.rs`): a JSON line per event in
+Each host keeps one event log (ADR 0019, `events/`): a JSON line per event in
 `state/events/<hour>.ndjson`, appended and synced under the log's lock, then sent to watchers.
 `seq` counts one more per event and never goes back: at start it goes on from the larger of the
 log's last line and every record's version. A state change says what happened through
