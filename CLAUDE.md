@@ -21,6 +21,7 @@ crates/briqyard-init     PID 1 inside the guest, static musl
 crates/briqyard          the CLI
 crates/briqyard-fleet    placement, forwarding, host registry, bootstrap, capacity signals, the registry's backup
 crates/briqyard-objstore the object store (S3 or a directory): machine backups, the registry's backup
+crates/briqyard-testing  test binaries only: each exits once its parent is gone (ADR 0049)
 api/openapi.yaml         the API, served at /v1/openapi.yaml
 fuzz/                    cargo fuzz targets for what untrusted parties write (nightly, by hand)
 hack/                    dev VM, systemd units, dev configs, the shell suites, the stress driver
@@ -33,7 +34,7 @@ docs/                    architecture, operations, development, mesh design, adr
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check` are CI.
 - **The VMs are shared by every checkout and session on this Mac: one at a time.** `hack/vm.sh install|restart|stop|e2e|fleet` take the lock themselves; any other suite or anything that restarts a daemon runs under it: `hack/vm-lock.sh bash -c 'hack/vm.sh install && limactl shell fc bash hack/e2e.sh'`. Edit and build outside it; hold it only while the VMs run your build. Never restart a daemon another holder is testing.
 - `hack/vm.sh install` builds in the VM, installs both units, restarts them. **Always after a config field change**: an old binary refuses a new field and systemd's start limit then needs `systemctl reset-failed`.
-- `hack/e2e.sh` (237 checks, one daemon; 233 without `network.host_ports`), `hack/fleet-smoke.sh` (32, through the fleet, a `host upgrade` included), `hack/fleet-two-hosts.sh` (26, needs `fc2`), `hack/fleet-restore.sh` (10, needs `fc2`: the registry's backup and restore). Run the first two on every daemon change; the last two on every fleet change.
+- `hack/e2e.sh` (241 checks, one daemon; 237 without `network.host_ports`), `hack/fleet-smoke.sh` (33, through the fleet, a `host upgrade` included), `hack/fleet-two-hosts.sh` (26, needs `fc2`), `hack/fleet-restore.sh` (10, needs `fc2`: the registry's backup and restore). Run the first two on every daemon change; the last two on every fleet change.
 - `hack/stress.py` with `hack/stress-invariants.sh`: many tenants through every feature, host invariants between phases. Run it after any change to the manager, the network or the store.
 - `hack/chaos.py`: owners that check a counter on their disks through every lifecycle operation, racers that stop, start, snapshot and back up under them. Run it after a change to snapshots, backups or the lifecycle.
 - Coverage: `cargo llvm-cov` in the VM. Last measure in `docs/research/2026-10-19-stress-spike.md`.
@@ -47,6 +48,7 @@ docs/                    architecture, operations, development, mesh design, adr
 - **Step back before finishing.** Re-read the change against the rules above and the ADRs. Remove what a reader would not understand without you.
 - **Every decision is an ADR.** Made in chat, in a review or in a benchmark: `docs/adr/NNNN-slug.md` in the same change, with the numbers that drove it. Research that informed a decision goes in `docs/research/` and the ADR links it.
 - **Docs are compact.** Short sentences. Say it once. A table over a paragraph. Update the doc in the same commit as the code; the counts in `docs/DEVELOPMENT.md` match the suites.
+- **A test ends what it starts, on any exit** (success, failure, panic, timeout, Ctrl-C; ADR 0049). A suite's one trap on EXIT, INT, TERM and HUP ends its own children by pid and destroys what it made; a test's child ends with the test or its parent, and a wait on a stand-in has a bound. Signal only the pids you recorded, never a name pattern.
 - **Every bug found by a suite gets a unit test** that fails without the fix, before the fix.
 - **Test on the Mac first.** Real servers cost money; a bug found in the VM is a bug not found on a paid host.
 - The API stays briq-shaped (tenant, name, metadata `briq_id`); a new field gets its OpenAPI entry and its CLI column in the same change.

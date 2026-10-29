@@ -1,5 +1,6 @@
 //! Probes (ADR 0022): one task per running machine that has some. Its startup probe runs
-//! first, then its readiness and liveness probes, each on its own period. What they find is the
+//! first, then its readiness and liveness probes, each on its own fixed period, the first run
+//! spread over a period just after a daemon start. What they find is the
 //! machine's `ready` and `probes_status`; a startup or liveness failure ends the boot or the run.
 
 use super::{Entry, Manager};
@@ -11,6 +12,7 @@ use serde_json::json;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::Instant;
 
 /// Probe executions a host runs at once (ADR 0022).
 pub(super) const PROBES_AT_ONCE: usize = 32;
@@ -86,6 +88,30 @@ pub(super) fn readiness_verdict(p: &api::Probe, t: &Tally, ready: bool) -> Optio
 /// Whether `ready` is true at a boot: without a startup or a readiness probe, at once.
 pub(super) fn ready_at_boot(p: &api::Probes) -> bool {
     p.startup.is_none() && p.readiness.is_none()
+}
+
+/// When a probe first runs: after its initial delay and, while the daemon is younger than the
+/// probe's period, at a random point (`spread`, 0 to 1) of one more period, as the kubelet
+/// does, so a daemon start that adopts or starts every machine does not probe them all at
+/// once. Later runs (a boot, a wake) are not delayed.
+pub(super) fn first_run(now: Instant, began: Instant, p: &api::Probe, spread: f64) -> Instant {
+    let period = secs(p.period_sec);
+    let jitter = match now.duration_since(began) < period {
+        true => period.mul_f64(spread.clamp(0.0, 1.0)),
+        false => Duration::ZERO,
+    };
+    now + secs(p.initial_delay_sec) + jitter
+}
+
+/// The tick after `last` on its period that is not past at `now`: a probe slower than its
+/// period skips the ticks it ran over, rather than running again at once.
+pub(super) fn next_tick(last: Instant, period: Duration, now: Instant) -> Instant {
+    let mut next = last + period;
+    if next < now {
+        let behind = (now - next).as_nanos().div_ceil(period.as_nanos().max(1));
+        next += period * behind as u32;
+    }
+    next
 }
 
 fn secs(n: u32) -> Duration {
@@ -167,9 +193,31 @@ impl Manager {
                 false => Ev::warning(reason::NOT_READY, "not ready: its probes changed")
                     .data(json!({ "probe": null, "failures": 0 })),
             };
-            e.note(ev);
-            let _ = self.save(e);
+            self.note_flip(e, ev);
             e.changed.notify_waiters();
+        }
+    }
+
+    /// Logs a readiness flip and writes the record with its version before that version can
+    /// be read: a folded flip's seq is in no line (ADR 0047), so the record is what keeps it
+    /// past a crash; a restart then never hands it out again. Never on a destroy under way,
+    /// whose record is about to go.
+    fn note_flip(&self, e: &Entry, ev: Ev) {
+        let written = self.save_edit(e, |r| {
+            if r.state == state::DESTROYING {
+                return false;
+            }
+            e.note_locked(r, ev);
+            true
+        });
+        if let Err(err) = written {
+            let r = e.snapshot();
+            tracing::warn!(
+                machine = r.id,
+                version = r.version,
+                err = %err,
+                "record not written: a restart may give its version out again"
+            );
         }
     }
 
@@ -251,8 +299,9 @@ impl Manager {
         }
     }
 
-    /// Runs `p` every period from its initial delay and records each result, until `decide`
-    /// makes something of the tally. None: the run is over (a newer one began).
+    /// Runs `p` on a fixed period from its first run (`first_run`) and records each result,
+    /// until `decide` makes something of the tally. A probe slower than its period skips the
+    /// ticks it ran over (`next_tick`). None: the run is over (a newer one began).
     async fn probe_until<T>(
         &self,
         at: &Target<'_>,
@@ -260,10 +309,12 @@ impl Manager {
         p: &api::Probe,
         mut decide: impl FnMut(&Tally) -> Option<T>,
     ) -> Option<T> {
-        tokio::time::sleep(secs(p.initial_delay_sec)).await;
+        let mut next = first_run(Instant::now(), self.inner.began, p, rand::random());
         let mut tally = Tally::default();
         loop {
+            tokio::time::sleep_until(next).await;
             let (passed, message) = self.probe_once(at, p).await;
+            next = next_tick(next, secs(p.period_sec), Instant::now());
             tally.add(passed);
             {
                 let mut run = at.e.probe.lock().unwrap();
@@ -280,7 +331,6 @@ impl Manager {
             if let Some(t) = decide(&tally) {
                 return Some(t);
             }
-            tokio::time::sleep(secs(p.period_sec)).await;
         }
     }
 
@@ -364,9 +414,8 @@ impl Manager {
                 }
             };
             // Under the run's lock: a reset waits for it, so the event is of this run.
-            e.note(ev);
+            self.note_flip(e, ev);
         }
-        let _ = self.save(e);
         e.changed.notify_waiters();
     }
 
@@ -467,6 +516,39 @@ mod tests {
             failure_threshold: failure,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_first_run_is_spread_only_just_after_a_daemon_start() {
+        let began = Instant::now();
+        let s = Duration::from_secs;
+        let p = api::Probe {
+            period_sec: 10,
+            initial_delay_sec: 5,
+            ..probe(1, 3)
+        };
+        // Within a period of the start: the initial delay, then a point of one period.
+        assert_eq!(first_run(began, began, &p, 0.0), began + s(5));
+        assert_eq!(first_run(began, began, &p, 0.5), began + s(10));
+        assert_eq!(
+            first_run(began + s(9), began, &p, 0.99),
+            began + s(9) + s(5) + s(10).mul_f64(0.99)
+        );
+        // A period or more after it: the initial delay alone.
+        assert_eq!(first_run(began + s(10), began, &p, 0.5), began + s(15));
+    }
+
+    #[test]
+    fn the_next_tick_keeps_the_period_and_skips_what_a_slow_probe_ran_over() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let period = ms(1000);
+        // On time: one period after the last tick, whenever the probe ended.
+        assert_eq!(next_tick(t0, period, t0 + ms(300)), t0 + ms(1000));
+        assert_eq!(next_tick(t0, period, t0 + ms(1000)), t0 + ms(1000));
+        // Ran over one tick, or three: the next one not past.
+        assert_eq!(next_tick(t0, period, t0 + ms(1500)), t0 + ms(2000));
+        assert_eq!(next_tick(t0, period, t0 + ms(3200)), t0 + ms(4000));
     }
 
     #[test]

@@ -59,7 +59,12 @@ impl Ingress {
                         }
                     }
                     Ok((ep, false)) => me.remove(&ep),
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Events were missed: the listeners are made to match the endpoints again,
+                    // or a removed endpoint's would stay open, holding its port, for good.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(missed = n, "endpoint events missed: listeners resynced");
+                        me.resync().await;
+                    }
                     Err(_) => return,
                 }
             }
@@ -82,7 +87,13 @@ impl Ingress {
         Ok(())
     }
 
-    async fn add(&self, ep: EndpointRec) -> Result<()> {
+    /// Opens an endpoint's listener, or routes its host name. Events are sent after the
+    /// manager's lock is let go, so a delete's can arrive before its create's: an endpoint
+    /// already gone is not opened.
+    pub(crate) async fn add(&self, ep: EndpointRec) -> Result<()> {
+        if self.mgr.endpoint(&ep.id).is_none() {
+            return Ok(());
+        }
         match ep.protocol.as_str() {
             "http" => {
                 self.hosts
@@ -120,6 +131,32 @@ impl Ingress {
         }
     }
 
+    /// The listeners and host names of the endpoints there are now, and no others.
+    async fn resync(&self) {
+        let now: HashMap<String, EndpointRec> = self
+            .mgr
+            .all_endpoints()
+            .into_iter()
+            .map(|ep| (ep.id.clone(), ep))
+            .collect();
+        self.listeners.lock().unwrap().retain(|id, h| {
+            let keep = now.contains_key(id);
+            if !keep {
+                h.abort();
+            }
+            keep
+        });
+        self.hosts
+            .lock()
+            .unwrap()
+            .retain(|_, ep| now.contains_key(&ep.id));
+        for ep in now.into_values() {
+            if let Err(e) = self.add(ep.clone()).await {
+                tracing::error!(endpoint = ep.id, err = %e, "endpoint listener");
+            }
+        }
+    }
+
     fn remove(&self, ep: &EndpointRec) {
         if let Some(h) = self.listeners.lock().unwrap().remove(&ep.id) {
             h.abort();
@@ -128,8 +165,11 @@ impl Ingress {
     }
 
     /// Connects to the machine's port, waking it, waiting for it to be ready (ADR 0022) and
-    /// for the port to listen, all within the wake timeout.
-    async fn dial(&self, ep: &EndpointRec) -> Result<TcpStream> {
+    /// for the port to listen, all within the wake timeout. The machine is in use while the
+    /// connection waits (ADR 0053), so it cannot go back to sleep under it; one that stops
+    /// meanwhile (a stop, an exit) ends the wait.
+    pub(crate) async fn dial(&self, ep: &EndpointRec) -> Result<TcpStream> {
+        let _waiting = self.mgr.in_use(&ep.machine_id)?;
         let deadline = tokio::time::Instant::now() + self.wake_timeout;
         let ip = tokio::time::timeout(
             self.wake_timeout,
@@ -139,16 +179,20 @@ impl Ingress {
         .map_err(|_| anyhow!("wake timed out"))??;
         let addr = SocketAddr::from((ip, ep.port));
         loop {
-            match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr)).await {
+            let tried =
+                tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr)).await;
+            let why = match tried {
                 Ok(Ok(c)) => return Ok(c),
-                Ok(Err(e)) if tokio::time::Instant::now() > deadline => {
-                    return Err(anyhow!("{addr} did not answer: {e}"))
-                }
-                _ if tokio::time::Instant::now() > deadline => {
-                    return Err(anyhow!("{addr} did not answer"))
-                }
-                _ => tokio::time::sleep(Duration::from_millis(250)).await,
+                Ok(Err(e)) => format!("{addr} did not answer: {e}"),
+                Err(_) => format!("{addr} did not answer"),
+            };
+            if !self.mgr.is_running(&ep.machine_id) {
+                return Err(anyhow!("{why}: the machine stopped"));
             }
+            if tokio::time::Instant::now() > deadline {
+                return Err(anyhow!(why));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
 

@@ -33,8 +33,8 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | REST resources, OpenAPI | ✓ `api/openapi.yaml`, served | | |
 | `resourceVersion`, optimistic concurrency (409 on a stale write) | ✓ a machine's `version`, `If-Match` on PATCH, DELETE, start, stop, wake, restart (ADR 0019) | | |
-| watch (list + watch, informers) | ✓ `GET /v1/events?watch=true` from a cursor; per host, or a tenant or a machine through the fleet | | |
-| Events (`kubectl get events`, `describe`) | ✓ an event log per host, a closed list of reasons, `briqyard events` | events of endpoints and tenants | yard, later |
+| watch (list + watch, informers) | ✓ `GET /v1/events?watch=true` from a cursor; per host, or a tenant or a machine through the fleet; a bookmark every 30 s of quiet (ADR 0047) | | |
+| Events (`kubectl get events`, `describe`) | ✓ an event log per host, a closed list of reasons, `briqyard events`; repeats of uses, refusals and readiness flips folded for 10 minutes into one line with `count` (ADR 0047) | events of endpoints and tenants; folding the restart chain | yard, later |
 | Labels and selectors (`-l app=web`) | ✓ metadata as labels, `?label=k=v&label=k` on machine listings, `machine ls -l` (ADR 0025) | `!=` and set-based selectors; selectors on events, top, usage | yard, later |
 | Annotations | ✓ metadata | | |
 | Namespaces | ✓ tenants | | |
@@ -56,7 +56,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Pod phases and conditions | ✓ states (`creating` is `Pending`), `stopped_reason`, `error_reason` (`pull_failed` is `ErrImagePull`), exit code, `ready` (ADR 0022, 0048) | | |
 | Create is stored, then scheduled and pulled (`Pending`, `ContainerCreating`, `kubectl wait`) | ✓ a create answers at `creating`, its room taken; the pull, the disks and the boot in the background; `/wait` and `GET`; one from an image taken up again after a restart of the daemon (ADR 0048) | a fork's or a restore's create resumed after a restart | yard, later |
 | Image pulls (`Pulling`/`Pulled` events, parallel pulls, `ImagePullBackOff`) | ◐ a `pulling` event per machine, `image_pulled` per host, four images at once, one build per image; a failed pull is `pull_failed`, never retried (ADR 0048) | a pull backoff: the caller creates again | — |
-| Liveness, readiness, startup probes | ✓ in the daemon: exec, TCP, HTTP, Kubernetes's timings, 32 at once per host (ADR 0022) | gRPC probes | yard, later |
+| Liveness, readiness, startup probes | ✓ in the daemon: exec, TCP, HTTP, Kubernetes's defaults but a 5 s timeout (1 s there: an exec probe crosses the vsock and the guest's init), a fixed period, the first run spread over a period after a daemon start, 32 at once per host (ADR 0022, 0047) | gRPC probes | yard, later |
 | `restartPolicy`, CrashLoopBackOff | ✓ `no`, `on-failure`, `always`, a retry count; 10 s doubling to 5 minutes, reset after 10 minutes, a `crash_loop` event | | |
 | Readiness gates traffic (endpoints follow Ready) | ✓ the ingress, `/wait` and the gateway's start wait for `ready` | another replica to send to (groups) | yard, later |
 | `terminationGracePeriod` | ✓ stop timeout, SIGTERM then reset | | |

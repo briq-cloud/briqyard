@@ -45,7 +45,11 @@ httparse = { workspace = true }
 # Image extraction (openat2); the daemon runs on Linux alone.
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true }
+# The daemon's allocator (ADR 0052).
+tikv-jemallocator = { workspace = true }
 
 [dev-dependencies]
+briqyard-testing = { workspace = true }
+ctor = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }

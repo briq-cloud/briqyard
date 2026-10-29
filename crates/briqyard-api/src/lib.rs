@@ -15,3 +15,10 @@ pub mod version;
 pub use auth::constant_eq;
 pub use types::*;
 pub use version::VERSION;
+
+/// A test binary ends with its parent, and in bounded time (briqyard-testing).
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn exit_with_parent() {
+    briqyard_testing::exit_with_parent();
+}
