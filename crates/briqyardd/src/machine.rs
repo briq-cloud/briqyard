@@ -1103,24 +1103,18 @@ impl Manager {
                 }
             }
         }
-        if let Ok(vols) = self.inner.zfs.volumes_under("m").await {
-            let mut ids: Vec<String> = vols
-                .iter()
-                .filter_map(|v| v.strip_prefix("m/"))
-                .filter_map(|v| v.split('/').next())
-                .map(String::from)
-                .collect();
-            ids.sort();
-            ids.dedup();
-            for id in ids {
-                if !known.contains(&id) {
+        // Every `m/<id>`, with its disks or none: a create cut between its dataset and its
+        // first disk leaves it empty.
+        if let Ok(children) = self.inner.zfs.children("m").await {
+            for id in children.iter().filter_map(|c| c.strip_prefix("m/")) {
+                if !known.contains(id) {
                     match self.inner.zfs.destroy(&format!("m/{id}")).await {
                         Ok(()) => {
-                            tracing::warn!(machine = id, "disks with no record, destroyed");
+                            tracing::warn!(machine = id, "dataset with no record, destroyed");
                             swept += 1;
                         }
                         Err(err) => {
-                            tracing::warn!(machine = id, err = %err, "disks with no record")
+                            tracing::warn!(machine = id, err = %err, "dataset with no record")
                         }
                     }
                 }
@@ -7638,6 +7632,8 @@ mod tests {
         let kept = h.add("m_kept", state::STOPPED, 256);
         h.disks(&kept).await;
         h.pool.zfs.create("m/m_ghost/root", 1 << 20).await.unwrap();
+        // A create cut between its dataset and its first disk: the dataset alone.
+        h.pool.zfs.create_parent("m/m_empty/root").await.unwrap();
         let ghost = h
             .host
             .left_running("m_ghost", &h.m.inner.cfg.run_dir().join("m_ghost"));
@@ -7667,6 +7663,7 @@ mod tests {
             .contains(&"destroy -r byard/m/m_ghost".to_string()));
         assert!(h.pool.dev().join("byard/m/m_kept/root").exists());
         assert!(!h.pool.dev().join("byard/m/m_ghost").exists());
+        assert!(!h.pool.dev().join("byard/m/m_empty").exists());
     }
 
     #[tokio::test]

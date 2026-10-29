@@ -57,10 +57,12 @@ enum Cmd {
     /// Backups in the store: delete one
     #[command(subcommand)]
     Backup(BackupCmd),
-    /// Every backup of the host's machines, destroyed ones' included: briqyard backups [--tenant T]
+    /// Every backup of the host's machines, destroyed ones' included: briqyard backups [--tenant T] [--machine ID]
     Backups {
         #[arg(long)]
         tenant: Option<String>,
+        #[arg(long)]
+        machine: Option<String>,
     },
     /// What each machine used, per hour: briqyard usage --from 2026-10-20T14:00:00Z --to 2026-10-20T15:00:00Z
     Usage {
@@ -1471,11 +1473,8 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             )
             .await?;
         }
-        Cmd::Backups { tenant } => {
-            let path = match tenant {
-                Some(t) => format!("/v1/backups?tenant={t}"),
-                None => "/v1/backups".into(),
-            };
+        Cmd::Backups { tenant, machine } => {
+            let path = backups_path(tenant.as_deref(), machine.as_deref());
             print_json(&c.call::<Vec<api::Backup>>(GET, &path, NONE).await?)
         }
         Cmd::Doctor => doctor(),
@@ -1763,6 +1762,18 @@ fn usage_path(
 }
 
 /// `GET /v1/events` for a tenant, a machine, both or neither.
+/// `/v1/backups`, of a tenant, of a machine, or of every one.
+fn backups_path(tenant: Option<&str>, machine: Option<&str>) -> String {
+    let q: Vec<String> = [("tenant", tenant), ("machine", machine)]
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|v| format!("{k}={v}")))
+        .collect();
+    match q.is_empty() {
+        true => "/v1/backups".into(),
+        false => format!("/v1/backups?{}", q.join("&")),
+    }
+}
+
 fn events_path(tenant: Option<&str>, machine: Option<&str>, watch: bool) -> String {
     let mut q = Vec::new();
     if let Some(t) = tenant {

@@ -1052,13 +1052,21 @@ fn backup_schedules_and_backup_commands() {
         backup_rm_path("m1", "b1", true, Some("t1")),
         "/v1/machines/m1/backups/b1?chain=true&tenant=t1"
     );
-    match parse(&["backups", "--tenant", "t1"]).cmd {
-        Cmd::Backups { tenant } => assert_eq!(tenant.as_deref(), Some("t1")),
+    match parse(&["backups", "--tenant", "t1", "--machine", "m1"]).cmd {
+        Cmd::Backups { tenant, machine } => {
+            assert_eq!(
+                (tenant.as_deref(), machine.as_deref()),
+                (Some("t1"), Some("m1"))
+            )
+        }
         _ => panic!("not backups"),
     }
     assert!(matches!(
         parse(&["backups"]).cmd,
-        Cmd::Backups { tenant: None }
+        Cmd::Backups {
+            tenant: None,
+            machine: None
+        }
     ));
     assert_eq!(
         fails(&["backup", "rm", "m1"]),
@@ -1956,6 +1964,12 @@ fn events_and_describe_parse() {
         "/v1/events?tenant=t1&since=d1:3"
     );
     assert_eq!(with_since("/v1/events", ""), "/v1/events");
+    assert_eq!(backups_path(None, None), "/v1/backups");
+    assert_eq!(backups_path(None, Some("m1")), "/v1/backups?machine=m1");
+    assert_eq!(
+        backups_path(Some("t1"), Some("m1")),
+        "/v1/backups?tenant=t1&machine=m1"
+    );
 }
 
 #[test]

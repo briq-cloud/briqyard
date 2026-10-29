@@ -45,6 +45,10 @@ missing=$(comm -13 <(echo "$roots") <(echo "$ids"))
 [ -z "$missing" ] && ok "every machine has its root disk" || fail "machines without a root disk: $(echo "$missing" | tr '\n' ' ')"
 check_eq "data disks == machines with a volume" "$(echo "$datas" | grep -c . || true)" "$(echo "$with_volume" | grep -c . || true)"
 [ -z "$others" ] && ok "no stray dataset under m/" || fail "stray datasets: $(echo "$others" | tr '\n' ' ')"
+# A machine's dataset counts even with no disk in it: a create cut short leaves it empty.
+fss=$(sudo zfs list -H -o name -t filesystem -d 1 "$POOL/m" 2>/dev/null | sed -n "s|^$POOL/m/||p" | sort)
+leaked=$(comm -23 <(echo "$fss") <(echo "$ids"))
+[ -z "$leaked" ] && ok "no machine dataset without a machine" || fail "machine datasets without a machine: $(echo "$leaked" | tr '\n' ' ')"
 
 # --- devices (ADR 0046): each disk's link names it; a Firecracker holds its own disks only ---
 wrong=""
