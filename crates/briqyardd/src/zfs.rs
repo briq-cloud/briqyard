@@ -2,10 +2,19 @@
 //! ("images/abc", "m/<id>/root"). Every method is idempotent where it can be.
 
 use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::process::Command;
+
+/// A `zfs` command that runs this long makes the host `storage_stalled` (ADR 0046).
+pub const STALL_AFTER: Duration = Duration::from_secs(60);
+/// How long a volume's device link may take to be right (ADR 0046).
+const LINK_WAIT: Duration = Duration::from_secs(15);
+/// The part of it `udevadm settle` may take.
+const SETTLE_WAIT: Duration = Duration::from_secs(5);
 
 /// A command the backend runs: a program and the arguments that come before the backend's own.
 /// On a host it is the program alone; a test's stand-in is `sh <script>`, so the script is read,
@@ -41,15 +50,58 @@ impl Tool {
     }
 }
 
+/// The commands the backend runs; fake ones in tests.
+#[derive(Clone, Debug)]
+pub struct Tools {
+    pub zfs: Tool,
+    pub udevadm: Tool,
+    /// Names the dataset a zvol device is now (the program udev's own rule runs).
+    pub zvol_id: Tool,
+}
+
+impl Tools {
+    pub fn host() -> Self {
+        Self {
+            zfs: Tool::program("zfs"),
+            udevadm: Tool::program("udevadm"),
+            zvol_id: Tool::program("/usr/lib/udev/zvol_id"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Zfs {
     pool: String,
-    /// The `zfs` command; a fake one in tests.
-    binary: Tool,
-    /// The `udevadm` command; a fake one in tests.
-    udevadm: Tool,
-    /// Where the kernel exposes zvols (`/dev/zvol/<dataset>`).
+    tools: Tools,
+    /// Where udev links zvols (`/dev/zvol/<dataset>`).
     dev_root: PathBuf,
+    /// The `zfs` commands running now (ADR 0046).
+    running: Arc<Mutex<Running>>,
+}
+
+/// The `zfs` commands running, each with when it started and what it is.
+#[derive(Default)]
+struct Running {
+    next: u64,
+    calls: HashMap<u64, (Instant, String)>,
+}
+
+/// One running command's entry, removed when the command ends.
+struct Call(Arc<Mutex<Running>>, u64);
+
+impl Drop for Call {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().calls.remove(&self.1);
+    }
+}
+
+/// What a volume's link says now.
+enum Link {
+    /// The device it names, which is that volume.
+    Right(PathBuf),
+    /// The device it names, which is another dataset or none (`zvol_id`'s answer).
+    Wrong(PathBuf, String),
+    Missing,
 }
 
 /// Whether the pool is encrypted and its key loaded (ADR 0026).
@@ -68,28 +120,17 @@ impl Zfs {
     /// Opens the pool. Nothing is made or mounted: its key may not be loaded yet (`key`,
     /// `load_key`, then `layout`).
     pub async fn new(pool: &str) -> Result<Self> {
-        Self::with_paths(
-            pool,
-            &Tool::program("zfs"),
-            &Tool::program("udevadm"),
-            Path::new("/dev/zvol"),
-        )
-        .await
+        Self::with_paths(pool, &Tools::host(), Path::new("/dev/zvol")).await
     }
 
-    /// `new` with the `zfs` and `udevadm` binaries and the zvol device root given, so tests
-    /// can stand in for all three without ZFS on the machine.
-    pub async fn with_paths(
-        pool: &str,
-        binary: &Tool,
-        udevadm: &Tool,
-        dev_root: &Path,
-    ) -> Result<Self> {
+    /// `new` with the commands and the link root given, so tests can stand in for them
+    /// without ZFS on the machine.
+    pub async fn with_paths(pool: &str, tools: &Tools, dev_root: &Path) -> Result<Self> {
         let z = Self {
             pool: pool.to_string(),
-            binary: binary.clone(),
-            udevadm: udevadm.clone(),
+            tools: tools.clone(),
             dev_root: dev_root.to_path_buf(),
+            running: Arc::default(),
         };
         z.run(&["list", "-H", "-o", "name", pool])
             .await
@@ -215,34 +256,57 @@ impl Zfs {
     }
 
     async fn run(&self, args: &[&str]) -> Result<String> {
-        let out = self
-            .binary
-            .command()
-            .args(args)
-            .output()
-            .await
-            .context("run zfs")?;
-        Self::answer(args, out)
+        self.call(args, None).await
     }
 
     /// `run` with `input` on the command's stdin.
     async fn run_input(&self, args: &[&str], input: &[u8]) -> Result<String> {
+        self.call(args, Some(input.to_vec())).await
+    }
+
+    /// Runs a `zfs` command, counted as running until it exits: one that never does (stuck in
+    /// the kernel) is the host's `storage_stalled` (ADR 0046). It is not timed out: a command
+    /// stuck in the kernel cannot be killed, and one that is only slow finishes what it started.
+    async fn call(&self, args: &[&str], input: Option<Vec<u8>>) -> Result<String> {
+        use std::process::Stdio;
         use tokio::io::AsyncWriteExt;
         let mut child = self
-            .binary
+            .tools
+            .zfs
             .command()
             .args(args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stdin(match input {
+                Some(_) => Stdio::piped(),
+                None => Stdio::null(),
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .context("run zfs")?;
-        let mut stdin = child.stdin.take().expect("piped");
-        // A command that exits without reading its input is answered by its status.
-        let _ = stdin.write_all(input).await;
-        drop(stdin);
+        let _call = self.begin(&format!("zfs {}", args.join(" ")));
+        if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
+            // A command that exits without reading its input is answered by its status.
+            let _ = stdin.write_all(&input).await;
+        }
         let out = child.wait_with_output().await.context("run zfs")?;
         Self::answer(args, out)
+    }
+
+    fn begin(&self, what: &str) -> Call {
+        let mut r = self.running.lock().unwrap();
+        r.next += 1;
+        let id = r.next;
+        r.calls.insert(id, (Instant::now(), what.to_string()));
+        Call(self.running.clone(), id)
+    }
+
+    /// The oldest `zfs` command running for longer than `after`: how long, and what. Real time,
+    /// whatever clock a test pauses.
+    pub fn stalled(&self, after: Duration) -> Option<(Duration, String)> {
+        let r = self.running.lock().unwrap();
+        let (since, what) = r.calls.values().min_by_key(|(t, _)| *t)?;
+        let ran = since.elapsed();
+        (ran > after).then(|| (ran, what.clone()))
     }
 
     fn answer(args: &[&str], out: std::process::Output) -> Result<String> {
@@ -323,35 +387,117 @@ impl Zfs {
         self.wait_device(name).await
     }
 
-    /// The device node of a volume, once udev has made it. `udevadm settle` waits for the
-    /// events udev holds, bounded. A poll follows because the kernel may register the block
-    /// device after `zfs` returned, so udev may not hold the event yet (ZFS's own `zvol_wait`
-    /// polls for this); where it does, the loop runs once.
+    /// A volume's device (`/dev/zdN`), checked to be that volume now: never another's. ZFS
+    /// makes, renames and removes a zvol's device after `zfs` returned, and udev may drop the
+    /// event that moves its link (ADR 0046), so the link at the volume's name can be missing a
+    /// while, or name the device of a disk renamed or destroyed under it. Each device the link
+    /// names is asked its dataset (`zvol_id`); a wrong one gets a change event of its own,
+    /// which moves its links. Every zvol's event is replayed, once, when the link is still not
+    /// right after that (the volume's own event was lost too) or at the end of the wait.
     async fn wait_device(&self, name: &str) -> Result<PathBuf> {
-        let dev = self.dev(name);
-        let out = self
-            .udevadm
-            .command()
-            .args(["settle", "--timeout=15"])
-            .output()
-            .await
-            .context("run udevadm")?;
+        let until = Instant::now() + LINK_WAIT;
+        self.settle(until).await?;
+        let deadline = tokio::time::Instant::now() + LINK_WAIT;
+        let (mut mended, mut replayed) = (false, false);
+        loop {
+            let (last, wrong) = match self.link(name, until).await {
+                Link::Right(dev) => return Ok(dev),
+                Link::Wrong(dev, other) => {
+                    (format!("names {} ({other})", dev.display()), Some(dev))
+                }
+                Link::Missing => ("is missing".to_string(), None),
+            };
+            let over = tokio::time::Instant::now() > deadline || Instant::now() > until;
+            // A replay was worked when it returns: still not right after one of the wrong
+            // device, the volume's own event was lost too.
+            if !replayed && (over || mended) {
+                self.replay(None, until).await?;
+                replayed = true;
+                continue;
+            }
+            if over {
+                return Err(anyhow!(
+                    "zvol device of {}: {} {last} after {} s",
+                    self.ds(name),
+                    self.dev(name).display(),
+                    LINK_WAIT.as_secs()
+                ));
+            }
+            let pause = match wrong {
+                Some(dev) => {
+                    self.replay(Some(&dev), until).await?;
+                    mended = true;
+                    500
+                }
+                None => 100,
+            };
+            tokio::time::sleep(Duration::from_millis(pause)).await;
+        }
+    }
+
+    /// What the link at a volume's name says now.
+    async fn link(&self, name: &str, until: Instant) -> Link {
+        let Ok(dev) = tokio::fs::canonicalize(self.dev(name)).await else {
+            return Link::Missing;
+        };
+        match self.zvol_name(&dev, until).await {
+            Ok(n) if n == self.ds(name) => Link::Right(dev),
+            Ok(n) => Link::Wrong(dev, n),
+            Err(err) => Link::Wrong(dev, err),
+        }
+    }
+
+    /// The dataset a zvol device is now, as the kernel says; a device being removed has none.
+    async fn zvol_name(&self, dev: &Path, until: Instant) -> Result<String, String> {
+        let mut cmd = self.tools.zvol_id.command();
+        cmd.arg(dev);
+        match bounded(cmd, until).await {
+            Some(Ok(o)) if o.status.success() => {
+                Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            }
+            Some(Ok(o)) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            Some(Err(e)) => Err(format!("run zvol_id: {e}")),
+            None => Err("zvol_id: no answer".into()),
+        }
+    }
+
+    /// Waits for the events udev holds, 5 s at most: the link is polled for after it, so a udevd
+    /// slow to settle leaves the rest of the wait to that.
+    async fn settle(&self, until: Instant) -> Result<()> {
+        let until = until.min(Instant::now() + SETTLE_WAIT);
+        self.udevadm(&["settle", "--timeout=5"], until).await
+    }
+
+    /// Sends a change event for one zvol device, or for every zvol device, and waits for it to
+    /// be worked: udev's rule then links each device at the name `zvol_id` gives it now.
+    async fn replay(&self, dev: Option<&Path>, until: Instant) -> Result<()> {
+        let mut args = vec!["trigger", "--action=change", "--settle"];
+        let dev = dev.map(|d| d.display().to_string());
+        match &dev {
+            Some(d) => args.push(d),
+            None => args.extend(["--subsystem-match=block", "--sysname-match=zd*"]),
+        }
+        self.udevadm(&args, until).await
+    }
+
+    /// Runs `udevadm` until `until`. One that has not answered by then (a udevd wedged, as a
+    /// stalled pool can leave it) is killed and counts as done: the link the caller reads next
+    /// says whether it worked.
+    async fn udevadm(&self, args: &[&str], until: Instant) -> Result<()> {
+        let mut cmd = self.tools.udevadm.command();
+        cmd.args(args);
+        let Some(out) = bounded(cmd, until).await else {
+            return Ok(());
+        };
+        let out = out.context("run udevadm")?;
         if !out.status.success() {
             return Err(anyhow!(
-                "udevadm settle: {}",
+                "udevadm {}: {}",
+                args.join(" "),
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        loop {
-            if tokio::fs::metadata(&dev).await.is_ok() {
-                return Ok(dev);
-            }
-            if tokio::time::Instant::now() > deadline {
-                return Err(anyhow!("zvol device {} did not appear", dev.display()));
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        Ok(())
     }
 
     /// A volume's size, in bytes.
@@ -402,10 +548,43 @@ impl Zfs {
         Ok(())
     }
 
-    /// Renames a dataset in place: its snapshots and its clones' origins follow it.
+    /// Renames a volume in place: its snapshots and its clones' origins follow it, and so does
+    /// its device's link. ZFS renames the device after `zfs rename` returned and udev may drop
+    /// the event that moves the link (ADR 0046): the device, found before, is waited for until
+    /// the kernel names it `to`, then given a change event until the link at `to` names it.
     pub async fn rename(&self, name: &str, to: &str) -> Result<()> {
+        let dev = self.device(name).await?;
         self.run(&["rename", &self.ds(name), &self.ds(to)]).await?;
-        Ok(())
+        let want = self.ds(to);
+        let until = Instant::now() + LINK_WAIT;
+        let deadline = tokio::time::Instant::now() + LINK_WAIT;
+        let mut named = false;
+        loop {
+            if !named {
+                named = self.zvol_name(&dev, until).await.as_deref() == Ok(want.as_str());
+            }
+            if named {
+                self.replay(Some(&dev), until).await?;
+                if matches!(self.link(to, until).await, Link::Right(at) if at == dev) {
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() > deadline || Instant::now() > until {
+                return Err(anyhow!(
+                    "rename {} to {want}: {} {} after {} s",
+                    self.ds(name),
+                    dev.display(),
+                    match named {
+                        true => format!("not linked at {}", self.dev(to).display()),
+                        false => "not renamed by the kernel".into(),
+                    },
+                    LINK_WAIT.as_secs()
+                ));
+            }
+            // Polled until the kernel renamed it; then each replay was worked when it returned.
+            let pause = if named { 500 } else { 50 };
+            tokio::time::sleep(Duration::from_millis(pause)).await;
+        }
     }
 
     /// Takes a dataset back to its newest snapshot: what was written since is freed.
@@ -613,7 +792,7 @@ impl Zfs {
         from: Option<&str>,
     ) -> Result<tokio::process::Child> {
         let target = format!("{}@{snap}", self.ds(name));
-        let mut cmd = self.binary.command();
+        let mut cmd = self.tools.zfs.command();
         cmd.arg("send").arg("-w");
         if let Some(f) = from {
             cmd.arg("-i").arg(format!("@{f}"));
@@ -627,7 +806,7 @@ impl Zfs {
     /// Starts `zfs receive` into a dataset (made or overwritten); the caller writes the stream
     /// to the child's stdin and waits for it.
     pub fn receive(&self, name: &str) -> Result<tokio::process::Child> {
-        let mut cmd = self.binary.command();
+        let mut cmd = self.tools.zfs.command();
         cmd.args(["receive", "-F", "-u", &self.ds(name)])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -724,6 +903,30 @@ impl Zfs {
     }
 }
 
+/// Runs a command until `until`, real time: past it the command is killed (`kill_on_drop`) and
+/// the answer is `None`. Not tokio's clock, which a test can pause: a paused clock jumps to the
+/// next timer whenever the runtime waits, and a command would time out at once.
+async fn bounded(
+    mut cmd: Command,
+    until: Instant,
+) -> Option<std::io::Result<std::process::Output>> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+    let (fire, fired) = tokio::sync::oneshot::channel::<()>();
+    let left = until.saturating_duration_since(Instant::now());
+    std::thread::spawn(move || {
+        if cancelled.recv_timeout(left) == Err(RecvTimeoutError::Timeout) {
+            let _ = fire.send(());
+        }
+    });
+    let out = tokio::select! {
+        out = cmd.kill_on_drop(true).output() => Some(out),
+        _ = fired => None,
+    };
+    drop(cancel);
+    out
+}
+
 /// A snapshot and the datasets cloned from it, relative to the pool.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapshotOf {
@@ -789,15 +992,15 @@ fn space_lines(out: &str, prefix: &str) -> Result<Vec<Space>> {
 pub(crate) mod fake {
     use super::*;
 
-    /// A stand-in for `zfs`, with the fake device root as its state: a directory per parent
+    /// A stand-in for `zfs`, with a directory as its state: a directory per parent
     /// dataset, a file per volume or snapshot, and `<clone>.origin` naming the snapshot a
     /// clone was made from (a filesystem, made with a mountpoint, is a directory; `promote` moves that snapshot and the source's older ones, in the
     /// order `snapshots.order` keeps, to the clone and makes the source the clone's clone, as
     /// ZFS does). Every call is appended to `calls`, one line each;
     /// `get` answers come from `answer.<property>` files when there is one, else `origin` and
     /// `clones` from the `.origin` files, and `list -p` (space) from `answer.space`; `busy` holds how many destroys still answer
-    /// "dataset is busy". A stream is one line naming its snapshot and its base, sent once no
-    /// `hold.send` file is there; a receive makes the dataset and the snapshot, and refuses
+    /// "dataset is busy"; a command waits while a `hold.<command>` file is there. A stream is
+    /// one line naming its snapshot and its base; a receive makes the dataset and the snapshot, and refuses
     /// an increment whose base the dataset lacks, as ZFS does; `load-key` takes the line on its
     /// stdin when it is the `key` file's and answers `keystatus` `available` from then on;
     /// `change-key` needs the dataset. A volume's file holds its `volsize`: set by `create -V`
@@ -807,6 +1010,7 @@ pub(crate) mod fake {
     const FAKE: &str = r#"#!/bin/sh
 DEV="__DEV__"
 printf '%s\n' "$*" >> "__LOG__"
+while [ -f "$DEV/hold.$1" ]; do sleep 0.02; done
 for a in "$@"; do last="$a"; done
 missing() { echo "cannot open '$1': dataset does not exist" >&2; exit 1; }
 # Renames the entries of the creation order that start with $1 to start with $2.
@@ -924,7 +1128,6 @@ case "$1" in
     done
     rm -rf "${DEV:?}/${last:?}" "$DEV/$last.origin" "$DEV/$last"@*; exit 0;;
   send)
-    while [ -f "$DEV/hold.send" ]; do sleep 0.02; done
     base=-; [ "$3" = "-i" ] && base="${4#@}"
     if [ "$base" != - ] && [ ! -e "$DEV/${last%@*}@$base" ]; then
       echo "cannot send '$last': incremental source $base is not a snapshot of it" >&2; exit 1
@@ -965,34 +1168,101 @@ esac
 exit 0
 "#;
 
-    /// A stand-in for `udevadm`: nothing to settle, the call is logged.
-    const FAKE_UDEVADM: &str = "#!/bin/sh\nprintf 'udevadm %s\\n' \"$*\" >> \"__LOG__\"\n";
+    /// Stand-ins for the kernel's devices and udev's links, over the fake's state: a volume's
+    /// device is `devs/zd<inode>`, a hard link to its file, so it stays the same device through
+    /// a rename and outlives a destroy until udev next looks. `zvol_id` names the volume whose
+    /// file a device is. Every `udevadm` call first makes the devices of new volumes (the
+    /// kernel's part); `settle` then links every device at its volume's name, unless
+    /// `udev.drop` is in the state (udev dropped the events); `trigger` links the device given,
+    /// or all of them, dropped or not. A device whose volume is gone loses its links and goes.
+    /// Each waits while `hang.udevadm` (`hang.zvol_id`) is in the state: a udevd wedged.
+    const FAKE_UDEVADM: &str = r#"#!/bin/sh
+DEV="__DEV__"; LINKS="__LINKS__"; DEVS="__DEVS__"
+printf 'udevadm %s\n' "$*" >> "__LOG__"
+while [ -f "$DEV/hang.udevadm" ]; do sleep 0.1; done
+for a in "$@"; do last="$a"; done
+# Each volume's inode and name; the kernel's part: a device for each volume that has none.
+find "$DEV" -mindepth 2 -type f ! -name '*@*' ! -name '*.origin' -exec ls -i {} + |
+  awk -v d="$DEV/" '{ sub(d, "", $2); print $1, $2 }' > "$DEVS.$$"
+trap 'rm -f "$DEVS.$$"' EXIT
+while read -r i n; do [ -e "$DEVS/zd$i" ] || ln "$DEV/$n" "$DEVS/zd$i" 2>/dev/null; done < "$DEVS.$$"
+name_of() { awk -v i="${1##*/zd}" '$1 == i { print $2; exit }' "$DEVS.$$"; }
+# udev's part for one device: linked at its volume's name only, or gone with its volume.
+link() {
+  n=$(name_of "$1")
+  find "$LINKS" -type l | while read -r l; do
+    [ "$l" -ef "$1" ] && [ "${l#$LINKS/}" != "$n" ] && rm -f "$l"
+  done
+  if [ -z "$n" ]; then rm -f "$1"; return 0; fi
+  mkdir -p "$LINKS/${n%/*}"; ln -sfn "$1" "$LINKS/$n"
+}
+case "$1" in
+  settle)
+    [ -f "$DEV/udev.drop" ] && exit 0
+    while read -r i n; do
+      [ "$LINKS/$n" -ef "$DEVS/zd$i" ] || { mkdir -p "$LINKS/${n%/*}"; ln -sfn "$DEVS/zd$i" "$LINKS/$n"; }
+    done < "$DEVS.$$"
+    find "$LINKS" -type l | sed "s|^$LINKS/||" | awk 'NR == FNR { v[$2]; next } !($0 in v)' "$DEVS.$$" - |
+      while read -r l; do rm -f "$LINKS/$l"; done
+    ls "$DEVS" | sed 's/^zd//' | awk 'NR == FNR { v[$1]; next } !($0 in v)' "$DEVS.$$" - |
+      while read -r i; do rm -f "$DEVS/zd$i"; done;;
+  trigger)
+    case "$last" in
+      --sysname-match=*) for d in "$DEVS"/zd*; do [ -e "$d" ] && link "$d"; done;;
+      *) link "$last";;
+    esac;;
+esac
+exit 0
+"#;
+
+    const FAKE_ZVOL_ID: &str = r#"#!/bin/sh
+DEV="__DEV__"
+while [ -f "$DEV/hang.zvol_id" ]; do sleep 0.1; done
+i=$(ls -i "$1" 2>/dev/null | awk '{ print $1 }')
+n=$(find "$DEV" -mindepth 2 -type f ! -name '*@*' ! -name '*.origin' -exec ls -i {} + |
+  awk -v i="$i" -v d="$DEV/" '$1 == i { sub(d, "", $2); print $2; exit }')
+[ -n "$i" ] && [ -n "$n" ] || { echo "$1: No such device or address" >&2; exit 1; }
+echo "$n"
+"#;
 
     pub(crate) struct Fake {
         dir: tempfile::TempDir,
         pub(crate) zfs: Zfs,
     }
 
-    /// The fake binaries and the device root, before the pool is opened.
+    /// The fake binaries, the state and where links and devices go, before the pool is opened.
     pub(crate) struct Scripts {
         dir: tempfile::TempDir,
         pub(crate) zfs: PathBuf,
         pub(crate) udevadm: PathBuf,
+        pub(crate) zvol_id: PathBuf,
         pub(crate) dev: PathBuf,
+        pub(crate) links: PathBuf,
         pub(crate) jail: PathBuf,
     }
 
     impl Scripts {
         pub(crate) fn new() -> Scripts {
             let dir = tempfile::tempdir().unwrap();
-            let dev = dir.path().join("dev");
-            std::fs::create_dir_all(&dev).unwrap();
-            let log = dir.path().join("calls");
-            let zfs = dir.path().join("zfs");
-            let udevadm = dir.path().join("udevadm");
-            for (bin, script) in [(&zfs, FAKE), (&udevadm, FAKE_UDEVADM)] {
+            // Canonical, as the links the daemon resolves are (macOS's /var is /private/var).
+            let root = dir.path().canonicalize().unwrap();
+            let (dev, links, devs) = (root.join("dev"), root.join("links"), root.join("devs"));
+            for d in [&dev, &links, &devs] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            let log = root.join("calls");
+            let zfs = root.join("zfs");
+            let udevadm = root.join("udevadm");
+            let zvol_id = root.join("zvol_id");
+            for (bin, script) in [
+                (&zfs, FAKE),
+                (&udevadm, FAKE_UDEVADM),
+                (&zvol_id, FAKE_ZVOL_ID),
+            ] {
                 let script = script
                     .replace("__DEV__", dev.to_str().unwrap())
+                    .replace("__LINKS__", links.to_str().unwrap())
+                    .replace("__DEVS__", devs.to_str().unwrap())
                     .replace("__LOG__", log.to_str().unwrap())
                     .replace("__POOL__", "byard");
                 std::fs::write(bin, script).unwrap();
@@ -1002,7 +1272,9 @@ exit 0
                 dir,
                 zfs,
                 udevadm,
+                zvol_id,
                 dev,
+                links,
                 jail,
             }
         }
@@ -1020,13 +1292,12 @@ exit 0
 
         /// The pool opened, nothing made.
         pub(crate) async fn pool(&self, pool: &str) -> Result<Zfs> {
-            Zfs::with_paths(
-                pool,
-                &Tool::script(&self.zfs),
-                &Tool::script(&self.udevadm),
-                &self.dev,
-            )
-            .await
+            let tools = Tools {
+                zfs: Tool::script(&self.zfs),
+                udevadm: Tool::script(&self.udevadm),
+                zvol_id: Tool::script(&self.zvol_id),
+            };
+            Zfs::with_paths(pool, &tools, &self.links).await
         }
 
         pub(crate) fn answer(&self, prop: &str, value: &str) {
@@ -1041,6 +1312,11 @@ exit 0
 
         pub(crate) fn dev(&self) -> PathBuf {
             self.dir.path().join("dev")
+        }
+
+        /// Where udev's links are.
+        pub(crate) fn links(&self) -> PathBuf {
+            self.dir.path().join("links")
         }
 
         pub(crate) fn jail(&self) -> String {
@@ -1070,7 +1346,14 @@ mod tests {
     use super::fake::{Fake, Scripts};
     use super::*;
 
-    const SETTLE: &str = "udevadm settle --timeout=15";
+    const SETTLE: &str = "udevadm settle --timeout=5";
+
+    /// Whether `dev` is the device of the fake's volume file `file`: the same inode.
+    fn device_of(dev: &Path, file: PathBuf) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let ino = |p: &Path| std::fs::metadata(p).unwrap().ino();
+        dev.file_name().unwrap().to_str().unwrap().starts_with("zd") && ino(dev) == ino(&file)
+    }
 
     #[tokio::test]
     async fn opening_checks_the_pool_and_makes_the_layout() {
@@ -1223,8 +1506,7 @@ mod tests {
         let f = Fake::open("byard").await.unwrap();
         f.calls();
         let dev = f.zfs.create("m/x/data", 2 << 30).await.unwrap();
-        assert_eq!(dev, f.dev().join("byard/m/x/data"));
-        assert!(dev.is_file());
+        assert!(device_of(&dev, f.dev().join("byard/m/x/data")), "{dev:?}");
         // The node is looked for once udev has settled.
         assert_eq!(
             f.calls(),
@@ -1287,10 +1569,172 @@ mod tests {
         let err = f.zfs.device("m/x/root").await.unwrap_err();
         assert_eq!(err.to_string(), "volume m/x/root does not exist");
         f.zfs.create("m/x/root", 1 << 20).await.unwrap();
+        let dev = f.zfs.device("m/x/root").await.unwrap();
+        assert!(device_of(&dev, f.dev().join("byard/m/x/root")), "{dev:?}");
+    }
+
+    /// A restore's swap (ADR 0046): udev dropped the events of both renames, so the link at the
+    /// disk's name still names the old disk's device. The renamed devices are given events of
+    /// their own, and the disk's device is the clone's, never the retired disk's.
+    #[tokio::test]
+    async fn a_rename_moves_the_link_udev_missed() {
+        let f = Fake::open("byard").await.unwrap();
+        let old = f.zfs.create("m/x/root", 1 << 20).await.unwrap();
+        f.zfs.snapshot("m/x/root", "s_1").await.unwrap();
+        let clone = f
+            .zfs
+            .clone_snapshot("m/x/root", "s_1", "m/x/root.next")
+            .await
+            .unwrap();
+        std::fs::write(f.dev().join("udev.drop"), "").unwrap();
+        f.zfs.rename("m/x/root", "m/x/root.r_1").await.unwrap();
+        f.zfs.rename("m/x/root.next", "m/x/root").await.unwrap();
+        let dev = f.zfs.device("m/x/root").await.unwrap();
+        assert_eq!(dev, clone);
+        assert!(device_of(&dev, f.dev().join("byard/m/x/root")));
+        assert_eq!(f.zfs.device("m/x/root.r_1").await.unwrap(), old);
+        assert!(!f.links().join("byard/m/x/root.next").exists());
+    }
+
+    /// A link udev left on the device of a destroyed volume, at the name of a volume made since
+    /// (ADR 0046): that device is never answered, the new volume's is.
+    #[tokio::test(start_paused = true)]
+    async fn a_link_left_on_a_destroyed_volume_is_never_its_device() {
+        let f = Fake::open("byard").await.unwrap();
+        let gone = f.zfs.create("m/x/root", 1 << 20).await.unwrap();
+        std::fs::write(f.dev().join("udev.drop"), "").unwrap();
+        f.zfs.destroy("m/x/root").await.unwrap();
+        let made = f.zfs.create("m/x/root", 1 << 20).await.unwrap();
+        assert_ne!(made, gone);
+        assert!(device_of(&made, f.dev().join("byard/m/x/root")));
+        // The destroyed volume's device went with the event the daemon sent for it.
+        assert!(!gone.exists());
+    }
+
+    /// A volume whose link udev never made: every zvol's event is replayed once the wait is
+    /// over, and the link is there.
+    #[tokio::test(start_paused = true)]
+    async fn a_link_udev_never_made_is_replayed() {
+        let f = Fake::open("byard").await.unwrap();
+        std::fs::write(f.dev().join("udev.drop"), "").unwrap();
+        f.calls();
+        let dev = f.zfs.create("m/x/data", 1 << 20).await.unwrap();
+        assert!(device_of(&dev, f.dev().join("byard/m/x/data")));
+        let calls = f.calls();
         assert_eq!(
-            f.zfs.device("m/x/root").await.unwrap(),
-            f.dev().join("byard/m/x/root")
+            calls.last().unwrap(),
+            "udevadm trigger --action=change --settle --subsystem-match=block --sysname-match=zd*"
         );
+    }
+
+    /// A link whose device never says it is the volume, after the replay too, is an error that
+    /// names what it found.
+    #[tokio::test(start_paused = true)]
+    async fn a_device_that_is_never_the_volume_is_an_error() {
+        let s = Scripts::new();
+        let zvol_id = s.zvol_id.clone();
+        let f = s.open("byard").await.unwrap();
+        f.zfs.create("m/x/data", 1 << 20).await.unwrap();
+        std::fs::write(&zvol_id, "echo 'No such device or address' >&2; exit 1\n").unwrap();
+        let err = f.zfs.device("m/x/data").await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.starts_with("zvol device of byard/m/x/data: "), "{msg}");
+        assert!(
+            msg.contains("(No such device or address) after 15 s"),
+            "{msg}"
+        );
+    }
+
+    /// A udevd wedged, as a stalled pool can leave it, and a `zvol_id` that never answers: the
+    /// wait still ends by its deadline, with an error, and the commands are killed.
+    #[tokio::test]
+    async fn a_wedged_udev_ends_the_wait_by_its_deadline() {
+        let f = Fake::open("byard").await.unwrap();
+        f.zfs.create("m/x/root", 1 << 20).await.unwrap();
+        std::fs::write(f.dev().join("hang.udevadm"), "").unwrap();
+        std::fs::write(f.dev().join("hang.zvol_id"), "").unwrap();
+        let t0 = Instant::now();
+        let err = f.zfs.device("m/x/root").await.unwrap_err();
+        assert!(
+            t0.elapsed() < LINK_WAIT + Duration::from_secs(3),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert!(
+            format!("{err:#}").contains("(zvol_id: no answer) after 15 s"),
+            "{err:#}"
+        );
+        // A rename: its device found once udev's settle was given up, then the new link
+        // never made.
+        std::fs::remove_file(f.dev().join("hang.zvol_id")).unwrap();
+        let t0 = Instant::now();
+        let err = f.zfs.rename("m/x/root", "m/x/root.r_1").await.unwrap_err();
+        assert!(
+            t0.elapsed() < 2 * LINK_WAIT + Duration::from_secs(3),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert!(format!("{err:#}").contains("not linked at"), "{err:#}");
+    }
+
+    /// A `zfs` command is counted as running until it exits: past the time given, it is the
+    /// host's stalled command (ADR 0046).
+    #[tokio::test]
+    async fn a_command_running_past_its_time_is_stalled() {
+        let f = Fake::open("byard").await.unwrap();
+        f.zfs.create("m/x/root", 1 << 20).await.unwrap();
+        assert_eq!(f.zfs.stalled(Duration::ZERO), None);
+        let hold = f.dev().join("hold.snapshot");
+        std::fs::write(&hold, "").unwrap();
+        let z = f.zfs.clone();
+        let snap = tokio::spawn(async move { z.snapshot("m/x/root", "s_1").await });
+        let stalled = loop {
+            if let Some(s) = f.zfs.stalled(Duration::ZERO) {
+                break s;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(stalled.1, "zfs snapshot byard/m/x/root@s_1");
+        assert_eq!(f.zfs.stalled(Duration::from_secs(3600)), None);
+        std::fs::remove_file(&hold).unwrap();
+        snap.await.unwrap().unwrap();
+        assert_eq!(f.zfs.stalled(Duration::ZERO), None);
+    }
+
+    /// Against the kernel and udev, on a Linux host with ZFS, as root (ADR 0046):
+    /// `BRIQYARD_ZFS_TEST_POOL=byard cargo test -p briqyardd -- --ignored real_pool`. A
+    /// restore's renames, then the links RISE-M was left with set by hand: the link at the disk's
+    /// name on the retired disk's device, the retired disk's link gone. Datasets under
+    /// `<pool>/zvtest-<pid>`, destroyed after.
+    #[tokio::test]
+    #[ignore = "needs ZFS and root"]
+    async fn real_pool_links_follow_renames_and_wrong_ones_are_mended() {
+        let pool = std::env::var("BRIQYARD_ZFS_TEST_POOL").expect("BRIQYARD_ZFS_TEST_POOL");
+        let z = Zfs::new(&pool).await.unwrap();
+        let base = format!("zvtest-{}", std::process::id());
+        let (live, next, retired) = (
+            format!("{base}/root"),
+            format!("{base}/root.next"),
+            format!("{base}/root.r_1"),
+        );
+        let old = z.create(&live, 64 << 20).await.unwrap();
+        z.snapshot(&live, "s_1").await.unwrap();
+        let clone = z.clone_snapshot(&live, "s_1", &next).await.unwrap();
+        z.rename(&live, &retired).await.unwrap();
+        z.rename(&next, &live).await.unwrap();
+        assert_eq!(z.device(&live).await.unwrap(), clone);
+        assert_eq!(z.device(&retired).await.unwrap(), old);
+        let link = |n: &str| z.dev(n);
+        assert_eq!(std::fs::canonicalize(link(&live)).unwrap(), clone);
+        assert!(!link(&next).exists(), "the clone's old link went");
+        // udev's events lost: the disk's link on the retired disk's device, the retired
+        // disk's link gone.
+        std::fs::remove_file(link(&live)).unwrap();
+        std::os::unix::fs::symlink(&old, link(&live)).unwrap();
+        std::fs::remove_file(link(&retired)).unwrap();
+        assert_eq!(z.device(&live).await.unwrap(), clone);
+        assert_eq!(std::fs::canonicalize(link(&retired)).unwrap(), old);
+        z.destroy(&base).await.unwrap();
     }
 
     #[tokio::test]
@@ -1341,7 +1785,7 @@ mod tests {
             .clone_snapshot("images/abc", "base", "m/y/root")
             .await
             .unwrap();
-        assert_eq!(dev, f.dev().join("byard/m/y/root"));
+        assert!(device_of(&dev, f.dev().join("byard/m/y/root")), "{dev:?}");
         assert_eq!(
             f.calls(),
             vec![
@@ -1671,15 +2115,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_binary_is_an_error() {
-        let err = Zfs::with_paths(
-            "byard",
-            &Tool::program("/nonexistent/zfs"),
-            &Tool::program("/nonexistent/udevadm"),
-            Path::new("/dev/zvol"),
-        )
-        .await
-        .err()
-        .unwrap();
+        let tools = Tools {
+            zfs: Tool::program("/nonexistent/zfs"),
+            udevadm: Tool::program("/nonexistent/udevadm"),
+            zvol_id: Tool::program("/nonexistent/zvol_id"),
+        };
+        let err = Zfs::with_paths("byard", &tools, Path::new("/dev/zvol"))
+            .await
+            .err()
+            .unwrap();
         assert!(format!("{err:#}").contains("run zfs"), "{err:#}");
         // The device wait needs udevadm as much as it needs zfs.
         let s = Scripts::new();

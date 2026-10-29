@@ -50,11 +50,18 @@ impl Guest for Vsock {
     }
 }
 
+/// The guest cannot be reached: Firecracker's socket refuses (its process is exiting or gone)
+/// or the init's port does (the guest is exiting). The machine is not running, whatever its
+/// record says until the exit is settled.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Unreachable(pub String);
+
 /// Connects to the init: open Firecracker's socket, ask for the guest port, wait for its OK.
 pub async fn dial(uds: &Path) -> Result<UnixStream> {
     let mut s = UnixStream::connect(uds)
         .await
-        .with_context(|| format!("vsock {}", uds.display()))?;
+        .map_err(|e| Unreachable(format!("vsock {}: {e}", uds.display())))?;
     s.write_all(format!("CONNECT {}\n", guest::PORT).as_bytes())
         .await?;
     let mut r = BufReader::new(s);
@@ -63,7 +70,7 @@ pub async fn dial(uds: &Path) -> Result<UnixStream> {
         .await
         .context("vsock connect")??;
     if !line.starts_with("OK ") {
-        return Err(anyhow!("vsock connect refused: {}", line.trim()));
+        return Err(Unreachable(format!("vsock connect refused: {}", line.trim())).into());
     }
     Ok(r.into_inner())
 }
@@ -351,12 +358,21 @@ mod tests {
         let err = dial(&path).await.unwrap_err();
         assert_eq!(err.to_string(), "vsock connect refused: nope");
 
+        assert!(err.is::<Unreachable>());
+
         let missing = path.with_file_name("none.sock");
         let err = dial(&missing).await.unwrap_err();
         assert!(
             format!("{err:#}").contains(&format!("vsock {}", missing.display())),
             "{err:#}"
         );
+        assert!(err.is::<Unreachable>());
+        // A socket nobody listens on any more: a Firecracker exiting.
+        let gone = path.with_file_name("gone.sock");
+        drop(UnixListener::bind(&gone).unwrap());
+        let err = dial(&gone).await.unwrap_err();
+        assert!(err.to_string().contains("Connection refused"), "{err}");
+        assert!(err.is::<Unreachable>());
     }
 
     #[tokio::test]

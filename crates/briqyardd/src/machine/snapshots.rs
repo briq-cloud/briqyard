@@ -965,6 +965,26 @@ mod tests {
         assert_eq!(h.m.get(&fork.id).unwrap().state, state::RUNNING);
     }
 
+    /// The restore of RISE-M (ADR 0046): udev drops every event from the snapshot on, so the
+    /// link at the root disk's name still names the disk the restore retired, then destroyed.
+    /// The machine boots on the clone's device all the same, never on the retired disk's.
+    #[tokio::test(start_paused = true)]
+    async fn a_restore_boots_the_new_disk_whatever_udev_missed() {
+        use std::os::unix::fs::MetadataExt;
+        let h = harness().await;
+        let m = h.m.create(h.request("m")).await.unwrap();
+        let root = h.pool.dev().join(format!("byard/m/{}/root", m.id));
+        let before = std::fs::metadata(&root).unwrap().ino();
+        let s = h.m.snapshot(&m.id, named("one")).await.unwrap();
+        std::fs::write(h.pool.dev().join("udev.drop"), "").unwrap();
+        h.m.restore_snapshot(&m.id, &s.id, None).await.unwrap();
+        assert!(h.retired(&m.id).await.is_empty(), "the retired disk went");
+        let booted = h.booted_root(&m.id);
+        let ino = std::fs::metadata(&booted).unwrap().ino();
+        assert_ne!(ino, before, "booted on the retired disk");
+        assert_eq!(ino, std::fs::metadata(&root).unwrap().ino());
+    }
+
     #[tokio::test]
     async fn deleted_snapshots_a_retired_disk_hangs_from_go_with_it() {
         let h = harness().await;

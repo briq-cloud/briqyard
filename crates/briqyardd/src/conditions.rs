@@ -1,5 +1,5 @@
 //! The host's conditions (ADR 0021): memory and disk pressure, decided by the tick on what it
-//! measured. Each is a pressure: true is trouble.
+//! measured, and a stalled pool (ADR 0046). Each is a pressure: true is trouble.
 
 use crate::config;
 use crate::zfs::Pool;
@@ -87,6 +87,20 @@ pub fn disk(pool: Pool, t: &config::Conditions) -> (bool, String) {
     (under, msg)
 }
 
+/// `storage_stalled`: a `zfs` command has run past `zfs::STALL_AFTER` (ADR 0046), the oldest.
+pub fn storage(stalled: Option<(std::time::Duration, String)>) -> (bool, String) {
+    match stalled {
+        Some((ran, what)) => (true, format!("{what} running for {} s", ran.as_secs())),
+        None => (
+            false,
+            format!(
+                "no zfs command running for over {} s",
+                crate::zfs::STALL_AFTER.as_secs()
+            ),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,10 +161,26 @@ mod tests {
     }
 
     #[test]
+    fn storage_is_stalled_by_its_oldest_command() {
+        let ran = std::time::Duration::from_secs(75);
+        assert_eq!(
+            storage(Some((ran, "zfs snapshot byard/m/m_1/root@fork-x".into()))),
+            (
+                true,
+                "zfs snapshot byard/m/m_1/root@fork-x running for 75 s".into()
+            )
+        );
+        assert_eq!(
+            storage(None),
+            (false, "no zfs command running for over 60 s".into())
+        );
+    }
+
+    #[test]
     fn a_condition_changes_once_and_keeps_its_message_fresh() {
         let mut c = Conditions::new(t("2026-10-21T10:00:00Z"));
         assert_eq!(api::under_pressure(&c.list()), None);
-        assert_eq!(c.list().len(), 2);
+        assert_eq!(c.list().len(), 3);
         // The same status: no change, the message follows the figures.
         let same = c.set(
             condition::DISK_PRESSURE,

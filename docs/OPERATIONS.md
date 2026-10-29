@@ -10,7 +10,7 @@ Through a fleet, `briqyard host add` runs the script for you (below, and "First 
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/bootstrap-host.sh
-BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.1 \
+BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.2 \
 BRIQYARD_POOL_DEVICE=/dev/nvme0n1,/dev/nvme1n1 \
 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
 PRIVATE_ADDRESS=10.42.0.11/16 ALLOWED_CLIENTS=10.42.0.0/16 \
@@ -315,9 +315,10 @@ snapshot, or is whole.
   Counters count from the daemon's start. Alert on `briqyard_host_condition == 1`.
 - `briqyard top [--tenant T]`: running machines by CPU, with memory, disk and network rates over
   the last 15 s (`GET /v1/top`; through the fleet, a tenant's host or every host).
-- Conditions (ADR 0021): `memory_pressure`, `disk_pressure` in `/v1/status` and `briqyard host
-  ls`; each change is a `host_condition` event (`briqyard events`), a warning when it turns
-  true. Under disk pressure the daemon removes unused images itself (`image_removed` events).
+- Conditions (ADR 0021): `memory_pressure`, `disk_pressure`, `storage_stalled` (ADR 0046) in
+  `/v1/status` and `briqyard host ls`; each change is a `host_condition` event (`briqyard
+  events`), a warning when it turns true. Under disk pressure the daemon removes unused images
+  itself (`image_removed` events).
 - Logs: one JSON line per event on stderr (journald under systemd): `journalctl -u briqyardd
   -o cat | jq`. Level with `BRIQYARD_LOG=debug` (or any `tracing` filter).
 - A machine: `briqyard machine get <id>` (state, why it stopped, its process's exit), `briqyard
@@ -380,6 +381,8 @@ snapshot, or is whole.
 | `release … has no …`, `digest differs from the release's SHA256SUMS` | `release` names a tag without this architecture's files, or the token cannot read the repository |
 | An endpoint connects but the service refuses | The machine was waking: clients retry, as connection pools do. Postgres accepts TCP before it is ready |
 | `dataset is busy` | A zvol a Firecracker just released; the daemon retries for ten seconds |
+| `storage_stalled` (a host condition) | A `zfs` command has run for over a minute; the fleet places nothing new on the host. If `/proc/$(pgrep z_zvol)/stack` shows `zvol_remove_minors_impl`, a removed zvol's device is still open: find the `/dev/zdN` that `/usr/lib/udev/zvol_id` cannot name among the processes' open files (`ls -l /proc/*/fd`) and kill its holder (ADR 0046) |
+| `zvol device of byard/m/…: … after 15 s` | The disk's link never named its device, even after the change events the daemon sent: `udevadm settle`, `ls -l /dev/zvol/byard/m/<id>/`, `/usr/lib/udev/zvol_id /dev/zdN`, and `journalctl -u systemd-udevd` for `Failed to process device` |
 | A machine with `sleep` set never sleeps | A session is open on it (`session_opened` without its `exec session ended` line): it is in use until its client leaves |
 | `-t needs a terminal on stdin` | `machine exec -t` from a script or a pipe: use `-i` alone |
 | `host call refused: not from the host's address` (fleet), `unknown_host` `…'s calls come from …` | The host's heartbeat or key request reached the fleet from another address than its `url` (NAT, another route): list the host by the address it calls from. Behind a local proxy (`tls: off`, loopback `listen`): the proxy must set `X-Forwarded-For` |
@@ -660,7 +663,7 @@ loopback listener it reads from the edge's `X-Forwarded-For`. The
 repository is private, so the binaries come from your Mac:
 
 ```bash
-gh release download v0.1.1 -R briq-cloud/briqyard -p 'briqyard*-linux-x86_64' -p SHA256SUMS-x86_64 -D /tmp/byard
+gh release download v0.1.2 -R briq-cloud/briqyard -p 'briqyard*-linux-x86_64' -p SHA256SUMS-x86_64 -D /tmp/byard
 (cd /tmp/byard && shasum -a 256 -c SHA256SUMS-x86_64)
 scp /tmp/byard/briqyard-fleet-linux-x86_64 root@<public ip>:/usr/local/bin/briqyard-fleet
 scp /tmp/byard/briqyard-linux-x86_64 root@<public ip>:/usr/local/bin/briqyard
@@ -687,7 +690,7 @@ state_dir: /var/lib/briqyard-fleet
 bootstrap:
   enabled: true
   ssh_key: /etc/briqyard/fleet_ssh_key
-  release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.1
+  release: https://github.com/briq-cloud/briqyard/releases/download/v0.1.2
   pool_device: /dev/nvme0n1,/dev/nvme1n1
   fleet_url: https://fleet.example.com
   fleet_address: 10.42.0.11                # this server on the vRack: hosts reach fleet_url here
