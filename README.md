@@ -120,6 +120,7 @@ briqyard host upgrade <id> --release <version or URL>   # its machines keep runn
 ```
 
 Step by step, with every option, a fleet and a Mac for development: [docs/INSTALL.md](docs/INSTALL.md).
+TLS, public names and access control come from a proxy in front: [docs/OPERATIONS.md](docs/OPERATIONS.md#a-proxy-in-front).
 
 ## Tests
 
