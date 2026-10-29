@@ -1397,7 +1397,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "briqyard_memory_mb{kind=\"used\", host=\"$host\"} / briqyard_memory_mb{kind=\"capacity\", host=\"$host\"}",
+          "expr": "briqyard_memory_mb{kind=\"used\", host=\"$host\"} / ignoring(kind) briqyard_memory_mb{kind=\"capacity\", host=\"$host\"}",
           "legendFormat": "__auto",
           "range": true,
           "instant": false
@@ -1467,7 +1467,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "briqyard_pool_bytes{kind=\"used\", host=\"$host\"} / briqyard_pool_bytes{kind=\"size\", host=\"$host\"}",
+          "expr": "briqyard_pool_bytes{kind=\"used\", host=\"$host\"} / ignoring(kind) briqyard_pool_bytes{kind=\"size\", host=\"$host\"}",
           "legendFormat": "__auto",
           "range": true,
           "instant": false

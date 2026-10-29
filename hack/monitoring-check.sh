@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks what a Prometheus beside the fleet reads (ADR 0048), against a fleet ($BRIQYARD_URL,
 # default http://127.0.0.1:7430, with $BRIQYARD_METRICS_TOKEN, else $BRIQYARD_TOKEN): the
-# targets name every host that may run a daemon, each host's metrics come through the relay.
+# targets name every host that may run a daemon, each serving host's metrics come through the relay.
 # With $PROMETHEUS_URL, that Prometheus scrapes every target, up exactly when its host answers.
 # With $GRAFANA_URL and $GRAFANA_PASSWORD_FILE (the admin's) too, every query of every panel of
 # hack/monitoring/dashboards returns data over the last 30 minutes, the host dashboard's for
@@ -14,6 +14,8 @@ auth=(); [ -n "$token" ] && auth=(-H "Authorization: Bearer $token")
 api_auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && api_auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
 get() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL$1"; }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+# A host in these states runs its daemon: its metrics come through and it is up.
+serving='select(.state | test("^(ready|draining|retiring|upgrading)$"))'
 pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
@@ -33,7 +35,7 @@ if [ -n "$token" ]; then
 fi
 
 echo "== relay"
-for id in $(jq -r '.[] | select(.state == "ready") | .id' <<<"$hosts"); do
+for id in $(jq -r ".[] | $serving | .id" <<<"$hosts"); do
   check "$id: its metrics, relayed" 'get "/v1/hosts/$id/metrics" | grep -q "^# TYPE briqyard_machines_total gauge$"'
   if [ -n "$token" ]; then
     check "$id: 401 without a token" '[ "$(code "$BRIQYARD_URL/v1/hosts/$id/metrics")" = 401 ]'
@@ -54,7 +56,7 @@ if [ -n "${PROMETHEUS_URL:-}" ]; then
   check "every target scraped ($n)" '[ "$(scraped)" = "$n" ]'
   up() { curl -fsS "$PROMETHEUS_URL/api/v1/query" --data-urlencode "query=$1" | jq -r '[.data.result[].value[1]] | join(",")'; }
   check "the fleet: up" '[ "$(up "up{instance=\"fleet\"}")" = 1 ]'
-  for id in $(jq -r '.[] | select(.state == "ready") | .id' <<<"$hosts"); do
+  for id in $(jq -r ".[] | $serving | .id" <<<"$hosts"); do
     check "$id: up" '[ "$(up "up{host=\"$id\"}")" = 1 ]'
   done
   for id in $(jq -r '.[] | select(.state == "down") | .id' <<<"$hosts"); do
