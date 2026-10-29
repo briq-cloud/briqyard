@@ -171,7 +171,7 @@ paths:
             schema: { $ref: "#/components/schemas/ExecRequest" }
       responses:
         "200": { description: output, content: { application/json: { schema: { $ref: "#/components/schemas/ExecResult" } } } }
-        "409": { description: not running (and `wake` was false) }
+        "409": { description: "`not_running`: not running (`wake` false, or stopped on request); or it went down during the command, which may have run" }
   /v1/machines/{id}/files:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -333,7 +333,7 @@ paths:
         "200": { description: "machines, by tenant then name", content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/TopMachine" } } } } }
   /v1/events:
     get:
-      summary: "What happened on the host, oldest first (ADR 0019): the events after `since`. With `watch=true`, those and then each new event as it is logged, kept open as NDJSON, one event per line, `{}` every 30 s, and a last line `{code, error}` when the watch ends (`lagged`: it fell more than 1,024 events behind; `shutdown`: the daemon goes down); watch again from the last seq received. Through the fleet: with `tenant`, from the tenant's host, else with `machine`, from the machine's host (`x-briqyard-host` names it, the cursor is its seq, a watch is streamed through); with neither, every host, never partial, merged by time with `host` on each event and a cursor `<host>:<seq>,…`; a watch of every host is refused (400)"
+      summary: "What happened on the host, oldest first (ADR 0019): the events after `since`. With `watch=true`, those and then each new event as it is logged, kept open as NDJSON, one event per line, `{\"bookmark\": <seq>}` after 30 s of quiet (`WatchBookmark`: the last seq the watch looked at, matching or not; not an event), and a last line `{code, error}` when the watch ends (`lagged`: it fell more than 1,024 events behind; `shutdown`: the daemon goes down); watch again from the later of the last `seq` and the last `bookmark` received. Repeats of `session_opened`, `quota_exceeded`, `ready` and `not_ready` within 10 minutes of their line are folded into one later line with `count` and `first_at` (ADR 0047). Through the fleet: with `tenant`, from the tenant's host, else with `machine`, from the machine's host (`x-briqyard-host` names it, the cursor is its seq, a watch is streamed through); with neither, every host, never partial, merged by time with `host` on each event and a cursor `<host>:<seq>,…`; a watch of every host is refused (400)"
       parameters:
         - { name: since, in: query, description: "a previous read's `next`; absent or 0, the oldest kept", schema: { type: string } }
         - { name: tenant, in: query, schema: { type: string } }
@@ -346,7 +346,7 @@ paths:
           description: a page, or with `watch` a stream
           content:
             application/json: { schema: { $ref: "#/components/schemas/EventsPage" } }
-            application/x-ndjson: { schema: { $ref: "#/components/schemas/Event" } }
+            application/x-ndjson: { schema: { oneOf: [{ $ref: "#/components/schemas/Event" }, { $ref: "#/components/schemas/WatchBookmark" }, { $ref: "#/components/schemas/ApiError" }] } }
         "400": { description: "`invalid`: a `since` that is not a cursor, a bad id or type; a fleet-wide watch" }
         "404": { description: "`not_found` (fleet): the tenant or the machine is on no host; a destroyed machine's events are read with its tenant" }
         "410": { description: "`gone`: the events after `since` were removed, or `since` is past the host's last seq (its log began again); `oldest` is the oldest seq kept" }
@@ -730,7 +730,7 @@ components:
         backup: { $ref: "#/components/schemas/BackupPolicy" }
         last_backup_at: { type: string, format: date-time, description: when its newest backup in the store was made }
         next_backup_at: { type: string, format: date-time, description: "when the daemon backs it up next: `every` after the last backup, 15 minutes after a failed one; a machine with no process whose disks wrote nothing is not backed up again and its time moves on" }
-        version: { type: integer, description: "the seq of the last event about it: every event moves it, its last use does not; what `If-Match` compares" }
+        version: { type: integer, description: "the seq of the last event about it: every event moves it, a folded readiness flip too (ADR 0047), its last use does not; what `If-Match` compares" }
         pending: { $ref: "#/components/schemas/Pending" }
         pending_since: { type: string, format: date-time, description: "when the oldest change still pending was made" }
         init_version: { type: string, description: "what the init in its root disk said at its last boot (ADR 0027); empty before it, or from an init older than the report" }
@@ -1000,7 +1000,7 @@ components:
       type: object
       required: [seq, at, type, reason, message]
       properties:
-        seq: { type: integer, description: one more per event on its host, never reused }
+        seq: { type: integer, description: "one more per event on its host, never reused; a folded readiness flip takes one no line carries (its machine's version)" }
         at: { type: string, format: date-time }
         type: { type: string, enum: [normal, warning] }
         reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, snapshot_taken, snapshot_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded, session_opened], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`, ADR 0029's for `session_opened`, ADR 0031's for snapshots and a restore to one" }
@@ -1008,7 +1008,14 @@ components:
         machine_id: { type: string }
         tenant: { type: string }
         host: { type: string, description: "the host it happened on (fleet-wide reads)" }
-        data: { type: object, description: "the reason's facts: `code`, `oom` for `exited`, `reason` for `stopped`…" }
+        data: { type: object, description: "the reason's facts: `code`, `oom` for `exited`, `reason` for `stopped`…; on a line that folds repeats, the last one's" }
+        count: { type: integer, default: 1, description: "how many times it happened, from `first_at` to `at`: on a line that folds repeats of a use, a refusal or a readiness flip within 10 minutes of the first one's line (ADR 0047); absent: 1" }
+        first_at: { type: string, format: date-time, description: "on a line that folds repeats: the first one's time; `at` is the last one's" }
+    WatchBookmark:
+      type: object
+      required: [bookmark]
+      properties:
+        bookmark: { type: integer, description: "a watch's line after 30 s of quiet: every event up to this seq was looked at, so a watch again from it misses nothing; through the fleet, the host's seq" }
     EventsPage:
       type: object
       properties:
