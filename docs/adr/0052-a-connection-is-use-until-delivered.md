@@ -28,7 +28,6 @@ Rejected:
 ## Consequences
 
 - With ADR 0051's counters, the hold stays in the proxy for as long as it is the activator (a machine asleep, starting or not ready). The counter's `ct state new` on the proxy's connection to the machine falls at the delivery, where the last use now is.
-- An exec that wakes its machine holds it from the call.
 
 ## Measured
 
