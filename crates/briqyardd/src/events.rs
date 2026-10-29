@@ -133,8 +133,12 @@ struct Log {
     dir: PathBuf,
     /// The last seq given.
     seq: u64,
-    /// The files, by hour, with the first seq and the number of lines each holds.
+    /// The files, by hour, with the first and last seqs and the number of lines each holds.
     files: BTreeMap<String, File>,
+    /// The last seq of the newest file retention removed (at start, the seq before the oldest
+    /// file kept): a cursor before it misses lines; one at or past it misses none, even on a
+    /// seq no line carries.
+    pruned: u64,
     /// The newest file, open for appending.
     open: Option<(String, std::fs::File)>,
     /// Events logged since the daemon started, by type and reason, folded ones included:
@@ -147,6 +151,7 @@ struct Log {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct File {
     first: u64,
+    last: u64,
     lines: u64,
 }
 
@@ -266,9 +271,11 @@ impl Log {
         }
         let file = self.files.entry(key).or_insert(File {
             first: e.seq,
+            last: e.seq,
             lines: 0,
         });
         file.lines += 1;
+        file.last = e.seq;
         Ok(())
     }
 
@@ -313,12 +320,12 @@ impl Log {
     fn flush(
         &mut self,
         tx: &broadcast::Sender<api::Event>,
-        pick: impl Fn(&Key) -> bool,
+        pick: impl Fn(&Key, &Series) -> bool,
     ) -> Option<u64> {
         let mut folded: Vec<_> = self
             .series
             .iter_mut()
-            .filter(|(k, _)| pick(k))
+            .filter(|(k, s)| pick(k, s))
             .filter_map(|(_, s)| s.folded.take())
             .collect();
         folded.sort_by_key(|f| f.at);
@@ -330,8 +337,9 @@ impl Log {
     }
 }
 
-/// Whether the events after `since` are all still in the log: `0` always is.
-fn check_since(since: u64, oldest: u64, last: u64) -> Result<(), Gone> {
+/// Whether the events after `since` are all still in the log: `0` always is; `pruned` is the
+/// last seq retention removed, `oldest` the first kept.
+fn check_since(since: u64, pruned: u64, oldest: u64, last: u64) -> Result<(), Gone> {
     if since > last {
         return Err(Gone {
             oldest,
@@ -340,7 +348,7 @@ fn check_since(since: u64, oldest: u64, last: u64) -> Result<(), Gone> {
             ),
         });
     }
-    if since > 0 && since + 1 < oldest {
+    if since > 0 && since < pruned {
         return Err(Gone {
             oldest,
             message: format!(
@@ -378,20 +386,22 @@ impl Events {
                 std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
                 continue;
             };
-            if newest {
-                seq = events.last().map_or(first.seq, |e| e.seq);
+            // Retention counts lines, not seqs: a folded flip takes a seq with no line.
+            let (mut last, mut lines) = (first.seq, 1);
+            for e in events {
+                (last, lines) = (e.seq, lines + 1);
             }
-            // What retention counts: the lines, not the seqs (a folded flip takes one, no line).
-            let data = std::fs::read(&p).with_context(|| format!("read {}", p.display()))?;
-            let lines = data.iter().filter(|b| **b == b'\n').count() as u64;
-            files.insert(
-                key.clone(),
-                File {
-                    first: first.seq,
-                    lines,
-                },
-            );
+            if newest {
+                seq = last;
+            }
+            let file = File {
+                first: first.seq,
+                last,
+                lines,
+            };
+            files.insert(key.clone(), file);
         }
+        let pruned = files.values().next().map_or(0, |f: &File| f.first - 1);
         let (tx, _) = broadcast::channel(WATCH_BUFFER);
         Ok(Self {
             inner: Arc::new(Shared {
@@ -399,6 +409,7 @@ impl Events {
                     dir: dir.to_path_buf(),
                     seq,
                     files,
+                    pruned,
                     open: None,
                     emitted: BTreeMap::new(),
                     series: BTreeMap::new(),
@@ -441,8 +452,8 @@ impl Events {
             return Some(log.seq);
         }
         match folds && !flip {
-            true => log.flush(tx, |k| *k == key),
-            false if !key.1.is_empty() => log.flush(tx, |k| k.1 == key.1),
+            true => log.flush(tx, |k, _| *k == key),
+            false if !key.1.is_empty() => log.flush(tx, |k, _| k.1 == key.1),
             false => None,
         };
         if folds {
@@ -468,7 +479,7 @@ impl Events {
             .filter(|(k, s)| s.due(now) && !FLIPS.contains(&k.2))
             .map(|(k, _)| k.clone())
             .collect();
-        log.flush(&self.inner.tx, |k| uses.contains(k));
+        log.flush(&self.inner.tx, |k, _| uses.contains(k));
         log.series.retain(|k, _| !uses.contains(k));
         let mut machines: Vec<String> = log
             .series
@@ -480,11 +491,14 @@ impl Events {
         machines
     }
 
-    /// Logs what a machine's series folded, the last seen last, and ends those whose window
-    /// is over: the last seq given, its version. The caller holds the machine's record.
+    /// Logs what a machine's flips folded, the last seen last, and its uses whose window is
+    /// over, and ends the series whose window is over: the last seq given, its version. The
+    /// caller holds the machine's record. Every flip series is logged, due or not, so the last
+    /// line says what the machine is.
     pub fn flush_machine(&self, machine: &str, now: DateTime<Utc>) -> Option<u64> {
         let mut log = self.inner.log.lock().unwrap();
-        let last = log.flush(&self.inner.tx, |k| k.1 == machine);
+        let pick = |k: &Key, s: &Series| k.1 == machine && (FLIPS.contains(&k.2) || s.due(now));
+        let last = log.flush(&self.inner.tx, pick);
         log.series.retain(|k, s| k.1 != machine || !s.due(now));
         last
     }
@@ -496,12 +510,12 @@ impl Events {
 
     /// Up to `limit` events after `since` that the filter keeps (blocking: it reads files).
     pub fn read(&self, since: u64, f: &Filter, limit: usize) -> Result<Page> {
-        let (dir, files, last) = {
+        let (dir, files, last, pruned) = {
             let log = self.inner.log.lock().unwrap();
-            (log.dir.clone(), log.files.clone(), log.seq)
+            (log.dir.clone(), log.files.clone(), log.seq, log.pruned)
         };
         let oldest = files.values().next().map_or(last + 1, |f| f.first);
-        check_since(since, oldest, last)?;
+        check_since(since, pruned, oldest, last)?;
         let files: Vec<(String, File)> = files.into_iter().collect();
         // From the last file that starts at or before the first event wanted.
         let from = files
@@ -514,8 +528,11 @@ impl Events {
                 Ok(f) => f,
                 // Removed by retention since the list was taken.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    let oldest = self.inner.log.lock().unwrap().oldest();
-                    check_since(since, oldest, last)?;
+                    let (pruned, oldest) = {
+                        let log = self.inner.log.lock().unwrap();
+                        (log.pruned, log.oldest())
+                    };
+                    check_since(since, pruned, oldest, last)?;
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -557,7 +574,9 @@ impl Events {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e).with_context(|| format!("remove {}", p.display())),
             }
-            log.files.remove(&key);
+            if let Some(f) = log.files.remove(&key) {
+                log.pruned = f.last;
+            }
             removed += 1;
         }
         Ok(removed)
@@ -568,7 +587,7 @@ impl Events {
     /// summary gets one 409.
     pub fn close(&self) {
         let mut log = self.inner.log.lock().unwrap();
-        log.flush(&self.inner.tx, |_| true);
+        log.flush(&self.inner.tx, |_, _| true);
         log.series.clear();
         drop(log);
         self.inner.closing.send_replace(true);
@@ -1058,7 +1077,15 @@ mod tests {
         logged_at(&ev, "2026-10-20T11:00:00Z", 3);
         let now = t("2026-10-20T12:00:00Z");
         assert_eq!(ev.prune(now, 7, 6).unwrap(), 0);
+        // A cursor in the gap is whole: the lines it lacks are all kept.
+        assert_eq!(all(&ev, 500), [1004, 1005, 1006]);
         assert_eq!(ev.prune(now, 7, 5).unwrap(), 1);
+        // Pruned up to seq 3: a cursor at or past it misses nothing, even in the gap; one
+        // before it does.
+        assert_eq!(all(&ev, 3), [1004, 1005, 1006]);
+        assert_eq!(all(&ev, 500), [1004, 1005, 1006]);
+        let err = ev.read(2, &Filter::default(), 10).unwrap_err();
+        assert_eq!(err.downcast_ref::<Gone>().map(|g| g.oldest), Some(1004));
         // Counted again at a start.
         drop(ev);
         let ev = Events::open(dir.path()).unwrap();
@@ -1075,8 +1102,44 @@ mod tests {
             files,
             [File {
                 first: 1004,
+                last: 1006,
                 lines: 3
             }]
+        );
+    }
+
+    #[test]
+    fn a_due_flip_logs_the_machine_s_flips_not_its_uses_still_in_their_window() {
+        let (_dir, ev) = open();
+        let t0 = t("2026-10-28T10:00:00Z");
+        let at = |s: i64| t0 + Duration::seconds(s);
+        let flip = |reason: &'static str, s: i64| {
+            ev.emit_at(Ev::normal(reason, reason).of("m_a", "t1"), at(s));
+        };
+        flip(reason::READY, 0);
+        flip(reason::READY, 1);
+        // Sessions opened 5 minutes later: their window ends 5 minutes after the flip's.
+        ev.emit_at(session(0), at(300));
+        ev.emit_at(session(1), at(301));
+        let due = at(600);
+        assert_eq!(ev.flush_due(due), ["m_a"]);
+        ev.flush_machine("m_a", due);
+        let got: Vec<(String, u64)> = lines_of(&ev).into_iter().map(|l| (l.1, l.2)).collect();
+        assert_eq!(
+            got,
+            [
+                ("ready".into(), 1),
+                ("session_opened".into(), 1),
+                ("ready".into(), 1)
+            ]
+        );
+        // The sessions' fold comes at the end of their own window.
+        assert!(ev.flush_due(at(899)).is_empty());
+        assert_eq!(lines_of(&ev).len(), 3);
+        ev.flush_due(at(900));
+        assert_eq!(
+            lines_of(&ev).pop().unwrap(),
+            (5, "session_opened".into(), 1)
         );
     }
 

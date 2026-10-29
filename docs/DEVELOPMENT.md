@@ -206,8 +206,10 @@ plus `apt-get purge docker.io` and the edge's files.
   torn line, retention counting lines, a watch's backlog, lag, bookmark and shutdown; repeats
   folded (ADR 0047): a use's at its window's end, a change logging them first, a tenant's
   refusal, the shutdown's, flips taking a seq with no line and the last line the machine's
-  state; a flapping readiness probe whose version moves, a stale `If-Match` refused, the tick's
-  line its version), metrics and
+  state, a due flip leaving uses in their window, a cursor in a gap after retention; a flapping
+  readiness probe whose version is on disk once readable, a stale `If-Match` refused, the
+  tick's line its version, the tick leaving a machine in a transition alone and never writing
+  a destroyed record back), metrics and
   conditions (the exposition of machines in every state checked line by line and against the
   format, no probe per scrape, conditions turning true and clearing with their events, a stuck
   `zfs` command as `storage_stalled` until it exits, a pool

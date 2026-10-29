@@ -1174,6 +1174,14 @@ impl Manager {
         self.inner.store.put("machines", &rec.id, &rec)
     }
 
+    /// [`Self::save`] for a caller that holds the record's lock: what it holds is on disk
+    /// before anyone can read it.
+    fn save_locked(&self, e: &Entry, r: &mut Record) -> Result<()> {
+        r.updated_at = Utc::now();
+        e.unsaved_use.store(false, Relaxed);
+        self.inner.store.put("machines", &r.id, r)
+    }
+
     /// Writes a record whose last use moved since it was last written, as it is: nothing
     /// about the machine changed, so `updated_at` stays. Under the machine's lock, and only
     /// while the manager still holds the machine: a destroy removes it under that lock, so a
@@ -3995,8 +4003,11 @@ impl Manager {
         }
     }
 
-    /// Logs the repeats folded for 10 minutes (ADR 0019): a machine's flips under its record,
-    /// since their line is its version.
+    /// Logs the repeats folded for 10 minutes (ADR 0047): a machine's flips under its record,
+    /// since their line is its version. Under the machine's lock and only while the manager
+    /// holds it, as `flush_use`: a destroy removes it under that lock, so the write never
+    /// brings a destroyed record back. A machine in a transition is skipped: the transition's
+    /// own line logs them, and the next tick ends the series.
     fn log_folded(&self, now: DateTime<Utc>) {
         for id in self.inner.events.flush_due(now) {
             let e = self.inner.machines.lock().unwrap().get(&id).cloned();
@@ -4004,16 +4015,20 @@ impl Manager {
                 self.inner.events.flush_machine(&id, now);
                 continue;
             };
-            let moved = {
-                let mut r = e.rec.lock().unwrap();
-                let seq = self.inner.events.flush_machine(&id, now);
-                if let Some(seq) = seq {
-                    r.version = seq;
-                }
-                seq.is_some()
+            let Ok(_turn) = e.lock.try_lock() else {
+                continue;
             };
-            if moved {
-                let _ = self.save(&e);
+            if !self.holds(&e) {
+                self.inner.events.flush_machine(&id, now);
+                continue;
+            }
+            let mut r = e.rec.lock().unwrap();
+            let Some(seq) = self.inner.events.flush_machine(&id, now) else {
+                continue;
+            };
+            r.version = seq;
+            if let Err(err) = self.save_locked(&e, &mut r) {
+                tracing::warn!(machine = id, version = seq, err = %err, "record not written");
             }
         }
     }
@@ -11325,7 +11340,10 @@ mod tests {
             for (code, ready) in [(200, true), (500, false)] {
                 h.host.http(&m.ip, 8080, code);
                 eventually("flipped", || h.m.get(&m.id).unwrap().ready == ready).await;
-                versions.push(h.m.get(&m.id).unwrap().version);
+                // A version is on disk once it can be read: a restart never gives it again.
+                let version = h.m.get(&m.id).unwrap().version;
+                assert!(h.stored(&m.id).unwrap().version >= version);
+                versions.push(version);
             }
         }
         // Eight flips, two lines: the first of each; every flip moved the version, on disk too.
@@ -11359,6 +11377,36 @@ mod tests {
         assert!(last.first_at.is_some_and(|t| t < last.at));
         assert_eq!(h.m.get(&m.id).unwrap().version, last.seq);
         assert_eq!(h.stored(&m.id).unwrap().version, last.seq);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_tick_never_writes_back_the_record_of_a_machine_being_destroyed() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let p = api::Probe {
+            failure_threshold: 1,
+            ..http_probe(8080)
+        };
+        let m = h.m.create(h.probed("web", readiness(p))).await.unwrap();
+        for code in [200, 500, 200, 500] {
+            h.host.http(&m.ip, 8080, code);
+            eventually("flipped", || h.m.get(&m.id).unwrap().ready == (code == 200)).await;
+        }
+        let due = Utc::now() + chrono::Duration::minutes(11);
+        // A transition holds the machine (a destroy does, from its stop to its record's
+        // delete): the tick leaves it alone, to log its flips later.
+        let e = h.m.entry(&m.id).unwrap();
+        let held = e.lock.clone().lock_owned().await;
+        let before = h.events_of(&m.id).len();
+        h.m.log_folded(due);
+        assert_eq!(h.events_of(&m.id).len(), before);
+        drop(held);
+        // The destroy logs the folded flips itself; a tick after it writes nothing back.
+        h.m.destroy(&m.id, None).await.unwrap();
+        h.m.log_folded(due);
+        assert!(h.stored(&m.id).is_none());
+        let reasons = h.reasons(&m.id);
+        assert_eq!(reasons.last().map(String::as_str), Some("destroyed"));
     }
 
     #[tokio::test(start_paused = true)]

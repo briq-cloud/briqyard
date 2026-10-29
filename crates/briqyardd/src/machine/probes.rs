@@ -193,9 +193,28 @@ impl Manager {
                 false => Ev::warning(reason::NOT_READY, "not ready: its probes changed")
                     .data(json!({ "probe": null, "failures": 0 })),
             };
-            e.note(ev);
-            let _ = self.save(e);
+            self.note_flip(e, ev);
             e.changed.notify_waiters();
+        }
+    }
+
+    /// Logs a readiness flip and writes the record with its version before that version can
+    /// be read: a folded flip's seq is in no line (ADR 0047), so the record is what keeps it
+    /// past a crash; a restart then never hands it out again. Never on a destroy under way,
+    /// whose record is about to go.
+    fn note_flip(&self, e: &Entry, ev: Ev) {
+        let mut r = e.rec.lock().unwrap();
+        if r.state == state::DESTROYING {
+            return;
+        }
+        e.note_locked(&mut r, ev);
+        if let Err(err) = self.save_locked(e, &mut r) {
+            tracing::warn!(
+                machine = r.id,
+                version = r.version,
+                err = %err,
+                "record not written: a restart may give its version out again"
+            );
         }
     }
 
@@ -392,9 +411,8 @@ impl Manager {
                 }
             };
             // Under the run's lock: a reset waits for it, so the event is of this run.
-            e.note(ev);
+            self.note_flip(e, ev);
         }
-        let _ = self.save(e);
         e.changed.notify_waiters();
     }
 
