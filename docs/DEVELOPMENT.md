@@ -51,6 +51,16 @@ brew install lima
 limactl start --name=fc --vm-type=vz --nested-virt --cpus=6 --memory=16 --disk=60 template://ubuntu
 ```
 
+**The VMs are one shared bench.** Every checkout and session on the Mac installs its build into the same daemons, so a suite run while another tree restarts them fails for nothing (or passes against the wrong build). `hack/vm-lock.sh COMMAND` runs the command under one lock, a kernel lock on `/tmp/briqyard-vm.lock` that the system releases when the command ends, however it ends: it waits while another holder runs, saying who. `hack/vm.sh install|restart|stop|e2e|fleet` take it themselves. A suite run by hand, the stress driver, or a change to fc2 goes inside it:
+
+```bash
+hack/vm-lock.sh bash -c 'hack/vm.sh install && limactl shell fc bash hack/e2e.sh && limactl shell fc bash hack/fleet-smoke.sh'
+hack/vm-lock.sh limactl shell fc python3 hack/stress.py --crash
+cat /tmp/briqyard-vm.lock             # who holds it while it is held: pid, tree, since
+```
+
+Build and edit outside the lock; hold it only while the VMs run your build, and leave both hosts `ready` with no machines of yours behind.
+
 fc's pool is on a Lima disk of its own, so a full root disk can no longer suspend it:
 
 ```bash
@@ -346,10 +356,11 @@ plus `apt-get purge docker.io` and the edge's files.
   alone (20 checks then: `/metrics` refused without a token over `https://`;
   `BRIQYARD_METRICS_TOKEN` when the fleet has a `metrics_token`).
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
-  a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
-  destroy, more starts at once than the host has memory for), host invariants between phases
-  (ADR 0010). `--tenants 6 --per-tenant 4 --rounds 2 --crash`. Against a daemon on TLS, the
-  invariants' curl trusts the daemon's certificate with `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
+  a daemon SIGKILL, then the races (a client that hangs up mid-create, a start and a
+  snapshot's delete against a destroy, more starts at once than the host has memory for), host
+  invariants between phases (ADR 0010; one is no record on disk the daemon does not hold).
+  `--tenants 6 --per-tenant 4 --rounds 2 --crash`. Against a daemon on TLS, the invariants' curl
+  trusts the daemon's certificate with `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
 - `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
   restarts, forks, snapshots (a restore with memory read again after a cold boot) and backups,
   while racers stop, start, restart, snapshot and back up any machine at once. It fails on a

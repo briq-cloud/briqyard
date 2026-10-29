@@ -172,11 +172,15 @@ impl ObjectStore {
             .get(&Self::path(key)?)
             .await
             .map_err(|e| self.failed("get", key, e))?;
+        Ok(self.reader(got, key))
+    }
+
+    fn reader(&self, got: object_store::GetResult, key: &str) -> Reader {
         let (scheme, key) = (self.scheme, key.to_string());
         let stream = got
             .into_stream()
             .map_err(move |e| std::io::Error::other(format!("{scheme} get {key}: {e}")));
-        Ok(Box::new(tokio_util::io::StreamReader::new(stream)))
+        Box::new(tokio_util::io::StreamReader::new(stream))
     }
 
     pub async fn put_bytes(&self, key: &str, data: &[u8]) -> Result<()> {
@@ -185,10 +189,17 @@ impl ObjectStore {
     }
 
     pub async fn get_bytes(&self, key: &str) -> Result<Vec<u8>> {
-        let mut r = self.get(key).await?;
-        let mut out = Vec::new();
-        r.read_to_end(&mut out).await?;
-        Ok(out)
+        let r = self.get(key).await?;
+        read_all(r).await
+    }
+
+    /// `get_bytes`, an object that is not there `None`: one deleted since it was listed.
+    pub async fn get_bytes_if_present(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        match self.inner.get(&Self::path(key)?).await {
+            Ok(got) => Ok(Some(read_all(self.reader(got, key)).await?)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(self.failed("get", key, e)),
+        }
     }
 
     /// Keys under a prefix, sorted. A prefix is whole path segments: `m_1` is not `m_10`.
@@ -212,6 +223,12 @@ impl ObjectStore {
             Err(e) => Err(self.failed("delete", key, e)),
         }
     }
+}
+
+async fn read_all(mut r: Reader) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    r.read_to_end(&mut out).await?;
+    Ok(out)
 }
 
 /// The HTTP client under the S3 store: our reqwest (the one the daemon and the fleet use, on
@@ -434,6 +451,10 @@ mod tests {
         store.delete("backups/m_1/root/a.full").await.unwrap();
         store.delete("backups/m_1/root/a.full").await.unwrap();
         assert!(store.get("backups/m_1/root/a.full").await.is_err());
+        let gone = store.get_bytes_if_present("backups/m_1/root/a.full");
+        assert_eq!(gone.await.unwrap(), None);
+        let here = store.get_bytes_if_present("backups/m_1/a.json");
+        assert_eq!(here.await.unwrap().as_deref(), Some(&b"{}"[..]));
         // No escaping the root.
         assert!(store.get("../etc/passwd").await.is_err());
         assert!(store.put_bytes("a//b", b"").await.is_err());
