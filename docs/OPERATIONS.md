@@ -274,8 +274,8 @@ nor a base of one goes (`backup_deleted`, `retention`). The store holds `keep` t
 refused while another continues from it, `--chain` deletes those too.
 
 A destroy keeps the machine's backups for `backup.keep_destroyed_days`: a holder
-(`state/holders/<id>.json`) keeps them listed (`briqyard backups --tenant T`, each with
-`deletes_at`) and counted in the machine's usage buckets (`backup_gb_hours`). Through a fleet,
+(`state/holders/<id>.json`) keeps them listed (`briqyard backups --tenant T`, `--machine ID`
+for one machine's, each with `deletes_at`) and counted in the machine's usage buckets (`backup_gb_hours`). Through a fleet,
 `backup rm` of a destroyed machine's backup names its tenant (`--tenant`).
 
 In the store, per machine: `backups/<machine>/<id>.json` (the record) and
