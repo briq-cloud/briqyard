@@ -629,12 +629,20 @@ async fn delete_backup(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Every backup of the host's machines, destroyed ones' included, of a tenant or all.
+#[derive(Deserialize)]
+struct BackupsQuery {
+    tenant: Option<String>,
+    machine: Option<String>,
+}
+
+/// Every backup of the host's machines, destroyed ones' included, of a tenant or all, of a
+/// machine or all.
 async fn all_backups(
     State(st): S,
-    Query(q): Query<ListQuery>,
+    Query(q): Query<BackupsQuery>,
 ) -> Result<Json<Vec<api::Backup>>, AppError> {
-    Ok(Json(st.mgr.all_backups(q.tenant.as_deref()).await?))
+    let (tenant, machine) = (q.tenant.as_deref(), q.machine.as_deref());
+    Ok(Json(st.mgr.all_backups(tenant, machine).await?))
 }
 
 async fn stats(State(st): S, Path(id): Path<String>) -> Result<Json<api::MachineStats>, AppError> {
