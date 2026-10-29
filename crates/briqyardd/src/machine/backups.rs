@@ -13,6 +13,11 @@ const RETRY_AFTER: chrono::Duration = chrono::Duration::minutes(15);
 
 /// The local store's kind for holders.
 const HOLDERS: &str = "holders";
+/// How long a destroy without disks waits for the store's list of its backups. Past it the
+/// store counts as unreachable, and the machine stays `destroying` for the tick to try again.
+/// The tick resumes destroys one by one, each under its machine's lock, so the store's own
+/// retry budget (minutes) must not hold them.
+const LIST_AT_DESTROY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Held by every backup and deletion of one machine's backups: one at a time per machine.
 /// A destroyed machine's holder takes it over.
@@ -809,7 +814,8 @@ impl Manager {
     /// A destroy's holder for the backups the record names. A destroy that found no disks
     /// may be a second one: a destroy cut short after its disks went, or a record an older
     /// daemon wrote back after its destroy, whose backups may have been deleted since. Then
-    /// what the store lists is held, nothing when it lists none.
+    /// what the store lists is held, nothing when it lists none; a store that does not list
+    /// them within [`LIST_AT_DESTROY`] fails the destroy.
     pub(super) async fn hold_at_destroy(
         &self,
         rec: &Record,
@@ -821,7 +827,15 @@ impl Manager {
         }
         let bytes = match (had_disks, self.inner.backups.store.is_some()) {
             (false, true) => {
-                let listed = self.backups(&rec.id).await?;
+                let listed = tokio::time::timeout(LIST_AT_DESTROY, self.backups(&rec.id))
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "backups of {} not listed by the store within {} s",
+                            rec.id,
+                            LIST_AT_DESTROY.as_secs()
+                        )
+                    })??;
                 if listed.is_empty() {
                     return Ok(());
                 }
@@ -1502,7 +1516,9 @@ mod tests {
         }
         let (mm, id) = (h.m.clone(), m.id.clone());
         let destroy = tokio::spawn(async move { mm.destroy(&id, None).await });
-        while h.pool.dev().join(format!("byard/m/{}", m.id)).exists() {
+        // Gone from the manager, not only its disks: the backup's failure then reads the
+        // destroy, whatever the destroy still had to do after its disks.
+        while h.m.entry(&m.id).is_ok() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         std::fs::remove_file(&hold).unwrap();
@@ -1991,6 +2007,32 @@ mod tests {
         );
         let held = h.m.holder(&kept.id).unwrap().rec.lock().unwrap().bytes;
         assert_eq!(held, listed);
+    }
+
+    /// A store that never answers fails a destroy without disks within [`LIST_AT_DESTROY`],
+    /// rather than after its own retries: the machine stays `destroying`, its lock free again,
+    /// for the tick to try again.
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_does_not_answer_fails_a_destroy_without_disks_in_time() {
+        let mut h = harness(|_| {}).await;
+        // Takes connections, never answers.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", silent.local_addr().unwrap());
+        let store = ObjectStore::open("s3://b", &endpoint, "", "key", "secret").unwrap();
+        Arc::get_mut(&mut h.m.inner).unwrap().backups.store = Some(store);
+        let e = h.add("m_s", state::DESTROYING, 256);
+        {
+            let mut r = e.rec.lock().unwrap();
+            r.backup_bytes = 1 << 20;
+            r.backup.last = Some("20261028T183459.168Z".into());
+        }
+        let started = tokio::time::Instant::now();
+        let err = h.m.destroy("m_s", None).await.unwrap_err();
+        assert!(err.to_string().contains("not listed"), "{err}");
+        assert!(started.elapsed() < LIST_AT_DESTROY * 2);
+        assert_eq!(h.stored("m_s").unwrap().state, state::DESTROYING);
+        assert!(e.lock.try_lock().is_ok());
+        assert!(h.m.holder("m_s").is_none());
     }
 
     #[tokio::test]
