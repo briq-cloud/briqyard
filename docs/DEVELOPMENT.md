@@ -215,11 +215,13 @@ plus `apt-get purge docker.io` and the edge's files.
   records at load, the route's pages, watch and 410; the log itself: seqs across a restart, a
   torn line, retention, a watch's backlog, lag, heartbeat and shutdown), metrics and
   conditions (the exposition of machines in every state checked line by line and against the
-  format, no probe per scrape, conditions turning true and clearing with their events, a stuck
+  format, the daemon's resident memory read, no probe per scrape, conditions turning true and
+  clearing with their events, a stuck
   `zfs` command as `storage_stalled` until it exits, a pool
   that cannot be read, image removal under disk pressure oldest unused first, `top` from two
   ticks, the console rotated while two tasks write with no line lost, logs across the rotated
-  file, placement and creates refused on a host under pressure), probes (readiness and
+  file, placement and creates refused on a host under pressure), the ingress closing a removed
+  endpoint's listener after it missed the event, probes (readiness and
   its events, `/wait` for ready and its `not_ready`, a startup failure that fails the boot and
   one that is a crash, liveness under `on-failure` and `no`, the backoff, its reset and
   `crash_loop`, the ingress waiting for a woken machine, the host's turns, a PATCH on a running
@@ -359,8 +361,12 @@ plus `apt-get purge docker.io` and the edge's files.
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start and a
   snapshot's delete against a destroy, more starts at once than the host has memory for), host
   invariants between phases (ADR 0010; one is no record on disk the daemon does not hold).
-  `--tenants 6 --per-tenant 4 --rounds 2 --crash`. Against a daemon on TLS, the invariants' curl
-  trusts the daemon's certificate with `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
+  `--tenants 6 --per-tenant 4 --rounds 2 --crash`. `--churn N` then runs N cycles per tenant of
+  create, files, an endpoint, a snapshot restored, a backup restored, a fork, suspend and
+  resume, destroy, and reads the daemon's `process_resident_memory_bytes` after each: growth
+  over the second half past `--rss-growth-mb` (32) is a break (ADR 0051). Against a daemon on
+  TLS, the invariants' curl trusts the daemon's certificate with
+  `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
 - `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
   restarts, forks, snapshots (a restore with memory read again after a cold boot) and backups,
   while racers stop, start, restart, snapshot and back up any machine at once. It fails on a

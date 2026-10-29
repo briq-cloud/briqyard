@@ -59,7 +59,12 @@ impl Ingress {
                         }
                     }
                     Ok((ep, false)) => me.remove(&ep),
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Events were missed: the listeners are made to match the endpoints again,
+                    // or a removed endpoint's would stay open, holding its port, for good.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(missed = n, "endpoint events missed: listeners resynced");
+                        me.resync().await;
+                    }
                     Err(_) => return,
                 }
             }
@@ -117,6 +122,32 @@ impl Ingress {
                 Ok(())
             }
             _ => Ok(()),
+        }
+    }
+
+    /// The listeners and host names of the endpoints there are now, and no others.
+    async fn resync(&self) {
+        let now: HashMap<String, EndpointRec> = self
+            .mgr
+            .all_endpoints()
+            .into_iter()
+            .map(|ep| (ep.id.clone(), ep))
+            .collect();
+        self.listeners.lock().unwrap().retain(|id, h| {
+            let keep = now.contains_key(id);
+            if !keep {
+                h.abort();
+            }
+            keep
+        });
+        self.hosts
+            .lock()
+            .unwrap()
+            .retain(|_, ep| now.contains_key(&ep.id));
+        for ep in now.into_values() {
+            if let Err(e) = self.add(ep.clone()).await {
+                tracing::error!(endpoint = ep.id, err = %e, "endpoint listener");
+            }
         }
     }
 
