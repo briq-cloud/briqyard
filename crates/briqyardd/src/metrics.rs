@@ -25,6 +25,16 @@ pub struct Host {
     pub events: BTreeMap<(&'static str, &'static str), u64>,
     /// The daemon's own counters: name, help, value.
     pub counters: Vec<(&'static str, &'static str, u64)>,
+    /// The daemon's resident memory, where the system says it.
+    pub resident_bytes: Option<u64>,
+}
+
+/// The process's resident memory, from `VmRSS` in `/proc/self/status`; none off Linux.
+pub fn resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kb = status.lines().find_map(|l| l.strip_prefix("VmRSS:"))?;
+    let kb: u64 = kb.trim().strip_suffix("kB")?.trim().parse().ok()?;
+    Some(kb << 10)
 }
 
 /// One machine's figures, as the tick last measured them.
@@ -304,6 +314,15 @@ pub fn render(h: &Host, machines: &[Machine]) -> String {
     for (name, help, n) in &h.counters {
         family(o, name, "counter", help, one(n));
     }
+    if let Some(n) = h.resident_bytes {
+        family(
+            o,
+            "process_resident_memory_bytes",
+            "gauge",
+            "The daemon's resident memory.",
+            one(n),
+        );
+    }
     for (name, kind, help, value) in MACHINE_SERIES {
         let samples = machines
             .iter()
@@ -371,6 +390,7 @@ mod tests {
                 free: 700,
             }),
             counters: vec![("briqyard_boots_total", "Cold boots.", 3)],
+            resident_bytes: Some(20 << 20),
             ..Default::default()
         };
         let text = render(&h, &[run, gw]);
@@ -384,6 +404,7 @@ mod tests {
             r#"briqyard_memory_mb{kind="capacity"} 4096"#,
             r#"briqyard_pool_bytes{kind="size"} 1000"#,
             "briqyard_boots_total 3",
+            "process_resident_memory_bytes 20971520",
             r#"briqyard_machine_cpu_seconds_total{machine="m_1",tenant="t1",name="db"} 2.5"#,
             r#"briqyard_machine_boot_seconds{machine="m_1",tenant="t1",name="db"} 1.25"#,
             r#"briqyard_machine_disk_write_bytes_total{machine="m_1",tenant="t1",name="db"} 67108864"#,
@@ -400,5 +421,12 @@ mod tests {
         assert!(empty.contains("# TYPE briqyard_machine_state gauge\n"));
         assert!(empty.contains("briqyard_machines_stopped{reason=\"exit\"} 0\n"));
         assert!(!empty.contains("briqyard_pool_bytes"), "no pool read yet");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_resident_memory_is_read() {
+        let n = resident_bytes().unwrap();
+        assert!(n > 1 << 20 && n < 1 << 40, "{n}");
     }
 }

@@ -30,16 +30,20 @@ Status: v0, in development. The API is not stable yet.
 
 A machine is one microVM running one OCI image. `POST /v1/machines` takes the
 image, command, environment, boot files, size (vCPUs, memory), an optional data volume and its
-mount path, the ports the image listens on, and the sleep window. The daemon:
+mount path, the ports the image listens on, and the sleep window. It answers 201 once the
+machine is recorded, in `creating`: its name, an address, its tenant's quota and, when it starts,
+the host's memory taken (ADR 0048). Then, in a task of its own, the daemon:
 
-1. pulls the image and turns it into a root disk, once per image digest (`image` package);
+1. pulls the image and turns it into a root disk, once per image digest (`image` package; four
+   images at once, the creates of one image sharing its build);
 2. clones that root disk for the machine (ZFS clone: instant, copy-on-write);
 3. makes the data volume (a ZFS zvol with an ext4 filesystem), when asked;
 4. gives the machine an address on its tenant's bridge and a TAP device;
 5. writes a config drive (a tar archive, read raw by the init: `config.json`, the boot files);
 6. starts Firecracker with the kernel, the three drives, the TAP and a vsock, and watches it.
 
-States: `created` → `starting` → `running` → `stopping` → `stopped` → (`starting` again) …
+States: `creating` → `starting` (or `created`, with `start: false`) → `running` → `stopping` →
+`stopped` → (`starting` again) …
 → `destroying` → gone. A `stopped` machine keeps both disks. `stopped_reason` says why it
 stopped: `user`, `idle` (went to sleep), `exit` (its process ended; `exit` says how), `host`
 (the daemon stopped it: a shutdown, or a leftover of a crashed daemon; the next daemon start
@@ -49,10 +53,13 @@ state, a setting), never with a use: `last_used_at` is kept in memory and reache
 with the next change or the sleeper's tick, so a busy machine does not rewrite its record on
 every connection. The record on disk says what the machine is, not when it was last touched.
 
-A boot the guest does not survive (the image's fault: no init to run, a command the init
-cannot start) leaves the machine in `error` with the console's last lines, and the request answers
-409 `boot_failed` with the machine in the body; nothing restarts it, the caller reads and
-destroys it. The host's own faults answer 500. Every transition (create, start, stop, destroy,
+A create that fails leaves the machine in `error`, `error_reason` saying why: `pull_failed`
+(the image), `create_failed` (its disks, its start refused, a restart of the daemon during a fork's or a restore's: one from an image is taken up again),
+both with no disks. A boot the guest does not survive (the image's fault: no init to run, a
+command the init cannot start) leaves it in `error` with the console's last lines,
+`boot_failed`, and a start answers 409 `boot_failed` with the machine in the body; so does a
+`/wait` on a create, whose timeout while the machine is on its way answers `not_ready`. Nothing
+is tried again: the caller reads and destroys it. A start's host faults answer 500. Every transition (create, start, stop, destroy,
 backup) runs in a task of its own that the request only waits on: a client that hangs up
 never leaves a machine half-moved (ADR 0011). One lock per machine orders its transitions;
 a start takes the host's memory and moves to `starting` in one step under the machines map's
@@ -90,7 +97,7 @@ startup or readiness probe, else when they pass; liveness failures end the proce
 for the restart policy. A startup failure on a run a caller asked for is a failed boot (`error`,
 ADR 0011); on a run the policy started, a crash. `/wait` waits for `ready` (`?for=running`
 otherwise), and so do the ingress before it proxies and a start that needs the tenant's gateway
-when the gateway has probes. Create and start answer at `running`. A restart waits 10 s,
+when the gateway has probes. A start answers at `running`, a create at `creating`. A restart waits 10 s,
 doubling to 5 minutes, reset by a run of 10 minutes; `restarting_at` says when, and the third
 in a row is a `crash_loop` event. Probes are not use: they never keep a machine awake.
 
@@ -275,7 +282,7 @@ at most 31 days; the fleet asks every host and fails whole.
 
 ### Events and versions
 
-Each host keeps one event log (ADR 0019, `events.rs`): a JSON line per event in
+Each host keeps one event log (ADR 0019, `events/`): a JSON line per event in
 `state/events/<hour>.ndjson`, appended and synced under the log's lock, then sent to watchers.
 `seq` counts one more per event and never goes back: at start it goes on from the larger of the
 log's last line and every record's version. A state change says what happened through
@@ -334,8 +341,9 @@ cannot pass it together. A refusal is 403 `quota` and a `quota_exceeded` event.
 
 ### Sleep
 
-Use is an exec or an exec session for as long as it runs (ADR 0029), an ingress connection, or
-an explicit `POST /machines/{id}/touch`. After the
+Use is an exec or an exec session for as long as it runs (ADR 0029), an ingress connection
+until it reaches the program (through a wake, readiness and the port's opening, ADR 0053), or
+an explicit `POST /machines/{id}/touch`. An open connection after that is not use. After the
 machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`; idle machines
 are stopped together, a few at a time, never one after another). A start, an
 ingress connection or an exec on an idle machine wakes it; one that arrives while the machine is

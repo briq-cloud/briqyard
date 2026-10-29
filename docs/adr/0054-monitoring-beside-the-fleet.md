@@ -1,4 +1,4 @@
-# ADR 0048: Monitoring beside the fleet: Prometheus and Grafana, hosts scraped through the fleet
+# ADR 0054: Monitoring beside the fleet: Prometheus and Grafana, hosts scraped through the fleet
 
 Date: 2026-10-29 · Status: accepted; amends ADR 0021 and 0042 (the metrics token no longer shuts the API's out of `/metrics`)
 

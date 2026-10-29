@@ -27,11 +27,23 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+# The daemon's own unit on this host, which some sections stop, kill or lock for a moment.
+UNIT=; if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then UNIT=briqyardd; fi
+# Run on any exit, a failed check, Ctrl-C or a kill included: what the run started ends, what
+# it changed is put back, what it made is destroyed.
 cleanup() {
   echo "cleanup"
+  # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
+  set +e
+  # The background sessions, watches and their stdin: this shell's children, by its pid.
+  pkill -P $$ || true
   # The encryption section moves the pool's key away for a moment: put it back first.
   if [ -n "${KEY_FILE:-}" ] && sudo test -f "$KEY_FILE.e2e"; then
     sudo mv "$KEY_FILE.e2e" "$KEY_FILE"
+  fi
+  # A run that ended while the daemon was down starts it again.
+  if [ -n "$UNIT" ]; then
+    sudo systemctl start "$UNIT"
     for i in $(seq 1 60); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
   fi
   # The mirror section stops the mirror and names it in the configuration for a moment.
@@ -42,7 +54,8 @@ cleanup() {
       handover
     fi
   fi
-  for t in "$T" "$T-eg" "$T-gw" "$T-ip" "$T-q"; do
+  # Every tenant of the run: "$T" and "$T-<section>" (-eg, -gw, -other, -par1…).
+  for t in $(briqyard tenant ls 2>/dev/null | jq -r --arg t "$T" '.[].id | select(. == $t or startswith($t + "-"))'); do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
     for i in $(seq 1 10); do
@@ -53,6 +66,7 @@ cleanup() {
   done
 }
 trap cleanup EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 echo "== status"
 briqyard status | jq -e '.host_id' >/dev/null && ok "status answers"
@@ -75,6 +89,30 @@ check "own name"     'briqyard machine exec "$A" -- nslookup alp.internal 2>&1 |
 check "egress"       'briqyard machine exec "$A" -- wget -qO- -T 10 https://example.com | grep -qi "example domain"'
 check "logs"         'briqyard machine logs "$A" --limit 5000 | grep -q "\[briqyard\] started"'
 
+echo "== a create answers once recorded; the pull and the boot follow (ADR 0048)"
+IMG2=busybox:1.36.1-musl
+for k in $(briqyard image ls | awk -v r="$IMG2" '$2 == r { print $1 }'); do briqyard image rm "$k" >/dev/null; done
+post() { "${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "$1" "$BRIQYARD_URL/v1/machines"; }
+body="{\"tenant\":\"$T\",\"name\":\"pulled\",\"image\":\"$IMG2\",\"cmd\":[\"sleep\",\"3600\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}"
+start=$(date +%s.%N); made=$(post "$body"); answered=$(echo "$(date +%s.%N) - $start" | bc)
+PL=$(echo "${made% *}" | jq -r .id)
+waited=$("${CURL[@]}" -fsS -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$PL/wait?for=running&timeout=600" | jq -r .state)
+ran=$(echo "$(date +%s.%N) - $start" | bc)
+check "create: 201 creating (${answered}s), running after its pull (${ran}s)" '[ "${made##* }" = 201 ] && [ "$(echo "${made% *}" | jq -r .state)" = creating ] && [ "$waited" = running ]'
+check "create: pulling, then created" '[ "$(briqyard events --machine "$PL" | awk "\$4 == \"pulling\" || \$4 == \"created\" { print \$4 }" | xargs)" = "pulling created" ]'
+again=$(post "$body")
+check "create: sent again, 409 conflict with the first" '[ "${again##* }" = 409 ] && [ "$(echo "${again% *}" | jq -r .machine.id)" = "$PL" ]'
+start=$(date +%s.%N); cached=$(post "${body/pulled/cached}"); answered=$(echo "$(date +%s.%N) - $start" | bc)
+CA=$(echo "${cached% *}" | jq -r .id)
+"${CURL[@]}" -fsS -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$CA/wait?for=running&timeout=120" >/dev/null || true
+ran=$(echo "$(date +%s.%N) - $start" | bc)
+check "create: the image on the host (${answered}s, running ${ran}s)" '[ "$(briqyard machine get "$CA" | jq -r .state)" = running ]'
+bad=$(post "{\"tenant\":\"$T\",\"name\":\"badpull\",\"image\":\"127.0.0.1:1/nope:1\",\"size\":{\"vcpus\":1,\"memory_mb\":128}}")
+BP=$(echo "${bad% *}" | jq -r .id)
+failed=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$BP/wait?timeout=120")
+check "create: a pull that fails is 409 pull_failed, the machine in error" '[ "${failed##* }" = 409 ] && [ "$(echo "${failed% *}" | jq -r .code)" = pull_failed ] && [ "$(briqyard machine get "$BP" | jq -r .error_reason)" = pull_failed ]'
+briqyard machine rm "$PL" >/dev/null; briqyard machine rm "$CA" >/dev/null; briqyard machine rm "$BP" >/dev/null
+
 echo "== image layers: hard links, merged /usr (ADR 0039)"
 BB=$(briqyard machine run --image busybox:1.37 --name bb --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
 check "busybox: 400 applets, one file"   '[ "$(briqyard machine exec "$BB" -- stat -c %h /bin/busybox)" -gt 400 ]'
@@ -91,8 +129,9 @@ check "a user with a supplementary group: running" '[ "$(briqyard machine get "$
 IDS='s=$(grep -lE "^Uid:[[:space:]]+101[[:space:]]" /proc/[0-9]*/status | head -1); grep -E "^(Uid|Gid|Groups):" "$s" | awk "{print \$2}" | xargs'
 check "its uid, gid and groups" '[ "$(briqyard machine exec "$NU" -- sh -c "$IDS")" = "101 101 101" ]'
 briqyard machine rm "$NU" >/dev/null 2>&1 || true
-nostart=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"tenant\":\"$T\",\"name\":\"nostart\",\"image\":\"alpine:3.20\",\"cmd\":[\"/no/such/program\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines")
-check "no program: 409 boot_failed" '[ "${nostart##* }" = 409 ] && [ "$(echo "${nostart% *}" | jq -r .code)" = boot_failed ]'
+NS=$("${CURL[@]}" -fsS -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"tenant\":\"$T\",\"name\":\"nostart\",\"image\":\"alpine:3.20\",\"cmd\":[\"/no/such/program\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines" | jq -r .id)
+nostart=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$NS/wait?timeout=120")
+check "no program: its wait is 409 boot_failed" '[ "${nostart##* }" = 409 ] && [ "$(echo "${nostart% *}" | jq -r .code)" = boot_failed ]'
 check "no program: the init's reason" '[ "$(echo "${nostart% *}" | jq -r .machine.error)" = "the machine exited during boot: start \"/no/such/program\": No such file or directory (os error 2)" ]'
 briqyard machine rm "$(echo "${nostart% *}" | jq -r .machine.id)" >/dev/null 2>&1 || true
 
@@ -109,13 +148,14 @@ $TTY 24x80 "send:exec sleep 6061\n" "expect:never printed" -- briqyard machine e
 held=$!
 for i in $(seq 1 40); do running "sleep 6061" && break; sleep 0.5; done
 check "tty: the command runs"           'running "sleep 6061"'
-pkill -9 -f "machine exec -it $A -- sh" || true
+pkill -9 -P "$held" || true
 check "tty: the client's close hangs it up" 'ended "sleep 6061"'
 wait "$held" 2>/dev/null || true
 sleep 600 | briqyard machine exec -i "$A" -- sleep 6062 >/dev/null 2>&1 &
+held=$!
 for i in $(seq 1 40); do running "sleep 6062" && break; sleep 0.5; done
 check "session: the command runs"       'running "sleep 6062"'
-pkill -9 -f "machine exec -i $A -- sleep 6062" || true
+kill -9 "$held" || true
 check "session: the client's close kills it" 'ended "sleep 6062"'
 check "session: an event"               'briqyard events --machine "$A" | awk "\$4 == \"session_opened\"" | grep -q .'
 
@@ -513,12 +553,13 @@ echo "== sleep on idle, wake on connect"
 # A machine with a session open is in use: it stays up while the sleeper below goes down.
 W=$(briqyard machine run --image alpine:3.20 --name awake --tenant "$T" --memory 128 --sleep 20s -- sleep 3600 | jq -r .id)
 sleep 600 | briqyard machine exec -i "$W" -- cat >/dev/null 2>&1 &
+held=$!
 S=$(briqyard machine run --image postgres:16-alpine --name sleeper --tenant "$T" --memory 512 --volume 1G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 20s | jq -r .id)
 SEP=$(briqyard endpoint add "$S" 5432 | jq -r .address)
 for i in $(seq 1 90); do [ "$(briqyard machine get "$S" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "slept when idle" '[ "$(briqyard machine get "$S" | jq -r .stopped_reason)" = idle ]'
 check "awake while a session is open" '[ "$(briqyard machine get "$W" | jq -r .state)" = running ]'
-pkill -9 -f "machine exec -i $W -- cat" || true
+kill -9 "$held" || true
 for i in $(seq 1 45); do [ "$(briqyard machine get "$W" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "asleep once it closed" '[ "$(briqyard machine get "$W" | jq -r .stopped_reason)" = idle ]'
 briqyard machine rm "$W" >/dev/null

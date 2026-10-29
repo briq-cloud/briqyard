@@ -1,4 +1,4 @@
-//! What a Prometheus beside the fleet scrapes (ADR 0048): every host's `/metrics` relayed by
+//! What a Prometheus beside the fleet scrapes (ADR 0054): every host's `/metrics` relayed by
 //! the fleet over the host's pinned TLS with the host's token, and the list of targets in
 //! Prometheus's HTTP service discovery format, so hosts added or retired come and go without
 //! an edit to its configuration.

@@ -480,6 +480,7 @@ impl Manager {
             e.set_state(state::ERROR, |r| {
                 r.error =
                     format!("the startup probe failed {failures} times in a row: {last}: {tail}");
+                r.error_reason = reason::BOOT_FAILED.into();
                 r.stopped_at = Some(Utc::now());
                 r.pid = 0;
                 None

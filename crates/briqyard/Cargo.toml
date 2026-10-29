@@ -21,4 +21,6 @@ libc = { workspace = true }
 tokio-tungstenite = { workspace = true }
 
 [dev-dependencies]
+briqyard-testing = { workspace = true }
+ctor = { workspace = true }
 axum = { workspace = true, features = ["ws"] }

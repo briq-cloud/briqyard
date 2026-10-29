@@ -187,6 +187,16 @@ plus `apt-get purge docker.io` and the edge's files.
 
 ## Tests
 
+Every test and suite ends what it starts, however it ends (ADR 0049):
+
+| | On a failure, a panic, a timeout, Ctrl-C or a killed parent |
+|---|---|
+| a test binary | exits within a second of its parent (`cargo test` killed), and after 6 minutes at most (`briqyard-testing`, installed in each crate) |
+| the fake `zfs`, `udevadm`, `zvol_id` | a held one ends with its test (its hold goes with the temp dir) or its parent (`kill -0 "$PPID"`) |
+| the stand-in servers | the CLI's and fleet's test clients time out after 10 s; the Firecracker and vsock stand-ins give up after 10 s |
+| each shell suite | one trap on EXIT, INT, TERM, HUP: ends the shell's children by pid (`pkill -P $$`: sessions, watches, `logs -f`, their `sleep 600`), starts again a daemon it stopped (fc's, fc2's), undrains the hosts it drained, puts back the config, key and registry it moved, destroys its machines and tenants |
+| `hack/stress.py` | SIGTERM and SIGHUP as Ctrl-C; a `finally` destroys what a failed or interrupted round left |
+
 - `cargo test --workspace`: unit tests, which run anywhere (extraction and whiteouts on Linux, DNS
   packets, the guest protocol, address allocation, the store, the configuration, the ZFS
   backend against a fake `zfs`, `udevadm` and `zvol_id` (a device per volume through renames;
@@ -221,11 +231,13 @@ plus `apt-get purge docker.io` and the edge's files.
   tick's line its version, the tick leaving a machine in a transition alone and never writing
   a destroyed record back), metrics and
   conditions (the exposition of machines in every state checked line by line and against the
-  format, no probe per scrape, conditions turning true and clearing with their events, a stuck
+  format, the daemon's resident memory read, no probe per scrape, conditions turning true and
+  clearing with their events, a stuck
   `zfs` command as `storage_stalled` until it exits, a pool
   that cannot be read, image removal under disk pressure oldest unused first, `top` from two
   ticks, the console rotated while two tasks write with no line lost, logs across the rotated
-  file, placement and creates refused on a host under pressure), probes (readiness and
+  file, placement and creates refused on a host under pressure), the ingress closing a removed
+  endpoint's listener after it missed the event and opening none for one already gone, probes (readiness and
   its events, `/wait` for ready and its `not_ready`, a startup failure that fails the boot and
   one that is a crash, liveness under `on-failure` and `no`, the backoff, its reset and
   `crash_loop`, the ingress waiting for a woken machine, the host's turns, a PATCH on a running
@@ -291,10 +303,12 @@ plus `apt-get purge docker.io` and the edge's files.
   token). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
-- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, image layers
-  (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary group
-  (running, its uid, gid and groups), a program that cannot start (409 `boot_failed` with the
-  init's reason), DNS,
+- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, a create
+  answered at once (ADR 0048: 201 `creating`, running after its pull, `pulling` then `created`,
+  sent again a 409 with the first, an image on the host, a pull that fails `pull_failed`), image
+  layers (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary
+  group (running, its uid, gid and groups), a program that cannot start (its `/wait` 409
+  `boot_failed` with the init's reason), DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress (two `Host` lines
   refused, an absolute-form target routed by its authority and refused when `Host` names
@@ -347,7 +361,7 @@ plus `apt-get purge docker.io` and the edge's files.
   root disk given back to the pool, exec after a bare pause and resume), a volume grown (ADR
   0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
-  data kept, the next backup incremental and its restore at the grown size). 236 checks, 232
+  data kept, the next backup incremental and its restore at the grown size). 241 checks, 237
   without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
@@ -368,8 +382,13 @@ plus `apt-get purge docker.io` and the edge's files.
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start and a
   snapshot's delete against a destroy, more starts at once than the host has memory for), host
   invariants between phases (ADR 0010; one is no record on disk the daemon does not hold).
-  `--tenants 6 --per-tenant 4 --rounds 2 --crash`. Against a daemon on TLS, the invariants' curl
-  trusts the daemon's certificate with `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
+  `--tenants 6 --per-tenant 4 --rounds 2 --crash`. `--churn N` then runs N cycles per tenant of
+  create, files, an endpoint, a snapshot restored, a backup restored, a fork, suspend and
+  resume, destroy, and reads the daemon's `process_resident_memory_bytes` 12 s after each:
+  growth over the second half past `--rss-growth-mb` (32) is a break (ADR 0052). Through a
+  fleet it needs `--invariants-url` (the daemon's), else the check is skipped and says so.
+  Against a daemon on TLS, the invariants' curl trusts the daemon's certificate with
+  `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
 - `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
   restarts, forks, snapshots (a restore with memory read again after a cold boot) and backups,
   while racers stop, start, restart, snapshot and back up any machine at once. It fails on a
@@ -391,7 +410,7 @@ plus `apt-get purge docker.io` and the edge's files.
   sealed (no key, no token in it), a restore refused over a registry, the registry lost and
   restored `0600` with the same key for fc2, then fc2's pool locked and fc2 back with the key
   of the restored registry; the config and the registry put back. 10 checks.
-- `hack/monitoring-check.sh` (in fc, as root, after `hack/install-monitoring.sh`, ADR 0048): the
+- `hack/monitoring-check.sh` (in fc, as root, after `hack/install-monitoring.sh`, ADR 0054): the
   fleet's targets (one per host that may run a daemon, each through its relay, at the address
   asked), each ready host's metrics relayed, a down host 503, an unknown one 404; with
   `PROMETHEUS_URL`, every target scraped and up exactly when its host answers; with

@@ -636,7 +636,11 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         },
         cfg,
         reg: Mutex::new(reg),
-        http: reqwest::Client::new(),
+        // A stub daemon that never answers fails its test rather than holding it forever.
+        http: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap(),
         pinned: Mutex::new(HashMap::new()),
         upgrade: Default::default(),
         backup,
@@ -1584,7 +1588,7 @@ async fn metrics_take_the_metrics_token_or_the_apis() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     scrape(&f.st, "api").await;
     // A metrics token of its own: the scraper's; the API's still opens what it reads anyway
-    // (ADR 0048). The same on every path a scraper reads.
+    // (ADR 0054). The same on every path a scraper reads.
     cfg.metrics_token = "scrape".into();
     let f = fleet(cfg.clone());
     scrape(&f.st, "scrape").await;
@@ -1608,7 +1612,7 @@ async fn metrics_take_the_metrics_token_or_the_apis() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
-// --- what Prometheus scrapes (ADR 0048) ---
+// --- what Prometheus scrapes (ADR 0054) ---
 
 #[tokio::test]
 async fn the_targets_are_every_host_through_the_relay_at_the_address_asked() {

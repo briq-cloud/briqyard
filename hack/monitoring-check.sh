@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks what a Prometheus beside the fleet reads (ADR 0048), against a fleet ($BRIQYARD_URL,
+# Checks what a Prometheus beside the fleet reads (ADR 0054), against a fleet ($BRIQYARD_URL,
 # default http://127.0.0.1:7430, with $BRIQYARD_METRICS_TOKEN, else $BRIQYARD_TOKEN): the
 # targets name every host that may run a daemon, each serving host's metrics come through the relay.
 # With $PROMETHEUS_URL, that Prometheus scrapes every target, up exactly when its host answers.

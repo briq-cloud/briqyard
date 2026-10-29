@@ -298,14 +298,15 @@ mod tests {
 
     /// A stand-in for Firecracker's vsock socket with the init behind it: answers the
     /// `CONNECT` line with `handshake`, reads one request frame, writes `answers` as they
-    /// are, closes, and hands the request back.
+    /// are, closes, and hands the request back. Within 10 s: a client that never sends what
+    /// it waits on fails its test, the socket closed.
     fn serve(
         uds: &Path,
         handshake: &'static str,
         answers: Vec<Vec<u8>>,
     ) -> tokio::task::JoinHandle<Request> {
         let ln = UnixListener::bind(uds).unwrap();
-        tokio::spawn(async move {
+        let serve = async move {
             let (s, _) = ln.accept().await.unwrap();
             let mut r = BufReader::new(s);
             let mut line = String::new();
@@ -326,6 +327,11 @@ mod tests {
                 s.write_all(&a).await.unwrap();
             }
             req
+        };
+        tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(10), serve)
+                .await
+                .expect("the stand-in waited 10 s")
         })
     }
 

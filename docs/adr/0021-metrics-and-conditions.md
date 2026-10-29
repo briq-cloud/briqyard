@@ -1,6 +1,6 @@
 # ADR 0021: Metrics per machine, host conditions, and what a host does under pressure
 
-Date: 2026-10-21 · Status: accepted; amended by ADR 0048 (the API's token opens `/metrics` too)
+Date: 2026-10-21 · Status: accepted; amended by ADR 0054 (the API's token opens `/metrics` too)
 
 ## Context
 

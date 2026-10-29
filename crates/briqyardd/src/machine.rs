@@ -46,6 +46,10 @@ pub enum MError {
     Invalid(String),
     #[error("{0}")]
     Conflict(String),
+    /// A create of a name the tenant has: the machine of that name, for a caller sending the
+    /// same create again to find the one it made (ADR 0048).
+    #[error("a machine with that name exists in the tenant: {}", .0.id)]
+    NameTaken(Box<api::Machine>),
     #[error("machine is not running: {0}")]
     NotRunning(String),
     #[error("machine is busy: {0}")]
@@ -67,9 +71,16 @@ pub enum MError {
     /// The machine stays, in state `error`, with the console tail in its `error`.
     #[error("boot failed: {}", .0.error)]
     BootFailed(Box<api::Machine>),
-    /// A `/wait` for `ready` ran out while the machine runs and its probes say it does not
-    /// serve yet (ADR 0022): the machine, its probes' last results in it.
-    #[error("machine {} is running, not ready: {}", .0.id, not_ready_why(.0))]
+    /// Its create could not pull its image (ADR 0048): the machine, in `error`, no disks.
+    #[error("pull failed: {}", .0.error)]
+    PullFailed(Box<api::Machine>),
+    /// Its create could not make its disks or start it (ADR 0048): the machine, in `error`.
+    #[error("create failed: {}", .0.error)]
+    CreateFailed(Box<api::Machine>),
+    /// A `/wait` ran out while the machine is on its way: creating, starting, a restart
+    /// waiting, or running while its probes say it does not serve yet (ADR 0022, 0048). The
+    /// machine, its probes' last results in it.
+    #[error("machine {} is {}", .0.id, not_ready_state(.0))]
     NotReady(Box<api::Machine>),
     /// `If-Match` named a version the machine has moved past (ADR 0019): the machine as it is.
     #[error("machine {} is at version {}: read it again", .0.id, .0.version)]
@@ -171,6 +182,17 @@ pub struct Record {
     pub exit: Option<api::Exit>,
     #[serde(default)]
     pub error: String,
+    /// The event that put it in `error` (`api::Machine::error_reason`).
+    #[serde(default)]
+    pub error_reason: String,
+    /// While `creating`: its create starts it once its disks are made, and its memory is
+    /// taken from the record on (ADR 0048).
+    #[serde(default)]
+    pub start: bool,
+    /// While `creating`: its disks come from a fork's source or a backup, which the record does
+    /// not name, so a restart of the daemon cannot take its create up again (ADR 0048).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_source: bool,
     pub subnet_index: u32,
     pub host_num: u8,
     pub ip: String,
@@ -270,6 +292,17 @@ impl Record {
     pub fn sleep_window(&self) -> Option<Duration> {
         api::parse_sleep(&self.sleep).ok().flatten()
     }
+    /// Its disks exist: not while its create runs, nor after one that failed (ADR 0048).
+    fn has_disks(&self) -> bool {
+        match self.state.as_str() {
+            state::CREATING => false,
+            state::ERROR => !matches!(
+                self.error_reason.as_str(),
+                reason::PULL_FAILED | reason::CREATE_FAILED
+            ),
+            _ => true,
+        }
+    }
 
     /// Brings a record written by an earlier daemon to the current shape: `sleep` was `""`
     /// for never, `state_changed_at` did not exist (its best stand-in is `updated_at`), nor
@@ -297,6 +330,18 @@ fn sleep_setting(s: &str) -> String {
 
 /// Whether a machine in this state holds the memory it was given: from the reservation at
 /// `starting` until its process is gone.
+/// What a call that needs its disks answers on a machine whose create has not made them, or
+/// failed (ADR 0048).
+fn made_never(r: &Record) -> MError {
+    MError::BadState(match r.state.as_str() {
+        state::CREATING => "creating".into(),
+        _ => format!(
+            "{} ({}): its create failed; destroy it and create it again",
+            r.state, r.error_reason
+        ),
+    })
+}
+
 /// A guest call's error: `not_running` when the guest cannot be reached (a machine whose guest
 /// exits as the call comes), else as it is.
 fn not_running_if_unreachable(err: anyhow::Error) -> MError {
@@ -308,6 +353,12 @@ fn not_running_if_unreachable(err: anyhow::Error) -> MError {
 
 fn holds_memory(state: &str) -> bool {
     matches!(state, state::STARTING | state::RUNNING | state::STOPPING)
+}
+
+/// Whether the host counts this machine's memory as taken: it holds it, or its create will
+/// start it (ADR 0048: room is taken when the machine is recorded, not when it boots).
+fn commits_memory(r: &Record) -> bool {
+    holds_memory(&r.state) || (r.state == state::CREATING && r.start)
 }
 
 /// What a machine in this record's state holds, for its usage.
@@ -425,7 +476,7 @@ fn over_quota(
 /// What a machine of this record counts toward its tenant's quota: itself, its volume, and
 /// its size while it holds memory, or when `starting` it is about to.
 fn quota_need(r: &Record, starting: bool) -> api::QuotaUse {
-    let runs = starting || holds_memory(&r.state);
+    let runs = starting || commits_memory(r);
     api::QuotaUse {
         machines: 1,
         memory_mb: if runs { r.size.memory_mb } else { 0 },
@@ -795,6 +846,16 @@ pub struct Manager {
     inner: Arc<Inner>,
 }
 
+/// What a create makes the machine's disks from (ADR 0048).
+enum Make {
+    /// Its image, pulled when the host has not seen it.
+    Image,
+    /// Snapshots of another machine's disks, taken now.
+    Fork(Arc<Entry>, api::ForkSpec),
+    /// A backup, and the key its streams are under.
+    Restore(Box<api::Backup>, Option<String>),
+}
+
 impl Manager {
     /// Loads the state and prepares the host: forwarding, nftables, the tenants' bridges and
     /// DNS, and reaps machines left over from a previous daemon.
@@ -991,8 +1052,8 @@ impl Manager {
     /// Machines a previous daemon left running: adopted when their Firecracker is still up
     /// and answering, else ended (only a process that still carries the machine's id is
     /// killed: after a reboot the pid is someone else's) and marked stopped by the host, so
-    /// the next use wakes them. Destroys cut short are resumed by the sleeper's tick. How many
-    /// were adopted, and how many marked stopped.
+    /// the next use wakes them. A create it left is failed (ADR 0048). Destroys cut short are
+    /// resumed by the sleeper's tick. How many were adopted, and how many marked stopped.
     async fn recover(&self) -> (usize, usize, usize) {
         let entries: Vec<Arc<Entry>> = self
             .inner
@@ -1005,6 +1066,28 @@ impl Manager {
         let (mut adopted, mut stopped, mut gone) = (0, 0, 0);
         for e in entries {
             let rec = e.snapshot();
+            // Its create's task went with the previous daemon. One from an image is taken up
+            // again, its partial disks gone first: the record holds what it needs. What a fork
+            // or a restore was made from is not on the record: failed, for the caller to create
+            // again, and nothing a person must look at (ADR 0048).
+            if rec.state == state::CREATING {
+                if !rec.from_source {
+                    let z = &self.inner.zfs;
+                    if z.exists(&rec.dataset()).await.unwrap_or(false) {
+                        if let Err(err) = z.destroy(&rec.dataset()).await {
+                            tracing::warn!(machine = rec.id, err = %err, "disks of a cut create");
+                        }
+                    }
+                    tracing::info!(machine = rec.id, "create cut by a restart, taken up again");
+                    self.spawn_make(e.clone(), Make::Image);
+                    continue;
+                }
+                let why = "its create was cut short by a restart of the host's daemon";
+                tracing::warn!(machine = rec.id, "{why}");
+                self.create_failed(&e, reason::CREATE_FAILED, why.into())
+                    .await;
+                continue;
+            }
             if !matches!(
                 rec.state.as_str(),
                 state::RUNNING | state::STARTING | state::STOPPING
@@ -1853,7 +1936,9 @@ impl Manager {
         let _turn = t.lock.lock().await;
         match self.gateway_of(tenant) {
             None => {
-                self.create_as(req, Some(Role::Gateway)).await?;
+                // Made before the answer: the tenant's lock orders its gateway's changes.
+                let (gw, how) = self.record(req, Some(Role::Gateway)).await?;
+                self.make(&gw, how).await?;
             }
             Some(gw) => self.replace_gateway(&gw, req, im).await?,
         }
@@ -2165,6 +2250,7 @@ impl Manager {
             stopped_reason: r.stopped_reason.clone(),
             exit: r.exit.clone(),
             error: r.error.clone(),
+            error_reason: r.error_reason.clone(),
             ip: r.ip.clone(),
             hostname: r.hostname(),
             machine_host: r.machine_host(),
@@ -2266,22 +2352,37 @@ impl Manager {
         let mut dropped = None;
         let over = {
             let machines = self.inner.machines.lock().unwrap();
-            let size = {
+            // A create's start: its memory is counted since it was recorded, and taken again
+            // here, the count without it (ADR 0048).
+            let (size, own) = {
                 let r = e.rec.lock().unwrap();
-                r.pending.as_ref().and_then(|p| p.size).unwrap_or(r.size)
+                let own = match commits_memory(&r) {
+                    true => r.size,
+                    false => api::Size::default(),
+                };
+                (
+                    r.pending.as_ref().and_then(|p| p.size).unwrap_or(r.size),
+                    own,
+                )
             };
             let need = api::QuotaUse {
                 memory_mb: size.memory_mb,
                 vcpus: size.vcpus,
                 ..Default::default()
             };
-            match over_quota(&tenant, &quota, &tenant_use(&machines, &tenant), &need) {
+            let mut held = tenant_use(&machines, &tenant);
+            held.memory_mb = held.memory_mb.saturating_sub(own.memory_mb);
+            held.vcpus = held.vcpus.saturating_sub(own.vcpus);
+            match over_quota(&tenant, &quota, &held, &need) {
                 Some(x) => Some(x),
                 None => {
                     let (used, _) = committed(&machines);
-                    admit(used.memory_mb, self.capacity().memory_mb, size.memory_mb)?;
+                    let used = used.memory_mb.saturating_sub(own.memory_mb);
+                    admit(used, self.capacity().memory_mb, size.memory_mb)?;
                     e.set_state(state::STARTING, |r| {
                         r.error.clear();
+                        r.error_reason.clear();
+                        r.start = false;
                         r.pid = 0;
                         r.restarting_at = None;
                         applied = apply_pending(r, image);
@@ -2434,6 +2535,7 @@ impl Manager {
         host.pool = *self.inner.pool.lock().unwrap();
         host.conditions = self.conditions();
         host.events = self.inner.events.emitted();
+        host.resident_bytes = metrics::resident_bytes();
         host.counters = vec![
             (
                 "briqyard_boots_total",
@@ -2550,16 +2652,44 @@ impl Manager {
 
     // --- create ---
 
+    /// The API's create (ADR 0048): answers once the machine is recorded, in `creating`; its
+    /// image, disks and start follow in a task of its own, which leaves it running (or
+    /// `created`), or in `error` with the reason. The caller waits with `/wait` or reads it.
     pub async fn create(&self, req: api::CreateMachineRequest) -> Result<api::Machine, MError> {
-        self.create_as(req, None).await
+        let (e, how) = self.record(req, None).await?;
+        let made = self.view(&e);
+        self.spawn_make(e, how);
+        Ok(made)
     }
 
-    /// A create, of one of the tenant's machines or of a machine with a role.
-    async fn create_as(
+    /// `make` in a task of its own: a create's background, from `create` or taken up again by
+    /// `recover`.
+    fn spawn_make(&self, e: Arc<Entry>, how: Make) {
+        let m = self.clone();
+        tokio::spawn(async move {
+            // Its outcome is on the machine, for a `/wait` or a read; logged once, here or
+            // where the create failed (`create_failed`).
+            match m.make(&e, how).await {
+                Ok(())
+                | Err(MError::NotFound | MError::PullFailed(_) | MError::CreateFailed(_)) => {}
+                Err(MError::BootFailed(v)) => {
+                    tracing::warn!(machine = v.id, err = v.error, "boot failed")
+                }
+                Err(err) => {
+                    tracing::error!(machine = e.snapshot().id, err = %err, "create's start failed")
+                }
+            }
+        });
+    }
+
+    /// The create's first half, what it answers on: the spec checked, the source found (a
+    /// fork's machine, a restore's backup), the name, an address, the tenant's quota and, when
+    /// it starts, the host's memory taken, the record written in `creating`.
+    async fn record(
         &self,
         req: api::CreateMachineRequest,
         role: Option<Role>,
-    ) -> Result<api::Machine, MError> {
+    ) -> Result<(Arc<Entry>, Make), MError> {
         check_tenant_id(&req.tenant)?;
         if let Some(rs) = &req.restore {
             if !api::valid_id(&rs.machine_id) {
@@ -2595,10 +2725,10 @@ impl Manager {
             p.check().map_err(invalid)?;
         }
         let restart = req.restart.clone().unwrap_or_default();
-        if self.name_taken(&req.tenant, &req.name) {
-            return Err(MError::Conflict(
-                "a machine with that name exists in the tenant".into(),
-            ));
+        // A cheap early answer, before a fork's or a restore's lookups; `add_machine` checks
+        // again under the map's lock, where it counts.
+        if let Some(e) = self.named(&req.tenant, &req.name) {
+            return Err(MError::NameTaken(Box::new(self.view(&e))));
         }
         let now = Utc::now();
         let mut rec = Record {
@@ -2625,10 +2755,13 @@ impl Manager {
             limits: req.limits.clone().unwrap_or_default(),
             disk_limits: req.disk_limits.clone().unwrap_or_default(),
             metadata: req.metadata.clone(),
-            state: state::CREATED.into(),
+            state: state::CREATING.into(),
             stopped_reason: String::new(),
             exit: None,
             error: String::new(),
+            error_reason: String::new(),
+            start: req.start.unwrap_or(true),
+            from_source: req.fork.is_some() || req.restore.is_some(),
             subnet_index: 0,
             host_num: 0,
             ip: String::new(),
@@ -2657,7 +2790,7 @@ impl Manager {
             restoring: None,
         };
         self.check_egress(&rec.egress, &rec.tenant, &rec.id)?;
-        let mut src: Option<Arc<Entry>> = None;
+        let mut src: Option<(Arc<Entry>, api::ForkSpec)> = None;
         let mut restore_from: Option<(api::Backup, Option<String>)> = None;
         if let Some(rs) = &req.restore {
             let b = self.find_backup(&rs.machine_id, &rs.backup).await?;
@@ -2728,6 +2861,12 @@ impl Manager {
             if sr.tenant != req.tenant {
                 return Err(invalid("fork source belongs to another tenant"));
             }
+            if !sr.has_disks() {
+                return Err(invalid(format!(
+                    "fork source has no disks: it is {} {}",
+                    sr.state, sr.error_reason
+                )));
+            }
             if !req.image.is_empty() && req.image != sr.image {
                 return Err(invalid("a fork keeps its source's image"));
             }
@@ -2745,13 +2884,9 @@ impl Manager {
                 }
                 _ => {}
             }
-            src = Some(s);
+            src = Some((s, fork.clone()));
         } else {
-            let im = self.inner.images.ensure(&req.image).await?;
             rec.image = req.image.clone();
-            rec.image_key = im.key;
-            rec.image_digest = im.digest;
-            rec.image_config = im.config;
         }
         if rec.root_key.is_empty() {
             rec.root_key = rec.image_key.clone();
@@ -2760,94 +2895,210 @@ impl Manager {
             self.room_on_pool(v.size_gb).await?;
         }
         let t = self.ensure_tenant(&req.tenant).await?;
-        let e = self.add_machine(rec, &t, req.start.unwrap_or(true))?;
-        let _guard = e.lock.lock().await;
+        let e = self.add_machine(rec, &t)?;
         let ip = e.snapshot().ip;
-        let made = match self.inner.net.count(&ip).await.context("usage counters") {
-            Err(err) => Err(err),
-            Ok(()) => match &restore_from {
-                Some((b, key)) => self.receive_disks(&e, b, key.as_deref()).await,
-                None => self.make_disks(&e, src.as_deref(), req.fork.as_ref()).await,
-            },
+        let counted = self.inner.net.count(&ip).await.context("usage counters");
+        // Written before the answer: a machine the caller was told of survives a restart, and
+        // a restart finds it `creating` and fails it (`recover`).
+        if let Err(err) = counted.and_then(|()| self.save(&e)) {
+            self.remove_machine(&e);
+            let _ = self.inner.net.uncount(&ip).await;
+            let _ = self.inner.store.delete("machines", &e.snapshot().id);
+            return Err(err.into());
+        }
+        let how = match (restore_from, src) {
+            (Some((b, key)), _) => Make::Restore(Box::new(b), key),
+            (None, Some((s, fork))) => Make::Fork(s, fork),
+            (None, None) => Make::Image,
+        };
+        Ok((e, how))
+    }
+
+    /// The create's second half (ADR 0048): the image pulled, without the machine's lock (a
+    /// pull may take minutes, and a destroy meanwhile must not wait for it), then the disks
+    /// made and the start done under it. A failure leaves the machine in `error` with the
+    /// reason (`pull_failed`, `create_failed`, or the start's), its disks gone, for the caller
+    /// to read and destroy; nothing is tried again. A machine destroyed meanwhile is left be.
+    async fn make(&self, e: &Arc<Entry>, how: Make) -> Result<(), MError> {
+        let reference = e.snapshot().image;
+        let image = match how {
+            Make::Image => {
+                let pulling = || {
+                    e.note(
+                        Ev::normal(reason::PULLING, format!("pulling {reference}"))
+                            .data(json!({ "image": reference })),
+                    )
+                };
+                match self.inner.images.ensure_noting(&reference, pulling).await {
+                    Ok(im) => Some(im),
+                    Err(err) => {
+                        let why = format!("pull {reference}: {err:#}");
+                        // The image's, or its registry's: not a person's to fix here.
+                        tracing::warn!(machine = e.snapshot().id, err = why, "pull failed");
+                        return Err(self.create_failed(e, reason::PULL_FAILED, why).await);
+                    }
+                }
+            }
+            _ => None,
+        };
+        let _guard = e.lock.lock().await;
+        let id = e.snapshot().id;
+        if !self.inner.machines.lock().unwrap().contains_key(&id)
+            || e.snapshot().state != state::CREATING
+        {
+            return Err(MError::NotFound);
+        }
+        if let Some(im) = image {
+            let mut r = e.rec.lock().unwrap();
+            r.image_key = im.key.clone();
+            r.root_key = im.key;
+            r.image_digest = im.digest;
+            r.image_config = im.config;
+        }
+        let made = match &how {
+            Make::Restore(b, key) => self.receive_disks(e, b, key.as_deref()).await,
+            Make::Fork(src, fork) => self.make_disks(e, Some(src.as_ref()), Some(fork)).await,
+            Make::Image => self.make_disks(e, None, None).await,
         };
         // A fork's or a restore's volume larger than its source's: its disk grows to it (ADR
         // 0040). A new volume is made at its size.
         let made = match made {
-            Ok(()) if src.is_some() || restore_from.is_some() => {
-                self.fit_volume(&e.snapshot()).await.map(drop)
-            }
+            Ok(()) if !matches!(how, Make::Image) => self.fit_volume(&e.snapshot()).await.map(drop),
             other => other,
         };
         if let Err(err) = made {
-            let rec = e.snapshot();
-            self.remove_machine(&e);
-            let _ = self.inner.net.uncount(&ip).await;
-            let _ = self.inner.zfs.destroy(&rec.dataset()).await;
-            return Err(err.into());
+            let why = format!("disks: {err:#}");
+            tracing::error!(machine = e.snapshot().id, err = why, "create failed");
+            return Err(self
+                .create_failed_locked(e, reason::CREATE_FAILED, why)
+                .await);
         }
-        e.note(match (&restore_from, &req.fork) {
-            (Some((b, _)), _) => Ev::normal(
+        let r = e.snapshot();
+        let ev = match &how {
+            Make::Restore(b, _) => Ev::normal(
                 reason::RESTORED,
                 format!("restored from backup {} of {}", b.id, b.machine_id),
             )
             .data(json!({ "from": b.machine_id, "backup": b.id })),
-            (None, Some(f)) => Ev::normal(reason::FORKED, format!("forked from {}", f.machine_id))
-                .data(json!({ "from": f.machine_id })),
-            (None, None) => {
-                let r = e.snapshot();
-                Ev::normal(reason::CREATED, format!("created from {}", r.image))
-                    .data(json!({ "image": r.image, "digest": r.image_digest }))
+            Make::Fork(src, _) => {
+                let from = src.snapshot().id;
+                Ev::normal(reason::FORKED, format!("forked from {from}"))
+                    .data(json!({ "from": from }))
             }
-        });
-        self.save(&e)?;
-        if req.start.unwrap_or(true) {
-            // Created but did not start: the same answer a start would give; the machine
-            // stays, for the caller to read and destroy.
-            self.start_entry(&e, true).await?;
+            Make::Image => Ev::normal(reason::CREATED, format!("created from {}", r.image))
+                .data(json!({ "image": r.image, "digest": r.image_digest })),
+        };
+        if !r.start {
+            e.set_state(state::CREATED, |_| Some(ev));
+            self.save(e)?;
+            return Ok(());
         }
-        Ok(self.view(&e))
+        e.note(ev);
+        self.save(e)?;
+        match self.start_entry(e, true).await {
+            // Refused before anything moved, so no state says it yet: its tenant's gateway did
+            // not come up (`boot_failed`, its disks kept for a start), its quota, its `via`.
+            Err(err) if e.snapshot().state == state::CREATING => {
+                let (reason, why) = match &err {
+                    MError::BootFailed(m) => (reason::BOOT_FAILED, m.error.clone()),
+                    other => (reason::CREATE_FAILED, format!("start: {other}")),
+                };
+                if reason == reason::CREATE_FAILED {
+                    tracing::error!(machine = e.snapshot().id, err = why, "create failed");
+                }
+                Err(self.create_failed_locked(e, reason, why).await)
+            }
+            // Its start failed and said so on the machine (`boot_failed`, `start_failed`).
+            other => other,
+        }
     }
 
-    fn name_taken(&self, tenant: &str, name: &str) -> bool {
-        self.inner.machines.lock().unwrap().values().any(|e| {
+    /// A create that did not get its machine made and started: the machine stays in `error`
+    /// with `why` and the event `reason`. `pull_failed` and `create_failed` leave no disks
+    /// (`has_disks`): the caller destroys it and creates again; `boot_failed` keeps them, for
+    /// a start. The caller logs it, by whose it is.
+    async fn create_failed(&self, e: &Arc<Entry>, reason: &'static str, why: String) -> MError {
+        let _guard = e.lock.lock().await;
+        self.create_failed_locked(e, reason, why).await
+    }
+
+    async fn create_failed_locked(
+        &self,
+        e: &Arc<Entry>,
+        reason: &'static str,
+        why: String,
+    ) -> MError {
+        let r = e.snapshot();
+        if !self.inner.machines.lock().unwrap().contains_key(&r.id) || r.state != state::CREATING {
+            return MError::NotFound;
+        }
+        let z = &self.inner.zfs;
+        if reason != reason::BOOT_FAILED && z.exists(&r.dataset()).await.unwrap_or(true) {
+            if let Err(err) = z.destroy(&r.dataset()).await {
+                tracing::warn!(machine = r.id, err = %err, "disks of a failed create");
+            }
+        }
+        e.set_state(state::ERROR, |r| {
+            r.error = why;
+            r.error_reason = reason.into();
+            r.start = false;
+            r.stopped_at = Some(Utc::now());
+            Some(Ev::warning(reason, r.error.clone()))
+        });
+        let _ = self.save(e);
+        let m = Box::new(self.view(e));
+        match reason {
+            reason::PULL_FAILED => MError::PullFailed(m),
+            reason::BOOT_FAILED => MError::BootFailed(m),
+            _ => MError::CreateFailed(m),
+        }
+    }
+
+    /// The tenant's machine of this name: what a create of the name answers, so a create sent
+    /// again after no answer finds the one the first made (ADR 0048).
+    fn named(&self, tenant: &str, name: &str) -> Option<Arc<Entry>> {
+        let machines = self.inner.machines.lock().unwrap();
+        let found = machines.values().find(|e| {
             let r = e.rec.lock().unwrap();
             r.tenant == tenant && r.name == name && r.state != state::DESTROYING
-        })
+        });
+        found.cloned()
     }
 
     /// Gives the machine an address and registers it, within its tenant's quota (ADR 0025):
-    /// a machine and its volume, and its size when it is `starting` at once. Nothing on disk
-    /// yet.
-    fn add_machine(
-        &self,
-        mut rec: Record,
-        t: &Tenant,
-        starting: bool,
-    ) -> Result<Arc<Entry>, MError> {
+    /// a machine and its volume, and when its create starts it its size, which the host's
+    /// memory must hold too (ADR 0048). Nothing on disk yet.
+    fn add_machine(&self, mut rec: Record, t: &Tenant) -> Result<Arc<Entry>, MError> {
         let mut machines = self.inner.machines.lock().unwrap();
+        let taken = machines.values().find(|e| {
+            let r = e.rec.lock().unwrap();
+            r.tenant == rec.tenant && r.name == rec.name && r.state != state::DESTROYING
+        });
+        if let Some(e) = taken.cloned() {
+            drop(machines);
+            return Err(MError::NameTaken(Box::new(self.view(&e))));
+        }
         let mut used = Vec::new();
         for e in machines.values() {
             let r = e.rec.lock().unwrap();
-            if r.tenant == rec.tenant && r.name == rec.name && r.state != state::DESTROYING {
-                return Err(MError::Conflict(
-                    "a machine with that name exists in the tenant".into(),
-                ));
-            }
             if r.tenant == t.rec.id {
                 used.push(r.host_num as u32);
             }
         }
         let held = tenant_use(&machines, &rec.tenant);
-        if let Some(x) = over_quota(
-            &rec.tenant,
-            &t.rec.quota,
-            &held,
-            &quota_need(&rec, starting),
-        ) {
+        if let Some(x) = over_quota(&rec.tenant, &t.rec.quota, &held, &quota_need(&rec, false)) {
             drop(machines);
             let ev = x.event(format!("create of {} refused: {x}", rec.name));
             self.inner.events.emit(ev.tenant(&rec.tenant));
             return Err(MError::Quota(x.to_string()));
+        }
+        if rec.start {
+            let (used, _) = committed(&machines);
+            admit(
+                used.memory_mb,
+                self.capacity().memory_mb,
+                rec.size.memory_mb,
+            )?;
         }
         // The address a `via` policy in the tables names stays its gateway's, even once that
         // machine is gone: given to a new machine, it would be reachable through the policy.
@@ -2972,10 +3223,46 @@ impl Manager {
         let e = self.own_entry(id)?;
         let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;
-        if e.snapshot().state != state::RUNNING {
-            self.start_entry(&e, true).await?;
+        match e.snapshot() {
+            r if r.state == state::CREATING => return self.creating(&e),
+            r if r.state != state::RUNNING => self.start_entry(&e, true).await?,
+            _ => {}
         }
         Ok(self.view(&e))
+    }
+
+    /// A start or a wake of a machine whose create is pulling its image (its lock is held
+    /// from then on, so it is never seen here later): its create starts it once made, its
+    /// memory taken now as a create's is (ADR 0048). The machine as it is, `creating`.
+    fn creating(&self, e: &Entry) -> Result<api::Machine, MError> {
+        let r = e.snapshot();
+        if r.start {
+            return Ok(self.view(e));
+        }
+        let quota = self
+            .tenant_of(&r.tenant)
+            .map(|t| t.rec.quota)
+            .unwrap_or_default();
+        // The machine and its volume are counted already: its size is what it adds.
+        let need = api::QuotaUse {
+            memory_mb: r.size.memory_mb,
+            vcpus: r.size.vcpus,
+            ..Default::default()
+        };
+        {
+            let machines = self.inner.machines.lock().unwrap();
+            let held = tenant_use(&machines, &r.tenant);
+            if let Some(x) = over_quota(&r.tenant, &quota, &held, &need) {
+                drop(machines);
+                e.note(x.event(format!("start refused: {x}")));
+                return Err(MError::Quota(x.to_string()));
+            }
+            let (used, _) = committed(&machines);
+            admit(used.memory_mb, self.capacity().memory_mb, r.size.memory_mb)?;
+            e.rec.lock().unwrap().start = true;
+        }
+        self.save(e)?;
+        Ok(self.view(e))
     }
 
     /// Starts a machine that went to sleep, that the host stopped or whose process ended;
@@ -2990,6 +3277,7 @@ impl Manager {
                 e.touch();
                 return Ok(self.view(&e));
             }
+            state::CREATING => return self.creating(&e),
             state::STOPPED if r.stopped_reason == stop::USER => {
                 return Err(MError::NotRunning("stopped on request".into()))
             }
@@ -3018,8 +3306,12 @@ impl Manager {
         let cfg = &self.inner.cfg;
         let rec = e.snapshot();
         match rec.state.as_str() {
-            state::CREATED | state::STOPPED | state::ERROR => {}
+            // `creating`: the create's own start (`make`), its lock held throughout.
+            state::CREATING | state::CREATED | state::STOPPED | state::ERROR => {}
             other => return Err(MError::BadState(other.into())),
+        }
+        if rec.state == state::ERROR && !rec.has_disks() {
+            return Err(made_never(&rec));
         }
         // A pending change's image is pulled and built before anything moves (ADR 0024): a
         // failure is the boot's, and the change waits for the next start.
@@ -3057,6 +3349,7 @@ impl Manager {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             e.set_state(state::ERROR, |r| {
                 r.error = format!("{err:#}");
+                r.error_reason = reason::START_FAILED.into();
                 r.stopped_at = Some(Utc::now());
                 r.pid = 0;
                 Some(Ev::warning(reason::START_FAILED, r.error.clone()))
@@ -3254,6 +3547,7 @@ impl Manager {
     fn boot_failed(&self, e: &Entry, why: String) -> MError {
         e.set_state(state::ERROR, |r| {
             r.error = why;
+            r.error_reason = reason::BOOT_FAILED.into();
             r.stopped_at = Some(Utc::now());
             r.pid = 0;
             Some(Ev::warning(reason::BOOT_FAILED, r.error.clone()))
@@ -3838,6 +4132,10 @@ impl Manager {
             return Err(MError::NotFound);
         }
         self.check_version(&e, at)?;
+        // What a create pulls, makes and starts is what it was asked (ADR 0048).
+        if e.snapshot().state == state::CREATING {
+            return Err(made_never(&e.snapshot()));
+        }
         // A larger volume grows below, once nothing else can refuse the request (ADR 0040).
         let grow = match req.spec.volume {
             Some(v) => volume_growth(&e.snapshot(), v.size_gb)?,
@@ -4415,7 +4713,9 @@ impl Manager {
     }
 
     /// Blocks until the machine runs (`Until::Running`) or is ready (`Until::Ready`, ADR 0022),
-    /// or until it is clear it will not, within `timeout`.
+    /// or until it is clear it will not, within `timeout`. A timeout while it is still on its
+    /// way (creating, starting, running not ready, a restart waiting) is `not_ready`, with the
+    /// machine: a caller waits again (ADR 0048).
     pub async fn wait(
         &self,
         id: &str,
@@ -4435,10 +4735,10 @@ impl Manager {
             }
             if tokio::time::timeout_at(deadline, changed).await.is_err() {
                 let m = self.view(&e);
-                return Err(match until == Until::Ready && m.state == state::RUNNING {
-                    true => MError::NotReady(Box::new(m)),
-                    false => MError::NotRunning(format!("still {} after {timeout:?}", m.state)),
-                });
+                return match wait_verdict(&m, until) {
+                    Some(answer) => answer.map(|()| m),
+                    None => Err(MError::NotReady(Box::new(m))),
+                };
             }
         }
     }
@@ -4611,6 +4911,8 @@ impl Manager {
             .execs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let e = self.own_entry(id)?;
+        // In use from the call (ADR 0053): the sleeper leaves a machine it wakes for this.
+        let in_use = InUse::new(e.clone());
         let sock = self.running_vsock(id, wake).await?;
         // An init older than sessions takes the request as a plain exec, its input and terminal
         // ignored (ADR 0027): refused, the init named, before the guest is asked.
@@ -4629,7 +4931,7 @@ impl Manager {
         .await
         .map_err(|_| MError::NotRunning("the guest did not take the command".into()))?
         .map_err(not_running_if_unreachable)?;
-        Ok((conn, InUse::new(e)))
+        Ok((conn, in_use))
     }
 
     pub async fn put_file(&self, id: &str, req: api::PutFileRequest) -> Result<(), MError> {
@@ -4907,6 +5209,19 @@ impl Manager {
         Ok(())
     }
 
+    /// Holds the machine in use for a connection the ingress is delivering (ADR 0053): from
+    /// its arrival until it reaches the machine's port, through a wake and the program's start.
+    /// The sleeper leaves it running meanwhile, and its last use is the delivery.
+    pub fn in_use(&self, id: &str) -> Result<InUse, MError> {
+        Ok(InUse::new(self.entry(id)?))
+    }
+
+    /// Whether the machine runs: a connection waiting for its port gives up once it does not.
+    pub fn is_running(&self, id: &str) -> bool {
+        self.entry(id)
+            .is_ok_and(|e| e.rec.lock().unwrap().state == state::RUNNING)
+    }
+
     /// The address a proxy connects to, waking the machine when asked.
     pub async fn machine_addr(&self, id: &str, wake: bool) -> Result<Ipv4Addr, MError> {
         let e = self.entry(id)?;
@@ -4950,14 +5265,15 @@ where
     }
 }
 
-/// What the machines in the map hold now: memory and vCPUs committed, and how many are up.
+/// What the machines in the map hold now: memory and vCPUs committed (a create that will start
+/// them included, ADR 0048), and how many are up.
 fn committed(machines: &HashMap<String, Arc<Entry>>) -> (api::Capacity, usize) {
     let mut used = api::Capacity::default();
     let mut up = 0;
     for e in machines.values() {
         let r = e.rec.lock().unwrap();
-        if holds_memory(&r.state) {
-            up += 1;
+        if commits_memory(&r) {
+            up += usize::from(holds_memory(&r.state));
             used.memory_mb += r.size.memory_mb;
             used.vcpus += r.size.vcpus;
         }
@@ -5105,15 +5421,31 @@ pub enum Until {
     Ready,
 }
 
-/// What a `/wait` answers now, or None to keep waiting. For `Ready`, a machine in `error`
+/// What a `/wait` answers now, or None to keep waiting. A machine whose create failed answers
+/// that (`pull_failed`, `create_failed`, ADR 0048). For `Ready`, another machine in `error`
 /// failed its boot (the guest or its startup probe): `boot_failed`, as its start would answer.
 fn wait_verdict(m: &api::Machine, until: Until) -> Option<Result<(), MError>> {
+    if m.state == state::ERROR {
+        match m.error_reason.as_str() {
+            reason::PULL_FAILED => return Some(Err(MError::PullFailed(Box::new(m.clone())))),
+            reason::CREATE_FAILED => return Some(Err(MError::CreateFailed(Box::new(m.clone())))),
+            _ => {}
+        }
+    }
     match (will_run(m), until) {
         (Some(Ok(())), Until::Ready) if !m.ready => None,
         (Some(Err(_)), Until::Ready) if m.state == state::ERROR => {
             Some(Err(MError::BootFailed(Box::new(m.clone()))))
         }
         (verdict, _) => verdict.map(|v| v.map_err(MError::NotRunning)),
+    }
+}
+
+/// Where a machine that is not ready is: still on its way, or running and why it is not ready.
+fn not_ready_state(m: &api::Machine) -> String {
+    match m.state.as_str() {
+        state::RUNNING => format!("running, not ready: {}", not_ready_why(m)),
+        other => format!("still {other}"),
     }
 }
 
@@ -5700,6 +6032,9 @@ mod tests {
             stopped_reason: String::new(),
             exit: None,
             error: String::new(),
+            error_reason: String::new(),
+            start: false,
+            from_source: false,
             subnet_index: 1,
             host_num: 2,
             ip: "10.64.1.2".into(),
@@ -6391,6 +6726,19 @@ mod tests {
         pub(super) m: Manager,
     }
 
+    impl Manager {
+        /// A create that answers once the machine is made, and started unless `start` is
+        /// false: what most tests start from.
+        pub(super) async fn create_made(
+            &self,
+            req: api::CreateMachineRequest,
+        ) -> Result<api::Machine, MError> {
+            let (e, how) = self.record(req, None).await?;
+            self.make(&e, how).await?;
+            Ok(self.view(&e))
+        }
+    }
+
     async fn harness(range: &str, memory_mb: u32) -> Harness {
         // No host limits: an open machine puts nothing in the tables, and the calls the tests
         // read are the pin's and the policy's alone. The limits' tests set theirs.
@@ -6570,6 +6918,15 @@ mod tests {
             self.pool.calls();
         }
 
+        /// Whether the log has an event of this reason about the machine.
+        pub(super) async fn said(&self, id: &str, reason: &str) -> bool {
+            let page = self.m.events_page(0, events::Filter::default(), 5000).await;
+            page.unwrap()
+                .events
+                .iter()
+                .any(|e| e.machine_id == id && e.reason == reason)
+        }
+
         /// Each stop takes this long on the host from now on.
         pub(super) fn stops_take(&self, d: Duration) {
             self.host.stops_take(d);
@@ -6599,6 +6956,68 @@ mod tests {
         pub(super) fn stored(&self, id: &str) -> Option<Record> {
             self.m.inner.store.get("machines", id).unwrap()
         }
+    }
+
+    /// Whether something listens on the host's port.
+    async fn listening(port: u16) -> bool {
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn the_ingress_resyncs_when_it_missed_endpoint_events() {
+        let h = harness_config(|c| c.ingress.tcp_ports = "39100-39199".into()).await;
+        h.tenant("t1");
+        h.add("m_abc123", state::RUNNING, 256);
+        let ing =
+            crate::ingress::Ingress::new(h.m.clone(), "127.0.0.1", "", Duration::from_secs(1));
+        ing.start().await.unwrap();
+        let tcp = |port| api::CreateEndpointRequest {
+            port,
+            protocol: "tcp".into(),
+            host: String::new(),
+        };
+        let ep = h.m.create_endpoint("m_abc123", tcp(8080)).unwrap();
+        let port = ep.host_port.unwrap();
+        while !listening(port).await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // More events than the channel holds, sent while the ingress cannot read (one thread,
+        // no await): it misses the removal of the first.
+        h.m.delete_endpoint(&ep.id).unwrap();
+        for p in 0..70 {
+            let x = h.m.create_endpoint("m_abc123", tcp(9000 + p)).unwrap();
+            h.m.delete_endpoint(&x.id).unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while listening(port).await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "port {port} of a removed endpoint still listening"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_ingress_opens_no_listener_for_an_endpoint_gone() {
+        let h = harness_config(|c| c.ingress.tcp_ports = "39200-39299".into()).await;
+        h.tenant("t1");
+        h.add("m_abc123", state::RUNNING, 256);
+        let ing =
+            crate::ingress::Ingress::new(h.m.clone(), "127.0.0.1", "", Duration::from_secs(1));
+        let req = api::CreateEndpointRequest {
+            port: 8080,
+            protocol: "tcp".into(),
+            host: String::new(),
+        };
+        let ep = h.m.create_endpoint("m_abc123", req).unwrap();
+        let rec = h.m.endpoint(&ep.id).unwrap();
+        // The delete's event first, then the create's.
+        h.m.delete_endpoint(&ep.id).unwrap();
+        ing.add(rec).await.unwrap();
+        assert!(!listening(ep.host_port.unwrap()).await);
     }
 
     #[tokio::test]
@@ -6937,7 +7356,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                matches!(h.m.create(req).await, Err(MError::Invalid(_))),
+                matches!(h.m.create_made(req).await, Err(MError::Invalid(_))),
                 "{bad}"
             );
             assert!(
@@ -7196,7 +7615,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         let t0 = Utc::now();
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         assert_eq!(m.state, state::RUNNING);
         assert!(m.state_changed_at >= t0);
         assert!(m.started_at.is_some() && m.last_used_at.is_some());
@@ -7241,8 +7660,8 @@ mod tests {
         assert_eq!(h.m.list(Some("t1"), &[])[0].id, m.id);
         // A second machine of that name is refused before anything is made.
         assert!(matches!(
-            h.m.create(h.request("web")).await,
-            Err(MError::Conflict(_))
+            h.m.create_made(h.request("web")).await,
+            Err(MError::NameTaken(x)) if x.id == m.id
         ));
         assert!(h.pool.calls().is_empty());
     }
@@ -7252,7 +7671,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         h.host.boots(Boots::Silent);
-        let err = h.m.create(h.request("web")).await.unwrap_err();
+        let err = h.m.create_made(h.request("web")).await.unwrap_err();
         let m = match err {
             MError::BootFailed(m) => m,
             other => panic!("{other:?}"),
@@ -7307,11 +7726,11 @@ mod tests {
             req
         };
         // The pong first, then the exit.
-        let a = h.m.create(once("pong-first")).await.unwrap();
+        let a = h.m.create_made(once("pong-first")).await.unwrap();
         h.host.exit(1000, 7, false);
         // The process gone first: no pong ever came.
         h.host.boots(Boots::Runs(7));
-        let b = h.m.create(once("exit-first")).await.unwrap();
+        let b = h.m.create_made(once("exit-first")).await.unwrap();
         for m in [&a, &b] {
             let r = settled(&h.m.entry(&m.id).unwrap()).await;
             assert_eq!(
@@ -7347,7 +7766,7 @@ mod tests {
         // The init's report says its main process never started.
         // An init older than its reason: the console's tail says it.
         h.host.boots(Boots::Exits(137, ""));
-        let err = h.m.create(h.request("web")).await.unwrap_err();
+        let err = h.m.create_made(h.request("web")).await.unwrap_err();
         let m = match err {
             MError::BootFailed(m) => m,
             other => panic!("{other:?}"),
@@ -7375,7 +7794,7 @@ mod tests {
         h.host.boots(Boots::Exits(1, ""));
         let mut req = h.request("db");
         req.start = Some(false);
-        let created = h.m.create(req).await.unwrap();
+        let created = h.m.create_made(req).await.unwrap();
         assert_eq!(created.state, state::CREATED);
         assert!(matches!(
             h.m.start(&created.id, None).await,
@@ -7390,7 +7809,7 @@ mod tests {
         // The init's own reason is the machine's error, not the console's last lines.
         let why = "start \"/run.sh\": Operation not permitted (os error 1)";
         h.host.boots(Boots::Exits(127, why));
-        let m = match h.m.create(h.request("web")).await {
+        let m = match h.m.create_made(h.request("web")).await {
             Err(MError::BootFailed(m)) => m,
             other => panic!("{other:?}"),
         };
@@ -7472,7 +7891,7 @@ mod tests {
     async fn a_stop_ends_the_guest_and_the_watcher_settles_it() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         h.host.calls();
         let stopped =
             h.m.stop(&m.id, Duration::from_secs(3), false, None)
@@ -7507,7 +7926,7 @@ mod tests {
     async fn a_stop_of_a_stopping_machine_returns_when_it_settles() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         let e = h.m.entry(&m.id).unwrap();
         // A stop is in flight: the state says so, and whoever asked still holds the lock.
         let held = e.lock.lock().await;
@@ -7538,7 +7957,7 @@ mod tests {
         // `bad_state: stopping`.
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("db")).await.unwrap();
+        let m = h.m.create_made(h.request("db")).await.unwrap();
         let e = h.m.entry(&m.id).unwrap();
         h.host.stops_take(Duration::from_millis(300));
         let (m2, e2) = (h.m.clone(), e.clone());
@@ -7564,8 +7983,8 @@ mod tests {
         let (m, req) = (h.m.clone(), h.request("web"));
         let caller =
             tokio::spawn(async move { detached(async move { m.create(req).await }).await });
-        // The client hangs up once the machine is registered: its disks and its boot are
-        // still to come.
+        // The client hangs up once the machine is registered, answered or not: its disks and
+        // its boot are still to come, in a task of their own (ADR 0048).
         let id = loop {
             match h.m.list(Some("t1"), &[]).pop() {
                 Some(m) => break m.id,
@@ -7573,7 +7992,7 @@ mod tests {
             }
         };
         caller.abort();
-        assert!(caller.await.unwrap_err().is_cancelled());
+        let _ = caller.await;
         let running =
             h.m.wait(&id, Until::Running, Duration::from_secs(5))
                 .await
@@ -7581,6 +8000,252 @@ mod tests {
         assert_eq!(running.state, state::RUNNING);
         assert_eq!(h.stored(&id).unwrap().state, state::RUNNING);
         assert_eq!(h.host.alive().len(), 1);
+    }
+
+    /// An image on a registry at `addr`, by digest: no tag to resolve, its pull goes there.
+    fn image_at(addr: &str, n: u8) -> String {
+        format!("{addr}/nope@sha256:{}", format!("{n:02x}").repeat(32))
+    }
+
+    #[tokio::test]
+    async fn a_create_answers_once_recorded_then_runs() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        h.host.boots(Boots::Ready(Duration::from_millis(50)));
+        let m = h.m.create(h.request("web")).await.unwrap();
+        // ADR 0048: recorded, on disk, its address and its memory taken; nothing booted yet.
+        assert_eq!(m.state, state::CREATING);
+        assert_eq!(m.ip, "10.64.1.2");
+        assert_eq!(h.stored(&m.id).unwrap().state, state::CREATING);
+        let running = h.m.wait(&m.id, Until::Ready, Duration::from_secs(5)).await;
+        assert_eq!(running.unwrap().state, state::RUNNING);
+        let (used, up, _) = h.m.usage();
+        assert_eq!((used.memory_mb, up), (256, 1));
+        let reasons: Vec<String> =
+            h.m.events_page(0, events::Filter::default(), 100)
+                .await
+                .unwrap()
+                .events
+                .into_iter()
+                .filter(|e| e.machine_id == m.id)
+                .map(|e| e.reason)
+                .collect();
+        assert_eq!(reasons, ["created", "starting", "started"]);
+    }
+
+    #[tokio::test]
+    async fn a_create_takes_its_memory_when_recorded() {
+        let h = harness("10.64.0.0/22", 512).await;
+        h.ready().await;
+        h.host.boots(Boots::Silent);
+        let mut req = h.request("a");
+        req.size.memory_mb = 384;
+        // Its pull is under way: the host counts it, and refuses what no longer fits.
+        let (addr, _held) = silent_registry().await;
+        req.image = image_at(&addr, 1);
+        let a = h.m.create(req).await.unwrap();
+        assert_eq!(a.state, state::CREATING);
+        assert_eq!(h.m.usage().0.memory_mb, 384);
+        assert!(matches!(
+            h.m.create(h.request("b")).await,
+            Err(MError::Capacity(_))
+        ));
+        // One that does not start takes none, and a start of it while it is created takes it.
+        let mut c = h.request("c");
+        c.image = image_at(&addr, 2);
+        c.start = Some(false);
+        let c = h.m.create(c).await.unwrap();
+        assert_eq!(h.m.usage().0.memory_mb, 384);
+        assert!(matches!(
+            h.m.start(&c.id, None).await,
+            Err(MError::Capacity(_))
+        ));
+        h.m.destroy(&a.id, None).await.unwrap();
+        let c = h.m.start(&c.id, None).await.unwrap();
+        assert_eq!(
+            (c.state.as_str(), h.m.usage().0.memory_mb),
+            (state::CREATING, 256)
+        );
+        assert!(h.stored(&c.id).unwrap().start);
+    }
+
+    /// A registry that takes connections and never answers: a pull from it waits until the
+    /// task is aborted, which closes them and the listener.
+    async fn silent_registry() -> (String, tokio::task::JoinHandle<()>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((c, _)) = l.accept().await {
+                held.push(c);
+            }
+        });
+        (addr, task)
+    }
+
+    #[tokio::test]
+    async fn a_destroy_during_the_pull_does_not_wait_for_it() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let (addr, held) = silent_registry().await;
+        let mut req = h.request("slow");
+        req.image = image_at(&addr, 3);
+        let m = h.m.create(req.clone()).await.unwrap();
+        // A second create of the same image shares the one pull; each says it waits for it.
+        let mut again = h.request("slow2");
+        again.image = req.image.clone();
+        let m2 = h.m.create(again).await.unwrap();
+        for id in [&m.id, &m2.id] {
+            let said = async {
+                while !h.said(id, reason::PULLING).await {
+                    tokio::task::yield_now().await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(5), said)
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), h.m.destroy(&m.id, None))
+            .await
+            .expect("a destroy waits for no pull")
+            .unwrap();
+        assert!(h.stored(&m.id).is_none());
+        // The registry goes: the pull fails, the machine left fails with it, the destroyed
+        // one stays gone.
+        held.abort();
+        let failed =
+            h.m.wait(&m2.id, Until::Ready, Duration::from_secs(10))
+                .await;
+        let Err(MError::PullFailed(f)) = failed else {
+            panic!("{failed:?}")
+        };
+        assert_eq!(
+            (f.state.as_str(), f.error_reason.as_str()),
+            (state::ERROR, reason::PULL_FAILED)
+        );
+        assert!(
+            f.error.starts_with(&format!("pull {}", req.image)),
+            "{}",
+            f.error
+        );
+        assert!(h.stored(&m.id).is_none() && h.m.get(&m.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_pull_that_fails_leaves_the_machine_in_error_without_disks() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let mut req = h.request("bad");
+        // Nothing listens there: refused at once.
+        req.image = image_at("127.0.0.1:1", 4);
+        let m = h.m.create(req).await.unwrap();
+        for until in [Until::Running, Until::Ready] {
+            let got = h.m.wait(&m.id, until, Duration::from_secs(10)).await;
+            assert!(
+                matches!(&got, Err(MError::PullFailed(f)) if f.id == m.id),
+                "{got:?}"
+            );
+        }
+        let r = h.stored(&m.id).unwrap();
+        assert_eq!(
+            (r.state.as_str(), r.error_reason.as_str()),
+            (state::ERROR, reason::PULL_FAILED)
+        );
+        assert!(!r.has_disks() && !h.pool.zfs.exists(&r.dataset()).await.unwrap());
+        assert_eq!(h.m.usage().0.memory_mb, 0);
+        // Nothing is tried again: a start says what to do, a destroy cleans up.
+        assert!(matches!(
+            h.m.start(&m.id, None).await,
+            Err(MError::BadState(_))
+        ));
+        let mut fork = h.request("fork");
+        fork.fork = Some(api::ForkSpec {
+            machine_id: m.id.clone(),
+            copy: String::new(),
+        });
+        assert!(matches!(h.m.create(fork).await, Err(MError::Invalid(_))));
+        h.m.destroy(&m.id, None).await.unwrap();
+        assert!(h.m.list(Some("t1"), &[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_create_sent_again_answers_the_machine_the_first_made() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        h.host.boots(Boots::Silent);
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let again = h.m.create(h.request("web")).await;
+        assert!(
+            matches!(&again, Err(MError::NameTaken(x)) if x.id == m.id),
+            "{again:?}"
+        );
+        assert_eq!(h.m.list(Some("t1"), &[]).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_create_cut_by_a_restart_is_taken_up_again_or_failed() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        h.host.boots(Boots::Ready(Duration::from_millis(10)));
+        // From an image: its partial disks go and its create runs again, to the end (ADR 0048).
+        let e = h.add("m_cut", state::CREATING, 256);
+        {
+            let mut r = e.rec.lock().unwrap();
+            r.image = IMAGE.into();
+            r.start = true;
+            // A volume is formatted with the host's `mkfs.ext4`.
+            r.volume = None;
+        }
+        h.disks(&e).await;
+        // From a fork's source or a backup, which the record does not name: failed.
+        let f = h.add("m_forked", state::CREATING, 256);
+        {
+            let mut r = f.rec.lock().unwrap();
+            r.name = "forked".into();
+            r.from_source = true;
+            r.start = true;
+        }
+        h.disks(&f).await;
+        h.m.recover().await;
+        let ran =
+            h.m.wait("m_cut", Until::Running, Duration::from_secs(5))
+                .await;
+        assert_eq!(ran.unwrap().state, state::RUNNING);
+        assert_eq!(h.host.alive().len(), 1, "one boot, on new disks");
+        let r = f.snapshot();
+        assert_eq!(
+            (r.state.as_str(), r.error_reason.as_str()),
+            (state::ERROR, reason::CREATE_FAILED)
+        );
+        assert!(!h.pool.zfs.exists(&r.dataset()).await.unwrap());
+        assert_eq!(h.m.usage().0.memory_mb, 256, "the one that runs");
+        let got =
+            h.m.wait("m_forked", Until::Ready, Duration::from_secs(1))
+                .await;
+        assert!(matches!(got, Err(MError::CreateFailed(_))), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn a_wait_that_runs_out_on_the_way_is_not_ready() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.add("m_c", state::CREATING, 256);
+        for until in [Until::Running, Until::Ready] {
+            let got = h.m.wait("m_c", until, Duration::from_millis(20)).await;
+            let Err(MError::NotReady(m)) = got else {
+                panic!("{got:?}")
+            };
+            assert_eq!(m.state, state::CREATING);
+        }
+        // Calls that change or run something wait for what the create makes.
+        assert!(matches!(
+            h.m.update("m_c", api::UpdateMachineRequest::default(), None)
+                .await,
+            Err(MError::BadState(_))
+        ));
+        assert!(matches!(
+            h.m.stop("m_c", Duration::ZERO, false, None).await,
+            Err(MError::BadState(_))
+        ));
     }
 
     #[tokio::test]
@@ -7676,7 +8341,7 @@ mod tests {
         h.ready().await;
         // The guest prints a forged exit line, then its process is gone without a report:
         // the exit is 255, not what the console says, and not a stop on request.
-        let m = h.m.create(h.request("liar")).await.unwrap();
+        let m = h.m.create_made(h.request("liar")).await.unwrap();
         let e = h.m.entry(&m.id).unwrap();
         h.host
             .say(1000, "[briqyard] exit code=0 oom=false requested=true");
@@ -7688,7 +8353,7 @@ mod tests {
         );
         assert_eq!(r.exit.as_ref().map(|x| x.code), Some(255));
         // The init's report says what it says: a requested stop is one.
-        let m = h.m.create(h.request("honest")).await.unwrap();
+        let m = h.m.create_made(h.request("honest")).await.unwrap();
         let e = h.m.entry(&m.id).unwrap();
         h.host.exit(1001, 0, true);
         let r = settled(&e).await;
@@ -7744,11 +8409,11 @@ mod tests {
     async fn the_tick_sleeps_idle_machines_and_resumes_destroys() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let idle = h.m.create(h.request("idle")).await.unwrap();
+        let idle = h.m.create_made(h.request("idle")).await.unwrap();
         let mut forever = h.request("forever");
         forever.sleep = "never".into();
-        let forever = h.m.create(forever).await.unwrap();
-        let fresh = h.m.create(h.request("fresh")).await.unwrap();
+        let forever = h.m.create_made(forever).await.unwrap();
+        let fresh = h.m.create_made(h.request("fresh")).await.unwrap();
         let long_ago = Some(Utc::now() - chrono::Duration::hours(1));
         for id in [&idle.id, &forever.id] {
             h.m.entry(id).unwrap().rec.lock().unwrap().last_used_at = long_ago;
@@ -7793,7 +8458,7 @@ mod tests {
     async fn a_suspend_resumes_on_the_next_start() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         h.host.calls();
         let slept =
             h.m.stop(&m.id, Duration::from_secs(1), true, None)
@@ -7872,7 +8537,7 @@ mod tests {
         h.ready().await;
         let mut req = h.request("web");
         req.start = Some(false);
-        let live = h.m.create(req).await.unwrap();
+        let live = h.m.create_made(req).await.unwrap();
         let mut old = h.stored(&live.id).unwrap();
         old.id = "m_00000000000a".into();
         old.name = "old".into();
@@ -7920,7 +8585,7 @@ mod tests {
         h.ready().await;
         let long_ago = Some(Utc::now() - chrono::Duration::hours(1));
         for name in ["a", "b", "c"] {
-            let m = h.m.create(h.request(name)).await.unwrap();
+            let m = h.m.create_made(h.request(name)).await.unwrap();
             h.m.entry(&m.id).unwrap().rec.lock().unwrap().last_used_at = long_ago;
         }
         // Each guest takes 3 s to stop: one after another, the tick would take 9.
@@ -7953,7 +8618,7 @@ mod tests {
                 machine_id: src.into(),
                 copy: String::new(),
             });
-            self.m.create(req).await.unwrap()
+            self.m.create_made(req).await.unwrap()
         }
 
         pub(super) fn snapshot_exists(&self, ds: &str, snap: &str) -> bool {
@@ -7965,7 +8630,7 @@ mod tests {
     async fn a_destroyed_fork_frees_its_snapshot_on_the_source() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let src = h.m.create(h.request("src")).await.unwrap();
+        let src = h.m.create_made(h.request("src")).await.unwrap();
         let fork = h.fork(&src.id, "fork").await;
         let (root, snap) = (format!("m/{}/root", src.id), format!("fork-{}", fork.id));
         assert!(h.snapshot_exists(&root, &snap));
@@ -8003,7 +8668,7 @@ mod tests {
     async fn a_destroyed_source_leaves_its_fork_whole_and_frees_what_it_took_over() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let src = h.m.create(h.request("src")).await.unwrap();
+        let src = h.m.create_made(h.request("src")).await.unwrap();
         let fork = h.fork(&src.id, "fork").await;
         let fork_root = format!("m/{}/root", fork.id);
         let snap = format!("fork-{}", fork.id);
@@ -8109,10 +8774,10 @@ mod tests {
     async fn a_via_machine_is_kept_to_its_gateway_while_it_runs() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let gw = h.m.create_made(h.request("gw")).await.unwrap();
         h.host.calls();
         let m =
-            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+            h.m.create_made(h.request_egress("sbx", "via", Some(&gw.id)))
                 .await
                 .unwrap();
         assert_eq!(m.egress, egress("via", Some(&gw.id)));
@@ -8153,9 +8818,9 @@ mod tests {
     async fn a_policy_changes_at_once_on_a_running_machine() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let gw = h.m.create_made(h.request("gw")).await.unwrap();
         let m =
-            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+            h.m.create_made(h.request_egress("sbx", "via", Some(&gw.id)))
                 .await
                 .unwrap();
         h.host.calls();
@@ -8203,15 +8868,15 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         h.tenant("t2");
-        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let gw = h.m.create_made(h.request("gw")).await.unwrap();
         let other =
-            h.m.create(api::CreateMachineRequest {
+            h.m.create_made(api::CreateMachineRequest {
                 tenant: "t2".into(),
                 ..h.request("other")
             })
             .await
             .unwrap();
-        let m = h.m.create(h.request("sbx")).await.unwrap();
+        let m = h.m.create_made(h.request("sbx")).await.unwrap();
         h.host.calls();
         h.pool.calls();
         let missing = "m_000000000000";
@@ -8222,7 +8887,9 @@ mod tests {
             ),
             (missing, format!("egress.via {missing}: no such machine")),
         ] {
-            let create = h.m.create(h.request_egress("sbx2", "via", Some(via))).await;
+            let create =
+                h.m.create_made(h.request_egress("sbx2", "via", Some(via)))
+                    .await;
             assert_eq!(refused(create), want);
             let update = h.m.update(&m.id, set_egress("via", Some(via)), None).await;
             assert_eq!(refused(update), want);
@@ -8235,7 +8902,7 @@ mod tests {
             "egress.via names the machine itself"
         );
         assert_eq!(
-            refused(h.m.create(h.request_egress("sbx2", "via", None)).await),
+            refused(h.m.create_made(h.request_egress("sbx2", "via", None)).await),
             "egress.via must name a machine of the tenant"
         );
         // Nothing applied, made or changed.
@@ -8254,14 +8921,17 @@ mod tests {
     async fn a_gateway_destroyed_under_a_via_machine_leaves_it_reaching_nothing() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let gw = h.m.create_made(h.request("gw")).await.unwrap();
         let m =
-            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+            h.m.create_made(h.request_egress("sbx", "via", Some(&gw.id)))
                 .await
                 .unwrap();
         h.m.destroy(&gw.id, None).await.unwrap();
         // The policy stays, and so does the address it names: a new machine gets another.
-        assert_eq!(h.m.create(h.request("next")).await.unwrap().ip, "10.64.1.4");
+        assert_eq!(
+            h.m.create_made(h.request("next")).await.unwrap().ip,
+            "10.64.1.4"
+        );
         h.host.calls();
         // A stop takes out what was set, gateway or not.
         h.m.stop(&m.id, Duration::from_secs(3), false, None)
@@ -8276,7 +8946,10 @@ mod tests {
         assert!(h.host.calls().is_empty());
         assert_eq!(h.stored(&m.id).unwrap().state, state::STOPPED);
         // Named by no policy, the address is free again.
-        assert_eq!(h.m.create(h.request("last")).await.unwrap().ip, "10.64.1.2");
+        assert_eq!(
+            h.m.create_made(h.request("last")).await.unwrap().ip,
+            "10.64.1.2"
+        );
     }
 
     #[tokio::test]
@@ -8351,9 +9024,9 @@ mod tests {
     async fn a_refused_swap_keeps_the_old_policy_and_the_record() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let gw = h.m.create_made(h.request("gw")).await.unwrap();
         let m =
-            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+            h.m.create_made(h.request_egress("sbx", "via", Some(&gw.id)))
                 .await
                 .unwrap();
         h.host.calls();
@@ -8407,7 +9080,7 @@ mod tests {
     async fn disks_boot_with_the_host_s_limits_for_the_size_under_the_machine_s_own() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         // The host's default for 1 vCPU, on the root disk only: it has no volume.
         assert_eq!(m.disk_limits, disk(32, 4000, 10).view());
         let disks = |id: &str| h.host.disks.lock().unwrap().get(id).copied();
@@ -8418,7 +9091,7 @@ mod tests {
             iops: Some(500),
             ..Default::default()
         });
-        let db = h.m.create(req).await.unwrap();
+        let db = h.m.create_made(req).await.unwrap();
         // Its own value over the host's; the rest scale with its 2 vCPUs.
         assert_eq!(db.disk_limits, disk(64, 500, 10).view());
         assert_eq!(disks(&db.id), Some((disk(64, 500, 10), false)));
@@ -8450,7 +9123,7 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            refused(h.m.create(bad).await),
+            refused(h.m.create_made(bad).await),
             "disk_limits.burst_sec: at most 3600"
         );
     }
@@ -8459,7 +9132,7 @@ mod tests {
     async fn disk_limits_change_at_once_on_a_running_machine_and_at_the_boot_otherwise() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         h.host.calls();
         let disks = |id: &str| h.host.disks.lock().unwrap().get(id).copied();
         let slow = api::DiskLimits {
@@ -8541,7 +9214,7 @@ mod tests {
     async fn disk_metrics_add_up_per_machine_across_its_boots() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         let io = h.m.entry(&m.id).unwrap().disk_io.clone();
         let line = |w: u64, t: u64| {
             json!({"block": {"write_bytes": w, "rate_limiter_throttled_events": t}}).to_string()
@@ -8593,7 +9266,7 @@ mod tests {
         let h = harness_with("10.64.0.0/22", 4096, host_limits()).await;
         h.ready().await;
         let m =
-            h.m.create(api::CreateMachineRequest {
+            h.m.create_made(api::CreateMachineRequest {
                 limits: Some(api::EgressLimits {
                     bandwidth_mbit: Some(100),
                     ..Default::default()
@@ -8648,7 +9321,7 @@ mod tests {
     async fn limits_change_at_once_on_a_running_machine() {
         let h = harness_with("10.64.0.0/22", 4096, host_limits()).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         assert_eq!(m.limits, view_limits(&[25], 600, 0));
         h.host.calls();
         // The fields it names, in one transaction; the others stay.
@@ -8704,7 +9377,7 @@ mod tests {
         );
         assert_eq!(
             refused(
-                h.m.create(api::CreateMachineRequest {
+                h.m.create_made(api::CreateMachineRequest {
                     limits: Some(bad),
                     ..h.request("web2")
                 })
@@ -8742,16 +9415,16 @@ mod tests {
     async fn via_and_none_machines_get_no_limits() {
         let h = harness_with("10.64.0.0/22", 4096, host_limits()).await;
         h.ready().await;
-        let gw = h.m.create(h.request("gw")).await.unwrap();
+        let gw = h.m.create_made(h.request("gw")).await.unwrap();
         h.host.calls();
         // They never reach the NAT: their policy is the one they would have without limits.
         let m =
-            h.m.create(h.request_egress("sbx", "via", Some(&gw.id)))
+            h.m.create_made(h.request_egress("sbx", "via", Some(&gw.id)))
                 .await
                 .unwrap();
         assert!(h.host.calls().contains(&format!("set_policy {VIA}")));
         let n =
-            h.m.create(h.request_egress("off", "none", None))
+            h.m.create_made(h.request_egress("off", "none", None))
                 .await
                 .unwrap();
         assert!(h
@@ -8904,7 +9577,7 @@ mod tests {
     async fn a_patch_waiting_on_a_destroy_finds_nothing() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         // The guest takes a while to stop: the destroy holds the lock meanwhile.
         h.host.stops_take(Duration::from_secs(3));
         let d = h.m.clone();
@@ -9003,8 +9676,8 @@ mod tests {
         assert!(h.m.logs(&gw.machine_id, "", 10).is_ok());
         // The name is taken in the tenant, like any machine's.
         assert!(matches!(
-            h.m.create(h.request("gateway")).await,
-            Err(MError::Conflict(_))
+            h.m.create_made(h.request("gateway")).await,
+            Err(MError::NameTaken(_))
         ));
         assert!(matches!(h.m.tenant("t9"), Err(MError::NotFound)));
         // A spec the gateway cannot run is refused before anything is made.
@@ -9034,7 +9707,7 @@ mod tests {
     async fn a_start_through_the_gateway_boots_it_first() {
         let h = harness("10.64.0.0/22", 4096).await;
         let gw = h.with_gateway().await;
-        let m = h.m.create(h.consumer("sbx")).await.unwrap();
+        let m = h.m.create_made(h.consumer("sbx")).await.unwrap();
         assert_eq!(m.state, state::RUNNING);
         // The gateway's boot and its port, then the machine's pin, its policy naming the
         // gateway's address, and its boot.
@@ -9080,7 +9753,7 @@ mod tests {
         for name in ["a", "b"] {
             let mut req = h.consumer(name);
             req.start = Some(false);
-            ids.push(h.m.create(req).await.unwrap().id);
+            ids.push(h.m.create_made(req).await.unwrap().id);
         }
         h.host.boots(Boots::Ready(Duration::from_millis(50)));
         let (ma, mb) = (h.m.clone(), h.m.clone());
@@ -9102,7 +9775,7 @@ mod tests {
         let gw = h.with_gateway().await;
         let mut req = h.consumer("sbx");
         req.start = Some(false);
-        let m = h.m.create(req).await.unwrap();
+        let m = h.m.create_made(req).await.unwrap();
         h.host.calls();
         // Its program never listens: the gateway is ended, in error, with the port named.
         h.host.silent_ports.store(true, Relaxed);
@@ -9156,11 +9829,11 @@ mod tests {
     async fn the_sleeper_stops_the_gateway_once_nothing_needs_it() {
         let h = harness("10.64.0.0/22", 4096).await;
         let gw = h.with_gateway().await;
-        let a = h.m.create(h.consumer("a")).await.unwrap();
-        let b = h.m.create(h.consumer("b")).await.unwrap();
+        let a = h.m.create_made(h.consumer("a")).await.unwrap();
+        let b = h.m.create_made(h.consumer("b")).await.unwrap();
         let mut open = h.request("open");
         open.sleep = "never".into();
-        h.m.create(open).await.unwrap();
+        h.m.create_made(open).await.unwrap();
         let long_ago = Some(Utc::now() - chrono::Duration::hours(1));
         let idle = |id: &str| h.m.entry(id).unwrap().rec.lock().unwrap().last_used_at = long_ago;
         // Nothing idle: the gateway stays.
@@ -9203,7 +9876,7 @@ mod tests {
     async fn the_sleeper_leaves_a_gateway_whose_tenant_is_busy() {
         let h = harness("10.64.0.0/22", 4096).await;
         let gw = h.with_gateway().await;
-        let m = h.m.create(h.consumer("sbx")).await.unwrap();
+        let m = h.m.create_made(h.consumer("sbx")).await.unwrap();
         h.m.stop(&m.id, Duration::from_secs(1), false, None)
             .await
             .unwrap();
@@ -9222,7 +9895,7 @@ mod tests {
     async fn a_gateway_in_use_is_kept_and_one_unused_removed() {
         let h = harness("10.64.0.0/22", 4096).await;
         let gw = h.with_gateway().await;
-        let m = h.m.create(h.consumer("sbx")).await.unwrap();
+        let m = h.m.create_made(h.consumer("sbx")).await.unwrap();
         assert!(matches!(
             h.m.delete_gateway("t1").await,
             Err(MError::GatewayInUse)
@@ -9252,7 +9925,7 @@ mod tests {
     async fn the_tenants_removal_destroys_its_gateway() {
         let h = harness("10.64.0.0/22", 4096).await;
         let gw = h.with_gateway().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         // The tenant's own machine keeps the tenant, and the gateway with it.
         assert!(matches!(
             h.m.delete_tenant("t1").await,
@@ -9271,8 +9944,8 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         let want = "tenant has no gateway: PUT /v1/tenants/t1/gateway first";
-        assert_eq!(refused(h.m.create(h.consumer("sbx")).await), want);
-        let m = h.m.create(h.request("web")).await.unwrap();
+        assert_eq!(refused(h.m.create_made(h.consumer("sbx")).await), want);
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         let patch =
             h.m.update(&m.id, set_egress("via", Some("gateway")), None)
                 .await;
@@ -9294,7 +9967,7 @@ mod tests {
         let gw = h.with_gateway().await;
         let mut req = h.request("sbx");
         req.sleep = "never".into();
-        let m = h.m.create(req).await.unwrap();
+        let m = h.m.create_made(req).await.unwrap();
         h.host.calls();
         let patched =
             h.m.update(&m.id, set_egress("via", Some("gateway")), None)
@@ -9322,7 +9995,7 @@ mod tests {
             .seed(IMAGE2, ImageConfig::default())
             .await
             .unwrap();
-        h.m.create(h.consumer("sbx")).await.unwrap();
+        h.m.create_made(h.consumer("sbx")).await.unwrap();
         h.host.calls();
         h.pool.calls();
         let spec = api::GatewaySpec {
@@ -9414,7 +10087,7 @@ mod tests {
         };
         let t = h.m.set_gateway("t1", spec(b"v1")).await.unwrap();
         let gw = t.gateway.unwrap().machine_id;
-        h.m.create(h.consumer("sbx")).await.unwrap();
+        h.m.create_made(h.consumer("sbx")).await.unwrap();
         let on_drive =
             |body: &[u8]| vec![("files/etc/proxy.yaml".to_string(), 0o600, body.to_vec())];
         assert_eq!(h.drive(&gw).1, on_drive(b"v1"));
@@ -9445,7 +10118,7 @@ mod tests {
     async fn the_gateways_address_stays_reserved_while_a_policy_names_it() {
         let h = harness("10.64.0.0/22", 4096).await;
         let gw = h.with_gateway().await;
-        h.m.create(h.consumer("sbx")).await.unwrap();
+        h.m.create_made(h.consumer("sbx")).await.unwrap();
         // Destroyed under a running consumer (by its machine id): a new gateway gets another
         // address, so the consumer's policy reaches nothing rather than a stranger.
         h.m.destroy_machine(&gw, None).await.unwrap();
@@ -9498,7 +10171,7 @@ mod tests {
                     .await
                     .map(|_| ()),
             ),
-            gateway(h.m.create(fork).await.map(|_| ())),
+            gateway(h.m.create_made(fork).await.map(|_| ())),
             gateway(h.m.exec(&gw, exec).await.map(|_| ())),
             gateway(h.m.put_file(&gw, put).await),
             gateway(h.m.get_file(&gw, "/etc/hostname").await.map(|_| ())),
@@ -9957,7 +10630,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         let t0 = Utc::now();
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         assert!(
             h.host.counted.lock().unwrap().contains_key(&m.ip),
             "counted from its create"
@@ -9985,7 +10658,7 @@ mod tests {
         assert_eq!(sum(|u| u.internet_in_bytes as f64), 500.0);
         // Counters that cannot be removed keep the destroy from finishing: the address would
         // be handed out again with the old count. The tick tries again.
-        let m = h.m.create(h.request("web2")).await.unwrap();
+        let m = h.m.create_made(h.request("web2")).await.unwrap();
         h.host.refuse_uncount.store(true, Relaxed);
         let err = h.m.destroy(&m.id, None).await.unwrap_err();
         assert!(format!("{err:#}").contains("usage counters"), "{err:#}");
@@ -9994,8 +10667,8 @@ mod tests {
         h.m.tick().await;
         assert!(matches!(h.m.get(&m.id), Err(MError::NotFound)));
         assert!(!h.host.counted.lock().unwrap().contains_key(&m.ip));
-        // A create that fails once counted (a fork of a source whose disks are gone) takes
-        // its counters back.
+        // A create that fails once counted (a fork of a source whose disks are gone) is kept
+        // in `error` for a read (ADR 0048); its destroy takes its counters back.
         h.add("m_src", state::STOPPED, 256);
         let mut fork = h.request("fork");
         fork.image.clear();
@@ -10003,8 +10676,13 @@ mod tests {
             machine_id: "m_src".into(),
             copy: String::new(),
         });
-        let err = h.m.create(fork).await.unwrap_err();
-        assert!(format!("{err:#}").contains("zfs"), "{err:#}");
+        let err = h.m.create_made(fork).await.unwrap_err();
+        let MError::CreateFailed(f) = err else {
+            panic!("{err:?}")
+        };
+        assert!(f.error.contains("zfs"), "{}", f.error);
+        assert_eq!(f.error_reason, reason::CREATE_FAILED);
+        h.m.destroy(&f.id, None).await.unwrap();
         assert!(h.host.counted.lock().unwrap().is_empty());
     }
 
@@ -10082,7 +10760,7 @@ mod tests {
             }
             r.send()
         };
-        // The fleet relays a host's metrics with the API token it holds (ADR 0048).
+        // The fleet relays a host's metrics with the API token it holds (ADR 0054).
         for token in ["scrape", "api"] {
             let r = get("/metrics", token).await.unwrap();
             assert_eq!(r.status(), 200, "{token}");
@@ -10133,7 +10811,7 @@ mod tests {
     async fn each_transition_is_an_event_and_moves_the_version() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         h.m.stop(&m.id, Duration::from_secs(1), false, None)
             .await
             .unwrap();
@@ -10178,7 +10856,7 @@ mod tests {
         h.ready().await;
         // The image's: the guest exited booting; its console's tail is in the message.
         h.host.boots(Boots::Exits(1, ""));
-        let m = match h.m.create(h.request("bad")).await {
+        let m = match h.m.create_made(h.request("bad")).await {
             Err(MError::BootFailed(m)) => m,
             other => panic!("{other:?}"),
         };
@@ -10200,7 +10878,7 @@ mod tests {
         h.host.boots(Boots::Ready(Duration::ZERO));
         h.host.refuse_policies.store(true, Relaxed);
         let err =
-            h.m.create(h.request_egress("walled", "none", None))
+            h.m.create_made(h.request_egress("walled", "none", None))
                 .await
                 .unwrap_err();
         assert!(matches!(err, MError::Other(_)), "{err:?}");
@@ -10220,7 +10898,7 @@ mod tests {
     async fn an_exit_and_its_restart_are_events() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("job")).await.unwrap();
+        let m = h.m.create_made(h.request("job")).await.unwrap();
         h.host.exit(1000, 7, false);
         // The default policy, on-failure with 3 retries: the first comes after 10 s.
         h.events_reach(&m.id, reason::STARTED, 2).await;
@@ -10259,7 +10937,7 @@ mod tests {
             policy: "no".into(),
             max_retries: 0,
         });
-        let m = h.m.create(req).await.unwrap();
+        let m = h.m.create_made(req).await.unwrap();
         h.host.exit(1002, 0, false);
         h.events_reach(&m.id, reason::EXITED, 1).await;
         let e = h.events_of(&m.id).pop().unwrap();
@@ -10274,7 +10952,7 @@ mod tests {
     async fn a_suspend_and_its_resume_are_events() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         h.m.stop(&m.id, Duration::from_secs(1), true, None)
             .await
             .unwrap();
@@ -10295,7 +10973,7 @@ mod tests {
         );
         assert_eq!(evs[3].data.as_ref().unwrap()["suspend"], true);
         // A sleeping machine stopped on request: that changes it, so it is an event.
-        let m = h.m.create(h.request("nap")).await.unwrap();
+        let m = h.m.create_made(h.request("nap")).await.unwrap();
         let e = h.m.entry(&m.id).unwrap();
         h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
             .await
@@ -10315,7 +10993,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         let gw = h.with_gateway().await;
         assert_eq!(h.reasons(&gw), ["created"]);
-        let c = h.m.create(h.consumer("c")).await.unwrap();
+        let c = h.m.create_made(h.consumer("c")).await.unwrap();
         assert_eq!(
             h.reasons(&gw),
             ["created", "starting", "started", "gateway_started"]
@@ -10329,7 +11007,7 @@ mod tests {
         let consumer = h.events_of(&c.id);
         assert!(consumer[1].seq > started.seq);
         // A start that finds it running says nothing more.
-        h.m.create(h.consumer("d")).await.unwrap();
+        h.m.create_made(h.consumer("d")).await.unwrap();
         assert_eq!(h.reasons(&gw).len(), 4);
         for id in [
             c.id.clone(),
@@ -10367,7 +11045,7 @@ mod tests {
     async fn a_patch_is_an_event_only_when_it_changes_something() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         let changed =
             h.m.update(&m.id, set_egress("none", None), None)
                 .await
@@ -10435,7 +11113,7 @@ mod tests {
     async fn a_stale_if_match_is_refused_with_the_machine_as_it_is() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         let stale = m.version - 1;
         let moved = |r: Result<api::Machine, MError>| match r {
             Err(MError::Moved(now)) => now.version,
@@ -10577,7 +11255,7 @@ mod tests {
         let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", ln.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(ln, crate::api::router(st)).await.unwrap() });
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         let http = reqwest::Client::new();
         let get = |q: String| http.get(format!("{base}/v1/events{q}")).send();
         let r = get(format!("?machine={}", m.id)).await.unwrap();
@@ -10693,7 +11371,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         // Without probes: ready once running, as Kubernetes; never while stopped.
-        let plain = h.m.create(h.request("plain")).await.unwrap();
+        let plain = h.m.create_made(h.request("plain")).await.unwrap();
         assert!(plain.ready);
         assert!(plain.probes.is_empty() && plain.probes_status.is_empty());
         let stopped =
@@ -10703,7 +11381,7 @@ mod tests {
         assert!(!stopped.ready);
         // A readiness probe: not ready while it fails, and never was, so no `not_ready`.
         let m =
-            h.m.create(h.probed("web", readiness(http_probe(8080))))
+            h.m.create_made(h.probed("web", readiness(http_probe(8080))))
                 .await
                 .unwrap();
         h.host.http(&m.ip, 8080, 503);
@@ -10759,7 +11437,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         let m =
-            h.m.create(h.probed("web", readiness(http_probe(8080))))
+            h.m.create_made(h.probed("web", readiness(http_probe(8080))))
                 .await
                 .unwrap();
         h.host.http(&m.ip, 8080, 503);
@@ -10783,7 +11461,7 @@ mod tests {
         h.host.http(&m.ip, 8080, 200);
         assert!(waiting.await.unwrap().unwrap().ready);
         // A machine without probes is ready with `running`.
-        let plain = h.m.create(h.request("plain")).await.unwrap();
+        let plain = h.m.create_made(h.request("plain")).await.unwrap();
         let ready = h.m.wait(&plain.id, Until::Ready, Duration::from_secs(1));
         assert!(ready.await.unwrap().ready);
     }
@@ -10798,7 +11476,7 @@ mod tests {
             liveness: Some(exec_probe("true")),
             ..Default::default()
         };
-        let m = h.m.create(h.probed("pg", probes)).await.unwrap();
+        let m = h.m.create_made(h.probed("pg", probes)).await.unwrap();
         // The create answers at `running`; the caller waits for `ready`.
         assert_eq!((m.state.as_str(), m.ready), (state::RUNNING, false));
         let failed = match h.m.wait(&m.id, Until::Ready, Duration::from_secs(60)).await {
@@ -10857,7 +11535,7 @@ mod tests {
             startup: Some(exec_probe("check")),
             ..Default::default()
         };
-        let m = h.m.create(h.probed("app", probes)).await.unwrap();
+        let m = h.m.create_made(h.probed("app", probes)).await.unwrap();
         // Startup passed and there is no readiness probe: ready, through the startup probe.
         eventually("ready", || h.m.get(&m.id).unwrap().ready).await;
         assert_eq!(h.last_event(&m.id).message, "ready: startup passed");
@@ -10889,7 +11567,10 @@ mod tests {
             liveness: Some(exec_probe(alive)),
             ..Default::default()
         };
-        let m = h.m.create(h.probed("live", probes.clone())).await.unwrap();
+        let m =
+            h.m.create_made(h.probed("live", probes.clone()))
+                .await
+                .unwrap();
         // Liveness does not gate `ready`.
         assert!(m.ready);
         h.host.answers(alive, 1);
@@ -10941,7 +11622,7 @@ mod tests {
             policy: "no".into(),
             max_retries: 0,
         });
-        let once = h.m.create(req).await.unwrap();
+        let once = h.m.create_made(req).await.unwrap();
         h.host.answers(alive, 1);
         h.events_reach(&once.id, reason::LIVENESS_FAILED, 1).await;
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -10965,7 +11646,7 @@ mod tests {
             policy: "always".into(),
             max_retries: 0,
         });
-        let m = h.m.create(req).await.unwrap();
+        let m = h.m.create_made(req).await.unwrap();
         for n in 1..=4 {
             h.host.exit(h.stored(&m.id).unwrap().pid, 1, false);
             h.events_reach(&m.id, reason::STARTED, n + 1).await;
@@ -11027,7 +11708,7 @@ mod tests {
     async fn a_session_streams_both_ways_and_is_an_event_not_a_version() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("sbx")).await.unwrap();
+        let m = h.m.create_made(h.request("sbx")).await.unwrap();
         h.host.answers("sh", 3);
         let mut s =
             h.m.open_session(&m.id, session_req(&["sh"], true))
@@ -11087,7 +11768,7 @@ mod tests {
     async fn an_open_session_keeps_the_machine_awake() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("sbx")).await.unwrap();
+        let m = h.m.create_made(h.request("sbx")).await.unwrap();
         let s =
             h.m.open_session(&m.id, session_req(&["sh"], true))
                 .await
@@ -11122,7 +11803,7 @@ mod tests {
     async fn a_command_in_flight_keeps_the_machine_awake() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("job")).await.unwrap();
+        let m = h.m.create_made(h.request("job")).await.unwrap();
         *h.host.exec_takes.lock().unwrap() = Duration::from_secs(3);
         let mgr = h.m.clone();
         let id = m.id.clone();
@@ -11152,11 +11833,60 @@ mod tests {
         );
     }
 
+    /// The ingress and a TCP endpoint to port 1 of `machine`, which nothing serves at the
+    /// harness's addresses: a dial waits on it until the machine stops.
+    fn ingress_to(h: &Harness, machine: &str) -> (crate::ingress::Ingress, EndpointRec) {
+        let req = api::CreateEndpointRequest {
+            port: 1,
+            protocol: "tcp".into(),
+            ..Default::default()
+        };
+        let ep = h.m.create_endpoint(machine, req).unwrap();
+        let ingress =
+            crate::ingress::Ingress::new(h.m.clone(), "127.0.0.1", "", Duration::from_secs(5));
+        (ingress, h.m.endpoint(&ep.id).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_wakes_its_machine_keeps_it_awake_until_delivered() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create_made(h.request("web")).await.unwrap();
+        let idle = || {
+            h.m.entry(&m.id).unwrap().rec.lock().unwrap().last_used_at =
+                Some(Utc::now() - chrono::Duration::hours(1))
+        };
+        idle();
+        h.m.tick().await;
+        assert_eq!(h.m.get(&m.id).unwrap().stopped_reason, stop::IDLE);
+        let (ingress, ep) = ingress_to(&h, &m.id);
+        let dial = tokio::spawn(async move { ingress.dial(&ep).await });
+        eventually("the connection woke it", || {
+            h.m.get(&m.id).unwrap().state == state::RUNNING
+        })
+        .await;
+        // Its window runs out before the program listens: the connection still waits for the
+        // port, and the machine does not go back to sleep under it.
+        idle();
+        h.m.tick().await;
+        let up = h.m.get(&m.id).unwrap();
+        assert_eq!(up.state, state::RUNNING);
+        assert_eq!(up.sleeps_at, None, "in use");
+        // A stop ends the wait, and the use with it.
+        h.m.stop(&m.id, Duration::ZERO, false, None).await.unwrap();
+        let err = dial.await.unwrap().unwrap_err().to_string();
+        assert!(err.ends_with("the machine stopped"), "{err}");
+        assert_eq!(h.m.entry(&m.id).unwrap().in_flight.load(Relaxed), 0);
+        assert!(
+            h.m.get(&m.id).unwrap().last_used_at > Some(Utc::now() - chrono::Duration::minutes(1))
+        );
+    }
+
     #[tokio::test]
     async fn a_session_wakes_a_sleeping_machine_or_says_why_not() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("sbx")).await.unwrap();
+        let m = h.m.create_made(h.request("sbx")).await.unwrap();
         let e = h.m.entry(&m.id).unwrap();
         h.m.stop_entry(&e, stop::IDLE, Duration::from_secs(1), false, None)
             .await
@@ -11191,7 +11921,7 @@ mod tests {
         // An init older than the version report: it would run the command as a plain exec,
         // no input, no terminal.
         *h.host.init_version.lock().unwrap() = String::new();
-        let m = h.m.create(h.request("old")).await.unwrap();
+        let m = h.m.create_made(h.request("old")).await.unwrap();
         h.host.calls();
         match h.m.open_session(&m.id, session_req(&["sh"], true)).await {
             Err(MError::Conflict(why)) => assert_eq!(
@@ -11214,7 +11944,7 @@ mod tests {
         assert_eq!(out.exit_code, 0);
         // One of a release before sessions, named.
         *h.host.init_version.lock().unwrap() = "0.0.9+a".into();
-        let m = h.m.create(h.request("older")).await.unwrap();
+        let m = h.m.create_made(h.request("older")).await.unwrap();
         match h.m.open_session(&m.id, session_req(&["sh"], false)).await {
             Err(MError::Conflict(why)) => assert!(
                 why.starts_with("the machine's init (0.0.9+a) does not know `session`"),
@@ -11224,7 +11954,7 @@ mod tests {
         }
         // This release's: a session.
         *h.host.init_version.lock().unwrap() = api::VERSION.into();
-        let m = h.m.create(h.request("new")).await.unwrap();
+        let m = h.m.create_made(h.request("new")).await.unwrap();
         assert!(h
             .m
             .open_session(&m.id, session_req(&["sh"], false))
@@ -11243,7 +11973,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         let m =
-            h.m.create(h.probed("web", readiness(http_probe(8080))))
+            h.m.create_made(h.probed("web", readiness(http_probe(8080))))
                 .await
                 .unwrap();
         eventually("ready", || h.m.get(&m.id).unwrap().ready).await;
@@ -11277,7 +12007,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         let m =
-            h.m.create(h.probed("db", readiness(http_probe(8080))))
+            h.m.create_made(h.probed("db", readiness(http_probe(8080))))
                 .await
                 .unwrap();
         eventually("ready", || h.m.get(&m.id).unwrap().ready).await;
@@ -11313,7 +12043,7 @@ mod tests {
         let mut ids = Vec::new();
         for i in 0..5 {
             let req = h.probed(&format!("m{i}"), readiness(exec_probe("ready-check")));
-            ids.push(h.m.create(req).await.unwrap().id);
+            ids.push(h.m.create_made(req).await.unwrap().id);
         }
         // Each one gets its turn: all ready in the end, never more than two at once.
         eventually("all ready", || {
@@ -11328,7 +12058,7 @@ mod tests {
     async fn a_patch_of_the_probes_applies_at_once_to_a_running_machine() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         assert!(m.ready);
         h.host.http(&m.ip, 8080, 503);
         let set = |p: api::Probes| api::UpdateMachineRequest {
@@ -11386,7 +12116,7 @@ mod tests {
             refused(h.m.update(&m.id, set(bad.clone()), None).await),
             want
         );
-        assert_eq!(refused(h.m.create(h.probed("bad", bad)).await), want);
+        assert_eq!(refused(h.m.create_made(h.probed("bad", bad)).await), want);
     }
 
     #[tokio::test(start_paused = true)]
@@ -11404,7 +12134,7 @@ mod tests {
         h.host.closed.lock().unwrap().insert((ip, 3128));
         h.host.calls();
         // Not ready within the boot timeout: the consumer's start fails, the gateway errs.
-        let err = h.m.create(h.consumer("c")).await.unwrap_err();
+        let err = h.m.create_made(h.consumer("c")).await.unwrap_err();
         let m = match err {
             MError::BootFailed(m) => m,
             other => panic!("{other:?}"),
@@ -11467,7 +12197,10 @@ mod tests {
             failure_threshold: 1,
             ..http_probe(8080)
         };
-        let m = h.m.create(h.probed("web", readiness(p))).await.unwrap();
+        let m =
+            h.m.create_made(h.probed("web", readiness(p)))
+                .await
+                .unwrap();
         let mut versions = vec![];
         for _ in 0..4 {
             for (code, ready) in [(200, true), (500, false)] {
@@ -11520,7 +12253,10 @@ mod tests {
             failure_threshold: 1,
             ..http_probe(8080)
         };
-        let m = h.m.create(h.probed("web", readiness(p))).await.unwrap();
+        let m =
+            h.m.create_made(h.probed("web", readiness(p)))
+                .await
+                .unwrap();
         for code in [200, 500, 200, 500] {
             h.host.http(&m.ip, 8080, code);
             eventually("flipped", || h.m.get(&m.id).unwrap().ready == (code == 200)).await;
@@ -11606,7 +12342,9 @@ mod tests {
             timeout_sec: 5,
             ..exec_probe("slow-check")
         };
-        h.m.create(h.probed("web", readiness(p))).await.unwrap();
+        h.m.create_made(h.probed("web", readiness(p)))
+            .await
+            .unwrap();
         let began = tokio::time::Instant::now();
         tokio::time::sleep(Duration::from_millis(6500)).await;
         let times: Vec<Duration> = h
@@ -11834,7 +12572,7 @@ mod tests {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
         // The seeded image is cloned by a machine; then four more, oldest first.
-        h.m.create(h.request("web")).await.unwrap();
+        h.m.create_made(h.request("web")).await.unwrap();
         let mut keys = vec![];
         for n in 2..=5 {
             let r = format!("alpine@sha256:{n:064}");
@@ -11992,11 +12730,14 @@ mod tests {
             req
         };
         let web =
-            h.m.create(labelled("web", &[("app", "web"), ("tier", "front")]))
+            h.m.create_made(labelled("web", &[("app", "web"), ("tier", "front")]))
                 .await
                 .unwrap();
-        let db = h.m.create(labelled("db", &[("app", "db")])).await.unwrap();
-        h.m.create(labelled("bare", &[])).await.unwrap();
+        let db =
+            h.m.create_made(labelled("db", &[("app", "db")]))
+                .await
+                .unwrap();
+        h.m.create_made(labelled("bare", &[])).await.unwrap();
         let ids = |tenant: Option<&str>, sel: &[&str]| -> Vec<String> {
             let sel: Vec<api::Label> = sel.iter().map(|s| api::Label::parse(s).unwrap()).collect();
             h.m.list(tenant, &sel).into_iter().map(|m| m.id).collect()
@@ -12083,10 +12824,10 @@ mod tests {
         let stored: TenantRec = h.m.inner.store.get("tenants", "t2").unwrap().unwrap();
         assert_eq!(stored.quota, set(1, 384), "kept across a restart");
         h.m.set_quota("t1", set(2, 384)).await.unwrap();
-        let a = h.m.create(h.request("a")).await.unwrap();
+        let a = h.m.create_made(h.request("a")).await.unwrap();
         let mut b = h.request("b");
         b.start = Some(false);
-        let b = h.m.create(b).await.unwrap();
+        let b = h.m.create_made(b).await.unwrap();
         // The use, as the quota counts it: two machines, one of them running.
         let used = |t| h.m.quota(t).unwrap().used;
         assert_eq!(
@@ -12124,7 +12865,7 @@ mod tests {
             machine_id: a.id.clone(),
             copy: String::new(),
         });
-        let err = h.m.create(fork).await.unwrap_err();
+        let err = h.m.create_made(fork).await.unwrap_err();
         assert_eq!(
             err.to_string(),
             "tenant t1's quota: machines 2 of 2 used, 1 more asked"
@@ -12157,14 +12898,14 @@ mod tests {
         // With room for machines: a create that starts is held to memory before it is made,
         // and one with a volume to disk.
         h.m.set_quota("t1", set(5, 384)).await.unwrap();
-        let err = h.m.create(h.request("c")).await.unwrap_err();
+        let err = h.m.create_made(h.request("c")).await.unwrap_err();
         assert!(err.to_string().contains("memory_mb 256 of 384"), "{err}");
         let mut v = h.request("v");
         v.volume = Some(api::VolumeSpec {
             size_gb: 6,
             mount: "/data".into(),
         });
-        let err = h.m.create(v).await.unwrap_err();
+        let err = h.m.create_made(v).await.unwrap_err();
         assert_eq!(
             err.to_string(),
             "tenant t1's quota: disk_gb 0 of 5 used, 6 more asked"
@@ -12195,7 +12936,7 @@ mod tests {
     async fn logs_follow_sends_what_is_there_then_each_line_across_a_rotation_until_destroyed() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         let dir = h.m.inner.cfg.run_dir().join(&m.id);
         // The daemon's writer of the console, rotating every two lines.
         let mut w = console::Writer::open(&dir, 64).await.unwrap();
@@ -12311,7 +13052,7 @@ mod tests {
             .unwrap();
         let mut req = h.request("web");
         req.env = env("V", "1");
-        let m = h.m.create(req).await.unwrap();
+        let m = h.m.create_made(req).await.unwrap();
         h.host.calls();
         let change = spec(|s| {
             s.image = Some(IMAGE2.into());
@@ -12552,10 +13293,10 @@ mod tests {
     async fn a_new_size_is_reserved_at_the_start_and_refused_past_the_host() {
         let h = harness("10.64.0.0/22", 1024).await;
         h.ready().await;
-        let a = h.m.create(h.request("a")).await.unwrap();
+        let a = h.m.create_made(h.request("a")).await.unwrap();
         let mut big = h.request("b");
         big.size.memory_mb = 512;
-        let b = h.m.create(big).await.unwrap();
+        let b = h.m.create_made(big).await.unwrap();
         let grown = api::Size {
             vcpus: 2,
             memory_mb: 768,
@@ -12599,7 +13340,7 @@ mod tests {
     async fn a_change_to_what_a_memory_snapshot_holds_makes_the_next_start_cold() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         let suspend = || h.m.stop(&m.id, Duration::from_secs(1), true, None);
         assert!(suspend().await.unwrap().suspended);
         // The ports are the daemon's: a resume applies them.
@@ -12811,19 +13552,19 @@ mod tests {
             start: Some(false),
             ..h.request(name)
         };
-        let err = h.m.create(fork(1, "small")).await.unwrap_err();
+        let err = h.m.create_made(fork(1, "small")).await.unwrap_err();
         assert_eq!(
             err.to_string(),
             "invalid request: volume: 1 GB asked, 2 GB held: a volume never shrinks"
         );
-        let f = h.m.create(fork(6, "big")).await.unwrap();
+        let f = h.m.create_made(fork(6, "big")).await.unwrap();
         assert_eq!(f.volume.map(|v| v.size_gb), Some(6));
         let ds = format!("m/{}/data", f.id);
         assert_eq!(h.pool.zfs.volsize(&ds).await.unwrap(), 6 << 30);
         assert_eq!(h.pool.zfs.volsize("m/m_v/data").await.unwrap(), 2 << 30);
         // The source's own size: its clone is that size already.
         h.pool.calls();
-        let same = h.m.create(fork(2, "same")).await.unwrap();
+        let same = h.m.create_made(fork(2, "same")).await.unwrap();
         assert!(!h.pool.calls().iter().any(|c| c.starts_with("set ")));
         assert_eq!(same.volume.map(|v| v.size_gb), Some(2));
     }
@@ -12832,7 +13573,7 @@ mod tests {
     async fn an_image_that_cannot_be_pulled_fails_the_boot_and_stays_pending() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         h.m.stop(&m.id, Duration::from_secs(1), false, None)
             .await
             .unwrap();
@@ -12875,7 +13616,7 @@ mod tests {
     async fn create_and_patch_refuse_a_bad_spec_in_the_same_words() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         let file = |path: &str, base64: &str, mode: Option<&str>| api::File {
             path: path.into(),
             base64: base64.into(),
@@ -12926,7 +13667,7 @@ mod tests {
             req.env = s.env.unwrap_or_default();
             req.ports = s.ports.unwrap_or_default();
             req.restart = s.restart;
-            let at_create = refused(h.m.create(req).await);
+            let at_create = refused(h.m.create_made(req).await);
             let at_patch = refused(h.m.update(&m.id, patch, None).await);
             assert!(at_create.starts_with(want), "{at_create:?}, want {want:?}");
             assert_eq!(at_create, at_patch);
@@ -12945,7 +13686,7 @@ mod tests {
     async fn a_boot_records_what_the_init_says_and_what_ran_it() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         assert_eq!(
             (m.init_version.as_str(), m.vmm_version.as_str()),
             ("0.1.0+init", "v1.17.0/test")
@@ -12972,7 +13713,7 @@ mod tests {
     async fn a_snapshot_taken_under_another_vmm_is_not_resumed() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         let suspend = || h.m.stop(&m.id, Duration::from_secs(1), true, None);
         assert!(suspend().await.unwrap().suspended);
         // Firecracker (or the host kernel) changed under the suspended machine: a cold boot.
@@ -13019,7 +13760,7 @@ mod tests {
     async fn a_hand_over_leaves_every_machine_running_for_the_next_daemon() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let m = h.m.create(h.request("web")).await.unwrap();
+        let m = h.m.create_made(h.request("web")).await.unwrap();
         h.m.touch(&m.id).unwrap();
         h.host.calls();
         let _held = h.m.hand_over().await;
@@ -13061,8 +13802,8 @@ mod tests {
     async fn a_hand_over_waits_for_a_transition_and_lets_none_begin() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let a = h.m.create(h.request("a")).await.unwrap();
-        let b = h.m.create(h.request("b")).await.unwrap();
+        let a = h.m.create_made(h.request("a")).await.unwrap();
+        let b = h.m.create_made(h.request("b")).await.unwrap();
         // A stop under way when the hand-over is asked: its guest takes a while to end.
         *h.host.stops.lock().unwrap() = Duration::from_millis(300);
         let m = h.m.clone();
@@ -13095,12 +13836,12 @@ mod tests {
     async fn a_daemons_start_boots_again_what_the_host_stopped() {
         let h = harness("10.64.0.0/22", 4096).await;
         h.ready().await;
-        let a = h.m.create(h.request("a")).await.unwrap();
-        let b = h.m.create(h.request("b")).await.unwrap();
-        let c = h.m.create(h.request("c")).await.unwrap();
+        let a = h.m.create_made(h.request("a")).await.unwrap();
+        let b = h.m.create_made(h.request("b")).await.unwrap();
+        let c = h.m.create_made(h.request("c")).await.unwrap();
         let mut never = h.request("d");
         never.sleep = "never".into();
-        let d = h.m.create(never).await.unwrap();
+        let d = h.m.create_made(never).await.unwrap();
         h.m.stop(&c.id, Duration::from_secs(1), false, None)
             .await
             .unwrap();

@@ -57,7 +57,7 @@ fn log_limit(asked: Option<usize>) -> usize {
 
 /// Which token a path needs: none for liveness; none for `/metrics` and the OpenAPI document
 /// on a loopback listener; for `/metrics`, the metrics token or the API's (the fleet relays a
-/// host's with the API token it holds, ADR 0048); else the API's.
+/// host's with the API token it holds, ADR 0054); else the API's.
 #[derive(Debug, PartialEq)]
 enum Bearer {
     None,
@@ -158,10 +158,12 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
             (StatusCode::NOT_FOUND, "not_found")
         }
         MError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
-        MError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+        MError::Conflict(_) | MError::NameTaken(_) => (StatusCode::CONFLICT, "conflict"),
         MError::NotRunning(_) => (StatusCode::CONFLICT, "not_running"),
         MError::BadState(_) => (StatusCode::CONFLICT, "bad_state"),
         MError::BootFailed(_) => (StatusCode::CONFLICT, "boot_failed"),
+        MError::PullFailed(_) => (StatusCode::CONFLICT, "pull_failed"),
+        MError::CreateFailed(_) => (StatusCode::CONFLICT, "create_failed"),
         MError::Moved(_) => (StatusCode::CONFLICT, "conflict"),
         MError::NotReady(_) => (StatusCode::CONFLICT, "not_ready"),
         MError::Gone { .. } => (StatusCode::GONE, "gone"),
@@ -191,7 +193,12 @@ impl From<MError> for AppError {
                 tracing::warn!(machine = m.id, err = %error, "boot failed");
                 Some(m)
             }
-            MError::Moved(m) | MError::NotReady(m) => Some(m),
+            // A create's failure was logged where it happened (ADR 0048); a `/wait` reads it.
+            MError::Moved(m)
+            | MError::NotReady(m)
+            | MError::PullFailed(m)
+            | MError::CreateFailed(m)
+            | MError::NameTaken(m) => Some(m),
             MError::Other(_) => {
                 tracing::error!(err = %error, "request failed");
                 None
@@ -351,6 +358,8 @@ async fn list_machines(
 // Every transition runs through `detached`: axum drops a handler's future when the client
 // hangs up, and a create, start, stop or destroy cut short would leave the machine half-moved.
 
+/// 201 once the machine is recorded, in `creating` (ADR 0048): its image, disks and start
+/// follow; `/wait` waits for them.
 async fn create_machine(
     State(st): S,
     Json(req): Json<api::CreateMachineRequest>,
@@ -1011,6 +1020,31 @@ mod tests {
             "machine m_1 is running, not ready: readiness: HTTP 503"
         );
         assert_eq!(e.machine.map(|m| m.state), Some("running".to_string()));
+        // ADR 0048: on its way at the timeout, a create that failed, a name taken: the machine.
+        let on_its_way = api::Machine {
+            id: "m_1".into(),
+            state: api::state::CREATING.into(),
+            ..Default::default()
+        };
+        let e = AppError::from(MError::NotReady(Box::new(on_its_way.clone())));
+        assert_eq!(
+            (e.code, e.error.as_str()),
+            ("not_ready", "machine m_1 is still creating")
+        );
+        let failed = api::Machine {
+            state: api::state::ERROR.into(),
+            error: "pull x: manifest unknown".into(),
+            ..on_its_way.clone()
+        };
+        let e = AppError::from(MError::PullFailed(Box::new(failed.clone())));
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "pull_failed"));
+        assert_eq!(e.error, "pull failed: pull x: manifest unknown");
+        let e = AppError::from(MError::CreateFailed(Box::new(failed)));
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "create_failed"));
+        assert!(e.machine.is_some());
+        let e = AppError::from(MError::NameTaken(Box::new(on_its_way)));
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "conflict"));
+        assert_eq!(e.machine.map(|m| m.id), Some("m_1".to_string()));
         let e = AppError::from(MError::Quota(
             "tenant t1's quota: machines 1 of 1 used, 1 more asked".into(),
         ));

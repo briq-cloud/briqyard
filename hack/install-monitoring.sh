@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prometheus and Grafana beside the fleet (ADR 0048), on the fleet's server: the pinned
+# Prometheus and Grafana beside the fleet (ADR 0054), on the fleet's server: the pinned
 # releases, checked against their digests; a systemd unit each, as a user of its own, both on
 # loopback (your reverse proxy serves Grafana, OPERATIONS.md). Prometheus finds the hosts at
 # the fleet's /v1/metrics/targets and scrapes each through the fleet; Grafana has the
@@ -132,7 +132,7 @@ global:
   scrape_timeout: 10s
   evaluation_interval: 1m
 scrape_configs:
-  # Every host, through the fleet's relay, and the fleet itself (ADR 0048).
+  # Every host, through the fleet's relay, and the fleet itself (ADR 0054).
   - job_name: briqyard
     scheme: ${FLEET_URL%%://*}
     ${auth}

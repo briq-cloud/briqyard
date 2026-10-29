@@ -42,7 +42,7 @@ paths:
               schema: { type: array, items: { $ref: "#/components/schemas/Machine" } }
         "400": { description: "`invalid`: a label selector that is not `key=value` or `key`" }
     post:
-      summary: Create a machine (pulls the image when the host has not seen it)
+      summary: "Create a machine (ADR 0048): answers once it is recorded, in `creating`, its name, address and (unless `start` is false) memory taken. Its image is pulled when the host has not seen it, its disks made and it is started in the background; `/wait` waits for that. A failure leaves it in `error` with `error_reason` (`pull_failed`, `create_failed`, `boot_failed`), for a read and a destroy; nothing is tried again"
       requestBody:
         required: true
         content:
@@ -50,13 +50,13 @@ paths:
             schema: { $ref: "#/components/schemas/CreateMachineRequest" }
       responses:
         "201":
-          description: created and, unless `start` is false, running
+          description: recorded, in `creating`
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Machine" }
-        "400": { description: "`invalid`: a bad field, named; a fork's or a restore's `volume` smaller than its source's (`a volume never shrinks`; a larger one grows the disk, ADR 0040); through the fleet, a `region` other than the tenant's (its host's: a tenant never spans regions)" }
+        "400": { description: "`invalid`: a bad field, named; a fork's or a restore's `volume` smaller than its source's (`a volume never shrinks`; a larger one grows the disk, ADR 0040); a fork's source without disks (creating, or its create failed); through the fleet, a `region` other than the tenant's (its host's: a tenant never spans regions)" }
         "403": { description: "`quota`: past a limit of the tenant's quota, the limit and the use in `error`; nothing made" }
-        "409": { description: "`conflict`: a machine with that name exists in the tenant; `boot_failed`: made but the guest did not come up, the body's `machine` is it, in state `error`, kept for its console and a destroy" }
+        "409": { description: "`conflict`: a machine with that name exists in the tenant, the body's `machine` is it: a create sent again after no answer finds the one it made" }
         "503": { description: "`capacity`: the host has no room (its memory, or for a volume its pool's free space); through the fleet, no host (of `region`, when given) has room" }
   /v1/machines/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
@@ -90,13 +90,13 @@ paths:
   /v1/machines/{id}/start:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Boot a created or stopped machine
+      summary: "Boot a created or stopped machine; a `creating` one is started by its create once made, its memory taken now, and answered as it is"
       parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "400": { description: "`invalid`: its `egress.via` names a machine that is gone, or `gateway` in a tenant that has none" }
         "403": { description: "`quota`: its memory or vCPUs would pass the tenant's quota; not moved, a `quota_exceeded` event about it" }
-        "409": { description: "`bad_state`: busy (starting, stopping or destroying); `boot_failed`: the guest did not come up, the body's `machine` is it, in state `error`; or the tenant's gateway did not come up, the body's `machine` is this one, not moved, the gateway's reason in its `error`; `conflict`: `If-Match` names a version it moved past, the body's `machine` is it as it is" }
+        "409": { description: "`bad_state`: busy (starting, stopping or destroying), or in `error` from a create that made no disks (`pull_failed`, `create_failed`: destroy it and create again); `boot_failed`: the guest did not come up, the body's `machine` is it, in state `error`; or the tenant's gateway did not come up, the body's `machine` is this one, not moved, the gateway's reason in its `error`; `conflict`: `If-Match` names a version it moved past, the body's `machine` is it as it is" }
         "503": { description: "`capacity`: the host has no room" }
   /v1/machines/{id}/wake:
     parameters: [{ $ref: "#/components/parameters/id" }]
@@ -143,7 +143,7 @@ paths:
       responses:
         "200": { description: ready (or running), content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "400": { description: "`invalid`: `for` is not `ready` or `running`" }
-        "409": { description: "`not_ready`: still running not ready at the timeout, the body's `machine` is it with its `probes_status`; `boot_failed` (`for=ready`): it is in `error`, its guest or its startup probe failed the boot, the body's `machine` is it; `not_running`: it will not run (stopped, destroying; `error` with `for=running`), or did not start in time" }
+        "409": { description: "`not_ready`: still on its way at the timeout (creating, starting, a restart waiting, running not ready), the body's `machine` is it with its `probes_status`: wait again; `pull_failed`, `create_failed`: its create failed (ADR 0048), the body's `machine` is it; `boot_failed` (`for=ready`): it is in `error`, its guest or its startup probe failed the boot, the body's `machine` is it; `not_running`: it will not run (stopped, destroying; `error` with `for=running`)" }
   /v1/machines/{id}/exec:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -458,7 +458,7 @@ paths:
         "503": { description: "the registry's backup could not be written (`backup`, ADR 0032); no key is handed out before the backup holds it" }
   /v1/metrics/targets:
     get:
-      summary: "What a Prometheus scrapes (fleet only, ADR 0048), in its HTTP service discovery format: the fleet's own `/metrics` (`instance: fleet`), then each host that may run a daemon (ready, draining, retiring, upgrading, down) through its relay. Every target at the address the caller reached the fleet at (`Host`). Takes the metrics token or the API's"
+      summary: "What a Prometheus scrapes (fleet only, ADR 0054), in its HTTP service discovery format: the fleet's own `/metrics` (`instance: fleet`), then each host that may run a daemon (ready, draining, retiring, upgrading, down) through its relay. Every target at the address the caller reached the fleet at (`Host`). Takes the metrics token or the API's"
       responses:
         "200":
           description: the targets
@@ -478,7 +478,7 @@ paths:
   /v1/hosts/{id}/metrics:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
-      summary: "A host's `/metrics` relayed (fleet only, ADR 0048): asked over the host's pinned TLS with its token, answered as the host's text as it is, or the host's own refusal. Takes the metrics token or the API's"
+      summary: "A host's `/metrics` relayed (fleet only, ADR 0054): asked over the host's pinned TLS with its token, answered as the host's text as it is, or the host's own refusal. Takes the metrics token or the API's"
       responses:
         "200": { description: "the host's exposition", content: { text/plain: { schema: { type: string } } } }
         "404": { description: "no such host (`not_found`)" }
@@ -679,7 +679,7 @@ components:
         disk_limits: { allOf: [{ $ref: "#/components/schemas/DiskLimits" }], description: "over the host's for its size, field by field; absent: the host's, or for a restore the backup's" }
         backup: { oneOf: [{ $ref: "#/components/schemas/BackupPolicy" }, { type: "null" }], description: "absent: the host's `backup.default_every` and `default_keep` (none unless configured); null: none. A restore or a fork takes this, not its source's" }
         probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "absent: none, or for a restore the backup's" }
-        start: { type: boolean, default: true, description: "the answer comes at `running`, not `ready`: `/wait` for that" }
+        start: { type: boolean, default: true, description: "its create starts it once its disks are made; the answer comes at `creating`: `/wait` for `running` or `ready`" }
         fork: { $ref: "#/components/schemas/ForkSpec" }
         restore: { $ref: "#/components/schemas/RestoreSpec" }
     Exit:
@@ -697,10 +697,11 @@ components:
         name: { type: string }
         image: { type: string }
         image_digest: { type: string }
-        state: { type: string, enum: [created, starting, running, stopping, stopped, destroying, error] }
+        state: { type: string, enum: [creating, created, starting, running, stopping, stopped, destroying, error], description: "`creating`: recorded, its image pulled and its disks made in the background, then started unless asked not to (ADR 0048); only `GET`, `/wait`, endpoints and `DELETE` act on it (a start or a wake asks its create to start it)" }
         stopped_reason: { type: string, enum: [user, idle, exit, host], description: "why it is stopped: asked, the sleep window ran out, its process ended, or the daemon stopped it (a shutdown, a leftover of a crashed daemon; wakeable like idle)" }
         exit: { $ref: "#/components/schemas/Exit" }
         error: { type: string }
+        error_reason: { type: string, enum: [pull_failed, create_failed, boot_failed, start_failed], description: "in `error`: the event that put it there. `pull_failed` (its image could not be pulled) and `create_failed` (its disks could not be made, its create's start was refused, or the daemon restarted during a fork's or a restore's create; one from an image is taken up again) leave no disks: destroy it and create again" }
         ip: { type: string }
         hostname: { type: string, description: "`<name>.internal`, follows the name" }
         machine_host: { type: string, description: "`<id>.vm.internal`, this exact machine" }
@@ -1003,7 +1004,7 @@ components:
         seq: { type: integer, description: "one more per event on its host, never reused; a folded readiness flip takes one no line carries (its machine's version)" }
         at: { type: string, format: date-time }
         type: { type: string, enum: [normal, warning] }
-        reason: { type: string, enum: [created, forked, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, snapshot_taken, snapshot_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded, session_opened], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`, ADR 0029's for `session_opened`, ADR 0031's for snapshots and a restore to one" }
+        reason: { type: string, enum: [created, forked, pulling, pull_failed, create_failed, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, snapshot_taken, snapshot_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded, session_opened], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`, ADR 0029's for `session_opened`, ADR 0031's for snapshots and a restore to one, ADR 0048's for a create's `pulling`, `pull_failed` and `create_failed`" }
         message: { type: string, description: for a person; at most 1 KB }
         machine_id: { type: string }
         tenant: { type: string }

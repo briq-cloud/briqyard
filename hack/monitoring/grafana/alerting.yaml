@@ -1,4 +1,4 @@
-# Alerts to Slack (ADR 0048), provisioned by hack/install-monitoring.sh when
+# Alerts to Slack (ADR 0054), provisioned by hack/install-monitoring.sh when
 # /etc/briqyard-monitoring/alerting.env sets SLACK_WEBHOOK_URL. @LARGEST_SLOT_MB@ is its
 # LARGEST_SLOT_MB (16384 by default): the largest size you offer.
 apiVersion: 1

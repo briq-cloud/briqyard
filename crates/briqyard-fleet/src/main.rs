@@ -481,7 +481,7 @@ fn bearer(headers: &HeaderMap) -> &str {
         .unwrap_or("")
 }
 
-/// The tokens that open a client's path (none set: open). A scraper's path (ADR 0048) takes
+/// The tokens that open a client's path (none set: open). A scraper's path (ADR 0054) takes
 /// the metrics token, so a scraper never holds the API's, or the API's, which reads as much
 /// elsewhere; none there on a loopback listener with nothing in front (`tls` unset), as the
 /// daemon's (ADR 0021). Any other path, the API's.
@@ -2436,3 +2436,10 @@ async fn by_endpoint(
 
 #[cfg(test)]
 mod tests;
+
+/// A test binary ends with its parent, and in bounded time (briqyard-testing).
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn exit_with_parent() {
+    briqyard_testing::exit_with_parent();
+}

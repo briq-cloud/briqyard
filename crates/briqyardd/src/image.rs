@@ -105,7 +105,13 @@ pub struct Builder {
     pub resolve_ttl: std::time::Duration,
     /// Where a pull is logged (`image_pulled`); the manager sets it.
     pub events: Option<Events>,
+    /// Pulls run at once (`PULLS_AT_ONCE`, ADR 0048): an image already built takes no turn.
+    pulls: tokio::sync::Semaphore,
 }
+
+/// Pulls and builds of different images at once on a host (ADR 0048); one image's creates
+/// share one build.
+pub const PULLS_AT_ONCE: usize = 4;
 
 /// The builds under way, by key: a waiter clones the receiver and is woken when the
 /// builder's sender drops, which happens whether the build finished or its future was
@@ -256,6 +262,7 @@ impl Builder {
             resolved: Mutex::new(HashMap::new()),
             resolve_ttl: std::time::Duration::from_secs(600),
             events: None,
+            pulls: tokio::sync::Semaphore::new(PULLS_AT_ONCE),
         })
     }
 
@@ -285,6 +292,14 @@ impl Builder {
     /// Returns the built image for `reference`, pulling and building it when the host has not
     /// seen it. Concurrent calls for one image share a build.
     pub async fn ensure(&self, reference: &str) -> Result<Image> {
+        self.ensure_noting(reference, || {}).await
+    }
+
+    /// `ensure`, calling `pulling` once when this call waits for a pull: its own, a turn for
+    /// one, or another call's of the same image (a create's `pulling` event, ADR 0048).
+    pub async fn ensure_noting(&self, reference: &str, pulling: impl Fn()) -> Result<Image> {
+        let noted = std::sync::Once::new();
+        let pulling = || noted.call_once(&pulling);
         let r: Reference = reference
             .parse()
             .map_err(|e| anyhow!("image {reference:?}: {e}"))?;
@@ -295,9 +310,12 @@ impl Builder {
         loop {
             match take(&self.building, &key) {
                 Turn::Build(_slot) => {
-                    return self.ensure_locked(&r, reference, &digest, &key).await;
+                    return self
+                        .ensure_locked(&r, reference, &digest, &key, pulling)
+                        .await;
                 }
                 Turn::Wait(mut rx) => {
+                    pulling();
                     // Returns when the builder is done, however it ended.
                     let _ = rx.changed().await;
                     if let Some(image) = self.load(&key) {
@@ -372,12 +390,16 @@ impl Builder {
         reference: &str,
         digest: &str,
         key: &str,
+        pulling: impl Fn(),
     ) -> Result<Image> {
         if let Some(cached) = self.load(key) {
             if self.zfs.exists(&cached.dataset()).await? {
                 return Ok(cached);
             }
         }
+        pulling();
+        // A turn among the pulls of other images; the creates of this one wait on its key.
+        let _turn = self.pulls.acquire().await?;
         tracing::info!(image = reference, digest, key, "building image");
         let started = std::time::Instant::now();
         // Pulled by the digest resolved above, so a tag moved since names the same build.
