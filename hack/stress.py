@@ -501,8 +501,11 @@ class Run:
         made, errs = parallel([f"cap{i}" for i in range(n)], lambda name: self.api.call("POST", "/v1/machines", dict(body, name=name), op="create (stopped)", timeout=600), n)
         self.report_errors("create stopped", errs)
         ids = [m["id"] for m in made.values()]
+        # A create answers at `creating` (ADR 0048): the race is between starts of machines made.
+        for mid in ids:
+            self.wait_state(mid, {"created"}, timeout=self.a.boot_timeout)
         # A start refused leaves a machine as it was: `created`, never started.
-        was = {m["id"]: m["state"] for m in made.values()}
+        was = {mid: "created" for mid in ids}
 
         # Live memory, sampled through the race: it must never exceed the host's.
         worst = {"mb": 0}
