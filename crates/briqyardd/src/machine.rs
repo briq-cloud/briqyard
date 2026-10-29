@@ -12294,7 +12294,9 @@ mod tests {
             timeout_sec: 5,
             ..exec_probe("slow-check")
         };
-        h.m.create_made(h.probed("web", readiness(p))).await.unwrap();
+        h.m.create_made(h.probed("web", readiness(p)))
+            .await
+            .unwrap();
         let began = tokio::time::Instant::now();
         tokio::time::sleep(Duration::from_millis(6500)).await;
         let times: Vec<Duration> = h
