@@ -59,7 +59,12 @@ impl Ingress {
                         }
                     }
                     Ok((ep, false)) => me.remove(&ep),
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Events were missed: the listeners are made to match the endpoints again,
+                    // or a removed endpoint's would stay open, holding its port, for good.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(missed = n, "endpoint events missed: listeners resynced");
+                        me.resync().await;
+                    }
                     Err(_) => return,
                 }
             }
@@ -82,7 +87,13 @@ impl Ingress {
         Ok(())
     }
 
-    async fn add(&self, ep: EndpointRec) -> Result<()> {
+    /// Opens an endpoint's listener, or routes its host name. Events are sent after the
+    /// manager's lock is let go, so a delete's can arrive before its create's: an endpoint
+    /// already gone is not opened.
+    pub(crate) async fn add(&self, ep: EndpointRec) -> Result<()> {
+        if self.mgr.endpoint(&ep.id).is_none() {
+            return Ok(());
+        }
         match ep.protocol.as_str() {
             "http" => {
                 self.hosts
@@ -117,6 +128,32 @@ impl Ingress {
                 Ok(())
             }
             _ => Ok(()),
+        }
+    }
+
+    /// The listeners and host names of the endpoints there are now, and no others.
+    async fn resync(&self) {
+        let now: HashMap<String, EndpointRec> = self
+            .mgr
+            .all_endpoints()
+            .into_iter()
+            .map(|ep| (ep.id.clone(), ep))
+            .collect();
+        self.listeners.lock().unwrap().retain(|id, h| {
+            let keep = now.contains_key(id);
+            if !keep {
+                h.abort();
+            }
+            keep
+        });
+        self.hosts
+            .lock()
+            .unwrap()
+            .retain(|_, ep| now.contains_key(&ep.id));
+        for ep in now.into_values() {
+            if let Err(e) = self.add(ep.clone()).await {
+                tracing::error!(endpoint = ep.id, err = %e, "endpoint listener");
+            }
         }
     }
 

@@ -2431,6 +2431,7 @@ impl Manager {
         host.pool = *self.inner.pool.lock().unwrap();
         host.conditions = self.conditions();
         host.events = self.inner.events.emitted();
+        host.resident_bytes = metrics::resident_bytes();
         host.counters = vec![
             (
                 "briqyard_boots_total",
@@ -6611,6 +6612,68 @@ mod tests {
         pub(super) fn stored(&self, id: &str) -> Option<Record> {
             self.m.inner.store.get("machines", id).unwrap()
         }
+    }
+
+    /// Whether something listens on the host's port.
+    async fn listening(port: u16) -> bool {
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn the_ingress_resyncs_when_it_missed_endpoint_events() {
+        let h = harness_config(|c| c.ingress.tcp_ports = "39100-39199".into()).await;
+        h.tenant("t1");
+        h.add("m_abc123", state::RUNNING, 256);
+        let ing =
+            crate::ingress::Ingress::new(h.m.clone(), "127.0.0.1", "", Duration::from_secs(1));
+        ing.start().await.unwrap();
+        let tcp = |port| api::CreateEndpointRequest {
+            port,
+            protocol: "tcp".into(),
+            host: String::new(),
+        };
+        let ep = h.m.create_endpoint("m_abc123", tcp(8080)).unwrap();
+        let port = ep.host_port.unwrap();
+        while !listening(port).await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // More events than the channel holds, sent while the ingress cannot read (one thread,
+        // no await): it misses the removal of the first.
+        h.m.delete_endpoint(&ep.id).unwrap();
+        for p in 0..70 {
+            let x = h.m.create_endpoint("m_abc123", tcp(9000 + p)).unwrap();
+            h.m.delete_endpoint(&x.id).unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while listening(port).await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "port {port} of a removed endpoint still listening"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_ingress_opens_no_listener_for_an_endpoint_gone() {
+        let h = harness_config(|c| c.ingress.tcp_ports = "39200-39299".into()).await;
+        h.tenant("t1");
+        h.add("m_abc123", state::RUNNING, 256);
+        let ing =
+            crate::ingress::Ingress::new(h.m.clone(), "127.0.0.1", "", Duration::from_secs(1));
+        let req = api::CreateEndpointRequest {
+            port: 8080,
+            protocol: "tcp".into(),
+            host: String::new(),
+        };
+        let ep = h.m.create_endpoint("m_abc123", req).unwrap();
+        let rec = h.m.endpoint(&ep.id).unwrap();
+        // The delete's event first, then the create's.
+        h.m.delete_endpoint(&ep.id).unwrap();
+        ing.add(rec).await.unwrap();
+        assert!(!listening(ep.host_port.unwrap()).await);
     }
 
     #[tokio::test]

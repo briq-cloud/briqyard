@@ -361,6 +361,7 @@ snapshot, or is whole.
   | `briqyard_host_condition` | `condition` | 1 while true |
   | `briqyard_events_total` | `type`, `reason` | events since the daemon started, folded repeats included |
   | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_tenants`, `briqyard_endpoints` | | counts (`execs`: exec sessions included) |
+  | `process_resident_memory_bytes` | | the daemon's own resident memory |
   | `briqyard_machine_cpu_seconds_total` | `machine`, `tenant`, `name`, `role` (a gateway's) | its cgroup's CPU time |
   | `briqyard_machine_memory_bytes`, `_memory_limit_bytes` | same | its cgroup's memory, its size |
   | `briqyard_machine_disk_used_bytes` | same | its disks, snapshots (retired disks included) and memory snapshots |
