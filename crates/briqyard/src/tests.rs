@@ -2525,3 +2525,38 @@ async fn a_session_refused_or_stopped_locally() {
         .unwrap();
     assert_eq!(code, 130);
 }
+
+// --- doctor (ADR 0050) ---
+
+#[test]
+fn doctor_reads_needrestart_and_reboot_settings() {
+    let conf = |s: &str| vec![s.to_string()];
+    // The snippet the bootstrap writes, and an entry in the main file's hash.
+    let snippet = include_str!("../../../hack/bootstrap-host.sh")
+        .split("conf.d/briqyard.conf <<'EOF'\n")
+        .nth(1)
+        .and_then(|s| s.split("\nEOF\n").next())
+        .unwrap();
+    assert!(needrestart_spares_daemon(&conf(snippet)));
+    assert!(needrestart_spares_daemon(&conf(
+        "$nrconf{override_rc} = {\n    qr(^briqyardd) => 0,\n};"
+    )));
+    // Ubuntu's file alone, a comment, the fleet alone, or a forced restart: not spared.
+    assert!(!needrestart_spares_daemon(&conf(
+        "$nrconf{override_rc} = {\n    qr(^dbus) => 0,\n};"
+    )));
+    assert!(!needrestart_spares_daemon(&conf(
+        "# $nrconf{override_rc}{qr(^briqyardd\\.service$)} = 0;"
+    )));
+    assert!(!needrestart_spares_daemon(&conf(
+        "$nrconf{override_rc}{qr(^briqyard-fleet\\.service$)} = 0;"
+    )));
+    assert!(!needrestart_spares_daemon(&conf(
+        "$nrconf{override_rc}{qr(^briqyardd\\.service$)} = 1;"
+    )));
+    assert!(!needrestart_spares_daemon(&[]));
+    // apt-config's answer, as Ubuntu 26.04 prints it.
+    assert!(!reboots_on_its_own(""));
+    assert!(!reboots_on_its_own("R='false'\n"));
+    assert!(reboots_on_its_own("R='true'\n"));
+}

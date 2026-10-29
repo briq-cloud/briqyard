@@ -2428,10 +2428,70 @@ fn doctor() {
         Err(_) => (false, "apt install zfsutils-linux"),
     };
     check("a zfs pool", pool_ok, pool_hint);
+    // What would restart the daemon or the host outside a planned upgrade (ADR 0050): a
+    // warning, the host works.
+    let warn = |name: &str, ok: bool, hint: &str| {
+        if ok {
+            println!("ok   {name}");
+        } else {
+            println!("warn {name}: {hint}");
+        }
+    };
+    if exists("/usr/sbin/needrestart") {
+        let mut confs =
+            vec![std::fs::read_to_string("/etc/needrestart/needrestart.conf").unwrap_or_default()];
+        if let Ok(dir) = std::fs::read_dir("/etc/needrestart/conf.d") {
+            for e in dir.flatten() {
+                if e.path().extension().is_some_and(|x| x == "conf") {
+                    confs.push(std::fs::read_to_string(e.path()).unwrap_or_default());
+                }
+            }
+        }
+        warn(
+            "needrestart spares briqyardd",
+            needrestart_spares_daemon(&confs),
+            "after a library update it restarts briqyardd, which suspends every machine: \
+             hack/bootstrap-host.sh writes /etc/needrestart/conf.d/briqyard.conf",
+        );
+    }
+    if let Ok(o) = std::process::Command::new("apt-config")
+        .args(["shell", "R", "Unattended-Upgrade::Automatic-Reboot/b"])
+        .output()
+    {
+        warn(
+            "no automatic reboot",
+            !reboots_on_its_own(&String::from_utf8_lossy(&o.stdout)),
+            "unattended-upgrades reboots the host, machines and all: \
+             set Unattended-Upgrade::Automatic-Reboot \"false\" and reboot after a drain",
+        );
+    }
     if bad > 0 {
         eprintln!("{bad} missing");
         std::process::exit(1);
     }
+}
+
+/// Whether needrestart's configuration (its file, then each `conf.d` snippet) keeps it from
+/// restarting the daemon: an `override_rc` entry for `briqyardd` set to 0, as
+/// `$nrconf{override_rc}{qr(^briqyardd\.service$)} = 0;` or `qr(^briqyardd) => 0,`.
+fn needrestart_spares_daemon(confs: &[String]) -> bool {
+    confs.iter().flat_map(|c| c.lines()).any(|l| {
+        let l = l.trim_start();
+        if l.starts_with('#') {
+            return false;
+        }
+        let Some(i) = l.find("briqyardd") else {
+            return false;
+        };
+        let value = l[i..].rsplit('=').next().unwrap_or("");
+        value.trim_start_matches('>').trim_start().starts_with('0')
+    })
+}
+
+/// Whether `apt-config shell R Unattended-Upgrade::Automatic-Reboot/b` says unattended-upgrades
+/// reboots the host after an update. Unset prints nothing: false, its default.
+fn reboots_on_its_own(apt_config: &str) -> bool {
+    apt_config.trim() == "R='true'"
 }
 
 fn suffix() -> String {

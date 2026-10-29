@@ -279,6 +279,12 @@ changed), and `briqyard host undrain <id>`. `systemctl restart briqyardd` by han
 without the reboot: a quarter-second pause per machine. A daemon that crashes leaves its
 machines running (`KillMode=process`), and the next one adopts them.
 
+**Security updates** (unattended upgrades) land on disk and never restart anything on their
+own (ADR 0050): the bootstrap keeps needrestart off `briqyardd` and `briqyard-fleet`
+(`/etc/needrestart/conf.d/briqyard.conf`), and `Unattended-Upgrade::Automatic-Reboot` stays
+false. The daemon picks an updated library up at its next `host upgrade` (the same release
+again is fine) or reboot. `briqyard doctor` warns when either would happen on its own.
+
 A host from before ADR 0014 (jails on `/`): stop the daemon and empty `jail_dir` before the
 first start that mounts `byard/jail` there, or the old files stay hidden on `/` and the
 machines suspended then boot cold.
@@ -447,6 +453,15 @@ snapshot, or is whole.
 `briqyard-fleet` runs anywhere that reaches every host (`/etc/briqyard/fleet.yaml`, unit in
 `hack/briqyard-fleet.service`). Clients use the fleet's URL and `token` as they would a
 daemon's; `briqyard host ls` shows the hosts.
+
+On a server with no host, keep needrestart from restarting the fleet, as the bootstrap does on
+a host (ADR 0050):
+
+```bash
+mkdir -p /etc/needrestart/conf.d && printf '%s\n' \
+  '$nrconf{override_rc}{qr(^briqyardd\.service$)} = 0;' \
+  '$nrconf{override_rc}{qr(^briqyard-fleet\.service$)} = 0;' > /etc/needrestart/conf.d/briqyard.conf
+```
 
 A host has one credential, its own API token, and the fleet must hold it before the host can
 be anything to it: it forwards with it and takes the host's heartbeats (`fleet:` in the host's
