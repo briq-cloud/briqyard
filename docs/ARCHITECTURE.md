@@ -54,7 +54,7 @@ with the next change or the sleeper's tick, so a busy machine does not rewrite i
 every connection. The record on disk says what the machine is, not when it was last touched.
 
 A create that fails leaves the machine in `error`, `error_reason` saying why: `pull_failed`
-(the image), `create_failed` (its disks, its start refused, a restart of the daemon during it),
+(the image), `create_failed` (its disks, its start refused, a restart of the daemon during a fork's or a restore's: one from an image is taken up again),
 both with no disks. A boot the guest does not survive (the image's fault: no init to run, a
 command the init cannot start) leaves it in `error` with the console's last lines,
 `boot_failed`, and a start answers 409 `boot_failed` with the machine in the body; so does a

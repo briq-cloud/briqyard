@@ -189,6 +189,10 @@ pub struct Record {
     /// taken from the record on (ADR 0048).
     #[serde(default)]
     pub start: bool,
+    /// While `creating`: its disks come from a fork's source or a backup, which the record does
+    /// not name, so a restart of the daemon cannot take its create up again (ADR 0048).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_source: bool,
     pub subnet_index: u32,
     pub host_num: u8,
     pub ip: String,
@@ -1055,11 +1059,26 @@ impl Manager {
         let (mut adopted, mut stopped, mut gone) = (0, 0, 0);
         for e in entries {
             let rec = e.snapshot();
-            // Its create's task went with the previous daemon, and what a fork or a restore
-            // was made from is not on the record: failed, for the caller to create again.
+            // Its create's task went with the previous daemon. One from an image is taken up
+            // again, its partial disks gone first: the record holds what it needs. What a fork
+            // or a restore was made from is not on the record: failed, for the caller to create
+            // again, and nothing a person must look at (ADR 0048).
             if rec.state == state::CREATING {
-                let why = "its create was cut short by a restart of the host's daemon".into();
-                self.create_failed(&e, reason::CREATE_FAILED, why).await;
+                if !rec.from_source {
+                    let z = &self.inner.zfs;
+                    if z.exists(&rec.dataset()).await.unwrap_or(false) {
+                        if let Err(err) = z.destroy(&rec.dataset()).await {
+                            tracing::warn!(machine = rec.id, err = %err, "disks of a cut create");
+                        }
+                    }
+                    tracing::info!(machine = rec.id, "create cut by a restart, taken up again");
+                    self.spawn_make(e.clone(), Make::Image);
+                    continue;
+                }
+                let why = "its create was cut short by a restart of the host's daemon";
+                tracing::warn!(machine = rec.id, "{why}");
+                self.create_failed(&e, reason::CREATE_FAILED, why.into())
+                    .await;
                 continue;
             }
             if !matches!(
@@ -2610,6 +2629,13 @@ impl Manager {
     pub async fn create(&self, req: api::CreateMachineRequest) -> Result<api::Machine, MError> {
         let (e, how) = self.record(req, None).await?;
         let made = self.view(&e);
+        self.spawn_make(e, how);
+        Ok(made)
+    }
+
+    /// `make` in a task of its own: a create's background, from `create` or taken up again by
+    /// `recover`.
+    fn spawn_make(&self, e: Arc<Entry>, how: Make) {
         let m = self.clone();
         tokio::spawn(async move {
             // Its outcome is on the machine, for a `/wait` or a read; logged once, here or
@@ -2625,7 +2651,6 @@ impl Manager {
                 }
             }
         });
-        Ok(made)
     }
 
     /// The create's first half, what it answers on: the spec checked, the source found (a
@@ -2671,6 +2696,8 @@ impl Manager {
             p.check().map_err(invalid)?;
         }
         let restart = req.restart.clone().unwrap_or_default();
+        // A cheap early answer, before a fork's or a restore's lookups; `add_machine` checks
+        // again under the map's lock, where it counts.
         if let Some(e) = self.named(&req.tenant, &req.name) {
             return Err(MError::NameTaken(Box::new(self.view(&e))));
         }
@@ -2705,6 +2732,7 @@ impl Manager {
             error: String::new(),
             error_reason: String::new(),
             start: req.start.unwrap_or(true),
+            from_source: req.fork.is_some() || req.restore.is_some(),
             subnet_index: 0,
             host_num: 0,
             ip: String::new(),
@@ -2876,6 +2904,8 @@ impl Manager {
                     Ok(im) => Some(im),
                     Err(err) => {
                         let why = format!("pull {reference}: {err:#}");
+                        // The image's, or its registry's: not a person's to fix here.
+                        tracing::warn!(machine = e.snapshot().id, err = why, "pull failed");
                         return Err(self.create_failed(e, reason::PULL_FAILED, why).await);
                     }
                 }
@@ -2909,6 +2939,7 @@ impl Manager {
         };
         if let Err(err) = made {
             let why = format!("disks: {err:#}");
+            tracing::error!(machine = e.snapshot().id, err = why, "create failed");
             return Err(self
                 .create_failed_locked(e, reason::CREATE_FAILED, why)
                 .await);
@@ -2943,6 +2974,9 @@ impl Manager {
                     MError::BootFailed(m) => (reason::BOOT_FAILED, m.error.clone()),
                     other => (reason::CREATE_FAILED, format!("start: {other}")),
                 };
+                if reason == reason::CREATE_FAILED {
+                    tracing::error!(machine = e.snapshot().id, err = why, "create failed");
+                }
                 Err(self.create_failed_locked(e, reason, why).await)
             }
             // Its start failed and said so on the machine (`boot_failed`, `start_failed`).
@@ -2953,8 +2987,7 @@ impl Manager {
     /// A create that did not get its machine made and started: the machine stays in `error`
     /// with `why` and the event `reason`. `pull_failed` and `create_failed` leave no disks
     /// (`has_disks`): the caller destroys it and creates again; `boot_failed` keeps them, for
-    /// a start. A pull or a create failure is logged here, once: the image's a warning, the
-    /// host's an error.
+    /// a start. The caller logs it, by whose it is.
     async fn create_failed(&self, e: &Arc<Entry>, reason: &'static str, why: String) -> MError {
         let _guard = e.lock.lock().await;
         self.create_failed_locked(e, reason, why).await
@@ -2975,12 +3008,6 @@ impl Manager {
             if let Err(err) = z.destroy(&r.dataset()).await {
                 tracing::warn!(machine = r.id, err = %err, "disks of a failed create");
             }
-        }
-        match reason {
-            reason::CREATE_FAILED => tracing::error!(machine = r.id, err = why, "create failed"),
-            reason::PULL_FAILED => tracing::warn!(machine = r.id, err = why, "pull failed"),
-            // Logged as any failed boot, by whoever reads the error.
-            _ => {}
         }
         e.set_state(state::ERROR, |r| {
             r.error = why;
@@ -5930,6 +5957,7 @@ mod tests {
             error: String::new(),
             error_reason: String::new(),
             start: false,
+            from_source: false,
             subnet_index: 1,
             host_num: 2,
             ip: "10.64.1.2".into(),
@@ -8008,21 +8036,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_create_cut_by_a_restart_is_failed_at_the_next_start() {
+    async fn a_create_cut_by_a_restart_is_taken_up_again_or_failed() {
         let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        h.host.boots(Boots::Ready(Duration::from_millis(10)));
+        // From an image: its partial disks go and its create runs again, to the end (ADR 0048).
         let e = h.add("m_cut", state::CREATING, 256);
-        e.rec.lock().unwrap().start = true;
+        {
+            let mut r = e.rec.lock().unwrap();
+            r.image = IMAGE.into();
+            r.start = true;
+            // A volume is formatted with the host's `mkfs.ext4`.
+            r.volume = None;
+        }
         h.disks(&e).await;
+        // From a fork's source or a backup, which the record does not name: failed.
+        let f = h.add("m_forked", state::CREATING, 256);
+        {
+            let mut r = f.rec.lock().unwrap();
+            r.name = "forked".into();
+            r.from_source = true;
+            r.start = true;
+        }
+        h.disks(&f).await;
         h.m.recover().await;
-        let r = e.snapshot();
+        let ran =
+            h.m.wait("m_cut", Until::Running, Duration::from_secs(5))
+                .await;
+        assert_eq!(ran.unwrap().state, state::RUNNING);
+        assert_eq!(h.host.alive().len(), 1, "one boot, on new disks");
+        let r = f.snapshot();
         assert_eq!(
             (r.state.as_str(), r.error_reason.as_str()),
             (state::ERROR, reason::CREATE_FAILED)
         );
         assert!(!h.pool.zfs.exists(&r.dataset()).await.unwrap());
-        assert_eq!(h.m.usage().0.memory_mb, 0);
+        assert_eq!(h.m.usage().0.memory_mb, 256, "the one that runs");
         let got =
-            h.m.wait("m_cut", Until::Ready, Duration::from_secs(1))
+            h.m.wait("m_forked", Until::Ready, Duration::from_secs(1))
                 .await;
         assert!(matches!(got, Err(MError::CreateFailed(_))), "{got:?}");
     }
@@ -8339,7 +8390,7 @@ mod tests {
         h.ready().await;
         let mut req = h.request("web");
         req.start = Some(false);
-        let live = h.m.create(req).await.unwrap();
+        let live = h.m.create_made(req).await.unwrap();
         let mut old = h.stored(&live.id).unwrap();
         old.id = "m_00000000000a".into();
         old.name = "old".into();

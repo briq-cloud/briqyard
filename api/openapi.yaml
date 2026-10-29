@@ -673,7 +673,7 @@ components:
         stopped_reason: { type: string, enum: [user, idle, exit, host], description: "why it is stopped: asked, the sleep window ran out, its process ended, or the daemon stopped it (a shutdown, a leftover of a crashed daemon; wakeable like idle)" }
         exit: { $ref: "#/components/schemas/Exit" }
         error: { type: string }
-        error_reason: { type: string, enum: [pull_failed, create_failed, boot_failed, start_failed], description: "in `error`: the event that put it there. `pull_failed` (its image could not be pulled) and `create_failed` (its disks could not be made, its create's start was refused, or the daemon restarted during it) leave no disks: destroy it and create again" }
+        error_reason: { type: string, enum: [pull_failed, create_failed, boot_failed, start_failed], description: "in `error`: the event that put it there. `pull_failed` (its image could not be pulled) and `create_failed` (its disks could not be made, its create's start was refused, or the daemon restarted during a fork's or a restore's create; one from an image is taken up again) leave no disks: destroy it and create again" }
         ip: { type: string }
         hostname: { type: string, description: "`<name>.internal`, follows the name" }
         machine_host: { type: string, description: "`<id>.vm.internal`, this exact machine" }
