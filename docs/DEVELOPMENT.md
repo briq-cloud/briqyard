@@ -373,7 +373,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   into another namespace and a fork into one (ADR 0056: a rename with the address, the
   uptime marker and the disk kept; into a namespace that exists a new address, a boot and the
   neighbour reached by name; a `moved` event in each namespace; the fork on a network of its own
-  with its source's disk). 254 checks (predicted until the next VM run), 250 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  with its source's disk). 254 checks, 250 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
@@ -421,7 +421,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   second host itself, as the fleet checks a host's calls by its address; and a move into a
   namespace on the other host (refused, the machine untouched; not supported yet) and a fork
   across hosts (refused into a namespace of the other host, on its source's host into a new
-  one; ADR 0056). 29 checks (predicted until the next VM run).
+  one; ADR 0056). 29 checks.
 - `hack/fleet-restore.sh` (from the Mac, `FLEET_SH="limactl shell fc sudo" SECOND_HOST_SH="limactl
   shell fc2 sudo"`): the dev fleet backed up to `file:///var/lib/briqyard-fleet-backup` for the
   run (an identity in `/etc/briqyard/fleet-backup.key` on fc, development only), the backup
