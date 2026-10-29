@@ -28,7 +28,7 @@ briqyard runs any OCI image in a Firecracker microVM on servers you own. Each ma
 | 🔐 **Encrypted at rest** | Every host's pool is encrypted (AES-256-GCM) with a key the fleet holds; no swap |
 | 🛡️ **Isolation** | KVM per machine; Firecracker under its jailer, with a chroot, a uid, a pid namespace, a cgroup and seccomp filters each |
 | 🖥️ **Several hosts** | One API across hosts: placement by region and free memory, a server you bring added and installed over SSH, upgraded in place while its machines run. Capacity signals per region for a scaler of yours |
-| 📈 **Observable** | An event log with a watch, a version per machine (`If-Match`), Prometheus metrics, host conditions, usage per machine |
+| 📈 **Observable** | An event log with a watch, a version per machine (`If-Match`), Prometheus metrics, host conditions, usage per machine; Prometheus and Grafana beside the fleet, with dashboards and alerts |
 
 ## Architecture
 

@@ -456,6 +456,34 @@ paths:
         "404": { description: "with `key_id`: the fleet holds no pool key of that id (`no_key`)" }
         "500": { description: the registry could not be written (`registry`); no key is handed out unwritten }
         "503": { description: "the registry's backup could not be written (`backup`, ADR 0032); no key is handed out before the backup holds it" }
+  /v1/metrics/targets:
+    get:
+      summary: "What a Prometheus scrapes (fleet only, ADR 0054), in its HTTP service discovery format: the fleet's own `/metrics` (`instance: fleet`), then each host that may run a daemon (ready, draining, retiring, upgrading, down) through its relay. Every target at the address the caller reached the fleet at (`Host`). Takes the metrics token or the API's"
+      responses:
+        "200":
+          description: the targets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    targets: { type: array, items: { type: string }, description: "the fleet's address, as asked" }
+                    labels:
+                      type: object
+                      description: "`instance` and `host` (the host's id), `region`, `__metrics_path__` (`/v1/hosts/{id}/metrics`); the fleet's: `instance: fleet` alone"
+                      additionalProperties: { type: string }
+        "400": { description: "no `Host` header (`invalid`)" }
+  /v1/hosts/{id}/metrics:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: "A host's `/metrics` relayed (fleet only, ADR 0054): asked over the host's pinned TLS with its token, answered as the host's text as it is, or the host's own refusal. Takes the metrics token or the API's"
+      responses:
+        "200": { description: "the host's exposition", content: { text/plain: { schema: { type: string } } } }
+        "404": { description: "no such host (`not_found`)" }
+        "502": { description: "the host did not answer within 5 s, or cut its answer short (`host_unreachable`)" }
+        "503": { description: "the host is down (`host_down`)" }
   /v1/hosts/{id}/retire:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:

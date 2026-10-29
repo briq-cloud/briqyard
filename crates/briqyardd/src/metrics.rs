@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 #[derive(Default)]
 pub struct Host {
     pub by_state: BTreeMap<String, usize>,
+    /// Stopped machines by why they stopped (`idle`: asleep).
+    pub stopped: BTreeMap<String, usize>,
     pub suspended: usize,
     pub tenants: usize,
     pub endpoints: usize,
@@ -203,6 +205,30 @@ pub fn render(h: &Host, machines: &[Machine]) -> String {
         "Machines on this host.",
         one(total),
     );
+    // Every reason, zeros included: a sleeping count of 0 is a value, not a missing series.
+    let mut stopped: BTreeMap<&str, usize> = [
+        api::stop::USER,
+        api::stop::IDLE,
+        api::stop::EXIT,
+        api::stop::HOST,
+    ]
+    .into_iter()
+    .map(|r| (r, 0))
+    .collect();
+    for (reason, n) in &h.stopped {
+        *stopped.entry(reason.as_str()).or_default() += n;
+    }
+    let stopped = stopped
+        .into_iter()
+        .map(|(r, n)| (format!("reason=\"{}\"", label_value(r)), n.to_string()))
+        .collect();
+    family(
+        o,
+        "briqyard_machines_stopped",
+        "gauge",
+        "Stopped machines, by why they stopped (idle: asleep, the next use wakes them).",
+        stopped,
+    );
     family(
         o,
         "briqyard_machines_suspended",
@@ -357,6 +383,7 @@ mod tests {
         run.disk_throttled = 12;
         let h = Host {
             by_state: BTreeMap::from([("running".into(), 1), ("stopped".into(), 1)]),
+            stopped: BTreeMap::from([("idle".into(), 1)]),
             memory_mb: (512, 4096),
             pool: Some(Pool {
                 used: 300,
@@ -372,6 +399,8 @@ mod tests {
         for want in [
             r#"briqyard_machines{state="running"} 1"#,
             "briqyard_machines_total 2",
+            r#"briqyard_machines_stopped{reason="idle"} 1"#,
+            r#"briqyard_machines_stopped{reason="user"} 0"#,
             r#"briqyard_memory_mb{kind="capacity"} 4096"#,
             r#"briqyard_pool_bytes{kind="size"} 1000"#,
             "briqyard_boots_total 3",
@@ -390,6 +419,7 @@ mod tests {
         let empty = render(&Host::default(), &[]);
         check_exposition(&empty);
         assert!(empty.contains("# TYPE briqyard_machine_state gauge\n"));
+        assert!(empty.contains("briqyard_machines_stopped{reason=\"exit\"} 0\n"));
         assert!(!empty.contains("briqyard_pool_bytes"), "no pool read yet");
     }
 
