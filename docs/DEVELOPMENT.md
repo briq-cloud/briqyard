@@ -143,6 +143,10 @@ PATH=target/release:$PATH BRIQYARD_URL=http://127.0.0.1:7430 \
   SECOND_HOST_SH="limactl shell fc2 sudo" bash hack/fleet-two-hosts.sh
 ```
 
+Without the three variables the run is partial: the sections it leaves out are named in the summary
+(`NOT A FULL RUN, skipped: …`) and the status is not 0 (`ALLOW_SKIPPED=1` accepts it). A suite that
+ends before its last check says `ENDED EARLY` and exits non-zero.
+
 Run it once the fleet lists fc's host empty: right after another suite, the fleet still counts
 what fc held, and placement puts the tenants the other way round. A VM that dies with Lima's
 `VirtualMachineStateError` and a `com.apple.Virtualization.VirtualMachine` report in

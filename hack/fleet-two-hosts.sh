@@ -9,6 +9,8 @@
 #   SECOND_HOST_STOP="limactl shell fc2 sudo systemctl stop briqyardd" \
 #   SECOND_HOST_START="limactl shell fc2 sudo systemctl start briqyardd" \
 #   SECOND_HOST_SH="limactl shell fc2 sudo" bash hack/fleet-two-hosts.sh
+# A section whose variable is not set is left out and named in the summary; the run then ends with
+# a non-zero status (ALLOW_SKIPPED=1 accepts it).
 set -euo pipefail
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7430}
 T=two-hosts
@@ -16,6 +18,7 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+. "$(dirname "${BASH_SOURCE[0]}")/suite-end.sh"
 auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
 hosts() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/hosts"; }
 CONF2=/etc/briqyard/config.yaml
@@ -33,6 +36,7 @@ as_second() {
 # when the run stopped it, what it made is destroyed, the second host's config put back.
 STOPPED=
 cleanup() {
+  local rc=$?
   # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
   set +e
   if [ -n "$STOPPED" ]; then
@@ -48,6 +52,7 @@ cleanup() {
     $SECOND_HOST_SH sh -c "mv $CONF2.two-hosts $CONF2 && rm -rf /var/lib/briqyard/backups && systemctl restart briqyardd" || true
     for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
   fi
+  suite_early_end "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
@@ -117,6 +122,8 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
   fi
   for i in $(seq 1 30); do briqyard machine exec "$B" -- hostname >/dev/null 2>&1 && break; sleep 2; done
   check "b answers again"       '[ "$(briqyard machine exec "$B" -- hostname)" = b ]'
+else
+  skip "a host goes silent (SECOND_HOST_STOP and SECOND_HOST_START are not set)"
 fi
 if [ -n "${SECOND_HOST_SH:-}" ]; then
   echo "== a backup on the second host: ciphertext, restored through the fleet (ADR 0035)"
@@ -146,7 +153,7 @@ if [ -n "${SECOND_HOST_SH:-}" ]; then
   check "its own key served by its id outside a restore" '[ "$own" = 64 ]'
   briqyard machine destroy "$RB" >/dev/null
   briqyard backup rm "$B" "$BK" >/dev/null
+else
+  skip "the second host: its pool locked while down, its key from the fleet, a backup there (SECOND_HOST_SH is not set)"
 fi
-echo
-echo "passed $pass, failed $fail"
-[ "$fail" = 0 ]
+suite_summary

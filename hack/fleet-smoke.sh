@@ -14,6 +14,7 @@ T=fleet-smoke
 pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
+. "$(dirname "${BASH_SOURCE[0]}")/suite-end.sh"
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 hosts() { api /v1/hosts; }
 host_field() { hosts | jq -r ".[] | select(.id == \"$1\") | $2"; }
@@ -21,6 +22,7 @@ host_field() { hosts | jq -r ".[] | select(.id == \"$1\") | $2"; }
 # what it made is destroyed.
 DRAINED=
 cleanup() {
+  local rc=$?
   # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
   set +e
   for h in $DRAINED; do briqyard host undrain "$h" >/dev/null 2>&1 || true; done
@@ -28,6 +30,7 @@ cleanup() {
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
     briqyard tenant rm "$t" >/dev/null 2>&1 || true
   done
+  suite_early_end "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
@@ -82,9 +85,8 @@ check "a tenant watch: its events, then a bookmark" 'watched'
 # take no tenant.
 LOCAL=$(api /v1/hosts | jq -r '.[] | select(.id == "local" and .state == "ready" and .provider == "static") | .id')
 if [ -z "$LOCAL" ]; then
-  echo
-  echo "passed $pass, failed $fail (no host local to drain)"
-  [ "$fail" = 0 ]; exit
+  skip "drain and forget the host local, and the host upgrade (no static host local, ready)"
+  suite_summary; exit
 fi
 echo "== hosts: drain and forget the host local"
 DRAINED=$LOCAL
@@ -125,7 +127,7 @@ if sudo -n test -d "$REL" 2>/dev/null; then
   check "never booted again"    '[ "$(briqyard machine logs "$U" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
   check "its init says its version" '[ "$(briqyard machine get "$U" | jq -r .init_version)" = "$build" ]'
   check "a release neither URL nor version refused" '! briqyard host upgrade "$UP" --release "not a release" >/dev/null 2>&1'
+else
+  skip "host upgrade (no release directory $REL, or no sudo)"
 fi
-echo
-echo "passed $pass, failed $fail"
-[ "$fail" = 0 ]
+suite_summary
