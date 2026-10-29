@@ -1004,6 +1004,32 @@ pub struct Pending {
     pub volume: Option<VolumeSize>,
 }
 
+/// Moves a machine into another namespace of the same host or fleet (ADR 0056).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MoveRequest {
+    /// The namespace it joins: made when it does not exist.
+    pub namespace: String,
+}
+
+/// What a move did.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MoveResult {
+    /// The machine in its namespace. Its `ip` is the address it has now.
+    pub machine: Machine,
+    /// The namespace it left.
+    pub from: String,
+    /// The address it had. Equal to `machine.ip` when the namespace was renamed.
+    pub previous_ip: String,
+    /// A running machine was stopped and started on the namespace's network: its programs
+    /// began again, on a new address. False for a rename and for a machine that was not running.
+    pub restarted: bool,
+    /// Through a fleet, into a namespace on another host: the machine was made again there from
+    /// a backup, under a new id, and this is the id of the machine it replaces (destroyed, its
+    /// backups kept).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
+}
+
 /// Changes a machine: the sleep window, metadata, egress, limits, disk limits and probes at
 /// once; what it runs (`spec`) at its next start.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1311,6 +1337,8 @@ pub mod reason {
     /// Its create could not make its disks or start it: the machine is in `error` (ADR 0048).
     pub const CREATE_FAILED: &str = "create_failed";
     pub const RESTORED: &str = "restored";
+    /// It joined another namespace (ADR 0056), in the one it left and in the one it joined.
+    pub const MOVED: &str = "moved";
     pub const STARTING: &str = "starting";
     pub const STARTED: &str = "started";
     pub const RESUMED: &str = "resumed";

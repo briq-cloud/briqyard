@@ -6,6 +6,7 @@
 mod backup;
 mod bootstrap;
 mod config;
+mod moves;
 mod registry;
 mod restores;
 mod scrape;
@@ -1558,6 +1559,20 @@ async fn create_machine(
             .fork
             .as_ref()
             .and_then(|f| reg.host_of_machine(&f.machine_id).map(|h| h.id.clone()));
+        // A fork is made on its source's host: into a namespace of another host it cannot be
+        // (ADR 0056).
+        if let (Some(src), Some(pinned)) = (&source, reg.namespaces.get(&req.namespace)) {
+            if src != pinned {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "invalid",
+                    format!(
+                        "namespace {} is on host {pinned}, the fork's source on host {src}: a fork is made on its source's host",
+                        req.namespace
+                    ),
+                ));
+            }
+        }
         // The host the request is bound to: a fork's source's, else the namespace's.
         let bound = source
             .clone()
@@ -1576,6 +1591,8 @@ async fn create_machine(
         let Some(host) = chosen.and_then(|id| reg.hosts.get(&id).cloned()) else {
             return Err(no_room(&st, &reg, &ask));
         };
+        // A fork's new namespace lives where its source does, as a placement would pin it.
+        reg.pin(&req.namespace, &host.id);
         let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb);
         (host, first, id)
     };
@@ -2425,6 +2442,9 @@ async fn by_machine(
         .unwrap_or_default();
     // What the call is, by its path alone: a query (`?namespace=`) changes nothing of it.
     let own = format!("/v1/machines/{id}");
+    if method == Method::POST && uri.path() == format!("{own}/move") {
+        return moves::move_machine(&st, host, &id, &headers, body).await;
+    }
     let is_delete = method == Method::DELETE && uri.path() == own;
     let plain_get = method == Method::GET && uri.path() == own;
     let adds_endpoint = method == Method::POST && uri.path() == format!("{own}/endpoints");

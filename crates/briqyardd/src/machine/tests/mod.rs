@@ -8,6 +8,7 @@ mod event_log;
 mod gateway;
 mod lifecycle;
 mod metering;
+mod moves;
 mod network;
 mod observe;
 mod probing;

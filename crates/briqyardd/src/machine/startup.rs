@@ -180,6 +180,7 @@ impl Manager {
                 .unwrap()
                 .insert(id, Entry::new(r, self.inner.events.clone()));
         }
+        self.drop_renamed_leftovers()?;
         // An endpoint port outside the range would listen where the daemon's table does not
         // hold it for `allowed_clients`: refused, like a namespace outside `network.range`.
         let spec = &self.inner.cfg.ingress.tcp_ports;

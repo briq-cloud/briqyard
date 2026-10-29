@@ -211,9 +211,6 @@ impl Manager {
                 other => other,
             })?;
             let sr = s.snapshot();
-            if sr.namespace != req.namespace {
-                return Err(invalid("fork source belongs to another namespace"));
-            }
             if !sr.has_disks() {
                 return Err(invalid(format!(
                     "fork source has no disks: it is {} {}",
@@ -428,6 +425,20 @@ impl Manager {
     /// memory must hold too (ADR 0048). Nothing on disk yet.
     fn add_machine(&self, mut rec: Record, t: &Namespace) -> Result<Arc<Entry>, MError> {
         let mut machines = self.inner.machines.lock().unwrap();
+        // A rename of the namespace (ADR 0056) swaps it under this lock: a create that read
+        // the old name is repeated, not recorded in a namespace that is gone.
+        if !self
+            .inner
+            .namespaces
+            .lock()
+            .unwrap()
+            .contains_key(&t.rec.id)
+        {
+            return Err(MError::Conflict(format!(
+                "namespace {} was renamed meanwhile: repeat the request",
+                t.rec.id
+            )));
+        }
         let taken = machines.values().find(|e| {
             let r = e.rec.lock().unwrap();
             r.namespace == rec.namespace && r.name == rec.name && r.state != state::DESTROYING
