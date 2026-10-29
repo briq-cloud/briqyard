@@ -19,9 +19,9 @@ use std::io::Write;
 use std::os::unix::process::parent_id;
 use std::time::{Duration, Instant};
 
-/// How long a test binary may run: well above the slowest one (a debug build in the
-/// development VM, or under `cargo llvm-cov`), well below a wasted CI hour.
-pub const LIMIT: Duration = Duration::from_secs(15 * 60);
+/// How long a test binary may run: five times the slowest one (`briqyardd`'s, 70 s on CI,
+/// 55 s in the development VM, 61 s on a Mac).
+pub const LIMIT: Duration = Duration::from_secs(6 * 60);
 
 /// Exits this process once its parent is gone (the pid it started under changed: reparented to
 /// init, launchd or a subreaper) or once [`LIMIT`] has passed. `exit` runs no destructor, so

@@ -191,7 +191,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
 
 | | On a failure, a panic, a timeout, Ctrl-C or a killed parent |
 |---|---|
-| a test binary | exits within a second of its parent (`cargo test` killed), and after 15 minutes at most (`briqyard-testing`, installed in each crate) |
+| a test binary | exits within a second of its parent (`cargo test` killed), and after 6 minutes at most (`briqyard-testing`, installed in each crate) |
 | the fake `zfs`, `udevadm`, `zvol_id` | a held one ends with its test (its hold goes with the temp dir) or its parent (`kill -0 "$PPID"`) |
 | the stand-in servers | the CLI's and fleet's test clients time out after 10 s; the Firecracker and vsock stand-ins give up after 10 s |
 | each shell suite | one trap on EXIT, INT, TERM, HUP: ends the shell's children by pid (`pkill -P $$`: sessions, watches, `logs -f`, their `sleep 600`), starts again a daemon it stopped (fc's, fc2's), undrains the hosts it drained, puts back the config, key and registry it moved, destroys its machines and tenants |

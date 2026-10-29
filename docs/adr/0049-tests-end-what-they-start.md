@@ -25,10 +25,11 @@ that exits (or is killed) runs none: the hold files stay and the fakes spin fore
 
 - **A test binary exits with its parent.** `briqyard-testing` (dev-only, `publish = false`)
   has one function, `exit_with_parent`: a thread that reads `getppid()` every second and exits
-  the process once it changed (reparented to init, launchd or a subreaper), or once 15 minutes
-  passed (the slowest binary takes about a minute; the tests not reported above the line it
-  prints were still running). Each crate installs it from its test root with `#[ctor]`
-  (dev-only): one line per crate covers every test, fixture or none. Linux's
+  the process once it changed (reparented to init, launchd or a subreaper), or once 6 minutes
+  passed: five times the slowest binary (`briqyardd`'s: 70 s on CI, 55 s in the dev VM, 61 s
+  on a Mac); the tests not reported above the line it prints were still running. Each crate
+  installs it from its test root with `#[ctor]` (dev-only): one line per crate covers every
+  test, fixture or none. Linux's
   `PR_SET_PDEATHSIG` follows the thread that forked and macOS has no equivalent; a kqueue or
   pidfd watch is two code paths; a cargo `runner` would wrap `cargo run` too.
 - **What a test spawns ends on its own.** The binary's exit runs no destructor, so a child is
@@ -39,7 +40,7 @@ that exits (or is killed) runs none: the hold files stay and the fakes spin fore
 - **A stand-in that never answers fails its test.** The fixtures that own a wait bound it:
   the CLI's and the fleet's test HTTP clients time out after 10 s, the Firecracker and vsock
   stand-ins give up after 10 s and close their socket. Waits on the code under test keep the
-  binary's 15 minutes as their bound.
+  binary's 6 minutes as their bound.
 - **A suite cleans up in one trap.** `trap cleanup EXIT`, and INT, TERM and HUP end the run
   through it (`exit 130`/`143`/`129`). The cleanup ends the shell's own children
   (`pkill -P $$`: a background pipeline's processes are all children of the shell, while
@@ -52,5 +53,6 @@ that exits (or is killed) runs none: the hold files stay and the fakes spin fore
 
 - A killed `cargo test` leaves nothing: its test binary exits within a second
   (0.6 s measured on the Mac), its fakes within one loop turn.
-- A test hung on the code under test costs at most 15 minutes, and fails then.
+- A test hung on the code under test costs at most 6 minutes, and fails then. A binary that
+  grows past a fifth of it raises `LIMIT` in the same change.
 - `ctor` runs code before `main`: the function it calls only starts a thread.
