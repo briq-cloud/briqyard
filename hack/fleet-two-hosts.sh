@@ -29,7 +29,14 @@ as_second() {
     ask_key() { curl -fsS -X POST -H "Authorization: Bearer $tok" -H "Content-Type: application/json" -d "$1" "$fleet/v1/hosts/key"; }
     '"$1" _ "${@:2}"
 }
+# Run on any exit, a failed check, Ctrl-C or a kill included: the second host is started again
+# when the run stopped it, what it made is destroyed, the second host's config put back.
+STOPPED=
 cleanup() {
+  if [ -n "$STOPPED" ]; then
+    eval "$SECOND_HOST_START" || true
+    for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
+  fi
   for t in "$T-a" "$T-b"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
     briqyard tenant rm "$t" >/dev/null 2>&1 || true
@@ -41,6 +48,7 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 echo "== two hosts"
 for i in $(seq 1 30); do [ "$(hosts | jq '[.[] | select(.state == "ready" and .capacity.memory_mb > 0)] | length')" -ge 2 ] && break; sleep 2; done
@@ -72,6 +80,7 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
   echo "== a host goes silent"
   # Whichever host holds b is the one we stop: the variables name the second host's commands,
   # so the caller makes sure b landed there (two equal hosts: b is on the second one).
+  STOPPED=1
   eval "$SECOND_HOST_STOP"
   for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = down ] && break; sleep 2; done
   check "host marked down"      '[ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = down ]'
@@ -90,6 +99,7 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
     started=$(on_second "date +%s")
   fi
   eval "$SECOND_HOST_START"
+  STOPPED=
   for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
   check "host back"             '[ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ]'
   if [ -n "${SECOND_HOST_SH:-}" ]; then

@@ -999,7 +999,8 @@ pub(crate) mod fake {
     /// ZFS does). Every call is appended to `calls`, one line each;
     /// `get` answers come from `answer.<property>` files when there is one, else `origin` and
     /// `clones` from the `.origin` files, and `list -p` (space) from `answer.space`; `busy` holds how many destroys still answer
-    /// "dataset is busy"; a command waits while a `hold.<command>` file is there. A stream is
+    /// "dataset is busy"; a command waits while a `hold.<command>` file is there and its test
+    /// process runs (a test binary that exits runs no destructor: the file stays). A stream is
     /// one line naming its snapshot and its base; a receive makes the dataset and the snapshot, and refuses
     /// an increment whose base the dataset lacks, as ZFS does; `load-key` takes the line on its
     /// stdin when it is the `key` file's and answers `keystatus` `available` from then on;
@@ -1010,7 +1011,7 @@ pub(crate) mod fake {
     const FAKE: &str = r#"#!/bin/sh
 DEV="__DEV__"
 printf '%s\n' "$*" >> "__LOG__"
-while [ -f "$DEV/hold.$1" ]; do sleep 0.02; done
+while [ -f "$DEV/hold.$1" ] && kill -0 "$PPID" 2>/dev/null; do sleep 0.02; done
 for a in "$@"; do last="$a"; done
 missing() { echo "cannot open '$1': dataset does not exist" >&2; exit 1; }
 # Renames the entries of the creation order that start with $1 to start with $2.
@@ -1175,11 +1176,12 @@ exit 0
     /// kernel's part); `settle` then links every device at its volume's name, unless
     /// `udev.drop` is in the state (udev dropped the events); `trigger` links the device given,
     /// or all of them, dropped or not. A device whose volume is gone loses its links and goes.
-    /// Each waits while `hang.udevadm` (`hang.zvol_id`) is in the state: a udevd wedged.
+    /// Each waits while `hang.udevadm` (`hang.zvol_id`) is in the state, a udevd wedged, and
+    /// its test process runs.
     const FAKE_UDEVADM: &str = r#"#!/bin/sh
 DEV="__DEV__"; LINKS="__LINKS__"; DEVS="__DEVS__"
 printf 'udevadm %s\n' "$*" >> "__LOG__"
-while [ -f "$DEV/hang.udevadm" ]; do sleep 0.1; done
+while [ -f "$DEV/hang.udevadm" ] && kill -0 "$PPID" 2>/dev/null; do sleep 0.1; done
 for a in "$@"; do last="$a"; done
 # Each volume's inode and name; the kernel's part: a device for each volume that has none.
 find "$DEV" -mindepth 2 -type f ! -name '*@*' ! -name '*.origin' -exec ls -i {} + |
@@ -1217,7 +1219,7 @@ exit 0
 
     const FAKE_ZVOL_ID: &str = r#"#!/bin/sh
 DEV="__DEV__"
-while [ -f "$DEV/hang.zvol_id" ]; do sleep 0.1; done
+while [ -f "$DEV/hang.zvol_id" ] && kill -0 "$PPID" 2>/dev/null; do sleep 0.1; done
 i=$(ls -i "$1" 2>/dev/null | awk '{ print $1 }')
 n=$(find "$DEV" -mindepth 2 -type f ! -name '*@*' ! -name '*.origin' -exec ls -i {} + |
   awk -v i="$i" -v d="$DEV/" '$1 == i { sub(d, "", $2); print $2; exit }')
@@ -1699,6 +1701,69 @@ mod tests {
         std::fs::remove_file(&hold).unwrap();
         snap.await.unwrap().unwrap();
         assert_eq!(f.zfs.stalled(Duration::ZERO), None);
+    }
+
+    /// Waits until the fake has logged its call: past that line, it waits on its hold.
+    fn held_from_now(s: &Scripts) {
+        let calls = s.dev.parent().unwrap().join("calls");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_to_string(&calls).is_ok_and(|c| c.contains("snapshot")) {
+            assert!(Instant::now() < deadline, "the command never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A command its test holds ends once the test is gone, by a panic too: the test's state
+    /// goes with its destructors, and the hold with it.
+    #[test]
+    fn a_held_command_ends_with_its_test_a_panic_included() {
+        let s = Scripts::new();
+        std::fs::write(s.dev.join("hold.snapshot"), "").unwrap();
+        let mut held = std::process::Command::new("sh")
+            .arg(&s.zfs)
+            .args(["snapshot", "byard/x@s"])
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        held_from_now(&s);
+        let test = std::thread::spawn(move || {
+            let _state = s;
+            panic!("a test that fails while its command is held (expected)");
+        });
+        assert!(test.join().is_err());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while held.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the held command still runs");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A command held by a test binary that exited ends too, though no destructor ran and the
+    /// hold is still there: it ends with its parent.
+    #[test]
+    fn a_held_command_ends_once_its_parent_is_gone() {
+        let s = Scripts::new();
+        std::fs::write(s.dev.join("hold.snapshot"), "").unwrap();
+        // Its parent starts it and exits at once, as a test binary killed mid-test would.
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(r#"sh "$0" snapshot byard/x@s >/dev/null 2>&1 & echo $!"#)
+            .arg(&s.zfs)
+            .output()
+            .unwrap();
+        let pid: i32 = String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        held_from_now(&s);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Reparented, it is reaped by init (launchd) once it exits.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "the held command still runs");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(s.dev.join("hold.snapshot").exists());
     }
 
     /// Against the kernel and udev, on a Linux host with ZFS, as root (ADR 0046):

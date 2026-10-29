@@ -25,14 +25,18 @@ ID=/etc/briqyard/fleet-backup.key
 STORE=/var/lib/briqyard-fleet-backup
 STATE=$(on_fleet "sed -n 's/^state_dir: //p' $CFG"); STATE=${STATE:-/var/lib/briqyard-fleet}
 
+# Run on any exit, a failed check, Ctrl-C or a kill included: the fleet's config and registry
+# put back, then the second host started again if the run left it stopped.
 cleanup() {
   echo "cleanup"
   on_fleet "systemctl stop briqyard-fleet
     if [ -f $STATE/registry.json.lost ]; then mv $STATE/registry.json.lost $STATE/registry.json; fi
     if [ -f $CFG.restore-check ]; then mv $CFG.restore-check $CFG; fi
     systemctl start briqyard-fleet" || true
+  on_second "systemctl start briqyardd" || true
 }
 trap cleanup EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 echo "== the registry backed up"
 on_fleet "cp $CFG $CFG.restore-check; [ -f $ID ] || briqyard-fleet --config $CFG keygen --out $ID >/dev/null"

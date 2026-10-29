@@ -350,8 +350,10 @@ dependencies = [
  "anyhow",
  "axum",
  "briqyard-api",
+ "briqyard-testing",
  "chrono",
  "clap",
+ "ctor",
  "futures",
  "humantime",
  "libc",
@@ -366,7 +368,9 @@ dependencies = [
 name = "briqyard-api"
 version = "0.1.2"
 dependencies = [
+ "briqyard-testing",
  "chrono",
+ "ctor",
  "hex",
  "rcgen",
  "rustls",
@@ -387,8 +391,10 @@ dependencies = [
  "base64 0.22.1",
  "briqyard-api",
  "briqyard-objstore",
+ "briqyard-testing",
  "chrono",
  "clap",
+ "ctor",
  "futures",
  "hyper",
  "hyper-util",
@@ -413,6 +419,8 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "briqyard-api",
+ "briqyard-testing",
+ "ctor",
  "futures",
  "libc",
  "nix 0.29.0",
@@ -430,7 +438,9 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
+ "briqyard-testing",
  "bytes",
+ "ctor",
  "futures",
  "http",
  "http-body-util",
@@ -443,6 +453,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "briqyard-testing"
+version = "0.1.2"
+
+[[package]]
 name = "briqyardd"
 version = "0.1.2"
 dependencies = [
@@ -453,8 +467,10 @@ dependencies = [
  "base64 0.22.1",
  "briqyard-api",
  "briqyard-objstore",
+ "briqyard-testing",
  "chrono",
  "clap",
+ "ctor",
  "flate2",
  "futures",
  "hex",
@@ -742,6 +758,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array 0.4.15",
+]
+
+[[package]]
+name = "ctor"
+version = "1.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
+dependencies = [
+ "link-section",
+ "linktime-proc-macro",
 ]
 
 [[package]]
@@ -1846,6 +1872,18 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "link-section"
+version = "0.19.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39c29a617ce3df32c08497bdc1ab6e2376e0b17948ac166a2fbe5977c5954cd9"
+
+[[package]]
+name = "linktime-proc-macro"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e57c38c1e860fd37c604281cdfb1dd2216977fd76a50f85ba2f388ef3219616"
 
 [[package]]
 name = "linux-raw-sys"

@@ -20,4 +20,6 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+briqyard-testing = { workspace = true }
+ctor = { workspace = true }
 tempfile = "3"
