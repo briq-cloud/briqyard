@@ -17,13 +17,20 @@ bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 hosts() { api /v1/hosts; }
 host_field() { hosts | jq -r ".[] | select(.id == \"$1\") | $2"; }
+# Run on any exit, a failed check, Ctrl-C or a kill included: the hosts it drained are undrained,
+# what it made is destroyed.
+DRAINED=
 cleanup() {
+  # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
+  set +e
+  for h in $DRAINED; do briqyard host undrain "$h" >/dev/null 2>&1 || true; done
   for t in "$T" "$T-2" "$T-up"; do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
     briqyard tenant rm "$t" >/dev/null 2>&1 || true
   done
 }
 trap cleanup EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 echo "== fleet"
 check "status"          'api "/v1/status" | jq -e ".hosts >= 1" >/dev/null'
@@ -80,6 +87,7 @@ if [ -z "$LOCAL" ]; then
   [ "$fail" = 0 ]; exit
 fi
 echo "== hosts: drain and forget the host local"
+DRAINED=$LOCAL
 briqyard host drain "$LOCAL"
 check "draining"          '[ "$(host_field "$LOCAL" .state)" = draining ]'
 # One host: the create is refused. Several: it lands on another one. Never on the draining host.
@@ -88,6 +96,7 @@ briqyard host undrain "$LOCAL"
 check "undrained"         '[ "$(host_field "$LOCAL" .state)" = ready ]'
 briqyard host drain "$LOCAL"
 briqyard host rm "$LOCAL"
+DRAINED=
 sleep 16
 check "back after rm (a static host is polled again)" 'briqyard host ls | awk "NR>1" | grep -q ready'
 
@@ -98,9 +107,11 @@ if sudo -n test -d "$REL" 2>/dev/null; then
   # The VM's own host, the one the fleet reaches over SSH; the machine is placed there.
   UP=$(hosts | jq -r '.[] | select(.url | test("//127[.]0[.]0[.]1:")) | .id')
   OTHERS=$(hosts | jq -r ".[] | select(.state == \"ready\" and .id != \"$UP\") | .id")
+  DRAINED=$OTHERS
   for h in $OTHERS; do briqyard host drain "$h"; done
   U=$(briqyard machine run --image alpine:3.20 --name up --tenant "$T-up" --memory 128 -- sleep 3600 | jq -r .id)
   for h in $OTHERS; do briqyard host undrain "$h"; done
+  DRAINED=
   before=$(host_field "$UP" .started.at)
   build=$(briqyard --version | awk '{print $2}')
   out=$(briqyard host upgrade "$UP" --release "file://$REL" 2>&1) || true

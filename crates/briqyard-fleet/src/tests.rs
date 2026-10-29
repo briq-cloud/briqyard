@@ -636,7 +636,11 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         },
         cfg,
         reg: Mutex::new(reg),
-        http: reqwest::Client::new(),
+        // A stub daemon that never answers fails its test rather than holding it forever.
+        http: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap(),
         pinned: Mutex::new(HashMap::new()),
         upgrade: Default::default(),
         backup,

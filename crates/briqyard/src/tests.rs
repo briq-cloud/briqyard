@@ -1758,7 +1758,11 @@ fn client(base: &str, token: Option<&str>) -> Client {
     Client {
         base: base.trim_end_matches('/').to_string(),
         token: token.map(|t| t.to_string()),
-        http: reqwest::Client::new(),
+        // A stub that never answers fails its test rather than holding it forever.
+        http: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap(),
     }
 }
 

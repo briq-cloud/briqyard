@@ -21,6 +21,7 @@ import http.client
 import json
 import os
 import random
+import signal
 import socket
 import statistics
 import subprocess
@@ -98,8 +99,12 @@ def parallel(items, fn, workers):
         except Exception as e:  # recorded, never fatal: the report counts them
             errors[i] = e
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
         list(ex.map(one, range(len(items))))
+    finally:
+        # An interrupt drops the calls not started yet; those under way finish.
+        ex.shutdown(cancel_futures=True)
     return results, errors
 
 
@@ -137,6 +142,9 @@ class Run:
 
     def mlist(self):
         return self.api.call("GET", "/v1/machines", op="list")
+
+    def mine(self):
+        return [m for m in self.mlist() if m["tenant"].startswith(self.prefix)]
 
     def find_named(self, tenant, name):
         return next((m for m in self.mlist() if m["tenant"] == tenant and m["name"] == name), None)
@@ -192,7 +200,7 @@ class Run:
             self.log(f"   INVARIANT BROKEN after {label}")
 
     def expected(self):
-        mine = [m for m in self.mlist() if m["tenant"].startswith(self.prefix)]
+        mine = self.mine()
         by = {}
         for m in mine:
             by[m["state"]] = by.get(m["state"], 0) + 1
@@ -558,7 +566,7 @@ class Run:
         _, errs = parallel(list(self.machines.values()), one, self.a.workers)
         self.report_errors("destroy", errs)
         # Whatever a failed phase left in these tenants (a fork, a retry's twin) goes too.
-        left = [m for m in self.mlist() if m["tenant"].startswith(self.prefix)]
+        left = self.mine()
         if left:
             self.log(f"   {len(left)} machine(s) left by failed phases, destroying them")
             parallel(left, one, self.a.workers)
@@ -612,6 +620,10 @@ class Run:
         return 0 if not self.api.failures and not self.broken else 1
 
 
+def interrupted(signum, frame):
+    raise KeyboardInterrupt
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--url", default=os.environ.get("BRIQYARD_URL", "http://127.0.0.1:7420"))
@@ -634,12 +646,25 @@ def main():
     if unknown:
         p.error(f"unknown phases: {','.join(sorted(unknown))}")
     run = Run(a)
+    # A kill or a closed terminal ends the run as Ctrl-C does: with the destroy below.
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
+    code = 1
     try:
-        sys.exit(run.run())
+        code = run.run()
     except KeyboardInterrupt:
-        run.log("interrupted; destroying what was made")
-        run.destroy_all()
-        sys.exit(130)
+        run.log("interrupted")
+        code = 130
+    finally:
+        # Each round destroys what it made; a failed or interrupted one, its tenants included,
+        # leaves it to this. A daemon that does not answer is logged; the run keeps its code.
+        if run.tenants:
+            run.log("destroying what was made")
+            try:
+                run.destroy_all()
+            except ApiError as e:
+                run.log(f"cleanup failed: {e}")
+    sys.exit(code)
 
 
 if __name__ == "__main__":

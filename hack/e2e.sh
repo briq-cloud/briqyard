@@ -27,11 +27,23 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+# The daemon's own unit on this host, which some sections stop, kill or lock for a moment.
+UNIT=; if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; then UNIT=briqyardd; fi
+# Run on any exit, a failed check, Ctrl-C or a kill included: what the run started ends, what
+# it changed is put back, what it made is destroyed.
 cleanup() {
   echo "cleanup"
+  # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
+  set +e
+  # The background sessions, watches and their stdin: this shell's children, by its pid.
+  pkill -P $$ || true
   # The encryption section moves the pool's key away for a moment: put it back first.
   if [ -n "${KEY_FILE:-}" ] && sudo test -f "$KEY_FILE.e2e"; then
     sudo mv "$KEY_FILE.e2e" "$KEY_FILE"
+  fi
+  # A run that ended while the daemon was down starts it again.
+  if [ -n "$UNIT" ]; then
+    sudo systemctl start "$UNIT"
     for i in $(seq 1 60); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
   fi
   # The mirror section stops the mirror and names it in the configuration for a moment.
@@ -42,7 +54,8 @@ cleanup() {
       handover
     fi
   fi
-  for t in "$T" "$T-eg" "$T-gw" "$T-ip" "$T-q"; do
+  # Every tenant of the run: "$T" and "$T-<section>" (-eg, -gw, -other, -par1…).
+  for t in $(briqyard tenant ls 2>/dev/null | jq -r --arg t "$T" '.[].id | select(. == $t or startswith($t + "-"))'); do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
     for i in $(seq 1 10); do
@@ -53,6 +66,7 @@ cleanup() {
   done
 }
 trap cleanup EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 echo "== status"
 briqyard status | jq -e '.host_id' >/dev/null && ok "status answers"
@@ -109,13 +123,14 @@ $TTY 24x80 "send:exec sleep 6061\n" "expect:never printed" -- briqyard machine e
 held=$!
 for i in $(seq 1 40); do running "sleep 6061" && break; sleep 0.5; done
 check "tty: the command runs"           'running "sleep 6061"'
-pkill -9 -f "machine exec -it $A -- sh" || true
+pkill -9 -P "$held" || true
 check "tty: the client's close hangs it up" 'ended "sleep 6061"'
 wait "$held" 2>/dev/null || true
 sleep 600 | briqyard machine exec -i "$A" -- sleep 6062 >/dev/null 2>&1 &
+held=$!
 for i in $(seq 1 40); do running "sleep 6062" && break; sleep 0.5; done
 check "session: the command runs"       'running "sleep 6062"'
-pkill -9 -f "machine exec -i $A -- sleep 6062" || true
+kill -9 "$held" || true
 check "session: the client's close kills it" 'ended "sleep 6062"'
 check "session: an event"               'briqyard events --machine "$A" | awk "\$4 == \"session_opened\"" | grep -q .'
 
@@ -513,12 +528,13 @@ echo "== sleep on idle, wake on connect"
 # A machine with a session open is in use: it stays up while the sleeper below goes down.
 W=$(briqyard machine run --image alpine:3.20 --name awake --tenant "$T" --memory 128 --sleep 20s -- sleep 3600 | jq -r .id)
 sleep 600 | briqyard machine exec -i "$W" -- cat >/dev/null 2>&1 &
+held=$!
 S=$(briqyard machine run --image postgres:16-alpine --name sleeper --tenant "$T" --memory 512 --volume 1G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 20s | jq -r .id)
 SEP=$(briqyard endpoint add "$S" 5432 | jq -r .address)
 for i in $(seq 1 90); do [ "$(briqyard machine get "$S" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "slept when idle" '[ "$(briqyard machine get "$S" | jq -r .stopped_reason)" = idle ]'
 check "awake while a session is open" '[ "$(briqyard machine get "$W" | jq -r .state)" = running ]'
-pkill -9 -f "machine exec -i $W -- cat" || true
+kill -9 "$held" || true
 for i in $(seq 1 45); do [ "$(briqyard machine get "$W" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "asleep once it closed" '[ "$(briqyard machine get "$W" | jq -r .stopped_reason)" = idle ]'
 briqyard machine rm "$W" >/dev/null
