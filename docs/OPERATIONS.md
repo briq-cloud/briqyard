@@ -410,7 +410,10 @@ snapshot, or is whole.
 
 | Symptom | Look at |
 |---|---|
-| A create or start answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the init's reason (`start "/run.sh": …`) or else the last console lines. `briqyard machine logs`, then destroy it |
+| A machine stays `creating` | Its image is being pulled (ADR 0048): `briqyard events --machine <id>` shows `pulling`; the host's `image_pulled` ends it. Pulls of four images run at once, the rest wait their turn; a registry silent for 15 minutes fails the pull |
+| A machine is `error (pull_failed)` | Its image could not be pulled: the reference, the registry's credentials (`registries:`), the registry or its mirror. `error` says which; nothing is tried again: destroy it and create again |
+| A machine is `error (create_failed)` | Its disks could not be made (`zfs` in `error` and the log, at `error`), its create's start was refused (its quota, its `via`), or the daemon restarted during a fork's or a restore's create (one from an image is taken up again). No disks: destroy it and create again |
+| A start or a create's `/wait` answers 409 `boot_failed` | The image's fault: the machine is kept in `state: error`, `error` holds the init's reason (`start "/run.sh": …`) or else the last console lines. `briqyard machine logs`, then destroy it |
 | A start after `machine set --image` answers 409 `boot_failed`, `error: image …` | The new image could not be pulled or built; the change is still `pending`. `machine set` another image (or the one it runs, which drops the change) and start again |
 | A start after `machine set --memory` answers 503 `capacity` | The host has no room for the new size; the change is still `pending`. Through a fleet, the tenant stays on its host: move it (backups, `tenant unpin`, restores) |
 | A machine is `stopped (host)` | The daemon stopped it: its stop, or a crashed daemon's leftover. The next start boots it again unless its sleep window had run out; else the next use wakes it |

@@ -384,6 +384,9 @@ struct RunArgs {
     entrypoint: Vec<String>,
     #[arg(long)]
     no_start: bool,
+    /// Answer once the machine is recorded (`creating`), without waiting for its image and boot
+    #[arg(long)]
+    detach: bool,
     /// The command, after --
     #[arg(last = true)]
     cmd: Vec<String>,
@@ -757,6 +760,31 @@ impl Client {
         Err(refusal(resp).await)
     }
 
+    /// A machine a create answered `creating` (ADR 0048), once it runs: `/wait` again while
+    /// it is on its way; one that ran and stopped (a command that exits at once) as it is
+    /// then; a create or a boot that failed is the error.
+    async fn running(&self, m: api::Machine) -> Result<api::Machine> {
+        if m.state != api::state::CREATING {
+            return Ok(m);
+        }
+        let path = format!("/v1/machines/{}/wait?for=running&timeout=600", m.id);
+        let mut done: api::Machine = loop {
+            match self.call(reqwest::Method::POST, &path, NONE).await {
+                Err(e) if refused_with(&e, "not_ready") => continue,
+                Err(e) if refused_with(&e, "not_running") => {
+                    let path = format!("/v1/machines/{}", m.id);
+                    break self.call(reqwest::Method::GET, &path, NONE).await?;
+                }
+                other => break other?,
+            }
+        };
+        // Through a fleet, the create's answer names the host; a wait's does not.
+        if done.host.is_empty() {
+            done.host = m.host;
+        }
+        Ok(done)
+    }
+
     /// Every event of a read, page after page, and the cursor after the last.
     async fn events(&self, path: &str, since: Option<String>) -> Result<(Vec<api::Event>, String)> {
         let (mut all, mut cursor) = (Vec::new(), since.unwrap_or_default());
@@ -819,10 +847,31 @@ async fn refusal(resp: reqwest::Response) -> anyhow::Error {
         Err(e) => return e.into(),
     };
     match serde_json::from_str::<api::ApiError>(&text) {
-        Ok(e) if e.request_id.is_empty() => anyhow!("{} ({})", e.error, e.code),
-        Ok(e) => anyhow!("{} ({}, request {})", e.error, e.code, e.request_id),
+        Ok(e) => Refused(e).into(),
         Err(_) => anyhow!("{status}: {}", text.trim()),
     }
+}
+
+/// A refusal the API explained: what the caller may read its code from.
+#[derive(Debug)]
+struct Refused(api::ApiError);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let e = &self.0;
+        match e.request_id.is_empty() {
+            true => write!(f, "{} ({})", e.error, e.code),
+            false => write!(f, "{} ({}, request {})", e.error, e.code, e.request_id),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Whether `err` is the API's refusal with this code.
+fn refused_with(err: &anyhow::Error, code: &str) -> bool {
+    err.downcast_ref::<Refused>()
+        .is_some_and(|r| r.0.code == code)
 }
 
 /// A line of a logs follow: a console line, a heartbeat (`{}`: nothing), or the end: a
@@ -1004,6 +1053,10 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     restore: None,
                 };
                 let m: api::Machine = c.call(POST, "/v1/machines", Some(&req)).await?;
+                let m = match a.detach || a.no_start {
+                    true => m,
+                    false => c.running(m).await?,
+                };
                 print_json(&m);
                 if m.state == api::state::ERROR {
                     bail!("{}", m.error);
@@ -1858,6 +1911,14 @@ fn backup_label(p: Option<&api::BackupPolicy>) -> String {
 // --- tables ---
 
 /// `machine ls`.
+/// Why a machine is in its state: stopped, or in `error`.
+fn reason_of(m: &api::Machine) -> &str {
+    match m.state.as_str() {
+        api::state::ERROR => &m.error_reason,
+        _ => &m.stopped_reason,
+    }
+}
+
 fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
         "{:<16} {:<10} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
@@ -1877,10 +1938,9 @@ fn machine_table(ms: &[api::Machine]) -> String {
         "PENDING"
     );
     for m in ms {
-        let state = if m.stopped_reason.is_empty() {
-            m.state.clone()
-        } else {
-            format!("{} ({})", m.state, m.stopped_reason)
+        let state = match reason_of(m) {
+            "" => m.state.clone(),
+            why => format!("{} ({why})", m.state),
         };
         let pending = match &m.pending {
             Some(p) => p.fields.join(","),
@@ -2208,8 +2268,8 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
     lines.push(("Image", m.image.clone()));
     lines.push(("State", m.state.clone()));
     lines.push(("Ready", if m.ready { "yes" } else { "no" }.into()));
-    if !m.stopped_reason.is_empty() {
-        lines.push(("Reason", m.stopped_reason.clone()));
+    if !reason_of(m).is_empty() {
+        lines.push(("Reason", reason_of(m).into()));
     }
     if let Some(x) = &m.exit {
         let mut exit = format!("code {} at {}", x.code, x.at.format("%Y-%m-%d %H:%M:%S"));

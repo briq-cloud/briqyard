@@ -422,7 +422,7 @@ class Run:
 
     # ---- the races ----
     def hangup_mid_create(self):
-        self.phase("hang up on a create after 1 s: the machine settles on its own, the image still builds")
+        self.phase("hang up on a create after 1 s: the machine settles on its own, the image still builds (a create answers at once since ADR 0048)")
         t, name = self.tenants[0], "hangup"
         body = {"tenant": t, "name": name, "image": HANGUP_IMAGE, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}
         status, text = self.api.request("POST", "/v1/machines", body, op="create (hang up)", timeout=1)
@@ -432,7 +432,7 @@ class Run:
             # The record, if the create got that far, must leave its pending state by itself.
             deadline = time.monotonic() + self.a.boot_timeout
             m = self.find_named(t, name)
-            while m and m["state"] in ("created", "starting"):
+            while m and m["state"] in ("creating", "created", "starting"):
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"{m['id']} still {m['state']} {self.a.boot_timeout}s after the hang-up")
                 time.sleep(0.5)
@@ -514,8 +514,11 @@ class Run:
         made, errs = parallel([f"cap{i}" for i in range(n)], lambda name: self.api.call("POST", "/v1/machines", dict(body, name=name), op="create (stopped)", timeout=600), n)
         self.report_errors("create stopped", errs)
         ids = [m["id"] for m in made.values()]
+        # A create answers at `creating` (ADR 0048): the race is between starts of machines made.
+        for mid in ids:
+            self.wait_state(mid, {"created"}, timeout=self.a.boot_timeout)
         # A start refused leaves a machine as it was: `created`, never started.
-        was = {m["id"]: m["state"] for m in made.values()}
+        was = {mid: "created" for mid in ids}
 
         # Live memory, sampled through the race: it must never exceed the host's.
         worst = {"mb": 0}

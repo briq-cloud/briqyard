@@ -303,10 +303,12 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   token). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
-- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, image layers
-  (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary group
-  (running, its uid, gid and groups), a program that cannot start (409 `boot_failed` with the
-  init's reason), DNS,
+- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, a create
+  answered at once (ADR 0048: 201 `creating`, running after its pull, `pulling` then `created`,
+  sent again a 409 with the first, an image on the host, a pull that fails `pull_failed`), image
+  layers (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary
+  group (running, its uid, gid and groups), a program that cannot start (its `/wait` 409
+  `boot_failed` with the init's reason), DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress (two `Host` lines
   refused, an absolute-form target routed by its authority and refused when `Host` names
@@ -359,7 +361,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   root disk given back to the pool, exec after a bare pause and resume), a volume grown (ADR
   0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
-  data kept, the next backup incremental and its restore at the grown size). 236 checks, 232
+  data kept, the next backup incremental and its restore at the grown size). 241 checks, 237
   without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
