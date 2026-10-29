@@ -339,8 +339,10 @@ plus `apt-get purge docker.io` and the edge's files.
   root disk given back to the pool, exec after a bare pause and resume), a volume grown (ADR
   0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
-  data kept, the next backup incremental and its restore at the grown size). 231 checks, 227
-  without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  data kept, the next backup incremental and its restore at the grown size), a hand-over
+  through systemd's store (ADR 0051: a connection held across it ends whole, the new ones made
+  during it all answered, the gap logged; with a unit that has a store, and python3). 234
+  checks, 230 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl

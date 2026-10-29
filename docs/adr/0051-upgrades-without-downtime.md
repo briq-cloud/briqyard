@@ -8,8 +8,8 @@ Date: 2026-10-29 · Status: proposed; amends ADR 0027 (what a hand-over costs th
 
 | During | What fails |
 |---|---|
-| `host upgrade` | MEASURE |
-| `systemctl restart briqyard-fleet` | MEASURE |
+| `host upgrade` | for 1.2 s, every new connection to an endpoint (TCP and HTTP) refused, every API call refused, every call through the fleet a 502 `host_unreachable`; every open endpoint connection reset |
+| `systemctl restart briqyard-fleet` | the fleet's API refused for 0.2 s |
 
 Read from the code:
 
@@ -90,9 +90,17 @@ Rejected:
 
 `hack/upgrade-probe.sh` (in the VM, through the fleet) makes a machine with an HTTP server and a line echo server, a TCP and an HTTP endpoint to each, and runs `hack/upgrade-probe.py` through them and against both APIs while `host upgrade` runs, twice (with no long-held connection, so the drain ends with the short ones, then with 4 held each way, so it runs to its bound), then while the fleet restarts. The probe opens a new connection per attempt (TCP, HTTP), keeps 4 long connections exchanging a line every 100 ms (TCP, HTTP), and GETs both APIs every 100 ms; an attempt ends `ok`, `refused`, `reset`, `timeout` (30 s, over the longest gap) or `failed`, a long connection broken counts a `cut`, `outage_ms` is the longest time between two `ok`s and `slowest_ms` the slowest `ok` (a queued connection shows here). `hack/e2e.sh` checks that a connection open across a hand-over within the bound survives and that new ones made during it are answered.
 
-| Probe | `host upgrade`, before | after | fleet restart, before | after |
-|---|---|---|---|---|
-| MEASURE | | | | |
+The dev VM (fc), 2026-10-29, `main` at 0323a8a against this change. Each probe opens a connection or makes a call every 50 to 100 ms; a cell is what failed of what was tried, then the longest time between two answers.
+
+| Probe | `host upgrade`, before | after | with 4 connections held each way, after | fleet restart, before | after |
+|---|---|---|---|---|---|
+| TCP endpoint, new connections | 23 refused of 348; 1.2 s | none of 397; 0.13 s | none of 259; 10.2 s | none | none |
+| HTTP ingress, new requests | 23 refused of 348; 1.2 s | none of 397; 0.14 s | none of 259; 10.2 s | none | none |
+| Long-held TCP and HTTP connections | 4 and 4 reset, then refused while reconnecting | — | 4 and 4 reset at the drain's end, reconnected at once | none | none |
+| The daemon's API (`/v1/status`) | 12 refused of 176; 1.3 s | none of 202; 0.23 s | none of 133; 10.2 s | none | none |
+| A call through the fleet | 11 `host_unreachable` of 182; 1.2 s | none of 210; 0.17 s | none of 137; 10.2 s | 1 refused of 99; 0.2 s | none of 99; 0.12 s |
+
+The next daemon's `serving again`: `gap_ms` 129 (its own start 101 ms: 5 ms to the pool, 88 ms to adopt the machines) with nothing long open, 10 158 with the held connections, which kept the old daemon to the drain's bound. The cost is the bound itself: while a connection that never ends on its own is open (a WebSocket, a pool), every new connection and call waits the full 10 s, and that connection is cut all the same. A shorter bound (2 s still lets a short request end) is the lever; 10 s stands until measured on a real host.
 
 ## What stays
 

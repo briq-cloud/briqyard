@@ -19,7 +19,10 @@ api() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL$1"; }
 sudo -n test -d "$REL" || { echo "no release at $REL: run hack/vm.sh install first"; exit 2; }
 ADDR=${PROBE_ADDR:-$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')}
 T=probe-$$
-UP=$(api /v1/hosts | jq -r '.[] | select(.url | test("//127[.]0[.]0[.]1:")) | .id')
+# A fleet just restarted is still hearing from its hosts: wait for the loopback one's room.
+up_ready='.[] | select((.url | test("//127[.]0[.]0[.]1:")) and .state == "ready" and .capacity.memory_mb > 0)'
+for i in $(seq 1 60); do api /v1/hosts 2>/dev/null | jq -e "$up_ready" >/dev/null && break; sleep 1; done
+UP=$(api /v1/hosts | jq -r "$up_ready | .id")
 [ -n "$UP" ] || { echo "the fleet has no host at a loopback URL"; exit 2; }
 probe=""
 cleanup() {
