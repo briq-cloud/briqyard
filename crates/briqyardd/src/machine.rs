@@ -12208,7 +12208,10 @@ mod tests {
             failure_threshold: 1,
             ..http_probe(8080)
         };
-        let m = h.m.create(h.probed("web", readiness(p))).await.unwrap();
+        let m =
+            h.m.create_made(h.probed("web", readiness(p)))
+                .await
+                .unwrap();
         for code in [200, 500, 200, 500] {
             h.host.http(&m.ip, 8080, code);
             eventually("flipped", || h.m.get(&m.id).unwrap().ready == (code == 200)).await;
