@@ -320,9 +320,9 @@ plus `apt-get purge docker.io` and the edge's files.
   disk back after a restore, a running machine booted again, a fork made after the snapshot
   still working, a backup after the restore continuing from the one before the snapshot and
   restoring to the machine's content, the newer snapshot restored and the next backup whole, a
-  snapshot with memory resumed with `/tmp` and the uptime kept), encryption at rest (the pool
-  and every dataset under it encrypted, records, runs, images and jails on it, the key in none
-  of the daemon's files nor its log; the daemon stopped and the pool locked as a reboot leaves
+  snapshot with memory resumed with `/tmp` and the uptime kept, and its disk the snapshot's
+  after a cold boot), encryption at rest (the pool and every dataset under it encrypted,
+  records, runs, images and jails on it, the key in none of the daemon's files nor its log; the daemon stopped and the pool locked as a reboot leaves
   it: without its key file no API and the reason logged, the file back and it starts, a machine
   of before runs again), exec sessions (`-i` streaming stdin, stderr apart and the code; `-it`
   driven by `hack/exec-tty.py`: a terminal of the size sent, a resize followed, the exit code;
@@ -341,8 +341,8 @@ plus `apt-get purge docker.io` and the edge's files.
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
   data kept, the next backup incremental and its restore at the grown size), a hand-over
   through systemd's store (ADR 0051: a connection held across it ends whole, the new ones made
-  during it all answered, the gap logged; with a unit that has a store, and python3). The dev
-  VM printed 230 checks on 2026-10-29, those 3 included; 4 fewer without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  during it all answered, the gap logged; with a unit that has a store, and python3). 235
+  checks, 231 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
@@ -367,6 +367,12 @@ plus `apt-get purge docker.io` and the edge's files.
   invariants between phases (ADR 0010; one is no record on disk the daemon does not hold).
   `--tenants 6 --per-tenant 4 --rounds 2 --crash`. Against a daemon on TLS, the invariants' curl
   trusts the daemon's certificate with `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
+- `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
+  restarts, forks, snapshots (a restore with memory read again after a cold boot) and backups,
+  while racers stop, start, restart, snapshot and back up any machine at once. It fails on a
+  counter that is not what it should be, or an answer a race does not explain. A write cut
+  short by a stop (409 `not_running`) may have run: its owner reads it back once the machine
+  runs. `--tenants 4 --racers 4 --minutes 10`; `--backups` with a store; a fleet with `--url`.
 - `hack/fleet-two-hosts.sh`: a fleet with two hosts: tenants placed on different hosts, calls
   forwarded to each, a host that stops answering marked down with its tenant's calls refused
   (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back;

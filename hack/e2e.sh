@@ -655,6 +655,9 @@ briqyard machine snapshot restore "$CK" warm >/dev/null
 took=$(echo "$(date +%s.%N) - $t0" | bc)
 check "restored with memory (${took}s): resumed, not booted" '[ "$(briqyard events --machine "$CK" | awk "{print \$4}" | tail -1)" = resumed ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 3 ]'
 check "memory and disks as they were"  '[ "$(on "cat /tmp/mark /data/f" | paste -sd, -)" = m1,v4 ] && [ "$(on "cut -d. -f1 /proc/uptime")" -ge "$up" ]'
+# Those reads may come from the memory's page cache: a cold boot reads the disk.
+briqyard machine restart "$CK" >/dev/null
+check "a cold boot after it, on the snapshot's disk" '[ "$(on "cat /data/f")" = v4 ] && ! on "test -e /tmp/mark"'
 briqyard machine snapshot rm "$CK" before
 check "deleted by name" '! briqyard machine snapshot ls "$CK" | grep -q " before "'
 briqyard machine destroy "$FK" >/dev/null
