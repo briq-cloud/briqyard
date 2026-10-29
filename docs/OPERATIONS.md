@@ -280,6 +280,12 @@ changed), and `briqyard host undrain <id>`. `systemctl restart briqyardd` by han
 without the reboot: a quarter-second pause per machine. A daemon that crashes leaves its
 machines running (`KillMode=process`), and the next one adopts them.
 
+**Security updates** (unattended upgrades) land on disk and never restart anything on their
+own (ADR 0050): the bootstrap keeps needrestart off `briqyardd` and `briqyard-fleet`
+(`/etc/needrestart/conf.d/briqyard.conf`), and `Unattended-Upgrade::Automatic-Reboot` stays
+false. The daemon picks an updated library up at its next `host upgrade` (the same release
+again is fine) or reboot. `briqyard doctor` warns when either would happen on its own.
+
 A host from before ADR 0014 (jails on `/`): stop the daemon and empty `jail_dir` before the
 first start that mounts `byard/jail` there, or the old files stay hidden on `/` and the
 machines suspended then boot cold.
@@ -326,9 +332,10 @@ nor a base of one goes (`backup_deleted`, `retention`). The store holds `keep` t
 refused while another continues from it, `--chain` deletes those too.
 
 A destroy keeps the machine's backups for `backup.keep_destroyed_days`: a holder
-(`state/holders/<id>.json`) keeps them listed (`briqyard backups --tenant T`, each with
-`deletes_at`) and counted in the machine's usage buckets (`backup_gb_hours`). Through a fleet,
-`backup rm` of a destroyed machine's backup names its tenant (`--tenant`).
+(`state/holders/<id>.json`) keeps them listed (`briqyard backups --tenant T`, `--machine ID`
+for one machine's, each with `deletes_at`) and counted in the machine's usage buckets
+(`backup_gb_hours`). Through a fleet, `backup rm` of a destroyed machine's backup names its
+tenant (`--tenant`).
 
 In the store, per machine: `backups/<machine>/<id>.json` (the record) and
 `backups/<machine>/<disk>/<id>.zfs` (a stream, `root` or `data`). Ids are times to the
@@ -409,7 +416,8 @@ snapshot, or is whole.
 | A machine is `stopped (host)` | The daemon stopped it: its stop, or a crashed daemon's leftover. The next start boots it again unless its sleep window had run out; else the next use wakes it |
 | `upgrade to … failed` in a host's note, the host `draining` | The step and the reason are in the note: SSH (the key, the pinned host key), the script's last lines, no heartbeat from the new version (`journalctl -u briqyardd` on the host), or a start that stopped machines it could not take over (`briqyard events --machine …`). Fix, then `briqyard host undrain` |
 | `the host now runs …, newer than this fleet` | Upgrade the fleet, then `host undrain` the host |
-| A machine stays `destroying` | Its disks could not be destroyed (`zfs destroy` in the log); the daemon tries again every 15 s |
+| A machine stays `destroying` | Its disks could not be destroyed (`zfs destroy` in the log), or, its disks gone, the backup store did not list its backups within 30 s (`resume destroy`); the daemon tries again every 15 s |
+| `record of a destroyed machine, written back after its destroy: removed` (`warn` at start) | A daemon up to v0.1.2 could write a destroyed machine's record back (a call that waited on the machine during its destroy); the next start destroyed it again. A `destroying` record whose address another machine holds is now deleted at start, nothing else done; another one is finished as a destroy, its holder made from what the backup store lists (30 s at most, else tried again) |
 | The process exits at once (`stopped`, `exit.code`) | `briqyard machine logs`: the image's own output. `restart.policy: on-failure` tries three times, 10 s, 20 s, 40 s apart (`restarting_at`); `crash_loop` events from the third |
 | `/wait` answers 409 `not_ready`, or the ingress 502 after a wait | The program runs but its readiness or startup probe does not pass: `briqyard machine describe` shows each probe's last result. A TCP or HTTP probe needs the program on the machine's address, not only `127.0.0.1` |
 | `startup_failed` then `error` | The startup probe did not pass within `failure_threshold` × `period_sec` of a start: the boot failed, as `boot_failed` does. On a restart it is a crash instead, restarted by the policy |
@@ -448,6 +456,15 @@ snapshot, or is whole.
 `briqyard-fleet` runs anywhere that reaches every host (`/etc/briqyard/fleet.yaml`, unit in
 `hack/briqyard-fleet.service`). Clients use the fleet's URL and `token` as they would a
 daemon's; `briqyard host ls` shows the hosts.
+
+On a server with no host, keep needrestart from restarting the fleet, as the bootstrap does on
+a host (ADR 0050):
+
+```bash
+mkdir -p /etc/needrestart/conf.d && printf '%s\n' \
+  '$nrconf{override_rc}{qr(^briqyardd\.service$)} = 0;' \
+  '$nrconf{override_rc}{qr(^briqyard-fleet\.service$)} = 0;' > /etc/needrestart/conf.d/briqyard.conf
+```
 
 A host has one credential, its own API token, and the fleet must hold it before the host can
 be anything to it: it forwards with it and takes the host's heartbeats (`fleet:` in the host's

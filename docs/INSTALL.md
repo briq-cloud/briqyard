@@ -49,7 +49,7 @@ export BRIQYARD_URL=https://<host>:7420 BRIQYARD_TOKEN=<token> BRIQYARD_TLS_FING
 briqyard status
 ```
 
-On the host, `briqyard doctor` checks KVM, ZFS, nftables, Firecracker and the kernel, one line each.
+On the host, `briqyard doctor` checks KVM, ZFS, nftables, Firecracker and the kernel, one line each, and warns about what would restart the daemon or the host on its own.
 
 ## Several hosts
 

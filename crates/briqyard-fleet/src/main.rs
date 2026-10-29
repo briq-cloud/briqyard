@@ -2296,32 +2296,46 @@ async fn list_backups(
 }
 
 /// The host that holds the backups of a machine no host has (ADR 0045): the one whose
-/// `/v1/backups` lists one of it, of `tenant` when given. Every host is asked, a down one
-/// included, so a backup left on the host a tenant moved from is found; a host that cannot
-/// answer fails the search with its answer rather than letting it name another.
+/// `/v1/backups?machine=` lists one of it, of `tenant` when given. Every host is asked at
+/// once, a down one included, so a backup left on the host a tenant moved from is found; a
+/// host that does not hold it answers from memory. With no host listing it, a host that
+/// could not answer fails the search with its answer, since it may be the one. A host older
+/// than the `machine` filter lists all it holds: what is not the machine's is not read.
 async fn holder(
     st: &AppState,
     id: &str,
     tenant: Option<&str>,
 ) -> Result<Option<HostRec>, Box<Response>> {
-    let path = match tenant.filter(|t| api::valid_id(t)) {
-        Some(t) => format!("/v1/backups?tenant={t}"),
-        None => "/v1/backups".into(),
-    };
+    if !api::valid_id(id) {
+        return Ok(None);
+    }
+    let mut path = format!("/v1/backups?machine={id}");
+    if let Some(t) = tenant.filter(|t| api::valid_id(t)) {
+        path.push_str(&format!("&tenant={t}"));
+    }
     let hosts = st.reg.lock().unwrap().listed();
-    for h in hosts {
-        let resp = forward(st, &h, Method::GET, &path, &HeaderMap::new(), Bytes::new()).await;
-        if !resp.status().is_success() {
-            return Err(Box::new(resp));
+    let asked = hosts.into_iter().map(|h| {
+        let path = &path;
+        async move {
+            let resp = forward(st, &h, Method::GET, path, &HeaderMap::new(), Bytes::new()).await;
+            if !resp.status().is_success() {
+                return Err(Box::new(resp));
+            }
+            let (_, data) = read(resp).await;
+            let backups: Vec<api::Backup> =
+                serde_json::from_slice(&data).map_err(|e| Box::new(unreadable(&h, e)))?;
+            Ok(backups.iter().any(|b| b.machine_id == id).then_some(h))
         }
-        let (_, data) = read(resp).await;
-        let backups: Vec<api::Backup> =
-            serde_json::from_slice(&data).map_err(|e| Box::new(unreadable(&h, e)))?;
-        if backups.iter().any(|b| b.machine_id == id) {
-            return Ok(Some(h));
+    });
+    let mut failed = None;
+    for answer in futures::future::join_all(asked).await {
+        match answer {
+            Ok(Some(h)) => return Ok(Some(h)),
+            Ok(None) => {}
+            Err(resp) => failed = failed.or(Some(resp)),
         }
     }
-    Ok(None)
+    failed.map_or(Ok(None), Err)
 }
 
 /// A host's memory and disk asked of it now, as its heartbeat would report them (ADR 0044).

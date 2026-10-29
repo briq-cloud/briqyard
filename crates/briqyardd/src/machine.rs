@@ -540,6 +540,9 @@ struct Entry {
     probe: Mutex<probes::Run>,
     /// The task running its probes, while one runs.
     prober: Mutex<Option<tokio::task::AbortHandle>>,
+    /// Out of the manager: its record deleted by its destroy, or never written (a create that
+    /// failed). Every write of the record checks it under this lock, which the deletion holds.
+    removed: Mutex<bool>,
 }
 
 impl Entry {
@@ -560,6 +563,7 @@ impl Entry {
             stop_deadline: Mutex::new(None),
             probe: Mutex::default(),
             prober: Mutex::new(None),
+            removed: Mutex::new(false),
         })
     }
 
@@ -924,7 +928,28 @@ impl Manager {
                 .unwrap()
                 .insert(rec.id.clone(), Tenant::new(rec, subnet));
         }
-        for mut r in st.list::<Record>("machines")? {
+        let records = st.list::<Record>("machines")?;
+        // An address is one record's at a time: a `destroying` record whose address another
+        // holds is a destroyed machine's, written back after its destroy by an older daemon.
+        // Its destroy ran; another would take the address's counters, and its limits, from
+        // the machine that holds it now. Removed, nothing else done.
+        let held: std::collections::HashSet<String> = records
+            .iter()
+            .filter(|r| r.state != state::DESTROYING && !r.ip.is_empty())
+            .map(|r| r.ip.clone())
+            .collect();
+        let (records, stale): (Vec<Record>, Vec<Record>) = records
+            .into_iter()
+            .partition(|r| r.state != state::DESTROYING || !held.contains(&r.ip));
+        for r in stale {
+            st.delete("machines", &r.id)?;
+            tracing::warn!(
+                machine = r.id,
+                ip = r.ip,
+                "record of a destroyed machine, written back after its destroy: removed"
+            );
+        }
+        for mut r in records {
             r.migrate();
             self.inner.events.floor(r.version);
             let id = r.id.clone();
@@ -1078,24 +1103,18 @@ impl Manager {
                 }
             }
         }
-        if let Ok(vols) = self.inner.zfs.volumes_under("m").await {
-            let mut ids: Vec<String> = vols
-                .iter()
-                .filter_map(|v| v.strip_prefix("m/"))
-                .filter_map(|v| v.split('/').next())
-                .map(String::from)
-                .collect();
-            ids.sort();
-            ids.dedup();
-            for id in ids {
-                if !known.contains(&id) {
+        // Every `m/<id>`, with its disks or none: a create cut between its dataset and its
+        // first disk leaves it empty.
+        if let Ok(children) = self.inner.zfs.children("m").await {
+            for id in children.iter().filter_map(|c| c.strip_prefix("m/")) {
+                if !known.contains(id) {
                     match self.inner.zfs.destroy(&format!("m/{id}")).await {
                         Ok(()) => {
-                            tracing::warn!(machine = id, "disks with no record, destroyed");
+                            tracing::warn!(machine = id, "dataset with no record, destroyed");
                             swept += 1;
                         }
                         Err(err) => {
-                            tracing::warn!(machine = id, err = %err, "disks with no record")
+                            tracing::warn!(machine = id, err = %err, "dataset with no record")
                         }
                     }
                 }
@@ -1158,13 +1177,39 @@ impl Manager {
 
     /// Writes the record: something about the machine changed.
     fn save(&self, e: &Entry) -> Result<()> {
-        let rec = {
-            let mut r = e.rec.lock().unwrap();
+        self.put_record(e, |r| {
             r.updated_at = Utc::now();
             e.unsaved_use.store(false, Relaxed);
+            true
+        })
+    }
+
+    /// Every write of a machine's record: the record as `edit` leaves it (nothing when it says
+    /// false), unless the machine is out of the manager. Checked and written under `removed`'s
+    /// lock, which [`Self::forget`] holds to delete the record: a write from a task that took
+    /// the entry before a destroy (a request waiting on its lock, a backup, the exit watcher)
+    /// lands before the deletion or not at all, and never brings the record back.
+    fn put_record(&self, e: &Entry, edit: impl FnOnce(&mut Record) -> bool) -> Result<()> {
+        let removed = e.removed.lock().unwrap();
+        if *removed {
+            return Ok(());
+        }
+        let rec = {
+            let mut r = e.rec.lock().unwrap();
+            if !edit(&mut r) {
+                return Ok(());
+            }
             r.clone()
         };
         self.inner.store.put("machines", &rec.id, &rec)
+    }
+
+    /// Deletes the record for good, under the lock every write of it checks.
+    fn forget(&self, e: &Entry) -> Result<()> {
+        let mut removed = e.removed.lock().unwrap();
+        self.inner.store.delete("machines", &e.snapshot().id)?;
+        *removed = true;
+        Ok(())
     }
 
     /// Writes a record whose last use moved since it was last written, as it is: nothing
@@ -1184,14 +1229,7 @@ impl Manager {
         if !self.holds(e) {
             return Ok(());
         }
-        let rec = {
-            let r = e.rec.lock().unwrap();
-            if !e.unsaved_use.swap(false, Relaxed) {
-                return Ok(());
-            }
-            r.clone()
-        };
-        self.inner.store.put("machines", &rec.id, &rec)
+        self.put_record(e, |_| e.unsaved_use.swap(false, Relaxed))
     }
 
     /// Whether the manager still holds this entry: a destroy removes it under its lock.
@@ -2808,6 +2846,7 @@ impl Manager {
     }
 
     fn remove_machine(&self, e: &Entry) {
+        *e.removed.lock().unwrap() = true;
         let rec = e.snapshot();
         self.inner.machines.lock().unwrap().remove(&rec.id);
         if let Some(t) = self.tenant_of(&rec.tenant) {
@@ -3695,7 +3734,8 @@ impl Manager {
         // moves it: the snapshot it leaves behind goes once nothing clones it.
         let z = &self.inner.zfs;
         let mut others = Vec::new();
-        if z.exists(&rec.dataset()).await.context("disks")? {
+        let had_disks = z.exists(&rec.dataset()).await.context("disks")?;
+        if had_disks {
             let promoted = z
                 .release_clones(&rec.dataset())
                 .await
@@ -3724,10 +3764,9 @@ impl Manager {
                     .await;
         }
         // Its backups stay, for a restore: a holder keeps them listed, counted and finite.
-        if rec.backup_bytes > 0 || rec.backup.last.is_some() {
-            self.hold(&rec, rec.backup_bytes, e.backup_turn.clone())?;
-        }
-        self.inner.store.delete("machines", id)?;
+        self.hold_at_destroy(&rec, had_disks, e.backup_turn.clone())
+            .await?;
+        self.forget(&e)?;
         self.remove_machine(&e);
         self.inner
             .events
@@ -7593,6 +7632,8 @@ mod tests {
         let kept = h.add("m_kept", state::STOPPED, 256);
         h.disks(&kept).await;
         h.pool.zfs.create("m/m_ghost/root", 1 << 20).await.unwrap();
+        // A create cut between its dataset and its first disk: the dataset alone.
+        h.pool.zfs.create_parent("m/m_empty/root").await.unwrap();
         let ghost = h
             .host
             .left_running("m_ghost", &h.m.inner.cfg.run_dir().join("m_ghost"));
@@ -7622,6 +7663,7 @@ mod tests {
             .contains(&"destroy -r byard/m/m_ghost".to_string()));
         assert!(h.pool.dev().join("byard/m/m_kept/root").exists());
         assert!(!h.pool.dev().join("byard/m/m_ghost").exists());
+        assert!(!h.pool.dev().join("byard/m/m_empty").exists());
     }
 
     #[tokio::test]
@@ -7745,6 +7787,38 @@ mod tests {
         mark();
         h.m.tick().await;
         assert!(unwritten());
+    }
+
+    /// A destroyed machine's record that an older daemon wrote back after the destroy
+    /// (`destroying`), whose address a machine holds now: removed at load and never destroyed
+    /// again, which would end the counters, and the limits, of that machine's address.
+    #[tokio::test]
+    async fn a_record_written_back_after_its_destroy_is_removed_at_load() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let mut req = h.request("web");
+        req.start = Some(false);
+        let live = h.m.create(req).await.unwrap();
+        let mut old = h.stored(&live.id).unwrap();
+        old.id = "m_00000000000a".into();
+        old.name = "old".into();
+        old.state = state::DESTROYING.into();
+        h.m.inner.store.put("machines", &old.id, &old).unwrap();
+        // A record whose address nobody else holds is a destroy to finish, as before.
+        let mut cut = old.clone();
+        cut.id = "m_00000000000b".into();
+        cut.ip = "10.64.1.200".into();
+        h.m.inner.store.put("machines", &cut.id, &cut).unwrap();
+        // The next daemon reads them.
+        h.m.inner.machines.lock().unwrap().clear();
+        h.m.load().unwrap();
+        assert!(h.stored(&old.id).is_none());
+        assert!(h.m.entry(&old.id).is_err());
+        assert!(h.m.entry(&cut.id).is_ok());
+        h.m.tick().await;
+        assert!(h.stored(&cut.id).is_none());
+        assert!(h.host.counted.lock().unwrap().contains_key(&live.ip));
+        assert_eq!(h.m.get(&live.id).unwrap().state, state::CREATED);
     }
 
     #[tokio::test]
