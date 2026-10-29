@@ -356,10 +356,11 @@ plus `apt-get purge docker.io` and the edge's files.
   alone (20 checks then: `/metrics` refused without a token over `https://`;
   `BRIQYARD_METRICS_TOKEN` when the fleet has a `metrics_token`).
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
-  a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a
-  destroy, more starts at once than the host has memory for), host invariants between phases
-  (ADR 0010). `--tenants 6 --per-tenant 4 --rounds 2 --crash`. Against a daemon on TLS, the
-  invariants' curl trusts the daemon's certificate with `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
+  a daemon SIGKILL, then the races (a client that hangs up mid-create, a start and a
+  snapshot's delete against a destroy, more starts at once than the host has memory for), host
+  invariants between phases (ADR 0010; one is no record on disk the daemon does not hold).
+  `--tenants 6 --per-tenant 4 --rounds 2 --crash`. Against a daemon on TLS, the invariants' curl
+  trusts the daemon's certificate with `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
 - `hack/fleet-two-hosts.sh`: a fleet with two hosts: tenants placed on different hosts, calls
   forwarded to each, a host that stops answering marked down with its tenant's calls refused
   (`host_down`) and its listings refused rather than partial, while the other host goes on, and the host back;
