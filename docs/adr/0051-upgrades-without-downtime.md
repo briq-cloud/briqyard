@@ -54,6 +54,8 @@ The rule they share: **the socket, or the data path, does not live in the proces
 
 **The fleet gets the graceful stop it lacks**: SIGTERM stops accepting, its calls get the same 2 s. A `host upgrade` still waiting then leaves its host `draining`, as a fleet restart does today.
 
+**Readiness carries over a hand-over**: the old daemon writes the ids of the machines running and ready (`handed-over-ready` in the run directory), and the next one adopts them ready, as the kubelet keeps readiness across its restart (KEP-4781). Their probes still start over and can take it back after their failure threshold. Without this, an adopted machine is not ready until its readiness probe first passes, at a random point of one period after the start (ADR 0022: 10 s by default), and the ingress holds every connection to it until then, whatever the drain's bound. Only a hand-over writes it: a crash's adoption starts not ready, as before.
+
 **The daemon logs the gap a client sees**: the old daemon writes the time of the signal with its hand-over, and the next one logs `serving again` with `gap_ms`, from that signal to its listeners accepting, with what took it (pool, tables, adoption).
 
 ### 3. Use and endpoint bytes are counted by nftables, per machine
