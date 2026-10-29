@@ -43,7 +43,7 @@ cleanup() {
     eval "$SECOND_HOST_START" || true
     for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
   fi
-  for t in "$T-a" "$T-b"; do
+  for t in "$T-a" "$T-b" "$T-fork"; do
     for id in $(briqyard machine ls --namespace "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
     briqyard namespace rm "$t" >/dev/null 2>&1 || true
   done
@@ -140,7 +140,11 @@ if [ -n "${SECOND_HOST_SH:-}" ]; then
   MARK=$(briqyard machine exec "$B" -- head -c 48 /root/mark)
   BK=$(briqyard machine backup "$B" | jq -r .id)
   check "backed up with its key's id" '[ "$(briqyard machine backups "$B" | jq -r ".[-1].key_id | length")" = 32 ]'
-  check "its stream holds no plaintext" 'on_second "test -s $STORE2/backups/$B/root/$BK.zfs && ! grep -qaF -- $MARK $STORE2/backups/$B/root/$BK.zfs"'
+  if [ -n "$STORE2" ]; then
+    check "its stream holds no plaintext" 'on_second "test -s $STORE2/backups/$B/root/$BK.zfs && ! grep -qaF -- $MARK $STORE2/backups/$B/root/$BK.zfs"'
+  else
+    skip "its stream holds no plaintext (the store is not a directory the host can read)"
+  fi
   RB=$(briqyard machine restore --from "$B" --backup "$BK" --namespace "$T-b" --name b-back | jq -r .id)
   for i in $(seq 1 45); do [ "$(briqyard machine get "$RB" | jq -r .state)" = running ] && break; sleep 2; done
   check "restored through the fleet, on the second host" '[ "$(briqyard machine get "$RB" | jq -r .host)" = "$HB" ] && [ "$(briqyard machine exec "$RB" -- head -c 48 /root/mark)" = "$MARK" ]'
@@ -156,4 +160,14 @@ if [ -n "${SECOND_HOST_SH:-}" ]; then
 else
   skip "the second host: its pool locked while down, its key from the fleet, a backup there (SECOND_HOST_SH is not set)"
 fi
+# A2, not A: A asks for enough memory to push the second namespace to the other host, and a
+# fork asks for as much again on the same host.
+echo "== a fork across hosts, a move into a namespace on the other host (ADR 0056)"
+out=$(briqyard machine fork "$A2" --namespace "$T-b" 2>&1 || true)
+check "a fork into a namespace of another host is refused" 'echo "$out" | grep -q "source.s host"'
+FN=$(briqyard machine fork "$A2" --name afork --namespace "$T-fork" | jq -r .id)
+check "a fork into a new namespace lands on its source's host" '[ "$(briqyard machine get "$FN" | jq -r .host)" = "$HA" ] && [ "$(briqyard namespace get "$T-fork" | jq -r .machines)" = 1 ]'
+# A move across hosts is not supported yet: refused before anything happens, naming both hosts.
+out=$(briqyard machine move "$A2" --namespace "$T-b" 2>&1 || true)
+check "a move into a namespace on the other host is refused, the machine untouched" 'echo "$out" | grep -q "not supported yet" && echo "$out" | grep -q "$HB" && [ "$(briqyard machine get "$A2" | jq -r "[.state, .host, .namespace] | join(\" \")")" = "running $HA $T-a" ]'
 suite_summary

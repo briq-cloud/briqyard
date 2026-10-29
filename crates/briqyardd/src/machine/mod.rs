@@ -32,6 +32,7 @@ mod create;
 mod endpoints;
 mod exec;
 mod gateway;
+mod moves;
 mod namespaces;
 mod network;
 mod observe;

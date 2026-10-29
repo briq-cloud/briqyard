@@ -212,7 +212,9 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   `Net`; ADR 0010): create to running, boot failures, start against destroy, starts past
   capacity, stop and suspend, a caller that hangs up, crash recovery, the orphan sweep,
   the sleeper's tick, the init's exit report and its reason for a program it could not start,
-  fork snapshots freed, backups (the schedule due
+  fork snapshots freed, a machine moved into another namespace (a rename with the address kept,
+  a join with a new address and moved counters, a refusal changing nothing, a rename cut short)
+  and a fork into one, backups (the schedule due
   and not before, at most `at_once`, one per machine, a machine with no process skipped while
   unchanged, retention and its restores, delete and `chain`, a failure and its backoff, a
   refused store leaving nothing, a destroyed machine's held, counted and expired, a backup racing
@@ -367,8 +369,11 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
   data kept, the next backup incremental and its restore at the grown size), a hand-over
   through systemd's store (ADR 0051: a connection held across it ends whole, the new ones made
-  during it all answered, the gap logged; with a unit that has a store, and python3). 244
-  checks, 240 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  during it all answered, the gap logged; with a unit that has a store, and python3), a move
+  into another namespace and a fork into one (ADR 0056: a rename with the address, the
+  uptime marker and the disk kept; into a namespace that exists a new address, a boot and the
+  neighbour reached by name; a `moved` event in each namespace; the fork on a network of its own
+  with its source's disk). 254 checks, 250 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
@@ -413,7 +418,10 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   backup there (a directory store for the run when it has none): its key's id, no plaintext in
   its stream, restored through the fleet onto it, its disk on the host's pool key, and its own
   key served to it by its id with no restore forwarded (ADR 0045). The key is asked from the
-  second host itself, as the fleet checks a host's calls by its address. 26 checks.
+  second host itself, as the fleet checks a host's calls by its address; and a move into a
+  namespace on the other host (refused, the machine untouched; not supported yet) and a fork
+  across hosts (refused into a namespace of the other host, on its source's host into a new
+  one; ADR 0056). 29 checks.
 - `hack/fleet-restore.sh` (from the Mac, `FLEET_SH="limactl shell fc sudo" SECOND_HOST_SH="limactl
   shell fc2 sudo"`): the dev fleet backed up to `file:///var/lib/briqyard-fleet-backup` for the
   run (an identity in `/etc/briqyard/fleet-backup.key` on fc, development only), the backup

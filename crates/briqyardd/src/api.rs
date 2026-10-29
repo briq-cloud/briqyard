@@ -93,6 +93,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/machines/:id/wake", post(wake_machine))
         .route("/v1/machines/:id/stop", post(stop_machine))
         .route("/v1/machines/:id/restart", post(restart_machine))
+        .route("/v1/machines/:id/move", post(move_machine))
         .route("/v1/machines/:id/touch", post(touch_machine))
         .route("/v1/machines/:id/wait", post(wait_machine))
         .route("/v1/machines/:id/exec", get(exec_session).post(exec))
@@ -476,6 +477,19 @@ async fn restart_machine(
     let m = st.mgr.clone();
     Ok(Json(
         detached(async move { m.restart(&id, at).await }).await?,
+    ))
+}
+
+async fn move_machine(
+    State(st): S,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<api::MoveRequest>,
+) -> Result<Json<api::MoveResult>, AppError> {
+    let at = if_match(&headers)?;
+    let m = st.mgr.clone();
+    Ok(Json(
+        detached(async move { m.move_machine(&id, &req.namespace, at).await }).await?,
     ))
 }
 

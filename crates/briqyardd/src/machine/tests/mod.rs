@@ -8,6 +8,7 @@ mod event_log;
 mod gateway;
 mod lifecycle;
 mod metering;
+mod moves;
 mod network;
 mod observe;
 mod probing;
@@ -158,6 +159,7 @@ struct Mock {
     counted: Mutex<BTreeMap<String, nft::Counters>>,
     /// `uncount` fails, as an `nft` that refuses its input.
     refuse_uncount: AtomicBool,
+    refuse_count: AtomicBool,
     /// What an exec of a command (its argv joined by spaces) exits with; 0 when absent.
     exec_codes: Mutex<HashMap<String, i32>>,
     /// How long an exec takes, and how many run at once now and at most.
@@ -199,6 +201,7 @@ impl Mock {
             cgroups: Mutex::new(HashMap::new()),
             counted: Mutex::new(BTreeMap::new()),
             refuse_uncount: AtomicBool::new(false),
+            refuse_count: AtomicBool::new(false),
             exec_codes: Mutex::new(HashMap::new()),
             exec_takes: Mutex::new(Duration::ZERO),
             execs_now: Default::default(),
@@ -685,6 +688,9 @@ impl host::Net for Mock {
 
     /// Like nft: again keeps the counts.
     async fn count(&self, ip: &str) -> Result<()> {
+        if self.refuse_count.load(Relaxed) {
+            return Err(anyhow!("nft: refused"));
+        }
         self.counted.lock().unwrap().entry(ip.into()).or_default();
         Ok(())
     }

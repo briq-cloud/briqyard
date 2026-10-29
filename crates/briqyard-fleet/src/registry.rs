@@ -529,6 +529,16 @@ impl Registry {
         h.disk_free_mb += hold.took_disk_mb;
     }
 
+    /// Pins a namespace to a host that holds it now, when it has no pin: a namespace made on a
+    /// host without a placement (a move or a fork into a new one, ADR 0056). Kept at least as
+    /// long as a placement's, until the host lists the namespace.
+    pub fn pin(&mut self, namespace: &str, host: &str) {
+        if !self.namespaces.contains_key(namespace) {
+            self.namespaces.insert(namespace.into(), host.into());
+            self.pinned_at.insert(namespace.into(), Utc::now());
+        }
+    }
+
     /// Releases a namespace from its host: its next machine is placed afresh. The host's next
     /// heartbeat pins it again if the namespace still has machines there.
     pub fn unpin(&mut self, namespace: &str) {

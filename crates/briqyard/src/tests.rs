@@ -662,11 +662,30 @@ fn machine_lifecycle_commands() {
         _ => panic!("not logs"),
     }
     match machine(parse(&["machine", "fork", "--name", "copy", "m1"])) {
-        MachineCmd::Fork { name, id } => {
-            assert_eq!((name.as_deref(), id.as_str()), (Some("copy"), "m1"))
-        }
+        MachineCmd::Fork {
+            name,
+            namespace,
+            id,
+        } => assert_eq!(
+            (name.as_deref(), namespace, id.as_str()),
+            (Some("copy"), None, "m1")
+        ),
         _ => panic!("not a fork"),
     }
+    match machine(parse(&["machine", "fork", "m1", "--namespace", "t2"])) {
+        MachineCmd::Fork { namespace, .. } => assert_eq!(namespace.as_deref(), Some("t2")),
+        _ => panic!("not a fork"),
+    }
+    match machine(parse(&["machine", "move", "m1", "--namespace", "t2"])) {
+        MachineCmd::Move { namespace, id } => {
+            assert_eq!((namespace.as_str(), id.as_str()), ("t2", "m1"))
+        }
+        _ => panic!("not a move"),
+    }
+    assert_eq!(
+        fails(&["machine", "move", "m1"]),
+        ErrorKind::MissingRequiredArgument
+    );
     match machine(parse(&[
         "machine",
         "put",

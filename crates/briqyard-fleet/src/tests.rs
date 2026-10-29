@@ -379,7 +379,18 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
     async fn get_machine(State(d): D, Path(id): Path<String>) -> Response {
         let ms = d.machines.lock().unwrap();
         match ms.iter().find(|m| m.id == id) {
-            Some(m) => Json(m.clone()).into_response(),
+            Some(m) => {
+                let mut m = m.clone();
+                m.endpoints = d
+                    .endpoints
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e.machine_id == id)
+                    .cloned()
+                    .collect();
+                Json(m).into_response()
+            }
             None => (
                 StatusCode::NOT_FOUND,
                 Json(api::ApiError {
@@ -414,6 +425,49 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             }
             None => StatusCode::NOT_FOUND.into_response(),
         }
+    }
+    async fn stop_machine(State(d): D, Path(id): Path<String>) -> Response {
+        let mut ms = d.machines.lock().unwrap();
+        match ms.iter_mut().find(|m| m.id == id) {
+            Some(m) => {
+                m.state = api::state::STOPPED.into();
+                Json(m.clone()).into_response()
+            }
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+    /// A move on the host: the machine joins the namespace; a namespace the daemon already
+    /// has is a restart on a new address, else a rename.
+    async fn move_machine(
+        State(d): D,
+        Path(id): Path<String>,
+        Json(req): Json<api::MoveRequest>,
+    ) -> Response {
+        let mut ms = d.machines.lock().unwrap();
+        let joins = ms.iter().any(|m| m.namespace == req.namespace);
+        let Some(m) = ms.iter_mut().find(|m| m.id == id) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let (from, previous_ip) = (m.namespace.clone(), m.ip.clone());
+        m.namespace = req.namespace;
+        if joins {
+            m.ip = "10.9.0.7".into();
+        }
+        Json(api::MoveResult {
+            machine: m.clone(),
+            from,
+            previous_ip,
+            restarted: joins,
+        })
+        .into_response()
+    }
+    async fn make_backup(State(d): D, Path(id): Path<String>) -> Response {
+        let b = serde_json::json!({
+            "id": "20261029T100000.000Z", "machine_id": id, "namespace": "t1", "name": "web",
+            "created_at": "2026-10-29T10:00:00Z", "bytes": 1, "incremental": false, "disks": [],
+            "host": d.id,
+        });
+        (StatusCode::CREATED, Json(b)).into_response()
     }
     /// The store is shared: every host answers for every machine id, with nothing here.
     async fn backups(State(_d): D) -> Json<Vec<serde_json::Value>> {
@@ -573,10 +627,12 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
         .route("/v1/machines", get(list).post(create))
         .route("/v1/machines/:id", get(get_machine).delete(delete_machine))
         .route("/v1/machines/:id/start", post(start_machine))
+        .route("/v1/machines/:id/stop", post(stop_machine))
+        .route("/v1/machines/:id/move", post(move_machine))
         .route("/v1/machines/:id/logs", get(logs))
         .route("/v1/machines/:id/exec", get(exec_session))
         .route("/v1/namespaces/:id/quota", get(get_quota).put(put_quota))
-        .route("/v1/machines/:id/backups", get(backups))
+        .route("/v1/machines/:id/backups", get(backups).post(make_backup))
         .route(
             "/v1/machines/:id/backups/:backup",
             axum::routing::delete(delete_backup),
@@ -4432,4 +4488,118 @@ fn a_registry_written_before_the_rename_loads() {
     let now = serde_json::to_value(&reg).unwrap();
     assert!(now.get("tenants").is_none());
     assert_eq!(now["namespaces"]["t1"], "h1");
+}
+
+/// The fleet and two daemons with a machine `web` in `t1` on d1, an endpoint on it, and
+/// namespace `t2` on d2.
+async fn fleet_with_a_machine_to_move() -> (Fleet, Vec<Running>, api::Machine) {
+    let (f, ds) = fleet_with_daemons(2).await;
+    let web = ds[0].stub.add("t1", "web", 512);
+    ds[0].stub.add_endpoint(&web.id);
+    ds[1].stub.add("t2", "db", 512);
+    poll_static_hosts_once(&f.st).await;
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        reg.machines.insert(web.id.clone(), "d1".into());
+        reg.namespaces.insert("t1".into(), "d1".into());
+        reg.namespaces.insert("t2".into(), "d2".into());
+    }
+    (f, ds, web)
+}
+
+fn move_to(namespace: &str) -> Option<serde_json::Value> {
+    Some(serde_json::json!({ "namespace": namespace }))
+}
+
+#[tokio::test]
+async fn a_move_within_a_host_is_the_hosts_and_pins_a_new_namespace() {
+    let (f, ds, web) = fleet_with_a_machine_to_move().await;
+    let path = format!("/v1/machines/{}/move", web.id);
+    let (s, _, body) = call(&f.st, "POST", &path, "api", move_to("t7")).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let r: api::MoveResult = serde_json::from_str(&body).unwrap();
+    assert_eq!((r.from.as_str(), r.restarted), ("t1", false));
+    assert_eq!(
+        (r.machine.namespace.as_str(), r.machine.host.as_str()),
+        ("t7", "d1")
+    );
+    assert_eq!(
+        pinned(&f.st, "t7").as_deref(),
+        Some("d1"),
+        "pinned where it was made"
+    );
+    assert!(
+        ds[1].stub.calls().iter().all(|c| !c.contains("move")),
+        "d2 not asked"
+    );
+    // Into a namespace the host has: a restart, a new address.
+    let (s, _, body) = call(&f.st, "POST", &path, "api", move_to("t1")).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    ds[0].stub.add("t8", "other", 128);
+    let (s, _, body) = call(&f.st, "POST", &path, "api", move_to("t8")).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let r: api::MoveResult = serde_json::from_str(&body).unwrap();
+    assert!(r.restarted && r.machine.ip == "10.9.0.7" && r.previous_ip != r.machine.ip);
+    // A namespace id that is not one is refused before any host.
+    let (s, _, _) = call(&f.st, "POST", &path, "api", move_to("../x")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_move_to_a_namespace_on_another_host_is_refused_before_anything_happens() {
+    let (f, ds, web) = fleet_with_a_machine_to_move().await;
+    let before: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
+    let path = format!("/v1/machines/{}/move", web.id);
+    let (s, _, body) = call(&f.st, "POST", &path, "api", move_to("t2")).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    let v = json(&body);
+    assert_eq!(v["code"], "other_host");
+    let msg = v["error"].as_str().unwrap();
+    assert!(
+        msg.contains("t2")
+            && msg.contains("d2")
+            && msg.contains("d1")
+            && msg.contains("not supported yet"),
+        "{msg}"
+    );
+    // Neither host was asked, and the machine is where it was.
+    let after: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
+    assert_eq!(before, after, "no call to either host");
+    assert_eq!(ds[0].stub.machines.lock().unwrap().len(), 1);
+    assert_eq!(
+        f.st.reg
+            .lock()
+            .unwrap()
+            .machines
+            .get(&web.id)
+            .map(String::as_str),
+        Some("d1")
+    );
+}
+
+#[tokio::test]
+async fn a_fork_may_name_a_namespace_of_its_hosts_and_not_one_of_another() {
+    let (f, ds, web) = fleet_with_a_machine_to_move().await;
+    // A new namespace: made on the source's host and pinned there.
+    let mut body = create_body("t9", "web-fork", 256);
+    body["fork"] = serde_json::json!({"machine_id": web.id});
+    let (s, headers, _) = call(&f.st, "POST", "/v1/machines", "api", Some(body)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(headers["x-briqyard-host"], "d1");
+    assert_eq!(pinned(&f.st, "t9").as_deref(), Some("d1"));
+    // A namespace that lives on d2: refused, nothing sent to either host.
+    let before: usize = ds.iter().map(|d| d.stub.calls().len()).sum();
+    let mut body = create_body("t2", "web-fork", 256);
+    body["fork"] = serde_json::json!({"machine_id": web.id});
+    let (s, _, body) = call(&f.st, "POST", "/v1/machines", "api", Some(body)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        json(&body)["error"]
+            .as_str()
+            .unwrap()
+            .contains("on its source's host"),
+        "{body}"
+    );
+    let after: usize = ds.iter().map(|d| d.stub.calls().len()).sum();
+    assert_eq!(before, after);
 }
