@@ -509,6 +509,104 @@ pool after its next reboot. Back the registry up before a host holds anything th
 (below); a host still up can be re-keyed with `zfs change-key`. The fleet's `state_dir` must be
 on an encrypted disk: it opens every pool.
 
+### The fleet in Docker (ADR 0057)
+
+The fleet, not the host daemon, ships as an image: `ghcr.io/briq-cloud/briqyard-fleet:<version>`
+(and `:latest` for a release that is not a pre-release; releases before the one that added it have no image), `linux/amd64` and `linux/arm64`, made
+by the release workflow from the release's own binaries. It holds `briqyard-fleet` and the CLI
+(`docker exec fleet briqyard host ls`). A host is still installed by `hack/bootstrap-host.sh`
+(ADR 0028): it needs ZFS, `/dev/kvm`, firewall tables, bridges and cgroups, and its machines
+outlive its daemon at a hand-over, which no container gives it.
+
+| | |
+|---|---|
+| Base | `debian:trixie-slim` with `openssh-client` (the fleet installs hosts by running `ssh`), `curl` (the health check) and CA certificates |
+| User | `briqyard`, uid and gid 10001; no root, no capability needed |
+| Volumes | `/var/lib/briqyard-fleet` (`state_dir`: the registry and the pinned SSH host keys, mode `0700`, the fleet's alone, on an encrypted disk as above); `/etc/briqyard` (`fleet.yaml`, the SSH key, the TLS files: yours) |
+| Configuration | `fleet.yaml` as for the unit, with paths inside the container. The image sets no `listen`: the file does |
+| Credentials | `--env-file` (`BRIQYARD_RELEASE_TOKEN`, `BRIQYARD_S3_ACCESS_KEY`, `BRIQYARD_S3_SECRET_KEY`: same file shape as `fleet.env`); `BRIQYARD_LOG` sets the level |
+| Health | `HEALTHCHECK` asks the fleet's `/healthz` at the address its `listen` names, over TLS or plain HTTP as `tls` says |
+| Stop | `docker stop` sends SIGTERM: the calls in flight get 2 s, the exit is 0 |
+
+What the container reads and writes must belong to uid 10001 (`chown`): a root-owned `0600`
+SSH key cannot be read by `ssh`, and the fleet sets the mode of `state_dir` itself.
+
+Once, on the server (the SSH key's public half goes in `authorized_keys` of every server you add,
+as in step 4):
+
+```bash
+install -d -m 0700 -o 10001 -g 10001 /etc/briqyard /var/lib/briqyard-fleet
+ssh-keygen -q -t ed25519 -N '' -f /etc/briqyard/fleet_ssh_key && chown 10001:10001 /etc/briqyard/fleet_ssh_key*
+install -m 0600 -o 10001 -g 10001 /dev/null /etc/briqyard/fleet.env && nano /etc/briqyard/fleet.env   # BRIQYARD_RELEASE_TOKEN=…
+install -m 0600 -o 10001 -g 10001 /dev/null /etc/briqyard/fleet.yaml && nano /etc/briqyard/fleet.yaml # as step 4
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <user> --password-stdin   # while the repository is private: read:packages
+```
+
+`docker run`, the layout of step 4 (a listener on loopback behind the edge, `tls: off`).
+**`--network host`** keeps the address of every caller as the fleet sees it today: a host's
+heartbeat and its pool key request are checked against the address they come from (ADR 0026),
+and the `X-Forwarded-For` of an edge is trusted only from a loopback peer. A bridge network
+with a published port changes both (the edge reaches the fleet from the bridge's gateway), so
+use it only when the fleet serves its own TLS and no proxy is in front:
+
+```bash
+docker run -d --name briqyard-fleet --restart unless-stopped --network host \
+  --env-file /etc/briqyard/fleet.env \
+  -v /etc/briqyard:/etc/briqyard -v /var/lib/briqyard-fleet:/var/lib/briqyard-fleet \
+  ghcr.io/briq-cloud/briqyard-fleet:<version>
+```
+
+The same as a Compose file:
+
+```yaml
+services:
+  fleet:
+    image: ghcr.io/briq-cloud/briqyard-fleet:<version>
+    restart: unless-stopped
+    network_mode: host
+    env_file: /etc/briqyard/fleet.env
+    volumes:
+      - /etc/briqyard:/etc/briqyard
+      - /var/lib/briqyard-fleet:/var/lib/briqyard-fleet
+```
+
+Day to day:
+
+```bash
+docker ps                                                  # STATUS: healthy
+docker logs -f briqyard-fleet                              # the same JSON lines as journalctl -u briqyard-fleet
+docker exec -e BRIQYARD_TOKEN=<fleet token> briqyard-fleet briqyard host add <ip> --address 10.42.0.11 --region gra
+```
+
+`keygen` and `restore` (below) are the fleet's subcommands: `docker run --rm -v … <image> restore --identity … --from …`
+replaces the default arguments, and reads `/etc/briqyard/fleet.yaml` all the same.
+
+**Upgrade**: pull the new tag, then replace the container; the fleet first, then the hosts
+(`briqyard host upgrade`, above). Only the image changes: the registry and the configuration
+are on the volumes. Pull before stopping, so the gap is the swap alone:
+
+```bash
+docker pull ghcr.io/briq-cloud/briqyard-fleet:<new version>
+# docker run: docker rm -f briqyard-fleet, then the same command with the new tag
+# Compose: change the tag in the file, then
+docker compose up -d
+```
+
+A configuration field new in a release goes into `fleet.yaml` after the upgrade, and a rollback
+is the older tag (see "Upgrade").
+
+What a container loses against the unit (ADR 0051):
+
+| | Unit | Container |
+|---|---|---|
+| The listening socket across a restart | Kept by systemd (`FileDescriptorStoreMax=1`): a call made meanwhile waits | Nothing keeps it: calls made between the stop and the new start are refused. Measured on a Mac, `docker restart`: 1.25 s |
+| Restart after a crash | `Restart=on-failure`, 2 s | `--restart unless-stopped`, Docker's backoff from 0.1 s |
+| Callers | Wait | A host sends its heartbeat each period, so one missed is the next; a call that lands in the gap is refused and its caller asks again |
+| A `host upgrade` running at the stop | The host stays `draining` | The same: `briqyard host undrain <id>` |
+
+The machines and the hosts' traffic are never in the fleet's path (the ingress is each daemon's),
+so the gap is control only. Where it matters, keep the unit.
+
 ### The registry's backup (ADR 0032)
 
 On your own machine, once: `briqyard-fleet keygen --out fleet-backup.key` prints the recipient
