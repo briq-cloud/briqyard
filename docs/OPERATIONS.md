@@ -707,7 +707,8 @@ machines running, asleep and stopped, room per region, events), a host (its mach
 and CPU against capacity, the pool, disks, network, boot times, restarts) and machines and
 tenants (the busiest, each machine's series, crash loops, egress drops, use per tenant). No
 anonymous access, no sign-up; the dashboards are the repository's (`hack/monitoring/dashboards`),
-read-only in Grafana.
+read-only in Grafana. Point the reverse proxy at `GRAFANA_LISTEN` only after the first run: Grafana
+starts with its default `admin` password, which the script replaces seconds later, on loopback.
 
 **Alerts to Slack**: a webhook in `/etc/briqyard-monitoring/alerting.env` (root's, `0600`,
 written with an editor), then the script again:
