@@ -76,12 +76,6 @@ impl Drop for Served {
     }
 }
 
-/// A TCP endpoint's listener is stored under the endpoint's id (`ep_…`), beside `http` and the
-/// API's `api`: a name of letters, digits and `_`, as sd_notify(3) wants one.
-fn tcp_name(endpoint: &str) -> String {
-    endpoint.to_string()
-}
-
 impl Ingress {
     pub fn new(
         mgr: Manager,
@@ -192,7 +186,9 @@ impl Ingress {
                 Ok(())
             }
             "tcp" => {
-                let name = tcp_name(&ep.id);
+                // Stored under the endpoint's id (`ep_…`), beside `http` and the API's `api`:
+                // letters, digits and `_`, a name sd_notify(3) takes.
+                let name = ep.id.clone();
                 if self.stopped.load(SeqCst) || self.accepting.lock().unwrap().contains_key(&name) {
                     return Ok(());
                 }
@@ -231,7 +227,7 @@ impl Ingress {
     }
 
     fn remove(&self, ep: &EndpointRec) {
-        let name = tcp_name(&ep.id);
+        let name = ep.id.clone();
         if let Some(h) = self.accepting.lock().unwrap().remove(&name) {
             h.abort();
             if let Err(e) = self.store.release(&name) {

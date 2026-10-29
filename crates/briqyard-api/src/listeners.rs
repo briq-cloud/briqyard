@@ -17,7 +17,12 @@ pub const BACKLOG: i32 = 4096;
 
 /// What systemd tells this process about its store, which a child must not read as its own:
 /// cleared from the environment of the processes the daemon starts.
-pub const ENV: [&str; 4] = ["LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES", "NOTIFY_SOCKET"];
+pub const ENV: [&str; 4] = [
+    "LISTEN_PID",
+    "LISTEN_FDS",
+    "LISTEN_FDNAMES",
+    "NOTIFY_SOCKET",
+];
 
 /// The first descriptor systemd passes (`SD_LISTEN_FDS_START`).
 const FIRST_FD: RawFd = 3;
@@ -357,8 +362,8 @@ mod tests {
     fn a_failed_removal_goes_on_with_the_others() {
         let n = Notify::new();
         let (a, b) = (bind(any_port()).unwrap(), bind(any_port()).unwrap());
-        let ports = [a.local_addr().unwrap(), b.local_addr().unwrap()]
-            .map(|x| x.as_socket().unwrap());
+        let ports =
+            [a.local_addr().unwrap(), b.local_addr().unwrap()].map(|x| x.as_socket().unwrap());
         let l = Listeners::new(
             vec![("ep_a".into(), a.into()), ("ep_b".into(), b.into())],
             Some(n.path.clone()),
