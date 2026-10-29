@@ -422,7 +422,10 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   namespace on the other host (made again there from a backup, its disk kept, the source gone,
   the neighbour reached by name; refused with `capacity` and running where it was when the
   other host has no room) and a fork across hosts (refused into a namespace of the other host,
-  on its source's host into a new one; ADR 0056). 33 checks (predicted until the next VM run).
+  on its source's host into a new one; ADR 0056). The move needs one store both hosts read, an
+  S3-compatible bucket in `backup.store` on both (`SHARED_STORE=1`); the dev VMs have a directory
+  each, so the move is left out there and named in the summary (`ALLOW_SKIPPED=1`). 28 checks,
+  33 with `SHARED_STORE=1` (predicted until the next VM run).
 - `hack/fleet-restore.sh` (from the Mac, `FLEET_SH="limactl shell fc sudo" SECOND_HOST_SH="limactl
   shell fc2 sudo"`): the dev fleet backed up to `file:///var/lib/briqyard-fleet-backup` for the
   run (an identity in `/etc/briqyard/fleet-backup.key` on fc, development only), the backup
