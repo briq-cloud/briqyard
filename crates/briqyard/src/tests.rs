@@ -1908,6 +1908,8 @@ fn ev(seq: u64, reason: &str, machine: &str, message: &str) -> api::Event {
         tenant: "t1".into(),
         host: String::new(),
         data: None,
+        count: 1,
+        first_at: None,
     }
 }
 
@@ -1978,17 +1980,24 @@ fn events_and_describe_parse() {
 
 #[test]
 fn the_events_table() {
+    let folded = api::Event {
+        count: 4,
+        first_at: Some(ts()),
+        ..ev(3, "session_opened", "m_0123456789ab", "sh")
+    };
     let out = events_table(&[
         ev(1, "host_started", "", "daemon started"),
         ev(2, "exited", "m_0123456789ab", "exited with code 7"),
+        folded,
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
         [
-            "TIME                 TYPE     REASON           MACHINE         MESSAGE",
-            "2026-10-19 08:30:01  normal   host_started     -               daemon started",
-            "2026-10-19 08:30:02  warning  exited           m_0123456789ab  exited with code 7",
+            "TIME                 TYPE     REASON           MACHINE         COUNT  MESSAGE",
+            "2026-10-19 08:30:01  normal   host_started     -                   1  daemon started",
+            "2026-10-19 08:30:02  warning  exited           m_0123456789ab      1  exited with code 7",
+            "2026-10-19 08:30:03  normal   session_opened   m_0123456789ab      4  sh (x4 since 08:30:00)",
         ]
     );
 }
@@ -2214,6 +2223,8 @@ fn a_watch_line_is_an_event_a_heartbeat_or_the_end() {
     let line = serde_json::to_string(&ev(3, "started", "m1", "running, pid 9")).unwrap();
     assert_eq!(watch_line(&line).unwrap().map(|e| e.seq), Some(3));
     assert!(watch_line("{}\n").unwrap().is_none());
+    // A bookmark is not an event: a client that keeps no cursor skips it.
+    assert!(watch_line("{\"bookmark\":812}\n").unwrap().is_none());
     let err =
         watch_line(r#"{"error":"the watch fell 9 events behind","code":"lagged"}"#).unwrap_err();
     assert_eq!(err.to_string(), "the watch fell 9 events behind (lagged)");

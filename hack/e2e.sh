@@ -392,6 +392,10 @@ briqyard machine rm "$EV" >/dev/null
 reasons=$(briqyard events --machine "$EV" 2>/dev/null | awk 'NR > 1 && $4 ~ /^(created|started|stopped|destroyed)$/ { print $4 }' | paste -sd, -)
 check "events in order ($reasons)"   '[ "$reasons" = created,started,stopped,started,destroyed ]'
 check "a cursor past the log is gone" '! briqyard events --since 999999999 >/dev/null 2>&1'
+# A watch of the destroyed machine stays quiet: a bookmark past its cursor, checked after the probes.
+BM_SINCE=$("${CURL[@]}" -s ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/events?machine=$EV" | jq -r .next)
+timeout 40 "${CURL[@]}" -sN ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/events?machine=$EV&since=$BM_SINCE&watch=true" > /tmp/by-e2e-bookmark.txt 2>&1 &
+BOOKMARK=$!
 
 echo "== probes: readiness decides ready, liveness restarts"
 # The program serves 5 s after its boot: ready only then, its probe every 10 s.
@@ -410,6 +414,18 @@ check "the liveness_failed event"    'briqyard events --machine "$LV" | awk "\$4
 for i in $(seq 1 30); do [ "$(briqyard machine get "$LV" | jq -r .state)" = running ] && break; sleep 2; done
 check "running again"                '[ "$(briqyard machine get "$LV" | jq -r .state)" = running ]'
 briqyard machine rm "$LV" >/dev/null
+# Ready for 2 s, not for 2 s, probed every second: about ten flips in 20 s, two lines (ADR 0047).
+flap='{"tenant":"'$T'","name":"flap","image":"alpine:3.20","cmd":["sh","-c","while :; do touch /tmp/up; sleep 2; rm -f /tmp/up; sleep 2; done"],"size":{"vcpus":1,"memory_mb":128},"probes":{"readiness":{"exec":["test","-f","/tmp/up"],"period_sec":1,"failure_threshold":1}}}'
+FL=$("${CURL[@]}" -s -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "$flap" "$BRIQYARD_URL/v1/machines" | jq -r .id)
+sleep 20
+flips() { briqyard events --machine "$FL" 2>/dev/null | awk 'NR > 1 && ($4 == "ready" || $4 == "not_ready")'; }
+last_seq=$("${CURL[@]}" -s ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/events?machine=$FL" | jq -r '.events[-1].seq')
+check "a flapping readiness probe: two lines"   '[ "$(flips | wc -l)" -le 2 ]'
+check "its version moved past its last line"   '[ "$(briqyard machine get "$FL" | jq -r .version)" -gt $((last_seq + 2)) ]'
+briqyard machine rm "$FL" >/dev/null
+check "the destroy logs the folded flips, counted" '[ -n "$(flips | awk "\$6 > 1")" ]'
+wait "$BOOKMARK" 2>/dev/null || true
+check "a quiet watch sends a bookmark past its cursor" 'jq -se --argjson s "$BM_SINCE" "map(select(has(\"seq\"))) == [] and (map(.bookmark // empty) | last > \$s)" /tmp/by-e2e-bookmark.txt >/dev/null'
 
 echo "== labels, a quota, logs follow"
 LW=$(briqyard machine run --image alpine:3.20 --name lweb --tenant "$T" --memory 128 -l app=web -- sleep 3600 | jq -r .id)
@@ -671,6 +687,9 @@ briqyard machine snapshot restore "$CK" warm >/dev/null
 took=$(echo "$(date +%s.%N) - $t0" | bc)
 check "restored with memory (${took}s): resumed, not booted" '[ "$(briqyard events --machine "$CK" | awk "{print \$4}" | tail -1)" = resumed ] && [ "$(briqyard machine logs "$CK" --limit 5000 | grep -c "\[briqyard\] started")" = 3 ]'
 check "memory and disks as they were"  '[ "$(on "cat /tmp/mark /data/f" | paste -sd, -)" = m1,v4 ] && [ "$(on "cut -d. -f1 /proc/uptime")" -ge "$up" ]'
+# Those reads may come from the memory's page cache: a cold boot reads the disk.
+briqyard machine restart "$CK" >/dev/null
+check "a cold boot after it, on the snapshot's disk" '[ "$(on "cat /data/f")" = v4 ] && ! on "test -e /tmp/mark"'
 briqyard machine snapshot rm "$CK" before
 check "deleted by name" '! briqyard machine snapshot ls "$CK" | grep -q " before "'
 briqyard machine destroy "$FK" >/dev/null

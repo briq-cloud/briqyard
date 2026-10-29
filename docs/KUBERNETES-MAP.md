@@ -33,8 +33,8 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | REST resources, OpenAPI | ✓ `api/openapi.yaml`, served | | |
 | `resourceVersion`, optimistic concurrency (409 on a stale write) | ✓ a machine's `version`, `If-Match` on PATCH, DELETE, start, stop, wake, restart (ADR 0019) | | |
-| watch (list + watch, informers) | ✓ `GET /v1/events?watch=true` from a cursor; per host, or a tenant or a machine through the fleet | | |
-| Events (`kubectl get events`, `describe`) | ✓ an event log per host, a closed list of reasons, `briqyard events` | events of endpoints and tenants | yard, later |
+| watch (list + watch, informers) | ✓ `GET /v1/events?watch=true` from a cursor; per host, or a tenant or a machine through the fleet; a bookmark every 30 s of quiet (ADR 0047) | | |
+| Events (`kubectl get events`, `describe`) | ✓ an event log per host, a closed list of reasons, `briqyard events`; repeats of uses, refusals and readiness flips folded for 10 minutes into one line with `count` (ADR 0047) | events of endpoints and tenants; folding the restart chain | yard, later |
 | Labels and selectors (`-l app=web`) | ✓ metadata as labels, `?label=k=v&label=k` on machine listings, `machine ls -l` (ADR 0025) | `!=` and set-based selectors; selectors on events, top, usage | yard, later |
 | Annotations | ✓ metadata | | |
 | Namespaces | ✓ tenants | | |
@@ -54,7 +54,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | `kubectl exec -it`, attach | ✓ exec sessions over a WebSocket: stdin streamed, a terminal with resize, the exit code, the client's close ends the command, use while open, through the fleet (ADR 0029) | attach to the main process (its output is `logs -f`) | yard, later |
 | `kubectl cp` | ✓ `/files` | | |
 | Pod phases and conditions | ✓ states, `stopped_reason`, exit code, `ready` (ADR 0022) | | |
-| Liveness, readiness, startup probes | ✓ in the daemon: exec, TCP, HTTP, Kubernetes's timings, 32 at once per host (ADR 0022) | gRPC probes | yard, later |
+| Liveness, readiness, startup probes | ✓ in the daemon: exec, TCP, HTTP, Kubernetes's defaults but a 5 s timeout (1 s there: an exec probe crosses the vsock and the guest's init), a fixed period, the first run spread over a period after a daemon start, 32 at once per host (ADR 0022, 0047) | gRPC probes | yard, later |
 | `restartPolicy`, CrashLoopBackOff | ✓ `no`, `on-failure`, `always`, a retry count; 10 s doubling to 5 minutes, reset after 10 minutes, a `crash_loop` event | | |
 | Readiness gates traffic (endpoints follow Ready) | ✓ the ingress, `/wait` and the gateway's start wait for `ready` | another replica to send to (groups) | yard, later |
 | `terminationGracePeriod` | ✓ stop timeout, SIGTERM then reset | | |
