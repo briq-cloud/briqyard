@@ -2,14 +2,18 @@
 //! listener that routes by host name. A connection to a sleeping machine's endpoint wakes it.
 //! HTTP routing reads the request head on the raw connection and then splices bytes, so
 //! WebSockets and streaming responses pass through untouched. The bytes each way are added
-//! to the machine's usage as they pass (ADR 0017).
+//! to the machine's usage as they pass (ADR 0017). Every listener is kept in systemd's file
+//! descriptor store (ADR 0051): at a hand-over this daemon stops accepting, the kernel queues
+//! what arrives for the next one, and the connections open here go on for the drain's bound.
 
 use crate::machine::{EndpointRec, Manager};
 use crate::usage::Traffic;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as _, Result};
+use briqyard_api::listeners::Listeners;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -23,12 +27,63 @@ pub struct Ingress {
     bind: String,
     http: String,
     wake_timeout: Duration,
-    listeners: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    store: Arc<Listeners>,
+    /// The accept loop of each listener, by its name in the store.
+    accepting: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     hosts: Arc<Mutex<HashMap<String, EndpointRec>>>,
+    /// Set at a hand-over or a stop: no listener opens or accepts again.
+    stopped: Arc<AtomicBool>,
+    open: Arc<Open>,
+}
+
+/// The connections being served, and a wake for the drain when the last one ends.
+#[derive(Default)]
+struct Open {
+    n: AtomicUsize,
+    none: tokio::sync::Notify,
+}
+
+impl Open {
+    async fn drain(&self, deadline: tokio::time::Instant) -> usize {
+        loop {
+            // Registered before the count is read, so a last end in between is not missed.
+            let none = self.none.notified();
+            tokio::pin!(none);
+            none.as_mut().enable();
+            let n = self.n.load(SeqCst);
+            if n == 0 || tokio::time::timeout_at(deadline, none).await.is_err() {
+                return self.n.load(SeqCst);
+            }
+        }
+    }
+}
+
+/// One connection being served, from its accept to its end.
+struct Served(Arc<Open>);
+
+impl Served {
+    fn new(open: &Arc<Open>) -> Self {
+        open.n.fetch_add(1, SeqCst);
+        Self(open.clone())
+    }
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        if self.0.n.fetch_sub(1, SeqCst) == 1 {
+            self.0.none.notify_waiters();
+        }
+    }
 }
 
 impl Ingress {
-    pub fn new(mgr: Manager, bind: &str, http: &str, boot_timeout: Duration) -> Self {
+    pub fn new(
+        mgr: Manager,
+        bind: &str,
+        http: &str,
+        boot_timeout: Duration,
+        store: Arc<Listeners>,
+    ) -> Self {
         Self {
             mgr,
             bind: bind.to_string(),
@@ -36,8 +91,11 @@ impl Ingress {
             // A connection waits for the machine as long as a boot may take, plus the
             // service's own start.
             wake_timeout: boot_timeout + Duration::from_secs(30),
-            listeners: Default::default(),
+            store,
+            accepting: Default::default(),
             hosts: Default::default(),
+            stopped: Default::default(),
+            open: Default::default(),
         }
     }
 
@@ -52,7 +110,11 @@ impl Ingress {
         let me = self.clone();
         tokio::spawn(async move {
             loop {
-                match events.recv().await {
+                let event = events.recv().await;
+                if me.stopped.load(SeqCst) {
+                    return;
+                }
+                match event {
                     Ok((ep, true)) => {
                         if let Err(e) = me.add(ep.clone()).await {
                             tracing::error!(endpoint = ep.id, err = %e, "endpoint listener");
@@ -70,21 +132,53 @@ impl Ingress {
             }
         });
         if !self.http.is_empty() {
-            let ln = TcpListener::bind(&self.http)
-                .await
-                .map_err(|e| anyhow!("http ingress on {}: {e}", self.http))?;
+            let addr: SocketAddr = self
+                .http
+                .parse()
+                .with_context(|| format!("ingress.http {:?}", self.http))?;
+            let ln = self.listen("http", addr).context("http ingress")?;
             tracing::info!(addr = self.http, "http ingress listening");
             let me = self.clone();
-            tokio::spawn(async move {
+            let h = tokio::spawn(async move {
                 loop {
                     if let Ok((conn, _)) = ln.accept().await {
                         let me = me.clone();
-                        tokio::spawn(async move { me.serve_http(conn).await });
+                        let served = Served::new(&me.open);
+                        tokio::spawn(async move {
+                            me.serve_http(conn).await;
+                            drop(served);
+                        });
                     }
                 }
             });
+            self.accepting.lock().unwrap().insert("http".into(), h);
         }
         Ok(())
+    }
+
+    /// The listener under `name`: the one the previous daemon left in the store, or a new one.
+    fn listen(&self, name: &str, addr: SocketAddr) -> Result<TcpListener> {
+        let ln = self
+            .store
+            .tcp(name, addr)
+            .with_context(|| format!("listen on {addr}"))?;
+        ln.set_nonblocking(true)?;
+        Ok(TcpListener::from_std(ln)?)
+    }
+
+    /// Accepts no more: every listener's socket stays in the store, where the kernel queues
+    /// what arrives for the next daemon (a stop leaves nothing in it). The connections being
+    /// served go on.
+    pub fn stop_accepting(&self) {
+        self.stopped.store(true, SeqCst);
+        for (_, h) in self.accepting.lock().unwrap().drain() {
+            h.abort();
+        }
+    }
+
+    /// Waits until no connection is served, or until `deadline`. Returns how many still are.
+    pub async fn drain(&self, deadline: tokio::time::Instant) -> usize {
+        self.open.drain(deadline).await
     }
 
     /// Opens an endpoint's listener, or routes its host name. Events are sent after the
@@ -103,28 +197,40 @@ impl Ingress {
                 Ok(())
             }
             "tcp" => {
-                if self.listeners.lock().unwrap().contains_key(&ep.id) {
+                // Stored under the endpoint's id (`ep_…`), beside `http` and the API's `api`:
+                // letters, digits and `_`, a name sd_notify(3) takes.
+                let name = ep.id.clone();
+                if self.stopped.load(SeqCst) || self.accepting.lock().unwrap().contains_key(&name) {
                     return Ok(());
                 }
                 let addr: SocketAddr =
                     format!("{}:{}", self.bind, ep.host_port.unwrap_or(0)).parse()?;
-                let ln = TcpListener::bind(addr).await?;
+                let ln = self.listen(&name, addr)?;
                 tracing::info!(endpoint = ep.id, machine = ep.machine_id, %addr, port = ep.port, "tcp endpoint listening");
                 let me = self.clone();
-                let id = ep.id.clone();
                 let h = tokio::spawn(async move {
                     loop {
                         match ln.accept().await {
                             Ok((conn, _)) => {
                                 let me = me.clone();
                                 let ep = ep.clone();
-                                tokio::spawn(async move { me.proxy_tcp(ep, conn).await });
+                                let served = Served::new(&me.open);
+                                tokio::spawn(async move {
+                                    me.proxy_tcp(ep, conn).await;
+                                    drop(served);
+                                });
                             }
                             Err(_) => return,
                         }
                     }
                 });
-                self.listeners.lock().unwrap().insert(id, h);
+                let mut accepting = self.accepting.lock().unwrap();
+                // A stop that came while this one opened: it accepts nothing either.
+                if self.stopped.load(SeqCst) {
+                    h.abort();
+                } else {
+                    accepting.insert(name, h);
+                }
                 Ok(())
             }
             _ => Ok(()),
@@ -139,13 +245,22 @@ impl Ingress {
             .into_iter()
             .map(|ep| (ep.id.clone(), ep))
             .collect();
-        self.listeners.lock().unwrap().retain(|id, h| {
-            let keep = now.contains_key(id);
-            if !keep {
+        let gone: Vec<String> = self
+            .accepting
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|name| name.as_str() != "http" && !now.contains_key(*name))
+            .cloned()
+            .collect();
+        for name in gone {
+            if let Some(h) = self.accepting.lock().unwrap().remove(&name) {
                 h.abort();
+                if let Err(e) = self.store.release(&name) {
+                    tracing::warn!(endpoint = name, err = %e, "endpoint listener left in the store");
+                }
             }
-            keep
-        });
+        }
         self.hosts
             .lock()
             .unwrap()
@@ -158,8 +273,12 @@ impl Ingress {
     }
 
     fn remove(&self, ep: &EndpointRec) {
-        if let Some(h) = self.listeners.lock().unwrap().remove(&ep.id) {
+        let name = ep.id.clone();
+        if let Some(h) = self.accepting.lock().unwrap().remove(&name) {
             h.abort();
+            if let Err(e) = self.store.release(&name) {
+                tracing::warn!(endpoint = ep.id, err = %e, "endpoint listener left in the store");
+            }
         }
         self.hosts.lock().unwrap().remove(&ep.host.to_lowercase());
     }
@@ -591,6 +710,35 @@ mod tests {
         drop(client);
         assert_eq!(conn.read(&mut buf).await.unwrap(), 0);
         assert_eq!(traffic.take(), (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_drain_ends_with_the_last_connection_or_at_its_bound() {
+        let open = Arc::new(Open::default());
+        let t = tokio::time::Instant::now();
+        assert_eq!(
+            open.drain(t + Duration::from_secs(10)).await,
+            0,
+            "nothing open"
+        );
+        assert_eq!(t.elapsed(), Duration::ZERO);
+        let (a, b) = (Served::new(&open), Served::new(&open));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            drop(a);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            drop(b);
+        });
+        assert_eq!(open.drain(t + Duration::from_secs(10)).await, 0);
+        assert_eq!(
+            t.elapsed(),
+            Duration::from_secs(3),
+            "ended with the last one"
+        );
+        let _held = Served::new(&open);
+        let t = tokio::time::Instant::now();
+        assert_eq!(open.drain(t + Duration::from_secs(10)).await, 1, "one cut");
+        assert_eq!(t.elapsed(), Duration::from_secs(10));
     }
 
     #[test]

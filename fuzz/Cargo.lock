@@ -251,10 +251,12 @@ version = "0.1.2"
 dependencies = [
  "chrono",
  "hex",
+ "nix 0.29.0",
  "rustls",
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "thiserror 2.0.21",
 ]
 

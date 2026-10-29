@@ -10,7 +10,17 @@ ExecStart=/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml
 # leaves them running for the next daemon to adopt; a crash leaves them too (ADR 0027).
 KillMode=process
 Restart=on-failure
-RestartSec=2
+# At once: a crash loop still ends at StartLimitBurst (5 starts in 10 s), which releases the
+# store below, and the clients it queued are reset.
+RestartSec=0
+# A hand-over exits 75: started again at once, not a failure. systemd keeps the store of
+# listening sockets (the API, the HTTP ingress, every TCP endpoint) across a restart, so the
+# kernel queues what arrives in between (ADR 0051). The size: the endpoint range of
+# hack/config.dev.yaml (30000-32767) and two.
+SuccessExitStatus=75
+RestartForceExitStatus=75
+NotifyAccess=main
+FileDescriptorStoreMax=2770
 LimitNOFILE=65536
 # A core dump of a Firecracker would be its guest's memory, on / in clear (ADR 0026).
 LimitCORE=0

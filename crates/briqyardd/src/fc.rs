@@ -556,6 +556,10 @@ impl Process {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // The daemon's store (ADR 0051) is not the jailer's or Firecracker's.
+        for v in briqyard_api::listeners::ENV {
+            cmd.env_remove(v);
+        }
         cmd.process_group(0);
         cmd.kill_on_drop(false);
         let mut child = cmd.spawn().context("start firecracker")?;

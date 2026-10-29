@@ -1064,6 +1064,7 @@ impl Manager {
             .cloned()
             .collect();
         let (mut adopted, mut stopped, mut gone) = (0, 0, 0);
+        let ready = self.take_handed_ready();
         for e in entries {
             let rec = e.snapshot();
             // Its create's task went with the previous daemon. One from an image is taken up
@@ -1094,7 +1095,10 @@ impl Manager {
             ) {
                 continue;
             }
-            if rec.state == state::RUNNING && rec.pid > 0 && self.adopt(&e, rec.pid).await {
+            if rec.state == state::RUNNING
+                && rec.pid > 0
+                && self.adopt(&e, rec.pid, ready.contains(&rec.id)).await
+            {
                 adopted += 1;
                 continue;
             }
@@ -1221,7 +1225,10 @@ impl Manager {
 
     /// Takes over a VMM a previous daemon left running (it crashed; a shutdown suspends
     /// them instead), when the VMM still answers for the machine.
-    async fn adopt(&self, e: &Arc<Entry>, pid: u32) -> bool {
+    ///
+    /// `ready`: the previous daemon handed it over ready (ADR 0051). Its probes still start
+    /// over, and failing them as often as a failure threshold takes that back.
+    async fn adopt(&self, e: &Arc<Entry>, pid: u32, ready: bool) -> bool {
         let rec = e.snapshot();
         let dir = self.inner.cfg.run_dir().join(&rec.id);
         let jail = self.jail_for(&rec);
@@ -1239,6 +1246,9 @@ impl Manager {
         // Its probes run again from the top; nobody waits on this run, so a startup that
         // fails is a crash for the restart policy, not a failed boot.
         let (_, _, generation) = self.reset_probes(e);
+        if ready {
+            e.probe.lock().unwrap().ready = true;
+        }
         self.spawn_probes(e, &vm, generation, false);
         e.note(
             Ev::normal(
@@ -1407,6 +1417,7 @@ impl Manager {
         }
         let running = self.usage().1;
         tracing::info!(running, "handing the machines over to the next daemon");
+        self.write_handed_ready(&entries);
         for e in entries.iter().filter(|e| e.unsaved_use.load(Relaxed)) {
             if let Err(err) = self.write_use(e) {
                 tracing::warn!(machine = e.snapshot().id, err = %err, "last use not written");
@@ -1414,6 +1425,37 @@ impl Manager {
         }
         self.write_usage().await;
         held
+    }
+
+    /// Where a hand-over leaves the machines that were ready, for the next daemon's adoption.
+    fn handed_ready_path(&self) -> PathBuf {
+        self.inner.cfg.run_dir().join("handed-over-ready")
+    }
+
+    /// Readiness crosses a hand-over (ADR 0051), as the kubelet keeps it across its restart
+    /// (KEP-4781): the machines running and ready now. Their probes start over in the next
+    /// daemon, and a machine not ready until its first probe passed would hold the ingress for
+    /// up to a probe period. Only a hand-over writes it, so a crash never carries a stale one.
+    fn write_handed_ready(&self, entries: &[Arc<Entry>]) {
+        let ready: Vec<String> = entries
+            .iter()
+            .filter(|e| e.snapshot().state == state::RUNNING && e.probe.lock().unwrap().ready)
+            .map(|e| e.snapshot().id)
+            .collect();
+        let path = self.handed_ready_path();
+        let written = std::fs::create_dir_all(self.inner.cfg.run_dir())
+            .and_then(|()| std::fs::write(&path, ready.join("\n")));
+        if let Err(err) = written {
+            tracing::warn!(err = %err, "the machines ready at the hand-over not written");
+        }
+    }
+
+    /// The machines the last hand-over left ready, read once: the file goes with the read.
+    fn take_handed_ready(&self) -> std::collections::HashSet<String> {
+        let path = self.handed_ready_path();
+        let read = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        read.lines().map(str::to_string).collect()
     }
 
     /// What the next daemon goes on from: the last uses not on the records yet, and the
@@ -1437,7 +1479,7 @@ impl Manager {
     }
 
     /// The usage measured up to now, written.
-    async fn write_usage(&self) {
+    pub async fn write_usage(&self) {
         let now = Utc::now();
         self.measure(now).await;
         if let Err(err) = self
@@ -6970,8 +7012,13 @@ mod tests {
         let h = harness_config(|c| c.ingress.tcp_ports = "39100-39199".into()).await;
         h.tenant("t1");
         h.add("m_abc123", state::RUNNING, 256);
-        let ing =
-            crate::ingress::Ingress::new(h.m.clone(), "127.0.0.1", "", Duration::from_secs(1));
+        let ing = crate::ingress::Ingress::new(
+            h.m.clone(),
+            "127.0.0.1",
+            "",
+            Duration::from_secs(1),
+            std::sync::Arc::new(briqyard_api::listeners::Listeners::none()),
+        );
         ing.start().await.unwrap();
         let tcp = |port| api::CreateEndpointRequest {
             port,
@@ -7005,8 +7052,13 @@ mod tests {
         let h = harness_config(|c| c.ingress.tcp_ports = "39200-39299".into()).await;
         h.tenant("t1");
         h.add("m_abc123", state::RUNNING, 256);
-        let ing =
-            crate::ingress::Ingress::new(h.m.clone(), "127.0.0.1", "", Duration::from_secs(1));
+        let ing = crate::ingress::Ingress::new(
+            h.m.clone(),
+            "127.0.0.1",
+            "",
+            Duration::from_secs(1),
+            std::sync::Arc::new(briqyard_api::listeners::Listeners::none()),
+        );
         let req = api::CreateEndpointRequest {
             port: 8080,
             protocol: "tcp".into(),
@@ -11842,8 +11894,13 @@ mod tests {
             ..Default::default()
         };
         let ep = h.m.create_endpoint(machine, req).unwrap();
-        let ingress =
-            crate::ingress::Ingress::new(h.m.clone(), "127.0.0.1", "", Duration::from_secs(5));
+        let ingress = crate::ingress::Ingress::new(
+            h.m.clone(),
+            "127.0.0.1",
+            "",
+            Duration::from_secs(5),
+            std::sync::Arc::new(briqyard_api::listeners::Listeners::none()),
+        );
         (ingress, h.m.endpoint(&ep.id).unwrap())
     }
 
@@ -13780,6 +13837,43 @@ mod tests {
         );
         // What the next daemon's start finds: the machine, still running, adopted.
         assert_eq!(h.m.recover().await, (1, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn readiness_crosses_a_hand_over() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        // A period far past the test: no probe runs, so only what was carried decides.
+        let slow = api::Probe {
+            http: Some(api::HttpProbe {
+                port: 8080,
+                path: "/".into(),
+            }),
+            period_sec: 3600,
+            ..Default::default()
+        };
+        let up =
+            h.m.create_made(h.probed("up", readiness(slow.clone())))
+                .await
+                .unwrap();
+        let down =
+            h.m.create_made(h.probed("down", readiness(slow)))
+                .await
+                .unwrap();
+        for id in [&up.id, &down.id] {
+            assert!(!h.m.get(id).unwrap().ready);
+        }
+        h.m.entry(&up.id).unwrap().probe.lock().unwrap().ready = true;
+        let held = h.m.hand_over().await;
+        drop(held);
+        // The next daemon's adoption: its probes start over, the ready one stays ready, and
+        // the one that was not has to pass its probe.
+        assert_eq!(h.m.recover().await, (2, 0, 0));
+        assert!(h.m.get(&up.id).unwrap().ready, "ready as handed over");
+        assert!(!h.m.get(&down.id).unwrap().ready);
+        // Read once: a later start (a crash's adoption) carries nothing.
+        assert_eq!(h.m.recover().await, (2, 0, 0));
+        assert!(!h.m.get(&up.id).unwrap().ready, "a crash carries nothing");
     }
 
     #[test]

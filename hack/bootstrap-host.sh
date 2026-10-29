@@ -472,7 +472,13 @@ if [ -n "$fingerprint" ]; then
 else
   echo "   none: the API is plain HTTP (a loopback listen, or api_tls: false)"
 fi
-cat > /etc/systemd/system/briqyardd.service <<'EOF'
+# The store of listening sockets holds the API's, the HTTP ingress's and one per TCP endpoint
+# (ADR 0051): the endpoint range and two. A range made larger later needs this run again: past
+# the store's size systemd refuses a socket, and that endpoint is refused while no daemon runs.
+range=$(awk '/^  tcp_ports:/ {gsub(/["\047 ]/, "", $2); print $2}' /etc/briqyard/config.yaml)
+range=${range:-30000-32767}
+store_max=$(( ${range#*-} - ${range%-*} + 3 ))
+cat > /etc/systemd/system/briqyardd.service <<EOF
 [Unit]
 Description=briqyard host daemon
 After=network-online.target zfs.target
@@ -485,7 +491,15 @@ ExecStart=/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml
 # leaves them running for the next daemon to adopt; a crash leaves them too (ADR 0027).
 KillMode=process
 Restart=on-failure
-RestartSec=2
+# At once: a crash loop still ends at StartLimitBurst (5 starts in 10 s), which releases the
+# store below, and the clients it queued are reset.
+RestartSec=0
+# A hand-over exits 75: started again at once, not a failure. systemd keeps the store of
+# listening sockets across a restart, so the kernel queues what arrives in between (ADR 0051).
+SuccessExitStatus=75
+RestartForceExitStatus=75
+NotifyAccess=main
+FileDescriptorStoreMax=$store_max
 LimitNOFILE=65536
 # A core dump of a Firecracker would be its guest's memory, on / in clear (ADR 0026).
 LimitCORE=0
@@ -499,8 +513,10 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable briqyardd >/dev/null
-# A running daemon hands its machines over (SIGUSR2, ADR 0027) and exits; the new one adopts them.
-# `systemctl restart` would suspend every machine instead.
+# A running daemon hands its machines over (SIGUSR2, ADR 0027) and exits 75, on which the unit
+# starts the new one at once, the listeners kept (ADR 0051); the new one adopts the machines. The
+# start below covers a daemon from before ADR 0051, which exits 0. `systemctl restart` would
+# suspend every machine instead.
 pid=$(systemctl show -p MainPID --value briqyardd)
 if [ "${pid:-0}" != 0 ]; then
   echo "== handing the machines over to the new daemon"

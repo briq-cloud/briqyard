@@ -241,7 +241,7 @@ What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it i
 |---|---|
 | `upgrading` | Placement stops; the host's machines are served |
 | Install | `hack/bootstrap-host.sh` over SSH with the release (`bootstrap.ssh_key`, the pinned host key), as at a bootstrap: packages, Firecracker and kernel pins, the binaries put in place by a rename, the unit |
-| Hand-over | The script sends the running daemon SIGUSR2: it exits and leaves every machine running; `systemctl start` brings the new one, which adopts them |
+| Hand-over | The script sends the running daemon SIGUSR2: it stops accepting, drains for up to 2 s, exits 75 and leaves every machine running; the unit starts the new one at once, which adopts them. Its listeners stay in systemd's store meanwhile (ADR 0051) |
 | Back | `briqyardd --version` over SSH, then a heartbeat from a new start of that version that stopped nothing, within 5 minutes |
 | Undrained | The host is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
 
@@ -260,7 +260,8 @@ What the machines see:
 
 | | |
 |---|---|
-| Running | Nothing: no reboot, no pause. Connections through the ingress (TCP endpoints, HTTP) are reset; clients reconnect |
+| Running | Nothing: no reboot, no pause |
+| Their clients | Nothing refused: a connection or an API call made during the hand-over waits for the next daemon (its log: `serving again`, `gap_ms`). A connection through the ingress open more than 2 s after the signal is reset |
 | Suspended | Resumed at their next start when Firecracker and the host kernel are the same; booted cold otherwise (`starting` says so) |
 | Their init | The one in their root disk until it is made again (an image change); `init_version` on the machine |
 | Their Firecracker | The process they booted with until their next start; `vmm_version` on the machine, the host's in `briqyard status` |

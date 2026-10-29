@@ -361,8 +361,10 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   root disk given back to the pool, exec after a bare pause and resume), a volume grown (ADR
   0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
-  data kept, the next backup incremental and its restore at the grown size). 241 checks, 237
-  without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  data kept, the next backup incremental and its restore at the grown size), a hand-over
+  through systemd's store (ADR 0051: a connection held across it ends whole, the new ones made
+  during it all answered, the gap logged; with a unit that has a store, and python3). 244
+  checks, 240 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
@@ -378,6 +380,10 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   against a real fleet: it drains only the dev fleet's host `local`, so it leaves real hosts
   alone (21 checks then: `/metrics` refused without a token over `https://`;
   `BRIQYARD_METRICS_TOKEN` when the fleet has a `metrics_token`).
+- `hack/upgrade-probe.sh`: traffic through a machine's TCP and HTTP endpoints and against both APIs
+  while the fleet upgrades the VM's host and then restarts, each attempt counted `ok`, `refused`,
+  `reset`, `timeout` or `failed` (`hack/upgrade-probe.py`; ADR 0051 keeps the numbers). A
+  measure, not a suite: it prints counts and passes nothing.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start and a
   snapshot's delete against a destroy, more starts at once than the host has memory for), host

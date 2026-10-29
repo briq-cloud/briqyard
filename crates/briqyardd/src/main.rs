@@ -15,6 +15,19 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 const OPENAPI: &str = include_str!("../../../api/openapi.yaml");
 
+/// What a stop or a hand-over gives the API's requests and the endpoint connections in
+/// flight, one bound for both (ADR 0051): what arrives meanwhile waits in the kernel's queue
+/// for the next daemon, so the bound is paid by every waiting client whenever a connection
+/// that never ends on its own (a pool, a WebSocket) is open. Long enough for a short request.
+const DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a stop or a hand-over may take in all.
+const SHUTDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The exit status of a hand-over: the unit restarts on it (`RestartForceExitStatus=`) and
+/// counts it a success (`SuccessExitStatus=`), and systemd keeps its store across a restart.
+const HANDED_OVER: i32 = 75;
+
 #[derive(Parser)]
 #[command(
     name = "briqyardd",
@@ -80,6 +93,7 @@ async fn run(args: Args) -> Result<()> {
     } else {
         return Err(anyhow!("config {} not found", args.config.display()));
     };
+    let began = std::time::Instant::now();
     let cfg = config::Config::load(path)?;
     if let Some(Cmd::TlsFingerprint) = args.cmd {
         if cfg.serves_tls() {
@@ -123,6 +137,7 @@ async fn run(args: Args) -> Result<()> {
         tracing::info!("stopped before the pool's key was loaded");
         return Ok(());
     }
+    let pool_ms = began.elapsed().as_millis() as u64;
     let mounts = cfg.pool_mounts();
     zfs.layout(
         &mounts
@@ -150,11 +165,15 @@ async fn run(args: Args) -> Result<()> {
         .collect();
     let dns = netw::dns::Resolver::new(&cfg.network.upstream_dns);
     let mgr = machine::Manager::new(cfg.clone(), store, zfs, images, dns).await?;
+    let adopted_ms = began.elapsed().as_millis() as u64;
+    // The listeners the previous daemon left in systemd's store (ADR 0051).
+    let listeners = Arc::new(briqyard_api::listeners::Listeners::from_env());
     let ing = ingress::Ingress::new(
         mgr.clone(),
         &cfg.ingress.bind,
         &cfg.ingress.http,
         std::time::Duration::from_secs(cfg.boot_timeout_sec.max(10)),
+        listeners.clone(),
     );
     ing.start().await?;
     if let Some(f) = cfg.fleet.clone() {
@@ -180,9 +199,19 @@ async fn run(args: Args) -> Result<()> {
             }
         });
     }
-    let listener = std::net::TcpListener::bind(&cfg.listen)
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(&cfg.listen)
+        .ok()
+        .and_then(|mut a| a.next())
+        .ok_or_else(|| anyhow!("listen {}: want address:port", cfg.listen))?;
+    let listener = listeners
+        .tcp("api", addr)
         .with_context(|| format!("listen {}", cfg.listen))?;
     listener.set_nonblocking(true)?;
+    match listeners.release_unused() {
+        Ok(gone) if !gone.is_empty() => tracing::info!(?gone, "listeners no longer used, closed"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(err = %e, "listeners no longer used left in the store"),
+    }
     let state = Arc::new(api::AppState {
         mgr: mgr.clone(),
         token: cfg.token.clone(),
@@ -199,73 +228,137 @@ async fn run(args: Args) -> Result<()> {
         pool = cfg.storage.pool,
         "briqyardd listening"
     );
+    // What a client saw of the hand-over that started this daemon: from the previous one's
+    // signal to now, and what this start spent.
+    if let Some(gap_ms) = gap_since_hand_over(&cfg) {
+        tracing::info!(
+            gap_ms,
+            pool_ms,
+            adopted_ms,
+            serving_ms = began.elapsed().as_millis() as u64,
+            "serving again"
+        );
+    }
     let handle = axum_server::Handle::new();
+    let app = api::router(state).into_make_service();
+    let mut server = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            match tls {
+                Some((_, server)) => {
+                    let config =
+                        axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
+                    axum_server::from_tcp_rustls(listener, config)
+                        .handle(handle)
+                        .serve(app)
+                        .await
+                }
+                None => {
+                    axum_server::from_tcp(listener)
+                        .handle(handle)
+                        .serve(app)
+                        .await
+                }
+            }
+        })
+    };
     // SIGTERM (a stop, a reboot) suspends the machines; SIGUSR2 (an upgrade) leaves them
     // running for the next daemon to adopt (ADR 0027).
-    let hand_over = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let (handle, hand_over) = (handle.clone(), hand_over.clone());
-        let watches = mgr.events().clone();
+    let hand_over = {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = signal(SignalKind::terminate())?;
         let mut usr2 = signal(SignalKind::user_defined2())?;
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = term.recv() => {}
-                _ = usr2.recv() => hand_over.store(true, std::sync::atomic::Ordering::SeqCst),
-            }
-            tracing::info!("shutting down");
-            // A watch never ends on its own: the server would wait for it. A request still
-            // running after the grace (a long exec) is cut: the machines come first.
-            watches.close();
-            handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
-        });
-    }
-    let app = api::router(state).into_make_service();
-    match tls {
-        Some((_, server)) => {
-            let config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
-            axum_server::from_tcp_rustls(listener, config)
-                .handle(handle)
-                .serve(app)
-                .await?
-        }
-        None => {
-            axum_server::from_tcp(listener)
-                .handle(handle)
-                .serve(app)
-                .await?
-        }
-    }
-    let down = async {
-        match hand_over.load(std::sync::atomic::Ordering::SeqCst) {
-            true => Some(mgr.hand_over().await),
-            false => {
-                mgr.close().await;
-                None
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => false,
+            _ = term.recv() => false,
+            _ = usr2.recv() => true,
+            served = &mut server => {
+                served??;
+                return Err(anyhow!("the API stopped serving"));
             }
         }
     };
-    let held = match tokio::time::timeout(std::time::Duration::from_secs(60), down).await {
+    tracing::info!(hand_over, "shutting down");
+    let deadline = tokio::time::Instant::now() + DRAIN;
+    if hand_over {
+        mark_hand_over(&cfg);
+    }
+    // Nothing is accepted from here: the listeners stay in systemd's store, so what arrives
+    // waits for the next daemon. A watch never ends on its own: the server would wait for it.
+    // A request or a connection still open after the drain (a long exec, a WebSocket) is cut:
+    // the machines come first.
+    ing.stop_accepting();
+    mgr.events().close();
+    handle.graceful_shutdown(Some(DRAIN));
+    let drain = async {
+        // The API's requests in flight end, or are cut at the drain's end.
+        match server.await {
+            Ok(Err(e)) => tracing::warn!(err = %e, "the API's last requests"),
+            Err(e) => tracing::warn!(err = %e, "the API's task"),
+            Ok(Ok(())) => {}
+        }
+        let cut = ing.drain(deadline).await;
+        if cut > 0 {
+            tracing::info!(
+                connections = cut,
+                "endpoint connections cut at the drain's end"
+            );
+        }
+    };
+    let down = async {
+        if hand_over {
+            // The machines' locks are taken while the connections drain (ADR 0051): the gap
+            // is the longer of the two, not their sum. The usage is written again once the
+            // connections are done, with what they passed meanwhile.
+            let (held, ()) = tokio::join!(mgr.hand_over(), drain);
+            mgr.write_usage().await;
+            Some(held)
+        } else {
+            // A stop drains first: suspending the machines would end the connections.
+            drain.await;
+            mgr.close().await;
+            None
+        }
+    };
+    let held = match tokio::time::timeout(SHUTDOWN, down).await {
         Ok(held) => held,
         Err(_) => {
             // What was not done by then: the next daemon finds those machines as a crash
             // leaves them.
-            tracing::warn!(
-                hand_over = hand_over.load(std::sync::atomic::Ordering::SeqCst),
-                "the shutdown ran past 60 s: ending without it"
-            );
+            tracing::warn!(hand_over, "the shutdown ran past 60 s: ending without it");
             None
         }
     };
-    if held.is_some() {
-        // A hand-over ends the process here, every machine's lock held: no transition begins
-        // in what is left of it (ADR 0027).
-        tracing::info!("handed over");
-        std::process::exit(0);
+    if hand_over {
+        // A hand-over ends the process here, every machine's lock held when it got them: no
+        // transition begins in what is left of it (ADR 0027). Its status has the unit start
+        // the next daemon at once, which keeps the listeners in systemd's store (ADR 0051).
+        if held.is_some() {
+            tracing::info!("handed over");
+        }
+        std::process::exit(HANDED_OVER);
     }
     Ok(())
+}
+
+/// Where a hand-over leaves the time of its signal for the next daemon's `serving again`.
+fn hand_over_mark(cfg: &config::Config) -> PathBuf {
+    cfg.run_dir().join("handed-over-at")
+}
+
+fn mark_hand_over(cfg: &config::Config) {
+    let now = chrono::Utc::now().timestamp_millis().to_string();
+    if let Err(e) = std::fs::write(hand_over_mark(cfg), now) {
+        tracing::warn!(err = %e, "the hand-over's time not written");
+    }
+}
+
+/// The milliseconds since the hand-over that started this daemon, read once.
+fn gap_since_hand_over(cfg: &config::Config) -> Option<i64> {
+    let path = hand_over_mark(cfg);
+    let at: i64 = std::fs::read_to_string(&path).ok()?.trim().parse().ok()?;
+    let _ = std::fs::remove_file(&path);
+    Some(chrono::Utc::now().timestamp_millis() - at)
 }
 
 /// Resolves at SIGINT or SIGTERM.
