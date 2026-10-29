@@ -52,7 +52,8 @@ cleanup() {
       handover
     fi
   fi
-  for t in "$T" "$T-eg" "$T-gw" "$T-ip" "$T-q"; do
+  # Every tenant of the run: "$T" and "$T-<section>" (-eg, -gw, -other, -par1…).
+  for t in $(briqyard tenant ls 2>/dev/null | jq -r --arg t "$T" '.[].id | select(. == $t or startswith($t + "-"))'); do
     for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
     # A machine still settling refuses its destroy; try again until the tenant is empty.
     for i in $(seq 1 10); do
