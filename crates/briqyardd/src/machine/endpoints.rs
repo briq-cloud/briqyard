@@ -74,7 +74,7 @@ impl Manager {
         if proto != "tcp" && proto != "http" {
             return Err(invalid("protocol must be tcp or http"));
         }
-        let tenant = e.snapshot().tenant;
+        let namespace = e.snapshot().namespace;
         let name = e.snapshot().name;
         let mut endpoints = self.inner.endpoints.lock().unwrap();
         if let Some(ex) = endpoints
@@ -86,7 +86,7 @@ impl Manager {
         let mut ep = EndpointRec {
             id: new_id("ep"),
             machine_id: machine_id.to_string(),
-            tenant,
+            namespace,
             port: req.port,
             protocol: proto.clone(),
             host_port: None,

@@ -5,7 +5,7 @@ use super::*;
 #[tokio::test]
 async fn the_ingress_resyncs_when_it_missed_endpoint_events() {
     let h = harness_config(|c| c.ingress.tcp_ports = "39100-39199".into()).await;
-    h.tenant("t1");
+    h.namespace("t1");
     h.add("m_abc123", state::RUNNING, 256);
     let ing = crate::ingress::Ingress::new(
         h.m.clone(),
@@ -45,7 +45,7 @@ async fn the_ingress_resyncs_when_it_missed_endpoint_events() {
 #[tokio::test]
 async fn the_ingress_opens_no_listener_for_an_endpoint_gone() {
     let h = harness_config(|c| c.ingress.tcp_ports = "39200-39299".into()).await;
-    h.tenant("t1");
+    h.namespace("t1");
     h.add("m_abc123", state::RUNNING, 256);
     let ing = crate::ingress::Ingress::new(
         h.m.clone(),

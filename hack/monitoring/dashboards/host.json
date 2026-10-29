@@ -480,8 +480,8 @@
     },
     {
       "type": "stat",
-      "title": "Tenants",
-      "description": "Tenants with a machine or a gateway here.",
+      "title": "Namespaces",
+      "description": "Namespaces with a machine or a gateway here.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -493,7 +493,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "briqyard_tenants{host=\"$host\"}",
+          "expr": "briqyard_namespaces{host=\"$host\"}",
           "legendFormat": "__auto",
           "range": true,
           "instant": false
@@ -1657,7 +1657,7 @@
     {
       "type": "timeseries",
       "title": "Disk used by machines",
-      "description": "What the machines' disks, their snapshots and memory snapshots take on the pool: the five tenants that take the most.",
+      "description": "What the machines' disks, their snapshots and memory snapshots take on the pool: the five namespaces that take the most.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -1669,8 +1669,8 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "topk(5, sum by (tenant) (briqyard_machine_disk_used_bytes{host=\"$host\"}))",
-          "legendFormat": "{{tenant}}",
+          "expr": "topk(5, sum by (namespace) (briqyard_machine_disk_used_bytes{host=\"$host\"}))",
+          "legendFormat": "{{namespace}}",
           "range": true,
           "instant": false
         }

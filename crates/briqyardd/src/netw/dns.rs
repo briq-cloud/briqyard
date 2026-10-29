@@ -1,4 +1,4 @@
-//! The gateway's DNS: answers `<name>.internal` for the tenant whose gateway the query came in
+//! The gateway's DNS: answers `<name>.internal` for the namespace whose gateway the query came in
 //! on, and forwards everything else upstream as raw packets, except for the sources whose
 //! egress policy keeps them inside (ADR 0015): they get internal answers only. Packets are
 //! decoded and encoded by hickory-proto (ADR 0033); the names and the policy are ours.
@@ -60,7 +60,7 @@ impl Resolver {
         self.names.write().unwrap().insert(gateway, names);
     }
 
-    /// Answers `source` on `gateway` from the tenant's names alone; `false` ends that.
+    /// Answers `source` on `gateway` from the namespace's names alone; `false` ends that.
     pub fn internal_only(&self, gateway: Ipv4Addr, source: Ipv4Addr, on: bool) {
         let mut all = self.internal_only.write().unwrap();
         let set = all.entry(gateway).or_default();
@@ -130,7 +130,7 @@ impl Resolver {
     async fn answer(&self, gateway: Ipv4Addr, source: Ipv4Addr, q: &[u8]) -> Option<Vec<u8>> {
         let query = parse_query(q)?;
         let name = query_name(&query);
-        // A source kept inside gets NXDOMAIN for every name the tenant does not have, never
+        // A source kept inside gets NXDOMAIN for every name the namespace does not have, never
         // a forward. Not REFUSED: glibc and Go fail at once on it, but musl ignores it and
         // waits out its timeout (5 s; res_msend.c: "ignore all other codes such as
         // refusal"), while NXDOMAIN is final for all three.

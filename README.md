@@ -4,7 +4,7 @@
 
 **Open-source microVMs for sandboxes and services that sleep, wake and fork.**
 
-briqyard runs any OCI image in a Firecracker microVM on servers you own. Each machine gets a durable disk, a private network shared with its tenant, and a sleep window: it stops when unused and wakes on the next connection or command. It is written in Rust and licensed AGPL-3.0.
+briqyard runs any OCI image in a Firecracker microVM on servers you own. Each machine gets a durable disk, a private network shared with its namespace, and a sleep window: it stops when unused and wakes on the next connection or command. It is written in Rust and licensed AGPL-3.0.
 
 **briqyard powers [briq.cloud](https://briq.cloud).** For managed sandboxes and microVMs for your agents, without running servers, [start on briq.cloud](https://briq.cloud).
 
@@ -18,12 +18,12 @@ briqyard runs any OCI image in a Firecracker microVM on servers you own. Each ma
 | 💾 **Durable disks** | A root disk and an optional data volume per machine, ZFS zvols on the host's NVMe. `fsync` reaches the disk; a volume grows, never shrinks |
 | 🔀 **Snapshots and forks** | Copy-on-write: a snapshot of the disks (and of the memory, if asked), a restore in place, a fork as a new machine with its data |
 | 😴 **Sleep and wake** | Stopped after its sleep window, woken by a connection or a command. With a memory snapshot, the processes carry on where they were |
-| 🌐 **A network per tenant** | A bridge, a subnet and DNS per tenant: machines reach each other by name, nothing else reaches them. No machine has a public address |
-| 🚦 **Egress control** | Per machine: open, none, or only through another machine (the tenant's gateway, which can hold secrets or filter traffic). Blocked ports, a connection rate and a bandwidth cap |
+| 🌐 **A network per namespace** | A bridge, a subnet and DNS per namespace: machines reach each other by name, nothing else reaches them. No machine has a public address |
+| 🚦 **Egress control** | Per machine: open, none, or only through another machine (the namespace's gateway, which can hold secrets or filter traffic). Blocked ports, a connection rate and a bandwidth cap |
 | 🔌 **Endpoints** | A TCP port or an HTTP name on the host that reaches a machine's port, and wakes it |
 | 💻 **Exec, files, logs** | Commands with stdin, exit code and timeout; interactive sessions with a terminal over a WebSocket; files in and out; the console as logs, followed live |
 | 🩺 **Probes and restarts** | Startup, readiness and liveness checks (exec, TCP, HTTP); a restart policy with backoff |
-| ⚖️ **Limits and quotas** | vCPUs, memory, disk throughput and IOPS per machine; machines, memory, vCPUs and disk per tenant |
+| ⚖️ **Limits and quotas** | vCPUs, memory, disk throughput and IOPS per machine; machines, memory, vCPUs and disk per namespace |
 | 🗄️ **Backups** | ZFS streams to S3 or a directory: incremental, encrypted, on a schedule, restored on any host |
 | 🔐 **Encrypted at rest** | Every host's pool is encrypted (AES-256-GCM) with a key the fleet holds; no swap |
 | 🛡️ **Isolation** | KVM per machine; Firecracker under its jailer, with a chroot, a uid, a pid namespace, a cgroup and seccomp filters each |
@@ -32,13 +32,13 @@ briqyard runs any OCI image in a Firecracker microVM on servers you own. Each ma
 
 ## Architecture
 
-Across hosts. The fleet speaks the same API as each host, so a client talks to either the same way. A tenant lives on one host, so its network needs no overlay.
+Across hosts. The fleet speaks the same API as each host, so a client talks to either the same way. A namespace lives on one host, so its network needs no overlay.
 
 <img src="docs/images/architecture.png" alt="Across servers: a control plane or the CLI calls briqyard-fleet (placement, registry, pool keys) over HTTPS. The fleet calls briqyardd on host 1 and host 2 over TLS with the certificate pinned, installs and upgrades host 2 over SSH, and gets a heartbeat back from each. An edge or router reaches the TCP and HTTP endpoints on both hosts. The hosts send encrypted backups, and the fleet its encrypted registry, to an S3 bucket." width="830">
 
-On one host. Each machine is a Firecracker process, with its disks on the pool and a TAP device on its tenant's bridge.
+On one host. Each machine is a Firecracker process, with its disks on the pool and a TAP device on its namespace's bridge.
 
-<img src="docs/images/host.png" alt="One server, a Linux host with KVM: the HTTP API on :7420 and the endpoints (TCP :30000-32767, HTTP :8080) reach briqyardd. briqyardd runs one Firecracker under the jailer per microVM; inside each microVM, briqyard-init runs as PID 1 and starts the image's command, and talks to briqyardd over vsock (exec, files, exit). briqyardd also keeps the encrypted ZFS pool (image disks, root and data zvols, snapshots) and the tenant networks (a bridge per tenant, a TAP per machine, nftables, DNS)." width="830">
+<img src="docs/images/host.png" alt="One server, a Linux host with KVM: the HTTP API on :7420 and the endpoints (TCP :30000-32767, HTTP :8080) reach briqyardd. briqyardd runs one Firecracker under the jailer per microVM; inside each microVM, briqyard-init runs as PID 1 and starts the image's command, and talks to briqyardd over vsock (exec, files, exit). briqyardd also keeps the encrypted ZFS pool (image disks, root and data zvols, snapshots) and the namespace networks (a bridge per namespace, a TAP per machine, nftables, DNS)." width="830">
 
 What a create does:
 
@@ -61,21 +61,21 @@ What you work with, and its closest Kubernetes counterpart.
 | **Volume** | A machine's data disk, kept across stops, snapshots and forks | PersistentVolume and claim |
 | **Snapshot** | A named copy of a machine's disks, and of its memory if asked; a machine goes back to it in place | VolumeSnapshot |
 | **Fork** | A new machine made from another's disks, at once | none |
-| **Tenant** | A group of machines with its own network, DNS and quotas, isolated from the others | Namespace |
+| **Namespace** | A group of machines with its own network, DNS and quotas, isolated from the others | Namespace |
 | **Endpoint** | A TCP port or an HTTP name on the host that reaches a machine's port and wakes it | Service (NodePort), Ingress |
 | **Egress policy** | Where a machine's traffic may go: open, none, or through another machine | NetworkPolicy |
-| **Gateway** | A machine of the tenant that the machines set to `via: gateway` send their traffic through, to filter it or add secrets | Egress gateway |
+| **Gateway** | A machine of the namespace that the machines set to `via: gateway` send their traffic through, to filter it or add secrets | Egress gateway |
 | **Probes** | Startup, readiness and liveness checks by exec, TCP or HTTP | startupProbe, readinessProbe, livenessProbe |
 | **Restart policy** | What happens when the main process exits: `no`, `on-failure` or `always`, with backoff | restartPolicy, CrashLoopBackOff |
 | **Sleep window** | How long a machine stays up unused before it stops; the next use wakes it | none |
 | **Backup** | A machine's disks in an object store, restored as a new machine on any host | Velero, outside the core |
 | **Host** | A server running `briqyardd` and its machines | Node |
-| **Fleet** | One API over many hosts: places each tenant on a host, forwards the calls | Control plane and scheduler |
-| **Region** | Where a host is; a tenant's machines stay in one | Topology zone |
+| **Fleet** | One API over many hosts: places each namespace on a host, forwards the calls | Control plane and scheduler |
+| **Region** | Where a host is; a namespace's machines stay in one | Topology zone |
 | **Labels** | Metadata on a machine, to select machines by | Labels and selectors |
 | **Events** | A log of what happened on a host, with a watch from a cursor | Events, watch |
 
-Not there yet: replicas and groups of identical machines, rolling updates, load balancing between machines, and a tenant spanning several hosts. The full comparison: [docs/KUBERNETES-MAP.md](docs/KUBERNETES-MAP.md).
+Not there yet: replicas and groups of identical machines, rolling updates, load balancing between machines, and a namespace spanning several hosts. The full comparison: [docs/KUBERNETES-MAP.md](docs/KUBERNETES-MAP.md).
 
 ## Binaries
 
@@ -83,7 +83,7 @@ Not there yet: replicas and groups of identical machines, rolling updates, load 
 |---|---|---|
 | `briqyardd` | Every host, as root | Runs the host's machines: their Firecracker processes, disks, networks, endpoints, sleep and backups. Serves the API |
 | `briqyard-init` | Inside every machine, as PID 1 | Starts the image's command and reports when it exits. Answers exec, files and terminal sessions over vsock |
-| `briqyard-fleet` | One server that reaches every host | Serves the same API for the whole fleet: picks a host for each tenant and forwards each call there. Keeps the list of hosts and their disk keys. Installs and upgrades hosts over SSH. Says what ran out when a create finds no room |
+| `briqyard-fleet` | One server that reaches every host | Serves the same API for the whole fleet: picks a host for each namespace and forwards each call there. Keeps the list of hosts and their disk keys. Installs and upgrades hosts over SSH. Says what ran out when a create finds no room |
 | `briqyard` | Anywhere | The CLI, for one host or a fleet |
 
 `hack/bootstrap-host.sh` turns a fresh Ubuntu server into a host; the fleet runs it to install a host and again to upgrade it. Two libraries are shared: `briqyard-api` (the API's types, and the protocol between a host and its machines' init) and `briqyard-objstore` (S3 or a directory, for backups and the fleet's registry).
@@ -124,7 +124,7 @@ TLS, public names and access control come from a proxy in front: [docs/OPERATION
 
 ## Tests
 
-`cargo test` runs the unit tests. `hack/e2e.sh` checks a host end to end (about 220 checks); `hack/fleet-smoke.sh`, `hack/fleet-two-hosts.sh` and `hack/fleet-restore.sh` check a fleet; `hack/stress.py` runs many tenants at once and checks the host's invariants. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+`cargo test` runs the unit tests. `hack/e2e.sh` checks a host end to end (about 220 checks); `hack/fleet-smoke.sh`, `hack/fleet-two-hosts.sh` and `hack/fleet-restore.sh` check a fleet; `hack/stress.py` runs many namespaces at once and checks the host's invariants. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Open-source software it builds on
 
@@ -133,7 +133,7 @@ TLS, public names and access control come from a proxy in front: [docs/OPERATION
 | [Firecracker](https://firecracker-microvm.github.io/) and its jailer | The microVMs (v1.17, pinned by digest) |
 | Linux KVM | Hardware virtualization |
 | [OpenZFS](https://openzfs.org/) | Disks, clones, snapshots, encryption, and send and receive for backups |
-| nftables, Linux bridges and TAP devices | Tenant networks, egress rules, the host's firewall |
+| nftables, Linux bridges and TAP devices | Namespace networks, egress rules, the host's firewall |
 | ext4 | The guests' filesystems |
 | Ubuntu Server 26.04, systemd | The host OS and its services |
 | [Zot](https://zotregistry.dev/) (optional) | A pull-through registry mirror per region |

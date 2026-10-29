@@ -30,9 +30,9 @@ paths:
               schema: { $ref: "#/components/schemas/Status" }
   /v1/machines:
     get:
-      summary: "List machines, a tenant's or every one; through the fleet, the tenant's host or every host, never partial (ADR 0006)"
+      summary: "List machines, a namespace's or every one; through the fleet, the namespace's host or every host, never partial (ADR 0006)"
       parameters:
-        - { name: tenant, in: query, schema: { type: string } }
+        - { name: namespace, in: query, schema: { type: string } }
         - { name: label, in: query, style: form, explode: true, schema: { type: array, items: { type: string } }, description: "repeatable, every one ANDed (ADR 0025): `key=value` (the machine's `metadata` has it) or `key` (has the key); a key is an optional DNS prefix and `/`, then at most 63 of a-z, A-Z, 0-9, `-_.`, alphanumeric at both ends; a value empty or the same. `!=`, `!key`, `in` and `notin` are refused" }
       responses:
         "200":
@@ -54,13 +54,13 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Machine" }
-        "400": { description: "`invalid`: a bad field, named; a fork's or a restore's `volume` smaller than its source's (`a volume never shrinks`; a larger one grows the disk, ADR 0040); a fork's source without disks (creating, or its create failed); through the fleet, a `region` other than the tenant's (its host's: a tenant never spans regions)" }
-        "403": { description: "`quota`: past a limit of the tenant's quota, the limit and the use in `error`; nothing made" }
-        "409": { description: "`conflict`: a machine with that name exists in the tenant, the body's `machine` is it: a create sent again after no answer finds the one it made" }
+        "400": { description: "`invalid`: a bad field, named; a fork's or a restore's `volume` smaller than its source's (`a volume never shrinks`; a larger one grows the disk, ADR 0040); a fork's source without disks (creating, or its create failed); through the fleet, a `region` other than the namespace's (its host's: a namespace never spans regions)" }
+        "403": { description: "`quota`: past a limit of the namespace's quota, the limit and the use in `error`; nothing made" }
+        "409": { description: "`conflict`: a machine with that name exists in the namespace, the body's `machine` is it: a create sent again after no answer finds the one it made" }
         "503": { description: "`capacity`: the host has no room (its memory, or for a volume its pool's free space); through the fleet, no host (of `region`, when given) has room" }
   /v1/machines/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
-    description: "A tenant's gateway answers GET, `/logs`, `/stats` and `/wait` here like any machine; every other route on its id answers 409 `gateway` (`/v1/tenants/{id}/gateway` owns it)."
+    description: "A namespace's gateway answers GET, `/logs`, `/stats` and `/wait` here like any machine; every other route on its id answers 409 `gateway` (`/v1/namespaces/{id}/gateway` owns it)."
     get:
       summary: A machine
       responses:
@@ -77,7 +77,7 @@ paths:
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
         "400": { description: "`invalid`: a bad sleep window, an `egress` the machine cannot take, bad `limits` or `probes` (the field named), a spec field a create would refuse (same message), a `volume` smaller than the machine's (`a volume never shrinks`) or on a machine without one, or an `If-Match` that is not a number" }
-        "403": { description: "`quota`: a volume's growth would pass the tenant's `disk_gb`; nothing changed, a `quota_exceeded` event about it" }
+        "403": { description: "`quota`: a volume's growth would pass the namespace's `disk_gb`; nothing changed, a `quota_exceeded` event about it" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Moved" }
         "503": { description: "`capacity`: the pool has less free than a volume's growth" }
@@ -94,9 +94,9 @@ paths:
       parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       responses:
         "200": { description: machine, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
-        "400": { description: "`invalid`: its `egress.via` names a machine that is gone, or `gateway` in a tenant that has none" }
-        "403": { description: "`quota`: its memory or vCPUs would pass the tenant's quota; not moved, a `quota_exceeded` event about it" }
-        "409": { description: "`bad_state`: busy (starting, stopping or destroying), or in `error` from a create that made no disks (`pull_failed`, `create_failed`: destroy it and create again); `boot_failed`: the guest did not come up, the body's `machine` is it, in state `error`; or the tenant's gateway did not come up, the body's `machine` is this one, not moved, the gateway's reason in its `error`; `conflict`: `If-Match` names a version it moved past, the body's `machine` is it as it is" }
+        "400": { description: "`invalid`: its `egress.via` names a machine that is gone, or `gateway` in a namespace that has none" }
+        "403": { description: "`quota`: its memory or vCPUs would pass the namespace's quota; not moved, a `quota_exceeded` event about it" }
+        "409": { description: "`bad_state`: busy (starting, stopping or destroying), or in `error` from a create that made no disks (`pull_failed`, `create_failed`: destroy it and create again); `boot_failed`: the guest did not come up, the body's `machine` is it, in state `error`; or the namespace's gateway did not come up, the body's `machine` is this one, not moved, the gateway's reason in its `error`; `conflict`: `If-Match` names a version it moved past, the body's `machine` is it as it is" }
         "503": { description: "`capacity`: the host has no room" }
   /v1/machines/{id}/wake:
     parameters: [{ $ref: "#/components/parameters/id" }]
@@ -225,7 +225,7 @@ paths:
       - { $ref: "#/components/parameters/id" }
       - { name: backup, in: path, required: true, schema: { type: string } }
       - { name: chain, in: query, description: "also delete every backup that continues from it", schema: { type: boolean, default: false } }
-      - { name: tenant, in: query, description: "through the fleet, for a machine destroyed: the hosts asked which holds its backups list only this tenant's (ADR 0045); without it, every backup they hold", schema: { type: string } }
+      - { name: namespace, in: query, description: "through the fleet, for a machine destroyed: the hosts asked which holds its backups list only this namespace's (ADR 0045); without it, every backup they hold", schema: { type: string } }
     delete:
       summary: "Delete a backup of a machine of this host, or of one destroyed here (ADR 0023): its streams, then its record; a `backup_deleted` event"
       responses:
@@ -234,13 +234,13 @@ paths:
         "409": { description: "`conflict`: other backups continue from it, named in `error`; `?chain=true` deletes them too" }
   /v1/backups:
     get:
-      summary: "Every backup of the host's machines, destroyed ones' included, by machine then age (ADR 0023); a destroyed machine's carry `deletes_at`. Through the fleet: every host, never partial, with `tenant` too (a host the tenant moved from holds the backups of what was destroyed there, ADR 0045)"
+      summary: "Every backup of the host's machines, destroyed ones' included, by machine then age (ADR 0023); a destroyed machine's carry `deletes_at`. Through the fleet: every host, never partial, with `namespace` too (a host the namespace moved from holds the backups of what was destroyed there, ADR 0045)"
       parameters:
-        - { name: tenant, in: query, schema: { type: string } }
+        - { name: namespace, in: query, schema: { type: string } }
         - { name: machine, in: query, description: "one machine's alone: none when it is neither on this host nor held here, without reading the store", schema: { type: string } }
       responses:
         "200": { description: backups, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Backup" } } } } }
-        "400": { description: "`invalid`: backups are off on this host, or a bad tenant or machine id" }
+        "400": { description: "`invalid`: backups are off on this host, or a bad namespace or machine id" }
   /v1/machines/{id}/snapshots:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
@@ -320,23 +320,23 @@ paths:
       parameters:
         - { name: from, in: query, required: true, description: "the first hour, RFC 3339 (2026-10-20T14:00:00Z)", schema: { type: string, format: date-time } }
         - { name: to, in: query, required: true, description: "the hour after the last; at most 31 days after `from`", schema: { type: string, format: date-time } }
-        - { name: tenant, in: query, schema: { type: string } }
+        - { name: namespace, in: query, schema: { type: string } }
       responses:
         "200": { description: "buckets, by hour then machine", content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/UsageBucket" } } } } }
         "400": { description: "`invalid`: `from` or `to` missing, not RFC 3339, not on the hour, `to` not after `from`, or more than 31 days" }
   /v1/top:
     get:
-      summary: "The running machines' use over the daemon's last two ticks, 15 s apart (ADR 0021): CPU, memory, disk, network rates, gateways included. Through the fleet: with `tenant`, from the tenant's host; without, every host, never partial, with `host` on each"
+      summary: "The running machines' use over the daemon's last two ticks, 15 s apart (ADR 0021): CPU, memory, disk, network rates, gateways included. Through the fleet: with `namespace`, from the namespace's host; without, every host, never partial, with `host` on each"
       parameters:
-        - { name: tenant, in: query, schema: { type: string } }
+        - { name: namespace, in: query, schema: { type: string } }
       responses:
-        "200": { description: "machines, by tenant then name", content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/TopMachine" } } } } }
+        "200": { description: "machines, by namespace then name", content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/TopMachine" } } } } }
   /v1/events:
     get:
-      summary: "What happened on the host, oldest first (ADR 0019): the events after `since`. With `watch=true`, those and then each new event as it is logged, kept open as NDJSON, one event per line, `{\"bookmark\": <seq>}` after 30 s of quiet (`WatchBookmark`: the last seq the watch looked at, matching or not; not an event), and a last line `{code, error}` when the watch ends (`lagged`: it fell more than 1,024 events behind; `shutdown`: the daemon goes down); watch again from the later of the last `seq` and the last `bookmark` received. Repeats of `session_opened`, `quota_exceeded`, `ready` and `not_ready` within 10 minutes of their line are folded into one later line with `count` and `first_at` (ADR 0047). Through the fleet: with `tenant`, from the tenant's host, else with `machine`, from the machine's host (`x-briqyard-host` names it, the cursor is its seq, a watch is streamed through); with neither, every host, never partial, merged by time with `host` on each event and a cursor `<host>:<seq>,…`; a watch of every host is refused (400)"
+      summary: "What happened on the host, oldest first (ADR 0019): the events after `since`. With `watch=true`, those and then each new event as it is logged, kept open as NDJSON, one event per line, `{\"bookmark\": <seq>}` after 30 s of quiet (`WatchBookmark`: the last seq the watch looked at, matching or not; not an event), and a last line `{code, error}` when the watch ends (`lagged`: it fell more than 1,024 events behind; `shutdown`: the daemon goes down); watch again from the later of the last `seq` and the last `bookmark` received. Repeats of `session_opened`, `quota_exceeded`, `ready` and `not_ready` within 10 minutes of their line are folded into one later line with `count` and `first_at` (ADR 0047). Through the fleet: with `namespace`, from the namespace's host, else with `machine`, from the machine's host (`x-briqyard-host` names it, the cursor is its seq, a watch is streamed through); with neither, every host, never partial, merged by time with `host` on each event and a cursor `<host>:<seq>,…`; a watch of every host is refused (400)"
       parameters:
         - { name: since, in: query, description: "a previous read's `next`; absent or 0, the oldest kept", schema: { type: string } }
-        - { name: tenant, in: query, schema: { type: string } }
+        - { name: namespace, in: query, schema: { type: string } }
         - { name: machine, in: query, schema: { type: string } }
         - { name: type, in: query, schema: { type: string, enum: [normal, warning] } }
         - { name: limit, in: query, schema: { type: integer, default: 500, maximum: 5000 } }
@@ -348,69 +348,69 @@ paths:
             application/json: { schema: { $ref: "#/components/schemas/EventsPage" } }
             application/x-ndjson: { schema: { oneOf: [{ $ref: "#/components/schemas/Event" }, { $ref: "#/components/schemas/WatchBookmark" }, { $ref: "#/components/schemas/ApiError" }] } }
         "400": { description: "`invalid`: a `since` that is not a cursor, a bad id or type; a fleet-wide watch" }
-        "404": { description: "`not_found` (fleet): the tenant or the machine is on no host; a destroyed machine's events are read with its tenant" }
+        "404": { description: "`not_found` (fleet): the namespace or the machine is on no host; a destroyed machine's events are read with its namespace" }
         "410": { description: "`gone`: the events after `since` were removed, or `since` is past the host's last seq (its log began again); `oldest` is the oldest seq kept" }
-  /v1/tenants:
+  /v1/namespaces:
     get:
-      summary: Tenants on the host (daemon), or tenant to host (fleet)
+      summary: Namespaces on the host (daemon), or namespace to host (fleet)
       responses:
-        "200": { description: tenants, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Tenant" } } } } }
-  /v1/tenants/{id}:
+        "200": { description: namespaces, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Namespace" } } } } }
+  /v1/namespaces/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
-      summary: A tenant, its gateway included
+      summary: A namespace, its gateway included
       responses:
-        "200": { description: tenant, content: { application/json: { schema: { $ref: "#/components/schemas/Tenant" } } } }
+        "200": { description: namespace, content: { application/json: { schema: { $ref: "#/components/schemas/Namespace" } } } }
         "404": { $ref: "#/components/responses/Error" }
     delete:
-      summary: Remove the network of a tenant with no machine left, and its gateway
+      summary: Remove the network of a namespace with no machine left, and its gateway
       responses:
         "204": { description: removed }
-        "409": { description: "`tenant_in_use`: the tenant still has machines" }
-  /v1/tenants/{id}/gateway:
+        "409": { description: "`namespace_in_use`: the namespace still has machines" }
+  /v1/namespaces/{id}/gateway:
     parameters: [{ $ref: "#/components/parameters/id" }]
     put:
       parameters:
-        - { name: region, in: query, schema: { type: string }, description: "fleet: where to place a tenant that has no host yet" }
-      summary: "Make the tenant's gateway (the tenant too, when it has nothing yet), not started unless `start`, or replace its spec: a running one is restarted with it, on the same address, and the spec it has changes nothing (ADR 0016). It is a machine of the daemon named `gateway.internal` in the tenant, absent from `GET /v1/machines`; a machine with `egress: {mode: via, via: gateway}` starts it and waits for its port (its `ready` when it has a startup or readiness probe) before its own boot, and the daemon stops it when no such machine runs or starts"
+        - { name: region, in: query, schema: { type: string }, description: "fleet: where to place a namespace that has no host yet" }
+      summary: "Make the namespace's gateway (the namespace too, when it has nothing yet), not started unless `start`, or replace its spec: a running one is restarted with it, on the same address, and the spec it has changes nothing (ADR 0016). It is a machine of the daemon named `gateway.internal` in the namespace, absent from `GET /v1/machines`; a machine with `egress: {mode: via, via: gateway}` starts it and waits for its port (its `ready` when it has a startup or readiness probe) before its own boot, and the daemon stops it when no such machine runs or starts"
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/GatewaySpec" }
       responses:
-        "200": { description: the tenant, content: { application/json: { schema: { $ref: "#/components/schemas/Tenant" } } } }
+        "200": { description: the namespace, content: { application/json: { schema: { $ref: "#/components/schemas/Namespace" } } } }
         "400": { description: "`invalid`: no image, no port, a bad size, bad `probes`, or a change of `volume_gb`" }
-        "403": { description: "`quota`: the gateway counts as one of the tenant's machines" }
-        "409": { description: "`conflict`: a machine named `gateway` exists in the tenant; `boot_failed`: the gateway did not come up (asked with `start`, or replaced while running), the body's `machine` is it, in `error` with its console's last lines" }
+        "403": { description: "`quota`: the gateway counts as one of the namespace's machines" }
+        "409": { description: "`conflict`: a machine named `gateway` exists in the namespace; `boot_failed`: the gateway did not come up (asked with `start`, or replaced while running), the body's `machine` is it, in `error` with its console's last lines" }
     delete:
-      summary: Stop and destroy the tenant's gateway; none is success
+      summary: Stop and destroy the namespace's gateway; none is success
       responses:
         "204": { description: removed }
-        "409": { description: "`gateway_in_use`: a machine of the tenant with `via: gateway` is running or starting" }
-  /v1/tenants/{id}/quota:
+        "409": { description: "`gateway_in_use`: a machine of the namespace with `via: gateway` is running or starting" }
+  /v1/namespaces/{id}/quota:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:
-      summary: The tenant's quota and what it holds (ADR 0025)
+      summary: The namespace's quota and what it holds (ADR 0025)
       responses:
-        "200": { description: quota, content: { application/json: { schema: { $ref: "#/components/schemas/TenantQuota" } } } }
-        "404": { description: "`not_found`: the host (through the fleet, any host) has no such tenant" }
+        "200": { description: quota, content: { application/json: { schema: { $ref: "#/components/schemas/NamespaceQuota" } } } }
+        "404": { description: "`not_found`: the host (through the fleet, any host) has no such namespace" }
     put:
-      summary: "Put the tenant's quota, whole (the tenant too, when it has nothing yet). Checked at create, fork, restore and gateway put (machines, disk) and at each start's reservation (memory, vCPUs); a refusal is 403 `quota` and a `quota_exceeded` event. One under the use stops nothing. Through the fleet, to the tenant's host; a tenant with none is placed, in `region`"
+      summary: "Put the namespace's quota, whole (the namespace too, when it has nothing yet). Checked at create, fork, restore and gateway put (machines, disk) and at each start's reservation (memory, vCPUs); a refusal is 403 `quota` and a `quota_exceeded` event. One under the use stops nothing. Through the fleet, to the namespace's host; a namespace with none is placed, in `region`"
       parameters:
-        - { name: region, in: query, schema: { type: string }, description: "fleet: where to place a tenant that has no host yet" }
+        - { name: region, in: query, schema: { type: string }, description: "fleet: where to place a namespace that has no host yet" }
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/Quota" }
       responses:
-        "200": { description: quota, content: { application/json: { schema: { $ref: "#/components/schemas/TenantQuota" } } } }
-        "503": { description: "`capacity` (fleet): no host (of `region`) takes a new tenant" }
-  /v1/tenants/{id}/unpin:
+        "200": { description: quota, content: { application/json: { schema: { $ref: "#/components/schemas/NamespaceQuota" } } } }
+        "503": { description: "`capacity` (fleet): no host (of `region`) takes a new namespace" }
+  /v1/namespaces/{id}/unpin:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Release a tenant from its host without touching the host (fleet only); its next machine is placed afresh, and the host's next heartbeat pins it again if the tenant still has machines there
+      summary: Release a namespace from its host without touching the host (fleet only); its next machine is placed afresh, and the host's next heartbeat pins it again if the namespace still has machines there
       responses:
         "204": { description: released }
   /v1/hosts:
@@ -487,21 +487,21 @@ paths:
   /v1/hosts/{id}/retire:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Take no new tenant on a host and forget it once nothing runs on it (fleet only); the server is the operator's to give back
+      summary: Take no new namespace on a host and forget it once nothing runs on it (fleet only); the server is the operator's to give back
       responses:
         "200": { description: "`retiring`, or `retired` (forgotten) when it was already empty", content: { application/json: { schema: { $ref: "#/components/schemas/Host" } } } }
         "409": { description: the host is upgrading (`conflict`) }
   /v1/hosts/{id}/drain:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Take no new tenant on this host, and keep it (fleet only; Kubernetes's cordon)
+      summary: Take no new namespace on this host, and keep it (fleet only; Kubernetes's cordon)
       responses:
         "204": { description: draining }
         "409": { description: the host is upgrading (`conflict`) }
   /v1/hosts/{id}/undrain:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: Take new tenants on a draining or retiring host again (fleet only)
+      summary: Take new namespaces on a draining or retiring host again (fleet only)
       responses:
         "204": { description: ready }
         "409": { description: "the host is neither draining nor retiring (`conflict`)" }
@@ -607,7 +607,7 @@ components:
       properties:
         id: { type: string, description: "a timestamp to the millisecond (20261021T101500.123Z), later ids sort later" }
         machine_id: { type: string }
-        tenant: { type: string }
+        namespace: { type: string }
         name: { type: string }
         created_at: { type: string, format: date-time }
         bytes: { type: integer }
@@ -633,8 +633,8 @@ components:
       type: object
       description: "where the machine's traffic may go, enforced on the host (ADR 0015); a refusal names the field"
       properties:
-        mode: { type: string, enum: [open, via, none], default: open, description: "open: its tenant and the internet; via: only the `via` machine (any port) and its gateway's DNS; none: its tenant, no internet. Under via and none, DNS answers internal names only (NXDOMAIN for the rest)" }
-        via: { type: string, description: "for `via` only: a machine of the same tenant, not this one, or `gateway`: the tenant's gateway, started before this machine and kept running while it runs" }
+        mode: { type: string, enum: [open, via, none], default: open, description: "open: its namespace and the internet; via: only the `via` machine (any port) and its gateway's DNS; none: its namespace, no internet. Under via and none, DNS answers internal names only (NXDOMAIN for the rest)" }
+        via: { type: string, description: "for `via` only: a machine of the same namespace, not this one, or `gateway`: the namespace's gateway, started before this machine and kept running while it runs" }
     EgressLimits:
       type: object
       description: "limits on the machine's internet traffic, through the host's NAT, enforced on the host (ADR 0018); `via` and `none` machines never reach it. In a request an absent field keeps the machine's value (on create, the host's `egress_limits`); in a machine, every field is there: the values in force"
@@ -658,10 +658,10 @@ components:
         bandwidth: { type: integer }
     CreateMachineRequest:
       type: object
-      required: [tenant, name, size]
+      required: [namespace, name, size]
       properties:
-        tenant: { type: string, description: "owns the machine and its network: a-z, 0-9, _ and -, at most 64 characters" }
-        name: { type: string, description: a DNS label, unique in the tenant; `<name>.internal` resolves to the machine }
+        namespace: { type: string, description: "owns the machine and its network: a-z, 0-9, _ and -, at most 64 characters" }
+        name: { type: string, description: a DNS label, unique in the namespace; `<name>.internal` resolves to the machine }
         image: { type: string, description: an OCI reference; required unless `fork` is set }
         entrypoint: { type: array, items: { type: string } }
         cmd: { type: array, items: { type: string } }
@@ -673,7 +673,7 @@ components:
         sleep: { type: string, description: '"30m", "2h", "7d" or "never"; stops the machine after that long without use' }
         restart: { $ref: "#/components/schemas/RestartPolicy" }
         metadata: { type: object, additionalProperties: { type: string }, description: "kept as is; the labels `?label=` selects on" }
-        region: { type: string, description: "fleet: a new tenant is placed on a host of this region (a host's `region`); a tenant's machines stay in its host's (ADR 0025). Absent: any. A daemon ignores it" }
+        region: { type: string, description: "fleet: a new namespace is placed on a host of this region (a host's `region`); a namespace's machines stay in its host's (ADR 0025). Absent: any. A daemon ignores it" }
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent: open, or for a restore the backup's" }
         limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "over the host's, field by field; absent: the host's, or for a restore the backup's" }
         disk_limits: { allOf: [{ $ref: "#/components/schemas/DiskLimits" }], description: "over the host's for its size, field by field; absent: the host's, or for a restore the backup's" }
@@ -693,7 +693,7 @@ components:
       type: object
       properties:
         id: { type: string }
-        tenant: { type: string }
+        namespace: { type: string }
         name: { type: string }
         image: { type: string }
         image_digest: { type: string }
@@ -826,7 +826,7 @@ components:
         size: { allOf: [{ $ref: "#/components/schemas/Size" }], description: "at the next start, reserved then: 503 `capacity` past the host's memory" }
         ports: { type: array, items: { type: integer }, description: at the next start }
         restart: { allOf: [{ $ref: "#/components/schemas/RestartPolicy" }], description: at the next start }
-        volume: { allOf: [{ $ref: "#/components/schemas/VolumeSize" }], description: "larger than it is (the same size is no change): the disk grows at once, the tenant's quota and the pool's free space checked as at a create; the guest's filesystem grows at the next start, which is cold (ADR 0040)" }
+        volume: { allOf: [{ $ref: "#/components/schemas/VolumeSize" }], description: "larger than it is (the same size is no change): the disk grows at once, the namespace's quota and the pool's free space checked as at a create; the guest's filesystem grows at the next start, which is cold (ADR 0040)" }
     Pending:
       type: object
       description: "what the next start applies (ADR 0024); a change to the image, entrypoint, command, env, files, size or volume also makes that start cold, its memory snapshot dropped"
@@ -912,16 +912,16 @@ components:
         size_gb: { type: integer }
         built_at: { type: string, format: date-time }
         machines: { type: integer }
-    Tenant:
+    Namespace:
       type: object
       properties:
         id: { type: string }
         subnet: { type: string }
-        router: { type: string, description: "the host's address on the tenant's network (`.1`): the machines' route and DNS" }
-        machines: { type: integer, description: the tenant's machines, its gateway not counted }
+        router: { type: string, description: "the host's address on the namespace's network (`.1`): the machines' route and DNS" }
+        machines: { type: integer, description: the namespace's machines, its gateway not counted }
         created_at: { type: string, format: date-time }
-        host: { type: string, description: The host the tenant lives on (fleet) }
-        region: { type: string, description: "its host's region (fleet): the tenant's" }
+        host: { type: string, description: The host the namespace lives on (fleet) }
+        region: { type: string, description: "its host's region (fleet): the namespace's" }
         gateway: { $ref: "#/components/schemas/GatewayView" }
     Quota:
       type: object
@@ -931,11 +931,11 @@ components:
         memory_mb: { type: integer, minimum: 0, description: "of its machines starting, running or stopping" }
         vcpus: { type: integer, minimum: 0, description: of the same }
         disk_gb: { type: integer, minimum: 0, description: "the volumes' sizes" }
-    TenantQuota:
+    NamespaceQuota:
       type: object
-      required: [tenant, quota, used]
+      required: [namespace, quota, used]
       properties:
-        tenant: { type: string }
+        namespace: { type: string }
         quota: { $ref: "#/components/schemas/Quota" }
         used:
           type: object
@@ -977,8 +977,8 @@ components:
       properties:
         hour: { type: string, format: date-time, description: the hour's start }
         machine_id: { type: string }
-        tenant: { type: string }
-        role: { type: string, enum: [gateway], description: "the tenant's gateway (ADR 0016); absent for the tenant's machines" }
+        namespace: { type: string }
+        role: { type: string, enum: [gateway], description: "the namespace's gateway (ADR 0016); absent for the namespace's machines" }
         metadata: { type: object, additionalProperties: { type: string }, description: as last in the hour }
         size: { $ref: "#/components/schemas/Size" }
         running_seconds: { type: number, description: "with a process: `starting`, `running`, `stopping`" }
@@ -1007,7 +1007,7 @@ components:
         reason: { type: string, enum: [created, forked, pulling, pull_failed, create_failed, restored, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, snapshot_taken, snapshot_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded, session_opened], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`, ADR 0029's for `session_opened`, ADR 0031's for snapshots and a restore to one, ADR 0048's for a create's `pulling`, `pull_failed` and `create_failed`" }
         message: { type: string, description: for a person; at most 1 KB }
         machine_id: { type: string }
-        tenant: { type: string }
+        namespace: { type: string }
         host: { type: string, description: "the host it happened on (fleet-wide reads)" }
         data: { type: object, description: "the reason's facts: `code`, `oom` for `exited`, `reason` for `stopped`…; on a line that folds repeats, the last one's" }
         count: { type: integer, default: 1, description: "how many times it happened, from `first_at` to `at`: on a line that folds repeats of a use, a refusal or a readiness flip within 10 minutes of the first one's line (ADR 0047); absent: 1" }
@@ -1021,7 +1021,7 @@ components:
       type: object
       properties:
         events: { type: array, items: { $ref: "#/components/schemas/Event" } }
-        next: { type: string, description: "the `since` to read on from: the last event returned when the page is full, else the host's last seq; through the fleet without a tenant or machine, `<host>:<seq>,…`" }
+        next: { type: string, description: "the `since` to read on from: the last event returned when the page is full, else the host's last seq; through the fleet without a namespace or machine, `<host>:<seq>,…`" }
     Status:
       type: object
       properties:
@@ -1029,7 +1029,7 @@ components:
         host_id: { type: string }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
-        machines: { type: integer, description: the tenants' machines, gateways not counted }
+        machines: { type: integer, description: the namespaces' machines, gateways not counted }
         running: { type: integer, description: machines up on the host, gateways included }
         disk_free_mb: { type: integer }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate, 64 hex digits; empty on plain HTTP (ADR 0020)" }
@@ -1039,7 +1039,7 @@ components:
         regions: { type: array, items: { $ref: "#/components/schemas/RegionRoom" }, description: "fleet only: each region's room and the creates refused for want of it (ADR 0042)" }
     RegionRoom:
       type: object
-      description: "A region as the fleet sees it (ADR 0042): its hosts that take a new tenant (ready, under the fill ceiling, no condition), and its refusals"
+      description: "A region as the fleet sees it (ADR 0042): its hosts that take a new namespace (ready, under the fill ceiling, no condition), and its refusals"
       properties:
         region: { type: string, description: "a host's region; empty for none; `other` counts refusals in a region no host is in" }
         free: { $ref: "#/components/schemas/Room", description: "absent for a region no host is in (refusals only)" }
@@ -1050,7 +1050,7 @@ components:
           properties:
             memory: { type: integer, description: "no host of the region had the memory free under its fill ceiling, or those with the room are under memory_pressure: a new host fixes it" }
             disk: { type: integer, description: "hosts had the memory, none the disk (a volume plus 2 GB), or those with the room are under disk_pressure: a new host fixes it" }
-            pressure: { type: integer, description: "the host the create is bound to (the tenant's, a fork's source's) is under a condition: that host must be freed" }
+            pressure: { type: integer, description: "the host the create is bound to (the namespace's, a fork's source's) is under a condition: that host must be freed" }
     Room:
       type: object
       description: "memory and disk, in MB: summed over the hosts (`free`), or the most on one (`largest_slot`)"
@@ -1083,9 +1083,9 @@ components:
       type: object
       properties:
         machine_id: { type: string }
-        tenant: { type: string }
+        namespace: { type: string }
         name: { type: string }
-        role: { type: string, enum: [gateway], description: "the tenant's gateway; absent for the tenant's machines" }
+        role: { type: string, enum: [gateway], description: "the namespace's gateway; absent for the namespace's machines" }
         cpu_percent: { type: number, description: "CPU time over the window, in percent of one CPU (jailed hosts)" }
         memory_bytes: { type: integer, description: "what its process holds, from its cgroup (jailed hosts)" }
         memory_limit_bytes: { type: integer, description: its size's memory }
@@ -1104,11 +1104,11 @@ components:
         ssh: { type: string, description: "where the fleet reaches the server over SSH, when not at the API's address (its API on the private network); absent otherwise" }
         region: { type: string }
         provider: { type: string, description: "how the host came: `static` (the fleet's `hosts:`) or `manual` (`POST /v1/hosts`)" }
-        state: { type: string, enum: [ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed, retired], description: "`draining` takes no new tenant; `retiring` neither, and is forgotten once empty (`retired` in the answer to the retire that forgets it); `upgrading` while `host upgrade` runs" }
+        state: { type: string, enum: [ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed, retired], description: "`draining` takes no new namespace; `retiring` neither, and is forgotten once empty (`retired` in the answer to the retire that forgets it); `upgrading` while `host upgrade` runs" }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer }
-        tenants: { type: array, items: { type: string } }
+        namespaces: { type: array, items: { type: string } }
         last_seen: { type: string, format: date-time }
         version: { type: string }
         note: { type: string, description: What the bootstrap or the last upgrade said }
@@ -1135,7 +1135,7 @@ components:
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer }
-        tenants: { type: array, items: { type: string } }
+        namespaces: { type: array, items: { type: string } }
         version: { type: string }
         disk_free_mb: { type: integer }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate; a fingerprint other than the pinned one is refused (403 tls_mismatch)" }
@@ -1157,7 +1157,7 @@ components:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, tenant_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, backup, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, namespace_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, backup, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]

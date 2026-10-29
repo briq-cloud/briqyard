@@ -32,6 +32,7 @@ mod create;
 mod endpoints;
 mod exec;
 mod gateway;
+mod namespaces;
 mod network;
 mod observe;
 mod persist;
@@ -41,7 +42,6 @@ mod shutdown;
 mod snapshots;
 mod start;
 mod startup;
-mod tenants;
 #[cfg(test)]
 mod tests;
 mod tick;
@@ -72,9 +72,9 @@ pub enum MError {
     Invalid(String),
     #[error("{0}")]
     Conflict(String),
-    /// A create of a name the tenant has: the machine of that name, for a caller sending the
+    /// A create of a name the namespace has: the machine of that name, for a caller sending the
     /// same create again to find the one it made (ADR 0048).
-    #[error("a machine with that name exists in the tenant: {}", .0.id)]
+    #[error("a machine with that name exists in the namespace: {}", .0.id)]
     NameTaken(Box<api::Machine>),
     #[error("machine is not running: {0}")]
     NotRunning(String),
@@ -82,16 +82,16 @@ pub enum MError {
     BadState(String),
     #[error("the host is full: {0}")]
     Capacity(String),
-    /// Past a limit of the tenant's quota (ADR 0025).
+    /// Past a limit of the namespace's quota (ADR 0025).
     #[error("{0}")]
     Quota(String),
-    #[error("the tenant still has machines")]
-    TenantInUse,
-    #[error("a machine of the tenant runs through its gateway")]
+    #[error("the namespace still has machines")]
+    NamespaceInUse,
+    #[error("a machine of the namespace runs through its gateway")]
     GatewayInUse,
-    /// A call that would change or run something in a tenant's gateway through the machine
-    /// routes: the tenant's route owns it.
-    #[error("the tenant's gateway: use /v1/tenants/{0}/gateway")]
+    /// A call that would change or run something in a namespace's gateway through the machine
+    /// routes: the namespace's route owns it.
+    #[error("the namespace's gateway: use /v1/namespaces/{0}/gateway")]
     Gateway(String),
     /// The guest never came up or exited while booting: the image's fault, not the host's.
     /// The machine stays, in state `error`, with the console tail in its `error`.
@@ -129,28 +129,28 @@ fn never_shrinks(asked: u32, held: u32) -> MError {
     ))
 }
 
-/// A tenant id is checked before it names a file.
-fn check_tenant_id(id: &str) -> Result<(), MError> {
+/// A namespace id is checked before it names a file.
+fn check_namespace_id(id: &str) -> Result<(), MError> {
     match api::valid_id(id) {
         true => Ok(()),
         false => Err(invalid(
-            "tenant must be a-z, 0-9, _ or -, at most 64 characters",
+            "namespace must be a-z, 0-9, _ or -, at most 64 characters",
         )),
     }
 }
 
-/// `via: "gateway"` in a tenant that has none.
-fn no_gateway(tenant: &str) -> MError {
+/// `via: "gateway"` in a namespace that has none.
+fn no_gateway(namespace: &str) -> MError {
     invalid(format!(
-        "tenant has no gateway: PUT /v1/tenants/{tenant}/gateway first"
+        "namespace has no gateway: PUT /v1/namespaces/{namespace}/gateway first"
     ))
 }
 
-/// What a machine is to its tenant when it is not one of the tenant's own.
+/// What a machine is to its namespace when it is not one of the namespace's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
-    /// The tenant's gateway (ADR 0016): run by the daemon, absent from the tenant's machines.
+    /// The namespace's gateway (ADR 0016): run by the daemon, absent from the namespace's machines.
     Gateway,
 }
 
@@ -158,8 +158,9 @@ pub enum Role {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     pub id: String,
-    pub tenant: String,
-    /// None for the tenant's own machines.
+    #[serde(alias = "tenant")]
+    pub namespace: String,
+    /// None for the namespace's own machines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
     pub name: String,
@@ -284,8 +285,8 @@ pub struct Record {
 }
 
 impl Record {
-    /// One of the tenant's own machines: what the tenant's listing, counts and removal see.
-    fn is_tenants(&self) -> bool {
+    /// One of the namespace's own machines: what the namespace's listing, counts and removal see.
+    fn is_namespaces(&self) -> bool {
         self.role.is_none()
     }
     fn is_gateway(&self) -> bool {
@@ -407,7 +408,7 @@ fn role_name(role: Option<Role>) -> Option<String> {
 fn usage_identity(r: &Record) -> api::UsageBucket {
     api::UsageBucket {
         machine_id: r.id.clone(),
-        tenant: r.tenant.clone(),
+        namespace: r.namespace.clone(),
         role: role_name(r.role),
         metadata: r.metadata.clone(),
         size: r.size,
@@ -437,29 +438,29 @@ fn disks_by_machine(spaces: &[crate::zfs::Space]) -> HashMap<String, usage::Disk
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TenantRec {
+pub struct NamespaceRec {
     pub id: String,
     pub subnet_index: u32,
     pub created_at: DateTime<Utc>,
-    /// What the tenant may hold (ADR 0025); none set: no limit.
+    /// What the namespace may hold (ADR 0025); none set: no limit.
     #[serde(default)]
     pub quota: api::Quota,
 }
 
-/// A tenant as the manager holds it: its record and the subnet its index names, checked
+/// A namespace as the manager holds it: its record and the subnet its index names, checked
 /// against `network.range` when the record was loaded or made.
 #[derive(Clone)]
-struct Tenant {
-    rec: TenantRec,
+struct Namespace {
+    rec: NamespaceRec,
     subnet: Subnet,
-    /// The tenant's lock: held while its gateway is started, put, removed or put to sleep,
+    /// The namespace's lock: held while its gateway is started, put, removed or put to sleep,
     /// and by a machine that needs the gateway until that machine is `starting`, so the
     /// sleeper never stops a gateway a start is about to use.
     lock: Arc<tokio::sync::Mutex<()>>,
 }
 
-impl Tenant {
-    fn new(rec: TenantRec, subnet: Subnet) -> Self {
+impl Namespace {
+    fn new(rec: NamespaceRec, subnet: Subnet) -> Self {
         Self {
             rec,
             subnet,
@@ -468,14 +469,15 @@ impl Tenant {
     }
 }
 
-/// The gateway's name in its tenant: `gateway.internal`.
+/// The gateway's name in its namespace: `gateway.internal`.
 const GATEWAY_NAME: &str = "gateway";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EndpointRec {
     pub id: String,
     pub machine_id: String,
-    pub tenant: String,
+    #[serde(alias = "tenant")]
+    pub namespace: String,
     pub port: u16,
     pub protocol: String,
     #[serde(default)]
@@ -687,7 +689,7 @@ impl Entry {
 
     /// A repeat folded with no seq (a use, a refusal: nothing changed) keeps the version.
     fn note_locked(&self, r: &mut Record, ev: Ev) {
-        if let Some(seq) = self.events.emit(ev.of(&r.id, &r.tenant)) {
+        if let Some(seq) = self.events.emit(ev.of(&r.id, &r.namespace)) {
             r.version = seq;
         }
     }
@@ -748,14 +750,14 @@ struct Inner {
     /// The address TCP endpoints are reported at, resolved once.
     advertise: String,
     machines: Mutex<HashMap<String, Arc<Entry>>>,
-    tenants: Mutex<HashMap<String, Tenant>>,
+    namespaces: Mutex<HashMap<String, Namespace>>,
     endpoints: Mutex<HashMap<String, EndpointRec>>,
     endpoint_events: broadcast::Sender<(EndpointRec, bool)>,
-    /// The egress policy the tables hold for each machine, with its tenant's gateway: what a
+    /// The egress policy the tables hold for each machine, with its namespace's gateway: what a
     /// stop takes out, even once the gateway machine it names is gone.
     policies: Mutex<HashMap<String, (Ipv4Addr, nft::Policy)>>,
-    /// Held while a tenant is made (its subnet index, bridge and record), see `ensure_tenant`.
-    tenant_create: tokio::sync::Mutex<()>,
+    /// Held while a namespace is made (its subnet index, bridge and record), see `ensure_namespace`.
+    namespace_create: tokio::sync::Mutex<()>,
     /// The backup store, the gate of scheduled backups, the holders (ADR 0023).
     backups: Backups,
     /// Boots run at once; see `boots_at_once`.

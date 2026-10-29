@@ -3,26 +3,32 @@
 use super::*;
 
 #[tokio::test]
-async fn a_tenant_outside_the_range_is_refused_at_load() {
+async fn a_namespace_outside_the_range_is_refused_at_load() {
     let h = harness("10.64.0.0/22", 4096).await;
-    let t = TenantRec {
+    let t = NamespaceRec {
         id: "t1".into(),
         subnet_index: 4,
         created_at: Utc::now(),
         quota: api::Quota::default(),
     };
-    h.m.inner.store.put("tenants", "t1", &t).unwrap();
+    h.m.inner
+        .store
+        .put(crate::store::NAMESPACES, "t1", &t)
+        .unwrap();
     let err = h.m.load().unwrap_err();
-    assert!(format!("{err:#}").contains("tenant t1"), "{err:#}");
-    assert!(h.m.inner.tenants.lock().unwrap().is_empty());
+    assert!(format!("{err:#}").contains("namespace t1"), "{err:#}");
+    assert!(h.m.inner.namespaces.lock().unwrap().is_empty());
     // In range: loaded with its subnet.
-    let t = TenantRec {
+    let t = NamespaceRec {
         subnet_index: 3,
         ..t
     };
-    h.m.inner.store.put("tenants", "t1", &t).unwrap();
+    h.m.inner
+        .store
+        .put(crate::store::NAMESPACES, "t1", &t)
+        .unwrap();
     h.m.load().unwrap();
-    assert_eq!(h.m.tenants()[0].router, "10.64.3.1");
+    assert_eq!(h.m.namespaces()[0].router, "10.64.3.1");
 }
 
 #[tokio::test]
@@ -32,7 +38,7 @@ async fn an_endpoint_port_outside_the_range_is_refused_at_load() {
     let ep = EndpointRec {
         id: "ep_1".into(),
         machine_id: "m_1".into(),
-        tenant: "t1".into(),
+        namespace: "t1".into(),
         port: 5432,
         protocol: "tcp".into(),
         host_port: Some(20001),
@@ -57,11 +63,11 @@ async fn an_endpoint_port_outside_the_range_is_refused_at_load() {
 }
 
 #[tokio::test]
-async fn a_tenant_id_is_checked_before_it_names_a_file() {
+async fn a_namespace_id_is_checked_before_it_names_a_file() {
     let h = harness("10.64.0.0/22", 4096).await;
     for bad in ["", "../x", "a/b", "A"] {
         let req = api::CreateMachineRequest {
-            tenant: bad.into(),
+            namespace: bad.into(),
             name: "db".into(),
             image: "alpine".into(),
             size: api::Size {
@@ -75,7 +81,7 @@ async fn a_tenant_id_is_checked_before_it_names_a_file() {
             "{bad}"
         );
         assert!(
-            matches!(h.m.delete_tenant(bad).await, Err(MError::Invalid(_))),
+            matches!(h.m.delete_namespace(bad).await, Err(MError::Invalid(_))),
             "{bad}"
         );
         assert!(
@@ -83,14 +89,14 @@ async fn a_tenant_id_is_checked_before_it_names_a_file() {
             "{bad}"
         );
     }
-    // A tenant that does not exist is simply gone.
-    assert!(h.m.delete_tenant("t-none").await.is_ok());
+    // A namespace that does not exist is simply gone.
+    assert!(h.m.delete_namespace("t-none").await.is_ok());
 }
 
 #[tokio::test]
 async fn recovery_adopts_our_process_and_signals_no_other() {
     let h = harness("10.64.0.0/22", 4096).await;
-    h.tenant("t1");
+    h.namespace("t1");
     // Ours: a VMM a previous daemon left, still carrying the machine's id.
     let ours = h.add("m_ours", state::RUNNING, 256);
     let pid = h
@@ -180,7 +186,7 @@ async fn the_exit_is_the_inits_report_never_the_console() {
 #[tokio::test]
 async fn the_sweep_ends_what_has_no_record() {
     let h = harness("10.64.0.0/22", 4096).await;
-    h.tenant("t1");
+    h.namespace("t1");
     let kept = h.add("m_kept", state::STOPPED, 256);
     h.disks(&kept).await;
     h.pool.zfs.create("m/m_ghost/root", 1 << 20).await.unwrap();
@@ -331,7 +337,7 @@ async fn a_destroyed_source_leaves_its_fork_whole_and_frees_what_it_took_over() 
 #[tokio::test]
 async fn the_sweep_frees_fork_snapshots_with_no_clone() {
     let h = harness("10.64.0.0/22", 4096).await;
-    h.tenant("t1");
+    h.namespace("t1");
     let kept = h.add("m_kept", state::STOPPED, 256);
     h.disks(&kept).await;
     let child = h.add("m_child", state::STOPPED, 256);
@@ -571,4 +577,42 @@ async fn a_daemons_start_boots_again_what_the_host_stopped() {
         ("stopped", "user")
     );
     assert!(h.m.wake(&b.id, None).await.unwrap().state == state::RUNNING);
+}
+
+/// The record with `namespace` under its former name, as a host that ran before ADR 0055 wrote it.
+fn written_as_tenant(rec: &impl Serialize) -> serde_json::Value {
+    let mut v = serde_json::to_value(rec).unwrap();
+    let o = v.as_object_mut().unwrap();
+    let ns = o.remove("namespace").expect("the record has a namespace");
+    o.insert("tenant".into(), ns);
+    v
+}
+
+#[tokio::test]
+async fn records_written_before_the_rename_still_load() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let store = &h.m.inner.store;
+    let r = record();
+    let ep = EndpointRec {
+        id: "ep_1".into(),
+        machine_id: r.id.clone(),
+        namespace: r.namespace.clone(),
+        port: 80,
+        protocol: "http".into(),
+        host_port: None,
+        host: String::new(),
+        created_at: Utc::now(),
+    };
+    store
+        .put("machines", &r.id, &written_as_tenant(&r))
+        .unwrap();
+    store
+        .put("endpoints", &ep.id, &written_as_tenant(&ep))
+        .unwrap();
+    let back: Record = store.get("machines", &r.id).unwrap().unwrap();
+    assert_eq!(back.namespace, r.namespace);
+    let back: EndpointRec = store.get("endpoints", &ep.id).unwrap().unwrap();
+    assert_eq!(back.namespace, ep.namespace);
+    // The namespaces' records stay in the directory they were first written to.
+    assert_eq!(crate::store::NAMESPACES, "tenants");
 }

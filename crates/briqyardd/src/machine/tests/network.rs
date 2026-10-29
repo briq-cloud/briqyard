@@ -39,7 +39,7 @@ impl Harness {
         }
     }
 
-    /// Whether tenant `t1`'s resolver answers `ip` from the tenant's names alone.
+    /// Whether namespace `t1`'s resolver answers `ip` from the namespace's names alone.
     fn dns_kept(&self, ip: &str) -> bool {
         let gateway = Ipv4Addr::new(10, 64, 1, 1);
         self.m
@@ -145,14 +145,14 @@ async fn a_policy_changes_at_once_on_a_running_machine() {
 }
 
 #[tokio::test]
-async fn a_via_names_another_machine_of_the_tenant() {
+async fn a_via_names_another_machine_of_the_namespace() {
     let h = harness("10.64.0.0/22", 4096).await;
     h.ready().await;
-    h.tenant("t2");
+    h.namespace("t2");
     let gw = h.m.create_made(h.request("gw")).await.unwrap();
     let other =
         h.m.create_made(api::CreateMachineRequest {
-            tenant: "t2".into(),
+            namespace: "t2".into(),
             ..h.request("other")
         })
         .await
@@ -164,7 +164,7 @@ async fn a_via_names_another_machine_of_the_tenant() {
     for (via, want) in [
         (
             other.id.as_str(),
-            format!("egress.via {}: a machine of another tenant", other.id),
+            format!("egress.via {}: a machine of another namespace", other.id),
         ),
         (missing, format!("egress.via {missing}: no such machine")),
     ] {
@@ -184,7 +184,7 @@ async fn a_via_names_another_machine_of_the_tenant() {
     );
     assert_eq!(
         refused(h.m.create_made(h.request_egress("sbx2", "via", None)).await),
-        "egress.via must name a machine of the tenant"
+        "egress.via must name a machine of the namespace"
     );
     // Nothing applied, made or changed.
     assert!(h.host.calls().is_empty());
@@ -192,7 +192,7 @@ async fn a_via_names_another_machine_of_the_tenant() {
     assert!(zfs.is_empty(), "{zfs:?}");
     assert!(h.m.list(None, &[]).iter().all(|x| x.name != "sbx2"));
     assert_eq!(h.stored(&m.id).unwrap().egress, api::Egress::default());
-    // Its own tenant's machine is a gateway.
+    // Its own namespace's machine is a gateway.
     h.m.update(&m.id, set_egress("via", Some(&gw.id)), None)
         .await
         .unwrap();
@@ -236,7 +236,7 @@ async fn a_gateway_destroyed_under_a_via_machine_leaves_it_reaching_nothing() {
 #[tokio::test]
 async fn the_tables_at_start_hold_the_running_policies() {
     let h = harness("10.64.0.0/22", 4096).await;
-    h.tenant("t1");
+    h.namespace("t1");
     let add = |id: &str, st: &str, n: u8, eg: api::Egress| {
         let e = h.add(id, st, 256);
         let mut r = e.rec.lock().unwrap();
@@ -506,7 +506,7 @@ async fn disk_metrics_add_up_per_machine_across_its_boots() {
     io.add(&line(1 << 20, 4));
     let text = h.m.metrics();
     briqyard_api::metrics::check_exposition(&text);
-    let l = format!(r#"machine="{}",tenant="t1",name="web""#, m.id);
+    let l = format!(r#"machine="{}",namespace="t1",name="web""#, m.id);
     for want in [
         format!("briqyard_machine_disk_write_bytes_total{{{l}}} 2097152"),
         format!("briqyard_machine_disk_throttled_total{{{l}}} 7"),
@@ -767,7 +767,7 @@ async fn via_and_none_machines_get_no_limits() {
 #[tokio::test]
 async fn the_tables_at_start_hold_the_running_machines_limits() {
     let h = harness_with("10.64.0.0/22", 4096, host_limits()).await;
-    h.tenant("t1");
+    h.namespace("t1");
     let add = |id: &str, st: &str, n: u8, eg: api::Egress, own: api::EgressLimits| {
         let e = h.add(id, st, 256);
         let mut r = e.rec.lock().unwrap();

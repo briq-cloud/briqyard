@@ -63,7 +63,7 @@ async fn each_transition_is_an_event_and_moves_the_version() {
     assert!(evs.windows(2).all(|w| w[0].seq < w[1].seq));
     assert!(evs
         .iter()
-        .all(|e| e.tenant == "t1" && e.kind == api::event::NORMAL));
+        .all(|e| e.namespace == "t1" && e.kind == api::event::NORMAL));
     let data = |i: usize| evs[i].data.clone().unwrap_or_default();
     assert_eq!(data(0)["image"], IMAGE);
     assert_eq!(data(1)["resume"], false);
@@ -226,7 +226,7 @@ async fn the_gateway_says_when_it_serves_and_when_it_sleeps() {
     let started = h.events_of(&gw).pop().unwrap();
     assert_eq!(
         started.message,
-        "the tenant's gateway answers on 10.64.1.2:3128"
+        "the namespace's gateway answers on 10.64.1.2:3128"
     );
     // Its consumer's start came after the gateway answered.
     let consumer = h.events_of(&c.id);
@@ -404,7 +404,7 @@ async fn the_seq_goes_on_past_every_records_version_at_load() {
 #[tokio::test]
 async fn recovery_says_what_it_adopted_and_what_it_stopped() {
     let h = harness("10.64.0.0/22", 4096).await;
-    h.tenant("t1");
+    h.namespace("t1");
     let ours = h.add("m_ours", state::RUNNING, 256);
     let pid = h
         .host

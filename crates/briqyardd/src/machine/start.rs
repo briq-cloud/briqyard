@@ -24,7 +24,7 @@ impl Manager {
             return Ok(self.view(e));
         }
         let quota = self
-            .tenant_of(&r.tenant)
+            .namespace_of(&r.namespace)
             .map(|t| t.rec.quota)
             .unwrap_or_default();
         // The machine and its volume are counted already: its size is what it adds.
@@ -35,8 +35,8 @@ impl Manager {
         };
         {
             let machines = self.inner.machines.lock().unwrap();
-            let held = tenant_use(&machines, &r.tenant);
-            if let Some(x) = over_quota(&r.tenant, &quota, &held, &need) {
+            let held = namespace_use(&machines, &r.namespace);
+            if let Some(x) = over_quota(&r.namespace, &quota, &held, &need) {
                 drop(machines);
                 e.note(x.event(format!("start refused: {x}")));
                 return Err(MError::Quota(x.to_string()));
@@ -111,11 +111,11 @@ impl Manager {
         };
         // Resolved before anything moves: a `via` whose machine is gone refuses the start.
         let policy = self.policy_for(&rec)?;
-        // Through the tenant's gateway: it runs first, and the tenant's lock is kept until
+        // Through the namespace's gateway: it runs first, and the namespace's lock is kept until
         // this machine is `starting`, which is what the sleeper looks for.
         let gateway_turn = match rec.egress.via_gateway() {
             true => Some(
-                self.ensure_gateway(&rec.tenant)
+                self.ensure_gateway(&rec.namespace)
                     .await
                     .map_err(|err| self.gateway_failed(e, err))?,
             ),
@@ -159,9 +159,9 @@ impl Manager {
         }
         // What this boot runs: the record, the change it applied on it.
         let rec = e.snapshot();
-        let t = match self.tenant_of(&rec.tenant) {
+        let t = match self.namespace_of(&rec.namespace) {
             Some(t) => t,
-            None => return Err(fail(anyhow!("tenant network is gone"))),
+            None => return Err(fail(anyhow!("namespace network is gone"))),
         };
         let tap = self
             .inner
@@ -293,7 +293,7 @@ impl Manager {
         let _ = self.save(e);
         tracing::info!(
             machine = rec.id,
-            tenant = rec.tenant,
+            namespace = rec.namespace,
             name = rec.name,
             ip = rec.ip,
             pid = live.pid,
@@ -386,7 +386,7 @@ impl Manager {
     }
 
     /// The jail of a machine, when the daemon runs Firecracker under the jailer: one uid per
-    /// machine, from its place in the tenant's network.
+    /// machine, from its place in the namespace's network.
     pub(super) fn jail_for(&self, rec: &Record) -> Option<fc::Jail> {
         let cfg = &self.inner.cfg;
         if cfg.jailer.as_os_str().is_empty() {
@@ -418,13 +418,13 @@ impl Manager {
 
     // --- config drive ---
 
-    fn write_config_drive(&self, path: &Path, r: &Record, t: &Tenant) -> Result<()> {
+    fn write_config_drive(&self, path: &Path, r: &Record, t: &Namespace) -> Result<()> {
         write_drive(path, &config_drive(r, t.subnet.gateway())?)
     }
 }
 
 /// The uid (and gid) a jailed machine runs as: one per machine, from its place in the
-/// tenant's network, so no two machines on the host share one.
+/// namespace's network, so no two machines on the host share one.
 pub(super) fn jail_uid(base: u32, subnet_index: u32, host_num: u8) -> u32 {
     base + subnet_index * 256 + host_num as u32
 }

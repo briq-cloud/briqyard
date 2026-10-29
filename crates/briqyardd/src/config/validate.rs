@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn a_public_bind_is_refused_unless_someone_says_who_may_connect() {
-        // Endpoints are the entry to every tenant: `bind: 0.0.0.0` alone is refused.
+        // Endpoints are the entry to every namespace: `bind: 0.0.0.0` alone is refused.
         let err = load("ingress:\n  bind: 0.0.0.0\n").unwrap_err().to_string();
         assert!(
             err.starts_with("ingress.bind: 0.0.0.0 is reachable"),

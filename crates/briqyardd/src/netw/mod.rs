@@ -1,4 +1,4 @@
-//! The host network: a bridge per tenant, a TAP per machine, addresses, nftables and the
+//! The host network: a bridge per namespace, a TAP per machine, addresses, nftables and the
 //! gateway's DNS.
 
 pub mod dns;
@@ -8,7 +8,7 @@ pub mod nft;
 use anyhow::{anyhow, Result};
 use std::net::{IpAddr, Ipv4Addr};
 
-/// A tenant's /24 inside the range.
+/// A namespace's /24 inside the range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Subnet {
     pub index: u32,
@@ -114,7 +114,7 @@ pub fn first_free(mut used: Vec<u32>, lo: u32, hi: u32) -> Option<u32> {
     }
 }
 
-/// The bridge of tenant subnet index n.
+/// The bridge of namespace subnet index n.
 pub fn bridge_name(index: u32) -> String {
     format!("by{index}")
 }

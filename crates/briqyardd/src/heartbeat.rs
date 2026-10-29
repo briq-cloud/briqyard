@@ -31,7 +31,7 @@ pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, m
             capacity: mgr.capacity(),
             used,
             machines: total,
-            tenants: mgr.tenants().into_iter().map(|t| t.id).collect(),
+            namespaces: mgr.namespaces().into_iter().map(|t| t.id).collect(),
             version: api::VERSION.into(),
             disk_free_mb: mgr.disk_free_mb().await,
             tls_fingerprint: tls_fingerprint.clone(),

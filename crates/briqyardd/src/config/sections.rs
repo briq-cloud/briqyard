@@ -53,7 +53,7 @@ pub enum KeySource {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Network {
-    /// The pool of tenant subnets, carved into /24s.
+    /// The pool of namespace subnets, carved into /24s.
     pub range: String,
     /// Upstream DNS servers the gateway forwards to. Default: the host's resolv.conf, then 1.1.1.1.
     pub upstream_dns: Vec<String>,

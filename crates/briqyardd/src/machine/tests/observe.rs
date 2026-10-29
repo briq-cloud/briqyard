@@ -37,7 +37,7 @@ async fn metrics_hold_every_machine_by_its_labels_from_the_last_measure() {
     let text = h.m.metrics();
     briqyard_api::metrics::check_exposition(&text);
     let lines: Vec<&str> = text.lines().collect();
-    let db = r#"machine="m_run",tenant="t1",name="db""#;
+    let db = r#"machine="m_run",namespace="t1",name="db""#;
     for want in [
         format!("briqyard_machine_cpu_seconds_total{{{db}}} 2.5"),
         format!("briqyard_machine_memory_bytes{{{db}}} 104857600"),
@@ -49,9 +49,9 @@ async fn metrics_hold_every_machine_by_its_labels_from_the_last_measure() {
         format!("briqyard_machine_egress_dropped_packets_total{{{db}}} 0"),
         format!("briqyard_machine_restarts_total{{{db}}} 0"),
         format!("briqyard_machine_state{{{db},state=\"running\"}} 1"),
-        r#"briqyard_machine_state{machine="m_gw",tenant="t1",name="gateway",role="gateway",state="running"} 1"#.into(),
-        r#"briqyard_machine_state{machine="m_err",tenant="t1",name="db",state="error"} 1"#.into(),
-        r#"briqyard_machine_state{machine="m_stop",tenant="t1",name="db",state="stopped"} 1"#.into(),
+        r#"briqyard_machine_state{machine="m_gw",namespace="t1",name="gateway",role="gateway",state="running"} 1"#.into(),
+        r#"briqyard_machine_state{machine="m_err",namespace="t1",name="db",state="error"} 1"#.into(),
+        r#"briqyard_machine_state{machine="m_stop",namespace="t1",name="db",state="stopped"} 1"#.into(),
         // The host's, the names from before included.
         r#"briqyard_machines{state="running"} 2"#.into(),
         "briqyard_machines_total 4".into(),
@@ -311,7 +311,7 @@ async fn top_takes_its_rates_from_the_last_two_ticks() {
         t,
         vec![api::TopMachine {
             machine_id: "m_a".into(),
-            tenant: "t1".into(),
+            namespace: "t1".into(),
             name: "db".into(),
             role: None,
             cpu_percent: 20.0,
@@ -379,9 +379,12 @@ async fn a_listing_selects_by_labels_all_of_them() {
             .await
             .unwrap();
     h.m.create_made(labelled("bare", &[])).await.unwrap();
-    let ids = |tenant: Option<&str>, sel: &[&str]| -> Vec<String> {
+    let ids = |namespace: Option<&str>, sel: &[&str]| -> Vec<String> {
         let sel: Vec<api::Label> = sel.iter().map(|s| api::Label::parse(s).unwrap()).collect();
-        h.m.list(tenant, &sel).into_iter().map(|m| m.id).collect()
+        h.m.list(namespace, &sel)
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
     };
     assert_eq!(ids(None, &["app=web"]), [web.id.as_str()]);
     assert_eq!(ids(Some("t1"), &["app"]), [web.id.clone(), db.id.clone()]);

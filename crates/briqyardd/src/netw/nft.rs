@@ -1,12 +1,12 @@
-//! The nftables rules (ADR 0003, ADR 0012): masquerade tenant egress, forward nothing but a
-//! tenant's way to the internet, keep tenants off the host's services and private networks,
+//! The nftables rules (ADR 0003, ADR 0012): masquerade namespace egress, forward nothing but a
+//! namespace's way to the internet, keep namespaces off the host's services and private networks,
 //! let only the allowed clients reach the daemon's ports, and pin every TAP to its machine's
 //! address so a guest cannot send as anyone else.
 //!
 //! The tables are rendered once at start. A machine's pin is one element added to or removed
 //! from the `pins` set, its egress policy (ADR 0015) and limits (ADR 0018) a few more in the
 //! sets and maps beside it, with a named `limit` per rate, its counters (ADR 0017, 0018) one
-//! element in each counter set for its life; tenants need no change at all: the rules name
+//! element in each counter set for its life; namespaces need no change at all: the rules name
 //! their bridges by prefix (`by*`), which only the daemon makes.
 
 use crate::config::EgressLimits;
@@ -17,7 +17,7 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-/// The networks a tenant may not reach, whatever the host routes to them.
+/// The networks a namespace may not reach, whatever the host routes to them.
 const PRIVATE_NETS: &str =
     "{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16 }";
 
@@ -25,17 +25,17 @@ const PRIVATE_NETS: &str =
 /// `open` is the absence of one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Policy {
-    /// `ip` reaches `to` (its gateway machine) and `host` (the tenant's `.1`), nothing else:
+    /// `ip` reaches `to` (its gateway machine) and `host` (the namespace's `.1`), nothing else:
     /// elements of `via_sources` and `via_allowed` in the bridge table.
     Via {
         ip: String,
         to: String,
         host: String,
     },
-    /// `ip` reaches its tenant and not the internet: an element of `egress_none` in the inet
+    /// `ip` reaches its namespace and not the internet: an element of `egress_none` in the inet
     /// table, where the route out is.
     None { ip: String },
-    /// `ip` reaches its tenant and the internet within `limits` (ADR 0018), which limit
+    /// `ip` reaches its namespace and the internet within `limits` (ADR 0018), which limit
     /// something: elements of `blocked_ports`, `conn_limits` and `bandwidth_limits` in the
     /// inet table, and a named `limit` for each rate. Open with no limits is no policy.
     Open { ip: String, limits: EgressLimits },
@@ -236,7 +236,7 @@ impl Ruleset {
         // Counted after the limits, so what they drop is not traffic, and before the
         // accepts, so replies count too: a lookup in a set with `counter` adds the packet to
         // its element and goes on to the next rule. Only the route to the internet crosses
-        // this chain: a tenant's own traffic is bridged, endpoints and DNS end on the host. A
+        // this chain: a namespace's own traffic is bridged, endpoints and DNS end on the host. A
         // first packet to a private network, dropped below, is counted.
         s.push_str(&format!("\t\t{out} ip saddr @internet_out\n"));
         s.push_str(&format!("\t\t{back} ip daddr @internet_in\n"));
@@ -252,7 +252,7 @@ impl Ruleset {
         s.push_str("\t}\n\tchain input {\n\t\ttype filter hook input priority 0; policy accept;\n");
         s.push_str("\t\tiifname \"lo\" accept\n");
         // The host's own services are the internet's: reached at the host's addresses, never
-        // at a tenant's `.1`, the one host address a `via` machine may send to (the bridge
+        // at a namespace's `.1`, the one host address a `via` machine may send to (the bridge
         // table holds it to its pairs); a machine without egress reaches none, and one whose
         // policy turns to none loses its open connections (before the replies' accept).
         let host_ports = (!self.host_ports.is_empty()).then(|| {
@@ -761,7 +761,7 @@ table bridge briqyard {
     fn the_forward_chain_drops_by_default() {
         let s = ruleset().render();
         assert!(s.contains("hook forward priority 0; policy drop;"));
-        // The only accepts: replies, and a tenant's way out through the egress interface.
+        // The only accepts: replies, and a namespace's way out through the egress interface.
         let accepts: Vec<&str> = s
             .lines()
             .skip_while(|l| !l.contains("chain forward"))

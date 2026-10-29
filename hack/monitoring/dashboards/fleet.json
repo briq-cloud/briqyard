@@ -385,7 +385,7 @@
     {
       "type": "stat",
       "title": "Hosts with a condition",
-      "description": "Hosts with a condition true (memory_pressure, disk_pressure…): the fleet places no new tenant there.",
+      "description": "Hosts with a condition true (memory_pressure, disk_pressure…): the fleet places no new namespace there.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -514,8 +514,8 @@
     },
     {
       "type": "stat",
-      "title": "Tenants",
-      "description": "Tenants with a machine or a gateway on a host.",
+      "title": "Namespaces",
+      "description": "Namespaces with a machine or a gateway on a host.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -527,7 +527,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum(briqyard_tenants{region=~\"$region\"})",
+          "expr": "sum(briqyard_namespaces{region=~\"$region\"})",
           "legendFormat": "__auto",
           "range": true,
           "instant": false
@@ -1808,7 +1808,7 @@
     {
       "type": "timeseries",
       "title": "Free room: memory",
-      "description": "Free memory on the region's hosts that take a new tenant, summed, and the most on one of them: the largest machine the region still takes.",
+      "description": "Free memory on the region's hosts that take a new namespace, summed, and the most on one of them: the largest machine the region still takes.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -1896,7 +1896,7 @@
     {
       "type": "timeseries",
       "title": "Free room: disk",
-      "description": "Free pool space on the region's hosts that take a new tenant, summed, and the most on one of them.",
+      "description": "Free pool space on the region's hosts that take a new namespace, summed, and the most on one of them.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -1984,7 +1984,7 @@
     {
       "type": "timeseries",
       "title": "Creates refused for want of room",
-      "description": "Creates answered 503 capacity, by region and what ran out: memory or disk (a new host helps) or pressure (the tenant's host must be freed).",
+      "description": "Creates answered 503 capacity, by region and what ran out: memory or disk (a new host helps) or pressure (the namespace's host must be freed).",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"

@@ -28,7 +28,7 @@ pub(super) fn logged_at(ev: &Events, at: &str, n: usize) {
             reason: reason::CREATED.into(),
             message: String::new(),
             machine_id: String::new(),
-            tenant: String::new(),
+            namespace: String::new(),
             host: String::new(),
             data: None,
             count: 1,

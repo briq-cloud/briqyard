@@ -74,7 +74,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Host {{ .Labels.host }} has {{ .Labels.condition }}: the fleet places no new tenant there."
+          summary: "Host {{ .Labels.host }} has {{ .Labels.condition }}: the fleet places no new namespace there."
       - uid: briqyard-pool-full
         title: "Pool over 80 %"
         condition: C
@@ -110,7 +110,7 @@ groups:
             datasourceUid: briqyard-prometheus
             model:
               refId: A
-              expr: 'max by (host, tenant, name, machine) (round(increase(briqyard_machine_restarts_total[10m])))'
+              expr: 'max by (host, namespace, name, machine) (round(increase(briqyard_machine_restarts_total[10m])))'
               instant: true
           - refId: C
             datasourceUid: __expr__
@@ -126,7 +126,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Machine {{ .Labels.name }} ({{ .Labels.machine }}) of tenant {{ .Labels.tenant }} on host {{ .Labels.host }} restarted three times or more in ten minutes."
+          summary: "Machine {{ .Labels.name }} ({{ .Labels.machine }}) of namespace {{ .Labels.namespace }} on host {{ .Labels.host }} restarted three times or more in ten minutes."
       - uid: briqyard-out-of-room
         title: "Creates refused: no room"
         condition: C
@@ -178,7 +178,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "A tenant's create in region {{ .Labels.region }} was refused: its host is under a condition. Free that host or move the tenant."
+          summary: "A namespace's create in region {{ .Labels.region }} was refused: its host is under a condition. Free that host or move the namespace."
       - uid: briqyard-slots-small
         title: "Largest slot too small"
         condition: C

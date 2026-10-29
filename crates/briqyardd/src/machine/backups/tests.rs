@@ -18,7 +18,7 @@ fn b(id: &str, from: Option<&str>) -> api::Backup {
     api::Backup {
         id: id.into(),
         machine_id: "m_1".into(),
-        tenant: "t".into(),
+        namespace: "t".into(),
         name: "n".into(),
         created_at: Utc::now(),
         bytes: 1,
@@ -120,7 +120,7 @@ fn what_continues_from_a_backup() {
     assert!(dependents(&all, 4).is_empty());
 }
 
-/// A harness whose host backs up to a directory, after `f`; tenant `t1` and the image in
+/// A harness whose host backs up to a directory, after `f`; namespace `t1` and the image in
 /// place.
 async fn harness(f: impl FnOnce(&mut config::Backup)) -> Harness {
     let h = harness_config(|cfg| {
@@ -410,7 +410,7 @@ async fn a_machine_with_no_process_is_backed_up_only_when_its_disks_changed() {
 
 fn restore_of(machine_id: &str, backup: &str, name: &str) -> api::CreateMachineRequest {
     api::CreateMachineRequest {
-        tenant: "t1".into(),
+        namespace: "t1".into(),
         name: name.into(),
         restore: Some(api::RestoreSpec {
             machine_id: machine_id.into(),
@@ -612,7 +612,7 @@ async fn retention_keeps_keep_restorable_points_and_their_bases() {
     );
     // The oldest kept point restores from its chain.
     let restore = |name: &str, backup: &str| api::CreateMachineRequest {
-        tenant: "t1".into(),
+        namespace: "t1".into(),
         name: name.into(),
         restore: Some(api::RestoreSpec {
             machine_id: m.id.clone(),
@@ -682,7 +682,7 @@ async fn a_promoted_fork_backs_up_whole_from_its_own_snapshots_only() {
     // And its chain restores.
     let r =
         h.m.create_made(api::CreateMachineRequest {
-            tenant: "t1".into(),
+            namespace: "t1".into(),
             name: "back".into(),
             restore: Some(api::RestoreSpec {
                 machine_id: fork.id.clone(),
@@ -879,7 +879,7 @@ async fn a_destroyed_machine_s_backups_are_listed_counted_then_deleted() {
     let gone = Utc::now();
     h.m.destroy(&m.id, None).await.unwrap();
     assert!(matches!(h.m.get(&m.id), Err(MError::NotFound)));
-    // Listed with the tenant's, each saying when it goes.
+    // Listed with the namespace's, each saying when it goes.
     let all = h.m.all_backups(Some("t1"), None).await.unwrap();
     assert_eq!(h.ids(&all), vec![first.id.clone(), second.id.clone()]);
     let deletes_at = all[0].deletes_at.unwrap();
@@ -975,7 +975,7 @@ async fn the_routes_delete_and_list() {
     tokio::spawn(async move { axum::serve(ln, crate::api::router(st)).await.unwrap() });
     let http = reqwest::Client::new();
     let list: Vec<api::Backup> = http
-        .get(format!("{url}/backups?tenant=t1"))
+        .get(format!("{url}/backups?namespace=t1"))
         .send()
         .await
         .unwrap()
@@ -1008,7 +1008,7 @@ async fn the_routes_delete_and_list() {
     };
     assert_eq!(of(format!("{url}/backups?machine={}", m.id)).await, 2);
     assert_eq!(
-        of(format!("{url}/backups?tenant=t1&machine=m_other")).await,
+        of(format!("{url}/backups?namespace=t1&machine=m_other")).await,
         0
     );
     // Two deletes of one chain sent together run one after the other (the machine's turn):
@@ -1023,7 +1023,7 @@ async fn the_routes_delete_and_list() {
         h.listed(&m.id).await.is_empty(),
         "{second:?} went with its base"
     );
-    for q in ["tenant=../x", "machine=../x"] {
+    for q in ["namespace=../x", "machine=../x"] {
         let r = http.get(format!("{url}/backups?{q}")).send().await.unwrap();
         assert_eq!(r.status(), 400, "{q}");
     }

@@ -1,4 +1,4 @@
-//! Tests of a tenant's quota.
+//! Tests of a namespace's quota.
 
 use super::*;
 
@@ -30,7 +30,7 @@ fn a_quota_refuses_the_first_limit_a_request_passes() {
     let x = over_quota("t1", &q, &used, &need(1, 512, 0)).unwrap();
     assert_eq!(
         x.to_string(),
-        "tenant t1's quota: memory_mb 256 of 512 used, 512 more asked"
+        "namespace t1's quota: memory_mb 256 of 512 used, 512 more asked"
     );
     // Disk is used up: a machine with no volume still fits, one with a volume does not.
     assert_eq!(over_quota("t1", &q, &used, &need(1, 0, 0)), None);
@@ -54,7 +54,7 @@ fn a_quota_refuses_the_first_limit_a_request_passes() {
 }
 
 #[tokio::test]
-async fn quotas_hold_a_tenant_at_create_fork_and_start() {
+async fn quotas_hold_a_namespace_at_create_fork_and_start() {
     let h = harness("10.64.0.0/22", 4096).await;
     h.ready().await;
     assert!(matches!(h.m.quota("t9"), Err(MError::NotFound)));
@@ -64,13 +64,18 @@ async fn quotas_hold_a_tenant_at_create_fork_and_start() {
         disk_gb: Some(5),
         vcpus: None,
     };
-    // Put before any machine (the tenant is made, as `ensure_tenant` makes one; the
+    // Put before any machine (the namespace is made, as `ensure_namespace` makes one; the
     // network needs the host, so known here).
-    h.tenant("t2");
+    h.namespace("t2");
     let q = h.m.set_quota("t2", set(1, 384)).await.unwrap();
     assert_eq!((q.quota, q.used), (set(1, 384), api::QuotaUse::default()));
-    assert_eq!(h.m.tenant("t2").unwrap().machines, 0);
-    let stored: TenantRec = h.m.inner.store.get("tenants", "t2").unwrap().unwrap();
+    assert_eq!(h.m.namespace("t2").unwrap().machines, 0);
+    let stored: NamespaceRec =
+        h.m.inner
+            .store
+            .get(crate::store::NAMESPACES, "t2")
+            .unwrap()
+            .unwrap();
     assert_eq!(stored.quota, set(1, 384), "kept across a restart");
     h.m.set_quota("t1", set(2, 384)).await.unwrap();
     let a = h.m.create_made(h.request("a")).await.unwrap();
@@ -93,7 +98,7 @@ async fn quotas_hold_a_tenant_at_create_fork_and_start() {
     assert!(matches!(err, MError::Quota(_)), "{err}");
     assert_eq!(
         err.to_string(),
-        "tenant t1's quota: memory_mb 256 of 384 used, 256 more asked"
+        "namespace t1's quota: memory_mb 256 of 384 used, 256 more asked"
     );
     assert_eq!(h.m.get(&b.id).unwrap().state, state::CREATED);
     let ev = h.events_of(&b.id).pop().unwrap();
@@ -107,7 +112,7 @@ async fn quotas_hold_a_tenant_at_create_fork_and_start() {
         json!({"resource": "memory_mb", "limit": 384, "used": 256, "need": 256})
     );
     assert_eq!(h.m.get(&b.id).unwrap().version, ev.seq, "an event about it");
-    // A fork past the machines: refused before anything is made, an event of the tenant.
+    // A fork past the machines: refused before anything is made, an event of the namespace.
     let mut fork = h.request("f");
     fork.image.clear();
     fork.fork = Some(api::ForkSpec {
@@ -117,11 +122,11 @@ async fn quotas_hold_a_tenant_at_create_fork_and_start() {
     let err = h.m.create_made(fork).await.unwrap_err();
     assert_eq!(
         err.to_string(),
-        "tenant t1's quota: machines 2 of 2 used, 1 more asked"
+        "namespace t1's quota: machines 2 of 2 used, 1 more asked"
     );
     assert_eq!(h.m.list(Some("t1"), &[]).len(), 2);
     let f = events::Filter {
-        tenant: Some("t1".into()),
+        namespace: Some("t1".into()),
         ..Default::default()
     };
     let last =
@@ -136,7 +141,7 @@ async fn quotas_hold_a_tenant_at_create_fork_and_start() {
         (
             last.reason.as_str(),
             last.machine_id.as_str(),
-            last.tenant.as_str()
+            last.namespace.as_str()
         ),
         ("quota_exceeded", "", "t1")
     );
@@ -157,7 +162,7 @@ async fn quotas_hold_a_tenant_at_create_fork_and_start() {
     let err = h.m.create_made(v).await.unwrap_err();
     assert_eq!(
         err.to_string(),
-        "tenant t1's quota: disk_gb 0 of 5 used, 6 more asked"
+        "namespace t1's quota: disk_gb 0 of 5 used, 6 more asked"
     );
     assert_eq!(h.m.list(Some("t1"), &[]).len(), 2, "nothing made");
     // Once a stops, b starts: memory is what runs.

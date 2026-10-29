@@ -82,7 +82,7 @@ fn machine_run_takes_every_setting() {
         "ghcr.io/x/nginx:1.27",
         "--name",
         "web",
-        "--tenant",
+        "--namespace",
         "t1",
         "--vcpus",
         "2",
@@ -117,7 +117,7 @@ fn machine_run_takes_every_setting() {
     };
     assert_eq!(a.image, "ghcr.io/x/nginx:1.27");
     assert_eq!(a.name.as_deref(), Some("web"));
-    assert_eq!(a.tenant, "t1");
+    assert_eq!(a.namespace, "t1");
     assert_eq!((a.vcpus, a.memory), (2, 1024));
     assert_eq!(a.sleep, "2h");
     assert_eq!(a.volume.as_deref(), Some("10G:/data"));
@@ -135,7 +135,7 @@ fn machine_run_defaults() {
         panic!("not a run");
     };
     assert_eq!(a.name, None);
-    assert_eq!(a.tenant, "default");
+    assert_eq!(a.namespace, "default");
     assert_eq!((a.vcpus, a.memory), (1, 512));
     assert_eq!(a.sleep, "", "the daemon's default window");
     assert_eq!(a.volume, None);
@@ -625,15 +625,15 @@ fn machine_lifecycle_commands() {
     ] {
         assert_eq!(fails(&args), ErrorKind::MissingRequiredArgument, "{args:?}");
     }
-    match machine(parse(&["machine", "ls", "--tenant", "t1"])) {
-        MachineCmd::Ls { tenant, labels } => {
-            assert_eq!(tenant.as_deref(), Some("t1"));
+    match machine(parse(&["machine", "ls", "--namespace", "t1"])) {
+        MachineCmd::Ls { namespace, labels } => {
+            assert_eq!(namespace.as_deref(), Some("t1"));
             assert!(labels.is_empty());
         }
         _ => panic!("not an ls"),
     }
     match machine(parse(&["m", "ls"])) {
-        MachineCmd::Ls { tenant, .. } => assert_eq!(tenant, None),
+        MachineCmd::Ls { namespace, .. } => assert_eq!(namespace, None),
         _ => panic!("not an ls"),
     }
     match machine(parse(&[
@@ -700,7 +700,7 @@ fn machine_lifecycle_commands() {
 }
 
 #[test]
-fn endpoint_tenant_and_image_commands() {
+fn endpoint_namespace_and_image_commands() {
     match parse(&["endpoint", "add", "--http", "--host", "web", "m1", "8080"]).cmd {
         Cmd::Endpoint(EndpointCmd::Add {
             http,
@@ -741,20 +741,23 @@ fn endpoint_tenant_and_image_commands() {
         _ => panic!("not an endpoint rm"),
     }
     assert!(matches!(
-        parse(&["tenant", "ls"]).cmd,
-        Cmd::Tenant(TenantCmd::Ls)
+        parse(&["namespace", "ls"]).cmd,
+        Cmd::Namespace(NamespaceCmd::Ls)
     ));
-    match parse(&["tenant", "rm", "t1"]).cmd {
-        Cmd::Tenant(TenantCmd::Rm { id }) => assert_eq!(id, "t1"),
-        _ => panic!("not a tenant rm"),
+    match parse(&["namespace", "rm", "t1"]).cmd {
+        Cmd::Namespace(NamespaceCmd::Rm { id }) => assert_eq!(id, "t1"),
+        _ => panic!("not a namespace rm"),
     }
-    assert_eq!(fails(&["tenant", "rm"]), ErrorKind::MissingRequiredArgument);
-    match parse(&["tenant", "get", "t1"]).cmd {
-        Cmd::Tenant(TenantCmd::Get { id }) => assert_eq!(id, "t1"),
-        _ => panic!("not a tenant get"),
+    assert_eq!(
+        fails(&["namespace", "rm"]),
+        ErrorKind::MissingRequiredArgument
+    );
+    match parse(&["namespace", "get", "t1"]).cmd {
+        Cmd::Namespace(NamespaceCmd::Get { id }) => assert_eq!(id, "t1"),
+        _ => panic!("not a namespace get"),
     }
     match parse(&[
-        "tenant",
+        "namespace",
         "gateway",
         "set",
         "t1",
@@ -772,9 +775,9 @@ fn endpoint_tenant_and_image_commands() {
     ])
     .cmd
     {
-        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set(a))) => {
+        Cmd::Namespace(NamespaceCmd::Gateway(GatewayCmd::Set(a))) => {
             let GatewaySetArgs {
-                tenant,
+                namespace,
                 region,
                 start,
                 image,
@@ -786,7 +789,7 @@ fn endpoint_tenant_and_image_commands() {
             } = *a;
             assert_eq!(files, ["/etc/proxy.yaml=proxy.yaml"]);
             assert_eq!(
-                (tenant.as_str(), image.as_str(), port),
+                (namespace.as_str(), image.as_str(), port),
                 ("t1", "proxy:1", 3128)
             );
             assert!(readiness.is_none(), "its port, unless a probe is named");
@@ -798,32 +801,42 @@ fn endpoint_tenant_and_image_commands() {
         _ => panic!("not a gateway set"),
     }
     match parse(&[
-        "tenant", "gateway", "set", "t1", "--image", "proxy:1", "--port", "3128", "--start",
+        "namespace",
+        "gateway",
+        "set",
+        "t1",
+        "--image",
+        "proxy:1",
+        "--port",
+        "3128",
+        "--start",
     ])
     .cmd
     {
-        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set(a))) => {
+        Cmd::Namespace(NamespaceCmd::Gateway(GatewayCmd::Set(a))) => {
             assert!(a.start && a.cmd.is_empty())
         }
         _ => panic!("not a gateway set"),
     }
     // An image and a port are what a gateway needs.
     assert_eq!(
-        fails(&["tenant", "gateway", "set", "t1", "--image", "proxy:1"]),
+        fails(&["namespace", "gateway", "set", "t1", "--image", "proxy:1"]),
         ErrorKind::MissingRequiredArgument
     );
     assert_eq!(
-        fails(&["tenant", "gateway", "set", "t1", "--port", "3128"]),
+        fails(&["namespace", "gateway", "set", "t1", "--port", "3128"]),
         ErrorKind::MissingRequiredArgument
     );
-    match parse(&["tenant", "gateway", "rm", "t1"]).cmd {
-        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Rm { tenant })) => assert_eq!(tenant, "t1"),
+    match parse(&["namespace", "gateway", "rm", "t1"]).cmd {
+        Cmd::Namespace(NamespaceCmd::Gateway(GatewayCmd::Rm { namespace })) => {
+            assert_eq!(namespace, "t1")
+        }
         _ => panic!("not a gateway rm"),
     }
     assert!(env_args(&["NOEQUALS".into()]).is_err());
-    match parse(&["tenant", "unpin", "t1"]).cmd {
-        Cmd::Tenant(TenantCmd::Unpin { id }) => assert_eq!(id, "t1"),
-        _ => panic!("not a tenant unpin"),
+    match parse(&["namespace", "unpin", "t1"]).cmd {
+        Cmd::Namespace(NamespaceCmd::Unpin { id }) => assert_eq!(id, "t1"),
+        _ => panic!("not a namespace unpin"),
     }
     assert!(matches!(
         parse(&["image", "ls"]).cmd,
@@ -902,7 +915,7 @@ fn usage_takes_a_range_of_hours() {
         "2026-10-20T16:00:00+02:00",
         "--to",
         "2026-10-20T15:00:00Z",
-        "--tenant",
+        "--namespace",
         "t1",
         "--json",
     ])
@@ -911,17 +924,17 @@ fn usage_takes_a_range_of_hours() {
         Cmd::Usage {
             from,
             to,
-            tenant,
+            namespace,
             json,
         } => {
             assert_eq!(from, utc("2026-10-20T14:00:00Z"), "read as UTC");
             assert_eq!(to, utc("2026-10-20T15:00:00Z"));
-            assert_eq!(tenant.as_deref(), Some("t1"));
+            assert_eq!(namespace.as_deref(), Some("t1"));
             assert!(json);
             // In UTC, the query needs no escaping.
             assert_eq!(
-                usage_path(from, to, tenant.as_deref()),
-                "/v1/usage?from=2026-10-20T14:00:00Z&to=2026-10-20T15:00:00Z&tenant=t1"
+                usage_path(from, to, namespace.as_deref()),
+                "/v1/usage?from=2026-10-20T14:00:00Z&to=2026-10-20T15:00:00Z&namespace=t1"
             );
             assert_eq!(
                 usage_path(from, to, None),
@@ -1035,10 +1048,10 @@ fn backup_schedules_and_backup_commands() {
             machine,
             backup,
             chain,
-            tenant,
+            namespace,
         }) => {
             assert_eq!(
-                backup_rm_path(&machine, &backup, chain, tenant.as_deref()),
+                backup_rm_path(&machine, &backup, chain, namespace.as_deref()),
                 "/v1/machines/m1/backups/b1?chain=true"
             )
         }
@@ -1050,12 +1063,12 @@ fn backup_schedules_and_backup_commands() {
     );
     assert_eq!(
         backup_rm_path("m1", "b1", true, Some("t1")),
-        "/v1/machines/m1/backups/b1?chain=true&tenant=t1"
+        "/v1/machines/m1/backups/b1?chain=true&namespace=t1"
     );
-    match parse(&["backups", "--tenant", "t1", "--machine", "m1"]).cmd {
-        Cmd::Backups { tenant, machine } => {
+    match parse(&["backups", "--namespace", "t1", "--machine", "m1"]).cmd {
+        Cmd::Backups { namespace, machine } => {
             assert_eq!(
-                (tenant.as_deref(), machine.as_deref()),
+                (namespace.as_deref(), machine.as_deref()),
                 (Some("t1"), Some("m1"))
             )
         }
@@ -1064,7 +1077,7 @@ fn backup_schedules_and_backup_commands() {
     assert!(matches!(
         parse(&["backups"]).cmd,
         Cmd::Backups {
-            tenant: None,
+            namespace: None,
             machine: None
         }
     ));
@@ -1094,7 +1107,7 @@ fn col(line: &str, at: usize, width: usize) -> String {
 fn the_machine_table() {
     let a = api::Machine {
         id: "m_01HZX".into(),
-        tenant: "t1".into(),
+        namespace: "t1".into(),
         name: "web".into(),
         image: "nginx:1.27".into(),
         state: "running".into(),
@@ -1152,31 +1165,43 @@ fn the_machine_table() {
     assert!(out.ends_with('\n'));
     assert_eq!(
         lines[0],
-        "ID               TENANT     NAME           IMAGE                    STATE              READY IP           SIZE      SLEEP  EGRESS             LIMITS                   DISK             BACKUP   PENDING      HOST"
+        "ID               NAMESPACE    NAME           IMAGE                    STATE              READY IP           SIZE      SLEEP  EGRESS             LIMITS                   DISK             BACKUP   PENDING      HOST"
     );
     // Every column starts where its header does.
     let cols = [
         (0, 16),
-        (17, 10),
-        (28, 14),
-        (43, 24),
-        (68, 18),
-        (87, 5),
-        (93, 12),
-        (106, 9),
-        (116, 6),
-        (123, 18),
-        (142, 24),
-        (167, 16),
-        (184, 8),
-        (193, 12),
+        (17, 12),
+        (30, 14),
+        (45, 24),
+        (70, 18),
+        (89, 5),
+        (95, 12),
+        (108, 9),
+        (118, 6),
+        (125, 18),
+        (144, 24),
+        (169, 16),
+        (186, 8),
+        (195, 12),
     ];
     let heads: Vec<String> = cols.iter().map(|(at, w)| col(lines[0], *at, *w)).collect();
     assert_eq!(
         heads,
         [
-            "ID", "TENANT", "NAME", "IMAGE", "STATE", "READY", "IP", "SIZE", "SLEEP", "EGRESS",
-            "LIMITS", "DISK", "BACKUP", "PENDING"
+            "ID",
+            "NAMESPACE",
+            "NAME",
+            "IMAGE",
+            "STATE",
+            "READY",
+            "IP",
+            "SIZE",
+            "SLEEP",
+            "EGRESS",
+            "LIMITS",
+            "DISK",
+            "BACKUP",
+            "PENDING"
         ]
     );
     let row: Vec<String> = cols.iter().map(|(at, w)| col(lines[2], *at, *w)).collect();
@@ -1204,15 +1229,15 @@ fn the_machine_table() {
     );
     assert_eq!(
         lines[2].len(),
-        193 + 12 + 1,
+        195 + 12 + 1,
         "no host: nothing after the pending fields"
     );
-    assert_eq!(col(lines[1], 167, 16), "-", "no disk limit");
-    assert_eq!(col(lines[1], 184, 8), "-", "no schedule");
-    assert_eq!(col(lines[1], 193, 12), "-", "nothing pending");
-    assert_eq!(col(lines[1], 87, 5), "yes");
-    assert_eq!(col(lines[1], 123, 18), "open");
-    assert_eq!(col(lines[1], 142, 24), "-", "nothing limited");
+    assert_eq!(col(lines[1], 169, 16), "-", "no disk limit");
+    assert_eq!(col(lines[1], 186, 8), "-", "no schedule");
+    assert_eq!(col(lines[1], 195, 12), "-", "nothing pending");
+    assert_eq!(col(lines[1], 89, 5), "yes");
+    assert_eq!(col(lines[1], 125, 18), "open");
+    assert_eq!(col(lines[1], 144, 24), "-", "nothing limited");
     // A value wider than its column is not cut: the rest of that row moves right.
     assert!(
         lines[3].contains("a-rather-long-name-indeed ghcr.io/org/some-image:v1.2.3 "),
@@ -1220,10 +1245,10 @@ fn the_machine_table() {
         lines[3]
     );
     assert_eq!(col(lines[1], 0, 16), "m_01HZX");
-    assert_eq!(col(lines[1], 68, 18), "running");
-    assert_eq!(col(lines[1], 93, 12), "10.1.0.2");
+    assert_eq!(col(lines[1], 70, 18), "running");
+    assert_eq!(col(lines[1], 95, 12), "10.1.0.2");
     assert!(lines[1].ends_with(" d1"));
-    assert_eq!(col(lines[1], 43, 24), "nginx:1.27");
+    assert_eq!(col(lines[1], 45, 24), "nginx:1.27");
     assert_eq!(machine_table(&[]).lines().count(), 1, "the header alone");
 }
 
@@ -1286,7 +1311,7 @@ fn the_host_table() {
             vcpus: 6,
         },
         machines: 3,
-        tenants: vec!["t1".into(), "t2".into()],
+        namespaces: vec!["t1".into(), "t2".into()],
         last_seen: ts(),
         version: "0.1.0".into(),
         note: String::new(),
@@ -1315,7 +1340,7 @@ fn the_host_table() {
         capacity: api::Capacity::default(),
         used: api::Capacity::default(),
         machines: 0,
-        tenants: vec![],
+        namespaces: vec![],
         note: "bootstrap attempt 2: ssh: connect to host 10.0.0.9 port 22: Connection refused"
             .into(),
         tls_fingerprint: String::new(),
@@ -1342,11 +1367,11 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[0],
-        "ID               URL                          STATE        REGION   MEMORY MB      VCPUS      MACHINES  TENANTS  VERSION              LAST SEEN"
+        "ID               URL                          STATE        REGION   MEMORY MB      VCPUS      MACHINES  NAMESPACES VERSION              LAST SEEN"
     );
     assert_eq!(
         lines[1],
-        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6/32       3         2        0.1.0                2026-10-19T08:30:00+00:00"
+        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6/32       3         2          0.1.0                2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[2],
@@ -1359,7 +1384,7 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[4],
-        "h_srv-9          -                            provisioning -        0/0            0/0        0         0        -                    2026-10-19T08:30:00+00:00",
+        "h_srv-9          -                            provisioning -        0/0            0/0        0         0          -                    2026-10-19T08:30:00+00:00",
         "no address, region nor version yet shows as -"
     );
     assert_eq!(
@@ -1368,7 +1393,7 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[6],
-        "h_10-42-0-11     https://10.42.0.11:7420      provisioning gra      0/0            0/0        0         0        -                    2026-10-19T08:30:00+00:00"
+        "h_10-42-0-11     https://10.42.0.11:7420      provisioning gra      0/0            0/0        0         0          -                    2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[7], "                 ssh: 51.68.1.2",
@@ -1447,7 +1472,7 @@ fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
         capacity: api::Capacity::default(),
         used: api::Capacity::default(),
         machines: 0,
-        tenants: vec![],
+        namespaces: vec![],
         last_seen: ts(),
         version: String::new(),
         note: String::new(),
@@ -1475,15 +1500,17 @@ fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
 }
 
 #[test]
-fn top_takes_a_tenant() {
-    match parse(&["top", "--tenant", "t1"]).cmd {
-        Cmd::Top { tenant, json } => assert_eq!((tenant.as_deref(), json), (Some("t1"), false)),
+fn top_takes_a_namespace() {
+    match parse(&["top", "--namespace", "t1"]).cmd {
+        Cmd::Top { namespace, json } => {
+            assert_eq!((namespace.as_deref(), json), (Some("t1"), false))
+        }
         _ => panic!("not a top"),
     }
     assert!(matches!(
         parse(&["top", "--json"]).cmd,
         Cmd::Top {
-            tenant: None,
+            namespace: None,
             json: true
         }
     ));
@@ -1493,7 +1520,7 @@ fn top_takes_a_tenant() {
 fn the_top_table_puts_the_busiest_first() {
     let m = |id: &str, name: &str, cpu: f64| api::TopMachine {
         machine_id: id.into(),
-        tenant: "t1".into(),
+        namespace: "t1".into(),
         name: name.into(),
         cpu_percent: cpu,
         memory_bytes: 100 << 20,
@@ -1512,9 +1539,9 @@ fn the_top_table_puts_the_busiest_first() {
     assert_eq!(
         lines,
         [
-            "MACHINE          TENANT     NAME            CPU %     MEMORY MB   DISK MB   INTERNET IN/OUT    INGRESS IN/OUT HOST",
-            "m_2              t1         busy             87.2       100/512      2048           2.0/0.5          0.0/10.0 h1",
-            "m_1              t1         idle              0.5       100/512      2048           2.0/0.5          0.0/10.0 h1",
+            "MACHINE          NAMESPACE    NAME            CPU %     MEMORY MB   DISK MB   INTERNET IN/OUT    INGRESS IN/OUT HOST",
+            "m_2              t1           busy             87.2       100/512      2048           2.0/0.5          0.0/10.0 h1",
+            "m_1              t1           idle              0.5       100/512      2048           2.0/0.5          0.0/10.0 h1",
         ]
     );
     assert_eq!(top_table(vec![]).lines().count(), 1, "the header alone");
@@ -1527,7 +1554,7 @@ fn the_usage_table() {
             .unwrap()
             .with_timezone(&chrono::Utc),
         machine_id: "m_0123456789ab".into(),
-        tenant: "t1".into(),
+        namespace: "t1".into(),
         size: api::Size {
             vcpus: 1,
             memory_mb: 512,
@@ -1554,8 +1581,8 @@ fn the_usage_table() {
     assert_eq!(
         lines,
         [
-            "HOUR              MACHINE          TENANT       RUN H    CPU S  MEM GB·H  DISK GB·H  BACKUP GB·H       INTERNET OUT/IN        INGRESS OUT/IN HOST",
-            "2026-10-20 14:00  m_0123456789ab   t1            0.50     12.3      0.25       5.00         0.50            1200/34000               5600/78 h1",
+            "HOUR              MACHINE          NAMESPACE      RUN H    CPU S  MEM GB·H  DISK GB·H  BACKUP GB·H       INTERNET OUT/IN        INGRESS OUT/IN HOST",
+            "2026-10-20 14:00  m_0123456789ab   t1              0.50     12.3      0.25       5.00         0.50            1200/34000               5600/78 h1",
         ]
     );
     assert_eq!(usage_table(&[]).lines().count(), 1, "the header alone");
@@ -1801,7 +1828,7 @@ async fn the_client_sends_the_token_and_the_body() {
     assert_eq!(text, "");
     let open = client(&url, None);
     let v: Vec<api::Machine> = open
-        .call(reqwest::Method::GET, "/v1/machines?tenant=t1", NONE)
+        .call(reqwest::Method::GET, "/v1/machines?namespace=t1", NONE)
         .await
         .unwrap();
     assert!(v.is_empty());
@@ -1816,7 +1843,7 @@ async fn the_client_sends_the_token_and_the_body() {
     assert_eq!(seen[1].content_type, None, "no body, no content type");
     assert_eq!(seen[1].body, "");
     assert_eq!(
-        seen[2].path, "/v1/machines?tenant=t1",
+        seen[2].path, "/v1/machines?namespace=t1",
         "the query goes along"
     );
     assert_eq!(seen[2].authorization, None, "no token, no header");
@@ -1953,7 +1980,7 @@ fn ev(seq: u64, reason: &str, machine: &str, message: &str) -> api::Event {
         reason: reason.into(),
         message: message.into(),
         machine_id: machine.into(),
-        tenant: "t1".into(),
+        namespace: "t1".into(),
         host: String::new(),
         data: None,
         count: 1,
@@ -1965,7 +1992,7 @@ fn ev(seq: u64, reason: &str, machine: &str, message: &str) -> api::Event {
 fn events_and_describe_parse() {
     match parse(&[
         "events",
-        "--tenant",
+        "--namespace",
         "t1",
         "--machine",
         "m1",
@@ -1976,13 +2003,13 @@ fn events_and_describe_parse() {
     .cmd
     {
         Cmd::Events {
-            tenant,
+            namespace,
             machine,
             since,
             watch,
         } => {
             assert_eq!(
-                (tenant.as_deref(), machine.as_deref(), since.as_deref()),
+                (namespace.as_deref(), machine.as_deref(), since.as_deref()),
                 (Some("t1"), Some("m1"), Some("d1:3,d2:9"))
             );
             assert!(watch);
@@ -1991,7 +2018,7 @@ fn events_and_describe_parse() {
     }
     match parse(&["events"]).cmd {
         Cmd::Events {
-            tenant: None,
+            namespace: None,
             machine: None,
             since: None,
             watch: false,
@@ -2010,19 +2037,19 @@ fn events_and_describe_parse() {
     assert_eq!(events_path(None, None, false), "/v1/events");
     assert_eq!(
         events_path(Some("t1"), Some("m1"), true),
-        "/v1/events?tenant=t1&machine=m1&watch=true"
+        "/v1/events?namespace=t1&machine=m1&watch=true"
     );
     assert_eq!(with_since("/v1/events", "4"), "/v1/events?since=4");
     assert_eq!(
-        with_since("/v1/events?tenant=t1", "d1:3"),
-        "/v1/events?tenant=t1&since=d1:3"
+        with_since("/v1/events?namespace=t1", "d1:3"),
+        "/v1/events?namespace=t1&since=d1:3"
     );
     assert_eq!(with_since("/v1/events", ""), "/v1/events");
     assert_eq!(backups_path(None, None), "/v1/backups");
     assert_eq!(backups_path(None, Some("m1")), "/v1/backups?machine=m1");
     assert_eq!(
         backups_path(Some("t1"), Some("m1")),
-        "/v1/backups?tenant=t1&machine=m1"
+        "/v1/backups?namespace=t1&machine=m1"
     );
 }
 
@@ -2081,7 +2108,7 @@ fn probes_from_the_command_line() {
 fn describe_shows_the_machine_then_its_events() {
     let m = api::Machine {
         id: "m_0123456789ab".into(),
-        tenant: "t1".into(),
+        namespace: "t1".into(),
         name: "web".into(),
         image: "nginx:1.27".into(),
         state: "stopped".into(),
@@ -2200,7 +2227,7 @@ fn describe_shows_the_machine_then_its_events() {
         [
             "Name:          web",
             "ID:            m_0123456789ab",
-            "Tenant:        t1",
+            "Namespace:     t1",
             "Host:          d1",
             "Image:         nginx:1.27",
             "State:         stopped",
@@ -2340,14 +2367,21 @@ async fn events_are_read_page_after_page_and_a_watch_line_by_line() {
 #[test]
 fn labels_regions_and_quotas_from_the_command_line() {
     match machine(parse(&[
-        "machine", "ls", "--tenant", "t1", "-l", "app=web", "--label", "tier",
+        "machine",
+        "ls",
+        "--namespace",
+        "t1",
+        "-l",
+        "app=web",
+        "--label",
+        "tier",
     ])) {
-        MachineCmd::Ls { tenant, labels } => {
-            assert_eq!(tenant.as_deref(), Some("t1"));
+        MachineCmd::Ls { namespace, labels } => {
+            assert_eq!(namespace.as_deref(), Some("t1"));
             assert_eq!(labels, ["app=web", "tier"]);
             assert_eq!(
-                machines_path(tenant.as_deref(), &labels),
-                "/v1/machines?tenant=t1&label=app%3Dweb&label=tier"
+                machines_path(namespace.as_deref(), &labels),
+                "/v1/machines?namespace=t1&label=app%3Dweb&label=tier"
             );
         }
         _ => panic!("not a ls"),
@@ -2374,7 +2408,7 @@ fn labels_regions_and_quotas_from_the_command_line() {
         _ => panic!("not logs"),
     }
     match parse(&[
-        "tenant",
+        "namespace",
         "quota",
         "t1",
         "--machines",
@@ -2386,7 +2420,7 @@ fn labels_regions_and_quotas_from_the_command_line() {
     ])
     .cmd
     {
-        Cmd::Tenant(TenantCmd::Quota {
+        Cmd::Namespace(NamespaceCmd::Quota {
             id,
             machines,
             memory_mb,
@@ -2400,30 +2434,39 @@ fn labels_regions_and_quotas_from_the_command_line() {
                 (Some(1), Some(2048), None, None)
             );
             assert_eq!(
-                tenant_put_path(&id, "quota", region.as_deref()),
-                "/v1/tenants/t1/quota?region=vin"
+                namespace_put_path(&id, "quota", region.as_deref()),
+                "/v1/namespaces/t1/quota?region=vin"
             );
         }
         _ => panic!("not a quota"),
     }
     assert_eq!(
-        fails(&["tenant", "quota", "t1", "--machines", "-1"]),
+        fails(&["namespace", "quota", "t1", "--machines", "-1"]),
         ErrorKind::UnknownArgument
     );
     match parse(&[
-        "tenant", "gateway", "set", "t1", "--image", "i", "--port", "1", "--region", "gra",
+        "namespace",
+        "gateway",
+        "set",
+        "t1",
+        "--image",
+        "i",
+        "--port",
+        "1",
+        "--region",
+        "gra",
     ])
     .cmd
     {
-        Cmd::Tenant(TenantCmd::Gateway(GatewayCmd::Set(a))) => {
+        Cmd::Namespace(NamespaceCmd::Gateway(GatewayCmd::Set(a))) => {
             let region = a.region;
             assert_eq!(region.as_deref(), Some("gra"))
         }
         _ => panic!("not a gateway set"),
     }
     assert_eq!(
-        tenant_put_path("t1", "gateway", None),
-        "/v1/tenants/t1/gateway"
+        namespace_put_path("t1", "gateway", None),
+        "/v1/namespaces/t1/gateway"
     );
 }
 

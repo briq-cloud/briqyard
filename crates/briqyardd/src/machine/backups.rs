@@ -110,7 +110,8 @@ pub(super) fn update(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct HolderRec {
     pub machine_id: String,
-    pub tenant: String,
+    #[serde(alias = "tenant")]
+    pub namespace: String,
     pub name: String,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
@@ -278,16 +279,16 @@ impl Owner {
         }
     }
 
-    /// The machine's id and tenant.
+    /// The machine's id and namespace.
     fn who(&self) -> (String, String) {
         match self {
             Owner::Machine(e) => {
                 let r = e.rec.lock().unwrap();
-                (r.id.clone(), r.tenant.clone())
+                (r.id.clone(), r.namespace.clone())
             }
             Owner::Holder(h) => {
                 let r = h.rec.lock().unwrap();
-                (r.machine_id.clone(), r.tenant.clone())
+                (r.machine_id.clone(), r.namespace.clone())
             }
         }
     }
@@ -434,9 +435,9 @@ impl Manager {
             }
             self.save(e)?;
         } else {
-            self.inner.events.emit(made.of(&rec.id, &rec.tenant));
+            self.inner.events.emit(made.of(&rec.id, &rec.namespace));
             if let Some(ev) = deleted {
-                self.inner.events.emit(ev.of(&rec.id, &rec.tenant));
+                self.inner.events.emit(ev.of(&rec.id, &rec.namespace));
             }
             self.hold(&rec, bytes, e.backup_turn.clone())?;
         }
@@ -511,7 +512,7 @@ impl Manager {
             Ok(disks) => api::Backup {
                 id: bid.clone(),
                 machine_id: rec.id.clone(),
-                tenant: rec.tenant.clone(),
+                namespace: rec.namespace.clone(),
                 name: rec.name.clone(),
                 created_at: Utc::now(),
                 bytes: disks.iter().map(|d| d.bytes).sum(),
@@ -595,7 +596,7 @@ impl Manager {
         let _lock = e.lock.lock().await;
         if !self.holds(e) {
             let r = e.snapshot();
-            self.inner.events.emit(ev.of(&r.id, &r.tenant));
+            self.inner.events.emit(ev.of(&r.id, &r.namespace));
             return;
         }
         {
@@ -680,22 +681,22 @@ impl Manager {
     }
 
     /// Every backup of the host's machines and of its destroyed machines' holders, of one
-    /// tenant or all, of one machine or all, by machine then age. A machine that is neither
+    /// namespace or all, of one machine or all, by machine then age. A machine that is neither
     /// here nor held here has none, and costs no store read.
     pub async fn all_backups(
         &self,
-        tenant: Option<&str>,
+        namespace: Option<&str>,
         machine: Option<&str>,
     ) -> Result<Vec<api::Backup>, MError> {
-        if let Some(t) = tenant {
-            check_tenant_id(t)?;
+        if let Some(t) = namespace {
+            check_namespace_id(t)?;
         }
         if machine.is_some_and(|m| !api::valid_id(m)) {
             return Err(invalid("machine: not a machine id"));
         }
         self.backup_store()?;
         let wanted = |t: &str, id: &str| {
-            tenant.is_none_or(|want| want == t) && machine.is_none_or(|want| want == id)
+            namespace.is_none_or(|want| want == t) && machine.is_none_or(|want| want == id)
         };
         let mut ids: Vec<String> = self
             .inner
@@ -705,7 +706,7 @@ impl Manager {
             .values()
             .filter_map(|e| {
                 let r = e.rec.lock().unwrap();
-                (r.is_tenants() && wanted(&r.tenant, &r.id)).then(|| r.id.clone())
+                (r.is_namespaces() && wanted(&r.namespace, &r.id)).then(|| r.id.clone())
             })
             .collect();
         ids.extend(
@@ -717,7 +718,7 @@ impl Manager {
                 .values()
                 .filter_map(|h| {
                     let r = h.rec.lock().unwrap();
-                    wanted(&r.tenant, &r.machine_id).then(|| r.machine_id.clone())
+                    wanted(&r.namespace, &r.machine_id).then(|| r.machine_id.clone())
                 }),
         );
         // A machine destroyed between the two reads is in both.
@@ -804,9 +805,9 @@ impl Manager {
             }
         }
         // Destroyed, or destroyed meanwhile: its destroy made the holder.
-        let (id, tenant) = owner.who();
+        let (id, namespace) = owner.who();
         if let Some(ev) = ev {
-            self.inner.events.emit(ev.of(&id, &tenant));
+            self.inner.events.emit(ev.of(&id, &namespace));
         }
         let Some(h) = self.holder(&id) else {
             return Ok(());
@@ -841,7 +842,7 @@ impl Manager {
             .or_insert_with(|| {
                 let r = HolderRec {
                     machine_id: rec.id.clone(),
-                    tenant: rec.tenant.clone(),
+                    namespace: rec.namespace.clone(),
                     name: rec.name.clone(),
                     metadata: rec.metadata.clone(),
                     size: rec.size,
@@ -911,7 +912,7 @@ impl Manager {
             .values()
             .filter(|e| {
                 let r = e.rec.lock().unwrap();
-                r.is_tenants()
+                r.is_namespaces()
                     && r.state != state::DESTROYING
                     && r.has_disks()
                     && r.backup.policy.is_some()
@@ -1054,7 +1055,7 @@ impl Manager {
                 m.advance(now, usage::Held::default());
                 let who = api::UsageBucket {
                     machine_id: r.machine_id.clone(),
-                    tenant: r.tenant.clone(),
+                    namespace: r.namespace.clone(),
                     metadata: r.metadata.clone(),
                     size: r.size,
                     ..Default::default()

@@ -217,7 +217,7 @@ async fn a_create_boots_the_machine_to_running() {
         "{zfs:?}"
     );
     assert!(!zfs.iter().any(|c| c.contains("/data")), "{zfs:?}");
-    // The TAP was made on the tenant's bridge, pinned to the address, before the boot;
+    // The TAP was made on the namespace's bridge, pinned to the address, before the boot;
     // then the guest was waited for.
     let tap = netw::tap_name(&m.id);
     assert_eq!(
@@ -397,7 +397,7 @@ async fn a_program_the_init_cannot_start_is_boot_failed_with_its_reason() {
 async fn a_start_and_a_destroy_racing_leave_nothing_behind() {
     for round in 0..6 {
         let h = harness("10.64.0.0/22", 4096).await;
-        h.tenant("t1");
+        h.namespace("t1");
         let e = h.add("m_race", state::STOPPED, 512);
         h.disks(&e).await;
         let (a, b) = (h.m.clone(), h.m.clone());
@@ -432,7 +432,7 @@ async fn a_start_and_a_destroy_racing_leave_nothing_behind() {
 #[tokio::test]
 async fn two_starts_past_capacity_admit_one() {
     let h = harness("10.64.0.0/22", 512).await;
-    h.tenant("t1");
+    h.namespace("t1");
     for id in ["m_a", "m_b"] {
         let e = h.add(id, state::STOPPED, 512);
         h.disks(&e).await;
@@ -824,7 +824,7 @@ async fn a_wait_that_runs_out_on_the_way_is_not_ready() {
 #[tokio::test]
 async fn a_transition_that_panics_is_internal_and_frees_the_machine() {
     let h = harness("10.64.0.0/22", 4096).await;
-    h.tenant("t1");
+    h.namespace("t1");
     let e = h.add("m_p", state::STOPPED, 512);
     h.disks(&e).await;
     h.host.boots(Boots::Panics);

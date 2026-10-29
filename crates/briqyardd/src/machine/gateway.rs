@@ -1,19 +1,19 @@
-//! A tenant's gateway: the machine the daemon runs for its `via-gateway` machines.
+//! A namespace's gateway: the machine the daemon runs for its `via-gateway` machines.
 
 use super::*;
 
 impl Manager {
-    // --- the tenant's gateway (ADR 0016) ---
+    // --- the namespace's gateway (ADR 0016) ---
 
-    /// Puts the tenant's gateway: made, not started, when the tenant has none (the tenant
+    /// Puts the namespace's gateway: made, not started, when the namespace has none (the namespace
     /// too, when it has nothing yet); else given the new spec, a running one restarted. With
     /// `start`, it then runs as a start that needs it would run it.
     pub async fn set_gateway(
         &self,
-        tenant: &str,
+        namespace: &str,
         spec: api::GatewaySpec,
-    ) -> Result<api::Tenant, MError> {
-        check_tenant_id(tenant)?;
+    ) -> Result<api::Namespace, MError> {
+        check_namespace_id(namespace)?;
         if spec.image.is_empty() || spec.port == 0 {
             return Err(invalid("a gateway needs an image and a port (1..65535)"));
         }
@@ -21,7 +21,7 @@ impl Manager {
         // A machine of the daemon: no window of its own, it runs while something needs it,
         // and comes back whenever its program ends on its own.
         let req = api::CreateMachineRequest {
-            tenant: tenant.into(),
+            namespace: namespace.into(),
             name: GATEWAY_NAME.into(),
             size: spec.size(),
             image: spec.image,
@@ -45,28 +45,30 @@ impl Manager {
         // A machine's own check, so a replacement is refused in the words a create would be.
         req.spec().check().map_err(invalid)?;
         check_size(&req.size)?;
-        // Pulled before the tenant's lock: a pull may take minutes.
+        // Pulled before the namespace's lock: a pull may take minutes.
         let im = self.inner.images.ensure(&req.image).await?;
-        let t = self.ensure_tenant(tenant).await?;
+        let t = self.ensure_namespace(namespace).await?;
         let _turn = t.lock.lock().await;
-        match self.gateway_of(tenant) {
+        match self.gateway_of(namespace) {
             None => {
-                // Made before the answer: the tenant's lock orders its gateway's changes.
+                // Made before the answer: the namespace's lock orders its gateway's changes.
                 let (gw, how) = self.record(req, Some(Role::Gateway)).await?;
                 self.make(&gw, how).await?;
             }
             Some(gw) => self.replace_gateway(&gw, req, im).await?,
         }
         if spec.start {
-            let gw = self.gateway_of(tenant).ok_or_else(|| no_gateway(tenant))?;
+            let gw = self
+                .gateway_of(namespace)
+                .ok_or_else(|| no_gateway(namespace))?;
             self.run_gateway(&gw).await?;
         }
-        self.tenant(tenant)
+        self.namespace(namespace)
     }
 
     /// A new spec on the same machine, address and volume: stopped if it runs, started again
     /// (a new image's root disk is made by the next start, ADR 0024). The spec it has already
-    /// changes nothing, so a control plane may put it again. Under the tenant's lock.
+    /// changes nothing, so a control plane may put it again. Under the namespace's lock.
     async fn replace_gateway(
         &self,
         gw: &Arc<Entry>,
@@ -145,25 +147,25 @@ impl Manager {
         Ok(())
     }
 
-    /// Stops and destroys the tenant's gateway; refused while a machine runs through it.
+    /// Stops and destroys the namespace's gateway; refused while a machine runs through it.
     /// None is success.
-    pub async fn delete_gateway(&self, tenant: &str) -> Result<(), MError> {
-        check_tenant_id(tenant)?;
-        let Some(t) = self.tenant_of(tenant) else {
+    pub async fn delete_gateway(&self, namespace: &str) -> Result<(), MError> {
+        check_namespace_id(namespace)?;
+        let Some(t) = self.namespace_of(namespace) else {
             return Ok(());
         };
         let _turn = t.lock.lock().await;
-        let Some(gw) = self.gateway_of(tenant) else {
+        let Some(gw) = self.gateway_of(namespace) else {
             return Ok(());
         };
-        if gateway_needed(&self.inner.machines.lock().unwrap(), tenant) {
+        if gateway_needed(&self.inner.machines.lock().unwrap(), namespace) {
             return Err(MError::GatewayInUse);
         }
         self.destroy_machine(&gw.snapshot().id, None).await
     }
 
-    /// The tenant's gateway machine, unless it is being destroyed.
-    pub(super) fn gateway_of(&self, tenant: &str) -> Option<Arc<Entry>> {
+    /// The namespace's gateway machine, unless it is being destroyed.
+    pub(super) fn gateway_of(&self, namespace: &str) -> Option<Arc<Entry>> {
         self.inner
             .machines
             .lock()
@@ -171,22 +173,24 @@ impl Manager {
             .values()
             .find(|e| {
                 let r = e.rec.lock().unwrap();
-                r.tenant == tenant && r.is_gateway() && r.state != state::DESTROYING
+                r.namespace == namespace && r.is_gateway() && r.state != state::DESTROYING
             })
             .cloned()
     }
 
-    /// Makes sure the tenant's gateway runs and its port answers, and returns the tenant's
+    /// Makes sure the namespace's gateway runs and its port answers, and returns the namespace's
     /// lock held: two starts that need the gateway boot it once.
     pub(super) async fn ensure_gateway(
         &self,
-        tenant: &str,
+        namespace: &str,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, MError> {
         let t = self
-            .tenant_of(tenant)
-            .ok_or_else(|| anyhow!("tenant network is gone"))?;
+            .namespace_of(namespace)
+            .ok_or_else(|| anyhow!("namespace network is gone"))?;
         let turn = t.lock.clone().lock_owned().await;
-        let gw = self.gateway_of(tenant).ok_or_else(|| no_gateway(tenant))?;
+        let gw = self
+            .gateway_of(namespace)
+            .ok_or_else(|| no_gateway(namespace))?;
         self.run_gateway(&gw).await?;
         Ok(turn)
     }
@@ -194,7 +198,7 @@ impl Manager {
     /// Starts the gateway unless it runs, then waits for it to serve within the boot timeout:
     /// its `ready` when it has a startup or readiness probe (ADR 0022), else its port. A
     /// gateway that does not serve in time is ended and left in `error` with its console's
-    /// last lines, as a boot that fails is. Under the tenant's lock; the gateway's own lock is
+    /// last lines, as a boot that fails is. Under the namespace's lock; the gateway's own lock is
     /// let go while it is waited for, since its probes take it to end a failed boot.
     async fn run_gateway(&self, gw: &Arc<Entry>) -> Result<(), MError> {
         let (started, live) = {
@@ -233,7 +237,7 @@ impl Manager {
                 gw.note(
                     Ev::normal(
                         reason::GATEWAY_STARTED,
-                        format!("the tenant's gateway answers on {ip}:{port}"),
+                        format!("the namespace's gateway answers on {ip}:{port}"),
                     )
                     .data(json!({ "port": port })),
                 );
@@ -254,49 +258,49 @@ impl Manager {
         match err {
             MError::BootFailed(gw) => {
                 let mut m = self.view(e);
-                m.error = format!("the tenant's gateway did not come up: {}", gw.error);
+                m.error = format!("the namespace's gateway did not come up: {}", gw.error);
                 MError::BootFailed(Box::new(m))
             }
             other => other,
         }
     }
 
-    /// The gateways whose state is not what their tenant needs: running while no machine
+    /// The gateways whose state is not what their namespace needs: running while no machine
     /// needs them (`running`), or not running while one does (not `running`).
     pub(super) fn gateways_out_of_step(&self, running: bool) -> Vec<Arc<Entry>> {
         let machines = self.inner.machines.lock().unwrap();
         machines
             .values()
             .filter(|e| {
-                let tenant = {
+                let namespace = {
                     let r = e.rec.lock().unwrap();
                     if !r.is_gateway() || (r.state == state::RUNNING) != running {
                         return false;
                     }
-                    r.tenant.clone()
+                    r.namespace.clone()
                 };
-                gateway_needed(&machines, &tenant) != running
+                gateway_needed(&machines, &namespace) != running
             })
             .cloned()
             .collect()
     }
 
-    /// Stops a gateway nothing needs, under its tenant's lock. A lock someone holds is a start
+    /// Stops a gateway nothing needs, under its namespace's lock. A lock someone holds is a start
     /// or a change of the gateway under way: the next tick looks again.
     pub(super) async fn sleep_gateway(&self, gw: &Arc<Entry>) {
         let r = gw.snapshot();
-        let Some(t) = self.tenant_of(&r.tenant) else {
+        let Some(t) = self.namespace_of(&r.namespace) else {
             return;
         };
         let Ok(_turn) = t.lock.try_lock() else {
             return;
         };
-        if gateway_needed(&self.inner.machines.lock().unwrap(), &r.tenant) {
+        if gateway_needed(&self.inner.machines.lock().unwrap(), &r.namespace) {
             return;
         }
         tracing::info!(
             machine = r.id,
-            tenant = r.tenant,
+            namespace = r.namespace,
             "gateway unused, going to sleep"
         );
         let suspend = self.inner.cfg.suspend_on_sleep;
@@ -311,19 +315,19 @@ impl Manager {
         if self.holds(gw) && gw.snapshot().state == state::STOPPED {
             gw.note(Ev::normal(
                 reason::GATEWAY_STOPPED,
-                "nothing sends through the tenant's gateway: stopped",
+                "nothing sends through the namespace's gateway: stopped",
             ));
             let _ = self.save(gw);
         }
     }
 }
 
-/// Whether a machine of `tenant` that sends through its gateway is running or starting: what
+/// Whether a machine of `namespace` that sends through its gateway is running or starting: what
 /// keeps the gateway up.
-fn gateway_needed(machines: &HashMap<String, Arc<Entry>>, tenant: &str) -> bool {
+fn gateway_needed(machines: &HashMap<String, Arc<Entry>>, namespace: &str) -> bool {
     machines.values().any(|e| {
         let r = e.rec.lock().unwrap();
-        r.tenant == tenant
+        r.namespace == namespace
             && r.egress.via_gateway()
             && matches!(r.state.as_str(), state::STARTING | state::RUNNING)
     })

@@ -5,7 +5,7 @@
 # phase prints what failed and how. Runs in the dev VM, through the fleet ($BRIQYARD_URL, default
 # http://127.0.0.1:7430) and its host whose URL is loopback, with the release directory
 # hack/vm.sh installs. Endpoints are dialled at PROBE_ADDR (default: the VM's own address, not
-# loopback). Makes one machine in a tenant "probe-<pid>" and removes it.
+# loopback). Makes one machine in a namespace "probe-<pid>" and removes it.
 #
 #   hack/vm-lock.sh bash -c 'hack/vm.sh install && limactl shell fc bash hack/upgrade-probe.sh'
 set -euo pipefail
@@ -27,8 +27,8 @@ UP=$(api /v1/hosts | jq -r "$up_ready | .id")
 probe=""
 cleanup() {
   [ -z "$probe" ] || kill "$probe" 2>/dev/null || true
-  for id in $(briqyard machine ls --tenant "$T" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
-  briqyard tenant rm "$T" >/dev/null 2>&1 || true
+  for id in $(briqyard machine ls --namespace "$T" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine destroy "$id" >/dev/null 2>&1 || true; done
+  briqyard namespace rm "$T" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -43,7 +43,7 @@ class H(s.StreamRequestHandler):
             self.wfile.write(line)
 s.ThreadingTCPServer.allow_reuse_address = True
 s.ThreadingTCPServer(("", 9000), H).serve_forever()'
-M=$(briqyard machine run --image python:3.12-alpine --name probe --tenant "$T" --memory 256 --sleep 1h \
+M=$(briqyard machine run --image python:3.12-alpine --name probe --namespace "$T" --memory 256 --sleep 1h \
   -e "ECHO=$ECHO" --readiness tcp:9000 -- sh -c 'python3 -m http.server 8080 >/dev/null 2>&1 & exec python3 -c "$ECHO"' | jq -r .id)
 for h in $OTHERS; do briqyard host undrain "$h" >/dev/null; done
 port() { briqyard endpoint add "$M" "$1" | jq -r .address | sed 's/.*://'; }

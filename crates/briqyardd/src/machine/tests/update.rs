@@ -451,7 +451,7 @@ async fn a_volume_never_shrinks_and_grows_within_the_quota_and_the_pool() {
         refused(h.m.update("m_n", grow_to(1), None).await),
         "invalid request: volume: the machine has none; a volume is made at create"
     );
-    // The tenant's quota counts the growth, as a create counts a volume.
+    // The namespace's quota counts the growth, as a create counts a volume.
     let quota = api::Quota {
         disk_gb: Some(4),
         ..Default::default()
@@ -460,7 +460,7 @@ async fn a_volume_never_shrinks_and_grows_within_the_quota_and_the_pool() {
     h.pool.calls();
     assert_eq!(
         refused(h.m.update("m_v", grow_to(5), None).await),
-        "tenant t1's quota: disk_gb 2 of 4 used, 3 more asked"
+        "namespace t1's quota: disk_gb 2 of 4 used, 3 more asked"
     );
     let last = h.events_of("m_v").pop().unwrap();
     assert_eq!(last.reason, "quota_exceeded");

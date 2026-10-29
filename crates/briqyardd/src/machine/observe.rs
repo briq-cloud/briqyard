@@ -88,7 +88,7 @@ impl Manager {
                 host.suspended += r.suspended as usize;
                 metrics::Machine {
                     id: r.id.clone(),
-                    tenant: r.tenant.clone(),
+                    namespace: r.namespace.clone(),
                     name: r.name.clone(),
                     role: role_name(r.role),
                     state: r.state.clone(),
@@ -107,7 +107,7 @@ impl Manager {
         let (used, _, _) = self.usage();
         let cap = self.capacity();
         let st = &self.inner.stats;
-        host.tenants = self.inner.tenants.lock().unwrap().len();
+        host.namespaces = self.inner.namespaces.lock().unwrap().len();
         host.endpoints = self.inner.endpoints.lock().unwrap().len();
         host.memory_mb = (used.memory_mb, cap.memory_mb);
         host.vcpus = (used.vcpus, cap.vcpus);
@@ -165,9 +165,9 @@ impl Manager {
         self.inner.vmm.version()
     }
 
-    /// The running machines' use over the tick's last window (ADR 0021), of one tenant or
-    /// all, gateways included, by tenant then name.
-    pub fn top(&self, tenant: Option<&str>) -> Vec<api::TopMachine> {
+    /// The running machines' use over the tick's last window (ADR 0021), of one namespace or
+    /// all, gateways included, by namespace then name.
+    pub fn top(&self, namespace: Option<&str>) -> Vec<api::TopMachine> {
         let entries: Vec<Arc<Entry>> = self
             .inner
             .machines
@@ -180,14 +180,14 @@ impl Manager {
             .iter()
             .filter_map(|e| {
                 let r = e.rec.lock().unwrap();
-                if r.state != state::RUNNING || tenant.is_some_and(|t| r.tenant != t) {
+                if r.state != state::RUNNING || namespace.is_some_and(|t| r.namespace != t) {
                     return None;
                 }
                 let m = e.meter.lock().unwrap();
                 let rates = m.rates();
                 Some(api::TopMachine {
                     machine_id: r.id.clone(),
-                    tenant: r.tenant.clone(),
+                    namespace: r.namespace.clone(),
                     name: r.name.clone(),
                     role: role_name(r.role),
                     cpu_percent: rates.cpu_percent,
@@ -203,7 +203,7 @@ impl Manager {
                 })
             })
             .collect();
-        out.sort_by(|a, b| (&a.tenant, &a.name).cmp(&(&b.tenant, &b.name)));
+        out.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
         out
     }
 
@@ -234,23 +234,23 @@ impl Manager {
         self.entry(id).ok().map(|e| e.traffic.clone())
     }
 
-    /// The buckets of the hours in `[from, to)`, of one tenant or all, by hour then machine:
+    /// The buckets of the hours in `[from, to)`, of one namespace or all, by hour then machine:
     /// the open hours from memory, the others from their files.
     pub async fn usage_buckets(
         &self,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
-        tenant: Option<String>,
+        namespace: Option<String>,
     ) -> Result<Vec<api::UsageBucket>, MError> {
         let (mut out, open) =
             self.inner
                 .usage
                 .lock()
                 .unwrap()
-                .open_buckets(from, to, tenant.as_deref());
+                .open_buckets(from, to, namespace.as_deref());
         let store = self.inner.store.clone();
         let stored = tokio::task::spawn_blocking(move || {
-            usage::stored(&store, from, to, tenant.as_deref(), &open)
+            usage::stored(&store, from, to, namespace.as_deref(), &open)
         })
         .await
         .map_err(|e| anyhow!(e))??;

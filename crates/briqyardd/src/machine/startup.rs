@@ -3,7 +3,7 @@
 use super::*;
 
 impl Manager {
-    /// Loads the state and prepares the host: forwarding, nftables, the tenants' bridges and
+    /// Loads the state and prepares the host: forwarding, nftables, the namespaces' bridges and
     /// DNS, and reaps machines left over from a previous daemon.
     pub async fn new(
         cfg: Config,
@@ -68,11 +68,11 @@ impl Manager {
             host_id,
             advertise,
             machines: Mutex::new(HashMap::new()),
-            tenants: Mutex::new(HashMap::new()),
+            namespaces: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
             endpoint_events,
             policies: Mutex::new(HashMap::new()),
-            tenant_create: tokio::sync::Mutex::new(()),
+            namespace_create: tokio::sync::Mutex::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),
             probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),
@@ -86,9 +86,16 @@ impl Manager {
         let m = Self { inner };
         m.load()?;
         host::enable_forwarding()?;
-        let tenants: Vec<Tenant> = m.inner.tenants.lock().unwrap().values().cloned().collect();
-        for t in &tenants {
-            m.plumb_tenant(t).await?;
+        let namespaces: Vec<Namespace> = m
+            .inner
+            .namespaces
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for t in &namespaces {
+            m.plumb_namespace(t).await?;
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
@@ -124,23 +131,23 @@ impl Manager {
         &self.inner.host_id
     }
 
-    /// Reads the records. A tenant whose subnet index is outside `network.range`, or an
+    /// Reads the records. A namespace whose subnet index is outside `network.range`, or an
     /// endpoint whose port is outside `ingress.tcp_ports`, is refused here, with the fix, rather than found by the first request that needs its subnet. The
     /// event log goes on past every machine's version.
     pub(super) fn load(&self) -> Result<()> {
         let st = &self.inner.store;
-        for rec in st.list::<TenantRec>("tenants")? {
+        for rec in st.list::<NamespaceRec>(crate::store::NAMESPACES)? {
             let subnet = self.inner.range.subnet(rec.subnet_index).with_context(|| {
                 format!(
-                    "tenant {}: widen network.range back, or remove the tenant",
+                    "namespace {}: widen network.range back, or remove the namespace",
                     rec.id
                 )
             })?;
             self.inner
-                .tenants
+                .namespaces
                 .lock()
                 .unwrap()
-                .insert(rec.id.clone(), Tenant::new(rec, subnet));
+                .insert(rec.id.clone(), Namespace::new(rec, subnet));
         }
         let records = st.list::<Record>("machines")?;
         // An address is one record's at a time: a `destroying` record whose address another
@@ -174,7 +181,7 @@ impl Manager {
                 .insert(id, Entry::new(r, self.inner.events.clone()));
         }
         // An endpoint port outside the range would listen where the daemon's table does not
-        // hold it for `allowed_clients`: refused, like a tenant outside `network.range`.
+        // hold it for `allowed_clients`: refused, like a namespace outside `network.range`.
         let spec = &self.inner.cfg.ingress.tcp_ports;
         let (lo, hi) = port_range(spec).map_err(|e| anyhow!("{e}"))?;
         for ep in st.list::<EndpointRec>("endpoints")? {
@@ -276,13 +283,13 @@ impl Manager {
             );
             let _ = self.save(&e);
         }
-        // An adopted machine that sends through its tenant's gateway needs it, and the
+        // An adopted machine that sends through its namespace's gateway needs it, and the
         // gateway's own process may not have survived: it starts as a start would start it.
         for gw in self.gateways_out_of_step(false) {
-            let (m, tenant) = (self.clone(), gw.snapshot().tenant);
+            let (m, namespace) = (self.clone(), gw.snapshot().namespace);
             tokio::spawn(async move {
-                if let Err(err) = m.ensure_gateway(&tenant).await {
-                    tracing::warn!(tenant, err = %err, "gateway an adopted machine needs");
+                if let Err(err) = m.ensure_gateway(&namespace).await {
+                    tracing::warn!(namespace, err = %err, "gateway an adopted machine needs");
                 }
             });
         }

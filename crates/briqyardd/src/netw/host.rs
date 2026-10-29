@@ -194,7 +194,7 @@ async fn link_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Makes the tenant's bridge with the gateway address, up.
+/// Makes the namespace's bridge with the gateway address, up.
 pub async fn ensure_bridge(s: &Subnet) -> Result<String> {
     let name = bridge_name(s.index);
     if !link_exists(&name).await {
@@ -225,7 +225,7 @@ pub async fn ensure_bridge(s: &Subnet) -> Result<String> {
     Ok(name)
 }
 
-/// Removes the tenant's bridge. Missing is success.
+/// Removes the namespace's bridge. Missing is success.
 pub async fn delete_bridge(index: u32) -> Result<()> {
     let name = bridge_name(index);
     if link_exists(&name).await {

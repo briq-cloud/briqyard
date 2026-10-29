@@ -27,7 +27,7 @@ runs again: each must be its old value or its new one, on its own, since a stop 
 disks' writes leaves one of each. Never assume the old value: the command often ran.
 
     python3 hack/chaos.py --minutes 10                        # the VM's daemon
-    python3 hack/chaos.py --url http://127.0.0.1:7430 --tenants 8 --racers 8 --backups
+    python3 hack/chaos.py --url http://127.0.0.1:7430 --namespaces 8 --racers 8 --backups
 
 Exit code 1 when an integrity check failed or an answer was unexpected; the report says which.
 """
@@ -99,9 +99,9 @@ class Chaos:
         self.api = Api(a.url, a.token, a.cafile)
         self.prefix = a.prefix or f"ch{a.seed % 1000:03d}"
         self.stop_at = time.monotonic() + a.minutes * 60
-        self.machines = {}  # id -> tenant, for the racers
+        self.machines = {}  # id -> namespace, for the racers
         self.mlock = threading.Lock()
-        self.backups = []  # (machine id, tenant, backup id)
+        self.backups = []  # (machine id, namespace, backup id)
         self.counts = {}
         self.integrity = []
 
@@ -113,8 +113,8 @@ class Chaos:
         body = {"cmd": ["sh", "-c", script], "timeout_ms": timeout_ms, "wake": True}
         return self.api.req("POST", f"/v1/machines/{mid}/exec", body, timeout=timeout_ms / 1000 + 120)
 
-    def create(self, tenant, name, vol, extra=None):
-        body = {"tenant": tenant, "name": name, "image": self.a.image, "cmd": ["sleep", "infinity"],
+    def create(self, namespace, name, vol, extra=None):
+        body = {"namespace": namespace, "name": name, "image": self.a.image, "cmd": ["sleep", "infinity"],
                 "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never",
                 "metadata": {"chaos": self.prefix}}
         if vol:
@@ -128,9 +128,9 @@ class Chaos:
 
     # ---- owners: integrity ----
 
-    def owner(self, tenant, slot):
-        who = f"{tenant}/s{slot}"
-        rng = random.Random(f"{self.a.seed}-{tenant}-{slot}")
+    def owner(self, namespace, slot):
+        who = f"{namespace}/s{slot}"
+        rng = random.Random(f"{self.a.seed}-{namespace}-{slot}")
         vol = slot % 2 == 0
         read_cmd = "cat /root/n 2>/dev/null || echo 0; " + ("cat /data/n 2>/dev/null || echo 0" if vol else "echo 0")
         gen, mid = 0, None
@@ -246,13 +246,13 @@ class Chaos:
 
         def adopt(target):
             with self.mlock:
-                self.machines[target] = tenant
+                self.machines[target] = namespace
 
         try:
             while time.monotonic() < self.stop_at:
                 if mid is None:
                     gen += 1
-                    st, j, txt, code = self.create(tenant, f"s{slot}g{gen}", vol)
+                    st, j, txt, code = self.create(namespace, f"s{slot}g{gen}", vol)
                     if st != 201:
                         if not (st == 503 and code == "capacity"):
                             self.api.note(who, f"create: {st} {txt[:200]}")
@@ -286,7 +286,7 @@ class Chaos:
                         verify(mid, op, val)
                 elif op == "fork":
                     expect = val
-                    st, j, txt, code = self.create(tenant, f"s{slot}g{gen}-f{rng.randint(0, 99999)}", vol,
+                    st, j, txt, code = self.create(namespace, f"s{slot}g{gen}-f{rng.randint(0, 99999)}", vol,
                                                    {"fork": {"machine_id": mid, "copy": "disk"}})
                     if st != 201:
                         if code not in RACE_OK and not (st == 503 and code == "capacity"):
@@ -335,10 +335,10 @@ class Chaos:
                             self.api.note(who, f"backup: {st} {txt[:200]}")
                         continue
                     with self.mlock:
-                        self.backups.append((mid, tenant, j["id"]))
+                        self.backups.append((mid, namespace, j["id"]))
                     self.count("backup")
                     if rng.random() < 0.5:
-                        st, j2, txt, code = self.create(tenant, f"r{rng.randint(0, 99999)}", vol,
+                        st, j2, txt, code = self.create(namespace, f"r{rng.randint(0, 99999)}", vol,
                                                         {"restore": {"machine_id": mid, "backup": j["id"]}})
                         if st != 201:
                             if not (st == 503 and code == "capacity"):
@@ -406,7 +406,7 @@ class Chaos:
         if st != 200:
             self.api.note("final", f"list: {st} {txt[:200]}")
             return []
-        return [m for m in ms if m["tenant"].startswith(self.prefix + "-")]
+        return [m for m in ms if m["namespace"].startswith(self.prefix + "-")]
 
     def settle_check(self):
         deadline = time.monotonic() + 180
@@ -437,22 +437,22 @@ class Chaos:
             if (mid, bid) in seen:
                 continue
             seen.add((mid, bid))
-            st, _, txt, _ = self.api.req("DELETE", f"/v1/machines/{mid}/backups/{bid}?chain=true&tenant={t}", timeout=300)
+            st, _, txt, _ = self.api.req("DELETE", f"/v1/machines/{mid}/backups/{bid}?chain=true&namespace={t}", timeout=300)
             if st not in (200, 204, 404):
                 self.api.note("cleanup", f"backup rm {mid}/{bid}: {st} {txt[:200]}")
-        for t in [f"{self.prefix}-t{i}" for i in range(self.a.tenants)]:
+        for t in [f"{self.prefix}-t{i}" for i in range(self.a.namespaces)]:
             for _ in range(10):
-                st, _, txt, _ = self.api.req("DELETE", f"/v1/tenants/{t}")
+                st, _, txt, _ = self.api.req("DELETE", f"/v1/namespaces/{t}")
                 if st in (200, 204, 404):
                     break
                 time.sleep(3)
             else:
-                self.api.note("cleanup", f"tenant rm {t}: {st} {txt[:200]}")
+                self.api.note("cleanup", f"namespace rm {t}: {st} {txt[:200]}")
 
     def run(self):
-        log(f"chaos {self.prefix}: {self.a.tenants} tenants x {self.a.per_tenant} owners, {self.a.racers} racers, {self.a.minutes} min, {self.a.url}")
+        log(f"chaos {self.prefix}: {self.a.namespaces} namespaces x {self.a.per_namespace} owners, {self.a.racers} racers, {self.a.minutes} min, {self.a.url}")
         threads = [threading.Thread(target=self.owner, args=(f"{self.prefix}-t{t}", s))
-                   for t in range(self.a.tenants) for s in range(self.a.per_tenant)]
+                   for t in range(self.a.namespaces) for s in range(self.a.per_namespace)]
         threads += [threading.Thread(target=self.racer, args=(i,)) for i in range(self.a.racers)]
         for t in threads:
             t.start()
@@ -490,14 +490,14 @@ if __name__ == "__main__":
     p.add_argument("--url", default=os.environ.get("BRIQYARD_URL", "http://127.0.0.1:7420"))
     p.add_argument("--token", default=os.environ.get("BRIQYARD_TOKEN", ""))
     p.add_argument("--cafile", default=os.environ.get("CURL_CA_BUNDLE"), help="the API's certificate, over https")
-    p.add_argument("--tenants", type=int, default=4)
-    p.add_argument("--per-tenant", type=int, default=3, help="owners per tenant")
+    p.add_argument("--namespaces", type=int, default=4)
+    p.add_argument("--per-namespace", type=int, default=3, help="owners per namespace")
     p.add_argument("--racers", type=int, default=4)
     p.add_argument("--minutes", type=float, default=10)
     p.add_argument("--image", default="alpine:3.20")
     p.add_argument("--memory", type=int, default=128)
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
-    p.add_argument("--prefix", default="", help="tenant prefix (default ch<seed>)")
+    p.add_argument("--prefix", default="", help="namespace prefix (default ch<seed>)")
     p.add_argument("--backups", action="store_true", help="also back up and restore (needs a backup store)")
     p.add_argument("--keep", action="store_true", help="leave the machines and backups")
     sys.exit(Chaos(p.parse_args()).run())

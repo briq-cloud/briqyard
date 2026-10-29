@@ -4,7 +4,7 @@
 # address), the daemon at $BRIQYARD_URL (default http://127.0.0.1:7420) with $BRIQYARD_TOKEN and,
 # over TLS, $BRIQYARD_TLS_FINGERPRINT; its HTTP ingress at $BRIQYARD_INGRESS (default the API's
 # address, port 8080); a `backup.store`; and the internet. psql, when present, adds checks.
-# Every machine it makes lives in a tenant "e2e-<pid>…" and is destroyed at the end.
+# Every machine it makes lives in a namespace "e2e-<pid>…" and is destroyed at the end.
 set -euo pipefail
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7420}
 for c in briqyard curl jq bc openssl timeout; do command -v "$c" >/dev/null || { echo "e2e needs $c"; exit 2; }; done
@@ -56,13 +56,13 @@ cleanup() {
       handover
     fi
   fi
-  # Every tenant of the run: "$T" and "$T-<section>" (-eg, -gw, -other, -par1…).
-  for t in $(briqyard tenant ls 2>/dev/null | jq -r --arg t "$T" '.[].id | select(. == $t or startswith($t + "-"))'); do
-    for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
-    # A machine still settling refuses its destroy; try again until the tenant is empty.
+  # Every namespace of the run: "$T" and "$T-<section>" (-eg, -gw, -other, -par1…).
+  for t in $(briqyard namespace ls 2>/dev/null | jq -r --arg t "$T" '.[].id | select(. == $t or startswith($t + "-"))'); do
+    for id in $(briqyard machine ls --namespace "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
+    # A machine still settling refuses its destroy; try again until the namespace is empty.
     for i in $(seq 1 10); do
-      briqyard tenant rm "$t" >/dev/null 2>&1 && break
-      for id in $(briqyard machine ls --tenant "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
+      briqyard namespace rm "$t" >/dev/null 2>&1 && break
+      for id in $(briqyard machine ls --namespace "$t" 2>/dev/null | awk 'NR>1{print $1}'); do briqyard machine rm "$id" >/dev/null 2>&1 || true; done
       sleep 2
     done
   done
@@ -76,7 +76,7 @@ briqyard status | jq -e '.host_id' >/dev/null && ok "status answers"
 
 echo "== alpine: boot, exec, files, dns, egress"
 start=$(date +%s.%N)
-A=$(briqyard machine run --image alpine:3.20 --name alp --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
+A=$(briqyard machine run --image alpine:3.20 --name alp --namespace "$T" --memory 256 -- sleep 3600 | jq -r .id)
 boot=$(echo "$(date +%s.%N) - $start" | bc)
 state=$(briqyard machine get "$A" | jq -r .state)
 check "alpine running (${boot}s)" '[ "$state" = running ]'
@@ -96,7 +96,7 @@ echo "== a create answers once recorded; the pull and the boot follow (ADR 0048)
 IMG2=busybox:1.36.1-musl
 for k in $(briqyard image ls | awk -v r="$IMG2" '$2 == r { print $1 }'); do briqyard image rm "$k" >/dev/null; done
 post() { "${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "$1" "$BRIQYARD_URL/v1/machines"; }
-body="{\"tenant\":\"$T\",\"name\":\"pulled\",\"image\":\"$IMG2\",\"cmd\":[\"sleep\",\"3600\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}"
+body="{\"namespace\":\"$T\",\"name\":\"pulled\",\"image\":\"$IMG2\",\"cmd\":[\"sleep\",\"3600\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}"
 start=$(date +%s.%N); made=$(post "$body"); answered=$(echo "$(date +%s.%N) - $start" | bc)
 PL=$(echo "${made% *}" | jq -r .id)
 waited=$("${CURL[@]}" -fsS -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$PL/wait?for=running&timeout=600" | jq -r .state)
@@ -110,16 +110,16 @@ CA=$(echo "${cached% *}" | jq -r .id)
 "${CURL[@]}" -fsS -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$CA/wait?for=running&timeout=120" >/dev/null || true
 ran=$(echo "$(date +%s.%N) - $start" | bc)
 check "create: the image on the host (${answered}s, running ${ran}s)" '[ "$(briqyard machine get "$CA" | jq -r .state)" = running ]'
-bad=$(post "{\"tenant\":\"$T\",\"name\":\"badpull\",\"image\":\"127.0.0.1:1/nope:1\",\"size\":{\"vcpus\":1,\"memory_mb\":128}}")
+bad=$(post "{\"namespace\":\"$T\",\"name\":\"badpull\",\"image\":\"127.0.0.1:1/nope:1\",\"size\":{\"vcpus\":1,\"memory_mb\":128}}")
 BP=$(echo "${bad% *}" | jq -r .id)
 failed=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$BP/wait?timeout=120")
 check "create: a pull that fails is 409 pull_failed, the machine in error" '[ "${failed##* }" = 409 ] && [ "$(echo "${failed% *}" | jq -r .code)" = pull_failed ] && [ "$(briqyard machine get "$BP" | jq -r .error_reason)" = pull_failed ]'
 briqyard machine rm "$PL" >/dev/null; briqyard machine rm "$CA" >/dev/null; briqyard machine rm "$BP" >/dev/null
 
 echo "== image layers: hard links, merged /usr (ADR 0039)"
-BB=$(briqyard machine run --image busybox:1.37 --name bb --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+BB=$(briqyard machine run --image busybox:1.37 --name bb --namespace "$T" --memory 128 -- sleep 3600 | jq -r .id)
 check "busybox: 400 applets, one file"   '[ "$(briqyard machine exec "$BB" -- stat -c %h /bin/busybox)" -gt 400 ]'
-DB=$(briqyard machine run --image debian:bookworm-slim --name deb --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+DB=$(briqyard machine run --image debian:bookworm-slim --name deb --namespace "$T" --memory 128 -- sleep 3600 | jq -r .id)
 check "debian: /bin a link to usr/bin"   '[ "$(briqyard machine exec "$DB" -- readlink /bin)" = usr/bin ]'
 check "debian: a command through it"     '[ "$(briqyard machine exec "$DB" -- /bin/sh -c "echo ok")" = ok ]'
 briqyard machine rm "$BB" >/dev/null; briqyard machine rm "$DB" >/dev/null
@@ -127,12 +127,12 @@ briqyard machine rm "$BB" >/dev/null; briqyard machine rm "$DB" >/dev/null
 echo "== an image's user, and a program that cannot start"
 # USER 101, listed in its own group in /etc/group: the groups are set before the user (v0.1.1
 # could not start such an image).
-NU=$(briqyard machine run --image nginxinc/nginx-unprivileged:1.28-alpine-slim --name nginxu --tenant "$T" --memory 128 2>/dev/null | jq -r .id || true)
+NU=$(briqyard machine run --image nginxinc/nginx-unprivileged:1.28-alpine-slim --name nginxu --namespace "$T" --memory 128 2>/dev/null | jq -r .id || true)
 check "a user with a supplementary group: running" '[ "$(briqyard machine get "$NU" | jq -r .state)" = running ]'
 IDS='s=$(grep -lE "^Uid:[[:space:]]+101[[:space:]]" /proc/[0-9]*/status | head -1); grep -E "^(Uid|Gid|Groups):" "$s" | awk "{print \$2}" | xargs'
 check "its uid, gid and groups" '[ "$(briqyard machine exec "$NU" -- sh -c "$IDS")" = "101 101 101" ]'
 briqyard machine rm "$NU" >/dev/null 2>&1 || true
-NS=$("${CURL[@]}" -fsS -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"tenant\":\"$T\",\"name\":\"nostart\",\"image\":\"alpine:3.20\",\"cmd\":[\"/no/such/program\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines" | jq -r .id)
+NS=$("${CURL[@]}" -fsS -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"namespace\":\"$T\",\"name\":\"nostart\",\"image\":\"alpine:3.20\",\"cmd\":[\"/no/such/program\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines" | jq -r .id)
 nostart=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$NS/wait?timeout=120")
 check "no program: its wait is 409 boot_failed" '[ "${nostart##* }" = 409 ] && [ "$(echo "${nostart% *}" | jq -r .code)" = boot_failed ]'
 check "no program: the init's reason" '[ "$(echo "${nostart% *}" | jq -r .machine.error)" = "the machine exited during boot: start \"/no/such/program\": No such file or directory (os error 2)" ]'
@@ -163,25 +163,25 @@ check "session: the client's close kills it" 'ended "sleep 6062"'
 check "session: an event"               'briqyard events --machine "$A" | awk "\$4 == \"session_opened\"" | grep -q .'
 
 echo "== second machine reaches the first by name"
-B=$(briqyard machine run --image alpine:3.20 --name alp2 --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
+B=$(briqyard machine run --image alpine:3.20 --name alp2 --namespace "$T" --memory 256 -- sleep 3600 | jq -r .id)
 check "ping by name" 'briqyard machine exec "$B" -- ping -c1 -W2 alp.internal >/dev/null'
 check "ping by id"   'briqyard machine exec "$B" -- ping -c1 -W2 "$A.vm.internal" >/dev/null'
 
-echo "== tenant isolation"
-O=$(briqyard machine run --image alpine:3.20 --name other --tenant "$T-other" --memory 256 -- sleep 3600 | jq -r .id)
+echo "== namespace isolation"
+O=$(briqyard machine run --image alpine:3.20 --name other --namespace "$T-other" --memory 256 -- sleep 3600 | jq -r .id)
 aip=$(briqyard machine get "$A" | jq -r .ip)
-check "other tenant cannot reach" '! briqyard machine exec "$O" -- ping -c1 -W2 "$aip" >/dev/null 2>&1'
-briqyard machine rm "$O" >/dev/null; briqyard tenant rm "$T-other" >/dev/null 2>&1 || true
+check "other namespace cannot reach" '! briqyard machine exec "$O" -- ping -c1 -W2 "$aip" >/dev/null 2>&1'
+briqyard machine rm "$O" >/dev/null; briqyard namespace rm "$T-other" >/dev/null 2>&1 || true
 
 echo "== egress: via a gateway machine, none, open again"
 E="$T-eg"
-serve() { briqyard machine run --image python:3.12-alpine --name "$1" --tenant "$E" --memory 256 -- python3 -m http.server 8080 | jq -r .id; }
+serve() { briqyard machine run --image python:3.12-alpine --name "$1" --namespace "$E" --memory 256 -- python3 -m http.server 8080 | jq -r .id; }
 G=$(serve egw); SIB=$(serve eside)
 for m in "$G" "$SIB"; do
   for i in $(seq 1 30); do briqyard machine exec "$m" -- wget -qO- -T 2 http://127.0.0.1:8080/ >/dev/null 2>&1 && break; sleep 1; done
 done
-V=$(briqyard machine run --image alpine:3.20 --name evia --tenant "$E" --memory 256 --egress "via:$G" -- sleep 3600 | jq -r .id)
-N=$(briqyard machine run --image alpine:3.20 --name enone --tenant "$E" --memory 256 --egress none -- sleep 3600 | jq -r .id)
+V=$(briqyard machine run --image alpine:3.20 --name evia --namespace "$E" --memory 256 --egress "via:$G" -- sleep 3600 | jq -r .id)
+N=$(briqyard machine run --image alpine:3.20 --name enone --namespace "$E" --memory 256 --egress none -- sleep 3600 | jq -r .id)
 reach() { briqyard machine exec "$1" -- wget -qO- -T 3 "$2" >/dev/null 2>&1; }
 # The internet by address, so a refused name is not what makes it fail; "open again" below
 # reaches the same address from the same machine, so the refusals mean something.
@@ -215,10 +215,10 @@ fi
 briqyard machine set-egress "$N" open >/dev/null
 check "open again: internet"      'connects "$N" "$NET"'
 for m in "$V" "$N" "$SIB" "$G"; do briqyard machine rm "$m" >/dev/null; done
-briqyard tenant rm "$E" >/dev/null 2>&1 || true
+briqyard namespace rm "$E" >/dev/null 2>&1 || true
 
 echo "== egress limits: port 25 blocked by default, a connection rate, a bandwidth cap"
-L=$(briqyard machine run --image alpine:3.20 --name lim --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
+L=$(briqyard machine run --image alpine:3.20 --name lim --namespace "$T" --memory 256 -- sleep 3600 | jq -r .id)
 lim() { briqyard machine get "$L" | jq -c "$1"; }
 # A connect to $NET's port $1 from the machine: refused (not 0) within a second, where a
 # dropped SYN would wait out the 5 s.
@@ -251,7 +251,7 @@ check "2 Mbit/s: a download capped" 'capped'
 briqyard machine rm "$L" >/dev/null
 
 echo "== disk limits: the host's for the size under its own, a slow disk, changed live and at a resume"
-DK=$(briqyard machine run --image alpine:3.20 --name disk --tenant "$T" --memory 256 --vcpus 2 --volume 1G:/data --disk-bw 4 --disk-burst 0 -- sleep 3600 | jq -r .id)
+DK=$(briqyard machine run --image alpine:3.20 --name disk --namespace "$T" --memory 256 --vcpus 2 --volume 1G:/data --disk-bw 4 --disk-burst 0 -- sleep 3600 | jq -r .id)
 dk() { briqyard machine get "$DK" | jq -c "$1"; }
 # Whole seconds for `dd` in the machine, with O_DIRECT so the guest's page cache takes none of it.
 took() {
@@ -273,7 +273,7 @@ briqyard machine start "$DK" >/dev/null
 check "resumed with the limit set while it slept" '[ "$(briqyard events --machine "$DK" | awk "\$4 == \"resumed\"" | wc -l)" = 1 ] && [ "$(took if=/dev/zero of=/data/f count=32 oflag=direct)" -ge 5 ]'
 # Kept until the metrics section: Firecracker writes its metrics a line a minute.
 
-echo "== tenant gateway: started by what needs it, stopped once nothing does"
+echo "== namespace gateway: started by what needs it, stopped once nothing does"
 GT="$T-gw"
 # A forward proxy: CONNECT host:port, then bytes both ways. On the image the egress section
 # pulled, so nothing is installed at boot.
@@ -299,31 +299,31 @@ async def main():
     await (await asyncio.start_server(handle, "0.0.0.0", 3128)).serve_forever()
 asyncio.run(main())
 '
-gw() { briqyard tenant get "$GT" | jq -r ".gateway.$1"; }
-setgw() { briqyard tenant gateway set "$GT" --image python:3.12-alpine --port 3128 -- python3 -c "$PROXY" | jq -r .gateway.machine_id; }
+gw() { briqyard namespace get "$GT" | jq -r ".gateway.$1"; }
+setgw() { briqyard namespace gateway set "$GT" --image python:3.12-alpine --port 3128 -- python3 -c "$PROXY" | jq -r .gateway.machine_id; }
 GW=$(setgw)
 check "gateway made, not started"   '[ "$(gw state)" = created ]'
-check "via:gateway needs a gateway" '! briqyard machine run --image alpine:3.20 --name nogw --tenant "$T-nogw" --memory 128 --egress via:gateway -- sleep 60 >/dev/null 2>&1'
-C=$(briqyard machine run --image python:3.12-alpine --name gwc --tenant "$GT" --memory 256 --egress via:gateway -- sleep 3600 | jq -r .id)
+check "via:gateway needs a gateway" '! briqyard machine run --image alpine:3.20 --name nogw --namespace "$T-nogw" --memory 128 --egress via:gateway -- sleep 60 >/dev/null 2>&1'
+C=$(briqyard machine run --image python:3.12-alpine --name gwc --namespace "$GT" --memory 256 --egress via:gateway -- sleep 3600 | jq -r .id)
 check "its start boots the gateway" '[ "$(gw state)" = running ]'
-check "gateway not in machine ls"   '! briqyard machine ls | grep -q "$GW" && [ "$(briqyard tenant get "$GT" | jq .machines)" = 1 ]'
+check "gateway not in machine ls"   '! briqyard machine ls | grep -q "$GW" && [ "$(briqyard namespace get "$GT" | jq .machines)" = 1 ]'
 check "gateway console readable"    'briqyard machine logs "$GW" --limit 5000 | grep -q "\[briqyard\] started"'
 # busybox wget sends a proxy a plain GET, not CONNECT: Python's client does what any SDK does.
 fetch='import urllib.request; print(urllib.request.urlopen("https://example.com", timeout=10).read().decode())'
 check "https through the gateway"   'briqyard machine exec "$C" -- env https_proxy=http://gateway.internal:3128 python3 -c "$fetch" | grep -qi "example domain"'
 check "no way around it"            '! connects "$C" "$NET"'
-check "rm refused while in use"     '! briqyard tenant gateway rm "$GT" >/dev/null 2>&1'
+check "rm refused while in use"     '! briqyard namespace gateway rm "$GT" >/dev/null 2>&1'
 briqyard machine stop "$C" >/dev/null
 # The sleeper looks every 15 s.
 for i in $(seq 1 30); do [ "$(gw state)" = stopped ] && break; sleep 2; done
 check "sleeper stops the gateway"   '[ "$(gw state)" = stopped ]'
-check "rm once nothing uses it"     'briqyard tenant gateway rm "$GT" && [ "$(gw state)" = null ] && ! briqyard machine get "$GW" >/dev/null 2>&1'
+check "rm once nothing uses it"     'briqyard namespace gateway rm "$GT" && [ "$(gw state)" = null ] && ! briqyard machine get "$GW" >/dev/null 2>&1'
 GW=$(setgw)
 briqyard machine rm "$C" >/dev/null
-check "tenant removed"              'briqyard tenant rm "$GT" && ! briqyard tenant get "$GT" >/dev/null 2>&1'
+check "namespace removed"              'briqyard namespace rm "$GT" && ! briqyard namespace get "$GT" >/dev/null 2>&1'
 check "gateway gone with it"        '! briqyard machine get "$GW" >/dev/null 2>&1'
 
-echo "== iron-proxy as the tenant gateway: a stock image, a header injected, a token swapped (ADR 0016)"
+echo "== iron-proxy as the namespace gateway: a stock image, a header injected, a token swapped (ADR 0016)"
 IT="$T-ip" IRON=ironsh/iron-proxy:0.54.0@sha256:6d074be2de9188f88d08013788d5500fb4de8557f16c2e5b27af4d8d2cb1e3fb
 D=$(mktemp -d)
 # One CA: iron-proxy signs its leaves with it, and it signed the echo server's certificate, which
@@ -371,12 +371,12 @@ transforms:
           replace: { proxy_value: proxy-tok, match_headers: [X-Api-Key], require: true }
           rules: [{ host: echo.internal, methods: [GET] }]
 YAML
-ECHO=$(briqyard machine run --image python:3.12-alpine --name echo --tenant "$IT" --memory 128 --file /srv/echo.py="$D/echo.py" \
+ECHO=$(briqyard machine run --image python:3.12-alpine --name echo --namespace "$IT" --memory 128 --file /srv/echo.py="$D/echo.py" \
   --file /srv/echo.crt="$D/echo.crt" --file /srv/echo.key="$D/echo.key" -- python3 /srv/echo.py | jq -r .id)
-check "iron: the gateway set, a stock image with its files" 'briqyard tenant gateway set "$IT" --image "$IRON" --port 3128 -e INJECTED=inj-s3cret -e API_KEY=real-s3cret -e SSL_CERT_FILE=/etc/iron-proxy/ca.crt \
+check "iron: the gateway set, a stock image with its files" 'briqyard namespace gateway set "$IT" --image "$IRON" --port 3128 -e INJECTED=inj-s3cret -e API_KEY=real-s3cret -e SSL_CERT_FILE=/etc/iron-proxy/ca.crt \
   --file /etc/iron-proxy/proxy.yaml="$D/proxy.yaml" --file /etc/iron-proxy/ca.crt="$D/ca.crt" --file /etc/iron-proxy/ca.key="$D/ca.key" -- -config /etc/iron-proxy/proxy.yaml >/dev/null'
-IC=$(briqyard machine run --image python:3.12-alpine --name agent --tenant "$IT" --memory 128 --egress via:gateway --file /etc/ca.crt="$D/ca.crt" -- sleep 3600 | jq -r .id)
-check "iron: its consumer's start runs it" '[ "$(briqyard tenant get "$IT" | jq -r .gateway.state)" = running ]'
+IC=$(briqyard machine run --image python:3.12-alpine --name agent --namespace "$IT" --memory 128 --egress via:gateway --file /etc/ca.crt="$D/ca.crt" -- sleep 3600 | jq -r .id)
+check "iron: its consumer's start runs it" '[ "$(briqyard namespace get "$IT" | jq -r .gateway.state)" = running ]'
 get='import sys, urllib.request; print(urllib.request.urlopen(urllib.request.Request(sys.argv[1], headers={"X-Api-Key": sys.argv[2]}), timeout=10).read().decode())'
 through() { briqyard machine exec "$IC" -- env https_proxy=http://gateway.internal:3128 SSL_CERT_FILE=/etc/ca.crt python3 -c "$get" "$1" "${2:-proxy-tok}" 2>&1; }
 seen=$(through https://echo.internal/ || true)
@@ -387,8 +387,8 @@ check "iron: a host off its list refused" 'out=$(through https://example.com/); 
 check "iron: the consumer holds no secret" '! briqyard machine exec "$IC" -- env | grep -q s3cret'
 briqyard machine rm "$IC" >/dev/null
 briqyard machine rm "$ECHO" >/dev/null
-briqyard tenant rm "$IT" >/dev/null 2>&1 || true
-check "iron: gone with its tenant" '! briqyard tenant get "$IT" >/dev/null 2>&1'
+briqyard namespace rm "$IT" >/dev/null 2>&1 || true
+check "iron: gone with its namespace" '! briqyard namespace get "$IT" >/dev/null 2>&1'
 rm -rf "$D"
 
 echo "== stop, start, exit handling"
@@ -397,12 +397,12 @@ check "stopped (user)" '[ "$(briqyard machine get "$A" | jq -r .stopped_reason)"
 briqyard machine start "$A" >/dev/null
 check "started again"  '[ "$(briqyard machine get "$A" | jq -r .state)" = running ]'
 check "file survived"  '[ "$(briqyard machine get-file "$A" /root/f.txt)" = hello-file ]'
-X=$(briqyard machine run --image alpine:3.20 --name exiter --tenant "$T" --memory 256 -- sh -c "exit 7" 2>/dev/null | jq -r .id || true)
+X=$(briqyard machine run --image alpine:3.20 --name exiter --namespace "$T" --memory 256 -- sh -c "exit 7" 2>/dev/null | jq -r .id || true)
 for i in $(seq 1 30); do [ "$(briqyard machine get "$X" | jq -r .exit.code)" != null ] && break; sleep 1; done
 check "exit recorded"  '[ "$(briqyard machine get "$X" | jq -r .exit.code)" = 7 ]'
 
 echo "== events, versions and a watch"
-EV=$(briqyard machine run --image alpine:3.20 --name evts --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+EV=$(briqyard machine run --image alpine:3.20 --name evts --namespace "$T" --memory 128 -- sleep 3600 | jq -r .id)
 # A watch from the machine's version: started before the stop, bounded, in the background.
 timeout 60 briqyard events --machine "$EV" --since "$(briqyard machine get "$EV" | jq -r .version)" --watch > /tmp/by-e2e-watch.txt 2>&1 &
 WATCH=$!
@@ -427,7 +427,7 @@ BOOKMARK=$!
 
 echo "== probes: readiness decides ready, liveness restarts"
 # The program serves 5 s after its boot: ready only then, its probe every 10 s.
-RD=$(briqyard machine run --image python:3.12-alpine --name ready --tenant "$T" --memory 256 --readiness http:8080/ -- sh -c 'sleep 5; exec python3 -m http.server 8080' | jq -r .id)
+RD=$(briqyard machine run --image python:3.12-alpine --name ready --namespace "$T" --memory 256 --readiness http:8080/ -- sh -c 'sleep 5; exec python3 -m http.server 8080' | jq -r .id)
 check "running, not ready at first"  '[ "$(briqyard machine get "$RD" | jq -r .state,.ready | paste -sd, -)" = running,false ]'
 for i in $(seq 1 30); do [ "$(briqyard machine get "$RD" | jq -r .ready)" = true ] && break; sleep 1; done
 check "ready once it serves"         '[ "$(briqyard machine get "$RD" | jq -r .ready)" = true ]'
@@ -435,7 +435,7 @@ check "the ready event listed"       'briqyard events --machine "$RD" | awk "\$4
 check "wait answers ready"           'briqyard machine wait "$RD" | jq -e .ready >/dev/null'
 briqyard machine rm "$RD" >/dev/null
 # The file goes after 5 s: three failed probes (30 s), the process ended, restarted 10 s later.
-LV=$(briqyard machine run --image alpine:3.20 --name alive --tenant "$T" --memory 128 --liveness "exec:test -f /tmp/alive" -- sh -c 'touch /tmp/alive; sleep 5; rm /tmp/alive; exec sleep 3600' | jq -r .id)
+LV=$(briqyard machine run --image alpine:3.20 --name alive --namespace "$T" --memory 128 --liveness "exec:test -f /tmp/alive" -- sh -c 'touch /tmp/alive; sleep 5; rm /tmp/alive; exec sleep 3600' | jq -r .id)
 for i in $(seq 1 60); do [ "$(briqyard machine get "$LV" | jq -r .restarts)" -ge 1 ] && break; sleep 2; done
 check "a failing liveness restarts it" '[ "$(briqyard machine get "$LV" | jq -r .restarts)" -ge 1 ]'
 check "the liveness_failed event"    'briqyard events --machine "$LV" | awk "\$4 == \"liveness_failed\"" | grep -q .'
@@ -443,7 +443,7 @@ for i in $(seq 1 30); do [ "$(briqyard machine get "$LV" | jq -r .state)" = runn
 check "running again"                '[ "$(briqyard machine get "$LV" | jq -r .state)" = running ]'
 briqyard machine rm "$LV" >/dev/null
 # Ready for 2 s, not for 2 s, probed every second: about ten flips in 20 s, two lines (ADR 0047).
-flap='{"tenant":"'$T'","name":"flap","image":"alpine:3.20","cmd":["sh","-c","while :; do touch /tmp/up; sleep 2; rm -f /tmp/up; sleep 2; done"],"size":{"vcpus":1,"memory_mb":128},"probes":{"readiness":{"exec":["test","-f","/tmp/up"],"period_sec":1,"failure_threshold":1}}}'
+flap='{"namespace":"'$T'","name":"flap","image":"alpine:3.20","cmd":["sh","-c","while :; do touch /tmp/up; sleep 2; rm -f /tmp/up; sleep 2; done"],"size":{"vcpus":1,"memory_mb":128},"probes":{"readiness":{"exec":["test","-f","/tmp/up"],"period_sec":1,"failure_threshold":1}}}'
 FL=$("${CURL[@]}" -s -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "$flap" "$BRIQYARD_URL/v1/machines" | jq -r .id)
 sleep 20
 flips() { briqyard events --machine "$FL" 2>/dev/null | awk 'NR > 1 && ($4 == "ready" || $4 == "not_ready")'; }
@@ -456,20 +456,20 @@ wait "$BOOKMARK" 2>/dev/null || true
 check "a quiet watch sends a bookmark past its cursor" 'jq -se --argjson s "$BM_SINCE" "map(select(has(\"seq\"))) == [] and (map(.bookmark // empty) | last > \$s)" /tmp/by-e2e-bookmark.txt >/dev/null'
 
 echo "== labels, a quota, logs follow"
-LW=$(briqyard machine run --image alpine:3.20 --name lweb --tenant "$T" --memory 128 -l app=web -- sleep 3600 | jq -r .id)
-briqyard machine run --image alpine:3.20 --name ldb --tenant "$T" --memory 128 -l app=db --no-start >/dev/null
-selected() { briqyard machine ls --tenant "$T" "$@" | awk 'NR > 1 { print $1 }'; }
+LW=$(briqyard machine run --image alpine:3.20 --name lweb --namespace "$T" --memory 128 -l app=web -- sleep 3600 | jq -r .id)
+briqyard machine run --image alpine:3.20 --name ldb --namespace "$T" --memory 128 -l app=db --no-start >/dev/null
+selected() { briqyard machine ls --namespace "$T" "$@" | awk 'NR > 1 { print $1 }'; }
 check "ls -l app=web lists one"      '[ "$(selected -l app=web)" = "$LW" ]'
 check "ls -l app lists both"         '[ "$(selected -l app | wc -l)" -eq 2 ]'
 check "a != selector is refused"     '! briqyard machine ls -l "app!=web" >/dev/null 2>&1'
 Q="$T-q"
-briqyard tenant quota "$Q" --machines 1 >/dev/null
-briqyard machine run --image alpine:3.20 --name q1 --tenant "$Q" --memory 128 --no-start >/dev/null
-second=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"tenant\":\"$Q\",\"name\":\"q2\",\"image\":\"alpine:3.20\",\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines")
+briqyard namespace quota "$Q" --machines 1 >/dev/null
+briqyard machine run --image alpine:3.20 --name q1 --namespace "$Q" --memory 128 --no-start >/dev/null
+second=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"namespace\":\"$Q\",\"name\":\"q2\",\"image\":\"alpine:3.20\",\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines")
 check "quota: the second create is 403 quota" '[ "${second##* }" = 403 ] && [ "$(echo "${second% *}" | jq -r .code)" = quota ]'
-check "quota: its use shown"         '[ "$(briqyard tenant quota "$Q" | jq -c "[.quota.machines, .used.machines]")" = "[1,1]" ]'
-check "quota: the refusal is an event" 'briqyard events --tenant "$Q" | awk "\$4 == \"quota_exceeded\"" | grep -q .'
-FL=$(briqyard machine run --image alpine:3.20 --name follow --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+check "quota: its use shown"         '[ "$(briqyard namespace quota "$Q" | jq -c "[.quota.machines, .used.machines]")" = "[1,1]" ]'
+check "quota: the refusal is an event" 'briqyard events --namespace "$Q" | awk "\$4 == \"quota_exceeded\"" | grep -q .'
+FL=$(briqyard machine run --image alpine:3.20 --name follow --namespace "$T" --memory 128 -- sleep 3600 | jq -r .id)
 timeout 60 briqyard machine logs -f "$FL" > /tmp/by-e2e-follow.txt 2>&1 &
 FOLLOW=$!
 # Connected once it printed the boot's lines; the next line is printed after that.
@@ -485,7 +485,7 @@ kill "$FOLLOW" 2>/dev/null || true; wait "$FOLLOW" 2>/dev/null || true
 echo "== changes at the next boot: env, files, then the image (ADR 0024)"
 # The program serves its boot file and the env it booted with; the volume holds a mark.
 printf v1 > /tmp/by-e2e-page.txt
-AP=$(briqyard machine run --image python:3.12-alpine --name apply --tenant "$T" --memory 256 --volume 1G:/data -e V=1 --file /srv/page.txt=/tmp/by-e2e-page.txt -- sh -c 'cd /srv && echo "$V" > v.txt && exec python3 -m http.server 8080' | jq -r .id)
+AP=$(briqyard machine run --image python:3.12-alpine --name apply --namespace "$T" --memory 256 --volume 1G:/data -e V=1 --file /srv/page.txt=/tmp/by-e2e-page.txt -- sh -c 'cd /srv && echo "$V" > v.txt && exec python3 -m http.server 8080' | jq -r .id)
 page() { briqyard machine exec "$AP" -- wget -qO- -T 2 "http://127.0.0.1:8080/$1" 2>/dev/null; }
 serving() { for i in $(seq 1 30); do page v.txt >/dev/null && return 0; sleep 1; done; return 1; }
 serving || true
@@ -508,7 +508,7 @@ check "a new image: the volume kept"   '[ "$(briqyard machine exec "$AP" -- cat 
 briqyard machine rm "$AP" >/dev/null
 
 echo "== a volume grows: its disk at once, its filesystem at the next boot (ADR 0040)"
-VG=$(briqyard machine run --image alpine:3.20 --name grow --tenant "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
+VG=$(briqyard machine run --image alpine:3.20 --name grow --namespace "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
 fs_mb() { briqyard machine exec "$1" -- df -m /data | awk 'NR == 2 { print $2 }'; }
 VPOOL=$(sudo sed -n 's/^  pool: //p' /etc/briqyard/config.yaml); VPOOL=${VPOOL:-byard}
 briqyard machine exec "$VG" -- sh -c 'echo kept > /data/mark; sync' >/dev/null
@@ -529,13 +529,13 @@ check "the init says it grew it"         'briqyard machine logs "$VG" --limit 50
 check "the data kept"                    '[ "$(briqyard machine exec "$VG" -- cat /data/mark)" = kept ]'
 VB2=$(briqyard machine backup "$VG" | jq -r .id)
 check "the next backup continues the chain" '[ "$(briqyard machine backups "$VG" | jq -r ".[] | select(.id == \"$VB2\") | .disks[] | select(.disk == \"data\") | .from")" = "$VB1" ]'
-VR=$(briqyard machine restore --from "$VG" --backup "$VB2" --tenant "$T" --name growback | jq -r .id)
+VR=$(briqyard machine restore --from "$VG" --backup "$VB2" --namespace "$T" --name growback | jq -r .id)
 check "restored from the chain: 3 GB, the data" '[ "$(briqyard machine get "$VR" | jq .volume.size_gb)" = 3 ] && [ "$(fs_mb "$VR")" = "$grown" ] && [ "$(briqyard machine exec "$VR" -- cat /data/mark)" = kept ]'
 briqyard machine destroy "$VR" >/dev/null
 briqyard machine destroy "$VG" >/dev/null
 
 echo "== postgres with a volume, endpoint, wake on connect"
-P=$(briqyard machine run --image postgres:16-alpine --name pg --tenant "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m --readiness "exec:pg_isready -h 127.0.0.1 -U postgres" | jq -r .id)
+P=$(briqyard machine run --image postgres:16-alpine --name pg --namespace "$T" --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 1m --readiness "exec:pg_isready -h 127.0.0.1 -U postgres" | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "postgres ready" 'briqyard machine exec "$P" -- pg_isready -h 127.0.0.1 -U postgres | grep -q accepting'
 check "volume mounted" 'briqyard machine exec "$P" -- sh -c "mount | grep -q /var/lib/postgresql/data"'
@@ -554,10 +554,10 @@ check "data survived"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc
 
 echo "== sleep on idle, wake on connect"
 # A machine with a session open is in use: it stays up while the sleeper below goes down.
-W=$(briqyard machine run --image alpine:3.20 --name awake --tenant "$T" --memory 128 --sleep 20s -- sleep 3600 | jq -r .id)
+W=$(briqyard machine run --image alpine:3.20 --name awake --namespace "$T" --memory 128 --sleep 20s -- sleep 3600 | jq -r .id)
 sleep 600 | briqyard machine exec -i "$W" -- cat >/dev/null 2>&1 &
 held=$!
-S=$(briqyard machine run --image postgres:16-alpine --name sleeper --tenant "$T" --memory 512 --volume 1G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 20s | jq -r .id)
+S=$(briqyard machine run --image postgres:16-alpine --name sleeper --namespace "$T" --memory 512 --volume 1G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 20s | jq -r .id)
 SEP=$(briqyard endpoint add "$S" 5432 | jq -r .address)
 for i in $(seq 1 90); do [ "$(briqyard machine get "$S" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "slept when idle" '[ "$(briqyard machine get "$S" | jq -r .stopped_reason)" = idle ]'
@@ -597,10 +597,10 @@ briqyard machine exec "$F" -- sh -c "sync" >/dev/null
 B2=$(briqyard machine backup "$F" | jq -r .id)
 check "second backup is a change" '[ "$(briqyard machine backups "$F" | jq -r ".[1].incremental")" = true ]'
 briqyard machine destroy "$F" >/dev/null
-R=$(briqyard machine restore --from "$F" --tenant "$T" --name restored | jq -r .id)
+R=$(briqyard machine restore --from "$F" --namespace "$T" --name restored | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$R" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "restored from the chain" '[ "$(briqyard machine exec "$R" -- psql -U postgres -tAc "select sum(x) from t")" = 129 ]'
-R1=$(briqyard machine restore --from "$F" --backup "$B1" --tenant "$T" --name restored1 | jq -r .id)
+R1=$(briqyard machine restore --from "$F" --backup "$B1" --namespace "$T" --name restored1 | jq -r .id)
 for i in $(seq 1 60); do briqyard machine exec "$R1" -- pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 check "restored the first backup" '[ "$(briqyard machine exec "$R1" -- psql -U postgres -tAc "select sum(x) from t")" = 85 ]'
 briqyard machine destroy "$R1" >/dev/null
@@ -620,14 +620,14 @@ else
   # are (a short line would be hidden by compression alone), and a random value in its env.
   ENVMARK=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
   DATA=$(sudo sed -n 's/^data_dir: //p' $CONF); DATA=${DATA:-/var/lib/briqyard}
-  K=$(briqyard machine run --image alpine:3.20 --name rawmark --tenant "$T" --memory 128 -e "RAWMARK=$ENVMARK" -- sleep 3600 | jq -r .id)
+  K=$(briqyard machine run --image alpine:3.20 --name rawmark --namespace "$T" --memory 128 -e "RAWMARK=$ENVMARK" -- sleep 3600 | jq -r .id)
   briqyard machine exec "$K" -- sh -c "head -c 98304 /dev/urandom | base64 -w 0 > /root/mark; sync" >/dev/null
   MARK=$(briqyard machine exec "$K" -- head -c 48 /root/mark)
   KB=$(briqyard machine backup "$K" | jq -r .id)
   KS="$STORE/backups/$K/root/$KB.zfs"
   check "its record says the key's id, never the key" '[ "$(briqyard machine backups "$K" | jq -r ".[0].key_id | length")" = 32 ] && { [ -z "$KF" ] || ! sudo grep -rqF "$(sudo cat "$KF" | tr -d " \n")" "$STORE/backups/$K"; }'
   check "its stream and its record hold no plaintext" 'sudo test -s "$KS" && ! sudo grep -rqaF -e "$MARK" -e "$ENVMARK" -- "$STORE/backups/$K"'
-  RK=$(briqyard machine restore --from "$K" --tenant "$T" --name rawback | jq -r .id)
+  RK=$(briqyard machine restore --from "$K" --namespace "$T" --name rawback | jq -r .id)
   for i in $(seq 1 30); do [ "$(briqyard machine get "$RK" | jq -r .state)" = running ] && break; sleep 1; done
   check "restored, its env opened, its disk on the pool's key" '[ "$(briqyard machine exec "$RK" -- sh -c "head -c 48 /root/mark; echo; echo \$RAWMARK" | paste -sd, -)" = "$MARK,$ENVMARK" ] && [ "$(sudo zfs get -H -o value encryptionroot "$POOL/m/$RK/root")" = "$POOL" ]'
   # The same snapshot sent in clear, its record beside it with the machine open, as a backup
@@ -638,7 +638,7 @@ else
   sudo cat "$STORE/backups/$K/$KB.json" | jq --arg m "$OLD" --arg k "backups/$OLD/root/$KB.zfs" --slurpfile spec <(sudo cat "$DATA/state/machines/$K.json") \
     '.machine_id = $m | .machine = $spec[0] | del(.key_id, .sealed) | .disks = [.disks[] | select(.disk == "root") | .key = $k]' | sudo tee "$STORE/backups/$OLD/$KB.json" >/dev/null
   check "the same in clear shows the plaintext" 'sudo grep -qaF -- "$MARK" "$STORE/backups/$OLD/root/$KB.zfs" && sudo grep -qF "$ENVMARK" "$STORE/backups/$OLD/$KB.json"'
-  RC=$(briqyard machine restore --from "$OLD" --backup "$KB" --tenant "$T" --name clearback | jq -r .id)
+  RC=$(briqyard machine restore --from "$OLD" --backup "$KB" --namespace "$T" --name clearback | jq -r .id)
   for i in $(seq 1 30); do [ "$(briqyard machine get "$RC" | jq -r .state)" = running ] && break; sleep 1; done
   check "a backup in clear still restores" '[ "$(briqyard machine exec "$RC" -- head -c 48 /root/mark)" = "$MARK" ]'
   for id in "$RC" "$RK" "$K"; do briqyard machine destroy "$id" >/dev/null; done
@@ -648,7 +648,7 @@ fi
 echo "== backups on a schedule: retention, delete, a destroyed machine's"
 # The schedule's own backups are an hour apart: the API's make the points, and retention
 # is the same after either.
-SB=$(briqyard machine run --image alpine:3.20 --name sched --tenant "$T" --memory 128 --backup-every 1h --backup-keep 2 -- sleep 3600 | jq -r .id)
+SB=$(briqyard machine run --image alpine:3.20 --name sched --namespace "$T" --memory 128 --backup-every 1h --backup-keep 2 -- sleep 3600 | jq -r .id)
 check "schedule shown" '[ "$(briqyard machine get "$SB" | jq -c "[.backup, (.next_backup_at != null)]")" = "[{\"every\":\"1h\",\"keep\":2},true]" ]'
 point() { briqyard machine exec "$SB" -- sh -c "echo $1 > /root/n; sync" >/dev/null && briqyard machine backup "$SB" | jq -r .id; }
 S1=$(point 1); S2=$(point 2); S3=$(point 3)
@@ -656,20 +656,20 @@ kinds=$(briqyard machine backups "$SB" | jq -r '[.[] | "\(.id):\(.incremental)"]
 # keep 2: the third is whole, and the second (kept) needs the first.
 check "every 2nd whole, a kept one's base kept" '[ "$kinds" = "$S1:false,$S2:true,$S3:false" ]'
 check "a base is not deleted alone" '! briqyard backup rm "$SB" "$S1" >/dev/null 2>&1'
-RS=$(briqyard machine restore --from "$SB" --backup "$S2" --tenant "$T" --name sched-r | jq -r .id)
+RS=$(briqyard machine restore --from "$SB" --backup "$S2" --namespace "$T" --name sched-r | jq -r .id)
 for i in $(seq 1 30); do briqyard machine exec "$RS" -- true >/dev/null 2>&1 && break; sleep 1; done
 check "the oldest kept restores from its chain" '[ "$(briqyard machine exec "$RS" -- cat /root/n)" = 2 ]'
 briqyard machine destroy "$RS" >/dev/null
 S4=$(point 4)
 check "retention leaves 2 restorable" '[ "$(briqyard machine backups "$SB" | jq -r "[.[].id] | join(\",\")")" = "$S3,$S4" ]'
-check "retention is an event" 'briqyard events --tenant "$T" --machine "$SB" 2>/dev/null | grep -q backup_deleted'
+check "retention is an event" 'briqyard events --namespace "$T" --machine "$SB" 2>/dev/null | grep -q backup_deleted'
 briqyard machine destroy "$SB" >/dev/null
-check "a destroyed machine's backups listed" '[ "$(briqyard backups --tenant "$T" | jq "[.[] | select(.machine_id == \"$SB\" and .deletes_at != null)] | length")" = 2 ]'
+check "a destroyed machine's backups listed" '[ "$(briqyard backups --namespace "$T" | jq "[.[] | select(.machine_id == \"$SB\" and .deletes_at != null)] | length")" = 2 ]'
 check "deleted with what continues from it" 'briqyard backup rm "$SB" "$S3" --chain && [ "$(briqyard machine backups "$SB" | jq length)" = 0 ]'
 
 
 echo "== snapshots: restore in place, a fork and backups around it, memory (ADR 0031)"
-CK=$(briqyard machine run --image alpine:3.20 --name ckpt --tenant "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
+CK=$(briqyard machine run --image alpine:3.20 --name ckpt --namespace "$T" --memory 256 --volume 1G:/data -- sleep 3600 | jq -r .id)
 on() { briqyard machine exec "$CK" -- sh -c "$1"; }
 on 'echo v1 > /data/f; echo r1 > /root/r; sync' >/dev/null
 CB1=$(briqyard machine backup "$CK" | jq -r .id)
@@ -692,14 +692,14 @@ check "a fork made after the snapshot still works" '[ "$(briqyard machine exec "
 on 'echo v3 > /data/f; sync' >/dev/null
 CB2=$(briqyard machine backup "$CK" | jq -r .id)
 check "a backup after it continues from the one before the snapshot" '[ "$(briqyard machine backups "$CK" | jq -r ".[] | select(.id == \"$CB2\") | .disks[0].from")" = "$CB1" ]'
-RK=$(briqyard machine restore --from "$CK" --backup "$CB2" --tenant "$T" --name ckback | jq -r .id)
+RK=$(briqyard machine restore --from "$CK" --backup "$CB2" --namespace "$T" --name ckback | jq -r .id)
 check "and restores to what the machine had" '[ "$(briqyard machine exec "$RK" -- cat /data/f /root/r | paste -sd, -)" = v3,r1 ]'
 briqyard machine destroy "$RK" >/dev/null
 briqyard machine snapshot restore "$CK" "$S2" >/dev/null
 check "the newer snapshot kept, restored" '[ "$(on "cat /data/f")" = v2 ] && ! on "test -e /root/r"'
 CB3=$(briqyard machine backup "$CK" | jq -r .id)
 check "its base gone with the restore: whole" '[ "$(briqyard machine backups "$CK" | jq -r ".[] | select(.id == \"$CB3\") | .incremental")" = false ]'
-RK=$(briqyard machine restore --from "$CK" --backup "$CB3" --tenant "$T" --name ckback3 | jq -r .id)
+RK=$(briqyard machine restore --from "$CK" --backup "$CB3" --namespace "$T" --name ckback3 | jq -r .id)
 check "and restores to what the machine had"  '[ "$(briqyard machine exec "$RK" -- cat /data/f)" = v2 ]'
 briqyard machine destroy "$RK" >/dev/null
 # Memory: /tmp is a tmpfs, only in memory; a resume keeps it, a boot would not.
@@ -723,13 +723,13 @@ check "deleted by name" '! briqyard machine snapshot ls "$CK" | grep -q " before
 briqyard machine destroy "$FK" >/dev/null
 briqyard machine destroy "$CK" >/dev/null
 
-echo "== tenants made together get bridges of their own"
-for i in 1 2 3; do briqyard machine run --image alpine:3.20 --name par --tenant "$T-par$i" --memory 128 -- sleep 600 > /tmp/by-par$i.json & done; wait
-check "three tenants at once"  '[ "$(briqyard tenant ls | jq -r "[.[] | select(.id | startswith(\"$T-par\")) | .subnet] | unique | length")" = 3 ]'
-for i in 1 2 3; do briqyard machine destroy "$(jq -r .id /tmp/by-par$i.json)" >/dev/null 2>&1; briqyard tenant rm "$T-par$i" >/dev/null 2>&1 || true; done
+echo "== namespaces made together get bridges of their own"
+for i in 1 2 3; do briqyard machine run --image alpine:3.20 --name par --namespace "$T-par$i" --memory 128 -- sleep 600 > /tmp/by-par$i.json & done; wait
+check "three namespaces at once"  '[ "$(briqyard namespace ls | jq -r "[.[] | select(.id | startswith(\"$T-par\")) | .subnet] | unique | length")" = 3 ]'
+for i in 1 2 3; do briqyard machine destroy "$(jq -r .id /tmp/by-par$i.json)" >/dev/null 2>&1; briqyard namespace rm "$T-par$i" >/dev/null 2>&1 || true; done
 
 echo "== suspend and resume"
-C=$(briqyard machine run --image alpine:3.20 --name counter --tenant "$T" --memory 256 -- sh -c 'i=0; while :; do i=$((i+1)); echo $i > /tmp/c; sleep 1; done' | jq -r .id)
+C=$(briqyard machine run --image alpine:3.20 --name counter --namespace "$T" --memory 256 -- sh -c 'i=0; while :; do i=$((i+1)); echo $i > /tmp/c; sleep 1; done' | jq -r .id)
 for i in $(seq 1 30); do before=$(briqyard machine exec "$C" -- cat /tmp/c 2>/dev/null) && [ -n "$before" ] && break; sleep 1; done
 up_before=$(briqyard machine exec "$C" -- cut -d. -f1 /proc/uptime)
 t_susp=$(date +%s.%N)
@@ -747,7 +747,7 @@ check "process went on ($before -> $after)" '[ "$after" -gt "$before" ]'
 check "one boot in the log" '[ "$(briqyard machine logs "$C" --limit 5000 | grep -c "\[briqyard\] started")" = 1 ]'
 
 echo "== http ingress: host routing, wake on request"
-W=$(briqyard machine run --image nginx:alpine --name web --tenant "$T" --memory 256 --port 80 --sleep 20s | jq -r .id)
+W=$(briqyard machine run --image nginx:alpine --name web --namespace "$T" --memory 256 --port 80 --sleep 20s | jq -r .id)
 WEP=$(briqyard endpoint add --http --host "e2e-web" "$W" 80 | jq -r .host)
 for i in $(seq 1 30); do briqyard machine exec "$W" -- wget -qO- http://127.0.0.1/ >/dev/null 2>&1 && break; sleep 1; done
 check "http endpoint host" '[ "$WEP" = "e2e-web.byard.localhost" ]'
@@ -765,7 +765,7 @@ check "http request wakes" 'curl -fsS --max-time 90 -H "Host: $WEP" "$INGRESS/" 
 
 echo "== usage: compute, internet, ingress, a stopped machine's disks"
 from=$(date -u +%Y-%m-%dT%H:00:00Z)
-U=$(briqyard machine run --image nginx:alpine --name use --tenant "$T" --memory 256 --port 80 | jq -r .id)
+U=$(briqyard machine run --image nginx:alpine --name use --namespace "$T" --memory 256 --port 80 | jq -r .id)
 for i in $(seq 1 30); do briqyard machine exec "$U" -- wget -qO- http://127.0.0.1/ >/dev/null 2>&1 && break; sleep 1; done
 briqyard machine exec "$U" -- wget -qO /dev/null -T 10 https://example.com >/dev/null 2>&1 || true
 UEP=$(briqyard endpoint add --http --host e2e-use "$U" 80 | jq -r .host)
@@ -787,13 +787,13 @@ check "usage: a range off the hour is refused" '! briqyard usage --from "${from%
 briqyard machine rm "$U" >/dev/null
 
 echo "== metrics, top, conditions"
-M=$(briqyard machine run --image alpine:3.20 --name top --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+M=$(briqyard machine run --image alpine:3.20 --name top --namespace "$T" --memory 128 -- sleep 3600 | jq -r .id)
 metrics=$("${CURL[@]}" -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics")
-check "metrics: the machine's CPU series" 'echo "$metrics" | grep -q "^briqyard_machine_cpu_seconds_total{machine=\"$M\",tenant=\"$T\",name=\"top\"} "'
-check "metrics: its state, running"      'echo "$metrics" | grep -qx "briqyard_machine_state{machine=\"$M\",tenant=\"$T\",name=\"top\",state=\"running\"} 1"'
-check "top lists it"                      'briqyard top --tenant "$T" | grep -q "^$M "'
+check "metrics: the machine's CPU series" 'echo "$metrics" | grep -q "^briqyard_machine_cpu_seconds_total{machine=\"$M\",namespace=\"$T\",name=\"top\"} "'
+check "metrics: its state, running"      'echo "$metrics" | grep -qx "briqyard_machine_state{machine=\"$M\",namespace=\"$T\",name=\"top\",state=\"running\"} 1"'
+check "top lists it"                      'briqyard top --namespace "$T" | grep -q "^$M "'
 # Rates need two ticks, 15 s apart.
-windowed() { briqyard top --tenant "$T" --json | jq -e ".[] | select(.machine_id == \"$M\") | .window_sec > 0" >/dev/null; }
+windowed() { briqyard top --namespace "$T" --json | jq -e ".[] | select(.machine_id == \"$M\") | .window_sec > 0" >/dev/null; }
 for i in $(seq 1 25); do windowed && break; sleep 2; done
 check "top: rates over the last window"   'windowed'
 # The slow writes above, held back by the disk limit: in the next line Firecracker writes.
@@ -827,7 +827,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1 && 
   drop_image() { for k in $(briqyard image ls | awk -v r="$IMG" '$2 == r { print $1 }'); do briqyard image rm "$k" >/dev/null; done; }
   last_pull() { briqyard events 2>/dev/null | awk '$4 == "image_pulled"' | grep -F "pulled $IMG " | tail -1; }
   drop_image
-  MR=$(briqyard machine run --image "$IMG" --name mirrored --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+  MR=$(briqyard machine run --image "$IMG" --name mirrored --namespace "$T" --memory 128 -- sleep 3600 | jq -r .id)
   digest=$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/images" | jq -r --arg r "$IMG" '.[] | select(.ref == $r) | .digest')
   check "mirror: a pull goes through it"      '[ "$(briqyard machine get "$MR" | jq -r .state)" = running ] && last_pull | grep -qF "through $MIRROR"'
   check "mirror: it holds the image by digest" 'curl -fsS -o /dev/null -I -H "Accept: application/vnd.oci.image.index.v1+json" "http://$MIRROR/v2/library/busybox/manifests/$digest"'
@@ -835,7 +835,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1 && 
   drop_image
   sudo systemctl stop briqyard-mirror
   since=$(date +%s)
-  MR=$(briqyard machine run --image "$IMG" --name unmirrored --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
+  MR=$(briqyard machine run --image "$IMG" --name unmirrored --namespace "$T" --memory 128 -- sleep 3600 | jq -r .id)
   check "mirror down: the registry serves the pull" '[ "$(briqyard machine get "$MR" | jq -r .state)" = running ] && last_pull | grep -q . && ! last_pull | grep -qF through'
   check "mirror down: the same digest"        '[ "$(curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/images" | jq -r --arg r "$IMG" ".[] | select(.ref == \$r) | .digest")" = "$digest" ]'
   check "mirror down: the fallback logged"    'sudo journalctl -u briqyardd --since "@$since" -o cat | grep -F "mirror failed" | grep -qF "$IMG"'
@@ -851,7 +851,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   echo "== Firecracker 1.17: deletes go back to the pool, a bare pause keeps exec (ADR 0037)"
   POOL=$(sudo sed -n 's/^  pool: //p' /etc/briqyard/config.yaml); POOL=${POOL:-byard}
   JAIL=$(sudo sed -n 's/^jail_dir: //p' /etc/briqyard/config.yaml); JAIL=${JAIL:-/var/lib/briqyard/jail}
-  DC=$(briqyard machine run --image alpine:3.20 --name trim --tenant "$T" --memory 256 --volume 2G:/data --disk-bw 0 --disk-iops 0 -- sleep 3600 | jq -r .id)
+  DC=$(briqyard machine run --image alpine:3.20 --name trim --namespace "$T" --memory 256 --volume 2G:/data --disk-bw 0 --disk-iops 0 -- sleep 3600 | jq -r .id)
   # What a disk takes in the pool, in MiB, once ZFS has written out what it holds.
   mib() { sudo zpool sync "$POOL"; echo $(( $(sudo zfs get -Hp -o value used "$POOL/m/$DC/$1") >> 20 )); }
   on_dc() { briqyard machine exec --timeout 120s "$DC" -- sh -c "$1"; }
@@ -870,7 +870,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   briqyard machine rm "$DC" >/dev/null
 
   echo "== daemon crash: running machines are adopted"
-  K=$(briqyard machine run --image alpine:3.20 --name survivor --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
+  K=$(briqyard machine run --image alpine:3.20 --name survivor --namespace "$T" --memory 256 -- sleep 3600 | jq -r .id)
   # The daemon alone (systemctl kill would signal every process of the unit, machines included).
   pid=$(systemctl show -p MainPID --value briqyardd)
   sudo kill -9 "$pid"
@@ -885,7 +885,7 @@ if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1; th
   check "stop after crash" '[ "$(briqyard machine get "$K" | jq -r .state)" = stopped ]'
 
   echo "== versions, a hand-over (an upgrade) and a stop (a reboot): ADR 0027"
-  V=$(briqyard machine run --image alpine:3.20 --name handover --tenant "$T" --memory 256 -- sleep 3600 | jq -r .id)
+  V=$(briqyard machine run --image alpine:3.20 --name handover --namespace "$T" --memory 256 -- sleep 3600 | jq -r .id)
   build=$(briqyardd --version | awk '{print $2}')
   check "status says the build"      '[ "$(briqyard status | jq -r .version)" = "$build" ]'
   check "the init says its version"  '[ "$(briqyard machine get "$V" | jq -r .init_version)" = "$build" ]'
@@ -906,7 +906,7 @@ class H(s.StreamRequestHandler):
             self.wfile.write(line)
 s.ThreadingTCPServer.allow_reuse_address = True
 s.ThreadingTCPServer(("", 9000), H).serve_forever()'
-    HO=$(briqyard machine run --image python:3.12-alpine --name drain --tenant "$T" --memory 256 -e "ECHO=$ECHO_PY" \
+    HO=$(briqyard machine run --image python:3.12-alpine --name drain --namespace "$T" --memory 256 -e "ECHO=$ECHO_PY" \
       --readiness tcp:9000 -- sh -c 'python3 -m http.server 8080 >/dev/null 2>&1 & exec python3 -c "$ECHO"' | jq -r .id)
     briqyard machine wait "$HO" >/dev/null 2>&1 || true
     HO_WEB=$(briqyard endpoint add "$HO" 8080 | jq -r .address)

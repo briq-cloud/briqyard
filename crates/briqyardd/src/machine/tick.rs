@@ -332,9 +332,9 @@ pub(super) fn sleeps_at(
     last_used?.checked_add_signed(w)
 }
 
-/// A tenant's machine the host stopped: what the daemon's start boots again.
+/// A namespace's machine the host stopped: what the daemon's start boots again.
 pub(super) fn stopped_by_host(r: &Record) -> bool {
-    r.state == state::STOPPED && r.stopped_reason == stop::HOST && r.is_tenants()
+    r.state == state::STOPPED && r.stopped_reason == stop::HOST && r.is_namespaces()
 }
 
 /// Whether the sleep window has run out at `now`. A clock that went backwards (a last use
