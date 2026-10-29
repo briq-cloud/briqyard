@@ -331,7 +331,7 @@ plus `apt-get purge docker.io` and the edge's files.
   root disk given back to the pool, exec after a bare pause and resume), a volume grown (ADR
   0040: the disk at once, the running guest's filesystem unchanged, the same size no change, a
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
-  data kept, the next backup incremental and its restore at the grown size). 231 checks, 227
+  data kept, the next backup incremental and its restore at the grown size). 236 checks, 232
   without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).

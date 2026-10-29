@@ -44,13 +44,15 @@ ADR 0011 made the work detached from the request, so the host finished it; the c
 
 ## Measurements
 
-Dev VM (`fc`, aarch64, 6 vCPUs, the pool encrypted), `hack/e2e.sh`'s create section, `busybox:1.37.0-musl` removed from the host first:
+Dev VM (`fc`, aarch64, 6 vCPUs, the pool encrypted), `hack/e2e.sh`'s create section, three runs; before, the answer came when the machine ran:
 
-| | Before (answer at `running`) | After |
+| | The create's answer | Then `running` (before: the answer) |
 |---|---|---|
-| The create's answer, image not on the host | MEASURE | MEASURE |
-| Then `running` | (the answer) | MEASURE |
-| The create's answer, image on the host | MEASURE | MEASURE |
+| `busybox:1.36.1-musl`, removed from the host first (pulled through the dev mirror) | 0.011–0.061 s | 5.4–6.7 s |
+| The same image on the host | 0.013–0.078 s | 3.4–4.9 s |
+| A pull that fails (`127.0.0.1:1/…`) | 201, then `/wait` 409 `pull_failed` at once | — |
+
+On a real host the second column is the pull: 502 s for the sandbox image of 2026-10-28, while the answer stays the record's write.
 
 ## Consequences
 
