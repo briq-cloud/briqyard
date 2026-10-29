@@ -87,7 +87,13 @@ impl Ingress {
         Ok(())
     }
 
-    async fn add(&self, ep: EndpointRec) -> Result<()> {
+    /// Opens an endpoint's listener, or routes its host name. Events are sent after the
+    /// manager's lock is let go, so a delete's can arrive before its create's: an endpoint
+    /// already gone is not opened.
+    pub(crate) async fn add(&self, ep: EndpointRec) -> Result<()> {
+        if self.mgr.endpoint(&ep.id).is_none() {
+            return Ok(());
+        }
         match ep.protocol.as_str() {
             "http" => {
                 self.hosts

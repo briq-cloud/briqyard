@@ -221,7 +221,7 @@ plus `apt-get purge docker.io` and the edge's files.
   that cannot be read, image removal under disk pressure oldest unused first, `top` from two
   ticks, the console rotated while two tasks write with no line lost, logs across the rotated
   file, placement and creates refused on a host under pressure), the ingress closing a removed
-  endpoint's listener after it missed the event, probes (readiness and
+  endpoint's listener after it missed the event and opening none for one already gone, probes (readiness and
   its events, `/wait` for ready and its `not_ready`, a startup failure that fails the boot and
   one that is a crash, liveness under `on-failure` and `no`, the backoff, its reset and
   `crash_loop`, the ingress waiting for a woken machine, the host's turns, a PATCH on a running

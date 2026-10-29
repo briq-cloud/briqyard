@@ -6576,6 +6576,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_ingress_opens_no_listener_for_an_endpoint_gone() {
+        let h = harness_config(|c| c.ingress.tcp_ports = "39200-39299".into()).await;
+        h.tenant("t1");
+        h.add("m_abc123", state::RUNNING, 256);
+        let ing =
+            crate::ingress::Ingress::new(h.m.clone(), "127.0.0.1", "", Duration::from_secs(1));
+        let req = api::CreateEndpointRequest {
+            port: 8080,
+            protocol: "tcp".into(),
+            host: String::new(),
+        };
+        let ep = h.m.create_endpoint("m_abc123", req).unwrap();
+        let rec = h.m.endpoint(&ep.id).unwrap();
+        // The delete's event first, then the create's.
+        h.m.delete_endpoint(&ep.id).unwrap();
+        ing.add(rec).await.unwrap();
+        assert!(!listening(ep.host_port.unwrap()).await);
+    }
+
+    #[tokio::test]
     async fn a_reservation_is_one_step() {
         // Eight starts race for the memory of two: never more than two may take it,
         // however they interleave.
