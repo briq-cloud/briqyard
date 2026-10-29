@@ -274,10 +274,12 @@ plus `apt-get purge docker.io` and the edge's files.
   token). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
-- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, image layers
-  (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary group
-  (running, its uid, gid and groups), a program that cannot start (409 `boot_failed` with the
-  init's reason), DNS,
+- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, a create
+  answered at once (ADR 0048: 201 `creating`, running after its pull, `pulling` then `created`,
+  sent again a 409 with the first, an image on the host, a pull that fails `pull_failed`), image
+  layers (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary
+  group (running, its uid, gid and groups), a program that cannot start (its `/wait` 409
+  `boot_failed` with the init's reason), DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress (two `Host` lines
   refused, an absolute-form target routed by its authority and refused when `Host` names

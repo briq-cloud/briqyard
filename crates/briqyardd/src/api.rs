@@ -157,10 +157,12 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
             (StatusCode::NOT_FOUND, "not_found")
         }
         MError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
-        MError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+        MError::Conflict(_) | MError::NameTaken(_) => (StatusCode::CONFLICT, "conflict"),
         MError::NotRunning(_) => (StatusCode::CONFLICT, "not_running"),
         MError::BadState(_) => (StatusCode::CONFLICT, "bad_state"),
         MError::BootFailed(_) => (StatusCode::CONFLICT, "boot_failed"),
+        MError::PullFailed(_) => (StatusCode::CONFLICT, "pull_failed"),
+        MError::CreateFailed(_) => (StatusCode::CONFLICT, "create_failed"),
         MError::Moved(_) => (StatusCode::CONFLICT, "conflict"),
         MError::NotReady(_) => (StatusCode::CONFLICT, "not_ready"),
         MError::Gone { .. } => (StatusCode::GONE, "gone"),
@@ -190,7 +192,12 @@ impl From<MError> for AppError {
                 tracing::warn!(machine = m.id, err = %error, "boot failed");
                 Some(m)
             }
-            MError::Moved(m) | MError::NotReady(m) => Some(m),
+            // A create's failure was logged where it happened (ADR 0048); a `/wait` reads it.
+            MError::Moved(m)
+            | MError::NotReady(m)
+            | MError::PullFailed(m)
+            | MError::CreateFailed(m)
+            | MError::NameTaken(m) => Some(m),
             MError::Other(_) => {
                 tracing::error!(err = %error, "request failed");
                 None
@@ -343,6 +350,8 @@ async fn list_machines(
 // Every transition runs through `detached`: axum drops a handler's future when the client
 // hangs up, and a create, start, stop or destroy cut short would leave the machine half-moved.
 
+/// 201 once the machine is recorded, in `creating` (ADR 0048): its image, disks and start
+/// follow; `/wait` waits for them.
 async fn create_machine(
     State(st): S,
     Json(req): Json<api::CreateMachineRequest>,

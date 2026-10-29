@@ -75,6 +75,30 @@ check "own name"     'briqyard machine exec "$A" -- nslookup alp.internal 2>&1 |
 check "egress"       'briqyard machine exec "$A" -- wget -qO- -T 10 https://example.com | grep -qi "example domain"'
 check "logs"         'briqyard machine logs "$A" --limit 5000 | grep -q "\[briqyard\] started"'
 
+echo "== a create answers once recorded; the pull and the boot follow (ADR 0048)"
+IMG2=busybox:1.36.1-musl
+for k in $(briqyard image ls | awk -v r="$IMG2" '$2 == r { print $1 }'); do briqyard image rm "$k" >/dev/null; done
+post() { "${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "$1" "$BRIQYARD_URL/v1/machines"; }
+body="{\"tenant\":\"$T\",\"name\":\"pulled\",\"image\":\"$IMG2\",\"cmd\":[\"sleep\",\"3600\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}"
+start=$(date +%s.%N); made=$(post "$body"); answered=$(echo "$(date +%s.%N) - $start" | bc)
+PL=$(echo "${made% *}" | jq -r .id)
+waited=$("${CURL[@]}" -fsS -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$PL/wait?for=running&timeout=600" | jq -r .state)
+ran=$(echo "$(date +%s.%N) - $start" | bc)
+check "create: 201 creating (${answered}s), running after its pull (${ran}s)" '[ "${made##* }" = 201 ] && [ "$(echo "${made% *}" | jq -r .state)" = creating ] && [ "$waited" = running ]'
+check "create: pulling, then created" '[ "$(briqyard events --machine "$PL" | awk "\$4 == \"pulling\" || \$4 == \"created\" { print \$4 }" | xargs)" = "pulling created" ]'
+again=$(post "$body")
+check "create: sent again, 409 conflict with the first" '[ "${again##* }" = 409 ] && [ "$(echo "${again% *}" | jq -r .machine.id)" = "$PL" ]'
+start=$(date +%s.%N); cached=$(post "${body/pulled/cached}"); answered=$(echo "$(date +%s.%N) - $start" | bc)
+CA=$(echo "${cached% *}" | jq -r .id)
+"${CURL[@]}" -fsS -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$CA/wait?for=running&timeout=120" >/dev/null || true
+ran=$(echo "$(date +%s.%N) - $start" | bc)
+check "create: the image on the host (${answered}s, running ${ran}s)" '[ "$(briqyard machine get "$CA" | jq -r .state)" = running ]'
+bad=$(post "{\"tenant\":\"$T\",\"name\":\"badpull\",\"image\":\"127.0.0.1:1/nope:1\",\"size\":{\"vcpus\":1,\"memory_mb\":128}}")
+BP=$(echo "${bad% *}" | jq -r .id)
+failed=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$BP/wait?timeout=120")
+check "create: a pull that fails is 409 pull_failed, the machine in error" '[ "${failed##* }" = 409 ] && [ "$(echo "${failed% *}" | jq -r .code)" = pull_failed ] && [ "$(briqyard machine get "$BP" | jq -r .error_reason)" = pull_failed ]'
+briqyard machine rm "$PL" >/dev/null; briqyard machine rm "$CA" >/dev/null; briqyard machine rm "$BP" >/dev/null
+
 echo "== image layers: hard links, merged /usr (ADR 0039)"
 BB=$(briqyard machine run --image busybox:1.37 --name bb --tenant "$T" --memory 128 -- sleep 3600 | jq -r .id)
 check "busybox: 400 applets, one file"   '[ "$(briqyard machine exec "$BB" -- stat -c %h /bin/busybox)" -gt 400 ]'
@@ -91,8 +115,9 @@ check "a user with a supplementary group: running" '[ "$(briqyard machine get "$
 IDS='s=$(grep -lE "^Uid:[[:space:]]+101[[:space:]]" /proc/[0-9]*/status | head -1); grep -E "^(Uid|Gid|Groups):" "$s" | awk "{print \$2}" | xargs'
 check "its uid, gid and groups" '[ "$(briqyard machine exec "$NU" -- sh -c "$IDS")" = "101 101 101" ]'
 briqyard machine rm "$NU" >/dev/null 2>&1 || true
-nostart=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"tenant\":\"$T\",\"name\":\"nostart\",\"image\":\"alpine:3.20\",\"cmd\":[\"/no/such/program\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines")
-check "no program: 409 boot_failed" '[ "${nostart##* }" = 409 ] && [ "$(echo "${nostart% *}" | jq -r .code)" = boot_failed ]'
+NS=$("${CURL[@]}" -fsS -X POST ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' -d "{\"tenant\":\"$T\",\"name\":\"nostart\",\"image\":\"alpine:3.20\",\"cmd\":[\"/no/such/program\"],\"size\":{\"vcpus\":1,\"memory_mb\":128}}" "$BRIQYARD_URL/v1/machines" | jq -r .id)
+nostart=$("${CURL[@]}" -s -w ' %{http_code}' -X POST ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/machines/$NS/wait?timeout=120")
+check "no program: its wait is 409 boot_failed" '[ "${nostart##* }" = 409 ] && [ "$(echo "${nostart% *}" | jq -r .code)" = boot_failed ]'
 check "no program: the init's reason" '[ "$(echo "${nostart% *}" | jq -r .machine.error)" = "the machine exited during boot: start \"/no/such/program\": No such file or directory (os error 2)" ]'
 briqyard machine rm "$(echo "${nostart% *}" | jq -r .machine.id)" >/dev/null 2>&1 || true
 

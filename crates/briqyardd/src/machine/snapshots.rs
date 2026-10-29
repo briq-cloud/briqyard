@@ -197,6 +197,9 @@ impl Manager {
         if r.state == state::DESTROYING {
             return Err(MError::BadState(r.state));
         }
+        if !r.has_disks() {
+            return Err(super::made_never(&r));
+        }
         if let Some(s) = &r.restoring {
             return Err(unfinished(s));
         }
@@ -917,7 +920,7 @@ mod tests {
     #[tokio::test]
     async fn a_restore_swaps_the_disk_and_keeps_newer_snapshots_and_forks() {
         let h = harness().await;
-        let src = h.m.create(h.request("src")).await.unwrap();
+        let src = h.m.create_made(h.request("src")).await.unwrap();
         let s1 = h.m.snapshot(&src.id, named("one")).await.unwrap();
         let fork = h.fork(&src.id, "fork").await;
         let fork_snap = format!("fork-{}", fork.id);
@@ -972,7 +975,7 @@ mod tests {
     async fn a_restore_boots_the_new_disk_whatever_udev_missed() {
         use std::os::unix::fs::MetadataExt;
         let h = harness().await;
-        let m = h.m.create(h.request("m")).await.unwrap();
+        let m = h.m.create_made(h.request("m")).await.unwrap();
         let root = h.pool.dev().join(format!("byard/m/{}/root", m.id));
         let before = std::fs::metadata(&root).unwrap().ino();
         let s = h.m.snapshot(&m.id, named("one")).await.unwrap();
@@ -988,7 +991,7 @@ mod tests {
     #[tokio::test]
     async fn deleted_snapshots_a_retired_disk_hangs_from_go_with_it() {
         let h = harness().await;
-        let src = h.m.create(h.request("src")).await.unwrap();
+        let src = h.m.create_made(h.request("src")).await.unwrap();
         let root = format!("m/{}/root", src.id);
         let s1 =
             h.m.snapshot(&src.id, api::SnapshotRequest::default())
@@ -1012,7 +1015,7 @@ mod tests {
     #[tokio::test]
     async fn a_fork_that_goes_frees_the_retired_disk_it_held() {
         let h = harness().await;
-        let src = h.m.create(h.request("src")).await.unwrap();
+        let src = h.m.create_made(h.request("src")).await.unwrap();
         let s1 =
             h.m.snapshot(&src.id, api::SnapshotRequest::default())
                 .await
@@ -1030,7 +1033,7 @@ mod tests {
     #[tokio::test]
     async fn a_destroyed_source_promotes_a_fork_of_its_retired_disk() {
         let h = harness().await;
-        let src = h.m.create(h.request("src")).await.unwrap();
+        let src = h.m.create_made(h.request("src")).await.unwrap();
         let s1 =
             h.m.snapshot(&src.id, api::SnapshotRequest::default())
                 .await
@@ -1050,7 +1053,7 @@ mod tests {
     #[tokio::test]
     async fn a_backup_after_a_restore_continues_from_an_ancestor_or_is_whole() {
         let h = harness().await;
-        let m = h.m.create(h.request("db")).await.unwrap();
+        let m = h.m.create_made(h.request("db")).await.unwrap();
         let b1 = h.m.backup(&m.id).await.unwrap();
         let s =
             h.m.snapshot(&m.id, api::SnapshotRequest::default())
@@ -1069,7 +1072,7 @@ mod tests {
         // Both chains restore.
         for (name, b) in [("r2", &b2), ("r3", &b3)] {
             let r =
-                h.m.create(api::CreateMachineRequest {
+                h.m.create_made(api::CreateMachineRequest {
                     tenant: "t1".into(),
                     name: name.into(),
                     restore: Some(api::RestoreSpec {
@@ -1151,7 +1154,7 @@ mod tests {
     #[tokio::test]
     async fn a_restore_checks_the_version_and_keeps_a_stopped_machine_stopped() {
         let h = harness().await;
-        let m = h.m.create(h.request("m")).await.unwrap();
+        let m = h.m.create_made(h.request("m")).await.unwrap();
         let s =
             h.m.snapshot(&m.id, api::SnapshotRequest::default())
                 .await
@@ -1176,7 +1179,7 @@ mod tests {
     #[tokio::test]
     async fn a_restore_cut_short_is_finished_by_the_daemon_or_a_start() {
         let h = harness().await;
-        let m = h.m.create(h.request("m")).await.unwrap();
+        let m = h.m.create_made(h.request("m")).await.unwrap();
         let s =
             h.m.snapshot(&m.id, api::SnapshotRequest::default())
                 .await
@@ -1213,7 +1216,7 @@ mod tests {
     #[tokio::test]
     async fn a_tidy_that_fails_after_the_swap_does_not_fail_the_restore() {
         let h = harness().await;
-        let m = h.m.create(h.request("m")).await.unwrap();
+        let m = h.m.create_made(h.request("m")).await.unwrap();
         let s =
             h.m.snapshot(&m.id, api::SnapshotRequest::default())
                 .await
@@ -1231,7 +1234,7 @@ mod tests {
     #[tokio::test]
     async fn a_restore_during_a_stop_waits_for_it() {
         let h = harness().await;
-        let m = h.m.create(h.request("m")).await.unwrap();
+        let m = h.m.create_made(h.request("m")).await.unwrap();
         let s =
             h.m.snapshot(&m.id, api::SnapshotRequest::default())
                 .await
@@ -1260,7 +1263,7 @@ mod tests {
     #[tokio::test]
     async fn a_memory_snapshot_never_writes_through_a_link_left_in_the_jail() {
         let h = harness().await;
-        let m = h.m.create(h.request("m")).await.unwrap();
+        let m = h.m.create_made(h.request("m")).await.unwrap();
         let s1 = h.m.snapshot(&m.id, with_memory()).await.unwrap();
         let rec = h.stored(&m.id).unwrap();
         let kept = h.m.memory_files(&rec, &s1.id)[1].clone();
@@ -1275,7 +1278,7 @@ mod tests {
     #[tokio::test]
     async fn tidy_removes_memory_files_no_snapshot_names() {
         let h = harness().await;
-        let m = h.m.create(h.request("m")).await.unwrap();
+        let m = h.m.create_made(h.request("m")).await.unwrap();
         let s1 = h.m.snapshot(&m.id, with_memory()).await.unwrap();
         let rec = h.stored(&m.id).unwrap();
         let kept = h.m.memory_files(&rec, &s1.id);
@@ -1297,7 +1300,7 @@ mod tests {
     #[tokio::test]
     async fn a_snapshots_memory_resumes_only_under_the_vmm_that_took_it() {
         let h = harness().await;
-        let m = h.m.create(h.request("m")).await.unwrap();
+        let m = h.m.create_made(h.request("m")).await.unwrap();
         let s = h.m.snapshot(&m.id, with_memory()).await.unwrap();
         let taken = h.stored(&m.id).unwrap();
         assert_eq!(taken.snapshots[0].vmm_version, "v1.17.0/test");
@@ -1325,7 +1328,7 @@ mod tests {
     #[tokio::test]
     async fn a_snapshot_with_memory_resumes_where_it_was_while_the_spec_is_the_same() {
         let h = harness().await;
-        let m = h.m.create(h.request("m")).await.unwrap();
+        let m = h.m.create_made(h.request("m")).await.unwrap();
         let pid = h.stored(&m.id).unwrap().pid;
         h.host_calls();
         let s = h.m.snapshot(&m.id, with_memory()).await.unwrap();
@@ -1375,7 +1378,7 @@ mod tests {
             .seed(IMAGE3, ImageConfig::default())
             .await
             .unwrap();
-        let m = h.m.create(h.request("m")).await.unwrap();
+        let m = h.m.create_made(h.request("m")).await.unwrap();
         let root = format!("m/{}/root", m.id);
         let first = h.origin(&root).await;
         let s =
