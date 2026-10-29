@@ -130,6 +130,18 @@ fetch() {
 }
 
 echo "== packages"
+# needrestart, run by apt's hook (unattended upgrades included), restarts a service that maps a
+# library just updated: the daemon's restart suspends every machine (ADR 0050). Written always
+# (needrestart installed later reads it too), before the install below, which can update a
+# library the running daemon maps.
+mkdir -p /etc/needrestart/conf.d
+cat > /etc/needrestart/conf.d/briqyard.conf <<'EOF'
+# briqyard (ADR 0050): never restarted after a library update; a hand-over (`briqyard host
+# upgrade`) or a reboot picks the update up.
+$nrconf{override_rc}{qr(^briqyardd\.service$)} = 0;
+$nrconf{override_rc}{qr(^briqyard-fleet\.service$)} = 0;
+EOF
+echo "   needrestart leaves briqyardd and briqyard-fleet running"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq zfsutils-linux nftables e2fsprogs gdisk curl jq ca-certificates >/dev/null

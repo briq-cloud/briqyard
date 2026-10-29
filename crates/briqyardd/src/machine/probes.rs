@@ -203,12 +203,15 @@ impl Manager {
     /// past a crash; a restart then never hands it out again. Never on a destroy under way,
     /// whose record is about to go.
     fn note_flip(&self, e: &Entry, ev: Ev) {
-        let mut r = e.rec.lock().unwrap();
-        if r.state == state::DESTROYING {
-            return;
-        }
-        e.note_locked(&mut r, ev);
-        if let Err(err) = self.save_locked(e, &mut r) {
+        let written = self.save_edit(e, |r| {
+            if r.state == state::DESTROYING {
+                return false;
+            }
+            e.note_locked(r, ev);
+            true
+        });
+        if let Err(err) = written {
+            let r = e.snapshot();
             tracing::warn!(
                 machine = r.id,
                 version = r.version,

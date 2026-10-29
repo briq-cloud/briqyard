@@ -57,7 +57,11 @@ backup) runs in a task of its own that the request only waits on: a client that 
 never leaves a machine half-moved (ADR 0011). One lock per machine orders its transitions;
 a start takes the host's memory and moves to `starting` in one step under the machines map's
 lock, so starts that race never oversubscribe it; a destroy holds the machine's lock from the
-state check to the record's removal and, when it fails, is tried again every 15 s.
+state check to the record's removal and, when it fails, is tried again every 15 s. Every write
+of a record checks, under the lock the destroy deletes it under, that the machine is still
+there: a call that took the machine before its destroy and went on after it writes nothing
+back. A destroy tried again that finds no disks holds the backups the store lists, not those
+the record names; a store that has not listed them within 30 s fails it, for the next tick.
 
 A PATCH of what a machine runs (`image`, `entrypoint`, `cmd`, `env`, `files`, `size`, `ports`,
 `restart`; ADR 0024), checked by the same `SpecChange::check` as a create, is kept as `pending`

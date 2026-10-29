@@ -849,6 +849,37 @@ mod tests {
         }
     }
 
+    /// A snapshot's delete that took the machine before its destroy, then waited on its lock
+    /// (the chaos run of 2026-10-28), goes on once the machine is destroyed: its write of the
+    /// record reaches nothing, so the next daemon does not find the record again.
+    #[tokio::test]
+    async fn a_snapshot_delete_behind_a_destroy_never_brings_the_record_back() {
+        let h = harness().await;
+        let e = h.add("m_s", state::STOPPED, 256);
+        h.disks(&e).await;
+        let s = h.m.snapshot("m_s", named("before")).await.unwrap();
+        assert!(h.stored("m_s").is_some());
+        // The destroy holds the lock through its `zfs destroy`; the delete waits behind it.
+        let hold = h.pool.dev().join("hold.destroy");
+        std::fs::write(&hold, "").unwrap();
+        let m = h.m.clone();
+        let destroy = tokio::spawn(async move { m.destroy("m_s", None).await });
+        while h.pool.zfs.stalled(Duration::ZERO).is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (m, snap) = (h.m.clone(), s.id.clone());
+        let delete = tokio::spawn(async move { m.delete_snapshot("m_s", &snap).await });
+        // It holds the backup turn, then waits on the lock.
+        while e.backup_turn.try_lock().is_ok() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        std::fs::remove_file(&hold).unwrap();
+        destroy.await.unwrap().unwrap();
+        delete.await.unwrap().unwrap();
+        assert!(matches!(h.m.get("m_s"), Err(MError::NotFound)));
+        assert!(h.stored("m_s").is_none(), "the record came back");
+    }
+
     #[tokio::test]
     async fn a_snapshot_is_taken_named_listed_and_deleted() {
         let h = harness().await;
@@ -983,6 +1014,57 @@ mod tests {
         let ino = std::fs::metadata(&booted).unwrap().ino();
         assert_ne!(ino, before, "booted on the retired disk");
         assert_eq!(ino, std::fs::metadata(&root).unwrap().ino());
+    }
+
+    /// A chaos run's question: after a restore with memory, the resume and every cold boot
+    /// after it run on the snapshot's disks, never on what the guest wrote since, with a stop
+    /// before the restore, after it, or none. The fake's volume file is the disk: the root's
+    /// holds what the guest wrote; the volume's holds its size, so it is checked by device.
+    #[tokio::test]
+    async fn a_memory_restore_and_the_cold_boots_after_it_run_on_the_snapshots_disks() {
+        use std::os::unix::fs::MetadataExt;
+        let h = harness().await;
+        with_volume(&h, "m_v", state::STOPPED, 1).await;
+        h.m.start("m_v", None).await.unwrap();
+        let ino = |p: &Path| std::fs::metadata(p).unwrap().ino();
+        let data = h.pool.dev().join("byard/m/m_v/data");
+        let on_the_snapshot = |when: &str, written: u64| {
+            let root = h.booted_root("m_v");
+            assert_eq!(std::fs::read_to_string(&root).unwrap(), "5", "{when}");
+            let booted = ino(&h.booted_data("m_v"));
+            assert!(booted == ino(&data) && booted != written, "{when}");
+        };
+        let stop = || h.m.stop("m_v", Duration::ZERO, false, None);
+        for racer in ["none", "before", "after"] {
+            std::fs::write(h.booted_root("m_v"), "5").unwrap();
+            let s = h.m.snapshot("m_v", with_memory()).await.unwrap();
+            // What the guest writes after it.
+            std::fs::write(h.booted_root("m_v"), "6").unwrap();
+            let written = ino(&data);
+            let restore = h.m.restore_snapshot("m_v", &s.id, None);
+            match racer {
+                "none" => drop(restore.await.unwrap()),
+                "before" => drop(tokio::join!(stop(), restore).1.unwrap()),
+                _ => drop(tokio::join!(restore, stop()).0.unwrap()),
+            }
+            // Stopped first, the restore keeps the memory for the start; stopped after, the
+            // resume is over and the start is cold.
+            let m = h.m.get("m_v").unwrap();
+            let want = match racer {
+                "none" => (state::RUNNING, false),
+                "before" => (state::STOPPED, true),
+                _ => (state::STOPPED, false),
+            };
+            assert_eq!((m.state.as_str(), m.suspended), want, "{racer}");
+            if m.state == state::STOPPED {
+                h.m.start("m_v", None).await.unwrap();
+            }
+            on_the_snapshot(&format!("{racer}: back"), written);
+            h.m.restart("m_v", None).await.unwrap();
+            assert_eq!(h.reasons("m_v").last().unwrap(), "started", "{racer}");
+            on_the_snapshot(&format!("{racer}: cold"), written);
+            h.m.delete_snapshot("m_v", &s.id).await.unwrap();
+        }
     }
 
     #[tokio::test]

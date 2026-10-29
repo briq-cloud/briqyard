@@ -2928,15 +2928,21 @@ async fn a_destroyed_machine_s_backup_is_deleted_on_the_host_that_holds_it() {
         .unwrap()
         .tenants
         .insert("t1".into(), "d2".into());
-    for query in ["chain=true&tenant=t1", "chain=true"] {
+    for (query, search) in [
+        (
+            "chain=true&tenant=t1",
+            "GET /v1/backups?machine=m_d1&tenant=t1",
+        ),
+        ("chain=true", "GET /v1/backups?machine=m_d1"),
+    ] {
         let path = format!("/v1/machines/m_d1/backups/b1?{query}");
         let (s, _, body) = call(&f.st, "DELETE", &path, "api", None).await;
         assert_eq!(s, StatusCode::NO_CONTENT, "{query}: {body}");
-        assert_eq!(
-            ds[0].stub.calls().last().unwrap(),
-            &format!("DELETE {path}"),
-            "{query}"
-        );
+        let calls = ds[0].stub.calls();
+        assert_eq!(calls.last().unwrap(), &format!("DELETE {path}"), "{query}");
+        // The search asks for that machine's alone; every host at once.
+        assert_eq!(calls[calls.len() - 2], search);
+        assert_eq!(ds[1].stub.calls().last().unwrap(), search);
         assert!(!ds[1].stub.calls().iter().any(|c| c.starts_with("DELETE")));
     }
     // Held nowhere: not found, and no host is asked to delete.
@@ -2949,11 +2955,27 @@ async fn a_destroyed_machine_s_backup_is_deleted_on_the_host_that_holds_it() {
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-    // A host that cannot say what it holds fails the search with its answer.
+    // A host that cannot say what it holds fails a search no other host answers with its
+    // answer: it may be the one. The host that lists the machine's backups is the one,
+    // whatever another could not say. The stubs list all they hold whatever the filter, as a
+    // host older than it does: the fleet reads the machine's alone.
     set_state(&f.st, "d1", "down");
-    let (s, _, body) = call(&f.st, "DELETE", "/v1/machines/m_d2/backups/b1", "api", None).await;
+    let (s, _, body) = call(
+        &f.st,
+        "DELETE",
+        "/v1/machines/m_gone/backups/b1",
+        "api",
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(json(&body)["code"], "host_down");
+    let (s, _, body) = call(&f.st, "DELETE", "/v1/machines/m_d2/backups/b1", "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        ds[1].stub.calls().last().unwrap(),
+        "DELETE /v1/machines/m_d2/backups/b1"
+    );
     // Only a backup's path searches: anything else about a machine no host has is a 404.
     set_state(&f.st, "d1", "ready");
     let before = ds[0].stub.calls().len();
