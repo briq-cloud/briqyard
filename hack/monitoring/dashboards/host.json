@@ -629,7 +629,8 @@
         "defaults": {
           "unit": "none",
           "color": {
-            "mode": "thresholds"
+            "mode": "fixed",
+            "fixedColor": "green"
           },
           "thresholds": {
             "mode": "absolute",

@@ -385,7 +385,7 @@
     {
       "type": "stat",
       "title": "Hosts with a condition",
-      "description": "Hosts with a condition true (memory_pressure, disk_pressure\u2026): the fleet places no new tenant there.",
+      "description": "Hosts with a condition true (memory_pressure, disk_pressure…): the fleet places no new tenant there.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -1052,7 +1052,8 @@
         "defaults": {
           "unit": "none",
           "color": {
-            "mode": "thresholds"
+            "mode": "fixed",
+            "fixedColor": "green"
           },
           "thresholds": {
             "mode": "absolute",
