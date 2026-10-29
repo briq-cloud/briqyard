@@ -2438,18 +2438,9 @@ fn doctor() {
         }
     };
     if exists("/usr/sbin/needrestart") {
-        let mut confs =
-            vec![std::fs::read_to_string("/etc/needrestart/needrestart.conf").unwrap_or_default()];
-        if let Ok(dir) = std::fs::read_dir("/etc/needrestart/conf.d") {
-            for e in dir.flatten() {
-                if e.path().extension().is_some_and(|x| x == "conf") {
-                    confs.push(std::fs::read_to_string(e.path()).unwrap_or_default());
-                }
-            }
-        }
         warn(
             "needrestart spares briqyardd",
-            needrestart_spares_daemon(&confs),
+            needrestart_spares_daemon(&needrestart_confs(std::path::Path::new("/etc/needrestart"))),
             "after a library update it restarts briqyardd, which suspends every machine: \
              hack/bootstrap-host.sh writes /etc/needrestart/conf.d/briqyard.conf",
         );
@@ -2471,21 +2462,75 @@ fn doctor() {
     }
 }
 
-/// Whether needrestart's configuration (its file, then each `conf.d` snippet) keeps it from
-/// restarting the daemon: an `override_rc` entry for `briqyardd` set to 0, as
-/// `$nrconf{override_rc}{qr(^briqyardd\.service$)} = 0;` or `qr(^briqyardd) => 0,`.
+/// needrestart's configuration in the order it evaluates it: `needrestart.conf`, then each
+/// `conf.d/*.conf` by name.
+fn needrestart_confs(dir: &std::path::Path) -> Vec<String> {
+    let mut snippets: Vec<_> = std::fs::read_dir(dir.join("conf.d"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "conf"))
+        .collect();
+    snippets.sort();
+    std::iter::once(dir.join("needrestart.conf"))
+        .chain(snippets)
+        .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+        .collect()
+}
+
+/// Whether needrestart's configuration (its file, then each `conf.d` snippet in name order)
+/// keeps it from restarting the daemon: the last `override_rc` entry whose pattern matches
+/// `briqyardd.service` is 0, as `$nrconf{override_rc}{qr(^briqyardd\.service$)} = 0;` or, in
+/// the file's hash, `qr(^briqyard) => 0,`. A hash assigned again forgets the entries before it.
 fn needrestart_spares_daemon(confs: &[String]) -> bool {
-    confs.iter().flat_map(|c| c.lines()).any(|l| {
-        let l = l.trim_start();
+    let mut spared = None;
+    let mut in_hash = false;
+    for l in confs.iter().flat_map(|c| c.lines()).map(str::trim_start) {
         if l.starts_with('#') {
-            return false;
+            continue;
         }
-        let Some(i) = l.find("briqyardd") else {
-            return false;
+        if l.starts_with("$nrconf{override_rc}") && l.contains("= {") {
+            (in_hash, spared) = (true, None);
+            continue;
+        }
+        if in_hash && l.starts_with('}') {
+            in_hash = false;
+            continue;
+        }
+        if !in_hash && !l.starts_with("$nrconf{override_rc}{") {
+            continue;
+        }
+        let Some((pattern, rest)) = l.split_once("qr(").and_then(|(_, r)| r.split_once(')')) else {
+            continue;
         };
-        let value = l[i..].rsplit('=').next().unwrap_or("");
-        value.trim_start_matches('>').trim_start().starts_with('0')
-    })
+        let value = rest.rsplit('=').next().unwrap_or("");
+        let value = value.trim_start_matches('>').trim_start();
+        if pattern_matches_daemon(pattern) && value.starts_with(|c: char| c.is_ascii_digit()) {
+            spared = Some(value.starts_with('0'));
+        }
+    }
+    spared == Some(true)
+}
+
+/// Whether a needrestart pattern (inside `qr(...)`) matches `briqyardd.service`. Literal
+/// patterns only, with `^`, `$` and `.` or `\.`; any other regex is not counted as a match.
+fn pattern_matches_daemon(pattern: &str) -> bool {
+    let unit = "briqyardd.service";
+    let (start, p) = pattern
+        .strip_prefix('^')
+        .map_or((false, pattern), |p| (true, p));
+    let (end, p) = p.strip_suffix('$').map_or((false, p), |p| (true, p));
+    let p = p.replace("\\.", ".");
+    if p.contains(|c: char| "\\^$*+?()[]{}|".contains(c)) {
+        return false;
+    }
+    match (start, end) {
+        (true, true) => unit == p,
+        (true, false) => unit.starts_with(&p),
+        (false, true) => unit.ends_with(&p),
+        (false, false) => unit.contains(&p),
+    }
 }
 
 /// Whether `apt-config shell R Unattended-Upgrade::Automatic-Reboot/b` says unattended-upgrades

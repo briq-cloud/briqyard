@@ -14,7 +14,7 @@ A `systemctl restart briqyardd` is not a hand-over: it suspends every machine an
 
 ## Decisions
 
-**The bootstrap writes `/etc/needrestart/conf.d/briqyard.conf`** when needrestart is installed, before its `apt-get install`:
+**The bootstrap writes `/etc/needrestart/conf.d/briqyard.conf`** on every host, before its `apt-get install`; needrestart installed later reads it too:
 
 ```perl
 $nrconf{override_rc}{qr(^briqyardd\.service$)} = 0;
@@ -25,7 +25,7 @@ Only `override_rc`: the Ubuntu mode stays on for every other service. A fleet on
 
 **The host never reboots itself.** `Unattended-Upgrade::Automatic-Reboot` is false by default (commented out in `50unattended-upgrades`); the bootstrap does not set it, and a reboot stays a drain first (`OPERATIONS.md`, Upgrade). needrestart's Ubuntu mode only prints a pending kernel.
 
-**`briqyard doctor` warns** (`warn`, not `MISS`: the host works) when needrestart is installed without an `override_rc` entry for `briqyardd` set to 0, and when `apt-config` says `Automatic-Reboot` is true.
+**`briqyard doctor` warns** (`warn`, not `MISS`: the host works) when needrestart is installed and the last `override_rc` entry matching `briqyardd.service` (its file, then `conf.d` in name order) is not 0, and when `apt-config` says `Automatic-Reboot` is true.
 
 ## Consequences
 
