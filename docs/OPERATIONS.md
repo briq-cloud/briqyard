@@ -146,7 +146,8 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 
 Endpoints are plain TCP and HTTP on the host, with no TLS, public names or access control:
 those are a proxy's, as an ingress controller's in Kubernetes. The smallest setup is a proxy
-on the host itself, the daemon's listeners on loopback. In `config.yaml`:
+on the host itself, the daemon's listeners on loopback. In `config.yaml`, before the first HTTP
+endpoint (an endpoint keeps the name it got), then `systemctl restart briqyardd`:
 
 ```yaml
 ingress:
@@ -175,7 +176,8 @@ record and a wildcard certificate, which needs Caddy built with your DNS provide
 `forward_auth`): an endpoint answers anyone who reaches it.
 
 TCP is passed as it is: TLS, when wanted, is the protocol's own (Postgres, Redis). Forward a
-public port to the host port the endpoint got, here with nginx's `stream` module:
+public port to the host port the endpoint got, here with nginx's `stream` module
+(`libnginx-mod-stream`; the block is top level in `nginx.conf`, not under `http`):
 
 ```
 stream {
@@ -184,7 +186,8 @@ stream {
 ```
 
 With the bootstrap's firewall (`PRIVATE_ADDRESS` set), the public interface takes SSH and
-`PUBLIC_TCP_PORTS` only: `80,443,5432` here.
+`PUBLIC_TCP_PORTS` only, set at its first run: `80,443,5432` here, the proxy's ports, never an
+endpoint's own (the daemon refuses 8080 and 30000-32767 there).
 A proxy on another server reaches the daemon over a private network: `ingress.http` and
 `ingress.bind` on the host's private address, `ingress.allowed_clients` the proxy's. With
 several hosts, send each name to the host its machine runs on (`briqyard machine ls`, HOST).
