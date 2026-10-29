@@ -626,7 +626,7 @@ def main():
     p.add_argument("--boot-timeout", type=int, default=300)
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
     p.add_argument("--crash", action="store_true", help="SIGKILL the daemon in round 1 (needs sudo on the host)")
-    p.add_argument("--phases", default="", help=f"comma-separated, of {','.join(PHASES)} (default: all)")
+    p.add_argument("--phases", default="", help=f"comma-separated, of {','.join(PHASES)} (default: all); endpoints_all relies on exec_all's wait for the web servers")
     p.add_argument("--no-invariants", action="store_true")
     p.add_argument("--invariants-url", default="", help="the daemon to check the host against when --url is a fleet")
     a = p.parse_args()

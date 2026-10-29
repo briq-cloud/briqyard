@@ -28,4 +28,15 @@ Rejected:
 ## Consequences
 
 - With ADR 0051's counters, the hold stays in the proxy for as long as it is the activator (a machine asleep, starting or not ready). The counter's `ct state new` on the proxy's connection to the machine falls at the delivery, where the last use now is.
-- `stress.py --phases endpoints_all,sleep_wake` runs the phase on its own. Measured on the dev host, two rounds each: MEASURE.
+- An exec that wakes its machine holds it from the call.
+
+## Measured
+
+In the dev VM (6 threads, three boots at once), `stress.py --tenants 6 --per-tenant 4 --rounds 2 --phases endpoints_all,sleep_wake`, wakes through an endpoint that were answered:
+
+| | Round 1 | Round 2 |
+|---|---|---|
+| Before | 6 of 6 | 4 of 6: one timed out, one closed unanswered as its machine slept |
+| After | 6 of 6 | 6 of 6 |
+
+Under that load a cold boot took 5 to 30 s and the program's start more. The full run (`--rounds 2 --crash`), before, failed 3 of 6 in each round.
