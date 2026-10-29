@@ -726,6 +726,30 @@ impl Zfs {
         Ok(v.split(',').map(String::from).collect())
     }
 
+    /// The datasets right under a dataset, as names relative to the pool (`m/<id>`).
+    pub async fn children(&self, name: &str) -> Result<Vec<String>> {
+        let out = self
+            .run(&[
+                "list",
+                "-H",
+                "-o",
+                "name",
+                "-t",
+                "filesystem,volume",
+                "-d",
+                "1",
+                &self.ds(name),
+            ])
+            .await?;
+        let prefix = format!("{}/", self.ds(name));
+        Ok(out
+            .lines()
+            .filter(|l| l.starts_with(&prefix))
+            .filter_map(|l| l.strip_prefix(&format!("{}/", self.pool)))
+            .map(String::from)
+            .collect())
+    }
+
     /// The volumes under a dataset, as names relative to the pool (`m/<id>/root`).
     pub async fn volumes_under(&self, name: &str) -> Result<Vec<String>> {
         let out = self
@@ -1049,6 +1073,12 @@ case "$1" in
     if [ "$6" = "volume" ]; then
       [ -e "$DEV/$last" ] || missing "$last"
       find "$DEV/$last" -type f -not -name '*@*' -not -name '*.origin' | sed "s|^$DEV/||" | sort
+      exit 0
+    fi
+    if [ "$6" = "filesystem,volume" ]; then
+      [ -e "$DEV/$last" ] || missing "$last"
+      echo "$last"
+      find "$DEV/$last" -mindepth 1 -maxdepth 1 -not -name '*@*' -not -name '*.origin' | sed "s|^$DEV/||" | sort
       exit 0
     fi
     case "$last" in *boom*) echo "cannot open '$last': permission denied" >&2; exit 1;; esac

@@ -5,8 +5,9 @@ Runs inside the development VM (or anywhere that reaches the API) with the stand
 only. Each phase runs its operations in parallel across every machine, records latencies and
 failures, and checks the host's invariants between phases through hack/stress-invariants.sh
 (needs sudo on the host; skipped with --no-invariants). After the feature phases come the
-races: a client that hangs up mid-create, a start against a destroy of the same machine, and
-more starts at once than the host has memory for.
+races: a client that hangs up mid-create, a start and a snapshot's delete against a destroy of
+the same machine, and more starts at once than the host has memory for. The invariants include
+no record on disk for a machine the daemon does not hold.
 
     python3 hack/stress.py --tenants 6 --per-tenant 4 --rounds 2
     python3 hack/stress.py --url http://127.0.0.1:7430 --crash  # through the fleet, kill the daemon mid-run
@@ -441,7 +442,7 @@ class Run:
         self.invariants("hang-up")
 
     def start_vs_destroy(self):
-        self.phase("start and destroy one stopped machine per tenant at the same moment: one wins, none stays destroying")
+        self.phase("start, destroy and a snapshot's delete on one stopped machine per tenant at the same moment: one wins, none stays destroying")
         picks = [(k, m) for k, m in self.machines.items() if k[1] == "m2"]
 
         def one(kv):
@@ -449,7 +450,8 @@ class Run:
             mid = m["id"]
             self.api.call("POST", f"/v1/machines/{mid}/stop", {"timeout_sec": 10}, op="stop", timeout=120)
             self.wait_state(mid, {"stopped"}, timeout=120)
-            go = threading.Barrier(2)
+            snap = self.api.call("POST", f"/v1/machines/{mid}/snapshots", {}, op="snapshot", timeout=120)
+            go = threading.Barrier(3)
             answers = {}
 
             def fire(op, method, path):
@@ -459,6 +461,8 @@ class Run:
             threads = [
                 threading.Thread(target=fire, args=("start", "POST", f"/v1/machines/{mid}/start")),
                 threading.Thread(target=fire, args=("destroy", "DELETE", f"/v1/machines/{mid}")),
+                # Behind the destroy, it once wrote the destroyed record back (2026-10-28).
+                threading.Thread(target=fire, args=("snapshot rm", "DELETE", f"/v1/machines/{mid}/snapshots/{snap['id']}")),
             ]
             for th in threads:
                 th.start()
