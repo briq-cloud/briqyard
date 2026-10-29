@@ -13,7 +13,7 @@ As root on the server:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/briq-cloud/briqyard/main/hack/bootstrap-host.sh
-BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.2 \
+BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.3 \
 BRIQYARD_POOL_DEVICE=/dev/nvme1n1 \
 BRIQYARD_TOKEN=$(openssl rand -hex 24) \
 ALLOWED_CLIENTS=203.0.113.0/24 \
