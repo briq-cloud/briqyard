@@ -357,7 +357,7 @@ plus `apt-get purge docker.io` and the edge's files.
   `BRIQYARD_METRICS_TOKEN` when the fleet has a `metrics_token`).
 - `hack/upgrade-probe.sh`: traffic through a machine's TCP and HTTP endpoints and against both APIs
   while the fleet upgrades the VM's host and then restarts, each attempt counted `ok`, `refused`,
-  `reset`, `timeout` or `failed` (`hack/upgrade-probe.py`; ADR 0050 keeps the numbers). A
+  `reset`, `timeout` or `failed` (`hack/upgrade-probe.py`; ADR 0051 keeps the numbers). A
   measure, not a suite: it prints counts and passes nothing.
 - `hack/stress.py` with `hack/stress-invariants.sh`: N tenants through every feature in parallel,
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start against a

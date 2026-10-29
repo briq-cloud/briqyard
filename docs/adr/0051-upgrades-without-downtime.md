@@ -1,4 +1,4 @@
-# ADR 0050: Upgrades without refused connections: listeners kept by systemd, a bounded drain, use counted in the kernel
+# ADR 0051: Upgrades without refused connections: listeners kept by systemd, a bounded drain, use counted in the kernel
 
 Date: 2026-10-29 · Status: proposed; amends ADR 0027 (what a hand-over costs the traffic) and ADR 0017 (how endpoint bytes are counted)
 
