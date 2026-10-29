@@ -1,4 +1,4 @@
-# ADR 0051: The daemon's memory: jemalloc, one glibc arena, a churn check in the stress driver
+# ADR 0052: The daemon's memory: jemalloc, one glibc arena, a churn check in the stress driver
 
 Date: 2026-10-29 · Status: accepted
 

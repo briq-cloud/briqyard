@@ -364,7 +364,7 @@ plus `apt-get purge docker.io` and the edge's files.
   `--tenants 6 --per-tenant 4 --rounds 2 --crash`. `--churn N` then runs N cycles per tenant of
   create, files, an endpoint, a snapshot restored, a backup restored, a fork, suspend and
   resume, destroy, and reads the daemon's `process_resident_memory_bytes` after each: growth
-  over the second half past `--rss-growth-mb` (32) is a break (ADR 0051). Against a daemon on
+  over the second half past `--rss-growth-mb` (32) is a break (ADR 0052). Against a daemon on
   TLS, the invariants' curl trusts the daemon's certificate with
   `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
 - `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// jemalloc: freed memory goes back to the system after a few seconds, so the daemon's RSS
-/// follows what it holds rather than its peak (ADR 0051).
+/// follows what it holds rather than its peak (ADR 0052).
 #[cfg(target_os = "linux")]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -62,7 +62,7 @@ fn main() {
 /// TLS destructors, for one). glibc gives each thread that allocates an arena of its own, up to
 /// 8 per core, and keeps every one, each at least a 2 MB huge page; tokio's blocking pool
 /// starts threads all the time, so the arenas followed the peak of threads and stayed (ADR
-/// 0051). Before the runtime starts any thread.
+/// 0052). Before the runtime starts any thread.
 fn one_malloc_arena() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     // SAFETY: a setting of the C allocator, made while this is the only thread.

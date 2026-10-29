@@ -72,7 +72,7 @@ axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 hickory-proto = { version = "0.26.3", default-features = false }
 # The ingress reads public request heads with it (ADR 0033); hyper already depends on it.
 httparse = "1.10"
-# The daemon's allocator, which gives freed memory back (ADR 0051).
+# The daemon's allocator, which gives freed memory back (ADR 0052).
 tikv-jemallocator = "0.6"
 
 [profile.release]
