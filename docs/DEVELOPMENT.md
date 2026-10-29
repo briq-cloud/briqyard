@@ -51,6 +51,16 @@ brew install lima
 limactl start --name=fc --vm-type=vz --nested-virt --cpus=6 --memory=16 --disk=60 template://ubuntu
 ```
 
+**The VMs are one shared bench.** Every checkout and session on the Mac installs its build into the same daemons, so a suite run while another tree restarts them fails for nothing (or passes against the wrong build). `hack/vm-lock.sh COMMAND` runs the command under one lock (`/tmp/briqyard-vm.lock`, which names its holder and is cleared by a reboot): it waits while another holder runs, takes over from one that is gone, and releases when the command ends. `hack/vm.sh install|restart|stop|e2e|fleet` take it themselves. A suite run by hand, the stress driver, or a change to fc2 goes inside it:
+
+```bash
+hack/vm-lock.sh bash -c 'hack/vm.sh install && limactl shell fc bash hack/e2e.sh && limactl shell fc bash hack/fleet-smoke.sh'
+hack/vm-lock.sh python3 hack/stress.py --crash
+cat /tmp/briqyard-vm.lock/owner      # who holds it: pid, tree, since
+```
+
+Build and edit outside the lock; hold it only while the VMs run your build, and leave both hosts `ready` with no machines of yours behind.
+
 fc's pool is on a Lima disk of its own, so a full root disk can no longer suspend it:
 
 ```bash
