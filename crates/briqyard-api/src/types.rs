@@ -1004,7 +1004,7 @@ pub struct Pending {
     pub volume: Option<VolumeSize>,
 }
 
-/// Moves a machine into another namespace of the same host or fleet (ADR 0056).
+/// Moves a machine into another namespace of the host it is on (ADR 0056).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MoveRequest {
     /// The namespace it joins: made when it does not exist.
@@ -1023,11 +1023,6 @@ pub struct MoveResult {
     /// A running machine was stopped and started on the namespace's network: its programs
     /// began again, on a new address. False for a rename and for a machine that was not running.
     pub restarted: bool,
-    /// Through a fleet, into a namespace on another host: the machine was made again there from
-    /// a backup, under a new id, and this is the id of the machine it replaces (destroyed, its
-    /// backups kept).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replaces: Option<String>,
 }
 
 /// Changes a machine: the sleep window, metadata, egress, limits, disk limits and probes at

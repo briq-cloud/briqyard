@@ -218,6 +218,37 @@ async fn a_move_the_target_refuses_changes_nothing() {
 }
 
 #[tokio::test]
+async fn a_refusal_after_the_stop_starts_a_running_machine_again() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    h.namespace("t2");
+    let a = h.m.create_made(h.request("a")).await.unwrap();
+    assert_eq!(a.state, state::RUNNING);
+    let mut s = h.request("s");
+    s.start = Some(false);
+    let s = h.m.create_made(s).await.unwrap();
+    // The counters for the new address are refused once the machine is stopped.
+    h.host.refuse_count.store(true, Relaxed);
+    let err = h.m.move_machine(&a.id, "t2", None).await.unwrap_err();
+    assert!(matches!(err, MError::Other(_)), "{err}");
+    let now = h.m.get(&a.id).unwrap();
+    assert_eq!(
+        (now.namespace.as_str(), now.state.as_str(), now.ip.as_str()),
+        ("t1", state::RUNNING, a.ip.as_str()),
+        "as it was, running"
+    );
+    assert!(counted(&h).contains(&a.ip));
+    // A machine that was stopped stays stopped.
+    let err = h.m.move_machine(&s.id, "t2", None).await.unwrap_err();
+    assert!(matches!(err, MError::Other(_)), "{err}");
+    assert_eq!(h.m.get(&s.id).unwrap().state, state::CREATED);
+    // Once the host counts again, the same move works.
+    h.host.refuse_count.store(false, Relaxed);
+    let r = h.m.move_machine(&a.id, "t2", None).await.unwrap();
+    assert!(r.restarted);
+}
+
+#[tokio::test]
 async fn a_machine_others_send_their_traffic_through_stays() {
     let h = harness("10.64.0.0/22", 4096).await;
     h.ready().await;

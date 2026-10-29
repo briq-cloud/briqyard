@@ -47,40 +47,57 @@ impl Manager {
         // Its turn and its lock once no stop is under way; a start that slipped in between is
         // the caller's to repeat.
         let _turns = e.lock_once_stopped(true).await;
-        let rec = e.snapshot();
-        if !matches!(rec.state.as_str(), state::STOPPED | state::CREATED) {
-            return Err(MError::BadState(rec.state));
+        // A refusal from here to the new address leaves the machine as it was: a running one
+        // runs again.
+        let joined: Result<(String, String), MError> = async {
+            let rec = e.snapshot();
+            if !matches!(rec.state.as_str(), state::STOPPED | state::CREATED) {
+                return Err(MError::BadState(rec.state));
+            }
+            self.check_movable(&rec, namespace)?;
+            // Usage up to now belongs to the namespace it leaves.
+            self.meter(std::slice::from_ref(&e), Utc::now()).await;
+            let from = rec.namespace.clone();
+            let (ip, left) = {
+                let machines = self.inner.machines.lock().unwrap();
+                let n = self.slot_in(&machines, &rec, &t, false)?;
+                let ip = t.subnet.host(n)?.to_string();
+                let mut r = e.rec.lock().unwrap();
+                let left = std::mem::replace(&mut r.ip, ip.clone());
+                r.namespace = namespace.into();
+                r.subnet_index = t.rec.subnet_index;
+                r.host_num = n;
+                // A memory snapshot resumes with the old address: the next start is a boot.
+                r.suspended = false;
+                (ip, left)
+            };
+            // The counters follow the address. Refused, the machine is as it was.
+            if let Err(err) = self.inner.net.count(&ip).await.context("usage counters") {
+                let mut r = e.rec.lock().unwrap();
+                r.namespace.clone_from(&from);
+                r.subnet_index = rec.subnet_index;
+                r.host_num = rec.host_num;
+                r.ip = left;
+                r.suspended = rec.suspended;
+                return Err(err.into());
+            }
+            if let Err(err) = self.inner.net.uncount(&left).await {
+                tracing::warn!(machine = rec.id, ip = left, err = %err, "usage counter of the old address left");
+            }
+            Ok((from, left))
         }
-        self.check_movable(&rec, namespace)?;
-        // Usage up to now belongs to the namespace it leaves.
-        self.meter(std::slice::from_ref(&e), Utc::now()).await;
-        let from = rec.namespace.clone();
-        let (ip, left) = {
-            let machines = self.inner.machines.lock().unwrap();
-            let n = self.slot_in(&machines, &rec, &t, false)?;
-            let ip = t.subnet.host(n)?.to_string();
-            let mut r = e.rec.lock().unwrap();
-            let left = std::mem::replace(&mut r.ip, ip.clone());
-            r.namespace = namespace.into();
-            r.subnet_index = t.rec.subnet_index;
-            r.host_num = n;
-            // A memory snapshot resumes with the old address: the next start is a boot.
-            r.suspended = false;
-            (ip, left)
+        .await;
+        let (from, left) = match joined {
+            Ok(j) => j,
+            Err(refusal) => {
+                if was_running && e.snapshot().state == state::STOPPED {
+                    if let Err(err) = self.start_entry(&e, true).await {
+                        tracing::warn!(machine = first.id, err = %err, "not started again after a refused move");
+                    }
+                }
+                return Err(refusal);
+            }
         };
-        // The counters follow the address. Refused, the machine is as it was.
-        if let Err(err) = self.inner.net.count(&ip).await.context("usage counters") {
-            let mut r = e.rec.lock().unwrap();
-            r.namespace.clone_from(&from);
-            r.subnet_index = rec.subnet_index;
-            r.host_num = rec.host_num;
-            r.ip = left;
-            r.suspended = rec.suspended;
-            return Err(err.into());
-        }
-        if let Err(err) = self.inner.net.uncount(&left).await {
-            tracing::warn!(machine = rec.id, ip = left, err = %err, "usage counter of the old address left");
-        }
         self.rehome_records(&e)?;
         self.after_move(&e, &from, &left, was_running);
         if let Some(old) = self.namespace_of(&from) {
@@ -99,7 +116,6 @@ impl Manager {
             from: was.namespace.clone(),
             previous_ip: was.ip.clone(),
             restarted,
-            replaces: None,
         }
     }
 

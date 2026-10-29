@@ -458,7 +458,6 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
             from,
             previous_ip,
             restarted: joins,
-            replaces: None,
         })
         .into_response()
     }
@@ -4524,7 +4523,6 @@ async fn a_move_within_a_host_is_the_hosts_and_pins_a_new_namespace() {
         (r.machine.namespace.as_str(), r.machine.host.as_str()),
         ("t7", "d1")
     );
-    assert_eq!(r.replaces, None);
     assert_eq!(
         pinned(&f.st, "t7").as_deref(),
         Some("d1"),
@@ -4548,66 +4546,25 @@ async fn a_move_within_a_host_is_the_hosts_and_pins_a_new_namespace() {
 }
 
 #[tokio::test]
-async fn a_move_to_a_namespace_on_another_host_goes_through_a_backup_and_a_restore() {
+async fn a_move_to_a_namespace_on_another_host_is_refused_before_anything_happens() {
     let (f, ds, web) = fleet_with_a_machine_to_move().await;
+    let before: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
     let path = format!("/v1/machines/{}/move", web.id);
     let (s, _, body) = call(&f.st, "POST", &path, "api", move_to("t2")).await;
-    assert_eq!(s, StatusCode::OK, "{body}");
-    let r: api::MoveResult = serde_json::from_str(&body).unwrap();
-    assert_eq!((r.from.as_str(), r.restarted), ("t1", true));
-    assert_eq!(r.replaces.as_deref(), Some(web.id.as_str()));
-    assert_eq!(
-        (r.machine.namespace.as_str(), r.machine.host.as_str()),
-        ("t2", "d2")
-    );
-    assert_ne!(r.machine.id, web.id, "made again, under a new id");
-    // In this order: the source stopped, backed up, the copy made, the source destroyed.
-    let on_d1: Vec<String> = ds[0]
-        .stub
-        .calls()
-        .into_iter()
-        .filter(|c| !c.starts_with("GET /v1/status"))
-        .collect();
-    let step = |name: &str| {
-        on_d1
-            .iter()
-            .position(|c| c.contains(name))
-            .unwrap_or(usize::MAX)
-    };
-    assert!(step("/stop") < step("/backups"), "{on_d1:?}");
-    assert!(step("/backups") < step("DELETE"), "{on_d1:?}");
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    let v = json(&body);
+    assert_eq!(v["code"], "other_host");
+    let msg = v["error"].as_str().unwrap();
     assert!(
-        ds[1].stub.calls().iter().any(|c| c == "POST /v1/machines"),
-        "the restore went to d2"
+        msg.contains("t2")
+            && msg.contains("d2")
+            && msg.contains("d1")
+            && msg.contains("not supported yet"),
+        "{msg}"
     );
-    assert!(
-        ds[1].stub.calls().iter().any(|c| c.ends_with("/endpoints")),
-        "its endpoint again"
-    );
-    assert!(ds[0].stub.machines.lock().unwrap().is_empty());
-    let reg = f.st.reg.lock().unwrap();
-    assert_eq!(reg.machines.get(&web.id), None);
-    assert_eq!(
-        reg.machines.get(&r.machine.id).map(String::as_str),
-        Some("d2")
-    );
-}
-
-#[tokio::test]
-async fn a_move_to_a_host_without_room_leaves_the_machine_running_where_it_was() {
-    let (f, ds, web) = fleet_with_a_machine_to_move().await;
-    ds[1].stub.add("t2", "big", DAEMON_MEMORY_MB);
-    poll_static_hosts_once(&f.st).await;
-    let path = format!("/v1/machines/{}/move", web.id);
-    let (s, _, body) = call(&f.st, "POST", &path, "api", move_to("t2")).await;
-    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_eq!(json(&body)["code"], "capacity");
-    let calls = ds[0].stub.calls();
-    assert!(
-        calls.iter().any(|c| c.ends_with("/start")),
-        "started again: {calls:?}"
-    );
-    assert!(calls.iter().all(|c| !c.starts_with("DELETE")), "{calls:?}");
+    // Neither host was asked, and the machine is where it was.
+    let after: Vec<usize> = ds.iter().map(|d| d.stub.calls().len()).collect();
+    assert_eq!(before, after, "no call to either host");
     assert_eq!(ds[0].stub.machines.lock().unwrap().len(), 1);
     assert_eq!(
         f.st.reg

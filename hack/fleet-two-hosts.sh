@@ -11,8 +11,6 @@
 #   SECOND_HOST_SH="limactl shell fc2 sudo" bash hack/fleet-two-hosts.sh
 # A section whose variable is not set is left out and named in the summary; the run then ends with
 # a non-zero status (ALLOW_SKIPPED=1 accepts it).
-# The move across hosts (ADR 0056) needs one store both hosts read: SHARED_STORE=1 when both
-# configs name the same S3-compatible bucket (the dev VMs have a directory each; left out then).
 set -euo pipefail
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7430}
 T=two-hosts
@@ -169,30 +167,7 @@ out=$(briqyard machine fork "$A2" --namespace "$T-b" 2>&1 || true)
 check "a fork into a namespace of another host is refused" 'echo "$out" | grep -q "source.s host"'
 FN=$(briqyard machine fork "$A2" --name afork --namespace "$T-fork" | jq -r .id)
 check "a fork into a new namespace lands on its source's host" '[ "$(briqyard machine get "$FN" | jq -r .host)" = "$HA" ] && [ "$(briqyard namespace get "$T-fork" | jq -r .machines)" = 1 ]'
-# A move across hosts is a stop, a backup on the source host, a restore on the target host and a
-# destroy of the source: the target reads what the source wrote, so both hosts need one store.
-# In production that is the bucket; the dev VMs have a directory each, which the other cannot
-# read. SHARED_STORE=1 says both hosts' backup.store is the same S3-compatible bucket.
-if [ -n "${SHARED_STORE:-}" ]; then
-  MC=$(briqyard machine run --image alpine:3.20 --name mvc --namespace "$T-a" --memory 256 -- sleep 3600 | jq -r .id)
-  briqyard machine exec "$MC" -- sh -c "echo kept > /root/moved; sync" >/dev/null
-  moved=$(briqyard machine move "$MC" --namespace "$T-b")
-  MN=$(echo "$moved" | jq -r .machine.id)
-  check "move across hosts: made again on the other host, the old id replaced" '[ "$(echo "$moved" | jq -r "[.machine.host, .machine.namespace, .replaces, .restarted] | join(\" \")")" = "$HB $T-b $MC true" ] && [ "$MN" != "$MC" ]'
-  check "move across hosts: its disk kept" '[ "$(briqyard machine exec "$MN" -- cat /root/moved)" = kept ]'
-  check "move across hosts: the source is gone" '! briqyard machine get "$MC" >/dev/null 2>&1'
-  check "move across hosts: it reaches its new neighbour by name" 'briqyard machine exec "$MN" -- ping -c1 -W2 b.internal >/dev/null'
-  # A machine larger than the other host has free: refused with `capacity`, running where it was.
-  fb=$(hosts | jq ".[] | select(.id == \"$HB\") | .capacity.memory_mb - .used.memory_mb")
-  fa=$(hosts | jq ".[] | select(.id == \"$HA\") | .capacity.memory_mb - .used.memory_mb")
-  if [ "$fa" -gt $((fb + 512)) ]; then
-    MBIG=$(briqyard machine run --image alpine:3.20 --name mvbig --namespace "$T-a" --memory $((fb + 512)) -- sleep 3600 | jq -r .id)
-    out=$(briqyard machine move "$MBIG" --namespace "$T-b" 2>&1 || true)
-    check "move across hosts without room: capacity, running where it was" 'echo "$out" | grep -q capacity && [ "$(briqyard machine get "$MBIG" | jq -r .state)" = running ] && [ "$(briqyard machine get "$MBIG" | jq -r .host)" = "$HA" ]'
-  else
-    echo "       skipped: $HA has no more free memory than $HB"
-  fi
-else
-  skip "a move into a namespace on the other host (SHARED_STORE is not set: the hosts need one S3 bucket)"
-fi
+# A move across hosts is not supported yet: refused before anything happens, naming both hosts.
+out=$(briqyard machine move "$A2" --namespace "$T-b" 2>&1 || true)
+check "a move into a namespace on the other host is refused, the machine untouched" 'echo "$out" | grep -q "not supported yet" && echo "$out" | grep -q "$HB" && [ "$(briqyard machine get "$A2" | jq -r "[.state, .host, .namespace] | join(\" \")")" = "running $HA $T-a" ]'
 suite_summary

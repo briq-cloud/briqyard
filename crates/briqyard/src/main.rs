@@ -193,7 +193,7 @@ enum MachineCmd {
     /// Put the machine in another namespace: briqyard machine move ID --namespace T. Alone in its
     /// namespace and into a new one: the namespace is renamed, nothing restarts. Into one that
     /// exists: the machine restarts on its network, with a new address. Through a fleet, into
-    /// a namespace on another host: made again there from a backup, under a new id
+    /// a namespace on another host: refused (not supported yet)
     Move {
         #[arg(long)]
         namespace: String,

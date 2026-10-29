@@ -130,7 +130,7 @@ paths:
   /v1/machines/{id}/move:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
-      summary: "Put the machine in another namespace (ADR 0056). Alone in its namespace and the target new: the namespace is renamed (its quota with it), nothing restarts, the address stays. Into a namespace of the host (made when it does not exist): a running machine is stopped and started on that network with a new address, its disks and endpoints kept; the namespace it left stays until deleted. Through the fleet, into a namespace pinned to another host: stopped, backed up, restored there, the source destroyed (its backups held, ADR 0023), under a new id (`replaces`); the call lasts as long as the backup and the restore. A `moved` event in each namespace"
+      summary: "Put the machine in another namespace (ADR 0056). Alone in its namespace and the target new: the namespace is renamed (its quota with it), nothing restarts, the address stays. Into a namespace of the host (made when it does not exist): a running machine is stopped and started on that network with a new address, its disks and endpoints kept; the namespace it left stays until deleted. Through the fleet, into a namespace pinned to another host: refused before anything happens (`other_host`; moving across hosts is not supported yet). A `moved` event in each namespace"
       parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       requestBody:
         required: true
@@ -141,8 +141,8 @@ paths:
         "200": { description: what the move did, content: { application/json: { schema: { $ref: "#/components/schemas/MoveResult" } } } }
         "400": { description: "`invalid`: not a namespace id; the machine's `egress` cannot be kept in the target (`via` a machine of another namespace, or the gateway of a namespace without one)" }
         "403": { description: "`quota`: the target namespace's quota" }
-        "409": { description: "`bad_state`: creating, starting, stopping or destroying; `conflict`: the target has a machine of that name, another machine of the namespace sends its traffic through this one, a snapshot with memory would resume on the old address, or a stale `If-Match`; `gateway`: the machine is a namespace's gateway" }
-        "503": { description: "`capacity`: no address left in the target, the host has no room for it to start again, or (through the fleet) the other host has no room for it" }
+        "409": { description: "`bad_state`: creating, starting, stopping or destroying; `conflict`: the target has a machine of that name, another machine of the namespace sends its traffic through this one, a snapshot with memory would resume on the old address, or a stale `If-Match`; `gateway`: the machine is a namespace's gateway; `other_host`: through the fleet, the target namespace is on another host" }
+        "503": { description: "`capacity`: no address left in the target, or the host has no room for it to start again" }
   /v1/machines/{id}/touch:
     parameters: [{ $ref: "#/components/parameters/id" }]
     post:
@@ -652,7 +652,6 @@ components:
         from: { type: string, description: the namespace it left }
         previous_ip: { type: string, description: its address before; equal to `machine.ip` for a rename }
         restarted: { type: boolean, description: "a running machine was stopped and started on the namespace's network (its programs began again, on a new address); false for a rename and for a machine that was not running" }
-        replaces: { type: string, description: "through the fleet, into a namespace on another host: the id of the machine this one replaces (destroyed); the machine was made again from a backup" }
     ForkSpec:
       type: object
       required: [machine_id]
@@ -1187,7 +1186,7 @@ components:
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, namespace_in_use, gateway_in_use, gateway, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, backup, internal, timeout] }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, namespace_in_use, gateway_in_use, gateway, other_host, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, backup, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]
