@@ -1005,6 +1005,31 @@ mod tests {
             "machine m_1 is running, not ready: readiness: HTTP 503"
         );
         assert_eq!(e.machine.map(|m| m.state), Some("running".to_string()));
+        // ADR 0048: on its way at the timeout, a create that failed, a name taken: the machine.
+        let on_its_way = api::Machine {
+            id: "m_1".into(),
+            state: api::state::CREATING.into(),
+            ..Default::default()
+        };
+        let e = AppError::from(MError::NotReady(Box::new(on_its_way.clone())));
+        assert_eq!(
+            (e.code, e.error.as_str()),
+            ("not_ready", "machine m_1 is still creating")
+        );
+        let failed = api::Machine {
+            state: api::state::ERROR.into(),
+            error: "pull x: manifest unknown".into(),
+            ..on_its_way.clone()
+        };
+        let e = AppError::from(MError::PullFailed(Box::new(failed.clone())));
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "pull_failed"));
+        assert_eq!(e.error, "pull failed: pull x: manifest unknown");
+        let e = AppError::from(MError::CreateFailed(Box::new(failed)));
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "create_failed"));
+        assert!(e.machine.is_some());
+        let e = AppError::from(MError::NameTaken(Box::new(on_its_way)));
+        assert_eq!((e.status, e.code), (StatusCode::CONFLICT, "conflict"));
+        assert_eq!(e.machine.map(|m| m.id), Some("m_1".to_string()));
         let e = AppError::from(MError::Quota(
             "tenant t1's quota: machines 1 of 1 used, 1 more asked".into(),
         ));
