@@ -1,6 +1,6 @@
 //! briqyard-init is PID 1 inside every machine. It prepares the guest from the config drive,
 //! runs the image's command, serves the host over vsock, and halts when the command ends.
-//! Linux only; the real source is init.rs.
+//! Linux only; the real source is in init/.
 
 #[cfg(target_os = "linux")]
 mod init;
