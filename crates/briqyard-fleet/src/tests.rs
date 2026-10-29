@@ -560,6 +560,8 @@ async fn start_daemon_on(id: &str, token: &str, cert: Option<&rcgen::CertifiedKe
     let app = Router::new()
         .route("/v1/status", get(status))
         .route("/v1/namespaces", get(namespaces))
+        // What the fleet polls, as every daemon serves it (ADR 0055).
+        .route("/v1/tenants", get(namespaces))
         .route(
             "/v1/namespaces/:id",
             get(get_namespace).delete(delete_namespace),
@@ -2412,8 +2414,8 @@ async fn the_poll_fills_a_static_host_in_and_marks_a_silent_one_down() {
     assert_eq!(hs[1].state, "ready", "silent but not yet past the grace");
     assert_eq!(
         d.stub.calls(),
-        ["GET /v1/status", "GET /v1/namespaces"],
-        "the poll asks for status and namespaces, with the host's token"
+        ["GET /v1/status", "GET /v1/tenants"],
+        "the poll asks for status and namespaces (the path every daemon serves), with the host's token"
     );
     // Past the grace, a silent host is down; the next answer brings it back.
     {

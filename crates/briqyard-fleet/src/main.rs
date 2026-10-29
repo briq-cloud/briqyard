@@ -1201,12 +1201,20 @@ async fn poll_static_hosts_once(st: &AppState) -> bool {
     let mut unseen = false;
     for h in hosts {
         if let Some(s) = get_json::<api::Status>(st, &h, "/v1/status").await {
-            let namespaces: Vec<String> = get_json::<Vec<api::Namespace>>(st, &h, "/v1/namespaces")
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|t| t.id)
-                .collect();
+            // The deprecated path, which every daemon serves (ADR 0055): a host not yet upgraded
+            // has no /v1/namespaces. A host that does not answer keeps the namespaces it had,
+            // since a heartbeat's list is the truth and an empty one would drop their pins.
+            let namespaces: Vec<String> =
+                match get_json::<Vec<api::Namespace>>(st, &h, "/v1/tenants").await {
+                    Some(list) => list.into_iter().map(|t| t.id).collect(),
+                    None => {
+                        let reg = st.reg.lock().unwrap();
+                        reg.hosts
+                            .get(&h.id)
+                            .map(|prev| prev.namespaces.clone())
+                            .unwrap_or_default()
+                    }
+                };
             let now = Utc::now();
             let mut rec = h.clone();
             rec.capacity = s.capacity;

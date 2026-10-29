@@ -18,6 +18,8 @@ The repository goes public with this release. A name that needs a footnote in th
 
 **Input accepts the former name, deprecated.** A body field `tenant`, a query parameter `tenant=` (machines, backups, usage, events, top) and the routes `/v1/tenants…` on the daemon and the fleet answer as their new names. They are not in `openapi.yaml` and are removed in the release after the control plane's adapter has moved. The CLI keeps `--tenant` and `briqyard tenant` as hidden aliases, out of `--help`. Responses carry `namespace` only, with no `tenant` beside it: a client that reads responses must change, one that only writes need not.
 
+**The fleet polls a static host on `/v1/tenants`** while that path is served, so a fleet upgraded before its hosts still reads their namespaces; a host that does not answer keeps the namespaces it had, since a heartbeat's list is the truth and an empty one would drop their pins.
+
 **Daemons and fleet move together.** A new fleet forwards `namespace=` and `/v1/namespaces`, which an old daemon does not know (it would list every machine for a filtered query); an old fleet reads responses by `tenant`, which a new daemon no longer sends. There is no safe mix of the two, so a host upgrade goes through the fleet in one window, as `host upgrade` does (ADR 0027). Records on disk need nothing: the new daemon reads them as they are. A downgrade after the first write is not supported: the old binary refuses records that carry `namespace`.
 
 **Moving a machine to another namespace is not part of this.** It is the next change, on top of the name.
