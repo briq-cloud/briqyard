@@ -28,8 +28,9 @@ restore from a backup and the fork, the second cut 16 of 64 cycles short: the gl
 less work than the others, not more.
 
 - **No leak in the daemon's own state.** The manager, the API and backups driven in process
-  (mock host, the fake `zfs`, a directory store) through 15 cycles: the heap the allocator
-  hands out stayed within 0.1 MB after the second cycle, every per-machine map back to zero.
+  (mock host, the fake `zfs`, a directory store) through 15 cycles under a counting allocator,
+  a one-off measurement not kept in the tree: the heap the allocator hands out stayed within
+  0.1 MB after the second cycle, every per-machine map back to zero.
   At the end of the real runs glibc counted 10.8 MB in use.
 - **glibc kept the rest in per-thread arenas.** glibc gives a thread that allocates an arena of
   its own, up to 8 per core, and never unmaps one. On this system each arena holds at least a

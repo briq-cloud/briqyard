@@ -661,11 +661,17 @@ class Run:
         for c in range(1, self.a.churn + 1):
             _, errs = parallel(list(enumerate(self.tenants)), lambda it: cycle(c, it[1], it[0]), self.a.workers)
             self.report_errors(f"churn {c}", errs, self.tenants)
+            # Idle first: jemalloc gives freed pages back after 10 s (ADR 0052).
+            time.sleep(12)
             mb = self.rss()
             sizes.append(mb)
             self.log(f"   cycle {c}: daemon RSS {'unknown' if mb is None else f'{mb:.1f} MB'}")
         self.invariants("churn")
-        if len(sizes) < 3 or None in sizes:
+        if None in sizes:
+            self.log("   RSS check skipped: no process_resident_memory_bytes at the daemon (through a fleet, give --invariants-url)")
+            return
+        if len(sizes) < 3:
+            self.log("   RSS check skipped: fewer than 3 cycles")
             return
         # Growth after the first cycle, over the second half against the first: a leak keeps
         # its slope, a pool that settled does not.
