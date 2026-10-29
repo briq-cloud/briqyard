@@ -1823,6 +1823,54 @@ async fn the_client_sends_the_token_and_the_body() {
 }
 
 #[tokio::test]
+async fn a_run_waits_for_its_create_again_and_again_and_keeps_its_host() {
+    let m = |state: &str, host: &str| {
+        serde_json::to_string(&api::Machine {
+            id: "m1".into(),
+            state: state.into(),
+            host: host.into(),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let not_ready = format!(
+        r#"{{"error":"machine m1 is still creating","code":"not_ready","machine":{}}}"#,
+        m("creating", "")
+    );
+    let failed = r#"{"error":"pull failed: pull x: manifest unknown","code":"pull_failed"}"#;
+    let running = m("running", "");
+    let (url, stub) = stub(vec![
+        (StatusCode::CONFLICT, JSON.to_vec(), &not_ready),
+        (StatusCode::OK, JSON.to_vec(), &running),
+        (StatusCode::CONFLICT, JSON.to_vec(), failed),
+    ])
+    .await;
+    let c = client(&url, None);
+    let creating = || serde_json::from_str::<api::Machine>(&m("creating", "h1")).unwrap();
+    // ADR 0048: a wait that runs out on the way is waited again; through a fleet, the create's
+    // answer named the host and the wait's does not.
+    let done = c.running(creating()).await.unwrap();
+    assert_eq!((done.state.as_str(), done.host.as_str()), ("running", "h1"));
+    let err = c.running(creating()).await.unwrap_err();
+    assert!(refused_with(&err, "pull_failed"), "{err:#}");
+    let paths: Vec<String> = stub
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.path.clone())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["/v1/machines/m1/wait?for=running&timeout=600"; 3]
+    );
+    // A machine past `creating` (a daemon from before ADR 0048 answers at `running`): as is.
+    let old = serde_json::from_str::<api::Machine>(&m("running", "")).unwrap();
+    assert_eq!(c.running(old).await.unwrap().state, "running");
+    assert_eq!(stub.seen.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
 async fn an_empty_answer_is_only_fine_when_nothing_is_expected() {
     let (url, _stub) = stub(vec![
         (StatusCode::OK, vec![], ""),

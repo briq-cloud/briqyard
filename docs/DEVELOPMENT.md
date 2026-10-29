@@ -231,11 +231,13 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   tick's line its version, the tick leaving a machine in a transition alone and never writing
   a destroyed record back), metrics and
   conditions (the exposition of machines in every state checked line by line and against the
-  format, no probe per scrape, conditions turning true and clearing with their events, a stuck
+  format, the daemon's resident memory read, no probe per scrape, conditions turning true and
+  clearing with their events, a stuck
   `zfs` command as `storage_stalled` until it exits, a pool
   that cannot be read, image removal under disk pressure oldest unused first, `top` from two
   ticks, the console rotated while two tasks write with no line lost, logs across the rotated
-  file, placement and creates refused on a host under pressure), probes (readiness and
+  file, placement and creates refused on a host under pressure), the ingress closing a removed
+  endpoint's listener after it missed the event and opening none for one already gone, probes (readiness and
   its events, `/wait` for ready and its `not_ready`, a startup failure that fails the boot and
   one that is a crash, liveness under `on-failure` and `no`, the backoff, its reset and
   `crash_loop`, the ingress waiting for a woken machine, the host's turns, a PATCH on a running
@@ -301,10 +303,12 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   token). What still needs the host: a tenant's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
-- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, image layers
-  (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary group
-  (running, its uid, gid and groups), a program that cannot start (409 `boot_failed` with the
-  init's reason), DNS,
+- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, a create
+  answered at once (ADR 0048: 201 `creating`, running after its pull, `pulling` then `created`,
+  sent again a 409 with the first, an image on the host, a pull that fails `pull_failed`), image
+  layers (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary
+  group (running, its uid, gid and groups), a program that cannot start (its `/wait` 409
+  `boot_failed` with the init's reason), DNS,
   egress, tenant isolation, stop and start, exit codes, Postgres on a volume, an endpoint,
   sleep on idle, wake on connect, a fork, suspend and resume, the HTTP ingress (two `Host` lines
   refused, an absolute-form target routed by its authority and refused when `Host` names
@@ -359,8 +363,8 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   smaller one refused, a suspended machine's start cold, the filesystem filling the disk, the
   data kept, the next backup incremental and its restore at the grown size), a hand-over
   through systemd's store (ADR 0051: a connection held across it ends whole, the new ones made
-  during it all answered, the gap logged; with a unit that has a store, and python3). 239
-  checks predicted (main's 236 and these 3) until a dev VM run confirms them, 235 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  during it all answered, the gap logged; with a unit that has a store, and python3). 244
+  checks predicted (main's 241 and these 3) until a dev VM run confirms them, 240 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
@@ -384,8 +388,13 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   a daemon SIGKILL, then the races (a client that hangs up mid-create, a start and a
   snapshot's delete against a destroy, more starts at once than the host has memory for), host
   invariants between phases (ADR 0010; one is no record on disk the daemon does not hold).
-  `--tenants 6 --per-tenant 4 --rounds 2 --crash`. Against a daemon on TLS, the invariants' curl
-  trusts the daemon's certificate with `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
+  `--tenants 6 --per-tenant 4 --rounds 2 --crash`. `--churn N` then runs N cycles per tenant of
+  create, files, an endpoint, a snapshot restored, a backup restored, a fork, suspend and
+  resume, destroy, and reads the daemon's `process_resident_memory_bytes` 12 s after each:
+  growth over the second half past `--rss-growth-mb` (32) is a break (ADR 0052). Through a
+  fleet it needs `--invariants-url` (the daemon's), else the check is skipped and says so.
+  Against a daemon on TLS, the invariants' curl trusts the daemon's certificate with
+  `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
 - `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
   restarts, forks, snapshots (a restore with memory read again after a cold boot) and backups,
   while racers stop, start, restart, snapshot and back up any machine at once. It fails on a

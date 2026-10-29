@@ -368,6 +368,9 @@ impl Manager {
         if rec.state == state::DESTROYING {
             return Err(MError::BadState(rec.state));
         }
+        if !rec.has_disks() {
+            return Err(super::made_never(&rec));
+        }
         // Its disks are half swapped: what a backup sent now would be neither (ADR 0031).
         if let Some(snap) = &rec.restoring {
             return Err(snapshots::unfinished(snap));
@@ -910,6 +913,7 @@ impl Manager {
                 let r = e.rec.lock().unwrap();
                 r.is_tenants()
                     && r.state != state::DESTROYING
+                    && r.has_disks()
                     && r.backup.policy.is_some()
                     && r.backup.next_at.is_none_or(|t| t <= now)
             })
@@ -1385,7 +1389,7 @@ mod tests {
             let mut req = self.request(name);
             req.backup = backup;
             req.start = Some(start);
-            self.m.create(req).await.unwrap()
+            self.m.create_made(req).await.unwrap()
         }
 
         async fn volsize_gb(&self, id: &str) -> u64 {
@@ -1445,7 +1449,7 @@ mod tests {
         ] {
             let mut req = h.request("bad");
             req.backup = backup;
-            match h.m.create(req).await {
+            match h.m.create_made(req).await {
                 Err(MError::Invalid(e)) => assert_eq!(e, why),
                 other => panic!("{other:?}"),
             }
@@ -1656,7 +1660,10 @@ mod tests {
         let b2 = h.m.backup("m_v").await.unwrap();
         let data = b2.disks.iter().find(|d| d.disk == "data").unwrap();
         assert_eq!(data.from.as_deref(), Some(b1.id.as_str()));
-        let r = h.m.create(restore_of("m_v", &b2.id, "r2")).await.unwrap();
+        let r =
+            h.m.create_made(restore_of("m_v", &b2.id, "r2"))
+                .await
+                .unwrap();
         assert_eq!(
             (r.volume.map(|v| v.size_gb), h.volsize_gb(&r.id).await),
             (Some(5), 5)
@@ -1668,12 +1675,12 @@ mod tests {
             }),
             ..restore_of("m_v", &b1.id, name)
         };
-        let err = h.m.create(with(1, "small")).await.unwrap_err();
+        let err = h.m.create_made(with(1, "small")).await.unwrap_err();
         assert_eq!(
             err.to_string(),
             "invalid request: volume: 1 GB asked, 2 GB held: a volume never shrinks"
         );
-        let r = h.m.create(with(8, "big")).await.unwrap();
+        let r = h.m.create_made(with(8, "big")).await.unwrap();
         assert_eq!(
             (r.volume.map(|v| v.size_gb), h.volsize_gb(&r.id).await),
             (Some(8), 8)
@@ -1688,7 +1695,7 @@ mod tests {
         let h = harness(|_| {}).await;
         let mut req = h.request("db");
         req.env.insert("PASSWORD".into(), "s3cret".into());
-        let m = h.m.create(req).await.unwrap();
+        let m = h.m.create_made(req).await.unwrap();
         h.pool.calls();
         let b = h.m.backup(&m.id).await.unwrap();
         let key = "0123456789abcdef".repeat(4);
@@ -1725,7 +1732,10 @@ mod tests {
         let mut moved = record.clone();
         moved.id = "20991231T000000.000Z".into();
         assert!(spec_of(&moved, Some(&key)).is_err());
-        let r = h.m.create(restore_of(&m.id, &b.id, "r")).await.unwrap();
+        let r =
+            h.m.create_made(restore_of(&m.id, &b.id, "r"))
+                .await
+                .unwrap();
         let env = h.m.entry(&r.id).unwrap().snapshot().env;
         assert_eq!(env["PASSWORD"], "s3cret", "the spec opened");
         let calls = h.pool.calls();
@@ -1749,7 +1759,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let err = h.m.create(restore_of(&m.id, &other.id, "r2")).await;
+        let err = h.m.create_made(restore_of(&m.id, &other.id, "r2")).await;
         let msg = match err {
             Ok(r) => h.m.get(&r.id).unwrap().error,
             Err(e) => format!("{e:#}"),
@@ -1797,7 +1807,10 @@ mod tests {
             .await
             .unwrap();
         h.pool.calls();
-        let r = h.m.create(restore_of(&m.id, &b.id, "r")).await.unwrap();
+        let r =
+            h.m.create_made(restore_of(&m.id, &b.id, "r"))
+                .await
+                .unwrap();
         assert_eq!(r.state, state::CREATED);
         let calls = h.pool.calls();
         assert!(
@@ -1836,7 +1849,7 @@ mod tests {
             start: Some(false),
             ..Default::default()
         };
-        let r = h.m.create(restore("r2", &made[1])).await.unwrap();
+        let r = h.m.create_made(restore("r2", &made[1])).await.unwrap();
         assert_eq!(r.state, state::CREATED);
         // Its own backups start a chain of their own, whole.
         let rb = h.m.backup(&r.id).await.unwrap();
@@ -1865,8 +1878,8 @@ mod tests {
             all.iter().map(|b| b.bytes).sum::<u64>()
         );
         // Both kept points restore.
-        h.m.create(restore("r3", &made[2])).await.unwrap();
-        h.m.create(restore("r4", &made[3])).await.unwrap();
+        h.m.create_made(restore("r3", &made[2])).await.unwrap();
+        h.m.create_made(restore("r4", &made[3])).await.unwrap();
     }
 
     #[tokio::test]
@@ -1879,7 +1892,7 @@ mod tests {
             machine_id: src.id.clone(),
             copy: String::new(),
         });
-        let fork = h.m.create(req).await.unwrap();
+        let fork = h.m.create_made(req).await.unwrap();
         // Destroyed under its fork: the fork's root disk takes the source's older snapshots
         // over, its backup snapshot among them, as ZFS's promote does.
         h.m.destroy(&src.id, None).await.unwrap();
@@ -1896,7 +1909,7 @@ mod tests {
         assert_eq!(second.disks[0].from.as_deref(), Some(first.id.as_str()));
         // And its chain restores.
         let r =
-            h.m.create(api::CreateMachineRequest {
+            h.m.create_made(api::CreateMachineRequest {
                 tenant: "t1".into(),
                 name: "back".into(),
                 restore: Some(api::RestoreSpec {
@@ -2087,7 +2100,7 @@ mod tests {
         let mut req = h.request("db");
         req.backup = every("1h", 3);
         req.metadata = BTreeMap::from([("briq".to_string(), "bq_1".to_string())]);
-        let m = h.m.create(req).await.unwrap();
+        let m = h.m.create_made(req).await.unwrap();
         let first = h.m.backup(&m.id).await.unwrap();
         let second = h.m.backup(&m.id).await.unwrap();
         let bytes = first.bytes + second.bytes;

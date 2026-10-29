@@ -465,7 +465,8 @@ impl EgressDrops {
     }
 }
 
-/// Makes a machine. The image is pulled if the host has not seen it.
+/// Makes a machine: recorded at once in `creating`, its image pulled (when the host has not
+/// seen it), its disks made and its start done in the background (ADR 0048).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateMachineRequest {
     /// Owns the machine and its network; any string, a team id for briq.
@@ -572,6 +573,9 @@ pub struct Exit {
 
 /// Machine states.
 pub mod state {
+    /// Recorded, its spec checked, its name, address and (when it starts) memory taken: its
+    /// image pulled and its disks made in the background, then started (ADR 0048).
+    pub const CREATING: &str = "creating";
     pub const CREATED: &str = "created";
     pub const STARTING: &str = "starting";
     pub const RUNNING: &str = "running";
@@ -610,6 +614,10 @@ pub struct Machine {
     pub exit: Option<Exit>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
+    /// Why it is in `error`, the event that put it there: `pull_failed` or `create_failed`
+    /// (its create, ADR 0048), `boot_failed`, `start_failed`. Empty for a record from before.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error_reason: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ip: String,
     pub hostname: String,
@@ -1291,6 +1299,12 @@ pub mod event {
 pub mod reason {
     pub const CREATED: &str = "created";
     pub const FORKED: &str = "forked";
+    /// Its create waits for its image to be pulled (ADR 0048).
+    pub const PULLING: &str = "pulling";
+    /// Its create could not pull its image: the machine is in `error` (ADR 0048).
+    pub const PULL_FAILED: &str = "pull_failed";
+    /// Its create could not make its disks or start it: the machine is in `error` (ADR 0048).
+    pub const CREATE_FAILED: &str = "create_failed";
     pub const RESTORED: &str = "restored";
     pub const STARTING: &str = "starting";
     pub const STARTED: &str = "started";
@@ -1333,6 +1347,9 @@ pub mod reason {
     pub const ALL: &[&str] = &[
         CREATED,
         FORKED,
+        PULLING,
+        PULL_FAILED,
+        CREATE_FAILED,
         RESTORED,
         STARTING,
         STARTED,
@@ -2113,7 +2130,13 @@ mod tests {
         input["pending"] = json!({"fields": ["image", "env", "size"], "image": "postgres:18",
             "size": {"vcpus": 2, "memory_mb": 1024}});
         input["pending_since"] = json!("2026-01-02T03:04:05Z");
+        // ADR 0048: why it is in `error`; absent from a machine of before, it reads empty.
+        let mut failed = input.clone();
+        failed["state"] = json!(state::ERROR);
+        failed["error_reason"] = json!(reason::PULL_FAILED);
+        assert_eq!(same::<Machine>(failed).error_reason, "pull_failed");
         let m: Machine = same(input);
+        assert_eq!(m.error_reason, "");
         let p = m.pending.as_ref().unwrap();
         assert_eq!(
             (p.fields.len(), p.image.as_deref()),
@@ -3007,7 +3030,7 @@ mod tests {
         all.sort();
         all.dedup();
         assert_eq!(all.len(), reason::ALL.len());
-        assert_eq!(all.len(), 36);
+        assert_eq!(all.len(), 39);
         assert!(all
             .iter()
             .all(|r| r.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')));

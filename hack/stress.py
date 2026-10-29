@@ -422,7 +422,7 @@ class Run:
 
     # ---- the races ----
     def hangup_mid_create(self):
-        self.phase("hang up on a create after 1 s: the machine settles on its own, the image still builds")
+        self.phase("hang up on a create after 1 s: the machine settles on its own, the image still builds (a create answers at once since ADR 0048)")
         t, name = self.tenants[0], "hangup"
         body = {"tenant": t, "name": name, "image": HANGUP_IMAGE, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}
         status, text = self.api.request("POST", "/v1/machines", body, op="create (hang up)", timeout=1)
@@ -432,7 +432,7 @@ class Run:
             # The record, if the create got that far, must leave its pending state by itself.
             deadline = time.monotonic() + self.a.boot_timeout
             m = self.find_named(t, name)
-            while m and m["state"] in ("created", "starting"):
+            while m and m["state"] in ("creating", "created", "starting"):
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"{m['id']} still {m['state']} {self.a.boot_timeout}s after the hang-up")
                 time.sleep(0.5)
@@ -514,8 +514,11 @@ class Run:
         made, errs = parallel([f"cap{i}" for i in range(n)], lambda name: self.api.call("POST", "/v1/machines", dict(body, name=name), op="create (stopped)", timeout=600), n)
         self.report_errors("create stopped", errs)
         ids = [m["id"] for m in made.values()]
+        # A create answers at `creating` (ADR 0048): the race is between starts of machines made.
+        for mid in ids:
+            self.wait_state(mid, {"created"}, timeout=self.a.boot_timeout)
         # A start refused leaves a machine as it was: `created`, never started.
-        was = {m["id"]: m["state"] for m in made.values()}
+        was = {mid: "created" for mid in ids}
 
         # Live memory, sampled through the race: it must never exceed the host's.
         worst = {"mb": 0}
@@ -579,6 +582,121 @@ class Run:
         self.endpoints.clear()
         self.invariants("destroy")
 
+    # ---- churn: the daemon's memory ----
+    def rss(self):
+        """The daemon's resident memory in MB, from its /metrics; None when it does not say."""
+        url = self.a.invariants_url or self.a.url
+        api = Api(url, self.a.token)
+        status, text = api.request("GET", "/metrics", op="metrics", timeout=30)
+        for line in text.splitlines() if status == 200 else []:
+            if line.startswith("process_resident_memory_bytes "):
+                return float(line.split()[1]) / (1 << 20)
+        return None
+
+    def churn(self):
+        """Cycles of everything a machine goes through, each ending with the tenants empty
+        again; the daemon's memory is read after each. What the first cycle settles (caches,
+        the allocator's pools) is not growth; what keeps growing after it is."""
+        self.phase(f"churn: {self.a.churn} cycles of create, exec, files, an endpoint, snapshot and restore, backup and restore, fork, suspend, destroy")
+        backups = {"on": True}
+        sizes = []
+
+        def cycle(c, t, i):
+            body = {
+                "tenant": t,
+                "name": f"c{c}",
+                "image": self.a.image,
+                "cmd": ["sh", "-c", "mkdir -p /www && echo hello > /www/index.html && exec python3 -m http.server 8080 --directory /www"],
+                "size": {"vcpus": 1, "memory_mb": self.a.memory},
+                "ports": [8080],
+                "sleep": "never",
+                "env": {"STRESS_SECRET": "s3cr3t"},
+            }
+            if i % 2 == 0:
+                body["volume"] = {"size_gb": 1, "mount": "/data"}
+            m = self.api.call("POST", "/v1/machines", body, op="create", timeout=600)
+            mid = m["id"]
+            made = [mid]
+            try:
+                self.wait_state(mid, {"running"}, timeout=self.a.boot_timeout)
+                # Synced: a snapshot holds what is on the disk, not in the guest's page cache.
+                self.exec(mid, ["sh", "-c", "echo one > /root/mark; sync"])
+                blob = rand_bytes(256 << 10)
+                self.api.call("PUT", f"/v1/machines/{mid}/files", {"path": "/tmp/blob", "base64": base64.b64encode(blob).decode()}, op="put")
+                got = self.api.call("GET", f"/v1/machines/{mid}/files?path=/tmp/blob", op="get_file")
+                assert base64.b64decode(got["base64"]) == blob, "file round trip differs"
+                ep = self.api.call("POST", f"/v1/machines/{mid}/endpoints", {"port": 8080, "protocol": "tcp"}, op="expose")
+                host, port = ep["address"].rsplit(":", 1)
+                host = host if host != "0.0.0.0" else "127.0.0.1"
+                # The ingress opens the port just after the answer: refused until it listens.
+                deadline = time.monotonic() + 30
+                for _ in range(5):
+                    while True:
+                        conn = http.client.HTTPConnection(host, int(port), timeout=90)
+                        try:
+                            conn.request("GET", "/")
+                            break
+                        except ConnectionRefusedError:
+                            if time.monotonic() > deadline:
+                                raise
+                            time.sleep(0.2)
+                    assert conn.getresponse().status == 200
+                    conn.close()
+                self.api.call("POST", f"/v1/machines/{mid}/snapshots", {"name": "one"}, op="snapshot")
+                self.exec(mid, ["sh", "-c", "echo two > /root/mark; sync"])
+                self.api.call("POST", f"/v1/machines/{mid}/snapshots/one/restore", op="restore snapshot", timeout=600)
+                self.wait_state(mid, {"running"}, timeout=self.a.boot_timeout)
+                assert self.exec(mid, ["cat", "/root/mark"]).strip() == "one", "snapshot not restored"
+                if backups["on"]:
+                    st, text = self.api.request("POST", f"/v1/machines/{mid}/backups", op="backup", timeout=600)
+                    if st == 400:
+                        backups["on"] = False
+                    elif st != 201:
+                        raise RuntimeError(f"backup answered {st} {text[:120]}")
+                    else:
+                        b = json.loads(text)
+                        r = self.api.call("POST", "/v1/machines", {"tenant": t, "name": f"r{c}", "restore": {"machine_id": mid, "backup": b["id"]}, "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="restore backup", timeout=600)
+                        made.append(r["id"])
+                        self.wait_state(r["id"], {"running"}, timeout=self.a.boot_timeout)
+                        assert self.exec(r["id"], ["cat", "/root/mark"]).strip() == "one", "backup not restored"
+                f = self.api.call("POST", "/v1/machines", {"tenant": t, "name": f"f{c}", "fork": {"machine_id": mid, "copy": "disk"}, "cmd": ["sleep", "3600"], "size": {"vcpus": 1, "memory_mb": self.a.memory}, "sleep": "never"}, op="fork", timeout=600)
+                made.append(f["id"])
+                self.wait_state(f["id"], {"running"}, timeout=self.a.boot_timeout)
+                self.api.call("POST", f"/v1/machines/{mid}/stop", {"suspend": True, "timeout_sec": 10}, op="suspend", timeout=120)
+                self.wait_state(mid, {"stopped"}, timeout=120)
+                self.api.call("POST", f"/v1/machines/{mid}/start", op="resume", timeout=180)
+                self.wait_state(mid, {"running"}, timeout=self.a.boot_timeout)
+            finally:
+                for x in reversed(made):
+                    self.api.call("DELETE", f"/v1/machines/{x}", op="destroy", timeout=180)
+                if backups["on"]:
+                    for b in self.api.call("GET", f"/v1/machines/{mid}/backups", op="backups"):
+                        self.api.request("DELETE", f"/v1/machines/{mid}/backups/{b['id']}?chain=true", op="delete backup")
+            return True
+
+        for c in range(1, self.a.churn + 1):
+            _, errs = parallel(list(enumerate(self.tenants)), lambda it: cycle(c, it[1], it[0]), self.a.workers)
+            self.report_errors(f"churn {c}", errs, self.tenants)
+            # Idle first: jemalloc gives freed pages back after 10 s (ADR 0052).
+            time.sleep(12)
+            mb = self.rss()
+            sizes.append(mb)
+            self.log(f"   cycle {c}: daemon RSS {'unknown' if mb is None else f'{mb:.1f} MB'}")
+        self.invariants("churn")
+        if None in sizes:
+            self.log("   RSS check skipped: no process_resident_memory_bytes at the daemon (through a fleet, give --invariants-url)")
+            return
+        if len(sizes) < 3:
+            self.log("   RSS check skipped: fewer than 3 cycles")
+            return
+        # Growth after the first cycle, over the second half against the first: a leak keeps
+        # its slope, a pool that settled does not.
+        half = len(sizes) // 2
+        first, second = sizes[half] - sizes[0], sizes[-1] - sizes[half]
+        self.log(f"   RSS {sizes[0]:.1f} MB after cycle 1, {sizes[-1]:.1f} MB after {len(sizes)}: +{first:.1f} MB to cycle {half + 1}, +{second:.1f} MB after it")
+        if second > self.a.rss_growth_mb:
+            self.broken.append(("churn", f"daemon RSS grew {second:.1f} MB over cycles {half + 1}..{len(sizes)} (bound {self.a.rss_growth_mb} MB)"))
+
     # ---- reporting ----
     def report_errors(self, phase, errs, names=None):
         for k, e in errs.items():
@@ -616,6 +734,9 @@ class Run:
                     continue
                 getattr(self, name)()
             self.destroy_all()
+        if self.a.churn:
+            self.churn()
+            self.destroy_all()
         self.report()
         return 0 if not self.api.failures and not self.broken else 1
 
@@ -638,6 +759,8 @@ def main():
     p.add_argument("--boot-timeout", type=int, default=300)
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
     p.add_argument("--crash", action="store_true", help="SIGKILL the daemon in round 1 (needs sudo on the host)")
+    p.add_argument("--churn", type=int, default=0, help="then this many cycles of every feature per tenant, the daemon's RSS read after each")
+    p.add_argument("--rss-growth-mb", type=float, default=32, help="churn: the most the daemon's RSS may grow over the second half of the cycles")
     p.add_argument("--phases", default="", help=f"comma-separated, of {','.join(PHASES)} (default: all); endpoints_all relies on exec_all's wait for the web servers")
     p.add_argument("--no-invariants", action="store_true")
     p.add_argument("--invariants-url", default="", help="the daemon to check the host against when --url is a fleet")
