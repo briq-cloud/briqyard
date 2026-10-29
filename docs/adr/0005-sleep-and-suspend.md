@@ -1,6 +1,6 @@
 # ADR 0005: Sleep: stop on idle, wake on connect, a memory snapshot for a quarter-second resume
 
-Date: 2026-10-19 · Status: accepted; amended by ADR 0027 (a stop's machines are booted again at the next start; a snapshot resumes only under the Firecracker and host kernel that took it; SIGUSR2 hands the machines over)
+Date: 2026-10-19 · Status: accepted; amended by ADR 0027 (a stop's machines are booted again at the next start; a snapshot resumes only under the Firecracker and host kernel that took it; SIGUSR2 hands the machines over) and by ADR 0053 (a connection is use until it reaches the program)
 
 ## Context
 

@@ -25,5 +25,7 @@ tls = ["dep:rustls", "dep:sha2", "dep:hex"]
 listeners = ["dep:nix", "dep:socket2"]
 
 [dev-dependencies]
+briqyard-testing = { workspace = true }
+ctor = { workspace = true }
 rcgen = { workspace = true }
 tempfile = "3"

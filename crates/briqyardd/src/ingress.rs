@@ -238,8 +238,11 @@ impl Ingress {
     }
 
     /// Connects to the machine's port, waking it, waiting for it to be ready (ADR 0022) and
-    /// for the port to listen, all within the wake timeout.
-    async fn dial(&self, ep: &EndpointRec) -> Result<TcpStream> {
+    /// for the port to listen, all within the wake timeout. The machine is in use while the
+    /// connection waits (ADR 0053), so it cannot go back to sleep under it; one that stops
+    /// meanwhile (a stop, an exit) ends the wait.
+    pub(crate) async fn dial(&self, ep: &EndpointRec) -> Result<TcpStream> {
+        let _waiting = self.mgr.in_use(&ep.machine_id)?;
         let deadline = tokio::time::Instant::now() + self.wake_timeout;
         let ip = tokio::time::timeout(
             self.wake_timeout,
@@ -249,16 +252,20 @@ impl Ingress {
         .map_err(|_| anyhow!("wake timed out"))??;
         let addr = SocketAddr::from((ip, ep.port));
         loop {
-            match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr)).await {
+            let tried =
+                tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr)).await;
+            let why = match tried {
                 Ok(Ok(c)) => return Ok(c),
-                Ok(Err(e)) if tokio::time::Instant::now() > deadline => {
-                    return Err(anyhow!("{addr} did not answer: {e}"))
-                }
-                _ if tokio::time::Instant::now() > deadline => {
-                    return Err(anyhow!("{addr} did not answer"))
-                }
-                _ => tokio::time::sleep(Duration::from_millis(250)).await,
+                Ok(Err(e)) => format!("{addr} did not answer: {e}"),
+                Err(_) => format!("{addr} did not answer"),
+            };
+            if !self.mgr.is_running(&ep.machine_id) {
+                return Err(anyhow!("{why}: the machine stopped"));
             }
+            if tokio::time::Instant::now() > deadline {
+                return Err(anyhow!(why));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
 

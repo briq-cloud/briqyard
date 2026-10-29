@@ -1215,10 +1215,11 @@ mod tests {
     }
 
     /// A stand-in for Firecracker's API socket: answers each connection with the next canned
-    /// response and hands back the requests it read, in order.
+    /// response and hands back the requests it read, in order. Within 10 s: a client that
+    /// never sends what it waits on fails its test, the socket closed.
     fn serve(socket: &Path, responses: Vec<&'static str>) -> tokio::task::JoinHandle<Vec<String>> {
         let ln = UnixListener::bind(socket).unwrap();
-        tokio::spawn(async move {
+        let serve = async move {
             let mut seen = Vec::new();
             for resp in responses {
                 let (mut s, _) = ln.accept().await.unwrap();
@@ -1235,6 +1236,11 @@ mod tests {
                 s.write_all(resp.as_bytes()).await.unwrap();
             }
             seen
+        };
+        tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(10), serve)
+                .await
+                .expect("the stand-in waited 10 s")
         })
     }
 

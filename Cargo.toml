@@ -7,6 +7,7 @@ members = [
     "crates/briqyard",
     "crates/briqyard-fleet",
     "crates/briqyard-objstore",
+    "crates/briqyard-testing",
 ]
 
 [workspace.package]
@@ -19,6 +20,9 @@ rust-version = "1.85"
 [workspace.dependencies]
 briqyard-api = { path = "crates/briqyard-api" }
 briqyard-objstore = { path = "crates/briqyard-objstore" }
+briqyard-testing = { path = "crates/briqyard-testing" }
+# Installs briqyard-testing's watchdog in each test binary before its tests start.
+ctor = "1"
 anyhow = "1"
 async-trait = "0.1"
 thiserror = "2"

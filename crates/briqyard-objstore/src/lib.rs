@@ -545,3 +545,10 @@ mod tests {
         assert!(store.list(&run).await.unwrap().is_empty());
     }
 }
+
+/// A test binary ends with its parent, and in bounded time (briqyard-testing).
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn exit_with_parent() {
+    briqyard_testing::exit_with_parent();
+}
