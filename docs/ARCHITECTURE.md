@@ -327,8 +327,9 @@ cannot pass it together. A refusal is 403 `quota` and a `quota_exceeded` event.
 
 ### Sleep
 
-Use is an exec or an exec session for as long as it runs (ADR 0029), an ingress connection, or
-an explicit `POST /machines/{id}/touch`. After the
+Use is an exec or an exec session for as long as it runs (ADR 0029), an ingress connection
+until it reaches the program (through a wake, readiness and the port's opening, ADR 0052), or
+an explicit `POST /machines/{id}/touch`. An open connection after that is not use. After the
 machine's `sleep` window with no use, the daemon stops it (`stopped_reason: idle`; idle machines
 are stopped together, a few at a time, never one after another). A start, an
 ingress connection or an exec on an idle machine wakes it; one that arrives while the machine is

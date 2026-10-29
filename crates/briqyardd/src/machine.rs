@@ -4550,6 +4550,8 @@ impl Manager {
             .execs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let e = self.own_entry(id)?;
+        // In use from the call (ADR 0052): the sleeper leaves a machine it wakes for this.
+        let in_use = InUse::new(e.clone());
         let sock = self.running_vsock(id, wake).await?;
         // An init older than sessions takes the request as a plain exec, its input and terminal
         // ignored (ADR 0027): refused, the init named, before the guest is asked.
@@ -4568,7 +4570,7 @@ impl Manager {
         .await
         .map_err(|_| MError::NotRunning("the guest did not take the command".into()))?
         .map_err(not_running_if_unreachable)?;
-        Ok((conn, InUse::new(e)))
+        Ok((conn, in_use))
     }
 
     pub async fn put_file(&self, id: &str, req: api::PutFileRequest) -> Result<(), MError> {
@@ -4844,6 +4846,19 @@ impl Manager {
             let _ = self.inner.endpoint_events.send((ep, false));
         }
         Ok(())
+    }
+
+    /// Holds the machine in use for a connection the ingress is delivering (ADR 0052): from
+    /// its arrival until it reaches the machine's port, through a wake and the program's start.
+    /// The sleeper leaves it running meanwhile, and its last use is the delivery.
+    pub fn in_use(&self, id: &str) -> Result<InUse, MError> {
+        Ok(InUse::new(self.entry(id)?))
+    }
+
+    /// Whether the machine runs: a connection waiting for its port gives up once it does not.
+    pub fn is_running(&self, id: &str) -> bool {
+        self.entry(id)
+            .is_ok_and(|e| e.rec.lock().unwrap().state == state::RUNNING)
     }
 
     /// The address a proxy connects to, waking the machine when asked.
@@ -11034,6 +11049,55 @@ mod tests {
         assert_eq!(h.m.get(&m.id).unwrap().state, state::RUNNING);
         let out = job.await.unwrap().unwrap();
         assert_eq!((out.exit_code, out.stdout.as_str()), (0, "ok\n"));
+        assert!(
+            h.m.get(&m.id).unwrap().last_used_at > Some(Utc::now() - chrono::Duration::minutes(1))
+        );
+    }
+
+    /// The ingress and a TCP endpoint to port 1 of `machine`, which nothing serves at the
+    /// harness's addresses: a dial waits on it until the machine stops.
+    fn ingress_to(h: &Harness, machine: &str) -> (crate::ingress::Ingress, EndpointRec) {
+        let req = api::CreateEndpointRequest {
+            port: 1,
+            protocol: "tcp".into(),
+            ..Default::default()
+        };
+        let ep = h.m.create_endpoint(machine, req).unwrap();
+        let ingress =
+            crate::ingress::Ingress::new(h.m.clone(), "127.0.0.1", "", Duration::from_secs(5));
+        (ingress, h.m.endpoint(&ep.id).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_wakes_its_machine_keeps_it_awake_until_delivered() {
+        let h = harness("10.64.0.0/22", 4096).await;
+        h.ready().await;
+        let m = h.m.create(h.request("web")).await.unwrap();
+        let idle = || {
+            h.m.entry(&m.id).unwrap().rec.lock().unwrap().last_used_at =
+                Some(Utc::now() - chrono::Duration::hours(1))
+        };
+        idle();
+        h.m.tick().await;
+        assert_eq!(h.m.get(&m.id).unwrap().stopped_reason, stop::IDLE);
+        let (ingress, ep) = ingress_to(&h, &m.id);
+        let dial = tokio::spawn(async move { ingress.dial(&ep).await });
+        eventually("the connection woke it", || {
+            h.m.get(&m.id).unwrap().state == state::RUNNING
+        })
+        .await;
+        // Its window runs out before the program listens: the connection still waits for the
+        // port, and the machine does not go back to sleep under it.
+        idle();
+        h.m.tick().await;
+        let up = h.m.get(&m.id).unwrap();
+        assert_eq!(up.state, state::RUNNING);
+        assert_eq!(up.sleeps_at, None, "in use");
+        // A stop ends the wait, and the use with it.
+        h.m.stop(&m.id, Duration::ZERO, false, None).await.unwrap();
+        let err = dial.await.unwrap().unwrap_err().to_string();
+        assert!(err.ends_with("the machine stopped"), "{err}");
+        assert_eq!(h.m.entry(&m.id).unwrap().in_flight.load(Relaxed), 0);
         assert!(
             h.m.get(&m.id).unwrap().last_used_at > Some(Utc::now() - chrono::Duration::minutes(1))
         );

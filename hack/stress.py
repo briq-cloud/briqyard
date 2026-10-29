@@ -11,6 +11,7 @@ no record on disk for a machine the daemon does not hold.
 
     python3 hack/stress.py --tenants 6 --per-tenant 4 --rounds 2
     python3 hack/stress.py --url http://127.0.0.1:7430 --crash  # through the fleet, kill the daemon mid-run
+    python3 hack/stress.py --phases endpoints_all,sleep_wake  # creates, then those phases, then destroys
 
 Exit code 1 when any operation failed or an invariant broke; the report says which.
 """
@@ -104,6 +105,10 @@ def parallel(items, fn, workers):
 
 def rand_bytes(n):
     return os.urandom(n)
+
+
+# The phases of a round, in order, between its creates and its destroys (--phases picks some).
+PHASES = ["exec_all", "endpoints_all", "stop_start_all", "fork_some", "crash", "sleep_wake", "hangup_mid_create", "start_vs_destroy", "starts_past_capacity"]
 
 
 class Run:
@@ -593,18 +598,15 @@ class Run:
     def run(self):
         self.log(f"stress {self.prefix}: {self.a.tenants} tenants × {self.a.per_tenant} machines, {self.a.rounds} round(s), {self.a.workers} workers, {self.a.url}")
         self.invariants("start")
+        want = set(self.a.phases.split(",")) if self.a.phases else set(PHASES)
         for r in range(1, self.a.rounds + 1):
             self.create_all(r)
-            self.exec_all()
-            self.endpoints_all()
-            self.stop_start_all()
-            self.fork_some()
-            if self.a.crash and r == 1:
-                self.crash()
-            self.sleep_wake()
-            self.hangup_mid_create()
-            self.start_vs_destroy()
-            self.starts_past_capacity()
+            for name in PHASES:
+                if name not in want:
+                    continue
+                if name == "crash" and not (self.a.crash and r == 1):
+                    continue
+                getattr(self, name)()
             self.destroy_all()
         self.report()
         return 0 if not self.api.failures and not self.broken else 1
@@ -624,9 +626,13 @@ def main():
     p.add_argument("--boot-timeout", type=int, default=300)
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
     p.add_argument("--crash", action="store_true", help="SIGKILL the daemon in round 1 (needs sudo on the host)")
+    p.add_argument("--phases", default="", help=f"comma-separated, of {','.join(PHASES)} (default: all)")
     p.add_argument("--no-invariants", action="store_true")
     p.add_argument("--invariants-url", default="", help="the daemon to check the host against when --url is a fleet")
     a = p.parse_args()
+    unknown = set(filter(None, a.phases.split(","))) - set(PHASES)
+    if unknown:
+        p.error(f"unknown phases: {','.join(sorted(unknown))}")
     run = Run(a)
     try:
         sys.exit(run.run())
