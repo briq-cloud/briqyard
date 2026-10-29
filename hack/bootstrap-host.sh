@@ -5,7 +5,7 @@
 # fleet's `host upgrade` does that, ADR 0027): a running daemon hands its machines over to the new
 # one, which adopts them; nothing stops.
 #
-#   BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.3 \
+#   BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.4 \
 #   BRIQYARD_POOL_DEVICE=/dev/nvme0n1,/dev/nvme1n1 BRIQYARD_TOKEN=... FLEET_URL=https://fleet.example \
 #   PRIVATE_ADDRESS=10.42.0.11/16 PRIVATE_INTERFACE=enp3s0f1 ALLOWED_CLIENTS=10.42.0.0/16 bash bootstrap-host.sh
 #
