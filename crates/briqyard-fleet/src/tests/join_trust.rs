@@ -168,8 +168,17 @@ async fn a_new_token_replaces_a_host_that_joined_and_never_heartbeated() {
     let (s, _, _) = call(&f.st, "POST", "/v1/hosts/key", &first, ask).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 
-    // By id as well, from another address (a server that came back under a new one).
-    let (token, _) = mint(&f, serde_json::json!({})).await;
+    // By id, from another address, the holder of another token takes nothing: the record is not
+    // theirs. The token that made it may (a server that came back under a new address).
+    let (other, _) = mint(&f, serde_json::json!({})).await;
+    let (s, text) = join(&f, peer(11), &other, facts("h_10-0-0-9")).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{text}");
+    assert_eq!(
+        f.st.reg.lock().unwrap().hosts["h_10-0-0-9"].token,
+        second,
+        "the record and its token are as they were"
+    );
+    assert_eq!(uses_of(&f, &other), 0);
     let (s, text) = join(&f, peer(11), &token, facts("h_10-0-0-9")).await;
     assert_eq!(s, StatusCode::CREATED, "{text}");
     assert!(hosts(&f.st).iter().all(|h| h.id == "h_10-0-0-9"));

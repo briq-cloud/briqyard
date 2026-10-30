@@ -34,6 +34,7 @@ fn host(id: &str, cap: u32, used: u32, machines: usize) -> HostRec {
         started: Default::default(),
         pool_key: PoolKey::default(),
         labels: Default::default(),
+        join_token: String::new(),
         unknown: Unknown::new(),
         holds: Vec::new(),
     }

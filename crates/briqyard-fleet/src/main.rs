@@ -239,6 +239,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         started: Default::default(),
         pool_key: Default::default(),
         labels: Default::default(),
+        join_token: String::new(),
         unknown: Default::default(),
         holds: Vec::new(),
     }

@@ -585,3 +585,37 @@ async fn a_join_the_registry_cannot_write_is_not_a_join() {
         "the token not written is not kept"
     );
 }
+
+/// A refused join is logged once a minute per peer; the call itself is answered every time.
+#[tokio::test]
+async fn refusals_are_logged_once_a_minute_per_peer_and_never_limited() {
+    assert!(crate::join::log_refusal("10.9.9.1"));
+    assert!(
+        !crate::join::log_refusal("10.9.9.1"),
+        "the same peer, at once"
+    );
+    assert!(crate::join::log_refusal("10.9.9.2"), "another peer");
+    let f = joinable();
+    for _ in 0..5 {
+        let (s, _) = join(&f, peer(9), "ffffff.0000000000000000", facts("")).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "every call is answered");
+    }
+}
+
+/// The listing drops what ended long ago, as a mint does.
+#[tokio::test]
+async fn listing_the_tokens_drops_those_that_ended_long_ago() {
+    let f = joinable();
+    let (_, old) = mint(&f, serde_json::json!({ "ttl_sec": 60 })).await;
+    let (_, live) = mint(&f, serde_json::json!({ "ttl_sec": 0 })).await;
+    f.st.reg.lock().unwrap().join_tokens[0].expires_at = Some(Utc::now() - Duration::days(31));
+    let (_, _, listed) = call(&f.st, "GET", "/v1/hosts/tokens", "api", None).await;
+    let ids: Vec<_> = json(&listed)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, [live["id"].as_str().unwrap()], "{listed}");
+    assert!(!ids.contains(&old["id"].as_str().unwrap().to_string()));
+}

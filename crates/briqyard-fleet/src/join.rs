@@ -108,7 +108,8 @@ pub(super) async fn create_token(
 
 pub(super) async fn list_tokens(State(st): S) -> Json<Vec<api::JoinToken>> {
     let now = Utc::now();
-    let reg = st.reg.lock().unwrap();
+    let mut reg = st.reg.lock().unwrap();
+    reg.prune_tokens(now);
     let mut tokens: Vec<api::JoinToken> = reg.join_tokens.iter().map(|t| t.to_api(now)).collect();
     tokens.sort_by_key(|t| std::cmp::Reverse(t.created_at));
     Json(tokens)
@@ -144,10 +145,41 @@ fn never_heartbeated(h: &HostRec) -> bool {
     h.provider == "join" && h.state == "joining" && h.tls_fingerprint.is_empty()
 }
 
+/// Whether a refused join from `peer` is logged now: one line per peer per minute, so a caller
+/// guessing tokens cannot fill the log. The call itself is never limited. The map is bounded:
+/// when full, the peers last seen over a minute ago are dropped, and if none is, the table
+/// starts over.
+pub(crate) fn log_refusal(peer: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration as Wait, Instant};
+    const EVERY: Wait = Wait::from_secs(60);
+    const PEERS: usize = 1024;
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let mut last = LAST
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if last.get(peer).is_some_and(|at| now - *at < EVERY) {
+        return false;
+    }
+    if last.len() >= PEERS && !last.contains_key(peer) {
+        last.retain(|_, at| now - *at < EVERY);
+        if last.len() >= PEERS {
+            last.clear();
+        }
+    }
+    last.insert(peer.to_string(), now);
+    true
+}
+
 /// The refusal for a token that cannot be used, whatever the reason: the caller is told one
-/// thing, the log the reason.
+/// thing, the log the reason (once a minute per peer, [`log_refusal`]).
 fn denied(why: registry::TokenError, peer: &str) -> Refusal {
-    tracing::warn!(reason = %why, peer, "join refused: the token is not usable");
+    if log_refusal(peer) {
+        tracing::warn!(reason = %why, peer, "join refused: the token is not usable");
+    }
     err(
         StatusCode::UNAUTHORIZED,
         "invalid_token",
@@ -219,13 +251,15 @@ pub(super) async fn join_host(
             (bound, "") => bound.to_string(),
             (bound, name) if bound == name => name.to_string(),
             (bound, name) => {
-                tracing::warn!(
-                    token = token.id,
-                    bound,
-                    name,
-                    peer,
-                    "join refused: not the name the token is bound to"
-                );
+                if log_refusal(&peer) {
+                    tracing::warn!(
+                        token = token.id,
+                        bound,
+                        name,
+                        peer,
+                        "join refused: not the name the token is bound to"
+                    );
+                }
                 return Err(err(
                     StatusCode::FORBIDDEN,
                     "wrong_name",
@@ -236,15 +270,19 @@ pub(super) async fn join_host(
         let id = host_id(asked, ip)?;
         let url = bootstrap::host_url(&ip.to_string());
         // A host that joined and never heartbeated holds nothing but a token no daemon has (a
-        // failed install): a fresh token replaces it, rotating its token. Any other host at the
-        // id or the address is a conflict.
+        // failed install): a new join replaces it, rotating its token, when it comes from the
+        // record's own address or with the token that made it. Any other host at the id or the
+        // address is a conflict, so the holder of another token cannot take a record by its id.
         let in_the_way: Vec<HostRec> = reg
             .hosts
             .values()
             .filter(|o| o.id == id || (!o.url.is_empty() && url_host(&o.url) == ip.to_string()))
             .cloned()
             .collect();
-        if let Some(other) = in_the_way.iter().find(|o| !never_heartbeated(o)) {
+        let ours = |o: &HostRec| {
+            never_heartbeated(o) && (url_host(&o.url) == ip.to_string() || o.join_token == token.id)
+        };
+        if let Some(other) = in_the_way.iter().find(|o| !ours(o)) {
             return Err(err(
                 StatusCode::CONFLICT,
                 "conflict",
@@ -276,6 +314,7 @@ pub(super) async fn join_host(
             ),
             public_tcp_ports: Some(b.public_tcp_ports.clone()),
             labels: token.labels.clone(),
+            join_token: token.id.clone(),
             ..Default::default()
         };
         let by = api::JoinTokenUse {
@@ -299,14 +338,18 @@ pub(super) async fn join_host(
     };
     let (rec, replaced, before) = rec;
     if let Err(e) = st.save().await {
-        // The host never got its answer: the use is taken back, and no host is recorded.
+        // The host never got its answer: the use is taken back, and no host is recorded. Only
+        // while the record is still the one this call made: a join that came in between and
+        // took its place owns it now.
         let mut reg = st.reg.lock().unwrap();
-        reg.hosts.remove(&rec.id);
-        for o in replaced {
-            reg.hosts.insert(o.id.clone(), o);
-        }
-        if let Some(t) = presented.split_once('.').map(|(id, _)| id) {
-            reg.release_token(t, before);
+        if reg.hosts.get(&rec.id).is_some_and(|h| h.token == rec.token) {
+            reg.hosts.remove(&rec.id);
+            for o in replaced {
+                reg.hosts.insert(o.id.clone(), o);
+            }
+            if let Some(t) = presented.split_once('.').map(|(id, _)| id) {
+                reg.release_token(t, before);
+            }
         }
         return Err(registry_error(e));
     }

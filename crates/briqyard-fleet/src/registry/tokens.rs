@@ -177,11 +177,17 @@ impl JoinTokenRec {
 }
 
 impl Registry {
+    /// Drops the tokens that ended more than [`KEEP_ENDED`] ago. Done at each mint and each
+    /// listing.
+    pub fn prune_tokens(&mut self, now: DateTime<Utc>) {
+        self.join_tokens
+            .retain(|t| t.ended().is_none_or(|at| now - at < KEEP_ENDED));
+    }
+
     /// Makes a token and returns it whole (`<id>.<secret>`), the one time it exists in clear.
     /// The caller writes the registry before the token is answered.
     pub fn mint_token(&mut self, spec: TokenSpec, now: DateTime<Utc>) -> (String, JoinTokenRec) {
-        self.join_tokens
-            .retain(|t| t.ended().is_none_or(|at| now - at < KEEP_ENDED));
+        self.prune_tokens(now);
         let id = loop {
             let id = random_alnum(6);
             if !self.join_tokens.iter().any(|t| t.id == id) {

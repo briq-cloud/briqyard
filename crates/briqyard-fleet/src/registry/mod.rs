@@ -105,6 +105,9 @@ pub struct HostRec {
     /// The labels of the join token the host came with (ADR 0059).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// The id of the join token the host came with (ADR 0059); empty: it did not join.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub join_token: String,
     /// The key of the host's pool (ADR 0026), made the first time the host asks for it and
     /// served to that host alone; never in `to_api`, gone with the record.
     #[serde(default, skip_serializing_if = "PoolKey::is_empty")]
