@@ -225,6 +225,7 @@ fn the_host_table() {
         version: "0.1.0".into(),
         note: String::new(),
         tls_fingerprint: "ab".repeat(32),
+        labels: Default::default(),
         public_tcp_ports: vec![],
         conditions: vec![
             api::Condition {
@@ -264,6 +265,7 @@ fn the_host_table() {
         ssh: "51.68.1.2".into(),
         region: "gra".into(),
         note: String::new(),
+        labels: Default::default(),
         public_tcp_ports: vec![80, 443, 5432],
         ..pending.clone()
     };
@@ -386,6 +388,7 @@ fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
         version: String::new(),
         note: String::new(),
         tls_fingerprint: String::new(),
+        labels: Default::default(),
         public_tcp_ports: vec![],
         conditions: vec![],
         started: Default::default(),

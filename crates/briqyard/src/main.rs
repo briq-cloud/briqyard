@@ -11,6 +11,7 @@ use std::time::Duration;
 mod client;
 mod doctor;
 mod helpers;
+mod host_token;
 mod run;
 mod session;
 mod tables;
@@ -18,6 +19,7 @@ mod tables;
 use client::*;
 use doctor::*;
 use helpers::*;
+use host_token::TokenCmd;
 use run::*;
 use tables::*;
 
@@ -682,6 +684,11 @@ enum HostCmd {
         /// 80,443,5432,...), or none; default: the fleet's public_tcp_ports
         #[arg(long)]
         public_tcp_ports: Option<String>,
+    },
+    /// Join tokens: a server joins on its own with one (curl <fleet>/install.sh | sh)
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCmd,
     },
     /// Place no new namespace on a host
     Drain {

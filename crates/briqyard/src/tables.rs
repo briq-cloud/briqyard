@@ -180,6 +180,10 @@ pub(super) fn host_table(hs: &[api::Host]) -> String {
         if !h.tls_fingerprint.is_empty() {
             out.push_str(&format!("{:<16} tls: {}\n", "", h.tls_fingerprint));
         }
+        if !h.labels.is_empty() {
+            let labels: Vec<String> = h.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            out.push_str(&format!("{:<16} labels: {}\n", "", labels.join(",")));
+        }
         if !h.public_tcp_ports.is_empty() {
             let ports: Vec<String> = h.public_tcp_ports.iter().map(u16::to_string).collect();
             out.push_str(&format!("{:<16} public tcp: {}\n", "", ports.join(",")));

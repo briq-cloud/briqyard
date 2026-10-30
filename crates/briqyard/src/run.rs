@@ -657,6 +657,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 };
                 print_json(&c.call::<api::Host>(POST, "/v1/hosts", Some(&req)).await?)
             }
+            HostCmd::Token { cmd } => host_token::run(c, cmd).await?,
             HostCmd::Drain { id } => {
                 c.raw(POST, &format!("/v1/hosts/{id}/drain"), NONE).await?;
             }
