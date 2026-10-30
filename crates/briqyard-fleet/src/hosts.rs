@@ -312,7 +312,7 @@ pub(super) async fn register_host(
         let mut reg = st.reg.lock().unwrap();
         let call = format!("heartbeat of {}", req.id);
         let rec = the_host(&reg, &req.url, &headers, caller, &call)?;
-        // A host that joined has no certificate pinned yet (ADR 0057): its first heartbeat, made
+        // A host that joined has no certificate pinned yet (ADR 0059): its first heartbeat, made
         // with its own token from its own address over the fleet's channel, pins the one it
         // reports. Every other host's pin comes from the bootstrap or the operator.
         let joining = rec.state == "joining" && rec.tls_fingerprint.is_empty();

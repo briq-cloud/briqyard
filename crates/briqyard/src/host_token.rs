@@ -1,15 +1,19 @@
-//! `host token`: the one-time tokens a server joins a fleet with (ADR 0057).
+//! `host token`: the tokens servers join a fleet with (ADR 0059), as `kubeadm token`.
 
 use super::*;
 
 #[derive(Subcommand)]
 pub(super) enum TokenCmd {
-    /// Make a token for a server to join with, shown once. Bind it to the server it is for:
-    /// briqyard host token create --address 10.42.0.12 --ttl 1h --region gra --labels rack=a1
+    /// Make a token servers join with until it expires or is revoked, shown once. Bind it to
+    /// the server it is for when you know it:
+    /// briqyard host token create --address 10.42.0.12 --ttl 1h --description "rack a1"
     Create {
-        /// How long it can be used (1h, 30m, 2d); default and at most: the fleet's (an hour, 30 days)
+        /// How long it can be used (1h, 30m, 2d); default 24h; 0 never expires
         #[arg(long)]
         ttl: Option<humantime::Duration>,
+        /// Free text shown in `host token ls`
+        #[arg(long, default_value = "")]
+        description: String,
         /// The region the host that joins with it is put in
         #[arg(long, default_value = "")]
         region: String,
@@ -20,14 +24,15 @@ pub(super) enum TokenCmd {
         #[arg(long, default_value = "")]
         host: String,
         /// The address (10.42.0.12) or network (10.42.0.0/24) the join must come from: a token
-        /// bound to the server it is for is useless from any other. Default: from anywhere
+        /// bound to the server it is for is useless from any other (our addition to kubeadm's
+        /// model). Default: from anywhere
         #[arg(long, default_value = "")]
         address: String,
     },
-    /// The tokens: active, used (by which host), expired, revoked
+    /// The tokens: active, expired, revoked, with their uses
     #[command(alias = "list")]
     Ls,
-    /// End a token no host has used
+    /// End a token; the hosts that joined with it stay
     Revoke { id: String },
 }
 
@@ -36,6 +41,7 @@ pub(super) async fn run(c: &Client, cmd: TokenCmd) -> Result<()> {
     match cmd {
         TokenCmd::Create {
             ttl,
+            description,
             region,
             labels,
             host,
@@ -43,6 +49,7 @@ pub(super) async fn run(c: &Client, cmd: TokenCmd) -> Result<()> {
         } => {
             let req = api::CreateJoinTokenRequest {
                 ttl_sec: ttl.map(|t| t.as_secs()),
+                description,
                 region,
                 labels: label_args(&labels)?,
                 host,
@@ -59,8 +66,8 @@ pub(super) async fn run(c: &Client, cmd: TokenCmd) -> Result<()> {
                 format!("from {} only", made.info.address)
             };
             eprintln!(
-                "expires {}, usable {bound}; shown once. On the server, as root:\n  {}",
-                made.info.expires_at.to_rfc3339(),
+                "{}, usable {bound}; shown once. On each server, as root:\n  {}",
+                expiry_line(&made.info),
                 install_command(&c.base)
             );
         }
@@ -76,6 +83,13 @@ pub(super) async fn run(c: &Client, cmd: TokenCmd) -> Result<()> {
     Ok(())
 }
 
+fn expiry_line(t: &api::JoinToken) -> String {
+    match t.expires_at {
+        Some(at) => format!("expires {}", at.to_rfc3339()),
+        None => "never expires".to_string(),
+    }
+}
+
 /// What a server runs to join, against the fleet this CLI talks to; the token is a placeholder
 /// to fill in. The fetch of the script is as strict as the script's own calls: `https` only,
 /// redirects included.
@@ -89,40 +103,41 @@ pub(super) fn install_command(fleet: &str) -> String {
 
 pub(super) fn token_table(tokens: &[api::JoinToken]) -> String {
     let mut out = format!(
-        "{:<8} {:<8} {:<26} {:<8} {:<24} USED BY\n",
-        "ID", "STATE", "EXPIRES", "REGION", "LABELS"
+        "{:<8} {:<8} {:<24} {:<5} {:<45} {:<8} {:<20} {:<24} DESCRIPTION\n",
+        "ID", "STATE", "EXPIRES", "USES", "LAST USED", "REGION", "LABELS", "BOUND TO"
     );
     for t in tokens {
         let labels: Vec<String> = t.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        let used = match &t.used_by {
-            Some(u) => format!("{} from {} at {}", u.host, u.peer, u.at.to_rfc3339()),
-            None => {
-                let mut bound = Vec::new();
-                if !t.host.is_empty() {
-                    bound.push(format!("for {}", t.host));
-                }
-                if !t.address.is_empty() {
-                    bound.push(format!("from {}", t.address));
-                }
-                if bound.is_empty() {
-                    "-".to_string()
-                } else {
-                    format!("({})", bound.join(", "))
-                }
-            }
+        let last = match &t.last_used {
+            Some(u) => format!(
+                "{} from {} {}",
+                u.host,
+                u.peer,
+                u.at.format("%Y-%m-%d %H:%M")
+            ),
+            None => "-".to_string(),
         };
+        let mut bound = Vec::new();
+        if !t.host.is_empty() {
+            bound.push(format!("host {}", t.host));
+        }
+        if !t.address.is_empty() {
+            bound.push(format!("from {}", t.address));
+        }
+        let or_dash = |s: String| if s.is_empty() { "-".to_string() } else { s };
         out.push_str(&format!(
-            "{:<8} {:<8} {:<26} {:<8} {:<24} {}\n",
+            "{:<8} {:<8} {:<24} {:<5} {:<45} {:<8} {:<20} {:<24} {}\n",
             t.id,
             t.state,
-            t.expires_at.format("%Y-%m-%d %H:%M:%S UTC"),
-            if t.region.is_empty() { "-" } else { &t.region },
-            if labels.is_empty() {
-                "-".to_string()
-            } else {
-                labels.join(",")
-            },
-            used
+            t.expires_at.map_or("never".to_string(), |at| at
+                .format("%Y-%m-%d %H:%M UTC")
+                .to_string()),
+            t.uses,
+            last,
+            or_dash(t.region.clone()),
+            or_dash(labels.join(",")),
+            or_dash(bound.join(", ")),
+            or_dash(t.description.clone()),
         ));
     }
     out

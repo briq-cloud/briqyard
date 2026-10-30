@@ -1,4 +1,4 @@
-//! Join tokens and the join call (ADR 0057).
+//! Join tokens and the join call (ADR 0059).
 
 use super::*;
 
@@ -109,13 +109,15 @@ async fn a_join_records_the_host_and_answers_what_the_ssh_bootstrap_sends() {
         "no SSH bootstrap for a host that installs itself"
     );
 
-    // The token is spent and says who spent it; nothing secret is in the listing or the file.
-    assert_eq!(state_of(&f, &token), "used");
+    // The token is still good and says who used it last; nothing secret is in the listing or
+    // the file.
+    assert_eq!(state_of(&f, &token), "active");
     let (_, _, listed) = call(&f.st, "GET", "/v1/hosts/tokens", "api", None).await;
     let l = json(&listed);
-    assert_eq!(l[0]["state"], "used");
-    assert_eq!(l[0]["used_by"]["host"], "h_10-0-0-9");
-    assert_eq!(l[0]["used_by"]["peer"], "10.0.0.9");
+    assert_eq!(l[0]["state"], "active");
+    assert_eq!(l[0]["uses"], 1);
+    assert_eq!(l[0]["last_used"]["host"], "h_10-0-0-9");
+    assert_eq!(l[0]["last_used"]["peer"], "10.0.0.9");
     let secret = token.split('.').nth(1).unwrap();
     let file = std::fs::read_to_string(&f.st.state_path).unwrap();
     assert!(!listed.contains(secret) && !file.contains(secret));
@@ -149,20 +151,34 @@ async fn a_join_records_the_host_and_answers_what_the_ssh_bootstrap_sends() {
     assert_eq!(json(&body)["code"], "tls_mismatch");
 }
 
+/// A token is reusable, as kubeadm's: the same one joins several hosts, each counted, until it
+/// expires or is revoked.
 #[tokio::test]
-async fn a_token_joins_one_host_and_a_second_call_gets_nothing() {
+async fn a_token_joins_several_hosts_and_counts_them() {
     let f = joinable();
-    let (token, _) = mint(&f, serde_json::json!({})).await;
-    let (s, _) = join(&f, peer(9), &token, facts("a")).await;
-    assert_eq!(s, StatusCode::CREATED);
-    let (s, text) = join(&f, peer(10), &token, facts("b")).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "{text}");
-    assert_eq!(json(&text)["code"], "invalid_token");
-    assert_eq!(hosts(&f.st).len(), 1);
+    let (token, _) = mint(&f, serde_json::json!({ "description": "the gra racks" })).await;
+    for (n, name) in [(9u8, "a"), (10, "b"), (11, "c")] {
+        let (s, text) = join(&f, peer(n), &token, facts(name)).await;
+        assert_eq!(s, StatusCode::CREATED, "{text}");
+    }
+    assert_eq!(hosts(&f.st).len(), 3);
+    assert_eq!(state_of(&f, &token), "active");
+    let (_, _, listed) = call(&f.st, "GET", "/v1/hosts/tokens", "api", None).await;
+    let l = json(&listed);
+    assert_eq!(l[0]["uses"], 3);
+    assert_eq!(l[0]["last_used"]["host"], "c");
+    assert_eq!(l[0]["description"], "the gra racks");
+    assert_eq!(saved(&f.st).join_tokens[0].uses, 3, "written");
+    // Each join is in the host's note, with the token that made it.
+    let reg = f.st.reg.lock().unwrap();
+    assert!(reg.hosts["a"].note.contains(&format!(
+        "joined with token {}",
+        token.split('.').next().unwrap()
+    )));
 }
 
 #[tokio::test]
-async fn two_joins_at_once_with_one_token_make_one_host() {
+async fn joins_at_once_with_one_token_all_make_a_host_and_all_are_counted() {
     let f = joinable();
     let (token, _) = mint(&f, serde_json::json!({})).await;
     let calls = (1..=8u8).map(|n| {
@@ -181,26 +197,91 @@ async fn two_joins_at_once_with_one_token_make_one_host() {
             s
         })
     });
-    let mut statuses = Vec::new();
     for c in calls {
-        statuses.push(c.await.unwrap());
+        assert_eq!(c.await.unwrap(), StatusCode::CREATED);
     }
-    assert_eq!(
-        statuses
-            .iter()
-            .filter(|s| **s == StatusCode::CREATED)
-            .count(),
-        1,
-        "{statuses:?}"
-    );
-    assert!(statuses
-        .iter()
-        .all(|s| *s == StatusCode::CREATED || *s == StatusCode::UNAUTHORIZED));
-    assert_eq!(hosts(&f.st).len(), 1);
+    assert_eq!(hosts(&f.st).len(), 8);
+    assert_eq!(f.st.reg.lock().unwrap().join_tokens[0].uses, 8);
 }
 
-/// Every reason a token cannot be used reads the same to the caller, and a refused call spends
-/// nothing.
+/// kubeadm's `--ttl 0`: the token never expires, and survives a restart doing so.
+#[tokio::test]
+async fn a_token_with_a_ttl_of_zero_never_expires() {
+    let f = joinable();
+    let (token, made) = mint(&f, serde_json::json!({ "ttl_sec": 0 })).await;
+    assert_eq!(made["state"], "active");
+    assert!(made.get("expires_at").is_none(), "{made}");
+    assert!(saved(&f.st).join_tokens[0].expires_at.is_none());
+    let (s, text) = join(&f, peer(9), &token, facts("")).await;
+    assert_eq!(s, StatusCode::CREATED, "{text}");
+    // A long time after, it is still listed active and still joins.
+    f.st.reg.lock().unwrap().join_tokens[0].created_at = Utc::now() - Duration::days(900);
+    assert_eq!(state_of(&f, &token), "active");
+    let (s, text) = join(&f, peer(10), &token, facts("")).await;
+    assert_eq!(s, StatusCode::CREATED, "{text}");
+}
+
+#[tokio::test]
+async fn an_expired_token_is_refused_and_listed_expired() {
+    let f = joinable();
+    let (token, made) = mint(&f, serde_json::json!({ "ttl_sec": 3600 })).await;
+    let (s, _) = join(&f, peer(9), &token, facts("a")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    // The token's hour has passed.
+    f.st.reg.lock().unwrap().join_tokens[0].expires_at = Some(Utc::now() - Duration::seconds(1));
+    let (s, text) = join(&f, peer(10), &token, facts("b")).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{text}");
+    assert_eq!(json(&text)["code"], "invalid_token");
+    assert_eq!(hosts(&f.st).len(), 1);
+    let (_, _, listed) = call(&f.st, "GET", "/v1/hosts/tokens", "api", None).await;
+    let l = json(&listed);
+    assert_eq!(l[0]["id"], made["id"]);
+    assert_eq!(l[0]["state"], "expired");
+    assert_eq!(l[0]["uses"], 1, "its uses stay in the listing");
+}
+
+/// The default life is kubeadm's 24 hours.
+#[tokio::test]
+async fn a_token_lasts_a_day_by_default() {
+    let f = joinable();
+    let (_, made) = mint(&f, serde_json::json!({})).await;
+    let secs = |k: &str| {
+        made[k]
+            .as_str()
+            .unwrap()
+            .parse::<chrono::DateTime<Utc>>()
+            .unwrap()
+    };
+    assert_eq!((secs("expires_at") - secs("created_at")).num_hours(), 24);
+}
+
+/// A revoke ends the token for new joins at once, whatever it was used for; the hosts that
+/// joined stay.
+#[tokio::test]
+async fn a_revoked_token_joins_no_one_more_and_leaves_the_hosts_it_joined() {
+    let f = joinable();
+    let (token, made) = mint(&f, serde_json::json!({})).await;
+    let (s, _) = join(&f, peer(9), &token, facts("a")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let url = format!("/v1/hosts/tokens/{}", made["id"].as_str().unwrap());
+    let (s, _, _) = call(&f.st, "DELETE", &url, "api", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "a used token can be revoked");
+    let (s, text) = join(&f, peer(10), &token, facts("b")).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{text}");
+    assert_eq!(state_of(&f, &token), "revoked");
+    assert_eq!(hosts(&f.st).len(), 1, "the host that joined stays");
+    let (_, _, listed) = call(&f.st, "GET", "/v1/hosts/tokens", "api", None).await;
+    assert_eq!(json(&listed)[0]["uses"], 1);
+}
+
+pub(super) fn uses_of(f: &Fleet, token: &str) -> u32 {
+    let id = token.split('.').next().unwrap();
+    let reg = f.st.reg.lock().unwrap();
+    reg.join_tokens.iter().find(|t| t.id == id).unwrap().uses
+}
+
+/// Every reason a token cannot be used reads the same to the caller, and a refused call counts
+/// no use.
 #[tokio::test]
 async fn an_unusable_token_is_one_answer_whatever_the_reason() {
     let f = joinable();
@@ -222,15 +303,16 @@ async fn an_unusable_token_is_one_answer_whatever_the_reason() {
         .join_tokens
         .last_mut()
         .unwrap()
-        .expires_at = Utc::now() - Duration::seconds(1);
+        .expires_at = Some(Utc::now() - Duration::seconds(1));
     let (id, secret) = good.split_once('.').unwrap();
-    let flipped = format!("{id}.{}", secret.replace(&secret[..1], "z"));
+    let first = if secret.starts_with('0') { "1" } else { "0" };
+    let flipped = format!("{id}.{first}{}", &secret[1..]);
     let mut bodies = Vec::new();
     for t in [
         revoked.as_str(),
         expired.as_str(),
         flipped.as_str(),
-        "ffffff.00000000000000000000000000000000",
+        "ffffff.0000000000000000",
         "nonsense",
         "",
         "api",
@@ -244,8 +326,9 @@ async fn an_unusable_token_is_one_answer_whatever_the_reason() {
     assert_eq!(
         state_of(&f, &good),
         "active",
-        "a wrong secret spends nothing"
+        "a wrong secret leaves it as it was"
     );
+    assert_eq!(uses_of(&f, &good), 0);
 }
 
 #[tokio::test]
@@ -381,8 +464,9 @@ async fn the_token_routes_are_the_operators_and_check_what_they_are_given() {
         assert_eq!(s, StatusCode::UNAUTHORIZED, "{method} {path}");
     }
     for body in [
-        serde_json::json!({ "ttl_sec": 5 }),
-        serde_json::json!({ "ttl_sec": 40 * 86400 }),
+        serde_json::json!({ "ttl_sec": 20 * 365 * 86400 }),
+        serde_json::json!({ "description": "x".repeat(257) }),
+        serde_json::json!({ "description": "two\nlines" }),
         serde_json::json!({ "region": "No Way" }),
         serde_json::json!({ "host": "Bad Host" }),
         serde_json::json!({ "labels": { "bad key": "v" } }),
@@ -409,16 +493,8 @@ async fn the_token_routes_are_the_operators_and_check_what_they_are_given() {
         "written before it is answered"
     );
 
-    let id = made["id"].as_str().unwrap();
     let (s, _) = join(&f, peer(9), &token, facts("")).await;
     assert_eq!(s, StatusCode::CREATED);
-    let url = format!("/v1/hosts/tokens/{id}");
-    let (s, _, _) = call(&f.st, "DELETE", &url, "api", None).await;
-    assert_eq!(
-        s,
-        StatusCode::CONFLICT,
-        "a used token stays as the record of who used it"
-    );
     let (s, _, _) = call(&f.st, "DELETE", "/v1/hosts/tokens/ffffff", "api", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }

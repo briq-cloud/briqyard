@@ -566,7 +566,7 @@ fn tokens_for<'a>(cfg: &'a config::Config, path: &str) -> Vec<&'a str> {
 async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Response {
     let path = req.uri().path().to_string();
     // A heartbeat and a key request present the host's own token, checked against its record
-    // by the handler; a join presents a join token, and the scripts hold no secret (ADR 0057).
+    // by the handler; a join presents a join token, and the scripts hold no secret (ADR 0059).
     let open = matches!(
         path.as_str(),
         "/healthz"

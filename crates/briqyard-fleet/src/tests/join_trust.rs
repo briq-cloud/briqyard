@@ -1,8 +1,8 @@
-//! What a join token and the scripts do not give away (ADR 0057): the bootstrap script only to
+//! What a join token and the scripts do not give away (ADR 0059): the bootstrap script only to
 //! the host that joined, tokens bound to an address, a failed install that a new token mends,
 //! and the writes a failed save undoes.
 
-use super::join::{facts, join, joinable, mint, peer, state_of};
+use super::join::{facts, join, joinable, mint, peer, state_of, uses_of};
 use super::*;
 
 const URL_9: &str = "https://10.0.0.9:7420";
@@ -103,26 +103,21 @@ async fn a_token_bound_to_an_address_joins_from_that_address_only() {
     assert_eq!(made["address"], "10.0.0.9");
     let (net, _) = mint(&f, serde_json::json!({ "address": "10.0.0.0/28" })).await;
 
-    // From elsewhere it is a token like any unusable one: the same answer, nothing spent, and
+    // From elsewhere it is a token like any unusable one: the same answer, no use counted, and
     // the reason in the log alone.
     let (s, unbound_body) = join(&f, peer(10), &net, facts("a")).await;
     assert_eq!(s, StatusCode::CREATED, "inside the network: {unbound_body}");
     let (s, wrong) = join(&f, peer(10), &one, facts("b")).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "{wrong}");
     assert_eq!(json(&wrong)["code"], "invalid_token");
-    let (_, unknown) = join(
-        &f,
-        peer(10),
-        "ffffff.00000000000000000000000000000000",
-        facts(""),
-    )
-    .await;
+    let (_, unknown) = join(&f, peer(10), "ffffff.0000000000000000", facts("")).await;
     assert_eq!(wrong, unknown, "no hint of what the token is bound to");
     assert_eq!(
         state_of(&f, &one),
         "active",
-        "a wrong address spends nothing"
+        "a wrong address leaves it as it was"
     );
+    assert_eq!(uses_of(&f, &one), 0, "a wrong address counts no use");
     let (s, outside) = join(&f, std::net::IpAddr::from([10, 0, 1, 1]), &net, facts("c")).await;
     assert_eq!(
         s,
@@ -132,7 +127,19 @@ async fn a_token_bound_to_an_address_joins_from_that_address_only() {
 
     let (s, text) = join(&f, peer(9), &one, facts("")).await;
     assert_eq!(s, StatusCode::CREATED, "{text}");
-    assert_eq!(state_of(&f, &one), "used");
+    assert_eq!(
+        state_of(&f, &one),
+        "active",
+        "reusable: from its address, again"
+    );
+    assert_eq!(uses_of(&f, &one), 1);
+    // Reuse keeps the binding: a second server in the network is no more welcome than before.
+    let (s, _) = join(&f, peer(10), &one, facts("d")).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    // The same server joining again (an install that failed) replaces its record.
+    let (s, text) = join(&f, peer(9), &one, facts("")).await;
+    assert_eq!(s, StatusCode::CREATED, "{text}");
+    assert_eq!(uses_of(&f, &one), 2);
     let (_, _, listed) = call(&f.st, "GET", "/v1/hosts/tokens", "api", None).await;
     assert!(listed.contains("10.0.0.0/28"), "{listed}");
 }

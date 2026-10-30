@@ -1,14 +1,16 @@
-//! Join tokens (ADR 0057): one-time, expiring, `<id>.<secret>`; the registry keeps the id and a
-//! hash of the secret, never the secret.
+//! Join tokens (ADR 0059): reusable until they expire or are revoked, `<id>.<secret>` as
+//! kubeadm's bootstrap tokens are; the registry keeps the id and a hash of the secret, never the
+//! secret.
 
 use super::*;
 use sha2::{Digest, Sha256};
 
-/// How long a token lasts when none is asked, and the most it can be asked for.
-pub const DEFAULT_TTL: Duration = Duration::hours(1);
-pub const MAX_TTL: Duration = Duration::days(30);
-/// A token that ended (used, revoked or expired) is kept this long for the audit, then dropped
-/// by the next mint.
+/// How long a token lasts when none is asked (kubeadm's default), and the longest life a finite
+/// ttl can ask for; longer is a token that never expires (a ttl of 0).
+pub const DEFAULT_TTL: Duration = Duration::hours(24);
+pub const MAX_TTL: Duration = Duration::days(3650);
+/// A token that ended (revoked or expired) is kept this long, with its uses, for the audit, then
+/// dropped by the next mint.
 const KEEP_ENDED: Duration = Duration::days(30);
 
 /// A join token as the registry keeps it.
@@ -19,7 +21,12 @@ pub struct JoinTokenRec {
     /// there is nothing to guess one from.
     pub secret_hash: String,
     pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    /// None: never expires (a ttl of 0).
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// What the operator wrote of it, shown in the listing.
+    #[serde(default)]
+    pub description: String,
     #[serde(default)]
     pub region: String,
     #[serde(default)]
@@ -31,8 +38,11 @@ pub struct JoinTokenRec {
     /// from anywhere.
     #[serde(default)]
     pub address: String,
+    /// How many joins it took, and the last of them.
+    #[serde(default)]
+    pub uses: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub used_by: Option<api::JoinTokenUse>,
+    pub last_used: Option<api::JoinTokenUse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<DateTime<Utc>>,
 }
@@ -40,7 +50,9 @@ pub struct JoinTokenRec {
 /// What a mint is asked for.
 #[derive(Clone, Debug, Default)]
 pub struct TokenSpec {
+    /// None: the default; zero: never expires.
     pub ttl: Option<Duration>,
+    pub description: String,
     pub region: String,
     pub labels: BTreeMap<String, String>,
     pub host: String,
@@ -57,7 +69,6 @@ pub enum TokenError {
     /// Not from the address or network the token is bound to.
     WrongAddress,
     Expired,
-    Used,
     Revoked,
 }
 
@@ -69,7 +80,6 @@ impl std::fmt::Display for TokenError {
             TokenError::WrongSecret => "wrong secret",
             TokenError::WrongAddress => "not from the address the token is bound to",
             TokenError::Expired => "expired",
-            TokenError::Used => "already used",
             TokenError::Revoked => "revoked",
         })
     }
@@ -79,14 +89,31 @@ impl std::fmt::Display for TokenError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RevokeError {
     Unknown,
-    Used,
 }
 
-fn random_hex(bytes: usize) -> String {
+/// A token's use count and last use, as they were before a join: put back when the registry
+/// could not be written and the host never got its answer.
+#[derive(Clone, Debug)]
+pub struct UseSnapshot {
+    uses: u32,
+    last_used: Option<api::JoinTokenUse>,
+}
+
+/// `len` characters of `[a-z0-9]`, drawn without bias (a byte over 251 is thrown away).
+fn random_alnum(len: usize) -> String {
     use rand::RngCore;
-    let mut b = vec![0u8; bytes];
-    rand::rngs::OsRng.fill_bytes(&mut b);
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    const ALPHABET: &[u8; 36] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut out = String::with_capacity(len);
+    let mut b = [0u8; 32];
+    while out.len() < len {
+        rand::rngs::OsRng.fill_bytes(&mut b);
+        for x in b.iter().filter(|x| **x < 252) {
+            if out.len() < len {
+                out.push(ALPHABET[(*x % 36) as usize] as char);
+            }
+        }
+    }
+    out
 }
 
 fn hash(secret: &str) -> String {
@@ -107,13 +134,11 @@ pub fn parse_address(s: &str) -> anyhow::Result<crate::bootstrap::Network> {
 }
 
 impl JoinTokenRec {
-    /// `active`, `used`, `expired` or `revoked`.
+    /// `active`, `expired` or `revoked`.
     pub fn state(&self, now: DateTime<Utc>) -> &'static str {
         if self.revoked_at.is_some() {
             "revoked"
-        } else if self.used_by.is_some() {
-            "used"
-        } else if now >= self.expires_at {
+        } else if self.expires_at.is_some_and(|at| now >= at) {
             "expired"
         } else {
             "active"
@@ -126,11 +151,13 @@ impl JoinTokenRec {
             state: self.state(now).into(),
             created_at: self.created_at,
             expires_at: self.expires_at,
+            description: self.description.clone(),
+            uses: self.uses,
+            last_used: self.last_used.clone(),
             region: self.region.clone(),
             labels: self.labels.clone(),
             host: self.host.clone(),
             address: self.address.clone(),
-            used_by: self.used_by.clone(),
             revoked_at: self.revoked_at,
         }
     }
@@ -140,13 +167,12 @@ impl JoinTokenRec {
         self.address.is_empty() || parse_address(&self.address).is_ok_and(|net| net.contains(ip))
     }
 
-    /// When it stopped being usable.
-    fn ended(&self) -> DateTime<Utc> {
-        [self.used_by.as_ref().map(|u| u.at), self.revoked_at]
+    /// When it stopped being usable; None: it has not.
+    fn ended(&self) -> Option<DateTime<Utc>> {
+        [self.expires_at, self.revoked_at]
             .into_iter()
             .flatten()
             .min()
-            .map_or(self.expires_at, |at| at.min(self.expires_at))
     }
 }
 
@@ -154,24 +180,28 @@ impl Registry {
     /// Makes a token and returns it whole (`<id>.<secret>`), the one time it exists in clear.
     /// The caller writes the registry before the token is answered.
     pub fn mint_token(&mut self, spec: TokenSpec, now: DateTime<Utc>) -> (String, JoinTokenRec) {
-        self.join_tokens.retain(|t| now - t.ended() < KEEP_ENDED);
+        self.join_tokens
+            .retain(|t| t.ended().is_none_or(|at| now - at < KEEP_ENDED));
         let id = loop {
-            let id = random_hex(3);
+            let id = random_alnum(6);
             if !self.join_tokens.iter().any(|t| t.id == id) {
                 break id;
             }
         };
-        let secret = random_hex(16);
+        let secret = random_alnum(16);
+        let ttl = spec.ttl.unwrap_or(DEFAULT_TTL);
         let rec = JoinTokenRec {
             id: id.clone(),
             secret_hash: hash(&secret),
             created_at: now,
-            expires_at: now + spec.ttl.unwrap_or(DEFAULT_TTL),
+            expires_at: (!ttl.is_zero()).then(|| now + ttl),
+            description: spec.description,
             region: spec.region,
             labels: spec.labels,
             host: spec.host,
             address: spec.address,
-            used_by: None,
+            uses: 0,
+            last_used: None,
             revoked_at: None,
         };
         self.join_tokens.push(rec.clone());
@@ -195,48 +225,51 @@ impl Registry {
         }
         match rec.state(now) {
             "revoked" => Err(TokenError::Revoked),
-            "used" => Err(TokenError::Used),
             "expired" => Err(TokenError::Expired),
             _ => Ok(rec),
         }
     }
 
-    /// Checks a token and marks it used by `by`, in one step: of any number of callers with the
-    /// same token, one gets it.
+    /// Checks a token and counts a use by `by`, in one step under the registry's lock. A token
+    /// is not spent: it takes joins until it expires or is revoked. Returns the token and what
+    /// to put back should the registry not be written.
     pub fn consume_token(
         &mut self,
         presented: &str,
         now: DateTime<Utc>,
         by: api::JoinTokenUse,
-    ) -> Result<JoinTokenRec, TokenError> {
+    ) -> Result<(JoinTokenRec, UseSnapshot), TokenError> {
         let id = self.check_token(presented, now)?.id.clone();
         let rec = self
             .join_tokens
             .iter_mut()
             .find(|t| t.id == id)
             .expect("the token was just found");
-        rec.used_by = Some(by);
-        Ok(rec.clone())
+        let before = UseSnapshot {
+            uses: rec.uses,
+            last_used: rec.last_used.take(),
+        };
+        rec.uses = rec.uses.saturating_add(1);
+        rec.last_used = Some(by);
+        Ok((rec.clone(), before))
     }
 
     /// Takes a use back: the registry could not be written, and the host never got its answer.
-    pub fn release_token(&mut self, id: &str) {
+    pub fn release_token(&mut self, id: &str, before: UseSnapshot) {
         if let Some(t) = self.join_tokens.iter_mut().find(|t| t.id == id) {
-            t.used_by = None;
+            t.uses = before.uses;
+            t.last_used = before.last_used;
         }
     }
 
-    /// Ends a token that no host has used. A revoked or expired one stays revoked. True when
-    /// this call ended it (so a failed write can take it back, [`Registry::unrevoke_token`]).
+    /// Ends a token, whatever it was used for; hosts that joined with it stay. A token already
+    /// revoked keeps its first revoke. True when this call ended it (so a failed write can take it back, [`Registry::unrevoke_token`]).
     pub fn revoke_token(&mut self, id: &str, now: DateTime<Utc>) -> Result<bool, RevokeError> {
         let t = self
             .join_tokens
             .iter_mut()
             .find(|t| t.id == id)
             .ok_or(RevokeError::Unknown)?;
-        if t.used_by.is_some() {
-            return Err(RevokeError::Used);
-        }
         let fresh = t.revoked_at.is_none();
         t.revoked_at.get_or_insert(now);
         Ok(fresh)
@@ -268,15 +301,24 @@ mod tests {
         }
     }
 
+    /// A secret that is not the token's, of the same shape.
+    fn flip(token: &str) -> String {
+        let (id, secret) = token.split_once('.').unwrap();
+        let first = if secret.starts_with('0') { "1" } else { "0" };
+        format!("{id}.{first}{}", &secret[1..])
+    }
+
     #[test]
-    fn a_token_is_an_id_and_a_secret_and_only_the_hash_is_kept() {
+    fn a_token_is_kubeadms_shape_and_only_the_hash_is_kept() {
         let mut reg = Registry::default();
         let (token, rec) = reg.mint_token(TokenSpec::default(), at(0));
         let (id, secret) = token.split_once('.').unwrap();
-        assert_eq!((id.len(), secret.len()), (6, 32), "{token}");
-        assert!(token.bytes().all(|c| c == b'.' || c.is_ascii_hexdigit()));
+        assert_eq!((id.len(), secret.len()), (6, 16), "{token}");
+        assert!(token
+            .bytes()
+            .all(|c| c == b'.' || c.is_ascii_lowercase() || c.is_ascii_digit()));
         assert_eq!(rec.id, id);
-        assert_eq!(rec.expires_at, at(3600), "an hour by default");
+        assert_eq!(rec.expires_at, Some(at(86_400)), "24 hours by default");
         let written = serde_json::to_string(&reg).unwrap();
         assert!(
             !written.contains(secret),
@@ -288,40 +330,40 @@ mod tests {
     }
 
     #[test]
-    fn a_token_is_used_once() {
+    fn a_token_takes_any_number_of_joins_and_keeps_count() {
         let mut reg = Registry::default();
         let (token, _) = reg.mint_token(TokenSpec::default(), at(0));
-        let rec = reg.consume_token(&token, at(5), by("h1")).unwrap();
-        assert_eq!(rec.used_by.unwrap().host, "h1");
-        assert_eq!(
-            reg.consume_token(&token, at(6), by("h2")).unwrap_err(),
-            TokenError::Used
-        );
+        reg.consume_token(&token, at(5), by("h1")).unwrap();
+        let (rec, _) = reg.consume_token(&token, at(6), by("h2")).unwrap();
+        assert_eq!(rec.uses, 2);
+        assert_eq!(rec.last_used.unwrap().host, "h2");
+        assert!(reg.check_token(&token, at(7)).is_ok(), "still good");
         let listed = reg.join_tokens[0].to_api(at(7));
-        assert_eq!(listed.state, "used");
-        assert_eq!(listed.used_by.unwrap().host, "h1", "who used it is kept");
+        assert_eq!(listed.state, "active");
+        assert_eq!(
+            (listed.uses, listed.last_used.unwrap().host),
+            (2, "h2".into())
+        );
     }
 
     #[test]
-    fn only_one_of_many_concurrent_consumes_wins() {
+    fn concurrent_joins_with_one_token_are_all_counted() {
         let reg = Arc::new(Mutex::new(Registry::default()));
         let (token, _) = reg.lock().unwrap().mint_token(TokenSpec::default(), at(0));
-        let wins: Vec<_> = (0..16)
+        let wins = (0..16)
             .map(|i| {
                 let (reg, token) = (reg.clone(), token.clone());
                 std::thread::spawn(move || {
                     let host = format!("h{i}");
-                    let got = reg.lock().unwrap().consume_token(&token, at(1), by(&host));
-                    got.map(|_| host)
+                    reg.lock().unwrap().consume_token(&token, at(1), by(&host))
                 })
             })
             .collect::<Vec<_>>()
             .into_iter()
             .filter_map(|t| t.join().unwrap().ok())
-            .collect();
-        assert_eq!(wins.len(), 1, "one winner: {wins:?}");
-        let reg = reg.lock().unwrap();
-        assert_eq!(reg.join_tokens[0].used_by.as_ref().unwrap().host, wins[0]);
+            .count();
+        assert_eq!(wins, 16);
+        assert_eq!(reg.lock().unwrap().join_tokens[0].uses, 16, "no use lost");
     }
 
     #[test]
@@ -332,7 +374,7 @@ mod tests {
             ..Default::default()
         };
         let (token, rec) = reg.mint_token(spec, at(0));
-        assert_eq!(rec.expires_at, at(600));
+        assert_eq!(rec.expires_at, Some(at(600)));
         assert!(reg.check_token(&token, at(599)).is_ok());
         assert_eq!(
             reg.check_token(&token, at(600)).unwrap_err(),
@@ -343,14 +385,29 @@ mod tests {
             reg.consume_token(&token, at(601), by("h1")).unwrap_err(),
             TokenError::Expired
         );
-        assert!(
-            reg.join_tokens[0].used_by.is_none(),
-            "an expired token is not used"
-        );
+        assert_eq!(reg.join_tokens[0].uses, 0, "an expired token takes no use");
     }
 
     #[test]
-    fn a_revoked_token_is_not_taken_and_a_used_one_cannot_be_revoked() {
+    fn a_ttl_of_zero_never_expires() {
+        let mut reg = Registry::default();
+        let spec = TokenSpec {
+            ttl: Some(Duration::zero()),
+            ..Default::default()
+        };
+        let (token, rec) = reg.mint_token(spec, at(0));
+        assert_eq!(rec.expires_at, None);
+        let ten_years = 10 * 365 * 86_400;
+        assert!(reg.check_token(&token, at(ten_years)).is_ok());
+        assert_eq!(rec.to_api(at(ten_years)).state, "active");
+        assert!(rec.to_api(at(0)).expires_at.is_none());
+        // Written and read back, it still never expires.
+        let back: Registry = serde_json::from_slice(&serde_json::to_vec(&reg).unwrap()).unwrap();
+        assert!(back.check_token(&token, at(ten_years)).is_ok());
+    }
+
+    #[test]
+    fn a_revoked_token_is_not_taken_even_after_uses() {
         let mut reg = Registry::default();
         let (first, a) = reg.mint_token(TokenSpec::default(), at(0));
         let (second, b) = reg.mint_token(TokenSpec::default(), at(0));
@@ -364,7 +421,12 @@ mod tests {
         );
         assert_eq!(reg.join_tokens[0].to_api(at(2)).state, "revoked");
         reg.consume_token(&second, at(2), by("h1")).unwrap();
-        assert_eq!(reg.revoke_token(&b.id, at(3)), Err(RevokeError::Used));
+        assert_eq!(reg.revoke_token(&b.id, at(3)), Ok(true), "a used one too");
+        assert_eq!(
+            reg.consume_token(&second, at(4), by("h2")).unwrap_err(),
+            TokenError::Revoked
+        );
+        assert_eq!(reg.join_tokens[1].uses, 1, "the uses stay as the record");
         assert_eq!(reg.revoke_token("ffffff", at(3)), Err(RevokeError::Unknown));
     }
 
@@ -373,7 +435,7 @@ mod tests {
         let mut reg = Registry::default();
         let (token, rec) = reg.mint_token(TokenSpec::default(), at(0));
         let (id, secret) = token.split_once('.').unwrap();
-        let wrong = format!("{id}.{}", secret.replace(&secret[..1], "z"));
+        let wrong = flip(&token);
         for (presented, why) in [
             (wrong.as_str(), TokenError::WrongSecret),
             (id, TokenError::Malformed),
@@ -392,6 +454,7 @@ mod tests {
             rec.id,
             "still good"
         );
+        assert_eq!(reg.join_tokens[0].uses, 0);
     }
 
     #[test]
@@ -450,12 +513,17 @@ mod tests {
     }
 
     #[test]
-    fn a_use_taken_back_leaves_the_token_whole() {
+    fn a_use_taken_back_leaves_the_count_and_last_use_as_they_were() {
         let mut reg = Registry::default();
         let (token, rec) = reg.mint_token(TokenSpec::default(), at(0));
         reg.consume_token(&token, at(1), by("h1")).unwrap();
-        reg.release_token(&rec.id);
-        assert!(reg.consume_token(&token, at(2), by("h2")).is_ok());
+        let (_, before) = reg.consume_token(&token, at(2), by("h2")).unwrap();
+        reg.release_token(&rec.id, before);
+        let t = &reg.join_tokens[0];
+        assert_eq!(
+            (t.uses, t.last_used.as_ref().unwrap().host.as_str()),
+            (1, "h1")
+        );
     }
 
     #[test]
@@ -463,25 +531,41 @@ mod tests {
         let mut reg = Registry::default();
         let (used, _) = reg.mint_token(TokenSpec::default(), at(0));
         reg.consume_token(&used, at(1), by("h1")).unwrap();
-        let (_, expired) = reg.mint_token(TokenSpec::default(), at(0));
-        let (_, active) = reg.mint_token(
+        let (_, revoked) = reg.mint_token(TokenSpec::default(), at(0));
+        reg.revoke_token(&revoked.id, at(2)).unwrap();
+        let (_, expired) = reg.mint_token(
             TokenSpec {
-                ttl: Some(MAX_TTL),
+                ttl: Some(Duration::hours(1)),
+                ..Default::default()
+            },
+            at(0),
+        );
+        let (_, never) = reg.mint_token(
+            TokenSpec {
+                ttl: Some(Duration::zero()),
+                ..Default::default()
+            },
+            at(0),
+        );
+        let (_, long) = reg.mint_token(
+            TokenSpec {
+                ttl: Some(Duration::days(365)),
                 ..Default::default()
             },
             at(0),
         );
         let day = 86_400;
         reg.mint_token(TokenSpec::default(), at(20 * day));
-        assert_eq!(reg.join_tokens.len(), 4, "kept for the audit");
+        assert_eq!(reg.join_tokens.len(), 6, "kept for the audit");
         reg.mint_token(TokenSpec::default(), at(40 * day));
         let ids: Vec<_> = reg.join_tokens.iter().map(|t| t.id.clone()).collect();
         assert!(!ids.contains(&expired.id), "{ids:?}");
-        assert!(ids.contains(&active.id), "an active token stays: {ids:?}");
+        assert!(!ids.contains(&revoked.id), "{ids:?}");
         assert!(
-            reg.join_tokens.iter().all(|t| t.used_by.is_none()),
-            "{ids:?}"
+            ids.contains(&never.id),
+            "a token that never expires stays: {ids:?}"
         );
+        assert!(ids.contains(&long.id), "a token still valid stays: {ids:?}");
     }
 
     #[test]
@@ -492,13 +576,17 @@ mod tests {
                 region: "gra".into(),
                 labels: [("rack".to_string(), "a1".to_string())].into(),
                 host: "h1".into(),
+                description: "the gra racks".into(),
                 ..Default::default()
             },
             at(0),
         );
+        reg.consume_token(&token, at(1), by("h1")).unwrap();
         let back: Registry = serde_json::from_slice(&serde_json::to_vec(&reg).unwrap()).unwrap();
         let rec = back.check_token(&token, at(1)).unwrap();
         assert_eq!((rec.region.as_str(), rec.host.as_str()), ("gra", "h1"));
         assert_eq!(rec.labels["rack"], "a1");
+        assert_eq!(rec.description, "the gra racks");
+        assert_eq!(rec.uses, 1);
     }
 }

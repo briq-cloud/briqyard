@@ -112,7 +112,7 @@ pub struct Host {
     /// plain HTTP (ADR 0020).
     #[serde(default)]
     pub tls_fingerprint: String,
-    /// The labels of the token it joined with (ADR 0057).
+    /// The labels of the token it joined with (ADR 0059).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     /// The ports its public interface takes besides SSH, from its bootstrap (ADR 0028).

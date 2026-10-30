@@ -1,13 +1,16 @@
-//! Join tokens and the join call (ADR 0057).
+//! Join tokens and the join call (ADR 0059).
 
 use super::*;
 
-/// `POST /v1/hosts/tokens`: a one-time token for a server to join the fleet with.
+/// `POST /v1/hosts/tokens`: a token servers join the fleet with, until it expires or is revoked.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateJoinTokenRequest {
-    /// How long it can be used, in seconds; absent: an hour. At most 30 days.
+    /// How long it can be used, in seconds; absent: 24 hours; 0: it never expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_sec: Option<u64>,
+    /// Free text shown in the listing (at most 256 characters).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     /// The region the host that joins with it is put in.
     #[serde(default)]
     pub region: String,
@@ -27,10 +30,20 @@ pub struct CreateJoinTokenRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JoinToken {
     pub id: String,
-    /// `active`, `used`, `expired` or `revoked`.
+    /// `active`, `expired` or `revoked`.
     pub state: String,
     pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    /// Absent: it never expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// How many joins it took.
+    #[serde(default)]
+    pub uses: u32,
+    /// The last of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<JoinTokenUse>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub region: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -41,14 +54,11 @@ pub struct JoinToken {
     /// The address or network the token is bound to, when it is.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub address: String,
-    /// Who used it, when it was.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub used_by: Option<JoinTokenUse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
-/// The host that consumed a token, when, and the address its call came from.
+/// A host that joined with a token, when, and the address its call came from.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JoinTokenUse {
     pub host: String,

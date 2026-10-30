@@ -1,5 +1,5 @@
-//! A server joins on its own (ADR 0057; Kubernetes's `kubeadm join` with a bootstrap token):
-//! the operator mints a one-time token, the server presents it with a few facts, and the fleet
+//! A server joins on its own (ADR 0059; Kubernetes's `kubeadm join` with a bootstrap token):
+//! the operator mints a token, reusable until it expires or is revoked, the server presents it with a few facts, and the fleet
 //! answers with what the SSH bootstrap sends a host added by hand. The fleet also serves the two
 //! scripts that do the rest on the server: `install.sh` (asks the join, runs the bootstrap) and
 //! `bootstrap-host.sh` (the one the SSH path runs).
@@ -9,7 +9,8 @@ use super::*;
 /// What a host runs to join: `curl -fsSL <fleet>/install.sh | FLEET_URL=… JOIN_TOKEN=… sh`.
 const INSTALL: &str = include_str!("../../../hack/install.sh");
 
-const SHORTEST_TTL: i64 = 60;
+/// A description is a line of free text in a listing.
+const LONGEST_DESCRIPTION: usize = 256;
 
 fn invalid(m: impl Into<String>) -> Refusal {
     err(StatusCode::BAD_REQUEST, "invalid", m)
@@ -27,18 +28,27 @@ fn bootstrap_on(b: &config::Bootstrap) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// `POST /v1/hosts/tokens`: a token for one server to join with. Answered once with the secret;
+/// `POST /v1/hosts/tokens`: a token for servers to join with. Answered once with the secret;
 /// written to the registry before it is.
 pub(super) async fn create_token(
     State(st): S,
     Json(req): Json<api::CreateJoinTokenRequest>,
 ) -> Result<Response, Refusal> {
     bootstrap_on(&st.cfg.bootstrap)?;
-    let ttl = req.ttl_sec.map(|s| s as i64);
-    if ttl.is_some_and(|s| !(SHORTEST_TTL..=registry::MAX_TTL.num_seconds()).contains(&s)) {
+    // 0 never expires; anything else is a life up to ten years.
+    let max = registry::MAX_TTL.num_seconds() as u64;
+    if req.ttl_sec.is_some_and(|s| s > max) {
         return Err(invalid(format!(
-            "ttl_sec: between {SHORTEST_TTL} seconds and {} days",
+            "ttl_sec: at most {} days; 0 for a token that never expires",
             registry::MAX_TTL.num_days()
+        )));
+    }
+    let ttl = req.ttl_sec.map(|s| s as i64);
+    if req.description.chars().count() > LONGEST_DESCRIPTION
+        || req.description.chars().any(char::is_control)
+    {
+        return Err(invalid(format!(
+            "description: one line of at most {LONGEST_DESCRIPTION} characters"
         )));
     }
     if !req.region.is_empty() && !api::valid_id(&req.region) {
@@ -60,6 +70,7 @@ pub(super) async fn create_token(
     let (token, rec) = st.reg.lock().unwrap().mint_token(
         registry::TokenSpec {
             ttl: ttl.map(Duration::seconds),
+            description: req.description,
             region: req.region,
             labels: req.labels,
             host: req.host,
@@ -78,7 +89,11 @@ pub(super) async fn create_token(
     }
     tracing::warn!(
         token = rec.id,
-        expires_at = %rec.expires_at,
+        expires_at = rec
+            .expires_at
+            .map(|at| at.to_rfc3339())
+            .unwrap_or_else(|| "never".into()),
+        description = rec.description,
         region = rec.region,
         host = rec.host,
         address = rec.address,
@@ -99,7 +114,7 @@ pub(super) async fn list_tokens(State(st): S) -> Json<Vec<api::JoinToken>> {
     Json(tokens)
 }
 
-/// Ends a token no host has used; one used stays as the record of who did.
+/// Ends a token. The hosts that joined with it stay: it is a way in, not a lease.
 pub(super) async fn revoke_token(
     State(st): S,
     Path(id): Path<String>,
@@ -108,13 +123,6 @@ pub(super) async fn revoke_token(
     match revoked {
         Err(registry::RevokeError::Unknown) => {
             return Err(err(StatusCode::NOT_FOUND, "not_found", "token not found"))
-        }
-        Err(registry::RevokeError::Used) => {
-            return Err(err(
-                StatusCode::CONFLICT,
-                "conflict",
-                format!("token {id} was used: it cannot be taken back"),
-            ))
         }
         Ok(fresh) => {
             if let Err(e) = st.save().await {
@@ -143,7 +151,7 @@ fn denied(why: registry::TokenError, peer: &str) -> Refusal {
     err(
         StatusCode::UNAUTHORIZED,
         "invalid_token",
-        "the join token is invalid, expired or already used",
+        "the join token is invalid, expired or revoked",
     )
 }
 
@@ -172,8 +180,8 @@ fn caller_address(caller: Caller, asked: &str) -> Result<std::net::Ipv4Addr, Ref
 
 /// `POST /v1/hosts/join`, with a join token as the bearer: the host is recorded `joining`, with
 /// its own API token, and told what the SSH bootstrap would send it. Everything is checked
-/// before the token is used, and the token is used in the step that records the host, under the
-/// registry's lock: of two calls with one token, one gets a host.
+/// before the use is counted, and it is counted in the step that records the host, under the
+/// registry's lock. A token takes as many joins as come until it expires or is revoked.
 pub(super) async fn join_host(
     State(st): S,
     info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
@@ -275,7 +283,8 @@ pub(super) async fn join_host(
             at: now,
             peer: peer.clone(),
         };
-        reg.consume_token(presented, now, by)
+        let (_, before) = reg
+            .consume_token(presented, now, by)
             .map_err(|why| denied(why, &peer))?;
         for o in &replaced {
             tracing::warn!(
@@ -286,18 +295,18 @@ pub(super) async fn join_host(
             reg.hosts.remove(&o.id);
         }
         reg.hosts.insert(host.id.clone(), host.clone());
-        (host, replaced)
+        (host, replaced, before)
     };
-    let (rec, replaced) = rec;
+    let (rec, replaced, before) = rec;
     if let Err(e) = st.save().await {
-        // The host never got its answer: the token is whole again, and no host is recorded.
+        // The host never got its answer: the use is taken back, and no host is recorded.
         let mut reg = st.reg.lock().unwrap();
         reg.hosts.remove(&rec.id);
         for o in replaced {
             reg.hosts.insert(o.id.clone(), o);
         }
         if let Some(t) = presented.split_once('.').map(|(id, _)| id) {
-            reg.release_token(t);
+            reg.release_token(t, before);
         }
         return Err(registry_error(e));
     }
@@ -305,6 +314,7 @@ pub(super) async fn join_host(
         host = rec.id,
         url = rec.url,
         peer,
+        token = presented.split_once('.').map_or("", |(id, _)| id),
         "host joined; it heartbeats once installed"
     );
     // A join sends the fleet's URL only when the fleet has one set: the host reached it by the

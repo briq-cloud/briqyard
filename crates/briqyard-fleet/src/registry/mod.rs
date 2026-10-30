@@ -102,7 +102,7 @@ pub struct HostRec {
     /// Memory and disk pressure, from the last heartbeat (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
-    /// The labels of the join token the host came with (ADR 0057).
+    /// The labels of the join token the host came with (ADR 0059).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     /// The key of the host's pool (ADR 0026), made the first time the host asks for it and
@@ -311,7 +311,7 @@ pub struct Registry {
     /// key, so the key outlives the record, for a restore on another host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_keys: Vec<RetiredKey>,
-    /// The join tokens (ADR 0057): their hashes, never a secret.
+    /// The join tokens (ADR 0059): their hashes, never a secret.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub join_tokens: Vec<JoinTokenRec>,
     /// Fields this fleet does not know, written back as they were.

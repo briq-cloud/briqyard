@@ -1,4 +1,4 @@
-//! `host token` (ADR 0057): the arguments, the table, and the calls against a stub fleet.
+//! `host token` (ADR 0059): the arguments, the table, and the calls against a stub fleet.
 
 use super::*;
 
@@ -25,9 +25,12 @@ fn token_commands() {
         "gra-1",
         "--address",
         "10.42.0.0/24",
+        "--description",
+        "rack a1, gra",
     ]) {
         TokenCmd::Create {
             ttl,
+            description,
             region,
             labels,
             host,
@@ -36,6 +39,7 @@ fn token_commands() {
             assert_eq!(ttl.unwrap().as_secs(), 5400);
             assert_eq!((region.as_str(), host.as_str()), ("gra", "gra-1"));
             assert_eq!(address, "10.42.0.0/24");
+            assert_eq!(description, "rack a1, gra");
             assert_eq!(labels, ["rack=a1", "disk=nvme"]);
         }
         _ => panic!("not a create"),
@@ -44,6 +48,11 @@ fn token_commands() {
         token_cmd(&["create"]),
         TokenCmd::Create { ttl: None, .. }
     ));
+    // 0 is kubeadm's "never expires".
+    match token_cmd(&["create", "--ttl", "0"]) {
+        TokenCmd::Create { ttl, .. } => assert_eq!(ttl.unwrap().as_secs(), 0),
+        _ => panic!("not a create"),
+    }
     assert!(matches!(token_cmd(&["ls"]), TokenCmd::Ls));
     assert!(matches!(token_cmd(&["list"]), TokenCmd::Ls));
     match token_cmd(&["revoke", "ab12cd"]) {
@@ -67,26 +76,30 @@ fn the_token_table_and_the_command_for_the_server() {
         id: id.into(),
         state: state.into(),
         created_at: at,
-        expires_at: at + chrono::Duration::hours(1),
+        expires_at: Some(at + chrono::Duration::hours(1)),
+        description: String::new(),
+        uses: 0,
+        last_used: None,
         region: String::new(),
         labels: Default::default(),
         host: String::new(),
         address: String::new(),
-        used_by: None,
         revoked_at: None,
     };
     let used = api::JoinToken {
         region: "gra".into(),
         labels: [("rack".to_string(), "a1".to_string())].into(),
-        used_by: Some(api::JoinTokenUse {
+        description: "gra racks".into(),
+        uses: 3,
+        last_used: Some(api::JoinTokenUse {
             host: "h_10-0-0-9".into(),
             at,
             peer: "10.0.0.9".into(),
         }),
-        ..token("ab12cd", "used")
+        ..token("ab12cd", "active")
     };
-    let bound = api::JoinToken {
-        host: "gra-2".into(),
+    let never = api::JoinToken {
+        expires_at: None,
         ..token("ef34ab", "active")
     };
     let both = api::JoinToken {
@@ -94,16 +107,16 @@ fn the_token_table_and_the_command_for_the_server() {
         address: "10.42.0.12".into(),
         ..token("cd56ef", "active")
     };
-    let out = crate::host_token::token_table(&[used, bound, both, token("000001", "expired")]);
+    let out = crate::host_token::token_table(&[used, never, both, token("000001", "expired")]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
         [
-            "ID       STATE    EXPIRES                    REGION   LABELS                   USED BY",
-            "ab12cd   used     2026-10-19 09:30:00 UTC    gra      rack=a1                  h_10-0-0-9 from 10.0.0.9 at 2026-10-19T08:30:00+00:00",
-            "ef34ab   active   2026-10-19 09:30:00 UTC    -        -                        (for gra-2)",
-            "cd56ef   active   2026-10-19 09:30:00 UTC    -        -                        (for gra-3, from 10.42.0.12)",
-            "000001   expired  2026-10-19 09:30:00 UTC    -        -                        -",
+            "ID       STATE    EXPIRES                  USES  LAST USED                                     REGION   LABELS               BOUND TO                 DESCRIPTION",
+            "ab12cd   active   2026-10-19 09:30 UTC     3     h_10-0-0-9 from 10.0.0.9 2026-10-19 08:30     gra      rack=a1              -                        gra racks",
+            "ef34ab   active   never                    0     -                                             -        -                    -                        -",
+            "cd56ef   active   2026-10-19 09:30 UTC     0     -                                             -        -                    host gra-3, from 10.42.0.12 -",
+            "000001   expired  2026-10-19 09:30 UTC     0     -                                             -        -                    -                        -",
         ]
     );
     // The command holds no token, and its fetch refuses http, redirects included.
@@ -129,6 +142,7 @@ async fn the_commands_call_the_fleets_token_routes() {
         &c,
         TokenCmd::Create {
             ttl: Some("1h".parse().unwrap()),
+            description: "gra racks".into(),
             region: "gra".into(),
             labels: vec!["rack=a1".into()],
             host: String::new(),
@@ -153,6 +167,7 @@ async fn the_commands_call_the_fleets_token_routes() {
     );
     let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
     assert_eq!(body["ttl_sec"], 3600);
+    assert_eq!(body["description"], "gra racks");
     assert_eq!(body["labels"]["rack"], "a1");
     assert_eq!(body["region"], "gra");
     assert_eq!(body["address"], "10.42.0.12");

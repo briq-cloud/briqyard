@@ -1,6 +1,6 @@
 #!/bin/sh
-# Joins this server to a briqyard fleet and installs it as a host (ADR 0057): the fleet checks
-# a one-time join token, records the host and answers with its settings, then this fetches the
+# Joins this server to a briqyard fleet and installs it as a host (ADR 0059): the fleet checks
+# a join token, records the host and answers with its settings, then this fetches the
 # fleet's bootstrap script (hack/bootstrap-host.sh; the fleet serves it to the host that joined,
 # with that host's own token) and runs it with them. That script downloads the
 # release binaries for this architecture and checks them against the release's SHA256SUMS,
@@ -10,12 +10,13 @@
 #     FLEET_URL=https://fleet.example JOIN_TOKEN=<id>.<secret> sh
 #
 # On the fleet: `briqyard host token create --address <this server's IP> --ttl 1h` prints the
-# token. Run as root, on Ubuntu 26.04 with KVM. The token is used last: this checks the server
-# first (root, architecture, KVM, the drives), then joins, then installs.
+# token (it joins any number of servers until it expires or is revoked, as kubeadm's does).
+# Run as root, on Ubuntu 26.04 with KVM. This checks the server first (root, architecture, KVM,
+# the drives), then joins, then installs.
 #
 #   FLEET_URL     the fleet, as this server reaches it. https:// only: the token and the host's
 #                 own API token cross this link
-#   JOIN_TOKEN    the one-time token, <id>.<secret>
+#   JOIN_TOKEN    the join token, <id>.<secret>
 #   HOST_NAME     the id to join as; default: h_ and this server's address
 #   ADDRESS       this server's API address (IPv4); the only valid value is the one the fleet
 #                 sees the call come from, which is also the default
@@ -57,8 +58,8 @@ case "$arch" in
   *) fail "no briqyard build for $arch" ;;
 esac
 
-# What this server must have, found out before the token is spent: a join that then fails
-# leaves a spent token and a host record waiting for a heartbeat that never comes.
+# What this server must have, found out before the join: a join that then fails leaves a host
+# record waiting for a heartbeat that never comes.
 # shellcheck source=/dev/null
 [ -r /etc/os-release ] && . /etc/os-release
 [ "${ID:-}" = ubuntu ] || fail "this is ${PRETTY_NAME:-not Ubuntu}: briqyard installs on Ubuntu"
@@ -84,7 +85,7 @@ done
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM HUP
 
-# The last thing before the join, which spends the token: nothing after it is a check of this
+# The last thing before the join, which records the host: nothing after it is a check of this
 # server's.
 echo "== join $FLEET_URL"
 facts=$(jq -n \
@@ -105,8 +106,8 @@ fi
 host=$(jq -er .id "$work/body")
 echo "   joined as $host"
 
-# The join is done: the token is spent, and a later failure needs a new one (the fleet lets a
-# new token replace a host that joined and never heartbeated).
+# The join is done. A later failure is mended by running this again: the fleet lets a new join
+# replace a host that joined and never heartbeated.
 unset join_token
 
 # The script the SSH bootstrap runs, from the fleet: one install, not a copy of it here. The
