@@ -5,3 +5,7 @@ dist/
 /tmp/
 target/
 __pycache__/
+
+# The fleet image's build context: the release binaries, laid out by the release workflow.
+/docker/fleet/amd64/
+/docker/fleet/arm64/
