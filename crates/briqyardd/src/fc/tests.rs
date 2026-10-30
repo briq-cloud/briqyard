@@ -691,3 +691,52 @@ fn fractional_cpu_quota_respects_kernel_granularity() {
     assert!(args.iter().any(|a| a == "cpu.max=25000 100000"));
     assert!(args.iter().any(|a| a == "cpu.weight=25"));
 }
+
+#[tokio::test]
+async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
+    for durable in [true, false] {
+        for failed in [false, true] {
+            let (dir, path) = socket();
+            let bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            let responses = if failed {
+                vec![NO_CONTENT, bad, NO_CONTENT]
+            } else {
+                vec![NO_CONTENT, NO_CONTENT]
+            };
+            let server = serve(&path, responses);
+            let (_gone, exited) = watch::channel(false);
+            let (_report, exit) = watch::channel(None);
+            let vm = Vm {
+                pid: 42,
+                api: path,
+                vsock: dir.path().join("vsock"),
+                dir: dir.path().to_path_buf(),
+                chroot: None,
+                resumed: false,
+                exited,
+                exit,
+            };
+            for name in ["snap.state", "snap.mem"] {
+                std::fs::write(dir.path().join(name), b"partial").unwrap();
+            }
+            let vmm = Firecracker {
+                binary: PathBuf::new(),
+                pci: false,
+                console_max: 0,
+                version: String::new(),
+            };
+            assert_eq!(vmm.snapshot(&vm, durable).await.is_err(), failed);
+            let seen = server.await.unwrap();
+            assert_eq!(body(&seen[0])["state"], "Paused");
+            assert!(seen[1].starts_with("PUT /snapshot/create "));
+            assert_eq!(body(&seen[1])["sync_snapshot_files"], durable);
+            if failed {
+                assert_eq!(body(&seen[2])["state"], "Resumed");
+                assert!(!dir.path().join("snap.state").exists());
+                assert!(!dir.path().join("snap.mem").exists());
+            } else {
+                assert_eq!(seen.len(), 2, "a successful snapshot remains paused");
+            }
+        }
+    }
+}

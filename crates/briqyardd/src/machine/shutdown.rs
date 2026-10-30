@@ -1,11 +1,18 @@
 //! A machine ends: its exit, a stop, a destroy, and the restart policy that follows an exit.
 
 use super::*;
+use crate::profile::stage;
+use std::time::Instant;
 
 impl Manager {
     /// Settles the state after the Firecracker process exited.
     pub(super) async fn settle_exit(&self, e: &Arc<Entry>, pid: u32) {
+        let machine = e.rec.lock().unwrap().id.clone();
+        let started = Instant::now();
+        stage("settle", "exit_observed", &machine, pid, started, true);
+        let started = Instant::now();
         let _guard = e.lock.lock().await;
+        stage("settle", "lock", &machine, pid, started, true);
         let mut exit = {
             let live = e.live.lock().unwrap();
             match live.as_ref() {
@@ -14,12 +21,16 @@ impl Manager {
             }
         };
         let rec = e.snapshot();
+        let started = Instant::now();
         self.unplug(&rec.id, &rec.ip).await;
+        stage("settle", "network", &machine, pid, started, true);
         *e.live.lock().unwrap() = None;
         // The init's report, or none: the process is gone, so the wait ends either way. A
         // process that ended without the init's word (killed, a kernel panic) reads as 255;
         // nothing the guest prints on its console can set its exit.
-        let _ = exit.wait_for(|r| r.is_some()).await;
+        let started = Instant::now();
+        let reported = exit.wait_for(|r| r.is_some()).await.is_ok();
+        stage("settle", "exit_report", &machine, pid, started, reported);
         let report = exit.borrow().clone().unwrap_or(guest::ExitReport {
             code: 255,
             ..Default::default()
@@ -49,6 +60,11 @@ impl Manager {
     /// A stop asked for `why` is done, its process gone: `stopped` with that reason, or
     /// `suspended` when it kept a memory snapshot.
     pub(super) fn settle_stopped(&self, e: &Entry, why: &str) {
+        let started = Instant::now();
+        let (machine, pid) = {
+            let rec = e.rec.lock().unwrap();
+            (rec.id.clone(), rec.pid)
+        };
         *e.stop_deadline.lock().unwrap() = None;
         e.set_state(state::STOPPED, |r| {
             r.pid = 0;
@@ -64,7 +80,15 @@ impl Manager {
             };
             Some(ev.data(json!({ "reason": why })))
         });
-        let _ = self.save(e);
+        let saved = self.save(e);
+        stage(
+            "settle",
+            "record_stopped",
+            &machine,
+            pid,
+            started,
+            saved.is_ok(),
+        );
     }
 
     /// A process that ended on its own, or that a probe ended (`failed` whatever its code):
@@ -246,8 +270,14 @@ impl Manager {
         } else {
             timeout
         };
+        let total = Instant::now();
+        let machine = e.rec.lock().unwrap().id.clone();
+        let operation = if suspend { "suspend" } else { "stop" };
         let live = {
+            let started = Instant::now();
             let _guard = e.lock.lock().await;
+            let pid = e.rec.lock().unwrap().pid;
+            stage(operation, "lock", &machine, pid, started, true);
             self.check_version(e, at)?;
             let r = e.snapshot();
             match r.state.as_str() {
@@ -290,15 +320,25 @@ impl Manager {
             // What this call waits at most below, the lock released: a start waits as long.
             *e.stop_deadline.lock().unwrap() =
                 Some(tokio::time::Instant::now() + timeout + Duration::from_secs(20));
+            let started = Instant::now();
             e.set_state(state::STOPPING, |_| {
                 Some(
                     Ev::normal(reason::STOPPING, format!("stopping ({why})"))
                         .data(json!({ "reason": why, "suspend": suspend })),
                 )
             });
-            let _ = self.save(e);
+            let saved = self.save(e);
+            stage(
+                operation,
+                "record_stopping",
+                &machine,
+                live.pid,
+                started,
+                saved.is_ok(),
+            );
             // A suspend keeps a memory snapshot: the next start resumes in well under a
             // second. Refused, the machine is stopped the plain way.
+            let started = Instant::now();
             let suspended = suspend
                 && match self.inner.vmm.snapshot(&live, true).await {
                     Ok(()) => true,
@@ -307,6 +347,11 @@ impl Manager {
                         false
                     }
                 };
+            if suspend {
+                stage(
+                    operation, "snapshot", &machine, live.pid, started, suspended,
+                );
+            }
             if suspended {
                 self.inner
                     .stats
@@ -316,14 +361,41 @@ impl Manager {
                 // state with the reason set above. The watcher takes the entry's lock to do
                 // it, so the lock is released before waiting, or the wait only ends when it
                 // times out.
+                let started = Instant::now();
                 e.rec.lock().unwrap().suspended = true;
-                let _ = self.save(e);
+                let saved = self.save(e);
+                stage(
+                    operation,
+                    "record_suspended",
+                    &machine,
+                    live.pid,
+                    started,
+                    saved.is_ok(),
+                );
                 let settled = e.changed.notified();
                 tokio::pin!(settled);
                 settled.as_mut().enable();
+                let started = Instant::now();
+                stage(operation, "kill_begin", &machine, live.pid, started, true);
                 self.inner.vmm.kill(live.pid);
                 drop(_guard);
-                let _ = tokio::time::timeout(Duration::from_secs(15), settled).await;
+                let settled = tokio::time::timeout(Duration::from_secs(15), settled).await;
+                stage(
+                    operation,
+                    "kill_to_notify",
+                    &machine,
+                    live.pid,
+                    started,
+                    settled.is_ok(),
+                );
+                stage(
+                    operation,
+                    "total",
+                    &machine,
+                    live.pid,
+                    total,
+                    settled.is_ok(),
+                );
                 return Ok(());
             }
             live

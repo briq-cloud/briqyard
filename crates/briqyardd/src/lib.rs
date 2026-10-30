@@ -15,6 +15,7 @@ pub mod machine;
 pub mod metrics;
 pub mod netw;
 pub mod poolkey;
+mod profile;
 pub mod session;
 pub mod store;
 pub mod tls;

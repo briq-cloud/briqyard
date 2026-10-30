@@ -318,13 +318,44 @@ impl Vmm for Firecracker {
     }
 
     async fn snapshot(&self, vm: &Vm, durable: bool) -> Result<()> {
+        use crate::profile::stage;
+        use std::time::Instant;
         let c = Client::new(&vm.api);
-        c.pause().await.context("pause")?;
-        if let Err(err) = c
+        let machine = vm.dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let operation = if durable {
+            "snapshot_durable"
+        } else {
+            "snapshot_unsynced"
+        };
+        let started = Instant::now();
+        let paused = c.pause().await;
+        stage(operation, "pause", machine, vm.pid, started, paused.is_ok());
+        paused.context("pause")?;
+        let started = Instant::now();
+        let snapshot = c
             .snapshot_create(&vm.inside("snap.state"), &vm.inside("snap.mem"), durable)
-            .await
-        {
-            let _ = c.resume().await;
+            .await;
+        // Firecracker's request includes disk flushes and, when durable, file fsyncs.
+        // This boundary cannot separate writing from syncing inside Firecracker.
+        stage(
+            operation,
+            "create",
+            machine,
+            vm.pid,
+            started,
+            snapshot.is_ok(),
+        );
+        if let Err(err) = snapshot {
+            let started = Instant::now();
+            let resumed = c.resume().await;
+            stage(
+                operation,
+                "resume_after_error",
+                machine,
+                vm.pid,
+                started,
+                resumed.is_ok(),
+            );
             let _ = tokio::fs::remove_file(vm.outside("snap.state")).await;
             let _ = tokio::fs::remove_file(vm.outside("snap.mem")).await;
             return Err(err.context("snapshot (resumed)"));
