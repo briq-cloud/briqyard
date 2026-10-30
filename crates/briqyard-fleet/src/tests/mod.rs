@@ -226,6 +226,7 @@ mod daemon;
 mod endpoints;
 mod events;
 mod hosts;
+mod join;
 mod listings;
 mod metrics;
 mod placement;

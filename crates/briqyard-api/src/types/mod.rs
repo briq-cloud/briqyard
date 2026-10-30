@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 mod events;
 mod host;
+mod join;
 mod lifecycle;
 mod limits;
 mod machine;
@@ -18,6 +19,7 @@ mod tests;
 
 pub use events::*;
 pub use host::*;
+pub use join::*;
 pub use lifecycle::*;
 pub use limits::*;
 pub use machine::*;
