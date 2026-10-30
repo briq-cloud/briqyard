@@ -835,8 +835,8 @@ briqyard machine rm "$U" >/dev/null
 echo "== metrics, top, conditions"
 M=$(briqyard machine run --image alpine:3.20 --name top --namespace "$T" --memory 128 -- sleep 3600 | jq -r .id)
 metrics=$("${CURL[@]}" -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics")
-check "metrics: the machine's CPU series" 'echo "$metrics" | grep -q "^briqyard_machine_cpu_seconds_total{machine=\"$M\",namespace=\"$T\",name=\"top\"} "'
-check "metrics: its state, running"      'echo "$metrics" | grep -qx "briqyard_machine_state{machine=\"$M\",namespace=\"$T\",name=\"top\",state=\"running\"} 1"'
+check "metrics: the machine's CPU series" 'grep -q "^briqyard_machine_cpu_seconds_total{machine=\"$M\",namespace=\"$T\",name=\"top\"} " <<<"$metrics"'
+check "metrics: its state, running"      'grep -qx "briqyard_machine_state{machine=\"$M\",namespace=\"$T\",name=\"top\",state=\"running\"} 1" <<<"$metrics"'
 check "top lists it"                      'briqyard top --namespace "$T" | grep -q "^$M "'
 # Rates need two ticks, 15 s apart.
 windowed() { briqyard top --namespace "$T" --json | jq -e ".[] | select(.machine_id == \"$M\") | .window_sec > 0" >/dev/null; }
