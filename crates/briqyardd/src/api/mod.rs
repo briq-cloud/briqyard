@@ -21,6 +21,7 @@ mod backups;
 mod endpoints;
 mod errors;
 mod exec;
+mod files;
 mod images;
 mod machines;
 mod namespaces;
@@ -120,6 +121,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/machines/:id/wait", post(wait_machine))
         .route("/v1/machines/:id/exec", get(exec_session).post(exec))
         .route("/v1/machines/:id/files", get(get_file).put(put_file))
+        .route(
+            "/v1/machines/:id/files/content",
+            get(files::get).put(files::put),
+        )
         .route("/v1/machines/:id/logs", get(logs))
         .route("/v1/machines/:id/stats", get(stats))
         .route(

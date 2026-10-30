@@ -180,6 +180,31 @@ impl Manager {
         Ok((conn, in_use))
     }
 
+    /// A file operation holds use for its whole transfer, including the guest handshake.
+    pub async fn file_stream(
+        &self,
+        id: &str,
+        req: guest::Request,
+    ) -> Result<(Box<dyn guestc::Conn>, Option<u64>, InUse), MError> {
+        let e = self.own_entry(id)?;
+        let in_use = InUse::new(e);
+        let sock = self.running_vsock(id, false).await?;
+        let (conn, size) = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.inner.guest.file_stream(&sock, req),
+        )
+        .await
+        .map_err(|_| MError::NotRunning("file stream handshake timeout".into()))?
+        .map_err(|e| {
+            if e.is::<guestc::FileTransferBusy>() {
+                MError::Conflict(e.to_string())
+            } else {
+                self.init_named(id, e)
+            }
+        })?;
+        Ok((conn, size, in_use))
+    }
+
     pub async fn put_file(&self, id: &str, req: api::PutFileRequest) -> Result<(), MError> {
         let sock = self.running_vsock(id, false).await?;
         let data =

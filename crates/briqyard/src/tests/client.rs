@@ -171,3 +171,28 @@ async fn errors_name_the_code_and_the_request() {
     );
     assert!(err.starts_with("request http://127.0.0.1:1: "), "{err}");
 }
+
+#[tokio::test]
+async fn raw_upload_encodes_the_path_and_sends_plain_bytes() {
+    let (url, stub) = stub(vec![(StatusCode::NO_CONTENT, vec![], "")]).await;
+    let c = client(&url, Some("token"));
+    let local = std::env::temp_dir().join(format!("briqyard-file-test-{}", std::process::id()));
+    std::fs::write(&local, b"raw content").unwrap();
+    let result = c
+        .put_file("m1", local.to_str().unwrap(), "/tmp/a & b?")
+        .await;
+    let _ = std::fs::remove_file(&local);
+    result.unwrap();
+    let seen = stub.seen.lock().unwrap();
+    assert_eq!(seen[0].method, "PUT");
+    assert_eq!(
+        seen[0].path,
+        "/v1/machines/m1/files/content?path=%2Ftmp%2Fa+%26+b%3F"
+    );
+    assert_eq!(seen[0].body, "raw content");
+    assert_eq!(
+        seen[0].content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+    assert_eq!(seen[0].authorization.as_deref(), Some("Bearer token"));
+}

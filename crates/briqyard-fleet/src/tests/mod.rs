@@ -229,6 +229,7 @@ mod backups;
 mod daemon;
 mod endpoints;
 mod events;
+mod files;
 mod hosts;
 mod join;
 mod join_trust;

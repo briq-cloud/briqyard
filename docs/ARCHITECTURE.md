@@ -244,7 +244,7 @@ entrypoint and command with its environment and user. It listens on vsock port 7
 host: `exec` (a command with stdin, streamed stdout and stderr, exit code, timeout; on a
 terminal of its own with `tty`, its input as frames after the request, the host's close ending
 it, ADR 0029), `put` and
-`get` (files), `ping`, `shutdown`. PID 1 inherits every orphan on the system; the init reaps
+`get` (JSON files), `put_stream` and `get_stream` (framed handshake then raw file bytes, ADR 0061), `ping`, `shutdown`. PID 1 inherits every orphan on the system; the init reaps
 them with `waitid(WNOWAIT)` and leaves alone the children it waits for itself, so a command's
 exit status is never stolen. When the main process exits, the init connects out to the host
 (vsock port 7422, which Firecracker brings to the daemon as `<vsock socket>_7422`), sends one
@@ -334,6 +334,13 @@ Kubernetes') become the init's `stdin`, `resize` and `close_stdin` frames, its `
 pseudo-terminal of its own as the leader of a new session. The host's close ends any exec's
 command (SIGKILL to its group; SIGHUP first on a terminal); the daemon pings the client every
 30 s and drops one silent for 90 s. A machine with a session open is in use and does not sleep.
+
+Files stream through `GET/PUT /v1/machines/{id}/files/content` (ADR 0061), through the
+fleet too. A PUT takes a declared length and commits with an atomic guest-side rename
+only after the body completes. Directory descriptors refuse symlink traversal; a GET
+reads only a regular file. Transfers hold machine use, have size, concurrency and time
+bounds, and buffer fixed chunks. The CLI's file commands use this path; JSON `/files`
+remains available to existing clients.
 
 ### Labels and quotas
 

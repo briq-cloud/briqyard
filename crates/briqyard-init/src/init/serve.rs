@@ -116,6 +116,7 @@ where
             .await;
         }
         "exec" => exec_op(&st, input, stream, req).await,
+        "put_stream" | "get_stream" => files::serve(input, stream, req).await,
         "put" => {
             let res = (|| -> std::io::Result<()> {
                 if let Some(parent) = Path::new(&req.path).parent() {

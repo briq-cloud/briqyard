@@ -16,6 +16,70 @@ pub(super) const WATCH_SILENCE: Duration = Duration::from_secs(90);
 pub(super) const UPGRADE_TIMEOUT: Duration = Duration::from_secs(2400);
 
 impl Client {
+    fn file_request(
+        &self,
+        method: reqwest::Method,
+        id: &str,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder> {
+        api::files::check_path(path).map_err(|e| anyhow!(e))?;
+        let mut url = url::Url::parse(&format!("{}/v1/machines/{id}/files/content", self.base))?;
+        url.query_pairs_mut().append_pair("path", path);
+        let mut request = self
+            .http
+            .request(method, url)
+            .timeout(Duration::from_secs(api::files::TRANSFER_SEC));
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        Ok(request)
+    }
+
+    pub(super) async fn put_file(&self, id: &str, local: &str, path: &str) -> Result<()> {
+        let file = tokio::fs::File::open(local)
+            .await
+            .with_context(|| local.to_string())?;
+        let metadata = file.metadata().await?;
+        if !metadata.is_file() {
+            bail!("{local}: need a regular file");
+        }
+        api::files::check_size(metadata.len()).map_err(|e| anyhow!(e))?;
+        let response = self
+            .file_request(reqwest::Method::PUT, id, path)?
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(reqwest::header::CONTENT_LENGTH, metadata.len())
+            .body(reqwest::Body::wrap_stream(
+                tokio_util::io::ReaderStream::with_capacity(file, api::files::CHUNK_SIZE),
+            ))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(refusal(response).await);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn get_file(&self, id: &str, path: &str) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let mut response = self
+            .file_request(reqwest::Method::GET, id, path)?
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(refusal(response).await);
+        }
+        let size = response
+            .content_length()
+            .ok_or_else(|| anyhow!("file response omitted Content-Length"))?;
+        api::files::check_size(size).map_err(|e| anyhow!(e))?;
+        let mut stdout = tokio::io::stdout();
+        while let Some(chunk) = response.chunk().await? {
+            stdout.write_all(&chunk).await?;
+        }
+        stdout.flush().await?;
+        Ok(())
+    }
+
     pub(super) async fn call<T: serde::de::DeserializeOwned>(
         &self,
         method: reqwest::Method,

@@ -3,7 +3,8 @@
 //!
 //! Every message is one frame: a 4-byte big-endian length, then JSON. One request per
 //! connection; a request gets one response, except `exec`, which streams `stdout`/`stderr`
-//! frames and ends with `exit`. After an `exec` the host may send more frames on the same
+//! frames and ends with `exit`. `put_stream` and `get_stream` exchange a framed ready
+//! handshake then a declared number of raw bytes (ADR 0061). After an `exec` the host may send more frames on the same
 //! connection (`stdin`, `resize`, `close_stdin`), and its close ends the command (ADR 0029).
 //!
 //! One connection goes the other way: when the main process ends, the init connects to the
@@ -77,7 +78,7 @@ pub struct FileMeta {
 /// (`cols`, `rows`), `close_stdin`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Request {
-    /// exec, put, get, ping, shutdown; then stdin, resize, close_stdin
+    /// exec, put, get, put_stream, get_stream, ping, shutdown; then stdin, resize, close_stdin
     pub op: String,
     #[serde(default)]
     pub cmd: Vec<String>,
@@ -109,9 +110,12 @@ pub struct Request {
     pub data: Vec<u8>,
     #[serde(default)]
     pub grace_sec: u64,
+    /// Raw stream length for put_stream; absent for every older operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
-/// Responses: stdout and stderr chunks then exit; or ok, file, pong, error.
+/// Responses: stdout and stderr chunks then exit; or ok, file, pong, ready, error.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Response {
     #[serde(rename = "type")]
@@ -131,6 +135,9 @@ pub struct Response {
     /// The init's version, in a `pong` (ADR 0027); empty from an init older than the field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
+    /// Raw bytes following a get_stream ready response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 /// How the main process ended, sent by the init on [`EXIT_PORT`] before the machine resets.

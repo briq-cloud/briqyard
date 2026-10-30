@@ -362,6 +362,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]
@@ -428,6 +430,7 @@ dependencies = [
  "libc",
  "nix 0.29.0",
  "rtnetlink",
+ "rustix",
  "serde_json",
  "tar",
  "tempfile",

@@ -205,6 +205,36 @@ paths:
             schema: { $ref: "#/components/schemas/PutFileRequest" }
       responses:
         "204": { description: written }
+  /v1/machines/{id}/files/content:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: path, in: query, required: true, schema: { type: string, maxLength: 4096 }, description: "absolute file path; no empty, . or .. components; symlinks in parent directories are refused" }
+    get:
+      summary: Stream a regular file from a running machine
+      description: "Raw bytes, at most 1 GiB, with Content-Length. Symlinks and special files are refused. The machine stays in use for the transfer. A file that changes during the read is not a snapshot; truncation ends the response early. Requires a streaming-capable init (ADR 0061)."
+      responses:
+        "200":
+          description: raw file bytes
+          headers:
+            Content-Length: { schema: { type: integer, minimum: 0, maximum: 1073741824 } }
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        "400": { description: invalid path or file too large }
+        "409": { description: machine not running, old init, or transfer limit reached }
+    put:
+      summary: Atomically replace a file in a running machine from raw bytes
+      description: "Content-Length is required, at most 1 GiB. Missing parent directories are created. The final path is replaced, including a symlink or hard link itself; its target is never written. On cancellation or an incomplete body the destination is unchanged. Transfer bounds: 16 per daemon, 4 per guest, 60 s idle, 900 s total. Requires a streaming-capable init (ADR 0061)."
+      parameters:
+        - { name: Content-Length, in: header, required: true, schema: { type: integer, minimum: 0, maximum: 1073741824 } }
+        - { name: mode, in: query, schema: { type: string, default: "0644", pattern: "^0*[0-7]{1,3}$" }, description: "octal permission bits, 0000 through 0777" }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: { type: string, format: binary } }
+      responses:
+        "204": { description: complete file committed }
+        "400": { description: missing length, invalid path, mode, size or body }
+        "409": { description: machine not running, old init, or transfer limit reached }
   /v1/machines/{id}/logs:
     parameters:
       - { $ref: "#/components/parameters/id" }

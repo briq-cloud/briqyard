@@ -57,6 +57,7 @@ struct State {
 
 mod boot;
 mod exec;
+mod files;
 mod network;
 mod pty;
 mod reap;

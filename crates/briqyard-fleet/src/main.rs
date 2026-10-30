@@ -503,6 +503,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         // A session (ADR 0029) is a WebSocket: relayed as bytes once both sides upgraded.
         .route("/v1/machines/:id/exec", get(exec_session).post(by_machine))
+        .route(
+            "/v1/machines/:id/files/content",
+            get(forward::file_stream).put(forward::file_stream),
+        )
         .route("/v1/machines/:id/*rest", any(by_machine))
         .route("/v1/endpoints/:id", any(by_endpoint))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth))

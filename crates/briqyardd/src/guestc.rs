@@ -26,6 +26,14 @@ pub trait Guest: Send + Sync {
     async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>>;
     async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()>;
     async fn get(&self, vsock: &Path, path: &str) -> Result<Vec<u8>>;
+    /// Open a raw file stream after its ready handshake (ADR 0061).
+    async fn file_stream(
+        &self,
+        _vsock: &Path,
+        _req: Request,
+    ) -> Result<(Box<dyn Conn>, Option<u64>)> {
+        Err(anyhow!("streaming files unavailable"))
+    }
 }
 
 /// The init behind Firecracker's vsock socket.
@@ -33,6 +41,25 @@ pub struct Vsock;
 
 #[async_trait]
 impl Guest for Vsock {
+    async fn file_stream(
+        &self,
+        vsock: &Path,
+        req: Request,
+    ) -> Result<(Box<dyn Conn>, Option<u64>)> {
+        let mut conn = dial(vsock).await?;
+        write_request(&mut conn, &req).await?;
+        let r: Response = read_frame(&mut conn).await?;
+        if r.kind == "error" {
+            if r.message == "too many file transfers" {
+                return Err(FileTransferBusy.into());
+            }
+            return Err(answered(&req.op, &r.message));
+        }
+        if r.kind != "ready" {
+            return Err(anyhow!("guest answered {}", r.kind));
+        }
+        Ok((Box::new(conn), r.size))
+    }
     async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<String> {
         wait_ready(vsock, timeout).await
     }
@@ -49,6 +76,11 @@ impl Guest for Vsock {
         get(vsock, path).await
     }
 }
+
+/// The guest's bounded file transfer slots are all in use.
+#[derive(Debug, thiserror::Error)]
+#[error("too many file transfers in the guest")]
+pub struct FileTransferBusy;
 
 /// The guest cannot be reached: Firecracker's socket refuses (its process is exiting or gone)
 /// or the init's port does (the guest is exiting). The machine is not running, whatever its
@@ -646,5 +678,78 @@ mod tests {
             wait_ready(&path, Duration::from_secs(5)).await.unwrap(),
             "0.1.0+fdad892eeefa"
         );
+    }
+    #[tokio::test]
+    async fn streaming_file_handshake_keeps_raw_bytes_and_reports_old_inits() {
+        let (_dir, path) = socket();
+        let server = serve(
+            &path,
+            OK,
+            vec![
+                frame(&Response {
+                    kind: "ready".into(),
+                    size: Some(4),
+                    ..Default::default()
+                }),
+                b"raw\0".to_vec(),
+            ],
+        );
+        let (mut conn, size) = Vsock
+            .file_stream(
+                &path,
+                Request {
+                    op: "get_stream".into(),
+                    path: "/file".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(size, Some(4));
+        let mut bytes = Vec::new();
+        conn.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, b"raw\0");
+        assert_eq!(server.await.unwrap().op, "get_stream");
+        let (_dir, path) = socket();
+        let server = serve(
+            &path,
+            OK,
+            vec![frame(&Response::error("unknown op put_stream"))],
+        );
+        let err = Vsock
+            .file_stream(
+                &path,
+                Request {
+                    op: "put_stream".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(err.is::<UnknownOp>());
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_guests_file_transfer_limit_is_a_typed_refusal() {
+        let (_dir, path) = socket();
+        let server = serve(
+            &path,
+            OK,
+            vec![frame(&Response::error("too many file transfers"))],
+        );
+        let err = Vsock
+            .file_stream(
+                &path,
+                Request {
+                    op: "get_stream".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(err.is::<FileTransferBusy>());
+        server.await.unwrap();
     }
 }

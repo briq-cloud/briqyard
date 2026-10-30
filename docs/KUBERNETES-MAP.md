@@ -53,7 +53,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Pod | ✓ machine | | |
 | Change image, env, command, size (`kubectl apply`, `set image`, in-place resize) | ✓ PATCH of image, entrypoint, cmd, env, files, size, ports, restart, `pending` until the next start, `POST /restart`; the root disk follows the image, the volume stays (ADR 0024) | a change to a running process (memory hot-plug) | |
 | `kubectl exec -it`, attach | ✓ exec sessions over a WebSocket: stdin streamed, a terminal with resize, the exit code, the client's close ends the command, use while open, through the fleet (ADR 0029) | attach to the main process (its output is `logs -f`) | yard, later |
-| `kubectl cp` | ✓ `/files` | | |
+| `kubectl cp` | ✓ `/files/content`: raw single-file streams, atomic upload, no guest utilities (ADR 0061); JSON `/files` kept | archive extraction belongs to the application | |
 | Pod phases and conditions | ✓ states (`creating` is `Pending`), `stopped_reason`, `error_reason` (`pull_failed` is `ErrImagePull`), exit code, `ready` (ADR 0022, 0048) | | |
 | Create is stored, then scheduled and pulled (`Pending`, `ContainerCreating`, `kubectl wait`) | ✓ a create answers at `creating`, its room taken; the pull, the disks and the boot in the background; `/wait` and `GET`; one from an image taken up again after a restart of the daemon (ADR 0048) | a fork's or a restore's create resumed after a restart | yard, later |
 | Image pulls (`Pulling`/`Pulled` events, parallel pulls, `ImagePullBackOff`) | ◐ a `pulling` event per machine, `image_pulled` per host, four images at once, one build per image; a failed pull is `pull_failed`, never retried (ADR 0048) | a pull backoff: the caller creates again | — |

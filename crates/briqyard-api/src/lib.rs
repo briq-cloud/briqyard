@@ -2,6 +2,7 @@
 //! (what `briqyardd` and `briqyard-init` agree on).
 
 pub mod auth;
+pub mod files;
 pub mod guest;
 #[cfg(feature = "listeners")]
 pub mod listeners;
