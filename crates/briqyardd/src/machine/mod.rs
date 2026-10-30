@@ -759,6 +759,8 @@ struct Inner {
     policies: Mutex<HashMap<String, (Ipv4Addr, nft::Policy)>>,
     /// Held while a namespace is made (its subnet index, bridge and record), see `ensure_namespace`.
     namespace_create: tokio::sync::Mutex<()>,
+    /// Readers admit machines or change namespaces; deletion owns the write guard through teardown.
+    namespace_lifecycle: tokio::sync::RwLock<()>,
     /// The backup store, the gate of scheduled backups, the holders (ADR 0023).
     backups: Backups,
     /// Boots run at once; see `boots_at_once`.

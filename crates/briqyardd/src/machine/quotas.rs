@@ -143,6 +143,7 @@ impl Manager {
         quota: api::Quota,
     ) -> Result<api::NamespaceQuota, MError> {
         check_namespace_id(namespace)?;
+        let _admission = self.inner.namespace_lifecycle.read().await;
         let mut t = self.ensure_namespace(namespace).await?;
         t.rec.quota = quota;
         self.inner
