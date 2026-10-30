@@ -509,7 +509,7 @@ pool after its next reboot. Back the registry up before a host holds anything th
 (below); a host still up can be re-keyed with `zfs change-key`. The fleet's `state_dir` must be
 on an encrypted disk: it opens every pool.
 
-### The fleet in Docker (ADR 0057)
+### The fleet in Docker (ADR 0060)
 
 The fleet, not the host daemon, ships as an image: `ghcr.io/briq-cloud/briqyard-fleet:<version>`
 (and `:latest` for a release that is not a pre-release; releases before the one that added it have no image), `linux/amd64` and `linux/arm64`, made
@@ -1098,3 +1098,17 @@ A self-hosted runner runs whatever a workflow says. On this private repository t
 us. Never let a public pull request reach it: before the repository goes public, the runner
 goes into a runner group limited to this repository, the KVM job runs on `push` to `main`
 (never on `pull_request` from forks), and outside contributors' workflows need approval.
+
+### CPU reservations
+
+`size.vcpus` is the guest topology. Optional `size.cpu_millis` limits CPU time in thousandths
+of a CPU, between 1 and `vcpus × 1000`; omission keeps the whole-CPU limit. Fractional
+limits require the jailer and cgroup v2. The CLI accepts `--cpu-millis` on machine run/set,
+namespace gateway set and namespace quota set. Reports expose precise `cpu_millis`
+separately from guest CPU count. Both legacy `vcpus × 1000` and explicit `cpu_millis`
+quotas apply when both are set.
+
+Upgrade hosts before the fleet: the new fleet will not place work on hosts that do not
+report precise CPU reservations. CPU-bearing PATCH requests to old hosts are refused.
+A backup records its captured size for restore placement. For older sealed backups without
+that metadata, provide an explicit restore size when restoring through the fleet.

@@ -424,6 +424,7 @@ impl Manager {
     /// a machine and its volume, and when its create starts it its size, which the host's
     /// memory must hold too (ADR 0048). Nothing on disk yet.
     fn add_machine(&self, mut rec: Record, t: &Namespace) -> Result<Arc<Entry>, MError> {
+        self.check_host_size(&rec.size)?;
         let mut machines = self.inner.machines.lock().unwrap();
         // A rename of the namespace (ADR 0056) swaps it under this lock: a create that read
         // the old name is repeated, not recorded in a namespace that is gone.
@@ -472,6 +473,11 @@ impl Manager {
                 used.memory_mb,
                 self.capacity().memory_mb,
                 rec.size.memory_mb,
+            )?;
+            admit_cpu(
+                used.cpu_millis(),
+                self.capacity().cpu_millis(),
+                rec.size.cpu_millis(),
             )?;
         }
         // The address a `via` policy in the tables names stays its gateway's, even once that
@@ -579,6 +585,18 @@ impl Manager {
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             }
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_host_size(&self, size: &api::Size) -> Result<(), MError> {
+        check_size(size)?;
+        if size.cpu_millis() < size.vcpus.saturating_mul(1000)
+            && self.inner.cfg.jailer.as_os_str().is_empty()
+        {
+            return Err(invalid(
+                "fractional cpu_millis requires the jailer and cgroup v2",
+            ));
         }
         Ok(())
     }

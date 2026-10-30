@@ -43,7 +43,7 @@ jobs:
       - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "briqyard $GITHUB_REF_NAME. Install with hack/bootstrap-host.sh (BRIQYARD_RELEASE=https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME)."
         env:
           GH_TOKEN: ${{ github.token }}
-  # The fleet as an image (ADR 0057), from the binaries the build job made: one manifest for
+  # The fleet as an image (ADR 0060), from the binaries the build job made: one manifest for
   # amd64 and arm64. The host daemon is not an image.
   image:
     needs: build

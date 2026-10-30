@@ -61,6 +61,7 @@ pub fn regions(reg: &Registry, policy: &Policy, refusals: &Refusals) -> Vec<Regi
         let u = &mut room.unschedulable;
         match resource {
             Resource::Memory => u.memory = *n,
+            Resource::Cpu => u.cpu = *n,
             Resource::Disk => u.disk = *n,
             Resource::Pressure => u.pressure = *n,
         }
@@ -147,6 +148,7 @@ pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
             Resource::ALL.map(|resource| {
                 let n = match resource {
                     Resource::Memory => u.memory,
+                    Resource::Cpu => u.cpu,
                     Resource::Disk => u.disk,
                     Resource::Pressure => u.pressure,
                 };

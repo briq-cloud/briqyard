@@ -73,6 +73,7 @@ async fn a_namespace_id_is_checked_before_it_names_a_file() {
             size: api::Size {
                 vcpus: 1,
                 memory_mb: 256,
+                cpu_millis: None,
             },
             ..Default::default()
         };

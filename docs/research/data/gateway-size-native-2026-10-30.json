@@ -1,0 +1,4555 @@
+[
+  {
+    "kind": "environment",
+    "time": 1793331697.6461394,
+    "uname": [
+      "Linux",
+      "lima-fc",
+      "7.0.0-38-generic",
+      "#38-Ubuntu SMP PREEMPT_DYNAMIC Fri Sep  4 09:28:02 UTC 2026",
+      "aarch64"
+    ],
+    "image": "docker.io/library/gateway-system-size@sha256:a54e6a065066d62964a453ca03d4beff9b90c079dab4ee646a113aa1f099a04c",
+    "fixture_image": "docker.io/library/gateway-size-fixture@sha256:5ea3e6dce637ae8bbfeafbb4bc00d2d07c44c0715db1b609f3e164691ca5e60b",
+    "fixture_vcpus": 4,
+    "fixture_memory_mb": 2048,
+    "stream_client": "rust",
+    "tls_server": "rust",
+    "stream_events": 30,
+    "stream_interval_ms": 1000,
+    "vm_chaos": false,
+    "status": {
+      "version": "0.1.5+unknown",
+      "host_id": "h_73e47562bc85",
+      "capacity": {
+        "memory_mb": 12288,
+        "vcpus": 24,
+        "cpu_millis": 24000
+      },
+      "used": {
+        "memory_mb": 0,
+        "vcpus": 0,
+        "cpu_millis": 0
+      },
+      "machines": 3,
+      "running": 0,
+      "disk_free_mb": 16116,
+      "tls_fingerprint": "",
+      "conditions": [
+        {
+          "type": "memory_pressure",
+          "status": false,
+          "since": "2026-10-30T03:41:19.778695871Z",
+          "message": "0 MB of 12288 committed (0%)"
+        },
+        {
+          "type": "disk_pressure",
+          "status": false,
+          "since": "2026-10-30T03:41:19.778695871Z",
+          "message": "pool 15.7 GB free of 38.3 (41%)"
+        },
+        {
+          "type": "storage_stalled",
+          "status": false,
+          "since": "2026-10-30T03:41:19.778695871Z",
+          "message": "no zfs command running for over 60 s"
+        }
+      ],
+      "started": {
+        "at": "2026-10-30T03:41:19.832315425Z",
+        "adopted": 0,
+        "stopped": 0,
+        "gone": 0
+      },
+      "vmm_version": "v1.17.0/7.0.0-38-generic"
+    },
+    "memory_mb": 64,
+    "vcpus": 1,
+    "native_cpu_millis": 0,
+    "namespace_gateway": false,
+    "repeats": 1,
+    "held_bodies": "2",
+    "max_body_mb": "8",
+    "upload_mb": "8",
+    "max_connections": "1024",
+    "rewrite_budget_mb": "16",
+    "secret_count": "1",
+    "secret_chars": "64",
+    "secret_charset": "ascii",
+    "refresh_ms": "15000",
+    "body_concurrency": 8,
+    "cpu_millis": [
+      1000
+    ],
+    "stream_counts": [
+      1000
+    ],
+    "connect_limit": 16,
+    "direct_control": true,
+    "ramp_per_second": 50.0,
+    "run": "idle64"
+  },
+  {
+    "kind": "boot",
+    "time": 1793331737.7019234,
+    "action": "first",
+    "scope": "gateway start API through gateway TCP readiness",
+    "gateway_was_suspended": false,
+    "seconds": 2.965086948010139,
+    "run": "idle64"
+  },
+  {
+    "kind": "boot",
+    "time": 1793331740.991561,
+    "action": "cold",
+    "scope": "gateway start API through gateway TCP readiness",
+    "gateway_was_suspended": false,
+    "seconds": 3.034556099999463,
+    "run": "idle64"
+  },
+  {
+    "kind": "boot",
+    "time": 1793331741.5274432,
+    "action": "resume",
+    "scope": "gateway start API through gateway TCP readiness",
+    "gateway_was_suspended": true,
+    "seconds": 0.23658827699546237,
+    "run": "idle64"
+  },
+  {
+    "kind": "cpu",
+    "time": 1793331741.766228,
+    "millis": 1000,
+    "cpu_max": "100000 100000",
+    "run": "idle64"
+  },
+  {
+    "kind": "environment",
+    "time": 1793331818.4208908,
+    "uname": [
+      "Linux",
+      "lima-fc",
+      "7.0.0-38-generic",
+      "#38-Ubuntu SMP PREEMPT_DYNAMIC Fri Sep  4 09:28:02 UTC 2026",
+      "aarch64"
+    ],
+    "image": "docker.io/library/gateway-system-size@sha256:a54e6a065066d62964a453ca03d4beff9b90c079dab4ee646a113aa1f099a04c",
+    "fixture_image": "docker.io/library/gateway-size-fixture@sha256:5ea3e6dce637ae8bbfeafbb4bc00d2d07c44c0715db1b609f3e164691ca5e60b",
+    "fixture_vcpus": 4,
+    "fixture_memory_mb": 2048,
+    "stream_client": "rust",
+    "tls_server": "rust",
+    "stream_events": 30,
+    "stream_interval_ms": 1000,
+    "vm_chaos": false,
+    "status": {
+      "version": "0.1.5+1243b7162d23",
+      "host_id": "h_73e47562bc85",
+      "capacity": {
+        "memory_mb": 12288,
+        "vcpus": 24,
+        "cpu_millis": 24000
+      },
+      "used": {
+        "memory_mb": 0,
+        "vcpus": 0,
+        "cpu_millis": 0
+      },
+      "machines": 3,
+      "running": 0,
+      "disk_free_mb": 16104,
+      "tls_fingerprint": "",
+      "conditions": [
+        {
+          "type": "memory_pressure",
+          "status": false,
+          "since": "2026-10-30T03:43:21.410429910Z",
+          "message": "0 MB of 12288 committed (0%)"
+        },
+        {
+          "type": "disk_pressure",
+          "status": false,
+          "since": "2026-10-30T03:43:21.410429910Z",
+          "message": "pool 15.7 GB free of 38.3 (41%)"
+        },
+        {
+          "type": "storage_stalled",
+          "status": false,
+          "since": "2026-10-30T03:43:21.410429910Z",
+          "message": "no zfs command running for over 60 s"
+        }
+      ],
+      "started": {
+        "at": "2026-10-30T03:43:21.455957247Z",
+        "adopted": 0,
+        "stopped": 0,
+        "gone": 0
+      },
+      "vmm_version": "v1.17.0/7.0.0-38-generic"
+    },
+    "memory_mb": 128,
+    "vcpus": 1,
+    "native_cpu_millis": 250,
+    "namespace_gateway": true,
+    "repeats": 1,
+    "held_bodies": "2",
+    "max_body_mb": "1",
+    "upload_mb": "8",
+    "max_connections": "128",
+    "rewrite_budget_mb": "16",
+    "secret_count": "50",
+    "secret_chars": "32768",
+    "secret_charset": "unicode",
+    "refresh_ms": "1000",
+    "body_concurrency": 8,
+    "cpu_millis": [
+      250
+    ],
+    "stream_counts": [
+      100
+    ],
+    "connect_limit": 16,
+    "direct_control": true,
+    "ramp_per_second": 50.0,
+    "run": "oversized-guard"
+  },
+  {
+    "kind": "boot",
+    "time": 1793331851.5108898,
+    "action": "first",
+    "scope": "consumer start API through gateway TCP readiness",
+    "gateway_was_suspended": false,
+    "seconds": 19.94567953600199,
+    "run": "oversized-guard"
+  },
+  {
+    "kind": "reservation",
+    "time": 1793331851.514475,
+    "before": {
+      "memory_mb": 2048,
+      "vcpus": 4,
+      "cpu_millis": 4000
+    },
+    "after": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "expected_delta": 1250,
+    "run": "oversized-guard"
+  },
+  {
+    "kind": "reservation_release",
+    "time": 1793331862.9773786,
+    "before": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "after": {
+      "memory_mb": 2048,
+      "vcpus": 4,
+      "cpu_millis": 4000
+    },
+    "expected_delta": 1250,
+    "run": "oversized-guard"
+  },
+  {
+    "kind": "boot",
+    "time": 1793331882.74296,
+    "action": "consumer_restart",
+    "scope": "consumer start API through gateway TCP readiness",
+    "gateway_was_suspended": false,
+    "seconds": 19.762686479996773,
+    "run": "oversized-guard"
+  },
+  {
+    "kind": "reservation",
+    "time": 1793331882.7458615,
+    "before": {
+      "memory_mb": 2048,
+      "vcpus": 4,
+      "cpu_millis": 4000
+    },
+    "after": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "expected_delta": 1250,
+    "run": "oversized-guard"
+  },
+  {
+    "kind": "cpu",
+    "time": 1793331882.7493036,
+    "millis": 250,
+    "cpu_max": "25000 100000",
+    "run": "oversized-guard"
+  },
+  {
+    "kind": "load",
+    "time": 1793331890.9203794,
+    "phase": "250m-proxy-guard-1",
+    "exit_code": 0,
+    "result": {
+      "mode": "guard",
+      "concurrency": 1,
+      "established": 1,
+      "completed": 1,
+      "refused": 3,
+      "recovered": true,
+      "same_tls_connection": true,
+      "recovery_seconds": 1.500895125999989,
+      "recovery_polls": 6,
+      "secret_count": 50,
+      "secret_bytes": 4816929,
+      "error_count": 0,
+      "errors": []
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 10908567\nuser_usec 6141924\nsystem_usec 4766643\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 486\nnr_throttled 423\nthrottled_usec 31703791\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "82509824",
+        "memory.peak": "82509824"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 25852860\nuser_usec 20030714\nsystem_usec 5822145\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 397\nnr_throttled 1\nthrottled_usec 631\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "274747392",
+        "memory.peak": "275464192"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 12296128\nuser_usec 7196489\nsystem_usec 5099638\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 562\nnr_throttled 471\nthrottled_usec 35181575\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "82280448",
+        "memory.peak": "82771968"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 32899546\nuser_usec 25367017\nsystem_usec 7532528\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 477\nnr_throttled 1\nthrottled_usec 631\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "367325184",
+        "memory.peak": "367616000"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 82771968,
+      "fixture": 367616000
+    },
+    "host_sample_count": 158,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "oversized-guard"
+  },
+  {
+    "kind": "environment",
+    "time": 1793332109.5358171,
+    "uname": [
+      "Linux",
+      "lima-fc",
+      "7.0.0-38-generic",
+      "#38-Ubuntu SMP PREEMPT_DYNAMIC Fri Sep  4 09:28:02 UTC 2026",
+      "aarch64"
+    ],
+    "image": "docker.io/library/gateway-system-size@sha256:e9cc0d66d73aab1a8debfdb6e3e05e5695da885b64b8bc3e8adc96cd9b1324c3",
+    "fixture_image": "docker.io/library/gateway-size-fixture@sha256:1a8622e7f5828676ca0526b245bc3ad2b82d81a581bd019305d8be56c35faced",
+    "fixture_vcpus": 4,
+    "fixture_memory_mb": 2048,
+    "stream_client": "rust",
+    "tls_server": "rust",
+    "stream_events": 600,
+    "stream_interval_ms": 50,
+    "vm_chaos": true,
+    "status": {
+      "version": "0.1.5+1243b7162d23",
+      "host_id": "h_73e47562bc85",
+      "capacity": {
+        "memory_mb": 12288,
+        "vcpus": 24,
+        "cpu_millis": 24000
+      },
+      "used": {
+        "memory_mb": 0,
+        "vcpus": 0,
+        "cpu_millis": 0
+      },
+      "machines": 3,
+      "running": 0,
+      "disk_free_mb": 16105,
+      "tls_fingerprint": "",
+      "conditions": [
+        {
+          "type": "memory_pressure",
+          "status": false,
+          "since": "2026-10-30T03:48:11.873537442Z",
+          "message": "0 MB of 12288 committed (0%)"
+        },
+        {
+          "type": "disk_pressure",
+          "status": false,
+          "since": "2026-10-30T03:48:11.873537442Z",
+          "message": "pool 15.7 GB free of 38.3 (41%)"
+        },
+        {
+          "type": "storage_stalled",
+          "status": false,
+          "since": "2026-10-30T03:48:11.873537442Z",
+          "message": "no zfs command running for over 60 s"
+        }
+      ],
+      "started": {
+        "at": "2026-10-30T03:48:11.925443379Z",
+        "adopted": 0,
+        "stopped": 0,
+        "gone": 0
+      },
+      "vmm_version": "v1.17.0/7.0.0-38-generic"
+    },
+    "memory_mb": 128,
+    "vcpus": 1,
+    "native_cpu_millis": 250,
+    "namespace_gateway": true,
+    "repeats": 5,
+    "held_bodies": "2",
+    "max_body_mb": "1",
+    "upload_mb": "8",
+    "max_connections": "128",
+    "rewrite_budget_mb": "16",
+    "secret_count": "1",
+    "secret_chars": "64",
+    "secret_charset": "ascii",
+    "refresh_ms": "15000",
+    "body_concurrency": 8,
+    "cpu_millis": [
+      250
+    ],
+    "stream_counts": [
+      100
+    ],
+    "connect_limit": 16,
+    "direct_control": true,
+    "ramp_per_second": 25.0,
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "boot",
+    "time": 1793332142.4297595,
+    "action": "first",
+    "scope": "consumer start API through gateway TCP readiness",
+    "gateway_was_suspended": false,
+    "seconds": 18.08766412100522,
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "reservation",
+    "time": 1793332142.4345863,
+    "before": {
+      "memory_mb": 2048,
+      "vcpus": 4,
+      "cpu_millis": 4000
+    },
+    "after": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "expected_delta": 1250,
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "reservation_release",
+    "time": 1793332152.2997012,
+    "before": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "after": {
+      "memory_mb": 2048,
+      "vcpus": 4,
+      "cpu_millis": 4000
+    },
+    "expected_delta": 1250,
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "boot",
+    "time": 1793332171.2834663,
+    "action": "consumer_restart",
+    "scope": "consumer start API through gateway TCP readiness",
+    "gateway_was_suspended": false,
+    "seconds": 18.98051731000305,
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "reservation",
+    "time": 1793332171.2877061,
+    "before": {
+      "memory_mb": 2048,
+      "vcpus": 4,
+      "cpu_millis": 4000
+    },
+    "after": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "expected_delta": 1250,
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "cpu",
+    "time": 1793332171.2919295,
+    "millis": 250,
+    "cpu_max": "25000 100000",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793332189.4458659,
+    "phase": "250m-proxy-bodies-8-repeat1",
+    "exit_code": 0,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.013937500000338332,
+          "p95": 0.5937500000001705,
+          "max": 0.5937500000001705
+        },
+        "ramp_delay": {
+          "p50": 140.89118799999767,
+          "p95": 611.922958000001,
+          "max": 611.922958000001
+        },
+        "tcp_connect": {
+          "p50": 55.5956875000021,
+          "p95": 89.84754199999401,
+          "max": 89.84754199999401
+        },
+        "connect_response": {
+          "p50": 394.7155835000018,
+          "p95": 708.1551260000012,
+          "max": 708.1551260000012
+        },
+        "tls_handshake": {
+          "p50": 512.0287920000023,
+          "p95": 1280.738209000006,
+          "max": 1280.738209000006
+        },
+        "request": {
+          "p50": 0.006353999999930693,
+          "p95": 1.0350410000015131,
+          "max": 1.0350410000015131
+        },
+        "body_upload": {
+          "p50": 7160.302211999997,
+          "p95": 7966.559669999995,
+          "max": 7966.559669999995
+        },
+        "body_barrier": {
+          "p50": 317.78427100000073,
+          "p95": 824.4243329999961,
+          "max": 824.4243329999961
+        },
+        "body_hold": {
+          "p50": 5057.182918500004,
+          "p95": 5063.488127,
+          "max": 5063.488127
+        },
+        "body_final_byte": {
+          "p50": 1.9230209999960834,
+          "p95": 29.08816699999761,
+          "max": 29.08816699999761
+        },
+        "body_response": {
+          "p50": 134.04593850000168,
+          "p95": 437.2417499999983,
+          "max": 437.2417499999983
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.6302500000023175,
+        "p95": 32.47787499999504,
+        "max": 410.783499999998
+      },
+      "error_stages": {},
+      "concurrency": 8,
+      "established": 8,
+      "completed": 8,
+      "peak_live_connections": 8,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 14.586037673999996,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 8137490\nuser_usec 3772339\nsystem_usec 4365150\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 422\nnr_throttled 312\nthrottled_usec 23302428\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "64495616",
+        "memory.peak": "64495616"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 20852619\nuser_usec 16480925\nsystem_usec 4371693\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 338\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "253181952",
+        "memory.peak": "253743104"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 11110349\nuser_usec 5624053\nsystem_usec 5486296\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 578\nnr_throttled 425\nthrottled_usec 32997080\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "77791232",
+        "memory.peak": "77795328"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 31127303\nuser_usec 23802026\nsystem_usec 7325277\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 514\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "365391872",
+        "memory.peak": "365457408"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 77795328,
+      "fixture": 365457408
+    },
+    "host_sample_count": 353,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793332203.6079557,
+    "phase": "250m-proxy-throughput-16-repeat1",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.0018954999987386145,
+          "p95": 0.20533400000033453,
+          "max": 0.7997089999918217
+        },
+        "ramp_delay": {
+          "p50": 305.2378329999996,
+          "p95": 609.1497920000108,
+          "max": 609.1497920000108
+        },
+        "tcp_connect": {
+          "p50": 36.540583499999,
+          "p95": 79.8331250000075,
+          "max": 79.8331250000075
+        },
+        "connect_response": {
+          "p50": 136.81689549999732,
+          "p95": 229.56674999998938,
+          "max": 229.56674999998938
+        },
+        "tls_handshake": {
+          "p50": 112.62539599999144,
+          "p95": 227.4248760000006,
+          "max": 227.4248760000006
+        },
+        "request": {
+          "p50": 10065.068275500003,
+          "p95": 10081.803046000005,
+          "max": 10081.803046000005
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.0315829999967692,
+        "p95": 4.189957999994928,
+        "max": 124.25450000000353
+      },
+      "error_stages": {},
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 11.002796837999995,
+      "requests": 5651,
+      "rps": 513.5966866609159,
+      "latency_ms": {
+        "p50": 4.732541999999285,
+        "p95": 90.44070900000634,
+        "max": 604.7485419999958
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 11111512\nuser_usec 5624629\nsystem_usec 5486883\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 579\nnr_throttled 425\nthrottled_usec 32997080\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "77791232",
+        "memory.peak": "77795328"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 31157811\nuser_usec 23825416\nsystem_usec 7332395\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 515\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "365654016",
+        "memory.peak": "365654016"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 13933738\nuser_usec 6726979\nsystem_usec 7206758\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 701\nnr_throttled 536\nthrottled_usec 42967560\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "77533184",
+        "memory.peak": "77811712"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 38776281\nuser_usec 27396766\nsystem_usec 11379515\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 646\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "368250880",
+        "memory.peak": "368340992"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 77811712,
+      "fixture": 368336896
+    },
+    "host_sample_count": 276,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793332239.9974558,
+    "phase": "250m-direct-streams-100-repeat1",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 31.246208765,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1682.6585672195674,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.07391348794122,
+        "p50": 17.952269375610392,
+        "p95": 18.963482481397175
+      },
+      "ramp_per_second": 25.0,
+      "route": "direct",
+      "runtime_lag_ms": {
+        "max": 730.121209,
+        "p50": 1.417875,
+        "p95": 3.461917
+      },
+      "seconds": 35.65785785,
+      "stage_ms": {
+        "first_event": {
+          "max": 1.554,
+          "p50": 0.0021460000000000003,
+          "p95": 0.00575
+        },
+        "queued": {
+          "max": 225.883,
+          "p50": 0.0006659999999999999,
+          "p95": 211.813083
+        },
+        "ramp_delay": {
+          "max": 3961.650293,
+          "p50": 1981.4808755,
+          "p95": 3801.2280020000003
+        },
+        "response_headers": {
+          "max": 303.641958,
+          "p50": 3.189021,
+          "p95": 190.126084
+        },
+        "stream_read": {
+          "max": 34052.932808,
+          "p50": 33421.964891,
+          "p95": 33991.792016
+        },
+        "tcp_connect": {
+          "max": 805.984834,
+          "p50": 2.6332495,
+          "p95": 783.777834
+        },
+        "tls_handshake": {
+          "max": 1093.0044169999999,
+          "p50": 4.1161460000000005,
+          "p95": 747.064084
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 1450.958959,
+        "p50": 9.2285415,
+        "p95": 1296.211668
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 13934346\nuser_usec 6727588\nsystem_usec 7206758\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 702\nnr_throttled 536\nthrottled_usec 42967560\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "77533184",
+        "memory.peak": "77811712"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 38865857\nuser_usec 27466220\nsystem_usec 11399637\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 647\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "368250880",
+        "memory.peak": "368340992"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 14222434\nuser_usec 6845075\nsystem_usec 7377358\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 841\nnr_throttled 536\nthrottled_usec 42967560\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "77479936",
+        "memory.peak": "77811712"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 57123877\nuser_usec 36473065\nsystem_usec 20650812\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1011\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "368967680",
+        "memory.peak": "369287168"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 77795328,
+      "fixture": 369287168
+    },
+    "host_sample_count": 713,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793332276.3843384,
+    "phase": "250m-proxy-streams-100-repeat1",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 30.897551224,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1676.5638159800403,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.166657724542365,
+        "p50": 17.840762564687857,
+        "p95": 18.859603485613345
+      },
+      "ramp_per_second": 25.0,
+      "route": "proxy",
+      "runtime_lag_ms": {
+        "max": 22.798708,
+        "p50": 1.3224375,
+        "p95": 2.1294999999999997
+      },
+      "seconds": 35.787483559,
+      "stage_ms": {
+        "connect_response": {
+          "max": 289.690583,
+          "p50": 4.3022705,
+          "p95": 30.224500000000003
+        },
+        "first_event": {
+          "max": 8.429458,
+          "p50": 0.0495835,
+          "p95": 0.710375
+        },
+        "queued": {
+          "max": 0.056125,
+          "p50": 0.0005625,
+          "p95": 0.001042
+        },
+        "ramp_delay": {
+          "max": 3961.430294,
+          "p50": 1981.5514385000001,
+          "p95": 3801.262044
+        },
+        "response_headers": {
+          "max": 396.369333,
+          "p50": 53.5401875,
+          "p95": 277.865166
+        },
+        "stream_read": {
+          "max": 35557.486851,
+          "p50": 33630.862682499996,
+          "p95": 35407.102392
+        },
+        "tcp_connect": {
+          "max": 164.425542,
+          "p50": 5.9723120000000005,
+          "p95": 80.34975
+        },
+        "tls_handshake": {
+          "max": 180.515166,
+          "p50": 4.9304375,
+          "p95": 46.635792
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 476.228833,
+        "p50": 87.5126255,
+        "p95": 372.342917
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 14222561\nuser_usec 6845136\nsystem_usec 7377424\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 841\nnr_throttled 536\nthrottled_usec 42967560\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "77479936",
+        "memory.peak": "77811712"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 57151426\nuser_usec 36494933\nsystem_usec 20656492\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1011\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "369229824",
+        "memory.peak": "369287168"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 22383439\nuser_usec 8569688\nsystem_usec 13813751\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1203\nnr_throttled 730\nthrottled_usec 48841474\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "79835136",
+        "memory.peak": "80105472"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 75787256\nuser_usec 41142925\nsystem_usec 34644330\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1374\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "366141440",
+        "memory.peak": "369754112"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 80105472,
+      "fixture": 369754112
+    },
+    "host_sample_count": 711,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793332323.8925226,
+    "phase": "250m-proxy-overload-128-repeat1",
+    "exit_code": 0,
+    "result": {
+      "mode": "overload",
+      "concurrency": 128,
+      "established": 128,
+      "completed": 128,
+      "events": 3840,
+      "rejected": 1000,
+      "error_count": 0,
+      "errors": [],
+      "recovered": true
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 22421427\nuser_usec 8589012\nsystem_usec 13832414\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1204\nnr_throttled 731\nthrottled_usec 48894851\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "79572992",
+        "memory.peak": "80105472"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 75961547\nuser_usec 41256454\nsystem_usec 34705093\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1375\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "366141440",
+        "memory.peak": "369754112"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 27564387\nuser_usec 10968221\nsystem_usec 16596166\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1599\nnr_throttled 882\nthrottled_usec 59262504\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "81551360",
+        "memory.peak": "81817600"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 109198747\nuser_usec 65167250\nsystem_usec 44031497\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1796\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "424050688",
+        "memory.peak": "424169472"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 81817600,
+      "fixture": 424169472
+    },
+    "host_sample_count": 926,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793332338.0076437,
+    "phase": "250m-proxy-bodies-8-repeat2",
+    "exit_code": 0,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.0026665000092407354,
+          "p95": 0.010459000009177544,
+          "max": 0.010459000009177544
+        },
+        "ramp_delay": {
+          "p50": 157.92906250000271,
+          "p95": 281.6574590000016,
+          "max": 281.6574590000016
+        },
+        "tcp_connect": {
+          "p50": 89.28254149999759,
+          "p95": 120.71045900000854,
+          "max": 120.71045900000854
+        },
+        "connect_response": {
+          "p50": 194.43722949999653,
+          "p95": 255.0872090000098,
+          "max": 255.0872090000098
+        },
+        "tls_handshake": {
+          "p50": 303.1372709999971,
+          "p95": 1414.4940420000012,
+          "max": 1414.4940420000012
+        },
+        "request": {
+          "p50": 0.003312499998742169,
+          "p95": 0.009750000003805326,
+          "max": 0.009750000003805326
+        },
+        "body_upload": {
+          "p50": 5701.815440499999,
+          "p95": 6497.941752999992,
+          "max": 6497.941752999992
+        },
+        "body_barrier": {
+          "p50": 396.82924999999614,
+          "p95": 4742.789835999985,
+          "max": 4742.789835999985
+        },
+        "body_hold": {
+          "p50": 5001.8365024999985,
+          "p95": 5004.239877000004,
+          "max": 5004.239877000004
+        },
+        "body_final_byte": {
+          "p50": 0.10116700001105983,
+          "p95": 1.0837499999922784,
+          "max": 1.0837499999922784
+        },
+        "body_response": {
+          "p50": 10.478354000014178,
+          "p95": 11.273749999986649,
+          "max": 11.273749999986649
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.4564169999971428,
+        "p95": 30.85979199998405,
+        "max": 528.1421259999888
+      },
+      "error_stages": {},
+      "concurrency": 8,
+      "established": 8,
+      "completed": 8,
+      "peak_live_connections": 8,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 12.029238131,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 27564387\nuser_usec 10968221\nsystem_usec 16596166\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1599\nnr_throttled 882\nthrottled_usec 59262504\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "81551360",
+        "memory.peak": "81817600"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 109237344\nuser_usec 65192395\nsystem_usec 44044949\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1796\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "424050688",
+        "memory.peak": "424169472"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 29443494\nuser_usec 11962042\nsystem_usec 17481451\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1709\nnr_throttled 952\nthrottled_usec 65473194\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "82702336",
+        "memory.peak": "82972672"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 116599647\nuser_usec 69813992\nsystem_usec 46785654\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1933\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "425218048",
+        "memory.peak": "425218048"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 82972672,
+      "fixture": 425218048
+    },
+    "host_sample_count": 275,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793332352.1475892,
+    "phase": "250m-proxy-throughput-16-repeat2",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.0023540000029242947,
+          "p95": 0.0044170000137455645,
+          "max": 0.00895900001296468
+        },
+        "ramp_delay": {
+          "p50": 303.7806044999911,
+          "p95": 601.9997919999867,
+          "max": 601.9997919999867
+        },
+        "tcp_connect": {
+          "p50": 19.402874999997266,
+          "p95": 61.69170900000154,
+          "max": 61.69170900000154
+        },
+        "connect_response": {
+          "p50": 3.9125204999947982,
+          "p95": 97.81524999999647,
+          "max": 97.81524999999647
+        },
+        "tls_handshake": {
+          "p50": 4.864770500006443,
+          "p95": 81.79487500001414,
+          "max": 81.79487500001414
+        },
+        "request": {
+          "p50": 12601.91769299999,
+          "p95": 13106.837715000012,
+          "max": 13106.837715000012
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.1807500000145383,
+        "p95": 5.591874999976196,
+        "max": 3930.5274189999977
+      },
+      "error_stages": {},
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 13.368363756000008,
+      "requests": 5485,
+      "rps": 410.29703411071637,
+      "latency_ms": {
+        "p50": 4.424374999985048,
+        "p95": 88.54216699998574,
+        "max": 4702.622168999995
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 29443494\nuser_usec 11962042\nsystem_usec 17481451\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1709\nnr_throttled 952\nthrottled_usec 65473194\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "82468864",
+        "memory.peak": "82972672"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 116614435\nuser_usec 69822865\nsystem_usec 46791569\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1933\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "424951808",
+        "memory.peak": "425218048"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 32913822\nuser_usec 13811969\nsystem_usec 19101852\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1849\nnr_throttled 1091\nthrottled_usec 77933143\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "83320832",
+        "memory.peak": "83324928"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 136697048\nuser_usec 85315714\nsystem_usec 51381334\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2074\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "424714240",
+        "memory.peak": "425218048"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 83320832,
+      "fixture": 425213952
+    },
+    "host_sample_count": 276,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793332388.4772625,
+    "phase": "250m-direct-streams-100-repeat2",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 31.309905932,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1692.442401019477,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.097054796143567,
+        "p50": 17.97637084218814,
+        "p95": 18.9911186014155
+      },
+      "ramp_per_second": 25.0,
+      "route": "direct",
+      "runtime_lag_ms": {
+        "max": 50.727291,
+        "p50": 1.71325,
+        "p95": 4.23375
+      },
+      "seconds": 35.451723476,
+      "stage_ms": {
+        "first_event": {
+          "max": 0.012791,
+          "p50": 0.0014585000000000002,
+          "p95": 0.008749999999999999
+        },
+        "queued": {
+          "max": 0.18066600000000002,
+          "p50": 0.000625,
+          "p95": 0.001042
+        },
+        "ramp_delay": {
+          "max": 3961.856293,
+          "p50": 1982.2551885000003,
+          "p95": 3801.443877
+        },
+        "response_headers": {
+          "max": 14.239625,
+          "p50": 1.9724374999999998,
+          "p95": 3.7605
+        },
+        "stream_read": {
+          "max": 35330.975600000005,
+          "p50": 33377.1697455,
+          "p95": 35254.879517
+        },
+        "tcp_connect": {
+          "max": 13.218499999999999,
+          "p50": 1.944146,
+          "p95": 5.942165999999999
+        },
+        "tls_handshake": {
+          "max": 53.124917,
+          "p50": 2.0545415,
+          "p95": 3.9916250000000004
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 79.516667,
+        "p50": 5.636729,
+        "p95": 11.26925
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 32913822\nuser_usec 13811969\nsystem_usec 19101852\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1850\nnr_throttled 1091\nthrottled_usec 77933143\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "83320832",
+        "memory.peak": "83324928"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 136789070\nuser_usec 85380876\nsystem_usec 51408194\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2075\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "424714240",
+        "memory.peak": "425218048"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 33299357\nuser_usec 14015322\nsystem_usec 19284035\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2012\nnr_throttled 1091\nthrottled_usec 77933143\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "83107840",
+        "memory.peak": "83324928"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 146390507\nuser_usec 90392905\nsystem_usec 55997602\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2435\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "424882176",
+        "memory.peak": "425500672"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 83320832,
+      "fixture": 425500672
+    },
+    "host_sample_count": 704,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793332424.708874,
+    "phase": "250m-proxy-streams-100-repeat2",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 31.199911556,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1700.7548862214858,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.224729195491754,
+        "p50": 18.116417211842105,
+        "p95": 19.156337002753812
+      },
+      "ramp_per_second": 25.0,
+      "route": "proxy",
+      "runtime_lag_ms": {
+        "max": 8.178666,
+        "p50": 1.728958,
+        "p95": 4.03175
+      },
+      "seconds": 35.278452225,
+      "stage_ms": {
+        "connect_response": {
+          "max": 80.824166,
+          "p50": 2.99175,
+          "p95": 12.425583
+        },
+        "first_event": {
+          "max": 0.835625,
+          "p50": 0.0371455,
+          "p95": 0.19
+        },
+        "queued": {
+          "max": 0.13549999999999998,
+          "p50": 0.00025,
+          "p95": 0.000625
+        },
+        "ramp_delay": {
+          "max": 3961.2795429999996,
+          "p50": 1981.630355,
+          "p95": 3800.885627
+        },
+        "response_headers": {
+          "max": 210.152208,
+          "p50": 73.71252100000001,
+          "p95": 191.518125
+        },
+        "stream_read": {
+          "max": 35021.727058000004,
+          "p50": 33119.130495,
+          "p95": 34917.668892
+        },
+        "tcp_connect": {
+          "max": 81.00575,
+          "p50": 17.6801045,
+          "p95": 74.01175
+        },
+        "tls_handshake": {
+          "max": 97.37225,
+          "p50": 2.881,
+          "p95": 82.839625
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 297.166333,
+        "p50": 84.576583,
+        "p95": 259.73533399999997
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 33300966\nuser_usec 14015999\nsystem_usec 19284967\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2013\nnr_throttled 1091\nthrottled_usec 77933143\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "83107840",
+        "memory.peak": "83324928"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 146450867\nuser_usec 90440693\nsystem_usec 56010174\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2436\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "424620032",
+        "memory.peak": "425500672"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 41112442\nuser_usec 16281669\nsystem_usec 24830773\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2372\nnr_throttled 1232\nthrottled_usec 84309818\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "83099648",
+        "memory.peak": "83369984"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 162921278\nuser_usec 96207757\nsystem_usec 66713520\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2795\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "424648704",
+        "memory.peak": "425500672"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 83369984,
+      "fixture": 424652800
+    },
+    "host_sample_count": 706,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793332434.6287746,
+    "phase": "250m-proxy-overload-128-repeat2",
+    "exit_code": 1,
+    "result": "Traceback (most recent call last):\n  File \"/tmp/overload.py\", line 157, in <module>\n    main()\n  File \"/tmp/overload.py\", line 140, in main\n    result = asyncio.run(asyncio.wait_for(workload(gateway, ctx, count), 80))\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/runners.py\", line 195, in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/base_events.py\", line 691, in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/tasks.py\", line 520, in wait_for\n    return await fut\n           ^^^^^^^^^\n  File \"/tmp/overload.py\", line 128, in closed\n    await asyncio.wait_for(writer.wait_closed(), 2)\n  File \"/usr/local/lib/python3.12/asyncio/tasks.py\", line 520, in wait_for\n    return await fut\n           ^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/streams.py\", line 364, in wait_closed\n    await self._protocol._get_close_waiter(self)\n  File \"/usr/local/lib/python3.12/asyncio/selector_events.py\", line 1013, in _read_ready__data_received\n    data = self._sock.recv(self.max_size)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nConnectionResetError: [Errno 104] Connection reset by peer\n",
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 41114618\nuser_usec 16282647\nsystem_usec 24831970\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2372\nnr_throttled 1232\nthrottled_usec 84309818\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "83099648",
+        "memory.peak": "83369984"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 162968709\nuser_usec 96238241\nsystem_usec 66730468\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2795\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "424910848",
+        "memory.peak": "425500672"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 42920404\nuser_usec 17046619\nsystem_usec 25873784\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2460\nnr_throttled 1301\nthrottled_usec 90049741\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "83374080",
+        "memory.peak": "83378176"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 176998236\nuser_usec 106516123\nsystem_usec 70482112\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2894\nnr_throttled 1\nthrottled_usec 847\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "425775104",
+        "memory.peak": "426041344"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 83378176,
+      "fixture": 426041344
+    },
+    "host_sample_count": 196,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "failure",
+    "time": 1793332434.6289647,
+    "error": "RuntimeError('health was not checked while admission was full')",
+    "run": "partial-repeated-load"
+  },
+  {
+    "kind": "environment",
+    "time": 1793332778.8270524,
+    "uname": [
+      "Linux",
+      "lima-fc",
+      "7.0.0-38-generic",
+      "#38-Ubuntu SMP PREEMPT_DYNAMIC Fri Sep  4 09:28:02 UTC 2026",
+      "aarch64"
+    ],
+    "image": "docker.io/library/gateway-system-size@sha256:e9cc0d66d73aab1a8debfdb6e3e05e5695da885b64b8bc3e8adc96cd9b1324c3",
+    "fixture_image": "docker.io/library/gateway-size-fixture@sha256:1a8622e7f5828676ca0526b245bc3ad2b82d81a581bd019305d8be56c35faced",
+    "fixture_vcpus": 4,
+    "fixture_memory_mb": 2048,
+    "stream_client": "rust",
+    "tls_server": "rust",
+    "stream_events": 600,
+    "stream_interval_ms": 50,
+    "vm_chaos": true,
+    "status": {
+      "version": "0.1.5+1243b7162d23",
+      "host_id": "h_73e47562bc85",
+      "capacity": {
+        "memory_mb": 12288,
+        "vcpus": 24,
+        "cpu_millis": 24000
+      },
+      "used": {
+        "memory_mb": 2176,
+        "vcpus": 2,
+        "cpu_millis": 1250
+      },
+      "machines": 4,
+      "running": 2,
+      "disk_free_mb": 15890,
+      "tls_fingerprint": "",
+      "conditions": [
+        {
+          "type": "memory_pressure",
+          "status": false,
+          "since": "2026-10-30T03:59:33.058898161Z",
+          "message": "2176 MB of 12288 committed (17%)"
+        },
+        {
+          "type": "disk_pressure",
+          "status": false,
+          "since": "2026-10-30T03:59:33.058898161Z",
+          "message": "pool 15.5 GB free of 38.3 (40%)"
+        },
+        {
+          "type": "storage_stalled",
+          "status": false,
+          "since": "2026-10-30T03:59:33.058898161Z",
+          "message": "no zfs command running for over 60 s"
+        }
+      ],
+      "started": {
+        "at": "2026-10-30T03:59:33.125652799Z",
+        "adopted": 2,
+        "stopped": 0,
+        "gone": 0
+      },
+      "vmm_version": "v1.17.0/7.0.0-38-generic"
+    },
+    "memory_mb": 128,
+    "vcpus": 1,
+    "native_cpu_millis": 250,
+    "namespace_gateway": true,
+    "repeats": 1,
+    "held_bodies": "2",
+    "max_body_mb": "1",
+    "upload_mb": "8",
+    "max_connections": "128",
+    "rewrite_budget_mb": "16",
+    "secret_count": "1",
+    "secret_chars": "64",
+    "secret_charset": "ascii",
+    "refresh_ms": "15000",
+    "body_concurrency": 8,
+    "cpu_millis": [
+      250
+    ],
+    "stream_counts": [
+      100
+    ],
+    "connect_limit": 16,
+    "direct_control": true,
+    "ramp_per_second": 25.0,
+    "run": "vm-fault"
+  },
+  {
+    "kind": "boot",
+    "time": 1793332805.7506344,
+    "action": "first",
+    "scope": "consumer start API through gateway TCP readiness",
+    "gateway_was_suspended": false,
+    "seconds": 17.935272388000158,
+    "run": "vm-fault"
+  },
+  {
+    "kind": "reservation",
+    "time": 1793332805.7541487,
+    "before": {
+      "memory_mb": 4224,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "after": {
+      "memory_mb": 4480,
+      "vcpus": 8,
+      "cpu_millis": 6500
+    },
+    "expected_delta": 1250,
+    "run": "vm-fault"
+  },
+  {
+    "kind": "reservation_release",
+    "time": 1793332818.6960158,
+    "before": {
+      "memory_mb": 4480,
+      "vcpus": 8,
+      "cpu_millis": 6500
+    },
+    "after": {
+      "memory_mb": 4224,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "expected_delta": 1250,
+    "run": "vm-fault"
+  },
+  {
+    "kind": "boot",
+    "time": 1793332836.5257316,
+    "action": "consumer_restart",
+    "scope": "consumer start API through gateway TCP readiness",
+    "gateway_was_suspended": false,
+    "seconds": 17.8261928169959,
+    "run": "vm-fault"
+  },
+  {
+    "kind": "reservation",
+    "time": 1793332836.5298975,
+    "before": {
+      "memory_mb": 4224,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "after": {
+      "memory_mb": 4480,
+      "vcpus": 8,
+      "cpu_millis": 6500
+    },
+    "expected_delta": 1250,
+    "run": "vm-fault"
+  },
+  {
+    "kind": "cpu",
+    "time": 1793332836.5343115,
+    "millis": 250,
+    "cpu_max": "25000 100000",
+    "run": "vm-fault"
+  },
+  {
+    "kind": "vm_fault",
+    "time": 1793332872.0031638,
+    "old_pid": 2342390,
+    "new_pid": 2342628,
+    "recovery_seconds": 26.449285430004238,
+    "result": {
+      "mode": "fault",
+      "concurrency": 1,
+      "established": 1,
+      "completed": 1,
+      "interrupted_after_injection": true,
+      "interruption": "TimeoutError",
+      "events_before_interruption": 1,
+      "release_wait_seconds": 15.271010382,
+      "recovered": true,
+      "recovery_seconds": 0.6739840420000007,
+      "ca_unchanged": true,
+      "original_ca_sha256": "11960cdc38b485aa2e6c1d47acf0b98f44aa30b74447b9798bffacef1894738f",
+      "error_count": 0,
+      "errors": []
+    },
+    "reservations_before": {
+      "memory_mb": 4480,
+      "vcpus": 8,
+      "cpu_millis": 6500
+    },
+    "reservations_after": {
+      "memory_mb": 4480,
+      "vcpus": 8,
+      "cpu_millis": 6500
+    },
+    "cpu_max": "25000 100000",
+    "cpu_weight": "25",
+    "run": "vm-fault"
+  },
+  {
+    "kind": "environment",
+    "time": 1793333294.8481314,
+    "uname": [
+      "Linux",
+      "lima-fc",
+      "7.0.0-38-generic",
+      "#38-Ubuntu SMP PREEMPT_DYNAMIC Fri Sep  4 09:28:02 UTC 2026",
+      "aarch64"
+    ],
+    "image": "docker.io/library/gateway-system-size@sha256:e9cc0d66d73aab1a8debfdb6e3e05e5695da885b64b8bc3e8adc96cd9b1324c3",
+    "fixture_image": "docker.io/library/gateway-size-fixture@sha256:1a8622e7f5828676ca0526b245bc3ad2b82d81a581bd019305d8be56c35faced",
+    "fixture_vcpus": 4,
+    "fixture_memory_mb": 2048,
+    "stream_client": "rust",
+    "tls_server": "rust",
+    "stream_events": 600,
+    "stream_interval_ms": 50,
+    "vm_chaos": true,
+    "status": {
+      "version": "0.1.5+1243b7162d23",
+      "host_id": "h_73e47562bc85",
+      "capacity": {
+        "memory_mb": 12288,
+        "vcpus": 24,
+        "cpu_millis": 24000
+      },
+      "used": {
+        "memory_mb": 0,
+        "vcpus": 0,
+        "cpu_millis": 0
+      },
+      "machines": 3,
+      "running": 0,
+      "disk_free_mb": 15920,
+      "tls_fingerprint": "",
+      "conditions": [
+        {
+          "type": "memory_pressure",
+          "status": false,
+          "since": "2026-10-30T04:07:57.994153846Z",
+          "message": "0 MB of 12288 committed (0%)"
+        },
+        {
+          "type": "disk_pressure",
+          "status": false,
+          "since": "2026-10-30T04:07:57.994153846Z",
+          "message": "pool 15.5 GB free of 38.3 (40%)"
+        },
+        {
+          "type": "storage_stalled",
+          "status": false,
+          "since": "2026-10-30T04:07:57.994153846Z",
+          "message": "no zfs command running for over 60 s"
+        }
+      ],
+      "started": {
+        "at": "2026-10-30T04:07:58.046314269Z",
+        "adopted": 0,
+        "stopped": 0,
+        "gone": 0
+      },
+      "vmm_version": "v1.17.0/7.0.0-38-generic"
+    },
+    "memory_mb": 128,
+    "vcpus": 1,
+    "native_cpu_millis": 250,
+    "namespace_gateway": true,
+    "repeats": 5,
+    "held_bodies": "2",
+    "max_body_mb": "1",
+    "upload_mb": "8",
+    "max_connections": "128",
+    "rewrite_budget_mb": "16",
+    "secret_count": "1",
+    "secret_chars": "64",
+    "secret_charset": "ascii",
+    "refresh_ms": "15000",
+    "body_concurrency": 8,
+    "cpu_millis": [
+      250
+    ],
+    "stream_counts": [
+      100
+    ],
+    "connect_limit": 16,
+    "direct_control": true,
+    "ramp_per_second": 25.0,
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "boot",
+    "time": 1793333334.2742069,
+    "action": "first",
+    "scope": "consumer start API through gateway TCP readiness",
+    "gateway_was_suspended": false,
+    "seconds": 18.72417346399743,
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "reservation",
+    "time": 1793333334.2775238,
+    "before": {
+      "memory_mb": 2048,
+      "vcpus": 4,
+      "cpu_millis": 4000
+    },
+    "after": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "expected_delta": 1250,
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "reservation_release",
+    "time": 1793333338.448683,
+    "before": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "after": {
+      "memory_mb": 2048,
+      "vcpus": 4,
+      "cpu_millis": 4000
+    },
+    "expected_delta": 1250,
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "boot",
+    "time": 1793333356.980219,
+    "action": "consumer_restart",
+    "scope": "consumer start API through gateway TCP readiness",
+    "gateway_was_suspended": false,
+    "seconds": 18.52831818899722,
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "reservation",
+    "time": 1793333356.9831538,
+    "before": {
+      "memory_mb": 2048,
+      "vcpus": 4,
+      "cpu_millis": 4000
+    },
+    "after": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "expected_delta": 1250,
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "cpu",
+    "time": 1793333356.9865086,
+    "millis": 250,
+    "cpu_max": "25000 100000",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333373.170417,
+    "phase": "250m-proxy-bodies-8-repeat1",
+    "exit_code": 0,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.013979500000260714,
+          "p95": 0.5230000000011614,
+          "max": 0.5230000000011614
+        },
+        "ramp_delay": {
+          "p50": 462.1299165000039,
+          "p95": 474.48091700000106,
+          "max": 474.48091700000106
+        },
+        "tcp_connect": {
+          "p50": 69.12418699999634,
+          "p95": 89.38608300000084,
+          "max": 89.38608300000084
+        },
+        "connect_response": {
+          "p50": 532.8254589999979,
+          "p95": 557.818583999996,
+          "max": 557.818583999996
+        },
+        "tls_handshake": {
+          "p50": 185.9477500000004,
+          "p95": 676.9469170000023,
+          "max": 676.9469170000023
+        },
+        "request": {
+          "p50": 0.003624999997953182,
+          "p95": 0.7791250000011019,
+          "max": 0.7791250000011019
+        },
+        "body_upload": {
+          "p50": 6614.610586000004,
+          "p95": 6885.205253000002,
+          "max": 6885.205253000002
+        },
+        "body_barrier": {
+          "p50": 247.32535449999915,
+          "p95": 1888.5730840000008,
+          "max": 1888.5730840000008
+        },
+        "body_hold": {
+          "p50": 5012.519272999994,
+          "p95": 5014.799169,
+          "max": 5014.799169
+        },
+        "body_final_byte": {
+          "p50": 0.5678335000069978,
+          "p95": 3.6172500000049013,
+          "max": 3.6172500000049013
+        },
+        "body_response": {
+          "p50": 300.2216670000024,
+          "p95": 414.97429100000716,
+          "max": 414.97429100000716
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.1500619999978285,
+        "p95": 25.382791999999196,
+        "max": 362.4039169999989
+      },
+      "error_stages": {},
+      "concurrency": 8,
+      "established": 8,
+      "completed": 8,
+      "peak_live_connections": 8,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 13.676455340000004,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 8026006\nuser_usec 3803147\nsystem_usec 4222859\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 379\nnr_throttled 311\nthrottled_usec 23242972\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "64090112",
+        "memory.peak": "64462848"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 41944642\nuser_usec 35405633\nsystem_usec 6539009\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 392\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "258486272",
+        "memory.peak": "258654208"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 10373980\nuser_usec 5224486\nsystem_usec 5149494\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 512\nnr_throttled 398\nthrottled_usec 30957981\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "76554240",
+        "memory.peak": "76603392"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 50556494\nuser_usec 41337020\nsystem_usec 9219473\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 554\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "372236288",
+        "memory.peak": "372498432"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 76603392,
+      "fixture": 372498432
+    },
+    "host_sample_count": 316,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333387.2950966,
+    "phase": "250m-proxy-throughput-16-repeat1",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.0023124999941614988,
+          "p95": 0.17245799999443534,
+          "max": 0.27379200000154924
+        },
+        "ramp_delay": {
+          "p50": 307.2771250000059,
+          "p95": 634.721875000011,
+          "max": 634.721875000011
+        },
+        "tcp_connect": {
+          "p50": 23.45254200000113,
+          "p95": 84.45629199999871,
+          "max": 84.45629199999871
+        },
+        "connect_response": {
+          "p50": 51.69031249999989,
+          "p95": 200.03779200000338,
+          "max": 200.03779200000338
+        },
+        "tls_handshake": {
+          "p50": 122.19118750000746,
+          "p95": 1538.859584000008,
+          "max": 1538.859584000008
+        },
+        "request": {
+          "p50": 10033.659004999998,
+          "p95": 10090.509545999992,
+          "max": 10090.509545999992
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.084333500000409,
+        "p95": 22.82687499998985,
+        "max": 267.07729199999335
+      },
+      "error_stages": {},
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 12.386480171999992,
+      "requests": 4656,
+      "rps": 375.89371115492736,
+      "latency_ms": {
+        "p50": 4.977937499994312,
+        "p95": 92.43899999999883,
+        "max": 1983.071375999998
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 10375904\nuser_usec 5226410\nsystem_usec 5149494\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 512\nnr_throttled 398\nthrottled_usec 30957981\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "76533760",
+        "memory.peak": "76603392"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 50594104\nuser_usec 41360428\nsystem_usec 9233675\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 554\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "372498432",
+        "memory.peak": "372498432"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 13483865\nuser_usec 6633476\nsystem_usec 6850388\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 645\nnr_throttled 521\nthrottled_usec 41980558\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "76980224",
+        "memory.peak": "77156352"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 58935772\nuser_usec 45762554\nsystem_usec 13173217\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 694\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "373272576",
+        "memory.peak": "373272576"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 77156352,
+      "fixture": 373272576
+    },
+    "host_sample_count": 277,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333423.6198096,
+    "phase": "250m-direct-streams-100-repeat1",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 31.479030057,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1679.4068190283149,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.02143650945921,
+        "p50": 17.86627422153822,
+        "p95": 18.884187313091534
+      },
+      "ramp_per_second": 25.0,
+      "route": "direct",
+      "runtime_lag_ms": {
+        "max": 222.205,
+        "p50": 1.734604,
+        "p95": 3.8912500000000003
+      },
+      "seconds": 35.726900308,
+      "stage_ms": {
+        "first_event": {
+          "max": 0.214583,
+          "p50": 0.0015625,
+          "p95": 0.043625000000000004
+        },
+        "queued": {
+          "max": 7.546749999999999,
+          "p50": 0.00075,
+          "p95": 0.058125
+        },
+        "ramp_delay": {
+          "max": 3961.9130020000002,
+          "p50": 1981.2557714999998,
+          "p95": 3801.278044
+        },
+        "response_headers": {
+          "max": 208.026709,
+          "p50": 1.8810005,
+          "p95": 125.336541
+        },
+        "stream_read": {
+          "max": 34992.386600000005,
+          "p50": 33582.8279955,
+          "p95": 34929.981683
+        },
+        "tcp_connect": {
+          "max": 253.92929199999998,
+          "p50": 1.486729,
+          "p95": 95.93975
+        },
+        "tls_handshake": {
+          "max": 371.948375,
+          "p50": 2.2447295,
+          "p95": 277.46416600000003
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 633.641917,
+        "p50": 5.9166870000000005,
+        "p95": 472.370792
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 13494185\nuser_usec 6634103\nsystem_usec 6860082\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 646\nnr_throttled 521\nthrottled_usec 41980558\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "76980224",
+        "memory.peak": "77156352"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 59028603\nuser_usec 45828175\nsystem_usec 13200427\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 694\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "373272576",
+        "memory.peak": "373272576"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 13985012\nuser_usec 6879372\nsystem_usec 7105640\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 838\nnr_throttled 522\nthrottled_usec 42033130\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "76288000",
+        "memory.peak": "77242368"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 72105561\nuser_usec 53797430\nsystem_usec 18308130\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1057\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "375975936",
+        "memory.peak": "375975936"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 77242368,
+      "fixture": 375975936
+    },
+    "host_sample_count": 707,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333461.8679256,
+    "phase": "250m-proxy-streams-100-repeat1",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 31.102869056,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1645.8766341879373,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.160715643728867,
+        "p50": 17.600514463226958,
+        "p95": 18.750518169397704
+      },
+      "ramp_per_second": 25.0,
+      "route": "proxy",
+      "runtime_lag_ms": {
+        "max": 46.992625000000004,
+        "p50": 1.524104,
+        "p95": 2.952625
+      },
+      "seconds": 36.454737101,
+      "stage_ms": {
+        "connect_response": {
+          "max": 98.920584,
+          "p50": 2.9417919999999995,
+          "p95": 21.410958
+        },
+        "first_event": {
+          "max": 0.324,
+          "p50": 0.037729,
+          "p95": 0.242
+        },
+        "queued": {
+          "max": 0.050917000000000004,
+          "p50": 0.00025,
+          "p95": 0.000625
+        },
+        "ramp_delay": {
+          "max": 3961.827961,
+          "p50": 1981.384314,
+          "p95": 3801.8670009999996
+        },
+        "response_headers": {
+          "max": 211.327417,
+          "p50": 69.1792915,
+          "p95": 196.338708
+        },
+        "stream_read": {
+          "max": 36190.360601,
+          "p50": 34089.9122665,
+          "p95": 35791.397767
+        },
+        "tcp_connect": {
+          "max": 68.81845799999999,
+          "p50": 8.513875,
+          "p95": 67.63087499999999
+        },
+        "tls_handshake": {
+          "max": 86.897875,
+          "p50": 3.2516875,
+          "p95": 78.483833
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 296.625,
+        "p50": 96.9374585,
+        "p95": 255.613417
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 13985012\nuser_usec 6879372\nsystem_usec 7105640\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 838\nnr_throttled 522\nthrottled_usec 42033130\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "76288000",
+        "memory.peak": "77242368"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 72148196\nuser_usec 53832828\nsystem_usec 18315367\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1058\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "375975936",
+        "memory.peak": "375975936"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 22684165\nuser_usec 9376620\nsystem_usec 13307544\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1217\nnr_throttled 747\nthrottled_usec 52463558\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "79835136",
+        "memory.peak": "79847424"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 90657500\nuser_usec 60483758\nsystem_usec 30173742\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1436\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "376664064",
+        "memory.peak": "376909824"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 79843328,
+      "fixture": 376909824
+    },
+    "host_sample_count": 751,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333506.0450783,
+    "phase": "250m-proxy-overload-128-repeat1",
+    "exit_code": 0,
+    "result": {
+      "mode": "overload",
+      "concurrency": 128,
+      "established": 128,
+      "completed": 128,
+      "events": 3840,
+      "rejected": 1000,
+      "error_count": 0,
+      "errors": [],
+      "recovered": true
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 22684165\nuser_usec 9376620\nsystem_usec 13307544\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1218\nnr_throttled 747\nthrottled_usec 52463558\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "79572992",
+        "memory.peak": "79847424"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 90732918\nuser_usec 60536872\nsystem_usec 30196046\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1437\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "376692736",
+        "memory.peak": "376909824"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 27612094\nuser_usec 12010721\nsystem_usec 15601373\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1577\nnr_throttled 911\nthrottled_usec 65627209\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "81838080",
+        "memory.peak": "82104320"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 120692375\nuser_usec 83856862\nsystem_usec 36835513\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1814\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "428703744",
+        "memory.peak": "428703744"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 81842176,
+      "fixture": 428703744
+    },
+    "host_sample_count": 861,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333522.1875725,
+    "phase": "250m-proxy-bodies-8-repeat2",
+    "exit_code": 0,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.0021664999962922593,
+          "p95": 0.50154199999497,
+          "max": 0.50154199999497
+        },
+        "ramp_delay": {
+          "p50": 1278.0556045000112,
+          "p95": 1278.8352089999933,
+          "max": 1278.8352089999933
+        },
+        "tcp_connect": {
+          "p50": 99.9575415000038,
+          "p95": 110.48379199999658,
+          "max": 110.48379199999658
+        },
+        "connect_response": {
+          "p50": 279.4126040000009,
+          "p95": 380.0281249999955,
+          "max": 380.0281249999955
+        },
+        "tls_handshake": {
+          "p50": 408.4877920000025,
+          "p95": 1400.3974589999757,
+          "max": 1400.3974589999757
+        },
+        "request": {
+          "p50": 0.004937499994639438,
+          "p95": 0.7880000000000109,
+          "max": 0.7880000000000109
+        },
+        "body_upload": {
+          "p50": 5880.756002500022,
+          "p95": 8302.050753000003,
+          "max": 8302.050753000003
+        },
+        "body_barrier": {
+          "p50": 397.5519584999887,
+          "p95": 1897.2580429999937,
+          "max": 1897.2580429999937
+        },
+        "body_hold": {
+          "p50": 5001.888231500005,
+          "p95": 5003.995378000013,
+          "max": 5003.995378000013
+        },
+        "body_final_byte": {
+          "p50": 0.06691650000334448,
+          "p95": 1.9496250000088367,
+          "max": 1.9496250000088367
+        },
+        "body_response": {
+          "p50": 23.405771000000186,
+          "p95": 30.094416999986606,
+          "max": 30.094416999986606
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.272249999982475,
+        "p95": 14.004750000009377,
+        "max": 1174.3112499999995
+      },
+      "error_stages": {},
+      "concurrency": 8,
+      "established": 8,
+      "completed": 8,
+      "peak_live_connections": 8,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 13.657485006000002,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 27612094\nuser_usec 12010721\nsystem_usec 15601373\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1577\nnr_throttled 911\nthrottled_usec 65627209\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "81604608",
+        "memory.peak": "82104320"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 120788204\nuser_usec 83926007\nsystem_usec 36862196\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1815\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "428703744",
+        "memory.peak": "428703744"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 30003252\nuser_usec 13382671\nsystem_usec 16620581\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1716\nnr_throttled 999\nthrottled_usec 73372975\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84328448",
+        "memory.peak": "84328448"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 132724481\nuser_usec 93000479\nsystem_usec 39724001\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1975\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "431144960",
+        "memory.peak": "431210496"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84328448,
+      "fixture": 431210496
+    },
+    "host_sample_count": 314,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333534.268723,
+    "phase": "250m-proxy-throughput-16-repeat2",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.0016669999922669376,
+          "p95": 0.004917000012483186,
+          "max": 0.008125000022118911
+        },
+        "ramp_delay": {
+          "p50": 305.9857705000013,
+          "p95": 602.299166999984,
+          "max": 602.299166999984
+        },
+        "tcp_connect": {
+          "p50": 47.112750000010806,
+          "p95": 92.04062500000987,
+          "max": 92.04062500000987
+        },
+        "connect_response": {
+          "p50": 120.62360400000216,
+          "p95": 235.2780829999972,
+          "max": 235.2780829999972
+        },
+        "tls_handshake": {
+          "p50": 194.29329150000285,
+          "p95": 308.84320799998477,
+          "max": 308.84320799998477
+        },
+        "request": {
+          "p50": 10039.479380000004,
+          "p95": 10084.640255000011,
+          "max": 10084.640255000011
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.0435839999843184,
+        "p95": 5.678042000010916,
+        "max": 268.72612500001196
+      },
+      "error_stages": {},
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 10.968058296999999,
+      "requests": 4737,
+      "rps": 431.8904834136113,
+      "latency_ms": {
+        "p50": 7.330124999981535,
+        "p95": 92.16291699999601,
+        "max": 791.8213760000015
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 30014348\nuser_usec 13389215\nsystem_usec 16625132\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1717\nnr_throttled 999\nthrottled_usec 73372975\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "83943424",
+        "memory.peak": "84328448"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 132787087\nuser_usec 93046293\nsystem_usec 39740793\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1975\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "431144960",
+        "memory.peak": "431210496"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 32766740\nuser_usec 14444236\nsystem_usec 18322503\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1834\nnr_throttled 1108\nthrottled_usec 83619667\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84205568",
+        "memory.peak": "84467712"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 140070066\nuser_usec 96442714\nsystem_usec 43627351\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2096\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "431542272",
+        "memory.peak": "431665152"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84463616,
+      "fixture": 431665152
+    },
+    "host_sample_count": 238,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333570.5948215,
+    "phase": "250m-direct-streams-100-repeat2",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 31.634840724,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1677.4768782553328,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 18.928186488476438,
+        "p50": 17.78226974021358,
+        "p95": 18.808478612268964
+      },
+      "ramp_per_second": 25.0,
+      "route": "direct",
+      "runtime_lag_ms": {
+        "max": 301.34058400000004,
+        "p50": 1.7109165,
+        "p95": 3.775875
+      },
+      "seconds": 35.768004184,
+      "stage_ms": {
+        "first_event": {
+          "max": 0.00825,
+          "p50": 0.0018750000000000001,
+          "p95": 0.00325
+        },
+        "queued": {
+          "max": 0.262334,
+          "p50": 0.000833,
+          "p95": 0.001542
+        },
+        "ramp_delay": {
+          "max": 3961.194919,
+          "p50": 1981.3235009999999,
+          "p95": 3801.775335
+        },
+        "response_headers": {
+          "max": 12.586791,
+          "p50": 1.022396,
+          "p95": 4.197833
+        },
+        "stream_read": {
+          "max": 35665.300017,
+          "p50": 33741.4937865,
+          "p95": 35522.260058
+        },
+        "tcp_connect": {
+          "max": 48.770624999999995,
+          "p50": 2.5707079999999998,
+          "p95": 8.525834
+        },
+        "tls_handshake": {
+          "max": 39.917292,
+          "p50": 2.04175,
+          "p95": 4.090292
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 63.570792000000004,
+        "p50": 6.668875,
+        "p95": 12.135290999999999
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 32767724\nuser_usec 14444236\nsystem_usec 18323488\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1835\nnr_throttled 1108\nthrottled_usec 83619667\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84205568",
+        "memory.peak": "84467712"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 140090060\nuser_usec 96456000\nsystem_usec 43634059\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2096\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "431542272",
+        "memory.peak": "431665152"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 33388028\nuser_usec 14820951\nsystem_usec 18567076\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2027\nnr_throttled 1115\nthrottled_usec 84131864\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84074496",
+        "memory.peak": "84467712"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 153416463\nuser_usec 103262972\nsystem_usec 50153490\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2458\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "430813184",
+        "memory.peak": "431665152"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84332544,
+      "fixture": 431542272
+    },
+    "host_sample_count": 709,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333608.8349752,
+    "phase": "250m-proxy-streams-100-repeat2",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 30.915427057,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1662.5685747855805,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.406763923008548,
+        "p50": 17.69418657442656,
+        "p95": 19.2284956984276
+      },
+      "ramp_per_second": 25.0,
+      "route": "proxy",
+      "runtime_lag_ms": {
+        "max": 64.184916,
+        "p50": 1.520583,
+        "p95": 2.8446249999999997
+      },
+      "seconds": 36.088736976,
+      "stage_ms": {
+        "connect_response": {
+          "max": 494.006125,
+          "p50": 1.9442085,
+          "p95": 193.04874999999998
+        },
+        "first_event": {
+          "max": 0.374208,
+          "p50": 0.038479,
+          "p95": 0.177541
+        },
+        "queued": {
+          "max": 424.553666,
+          "p50": 0.0002705,
+          "p95": 385.932292
+        },
+        "ramp_delay": {
+          "max": 3960.544044,
+          "p50": 1981.5826465,
+          "p95": 3801.623835
+        },
+        "response_headers": {
+          "max": 885.9489590000001,
+          "p50": 10.5965835,
+          "p95": 801.020792
+        },
+        "stream_read": {
+          "max": 35890.743393000004,
+          "p50": 33909.442516,
+          "p95": 35704.102601000006
+        },
+        "tcp_connect": {
+          "max": 139.466208,
+          "p50": 1.9304375,
+          "p95": 74.56316699999999
+        },
+        "tls_handshake": {
+          "max": 314.490375,
+          "p50": 1.698521,
+          "p95": 105.869167
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 1077.818167,
+        "p50": 55.3197915,
+        "p95": 1036.4677499999998
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 33388028\nuser_usec 14820951\nsystem_usec 18567076\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2028\nnr_throttled 1115\nthrottled_usec 84131864\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "83820544",
+        "memory.peak": "84467712"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 153493229\nuser_usec 103317237\nsystem_usec 50175991\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2458\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "430813184",
+        "memory.peak": "431665152"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 41999178\nuser_usec 17129952\nsystem_usec 24869226\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2404\nnr_throttled 1315\nthrottled_usec 92003110\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84504576",
+        "memory.peak": "84766720"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 171727551\nuser_usec 109304149\nsystem_usec 62423402\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2834\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "430813184",
+        "memory.peak": "431665152"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84766720,
+      "fixture": 431075328
+    },
+    "host_sample_count": 751,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333650.8452735,
+    "phase": "250m-proxy-overload-128-repeat2",
+    "exit_code": 0,
+    "result": {
+      "mode": "overload",
+      "concurrency": 128,
+      "established": 128,
+      "completed": 128,
+      "events": 3840,
+      "rejected": 1000,
+      "error_count": 0,
+      "errors": [],
+      "recovered": true
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 41999178\nuser_usec 17129952\nsystem_usec 24869226\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2404\nnr_throttled 1315\nthrottled_usec 92003110\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84504576",
+        "memory.peak": "84766720"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 171804060\nuser_usec 109358247\nsystem_usec 62445813\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2835\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "431075328",
+        "memory.peak": "431665152"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 45694439\nuser_usec 18643289\nsystem_usec 27051149\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2755\nnr_throttled 1420\nthrottled_usec 100592025\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84561920",
+        "memory.peak": "84824064"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 193693586\nuser_usec 125887072\nsystem_usec 67806513\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3187\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "447995904",
+        "memory.peak": "447995904"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84824064,
+      "fixture": 447995904
+    },
+    "host_sample_count": 815,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333664.976463,
+    "phase": "250m-proxy-bodies-8-repeat3",
+    "exit_code": 0,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.003207999981214016,
+          "p95": 0.4058339999915006,
+          "max": 0.4058339999915006
+        },
+        "ramp_delay": {
+          "p50": 162.04212449997613,
+          "p95": 333.32104100003335,
+          "max": 333.32104100003335
+        },
+        "tcp_connect": {
+          "p50": 42.7293544999543,
+          "p95": 76.97575000003098,
+          "max": 76.97575000003098
+        },
+        "connect_response": {
+          "p50": 65.40870800000675,
+          "p95": 894.2767089999961,
+          "max": 894.2767089999961
+        },
+        "tls_handshake": {
+          "p50": 122.1193125000184,
+          "p95": 186.3572909999789,
+          "max": 186.3572909999789
+        },
+        "request": {
+          "p50": 0.00387500000442742,
+          "p95": 0.0049580000336391095,
+          "max": 0.0049580000336391095
+        },
+        "body_upload": {
+          "p50": 5448.167482000003,
+          "p95": 5808.793544000026,
+          "max": 5808.793544000026
+        },
+        "body_barrier": {
+          "p50": 1043.0551460000004,
+          "p95": 2685.9655850000195,
+          "max": 2685.9655850000195
+        },
+        "body_hold": {
+          "p50": 5002.578002500002,
+          "p95": 5003.229878000013,
+          "max": 5003.229878000013
+        },
+        "body_final_byte": {
+          "p50": 0.18249999999397915,
+          "p95": 0.7142499999872598,
+          "max": 0.7142499999872598
+        },
+        "body_response": {
+          "p50": 11.09014599998659,
+          "p95": 15.8953750000137,
+          "max": 15.8953750000137
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.510666500007571,
+        "p95": 33.17212499997595,
+        "max": 257.33287499998596
+      },
+      "error_stages": {},
+      "concurrency": 8,
+      "established": 8,
+      "completed": 8,
+      "peak_live_connections": 8,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 11.886464129999979,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 45697524\nuser_usec 18643289\nsystem_usec 27054234\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2755\nnr_throttled 1420\nthrottled_usec 100592025\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84561920",
+        "memory.peak": "84824064"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 193860259\nuser_usec 126011513\nsystem_usec 67848745\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3188\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "447889408",
+        "memory.peak": "447995904"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 47559285\nuser_usec 19643422\nsystem_usec 27915863\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2864\nnr_throttled 1489\nthrottled_usec 106607672\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84570112",
+        "memory.peak": "84836352"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 201971123\nuser_usec 131299148\nsystem_usec 70671974\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3323\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "451940352",
+        "memory.peak": "452145152"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84836352,
+      "fixture": 452145152
+    },
+    "host_sample_count": 275,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333677.1294363,
+    "phase": "250m-proxy-throughput-16-repeat3",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.002562499986424882,
+          "p95": 0.0055830000178502814,
+          "max": 0.006707999943955656
+        },
+        "ramp_delay": {
+          "p50": 302.6637085000061,
+          "p95": 600.9849170000052,
+          "max": 600.9849170000052
+        },
+        "tcp_connect": {
+          "p50": 32.289895999980445,
+          "p95": 73.70695899999191,
+          "max": 73.70695899999191
+        },
+        "connect_response": {
+          "p50": 1.7130624999879274,
+          "p95": 4.1513330000384485,
+          "max": 4.1513330000384485
+        },
+        "tls_handshake": {
+          "p50": 2.2932080000259703,
+          "p95": 6.5242919999946025,
+          "max": 6.5242919999946025
+        },
+        "request": {
+          "p50": 10004.267754500006,
+          "p95": 10020.695755000019,
+          "max": 10020.695755000019
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.040312500020943,
+        "p95": 3.39733400001023,
+        "max": 1068.6571669999807
+      },
+      "error_stages": {},
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 10.622805296999957,
+      "requests": 4661,
+      "rps": 438.77298601305796,
+      "latency_ms": {
+        "p50": 5.920500000001994,
+        "p95": 92.99025000001393,
+        "max": 1199.6192510000014
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 47559285\nuser_usec 19643422\nsystem_usec 27915863\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2864\nnr_throttled 1489\nthrottled_usec 106607672\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84570112",
+        "memory.peak": "84836352"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 202045310\nuser_usec 131358361\nsystem_usec 70686949\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3323\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "451940352",
+        "memory.peak": "452145152"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 50234326\nuser_usec 20713262\nsystem_usec 29521063\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2981\nnr_throttled 1595\nthrottled_usec 115890861\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84877312",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 211611856\nuser_usec 137184734\nsystem_usec 74427122\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3440\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453906432",
+        "memory.peak": "454295552"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84877312,
+      "fixture": 454295552
+    },
+    "host_sample_count": 238,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333713.390138,
+    "phase": "250m-direct-streams-100-repeat3",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 31.309968765,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1690.9886944647549,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.094505748936637,
+        "p50": 17.994789104913323,
+        "p95": 19.020328364080612
+      },
+      "ramp_per_second": 25.0,
+      "route": "direct",
+      "runtime_lag_ms": {
+        "max": 65.183458,
+        "p50": 1.6998125000000002,
+        "p95": 3.773584
+      },
+      "seconds": 35.482200559,
+      "stage_ms": {
+        "first_event": {
+          "max": 0.007583,
+          "p50": 0.0017705,
+          "p95": 0.0029579999999999997
+        },
+        "queued": {
+          "max": 0.864084,
+          "p50": 0.00075,
+          "p95": 0.001542
+        },
+        "ramp_delay": {
+          "max": 3960.585418,
+          "p50": 1981.4853965000002,
+          "p95": 3800.84996
+        },
+        "response_headers": {
+          "max": 16.330292,
+          "p50": 1.5419795,
+          "p95": 5.01925
+        },
+        "stream_read": {
+          "max": 35316.781975,
+          "p50": 33342.989037,
+          "p95": 35167.657475
+        },
+        "tcp_connect": {
+          "max": 43.662959,
+          "p50": 2.0522295,
+          "p95": 4.792249999999999
+        },
+        "tls_handshake": {
+          "max": 44.545959,
+          "p50": 2.194125,
+          "p95": 4.883875000000001
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 80.780833,
+        "p50": 6.333354,
+        "p95": 11.450833000000001
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 50234326\nuser_usec 20713262\nsystem_usec 29521063\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 2982\nnr_throttled 1595\nthrottled_usec 115890861\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84877312",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 211720277\nuser_usec 137265000\nsystem_usec 74455276\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3441\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454164480",
+        "memory.peak": "454430720"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 50696890\nuser_usec 20942006\nsystem_usec 29754884\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3167\nnr_throttled 1598\nthrottled_usec 115999803\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84357120",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 224847757\nuser_usec 143593189\nsystem_usec 81254568\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3802\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454041600",
+        "memory.peak": "454688768"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84877312,
+      "fixture": 454688768
+    },
+    "host_sample_count": 708,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333749.6148708,
+    "phase": "250m-proxy-streams-100-repeat3",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 31.091149557,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1698.7241645102831,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.21726370432091,
+        "p50": 18.0479610794281,
+        "p95": 19.108620934711926
+      },
+      "ramp_per_second": 25.0,
+      "route": "proxy",
+      "runtime_lag_ms": {
+        "max": 40.036708999999995,
+        "p50": 1.465625,
+        "p95": 2.88425
+      },
+      "seconds": 35.320625475,
+      "stage_ms": {
+        "connect_response": {
+          "max": 41.299457999999994,
+          "p50": 1.6384375,
+          "p95": 5.177583
+        },
+        "first_event": {
+          "max": 0.412667,
+          "p50": 0.0376875,
+          "p95": 0.236083
+        },
+        "queued": {
+          "max": 0.000792,
+          "p50": 0.0002915,
+          "p95": 0.000584
+        },
+        "ramp_delay": {
+          "max": 3960.51646,
+          "p50": 1981.6187714999999,
+          "p95": 3801.72296
+        },
+        "response_headers": {
+          "max": 102.33129100000001,
+          "p50": 11.364333499999999,
+          "p95": 93.91625
+        },
+        "stream_read": {
+          "max": 35198.589725,
+          "p50": 33244.759412,
+          "p95": 35060.518516000004
+        },
+        "tcp_connect": {
+          "max": 62.975542,
+          "p50": 1.4019165,
+          "p95": 61.070791
+        },
+        "tls_handshake": {
+          "max": 76.915125,
+          "p50": 1.9182919999999999,
+          "p95": 9.444917
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 160.723834,
+        "p50": 43.39429199999999,
+        "p95": 142.43200000000002
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 50696890\nuser_usec 20942006\nsystem_usec 29754884\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3168\nnr_throttled 1598\nthrottled_usec 115999803\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84357120",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 224914306\nuser_usec 143643922\nsystem_usec 81270384\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3802\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454041600",
+        "memory.peak": "454688768"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 59165517\nuser_usec 23057488\nsystem_usec 36108028\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3529\nnr_throttled 1836\nthrottled_usec 124200842\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84365312",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 243687566\nuser_usec 150517955\nsystem_usec 93169610\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4162\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453795840",
+        "memory.peak": "454688768"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84623360,
+      "fixture": 454299648
+    },
+    "host_sample_count": 713,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333791.5289822,
+    "phase": "250m-proxy-overload-128-repeat3",
+    "exit_code": 0,
+    "result": {
+      "mode": "overload",
+      "concurrency": 128,
+      "established": 128,
+      "completed": 128,
+      "events": 3840,
+      "rejected": 1000,
+      "error_count": 0,
+      "errors": [],
+      "recovered": true
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 59166048\nuser_usec 23057695\nsystem_usec 36108352\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3529\nnr_throttled 1836\nthrottled_usec 124200842\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84111360",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 243768972\nuser_usec 150580031\nsystem_usec 93188940\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4163\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454057984",
+        "memory.peak": "454688768"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 63663720\nuser_usec 25037271\nsystem_usec 38626448\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3891\nnr_throttled 1969\nthrottled_usec 134712782\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84705280",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 265641073\nuser_usec 166510842\nsystem_usec 99130230\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4514\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453808128",
+        "memory.peak": "454688768"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84705280,
+      "fixture": 454332416
+    },
+    "host_sample_count": 814,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333805.6576333,
+    "phase": "250m-proxy-bodies-8-repeat4",
+    "exit_code": 0,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.0030624999851625034,
+          "p95": 0.008249999950749043,
+          "max": 0.008249999950749043
+        },
+        "ramp_delay": {
+          "p50": 145.8313750000002,
+          "p95": 345.7757510000192,
+          "max": 345.7757510000192
+        },
+        "tcp_connect": {
+          "p50": 19.51670800002603,
+          "p95": 156.67487500002153,
+          "max": 156.67487500002153
+        },
+        "connect_response": {
+          "p50": 147.0941245000006,
+          "p95": 618.561375000013,
+          "max": 618.561375000013
+        },
+        "tls_handshake": {
+          "p50": 122.36377150000521,
+          "p95": 509.48375000001533,
+          "max": 509.48375000001533
+        },
+        "request": {
+          "p50": 0.003603999999768348,
+          "p95": 0.005500000042957254,
+          "max": 0.005500000042957254
+        },
+        "body_upload": {
+          "p50": 4542.569772500003,
+          "p95": 5094.788961000006,
+          "max": 5094.788961000006
+        },
+        "body_barrier": {
+          "p50": 547.2059169999568,
+          "p95": 2380.4435429999558,
+          "max": 2380.4435429999558
+        },
+        "body_hold": {
+          "p50": 5001.81041899998,
+          "p95": 5002.156376999948,
+          "max": 5002.156376999948
+        },
+        "body_final_byte": {
+          "p50": 0.11414599998715858,
+          "p95": 0.40883299999450173,
+          "max": 0.40883299999450173
+        },
+        "body_response": {
+          "p50": 11.542146500005401,
+          "p95": 13.888124999994034,
+          "max": 13.888124999994034
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.461354500020204,
+        "p95": 38.062500000035016,
+        "max": 249.94412500002454
+      },
+      "error_stages": {},
+      "concurrency": 8,
+      "established": 8,
+      "completed": 8,
+      "peak_live_connections": 8,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 10.738128213000039,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 63663720\nuser_usec 25037271\nsystem_usec 38626448\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 3892\nnr_throttled 1969\nthrottled_usec 134712782\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84705280",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 265807227\nuser_usec 166625724\nsystem_usec 99181502\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4515\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453808128",
+        "memory.peak": "454688768"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 65264358\nuser_usec 25900750\nsystem_usec 39363607\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4007\nnr_throttled 2026\nthrottled_usec 139927982\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84180992",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 274271570\nuser_usec 172525359\nsystem_usec 101746210\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4646\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454131712",
+        "memory.peak": "454688768"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84705280,
+      "fixture": 454131712
+    },
+    "host_sample_count": 274,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333817.7250874,
+    "phase": "250m-proxy-throughput-16-repeat4",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.002332999997634033,
+          "p95": 0.004333999982009118,
+          "max": 0.0065419999941696005
+        },
+        "ramp_delay": {
+          "p50": 301.147250500037,
+          "p95": 602.6259169999548,
+          "max": 602.6259169999548
+        },
+        "tcp_connect": {
+          "p50": 38.322770500002434,
+          "p95": 82.82141699999102,
+          "max": 82.82141699999102
+        },
+        "connect_response": {
+          "p50": 6.0613539999962995,
+          "p95": 12.108458000000155,
+          "max": 12.108458000000155
+        },
+        "tls_handshake": {
+          "p50": 8.461916999976893,
+          "p95": 89.40579099999013,
+          "max": 89.40579099999013
+        },
+        "request": {
+          "p50": 10001.653192500044,
+          "p95": 10083.480422000037,
+          "max": 10083.480422000037
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.2486250000279115,
+        "p95": 4.233750000037159,
+        "max": 153.41899999993984
+      },
+      "error_stages": {},
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 10.725229631000047,
+      "requests": 5320,
+      "rps": 496.0266757014833,
+      "latency_ms": {
+        "p50": 6.637958500022023,
+        "p95": 90.21795899997187,
+        "max": 287.58062500003234
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 65264358\nuser_usec 25900750\nsystem_usec 39363607\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4008\nnr_throttled 2026\nthrottled_usec 139927982\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84180992",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 274332982\nuser_usec 172565313\nsystem_usec 101767669\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4646\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454131712",
+        "memory.peak": "454688768"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 67936713\nuser_usec 26881833\nsystem_usec 41054880\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4123\nnr_throttled 2133\nthrottled_usec 150578468\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84189184",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 279300843\nuser_usec 174299109\nsystem_usec 105001733\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4763\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454135808",
+        "memory.peak": "454688768"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84713472,
+      "fixture": 454135808
+    },
+    "host_sample_count": 237,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333854.0022054,
+    "phase": "250m-direct-streams-100-repeat4",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 31.531224182,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1684.7850707038183,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.014204441480068,
+        "p50": 17.88895034963841,
+        "p95": 18.915204823790543
+      },
+      "ramp_per_second": 25.0,
+      "route": "direct",
+      "runtime_lag_ms": {
+        "max": 10.990625,
+        "p50": 1.790708,
+        "p95": 3.7992920000000003
+      },
+      "seconds": 35.612851184,
+      "stage_ms": {
+        "first_event": {
+          "max": 0.015083,
+          "p50": 0.0021665,
+          "p95": 0.010958
+        },
+        "queued": {
+          "max": 0.5680000000000001,
+          "p50": 0.000958,
+          "p95": 0.001792
+        },
+        "ramp_delay": {
+          "max": 3961.414751,
+          "p50": 1981.9962504999999,
+          "p95": 3800.8732520000003
+        },
+        "response_headers": {
+          "max": 24.933042,
+          "p50": 0.390583,
+          "p95": 2.330042
+        },
+        "stream_read": {
+          "max": 35418.698558000004,
+          "p50": 33540.2719115,
+          "p95": 35364.013558000006
+        },
+        "tcp_connect": {
+          "max": 24.905959,
+          "p50": 1.7564994999999999,
+          "p95": 9.513083
+        },
+        "tls_handshake": {
+          "max": 64.84774999999999,
+          "p50": 1.1058545,
+          "p95": 2.81025
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 106.181083,
+        "p50": 3.8987295,
+        "p95": 11.045459000000001
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 67936713\nuser_usec 26881833\nsystem_usec 41054880\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4123\nnr_throttled 2133\nthrottled_usec 150578468\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84189184",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 279311421\nuser_usec 174304539\nsystem_usec 105006881\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4763\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454135808",
+        "memory.peak": "454688768"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 68312607\nuser_usec 27059673\nsystem_usec 41252933\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4292\nnr_throttled 2133\nthrottled_usec 150578468\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84430848",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 291167473\nuser_usec 179571741\nsystem_usec 111595731\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5124\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453623808",
+        "memory.peak": "454688768"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84688896,
+      "fixture": 454135808
+    },
+    "host_sample_count": 709,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333890.196771,
+    "phase": "250m-proxy-streams-100-repeat4",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 30.978691015,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1707.2410151046483,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.333893649077034,
+        "p50": 18.146824588192715,
+        "p95": 19.221491899462627
+      },
+      "ramp_per_second": 25.0,
+      "route": "proxy",
+      "runtime_lag_ms": {
+        "max": 8.223416,
+        "p50": 1.481333,
+        "p95": 3.0736660000000002
+      },
+      "seconds": 35.144422767,
+      "stage_ms": {
+        "connect_response": {
+          "max": 55.174875,
+          "p50": 1.041687,
+          "p95": 3.269
+        },
+        "first_event": {
+          "max": 0.633834,
+          "p50": 0.040021,
+          "p95": 0.22225
+        },
+        "queued": {
+          "max": 0.000917,
+          "p50": 0.00025,
+          "p95": 0.000542
+        },
+        "ramp_delay": {
+          "max": 3961.995418,
+          "p50": 1981.3660005000002,
+          "p95": 3800.680085
+        },
+        "response_headers": {
+          "max": 77.651083,
+          "p50": 6.519292,
+          "p95": 71.700667
+        },
+        "stream_read": {
+          "max": 35063.7121,
+          "p50": 33063.657370500005,
+          "p95": 34864.3036
+        },
+        "tcp_connect": {
+          "max": 37.675917000000005,
+          "p50": 1.0262915000000001,
+          "p95": 34.787040999999995
+        },
+        "tls_handshake": {
+          "max": 54.150792,
+          "p50": 1.0417079999999999,
+          "p95": 2.5052920000000003
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 80.42904200000001,
+        "p50": 17.122000500000002,
+        "p95": 74.96575
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 68312607\nuser_usec 27059673\nsystem_usec 41252933\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4292\nnr_throttled 2133\nthrottled_usec 150578468\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84430848",
+        "memory.peak": "84877312"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 291185916\nuser_usec 179585780\nsystem_usec 111600136\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5124\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453619712",
+        "memory.peak": "454688768"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 76794594\nuser_usec 28859922\nsystem_usec 47934671\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4647\nnr_throttled 2383\nthrottled_usec 158280916\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84684800",
+        "memory.peak": "84963328"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 308239917\nuser_usec 184940757\nsystem_usec 123299160\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5482\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453627904",
+        "memory.peak": "454688768"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84963328,
+      "fixture": 453627904
+    },
+    "host_sample_count": 713,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333927.8275194,
+    "phase": "250m-proxy-overload-128-repeat4",
+    "exit_code": 0,
+    "result": {
+      "mode": "overload",
+      "concurrency": 128,
+      "established": 128,
+      "completed": 128,
+      "events": 3840,
+      "rejected": 1000,
+      "error_count": 0,
+      "errors": [],
+      "recovered": true
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 76798580\nuser_usec 28862343\nsystem_usec 47936237\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4647\nnr_throttled 2383\nthrottled_usec 158280916\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84680704",
+        "memory.peak": "84963328"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 308256632\nuser_usec 184951211\nsystem_usec 123305420\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5482\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453627904",
+        "memory.peak": "454688768"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 79825890\nuser_usec 30261547\nsystem_usec 49564342\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4923\nnr_throttled 2473\nthrottled_usec 165992864\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "85073920",
+        "memory.peak": "85073920"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 322848485\nuser_usec 194837855\nsystem_usec 128010630\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5773\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453967872",
+        "memory.peak": "454688768"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 85073920,
+      "fixture": 454668288
+    },
+    "host_sample_count": 731,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333942.0214934,
+    "phase": "250m-proxy-bodies-8-repeat5",
+    "exit_code": 0,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.002896000069085858,
+          "p95": 0.006999999982326699,
+          "max": 0.006999999982326699
+        },
+        "ramp_delay": {
+          "p50": 143.06387499999573,
+          "p95": 281.3390830000344,
+          "max": 281.3390830000344
+        },
+        "tcp_connect": {
+          "p50": 12.634250000019165,
+          "p95": 74.35458300005848,
+          "max": 74.35458300005848
+        },
+        "connect_response": {
+          "p50": 49.054854499956946,
+          "p95": 394.32116699993,
+          "max": 394.32116699993
+        },
+        "tls_handshake": {
+          "p50": 201.0377915000845,
+          "p95": 212.86245900000722,
+          "max": 212.86245900000722
+        },
+        "request": {
+          "p50": 0.0028125000426371116,
+          "p95": 0.0043750000031650416,
+          "max": 0.0043750000031650416
+        },
+        "body_upload": {
+          "p50": 5571.999752999944,
+          "p95": 6502.630128999954,
+          "max": 6502.630128999954
+        },
+        "body_barrier": {
+          "p50": 701.860020999959,
+          "p95": 6003.424128000006,
+          "max": 6003.424128000006
+        },
+        "body_hold": {
+          "p50": 5012.402731500004,
+          "p95": 5012.756544000013,
+          "max": 5012.756544000013
+        },
+        "body_final_byte": {
+          "p50": 0.10150000002795423,
+          "p95": 8.808166999983769,
+          "max": 8.808166999983769
+        },
+        "body_response": {
+          "p50": 149.36404149995042,
+          "p95": 182.55145800003447,
+          "max": 182.55145800003447
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.139687499983208,
+        "p95": 9.713708999993283,
+        "max": 287.59491699993305
+      },
+      "error_stages": {},
+      "concurrency": 8,
+      "established": 8,
+      "completed": 8,
+      "peak_live_connections": 8,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 12.189522422999971,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 79825890\nuser_usec 30261547\nsystem_usec 49564342\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 4923\nnr_throttled 2473\nthrottled_usec 165992864\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84860928",
+        "memory.peak": "85073920"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 322861879\nuser_usec 194847386\nsystem_usec 128014492\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5774\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453963776",
+        "memory.peak": "454688768"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 81774664\nuser_usec 31408386\nsystem_usec 50366278\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5036\nnr_throttled 2547\nthrottled_usec 172533828\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84852736",
+        "memory.peak": "85073920"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 329179174\nuser_usec 198692232\nsystem_usec 130486941\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5907\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454496256",
+        "memory.peak": "454746112"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84856832,
+      "fixture": 454746112
+    },
+    "host_sample_count": 274,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333954.122491,
+    "phase": "250m-proxy-throughput-16-repeat5",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 25.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.002332999997634033,
+          "p95": 0.39558299999953306,
+          "max": 0.40058399997633387
+        },
+        "ramp_delay": {
+          "p50": 301.4900205000117,
+          "p95": 612.4842919999764,
+          "max": 612.4842919999764
+        },
+        "tcp_connect": {
+          "p50": 27.9234794999752,
+          "p95": 69.95466700004727,
+          "max": 69.95466700004727
+        },
+        "connect_response": {
+          "p50": 13.291249500014146,
+          "p95": 37.8936250000379,
+          "max": 37.8936250000379
+        },
+        "tls_handshake": {
+          "p50": 91.68364599997858,
+          "p95": 107.53050099992834,
+          "max": 107.53050099992834
+        },
+        "request": {
+          "p50": 10005.478775999962,
+          "p95": 10085.526046999916,
+          "max": 10085.526046999916
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.1678750000328337,
+        "p95": 5.365832999996198,
+        "max": 200.66854199997124
+      },
+      "error_stages": {},
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 10.853435297000033,
+      "requests": 5024,
+      "rps": 462.89491414655316,
+      "latency_ms": {
+        "p50": 7.383562500024254,
+        "p95": 90.26479099998141,
+        "max": 299.699583000006
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 81774664\nuser_usec 31408386\nsystem_usec 50366278\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5036\nnr_throttled 2547\nthrottled_usec 172533828\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84852736",
+        "memory.peak": "85073920"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 329333917\nuser_usec 198808846\nsystem_usec 130525070\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5908\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454496256",
+        "memory.peak": "454746112"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 84506110\nuser_usec 32441009\nsystem_usec 52065100\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5151\nnr_throttled 2656\nthrottled_usec 182623931\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84598784",
+        "memory.peak": "85073920"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 336333521\nuser_usec 202065476\nsystem_usec 134268044\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 6028\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454496256",
+        "memory.peak": "454758400"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84852736,
+      "fixture": 454758400
+    },
+    "host_sample_count": 238,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793333990.4343908,
+    "phase": "250m-direct-streams-100-repeat5",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 31.228848056,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1696.9287204674088,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.140764886865743,
+        "p50": 18.011751525473592,
+        "p95": 19.037948440672228
+      },
+      "ramp_per_second": 25.0,
+      "route": "direct",
+      "runtime_lag_ms": {
+        "max": 41.1215,
+        "p50": 1.78525,
+        "p95": 3.8279159999999997
+      },
+      "seconds": 35.357996642,
+      "stage_ms": {
+        "first_event": {
+          "max": 0.013833,
+          "p50": 0.002,
+          "p95": 0.003625
+        },
+        "queued": {
+          "max": 0.464125,
+          "p50": 0.000917,
+          "p95": 0.001583
+        },
+        "ramp_delay": {
+          "max": 3961.5736269999998,
+          "p50": 1981.6008969999998,
+          "p95": 3802.644627
+        },
+        "response_headers": {
+          "max": 20.261541,
+          "p50": 0.41612499999999997,
+          "p95": 2.8603330000000002
+        },
+        "stream_read": {
+          "max": 35216.361266,
+          "p50": 33311.5929115,
+          "p95": 35128.508308000004
+        },
+        "tcp_connect": {
+          "max": 73.71025,
+          "p50": 3.252396,
+          "p95": 10.302999999999999
+        },
+        "tls_handshake": {
+          "max": 58.343083,
+          "p50": 1.287625,
+          "p95": 5.564333
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 89.374167,
+        "p50": 6.036271,
+        "p95": 12.220458
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 84506110\nuser_usec 32441009\nsystem_usec 52065100\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5151\nnr_throttled 2656\nthrottled_usec 182623931\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84598784",
+        "memory.peak": "85073920"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 336382978\nuser_usec 202098125\nsystem_usec 134284853\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 6029\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454496256",
+        "memory.peak": "454758400"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 84929110\nuser_usec 32611526\nsystem_usec 52317584\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5323\nnr_throttled 2657\nthrottled_usec 182668172\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84852736",
+        "memory.peak": "85073920"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 349036678\nuser_usec 207621850\nsystem_usec 141414828\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 6389\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453980160",
+        "memory.peak": "454758400"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 84856832,
+      "fixture": 454504448
+    },
+    "host_sample_count": 709,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793334026.5992842,
+    "phase": "250m-proxy-streams-100-repeat5",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 30.95984139,
+      "client": "rust",
+      "completed": 100,
+      "concurrency": 100,
+      "connect_limit": 16,
+      "data_events_per_second": 1709.8892950027196,
+      "error_count": 0,
+      "errors": [],
+      "established": 100,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 100,
+      "per_stream_events_per_second": {
+        "max": 19.357803540252075,
+        "p50": 18.16791132462221,
+        "p95": 19.285733226783908
+      },
+      "ramp_per_second": 25.0,
+      "route": "proxy",
+      "runtime_lag_ms": {
+        "max": 20.638542,
+        "p50": 1.434458,
+        "p95": 2.6353750000000002
+      },
+      "seconds": 35.089991016,
+      "stage_ms": {
+        "connect_response": {
+          "max": 33.641208,
+          "p50": 1.579104,
+          "p95": 7.255583000000001
+        },
+        "first_event": {
+          "max": 0.7144999999999999,
+          "p50": 0.038333500000000006,
+          "p95": 0.239958
+        },
+        "queued": {
+          "max": 0.0006670000000000001,
+          "p50": 0.00029099999999999997,
+          "p95": 0.000542
+        },
+        "ramp_delay": {
+          "max": 3963.017335,
+          "p50": 1982.299689,
+          "p95": 3801.608252
+        },
+        "response_headers": {
+          "max": 100.636166,
+          "p50": 11.4183545,
+          "p95": 95.863
+        },
+        "stream_read": {
+          "max": 34993.6281,
+          "p50": 33025.299078,
+          "p95": 34893.231266999996
+        },
+        "tcp_connect": {
+          "max": 76.912792,
+          "p50": 2.0664585,
+          "p95": 71.584834
+        },
+        "tls_handshake": {
+          "max": 51.750333000000005,
+          "p50": 1.4557920000000002,
+          "p95": 7.535875
+        }
+      },
+      "stream_events": 600,
+      "stream_interval_ms": 50,
+      "ttft_ms": {
+        "max": 182.42087500000002,
+        "p50": 43.5844795,
+        "p95": 156.889417
+      },
+      "validated_data_events": 60000,
+      "worker_timeout_s": 100
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 84929110\nuser_usec 32611526\nsystem_usec 52317584\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5323\nnr_throttled 2657\nthrottled_usec 182668172\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84586496",
+        "memory.peak": "85073920"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 349097617\nuser_usec 207672298\nsystem_usec 141425319\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 6390\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "454242304",
+        "memory.peak": "454758400"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 93329551\nuser_usec 34475506\nsystem_usec 58854045\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5684\nnr_throttled 2905\nthrottled_usec 190967397\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84086784",
+        "memory.peak": "85131264"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 366268977\nuser_usec 212820976\nsystem_usec 153448000\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 6747\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453726208",
+        "memory.peak": "454758400"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 85131264,
+      "fixture": 454500352
+    },
+    "host_sample_count": 713,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "load",
+    "time": 1793334067.473344,
+    "phase": "250m-proxy-overload-128-repeat5",
+    "exit_code": 0,
+    "result": {
+      "mode": "overload",
+      "concurrency": 128,
+      "established": 128,
+      "completed": 128,
+      "events": 3840,
+      "rejected": 1000,
+      "error_count": 0,
+      "errors": [],
+      "recovered": true
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 93329551\nuser_usec 34475506\nsystem_usec 58854045\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 5684\nnr_throttled 2905\nthrottled_usec 190967397\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84086784",
+        "memory.peak": "85131264"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 366276930\nuser_usec 212826147\nsystem_usec 153450783\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 6747\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "453722112",
+        "memory.peak": "454758400"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 96937622\nuser_usec 35963315\nsystem_usec 60974306\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 6020\nnr_throttled 3012\nthrottled_usec 199409852\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "84631552",
+        "memory.peak": "85164032"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 390213845\nuser_usec 230597037\nsystem_usec 159616808\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 7085\nnr_throttled 1\nthrottled_usec 1373\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "460484608",
+        "memory.peak": "460926976"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 85159936,
+      "fixture": 460926976
+    },
+    "host_sample_count": 795,
+    "peak_scope": "sampled peaks are per phase; memory.peak and guest VmHWM are lifetime peaks",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "vm_fault",
+    "time": 1793334099.5041943,
+    "old_pid": 2345738,
+    "new_pid": 2347654,
+    "recovery_seconds": 29.153887491003843,
+    "result": {
+      "mode": "fault",
+      "concurrency": 1,
+      "established": 1,
+      "completed": 1,
+      "interrupted_after_injection": true,
+      "interruption": "TimeoutError",
+      "events_before_interruption": 1,
+      "release_wait_seconds": 18.33620346700002,
+      "recovered": true,
+      "recovery_seconds": 0.830869959000097,
+      "ca_unchanged": true,
+      "original_ca_sha256": "b1afe7fa938ea36cdf2ced2b4635eb46c53c19fb4c7eaee73b0ec850a558447e",
+      "error_count": 0,
+      "errors": []
+    },
+    "reservations_before": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "reservations_after": {
+      "memory_mb": 2304,
+      "vcpus": 6,
+      "cpu_millis": 5250
+    },
+    "cpu_max": "25000 100000",
+    "cpu_weight": "25",
+    "run": "final-instrumented-repeated-load"
+  },
+  {
+    "kind": "final_summary",
+    "memory_mb": 128,
+    "cpu_millis": 250,
+    "max_connections": 128,
+    "held_bodies": 2,
+    "max_body_mb": 1,
+    "rewrite_budget_mb": 16,
+    "repeats": 5,
+    "proxy_stream_events": 300000,
+    "excess_connections_rejected": 5000,
+    "host_rss_peak_kib": 63608,
+    "sampled_cgroup_peak_bytes": 85159936,
+    "vm_recovery_seconds": 29.153887491003843,
+    "throughput_rps_range": [
+      375.89371115492736,
+      496.0266757014833
+    ],
+    "proxy_stream_ttft_p95_ms_range": [
+      74.96575,
+      1036.4677499999998
+    ],
+    "all_stream_overlap_seconds_range": [
+      30.915427057,
+      31.102869056
+    ]
+  }
+]

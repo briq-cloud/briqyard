@@ -44,7 +44,7 @@ impl Manager {
         };
         // A machine's own check, so a replacement is refused in the words a create would be.
         req.spec().check().map_err(invalid)?;
-        check_size(&req.size)?;
+        self.check_host_size(&req.size)?;
         // Pulled before the namespace's lock: a pull may take minutes.
         let im = self.inner.images.ensure(&req.image).await?;
         let t = self.ensure_namespace(namespace).await?;

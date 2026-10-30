@@ -1,4 +1,4 @@
-# The fleet as an image (ADR 0057). Built from the release's binaries, not from source: the
+# The fleet as an image (ADR 0060). Built from the release's binaries, not from source: the
 # release workflow lays them out as <context>/<amd64|arm64>/{briqyard-fleet,briqyard}.
 # The release builds on Ubuntu 24.04 (glibc 2.39); the base needs a glibc at least as new.
 FROM debian:trixie-slim
