@@ -430,7 +430,7 @@ and closes the public interface to all but SSH (ADR 0028). The fleet is given no
 the key seen at the first successful bootstrap is pinned in `<state_dir>/known_hosts`, its
 fingerprint in the host's note, and later connects are strict against it. An upgrade runs the
 same script over the same connection with another release (ADR 0027).
-A server the fleet cannot reach joins on its own instead (ADR 0057): `host token create` mints a one-time token (the registry keeps a hash), the server runs `install.sh` from the fleet, `POST /v1/hosts/join` records it `joining` and answers the settings the SSH path sends, and the same script installs it; its first heartbeat pins its certificate.
+A server the fleet cannot reach joins on its own instead (ADR 0059): `host token create` mints a token that joins servers until it expires or is revoked (the registry keeps a hash), the server runs `install.sh` from the fleet, `POST /v1/hosts/join` records it `joining` and answers the settings the SSH path sends, and the same script installs it; its first heartbeat pins its certificate.
 
 The control path is TLS (ADR 0020). Each daemon makes a self-signed certificate once and
 serves its API with it on any non-loopback address; the fleet trusts that certificate by its

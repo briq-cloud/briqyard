@@ -447,11 +447,11 @@ paths:
         "409": { description: "`conflict`: a host has that id or address; `bootstrap_off`: `bootstrap.enabled` is false" }
   /v1/hosts/tokens:
     get:
-      summary: "Join tokens, newest first (fleet only, ADR 0057): active, used (by which host, from which address), expired or revoked. The secret is never listed"
+      summary: "Join tokens, newest first (fleet only, ADR 0059): active, expired or revoked, with the number of joins and the last (which host, from which address). The secret is never listed"
       responses:
         "200": { description: tokens, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/JoinToken" } } } } }
     post:
-      summary: "Make a one-time join token (fleet only, ADR 0057; Kubernetes's bootstrap token): `<id>.<secret>`, valid for `ttl_sec` (an hour by default, at most 30 days), used by one `POST /v1/hosts/join`. Answered once with the secret, which the fleet does not keep (only its hash)"
+      summary: "Make a join token (fleet only, ADR 0059; Kubernetes's bootstrap token, `kubeadm token create`): `<id>.<secret>` (`[a-z0-9]{6}.[a-z0-9]{16}`), valid for `ttl_sec` (24 hours by default, 0 never expires) and usable by any number of `POST /v1/hosts/join` until then or until it is revoked. Answered once with the secret, which the fleet does not keep (only its hash)"
       requestBody:
         required: false
         content:
@@ -459,19 +459,18 @@ paths:
             schema: { $ref: "#/components/schemas/CreateJoinTokenRequest" }
       responses:
         "201": { description: made, content: { application/json: { schema: { $ref: "#/components/schemas/JoinTokenCreated" } } } }
-        "400": { description: "`invalid`: a `ttl_sec` outside 60 s to 30 days, a region, host or label that is not valid" }
+        "400": { description: "`invalid`: a `ttl_sec` over ten years (0 is a token that never expires), a description over 256 characters or with a line break, an address, a region, host or label that is not valid" }
         "409": { description: "`bootstrap_off`: `bootstrap.enabled` is false" }
   /v1/hosts/tokens/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     delete:
-      summary: Revoke a join token no host has used (fleet only); the listing keeps it as `revoked`
+      summary: "Revoke a join token (fleet only), used or not: no new join takes it. The hosts that joined stay, and the listing keeps it as `revoked`"
       responses:
         "204": { description: revoked }
         "404": { description: no such token }
-        "409": { description: "`conflict`: a host used it" }
   /v1/hosts/join:
     post:
-      summary: "A server joins (fleet only, ADR 0057; Kubernetes's `kubeadm join`): the join token is the bearer, and the call must come from the address the host will serve its API at. Recorded `joining`, with a token of its own for its API; answered with the settings of `hack/bootstrap-host.sh` by their environment names. The token is used by this call and no other. The first heartbeat pins the host's certificate and makes it ready"
+      summary: "A server joins (fleet only, ADR 0059; Kubernetes's `kubeadm join`): the join token is the bearer, and the call must come from the address the host will serve its API at. Recorded `joining`, with a token of its own for its API; answered with the settings of `hack/bootstrap-host.sh` by their environment names. The call counts a use of the token, which stays valid for other joins. The first heartbeat pins the host's certificate and makes it ready"
       requestBody:
         required: true
         content:
@@ -480,18 +479,18 @@ paths:
       responses:
         "201": { description: joined, content: { application/json: { schema: { $ref: "#/components/schemas/JoinResponse" } } } }
         "400": { description: "`invalid`: an architecture or id that is not valid, or a caller that is not an IPv4 address" }
-        "401": { description: "`invalid_token`: invalid, expired, revoked or already used (one answer for all)" }
+        "401": { description: "`invalid_token`: invalid, expired, revoked or bound to another address (one answer for all)" }
         "403": { description: "`unknown_host`: the fleet cannot see where the call came from, or `address` is not it; `wrong_name`: the token is bound to another id" }
         "409": { description: "`conflict`: a host has that id or address; `bootstrap_off`: `bootstrap.enabled` is false or `bootstrap.release` is empty" }
   /install.sh:
     get:
-      summary: "The script a server runs to join (fleet only, ADR 0057): `curl -fsSL <fleet>/install.sh | FLEET_URL=<fleet> JOIN_TOKEN=<token> sh`. No token needed, none inside"
+      summary: "The script a server runs to join (fleet only, ADR 0059): `curl -fsSL <fleet>/install.sh | FLEET_URL=<fleet> JOIN_TOKEN=<token> sh`. No token needed, none inside"
       responses:
         "200": { description: the script, content: { text/plain: { schema: { type: string } } } }
         "409": { description: "`bootstrap_off`" }
   /bootstrap-host.sh:
     get:
-      summary: "The bootstrap script (fleet only): the one the SSH bootstrap sends, or `bootstrap.script`'s. No token needed, none inside"
+      summary: "The bootstrap script (fleet only): the one the SSH bootstrap sends, or `bootstrap.script`'s. Served only to the host that joined, with its own token from its own address (the script may hold what the operator wrote in `bootstrap.script`)"
       responses:
         "200": { description: the script, content: { text/plain: { schema: { type: string } } } }
         "409": { description: "`bootstrap_off`" }
@@ -1192,7 +1191,7 @@ components:
         version: { type: string }
         note: { type: string, description: What the bootstrap or the last upgrade said }
         tls_fingerprint: { type: string, description: "SHA-256 of the host's API certificate, pinned by the fleet; empty on plain HTTP" }
-        labels: { type: object, additionalProperties: { type: string }, description: "the labels of the join token it came with (ADR 0057); absent: none" }
+        labels: { type: object, additionalProperties: { type: string }, description: "the labels of the join token it came with (ADR 0059); absent: none" }
         public_tcp_ports: { type: array, items: { type: integer }, description: "ports its public interface takes besides SSH, from its bootstrap (ADR 0028); absent: none" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" }, description: from its last heartbeat }
         started: { $ref: "#/components/schemas/DaemonStart" }
@@ -1208,21 +1207,26 @@ components:
     CreateJoinTokenRequest:
       type: object
       properties:
-        ttl_sec: { type: integer, description: "default 3600; 60 to 2592000" }
+        ttl_sec: { type: integer, description: "seconds of life; default 86400 (24 hours); 0: never expires; at most ten years" }
+        description: { type: string, description: "free text shown in the listing; one line, at most 256 characters" }
         region: { type: string, description: the region the host that joins with it is put in }
         labels: { type: object, additionalProperties: { type: string }, description: "labels the host carries (`key=value`, as machine labels)" }
         host: { type: string, description: "the id the host must join as; empty: the joiner names itself" }
+        address: { type: string, description: "our addition to kubeadm's model: an IPv4 address or network (`10.42.0.0/24`) the join must come from; empty: from anywhere" }
     JoinToken:
       type: object
       properties:
         id: { type: string }
-        state: { type: string, enum: [active, used, expired, revoked] }
+        state: { type: string, enum: [active, expired, revoked] }
         created_at: { type: string, format: date-time }
-        expires_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, description: "absent: never expires" }
+        description: { type: string }
         region: { type: string }
         labels: { type: object, additionalProperties: { type: string } }
         host: { type: string, description: the id the token is bound to }
-        used_by:
+        address: { type: string, description: the address or network the token is bound to }
+        uses: { type: integer, description: how many joins it took }
+        last_used:
           type: object
           properties:
             host: { type: string }

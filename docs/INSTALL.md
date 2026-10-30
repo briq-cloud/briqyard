@@ -62,7 +62,7 @@ briqyard host ls
 briqyard host upgrade <id> --release <version or URL>   # drained, upgraded, back; its machines keep running
 ```
 
-A server the fleet cannot reach over SSH joins on its own, with a one-time token ([OPERATIONS.md, A server that joins on its own](OPERATIONS.md#a-server-that-joins-on-its-own-adr-0057)):
+A server the fleet cannot reach over SSH joins on its own, with a bootstrap token ([OPERATIONS.md, A server that joins on its own](OPERATIONS.md#a-server-that-joins-on-its-own-adr-0059)):
 
 ```bash
 briqyard host token create --address <server IP> --ttl 1h   # on your machine
