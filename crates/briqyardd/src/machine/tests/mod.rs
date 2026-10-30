@@ -218,6 +218,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             boot_gate: tokio::sync::Semaphore::new(2),
             probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),
             began: tokio::time::Instant::now(),
+            probe_spread: Box::new(golden_spread()),
             usage: Mutex::new(Ledger::default()),
             events,
             pool: Mutex::new(None),
@@ -231,6 +232,17 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
         host,
         _dir: dir,
         m,
+    }
+}
+
+/// A fixed, evenly spread sequence in [0, 1) (the golden ratio's multiples), where production
+/// draws at random: sixteen random points can all land in half a period, so a test that
+/// checks how far apart first runs fall needs points that do not depend on chance.
+fn golden_spread() -> impl Fn() -> f64 + Send + Sync {
+    let n = std::sync::atomic::AtomicU32::new(0);
+    move || {
+        let i = n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        (f64::from(i) * 0.618_033_988_749_894_9).fract()
     }
 }
 

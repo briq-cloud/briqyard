@@ -77,6 +77,7 @@ impl Manager {
             boot_gate: tokio::sync::Semaphore::new(boots_at_once as usize),
             probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),
             began: tokio::time::Instant::now(),
+            probe_spread: Box::new(rand::random::<f64>),
             usage: Mutex::new(ledger),
             events,
             pool: Mutex::new(None),
