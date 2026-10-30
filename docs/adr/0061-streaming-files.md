@@ -13,27 +13,36 @@ as an ordinary file when their application needs one.
 ## Decisions
 
 **Add GET and PUT `/v1/machines/{id}/files/content?path=…`.** The body is raw bytes.
-PUT requires `Content-Length`; GET answers with it. PUT's optional `mode` is octal
-permission bits, default `0644`, including `0000`, never setuid, setgid or sticky.
-The CLI's existing `machine put` and `get-file` use this endpoint and encode the path
-as a query parameter. The fleet forwards both directions without buffering the file.
+PUT accepts a known `Content-Length` or an unknown-length HTTP body; both are counted
+and bounded. GET answers with `Content-Length`. PUT's optional `mode` is octal permission
+bits, including `0000`, never setuid, setgid or sticky. When absent it preserves an existing
+regular destination's permission bits; a new file or a final symlink replacement defaults
+to `0644`. The CLI's existing `machine put` and `get-file` use this endpoint and encode the
+path as a query parameter. The fleet forwards both directions without buffering the file.
 The existing JSON operations remain for clients and inits that already use them.
 
-**A framed handshake, then raw bytes on the same vsock connection.** Additive guest
-operations `put_stream` (path, mode, size) and `get_stream` (path) answer `ready` or
-`error`. GET's ready carries `size`; exactly that many bytes follow. PUT's host
-sends exactly its size then one commit byte (`1`), only after the HTTP body ended
-successfully; the guest answers `ok` after committing. An old init answers its
-usual unknown-op error, which names the init and the image-change upgrade path;
-there is no fallback through exec. After a GET's ready, failure is a short stream,
-never a framed error mistaken for file bytes. A download is not a file snapshot:
-concurrent growth is excluded by its initial size; truncation fails the response.
+**A framed handshake, then bounded binary chunks for uploads, raw bytes for downloads.**
+Additive guest operations `put_stream` (path, optional file_mode and size) and `get_stream`
+(path) answer `ready` or `error`. A PUT chunk is a four-byte big-endian length followed by
+at most 64 KiB of raw data. A zero length commits; the host sends it only after the HTTP
+body ended successfully. Both sides count bytes against the 1 GiB cap and the optional
+declared total. A truncated chunk, EOF without the terminal or a mismatched total never
+commits. This one format accepts both known and unknown sizes, without vsock half-close
+semantics. The guest computes SHA-256 while writing and answers `ok` with `size` and
+`sha256` after commit; HTTP answers 200 with those fields as JSON.
+
+GET's ready carries `size`; exactly that many raw bytes follow. An old init answers its
+usual unknown-op error, which names the init and the image-change upgrade path; there
+is no fallback through exec. After a GET's ready, failure is a short stream, never a
+framed error mistaken for file bytes. A download is not a file snapshot: concurrent
+growth is excluded by its initial size; truncation fails the response.
 
 **Write a temporary file beside the destination, then rename.** The guest writes
 `0600` through the open file descriptor, flushes and syncs its contents, sets its
-mode through the descriptor, and atomically renames it into place. A failed or
-cancelled upload unlinks its temporary file. It can leave newly created parent
-directories. An existing destination stays untouched until commit. Its final
+explicit or preserved mode through the descriptor, and atomically renames it into place.
+A failed or cancelled upload unlinks its temporary file. It can leave newly created parent
+directories. An existing destination stays untouched until commit. Temporary names cannot
+equal the destination basename; cleanup ends permanently after a successful rename. Its final
 symlink or hard link is replaced itself, never its target. Concurrent uploads are
 last successful rename wins. A guest crash may leave a temporary file; the API
 does not claim that a rename survives a guest crash before the directory is synced.
@@ -69,7 +78,8 @@ at the client. Limits are in the shared API crate, not new configuration knobs.
 ## Validation
 
 Regression tests cover binary and empty files, a 5 MiB transfer above both JSON and
-frame bounds, incomplete and uncommitted uploads, cleanup, modes, symlink and hard
-link replacement, parent symlink refusal, a renamed parent directory, special
+frame bounds, known and unknown lengths, incomplete and uncommitted uploads, oversized
+chunks and counted totals, cleanup, explicit and preserved modes, hashes, temporary-name
+collisions, symlink and hard link replacement, parent symlink refusal, a renamed parent directory, special
 files, path and size bounds, unknown old-init operations, HTTP-body failures,
 idle expiry, and fleet and CLI forwarding with encoded paths.

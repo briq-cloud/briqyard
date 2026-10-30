@@ -30,15 +30,26 @@ pub(super) async fn put(
     Query(q): Query<FileQuery>,
     headers: HeaderMap,
     body: Body,
-) -> Result<StatusCode, AppError> {
+) -> Result<Json<wire::FileWriteResponse>, AppError> {
     wire::check_path(&q.path).map_err(invalid)?;
-    let mode = wire::mode(q.mode.as_deref()).map_err(invalid)?;
+    let mode = q
+        .mode
+        .as_deref()
+        .map(|m| wire::mode(Some(m)))
+        .transpose()
+        .map_err(invalid)?;
     let size = headers
         .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| invalid("Content-Length is required"))?;
-    wire::check_size(size).map_err(invalid)?;
+        .map(|v| {
+            v.to_str()
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .ok_or_else(|| invalid("invalid Content-Length"))
+        })
+        .transpose()?;
+    if let Some(size) = size {
+        wire::check_size(size).map_err(invalid)?;
+    }
     let _permit = permit()?;
     let result = tokio::time::timeout(Duration::from_secs(wire::TRANSFER_SEC), async {
         let (mut conn, _, _in_use) = st
@@ -48,8 +59,8 @@ pub(super) async fn put(
                 guest::Request {
                     op: "put_stream".into(),
                     path: q.path,
-                    mode,
-                    size: Some(size),
+                    file_mode: mode,
+                    size,
                     ..Default::default()
                 },
             )
@@ -58,30 +69,36 @@ pub(super) async fn put(
     })
     .await
     .map_err(|_| invalid("file transfer timeout"))?;
-    result?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(result?))
 }
 
-/// No commit byte is sent until the HTTP body reports a successful end.
-async fn upload(conn: &mut impl crate::guestc::Conn, body: Body, size: u64) -> Result<(), MError> {
+/// No terminal chunk is sent until the HTTP body reports a successful end.
+async fn upload(
+    conn: &mut impl crate::guestc::Conn,
+    body: Body,
+    size: Option<u64>,
+) -> Result<wire::FileWriteResponse, MError> {
     let mut stream = body.into_data_stream();
-    let mut left = size;
+    let mut total = 0u64;
     while let Some(chunk) = idle(stream.next()).await? {
         let chunk = chunk.map_err(|e| MError::Invalid(format!("file body: {e}")))?;
-        if chunk.len() as u64 > left {
-            return Err(MError::Invalid("file body exceeds Content-Length".into()));
+        let next = wire::streamed_size(total, chunk.len() as u64, size).map_err(MError::Invalid)?;
+        for piece in chunk.chunks(wire::CHUNK_SIZE) {
+            idle(conn.write_u32(piece.len() as u32))
+                .await?
+                .map_err(|e| MError::Other(e.into()))?;
+            idle(conn.write_all(piece))
+                .await?
+                .map_err(|e| MError::Other(e.into()))?;
         }
-        idle(conn.write_all(&chunk))
-            .await?
-            .map_err(|e| MError::Other(e.into()))?;
-        left -= chunk.len() as u64;
+        total = next;
     }
-    if left != 0 {
+    if size.is_some_and(|size| size != total) {
         return Err(MError::Invalid(
             "file body shorter than Content-Length".into(),
         ));
     }
-    idle(conn.write_all(&[1]))
+    idle(conn.write_u32(0))
         .await?
         .map_err(|e| MError::Other(e.into()))?;
     let response: guest::Response = idle(crate::guestc::read_frame(conn))
@@ -93,7 +110,18 @@ async fn upload(conn: &mut impl crate::guestc::Conn, body: Body, size: u64) -> R
             response.message
         )));
     }
-    Ok::<_, MError>(())
+    if response.size != Some(total)
+        || response.sha256.len() != 64
+        || !response.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(MError::Other(anyhow::anyhow!(
+            "guest returned invalid upload result"
+        )));
+    }
+    Ok(wire::FileWriteResponse {
+        size: total,
+        sha256: response.sha256,
+    })
 }
 
 async fn idle<T>(f: impl std::future::Future<Output = T>) -> Result<T, MError> {
@@ -209,38 +237,56 @@ mod tests {
             ])),
         ] {
             let (mut host, mut guest) = tokio::io::duplex(1024);
-            assert!(upload(&mut host, body, 8).await.is_err());
+            assert!(upload(&mut host, body, Some(8)).await.is_err());
             drop(host);
             let mut received = Vec::new();
             guest.read_to_end(&mut received).await.unwrap();
-            assert!(
-                !received.contains(&1),
-                "no commit marker after a failed body"
-            );
+            let mut rest = received.as_slice();
+            while rest.len() >= 4 {
+                let length = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+                assert!(length > 0, "no terminal chunk after a failed body");
+                assert!(rest.len() >= 4 + length);
+                rest = &rest[4 + length..];
+            }
+            assert!(rest.is_empty());
         }
     }
 
     #[tokio::test]
     async fn upload_waits_for_the_guest_ack_after_complete_body() {
-        let (mut host, mut guest) = tokio::io::duplex(1024);
-        let task = tokio::spawn(async move {
-            let mut received = [0; 6];
-            guest.read_exact(&mut received).await.unwrap();
-            assert_eq!(&received, b"bytes\x01");
-            guest
-                .write_all(&guest::encode_frame(&guest::Response::new("ok")).unwrap())
+        for declared in [None, Some(5)] {
+            let (mut host, mut guest) = tokio::io::duplex(1024);
+            let task = tokio::spawn(async move {
+                let mut received = [0; 13];
+                guest.read_exact(&mut received).await.unwrap();
+                assert_eq!(&received, b"\0\0\0\x05bytes\0\0\0\0");
+                guest
+                    .write_all(
+                        &guest::encode_frame(&guest::Response {
+                            kind: "ok".into(),
+                            size: Some(5),
+                            sha256: "a".repeat(64),
+                            ..Default::default()
+                        })
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            });
+            let written = upload(&mut host, Body::from("bytes"), declared)
                 .await
                 .unwrap();
-        });
-        upload(&mut host, Body::from("bytes"), 5).await.unwrap();
-        task.await.unwrap();
+            assert_eq!(written.size, 5);
+            assert_eq!(written.sha256, "a".repeat(64));
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test(start_paused = true)]
     async fn silent_upload_body_expires_without_a_commit() {
         let (mut host, mut guest) = tokio::io::duplex(1024);
         let body = Body::from_stream(futures::stream::pending::<Result<Vec<u8>, std::io::Error>>());
-        let err = upload(&mut host, body, 1).await.unwrap_err();
+        let err = upload(&mut host, body, Some(1)).await.unwrap_err();
         assert!(err.to_string().contains("idle timeout"));
         drop(host);
         let mut bytes = Vec::new();
@@ -308,5 +354,37 @@ mod tests {
             Instant::now() + Duration::from_secs(wire::TRANSFER_SEC),
         );
         assert!(axum::body::to_bytes(body, 10).await.is_err());
+    }
+    #[tokio::test]
+    async fn large_unknown_http_chunks_are_split_into_bounded_guest_chunks() {
+        let (mut host, mut guest) = tokio::io::duplex(1024);
+        let size = wire::CHUNK_SIZE * 2 + 7;
+        let task = tokio::spawn(async move {
+            for expected in [wire::CHUNK_SIZE, wire::CHUNK_SIZE, 7] {
+                let length = guest.read_u32().await.unwrap() as usize;
+                assert_eq!(length, expected);
+                let mut data = vec![0; length];
+                guest.read_exact(&mut data).await.unwrap();
+                assert!(data.iter().all(|b| *b == 7));
+            }
+            assert_eq!(guest.read_u32().await.unwrap(), 0);
+            guest
+                .write_all(
+                    &guest::encode_frame(&guest::Response {
+                        kind: "ok".into(),
+                        size: Some(size as u64),
+                        sha256: "a".repeat(64),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        let result = upload(&mut host, Body::from(vec![7; size]), None)
+            .await
+            .unwrap();
+        assert_eq!(result.size, size as u64);
+        task.await.unwrap();
     }
 }

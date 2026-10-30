@@ -284,20 +284,15 @@ pub(super) async fn file_stream(
         .unwrap_or_default();
     let mut to = to_host(&st, &host, req.method().clone(), path, req.headers())?;
     if req.method() == Method::PUT {
-        let length = req
-            .headers()
-            .get(header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or_else(|| {
-                err(
-                    StatusCode::BAD_REQUEST,
-                    "invalid",
-                    "Content-Length is required",
-                )
-            })?;
-        wire::check_size(length).map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", e))?;
-        to = to.header(header::CONTENT_LENGTH, length);
+        if let Some(value) = req.headers().get(header::CONTENT_LENGTH) {
+            let length = value
+                .to_str()
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid", "invalid Content-Length"))?;
+            wire::check_size(length).map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", e))?;
+            to = to.header(header::CONTENT_LENGTH, length);
+        }
     }
     let to = to
         .body(reqwest::Body::wrap_stream(

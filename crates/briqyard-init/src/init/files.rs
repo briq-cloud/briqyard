@@ -3,6 +3,7 @@
 use super::*;
 use briqyard_api::files as wire;
 use rustix::fs::{self as at, AtFlags, Mode, OFlags};
+use sha2::{Digest, Sha256};
 use std::ffi::CString;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,31 +25,49 @@ where
         wire::check_path(&req.path).map_err(|e| anyhow!(e))?;
         match req.op.as_str() {
             "put_stream" => {
-                let size = req.size.ok_or_else(|| anyhow!("file size is required"))?;
-                wire::check_size(size).map_err(|e| anyhow!(e))?;
-                if req.mode > 0o777 {
+                if let Some(size) = req.size {
+                    wire::check_size(size).map_err(|e| anyhow!(e))?;
+                }
+                if req.file_mode.is_some_and(|mode| mode > 0o777) {
                     return Err(anyhow!("invalid file mode"));
                 }
                 let mut upload = Upload::new(Path::new("/"), &req.path)?;
                 send(&output, &Response::new("ready")).await;
-                let mut left = size;
+                let mut total = 0u64;
+                let mut hash = Sha256::new();
                 let mut buf = vec![0; wire::CHUNK_SIZE];
-                while left > 0 {
-                    let n = (left as usize).min(buf.len());
-                    idle(input.read_exact(&mut buf[..n])).await?;
-                    idle(upload.file.write_all(&buf[..n])).await?;
-                    left -= n as u64;
+                loop {
+                    let length = idle(input.read_u32()).await? as usize;
+                    if length == 0 {
+                        break;
+                    }
+                    if length > buf.len() {
+                        return Err(anyhow!("file chunk exceeds {} bytes", buf.len()));
+                    }
+                    let next = wire::streamed_size(total, length as u64, req.size)
+                        .map_err(|e| anyhow!(e))?;
+                    idle(input.read_exact(&mut buf[..length])).await?;
+                    idle(upload.file.write_all(&buf[..length])).await?;
+                    hash.update(&buf[..length]);
+                    total = next;
                 }
-                // The host commits only after the HTTP body ended successfully.
-                let mut commit = [0];
-                idle(input.read_exact(&mut commit)).await?;
-                if commit != [1] {
-                    return Err(anyhow!("file stream was not committed"));
+                if req.size.is_some_and(|size| size != total) {
+                    return Err(anyhow!("file stream shorter than declared size"));
                 }
+                // Only the zero-length terminal commits; EOF or a failed HTTP body never does.
                 idle(upload.file.flush()).await?;
                 idle(upload.file.sync_all()).await?;
-                upload.commit(req.mode)?;
-                send(&output, &Response::new("ok")).await;
+                upload.commit(req.file_mode)?;
+                send(
+                    &output,
+                    &Response {
+                        kind: "ok".into(),
+                        size: Some(total),
+                        sha256: hex::encode(hash.finalize()),
+                        ..Default::default()
+                    },
+                )
+                .await;
             }
             "get_stream" => {
                 let file = open_file(Path::new("/"), &req.path)?;
@@ -201,7 +220,19 @@ impl Upload {
         }
         Err(anyhow!("cannot create upload temporary file"))
     }
-    fn commit(&mut self, mode: u32) -> Result<()> {
+    fn commit(&mut self, mode: Option<u32>) -> Result<()> {
+        let mode = match mode {
+            Some(mode) => mode,
+            None => match at::statat(&self.dir, &self.name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat)
+                    if at::FileType::from_raw_mode(stat.st_mode) == at::FileType::RegularFile =>
+                {
+                    stat.st_mode & 0o777
+                }
+                Ok(_) | Err(rustix::io::Errno::NOENT) => 0o644,
+                Err(e) => return Err(e.into()),
+            },
+        };
         at::fchmod(&self.file, Mode::from_raw_mode(mode))?;
         // rename replaces a final symlink itself; it never writes its target.
         at::renameat(&self.dir, &self.temporary, &self.dir, &self.name)?;
@@ -234,13 +265,18 @@ mod tests {
     #[tokio::test]
     async fn raw_file_roundtrip_larger_than_a_frame_and_empty() {
         let root = tempfile::tempdir().unwrap();
-        for data in [vec![], (0..(5 << 20)).map(|n| (n % 251) as u8).collect()] {
+        for (declared, data) in [
+            (true, vec![]),
+            (false, vec![]),
+            (true, (0..(5 << 20)).map(|n| (n % 251) as u8).collect()),
+            (false, (0..(5 << 20)).map(|n| (n % 251) as u8).collect()),
+        ] {
             let path = root.path().join("nested/a & b.bin");
             let req = Request {
                 op: "put_stream".into(),
                 path: path.to_str().unwrap().into(),
-                size: Some(data.len() as u64),
-                mode: 0o640,
+                size: declared.then_some(data.len() as u64),
+                file_mode: Some(0o640),
                 ..Default::default()
             };
             let (mut client, server) = tokio::io::duplex(1024);
@@ -250,9 +286,15 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(read_response(&mut client).await.kind, "ready");
-            client.write_all(&data).await.unwrap();
-            client.write_all(&[1]).await.unwrap();
-            assert_eq!(read_response(&mut client).await.kind, "ok");
+            for chunk in data.chunks(wire::CHUNK_SIZE) {
+                client.write_u32(chunk.len() as u32).await.unwrap();
+                client.write_all(chunk).await.unwrap();
+            }
+            client.write_u32(0).await.unwrap();
+            let result = read_response(&mut client).await;
+            assert_eq!(result.kind, "ok");
+            assert_eq!(result.size, Some(data.len() as u64));
+            assert_eq!(result.sha256, hex::encode(Sha256::digest(&data)));
             task.await.unwrap();
             assert_eq!(fs::read(&path).unwrap(), data);
             assert_eq!(
@@ -306,6 +348,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(read_response(&mut client).await.kind, "ready");
+            client.write_u32(data.len() as u32).await.unwrap();
             client.write_all(data).await.unwrap();
             client.shutdown().await.unwrap();
             assert_eq!(read_response(&mut client).await.kind, "error");
@@ -329,7 +372,7 @@ mod tests {
             let mut upload = Upload::new(root.path(), &format!("/{link}")).unwrap();
             upload.file.write_all(b"new").await.unwrap();
             upload.file.flush().await.unwrap();
-            upload.commit(0).unwrap();
+            upload.commit(Some(0)).unwrap();
             assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0);
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
             assert_eq!(fs::read(path).unwrap(), b"new");
@@ -351,7 +394,7 @@ mod tests {
         symlink(outside.path(), root.path().join("dir")).unwrap();
         upload.file.write_all(b"safe").await.unwrap();
         upload.file.flush().await.unwrap();
-        upload.commit(0o600).unwrap();
+        upload.commit(Some(0o600)).unwrap();
         assert!(!outside.path().join("file").exists());
         assert_eq!(fs::read(root.path().join("old/file")).unwrap(), b"safe");
     }
@@ -385,7 +428,8 @@ mod tests {
             Request {
                 op: "put_stream".into(),
                 path: "/file".into(),
-                size: None,
+                size: Some(0),
+                file_mode: Some(0o4755),
                 ..Default::default()
             },
             Request {
@@ -419,12 +463,66 @@ mod tests {
         );
         upload.file.write_all(b"complete").await.unwrap();
         upload.file.flush().await.unwrap();
-        upload.commit(0o600).unwrap();
+        upload.commit(Some(0o600)).unwrap();
         // Another writer may reuse the old temporary pathname after the rename.
         let reused = root.path().join(upload.temporary.to_str().unwrap());
         fs::write(&reused, b"other writer").unwrap();
         drop(upload);
         assert_eq!(fs::read(root.path().join(name)).unwrap(), b"complete");
         assert_eq!(fs::read(reused).unwrap(), b"other writer");
+    }
+    #[tokio::test]
+    async fn chunk_bounds_and_declared_totals_fail_without_committing() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        fs::write(&path, b"old").unwrap();
+        for (size, bytes) in [
+            (None, ((wire::CHUNK_SIZE + 1) as u32).to_be_bytes().to_vec()),
+            (Some(2), b"\0\0\0\x04full".to_vec()),
+            (Some(8), b"\0\0\0\x04full\0\0\0\0".to_vec()),
+            (None, b"\0\0\0\x04ha".to_vec()),
+            (None, b"\0\0".to_vec()),
+        ] {
+            let (mut client, server) = tokio::io::duplex(1024);
+            let task = tokio::spawn(super::super::serve::handle(state(), server));
+            client
+                .write_all(
+                    &guest::encode_frame(&Request {
+                        op: "put_stream".into(),
+                        path: path.to_str().unwrap().into(),
+                        size,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(read_response(&mut client).await.kind, "ready");
+            client.write_all(&bytes).await.unwrap();
+            client.shutdown().await.unwrap();
+            assert_eq!(read_response(&mut client).await.kind, "error");
+            task.await.unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"old");
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn absent_mode_preserves_regular_file_permissions_and_defaults_for_new_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o711)).unwrap();
+        for (name, mode) in [("/file", 0o711), ("/new", 0o644)] {
+            let mut upload = Upload::new(root.path(), name).unwrap();
+            upload.file.write_all(b"replacement").await.unwrap();
+            upload.file.flush().await.unwrap();
+            upload.commit(None).unwrap();
+            let file = root.path().join(&name[1..]);
+            assert_eq!(
+                fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
     }
 }

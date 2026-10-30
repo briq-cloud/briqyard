@@ -394,8 +394,9 @@ snapshot, or is whole.
   to sleep; a client silent for 90 s is dropped and its command ended.
 - Files (ADR 0061): `briqyard machine put <id> local/path /guest/path` and
   `briqyard machine get-file <id> /guest/path > local/path` stream raw bytes, at most 1 GiB.
-  HTTP is `GET/PUT /v1/machines/{id}/files/content?path=<encoded-absolute-path>`; PUT needs
-  `Content-Length`, optional `mode=0644`. Uploads atomically replace the destination;
+  HTTP is `GET/PUT /v1/machines/{id}/files/content?path=<encoded-absolute-path>`; PUT accepts
+  optional `Content-Length` and `mode=0644`; absent mode preserves regular file permissions
+  (new files default to `0644`). A successful PUT returns JSON `{size, sha256}` from the guest. Uploads atomically replace the destination;
   interrupted uploads keep the old file. Parent symlinks are refused; use the resolved
   directory path. GET refuses symlinks and special files. The machine must be running and
   stays in use during the transfer. Bounds: 16 per daemon, four per guest, 60 s idle,

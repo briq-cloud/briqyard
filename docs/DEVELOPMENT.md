@@ -373,7 +373,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   into another namespace and a fork into one (ADR 0056: a rename with the address, the
   uptime marker and the disk kept; into a namespace that exists a new address, a boot and the
   neighbour reached by name; a `moved` event in each namespace; the fork on a network of its own
-  with its source's disk). 262 checks, 258 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  with its source's disk). 263 checks, 259 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl

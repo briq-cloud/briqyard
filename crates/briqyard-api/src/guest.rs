@@ -4,7 +4,8 @@
 //! Every message is one frame: a 4-byte big-endian length, then JSON. One request per
 //! connection; a request gets one response, except `exec`, which streams `stdout`/`stderr`
 //! frames and ends with `exit`. `put_stream` and `get_stream` exchange a framed ready
-//! handshake then a declared number of raw bytes (ADR 0061). After an `exec` the host may send more frames on the same
+//! handshake; uploads use bounded binary chunks and a zero-length terminal, downloads
+//! send a declared number of raw bytes (ADR 0061). After an `exec` the host may send more frames on the same
 //! connection (`stdin`, `resize`, `close_stdin`), and its close ends the command (ADR 0029).
 //!
 //! One connection goes the other way: when the main process ends, the init connects to the
@@ -110,9 +111,12 @@ pub struct Request {
     pub data: Vec<u8>,
     #[serde(default)]
     pub grace_sec: u64,
-    /// Raw stream length for put_stream; absent for every older operation.
+    /// Optional declared total for put_stream; absent for older operations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    /// Streaming upload permissions; absent preserves a regular destination's mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_mode: Option<u32>,
 }
 
 /// Responses: stdout and stderr chunks then exit; or ok, file, pong, ready, error.
@@ -138,6 +142,9 @@ pub struct Response {
     /// Raw bytes following a get_stream ready response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    /// SHA-256 of a committed streaming upload.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sha256: String,
 }
 
 /// How the main process ended, sent by the init on [`EXIT_PORT`] before the machine resets.

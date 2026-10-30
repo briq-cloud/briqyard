@@ -25,10 +25,9 @@ async fn file_bytes_stream_through_the_fleet_above_the_json_limit() {
         .put(move |req: Request| {
             let expected = expected.clone();
             async move {
-                assert_eq!(
-                    req.headers()[header::CONTENT_LENGTH],
-                    expected.len().to_string()
-                );
+                if let Some(length) = req.headers().get(header::CONTENT_LENGTH) {
+                    assert_eq!(length.to_str().unwrap(), expected.len().to_string());
+                }
                 let actual = axum::body::to_bytes(req.into_body(), 6 << 20)
                     .await
                     .unwrap();
@@ -80,6 +79,7 @@ async fn file_bytes_stream_through_the_fleet_above_the_json_limit() {
         .unwrap();
     assert_eq!(bytes.len(), 5 << 20);
     let response = route
+        .clone()
         .oneshot(
             axum::http::Request::builder()
                 .method(Method::PUT)
@@ -92,10 +92,28 @@ async fn file_bytes_stream_through_the_fleet_above_the_json_limit() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let data: Vec<u8> = (0..(5 << 20)).map(|n| (n % 251) as u8).collect();
+    let body = Body::from_stream(futures::stream::iter(
+        data.chunks(api::files::CHUNK_SIZE)
+            .map(|c| Ok::<_, std::io::Error>(c.to_vec()))
+            .collect::<Vec<_>>(),
+    ));
+    let response = route
+        .oneshot(
+            axum::http::Request::builder()
+                .method(Method::PUT)
+                .uri("/v1/machines/m1/files/content?path=%2Ffile")
+                .header(header::AUTHORIZATION, "Bearer api")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]
-async fn missing_or_oversize_lengths_are_refused_before_forwarding() {
+async fn invalid_or_oversize_lengths_are_refused_before_forwarding() {
     let f = fleet(config::Config {
         token: "api".into(),
         hosts: vec![config::StaticHost {
@@ -110,14 +128,12 @@ async fn missing_or_oversize_lengths_are_refused_before_forwarding() {
         .unwrap()
         .machines
         .insert("m1".into(), "h1".into());
-    for size in [None, Some(api::files::MAX_SIZE + 1)] {
+    for size in ["invalid".to_owned(), (api::files::MAX_SIZE + 1).to_string()] {
         let mut req = axum::http::Request::builder()
             .method(Method::PUT)
             .uri("/v1/machines/m1/files/content?path=%2Ffile")
             .header(header::AUTHORIZATION, "Bearer api");
-        if let Some(size) = size {
-            req = req.header(header::CONTENT_LENGTH, size);
-        }
+        req = req.header(header::CONTENT_LENGTH, size);
         let response = app(f.st.clone())
             .oneshot(req.body(Body::empty()).unwrap())
             .await

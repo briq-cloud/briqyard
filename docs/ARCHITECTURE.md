@@ -336,8 +336,8 @@ command (SIGKILL to its group; SIGHUP first on a terminal); the daemon pings the
 30 s and drops one silent for 90 s. A machine with a session open is in use and does not sleep.
 
 Files stream through `GET/PUT /v1/machines/{id}/files/content` (ADR 0061), through the
-fleet too. A PUT takes a declared length and commits with an atomic guest-side rename
-only after the body completes. Directory descriptors refuse symlink traversal; a GET
+fleet too. A PUT accepts known or unknown length, counts bounded binary chunks, and commits with
+an atomic guest-side rename only after the body completes, returning its size and SHA-256. Directory descriptors refuse symlink traversal; a GET
 reads only a regular file. Transfers hold machine use, have size, concurrency and time
 bounds, and buffer fixed chunks. The CLI's file commands use this path; JSON `/files`
 remains available to existing clients.

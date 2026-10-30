@@ -19,6 +19,8 @@ nix = { workspace = true }
 libc = { workspace = true }
 rtnetlink = { workspace = true }
 rustix = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 futures = { workspace = true }
 tar = { workspace = true }
 
