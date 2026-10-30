@@ -24,6 +24,13 @@ fn permit() -> Result<tokio::sync::SemaphorePermit<'static>, AppError> {
         .map_err(|_| MError::Conflict("too many file transfers".into()).into())
 }
 
+pub(super) async fn capabilities(
+    State(st): S,
+    Path(id): Path<String>,
+) -> Result<Json<wire::FileCapabilities>, AppError> {
+    Ok(Json(st.mgr.file_capabilities(&id).await?))
+}
+
 pub(super) async fn put(
     State(st): S,
     Path(id): Path<String>,

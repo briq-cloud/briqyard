@@ -205,6 +205,25 @@ paths:
             schema: { $ref: "#/components/schemas/PutFileRequest" }
       responses:
         "204": { description: written }
+  /v1/machines/{id}/files/capabilities:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Probe the running guest's current file capabilities
+      description: "A fresh pong, never inferred from the init version or cached across calls. Choose the transfer path before consuming input. file_stream_v1=false permits bounded small JSON operations with legacy semantics; an image change installs the current init. An error is a failed probe, never permission to fall back."
+      responses:
+        "200":
+          description: live guest support and protocol limits
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [file_stream_v1, init_version, legacy_max_bytes, native_max_bytes]
+                properties:
+                  file_stream_v1: { type: boolean }
+                  init_version: { type: string }
+                  legacy_max_bytes: { type: integer, enum: [1048576] }
+                  native_max_bytes: { type: integer, enum: [1073741824] }
+        "409": { description: machine not running or guest probe timed out }
   /v1/machines/{id}/files/content:
     parameters:
       - { $ref: "#/components/parameters/id" }

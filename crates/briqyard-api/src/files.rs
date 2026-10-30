@@ -1,5 +1,7 @@
 //! Bounds and validation shared by streaming file clients and servers (ADR 0061).
 
+pub const LEGACY_MAX_SIZE: u64 = 1 << 20;
+pub const LEGACY_MAX_JSON: usize = (LEGACY_MAX_SIZE as usize).div_ceil(3) * 4 + 16_384;
 pub const MAX_SIZE: u64 = 1 << 30;
 pub const CHUNK_SIZE: usize = 64 << 10;
 pub const IDLE_SEC: u64 = 60;
@@ -48,6 +50,38 @@ pub fn mode(asked: Option<&str>) -> Result<u32, String> {
     Ok(mode)
 }
 
+/// Live file support, from a fresh guest pong rather than its release number.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct FileCapabilities {
+    pub file_stream_v1: bool,
+    pub init_version: String,
+    pub legacy_max_bytes: u64,
+    pub native_max_bytes: u64,
+}
+
+impl FileCapabilities {
+    pub fn from_pong(pong: &crate::guest::Response) -> Self {
+        Self {
+            file_stream_v1: pong.file_stream_v1,
+            init_version: pong.version.clone(),
+            legacy_max_bytes: LEGACY_MAX_SIZE,
+            native_max_bytes: MAX_SIZE,
+        }
+    }
+}
+
+/// A bounded legacy JSON response is decoded only after its encoded length is checked.
+pub fn legacy_bytes(base64: &str) -> Result<Vec<u8>, String> {
+    if base64.len() > (LEGACY_MAX_SIZE as usize).div_ceil(3) * 4 {
+        return Err("legacy file exceeds 1 MiB; an image change installs streaming support".into());
+    }
+    let data = crate::guest::base64_decode(base64)?;
+    if data.len() as u64 > LEGACY_MAX_SIZE {
+        return Err("legacy file exceeds 1 MiB; an image change installs streaming support".into());
+    }
+    Ok(data)
+}
+
 /// The guest's result after a complete upload has been atomically committed.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FileWriteResponse {
@@ -79,5 +113,34 @@ mod tests {
         for m in ["888", "4755", "100644", ""] {
             assert!(mode(Some(m)).is_err());
         }
+    }
+    #[test]
+    fn live_capability_does_not_follow_the_version() {
+        for supported in [false, true] {
+            let pong: crate::guest::Response = serde_json::from_value(
+                serde_json::json!({"type":"pong", "version":"0.1.7", "file_stream_v1":supported}),
+            )
+            .unwrap();
+            assert_eq!(FileCapabilities::from_pong(&pong).file_stream_v1, supported);
+        }
+        let old: crate::guest::Response =
+            serde_json::from_value(serde_json::json!({"type":"pong", "version":"0.1.7"})).unwrap();
+        assert!(!FileCapabilities::from_pong(&old).file_stream_v1);
+        assert!(legacy_bytes(&"A".repeat(LEGACY_MAX_JSON)).is_err());
+        assert_eq!(
+            legacy_bytes(&crate::guest::base64_encode(&vec![
+                7;
+                LEGACY_MAX_SIZE as usize
+            ]))
+            .unwrap()
+            .len(),
+            LEGACY_MAX_SIZE as usize
+        );
+        assert!(legacy_bytes(&crate::guest::base64_encode(&vec![
+            7;
+            LEGACY_MAX_SIZE as usize
+                + 1
+        ]))
+        .is_err());
     }
 }

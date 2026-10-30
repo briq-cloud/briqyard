@@ -180,6 +180,20 @@ impl Manager {
         Ok((conn, in_use))
     }
 
+    /// Probe this running init now: a retained guest may predate its upgraded host.
+    pub async fn file_capabilities(
+        &self,
+        id: &str,
+    ) -> Result<api::files::FileCapabilities, MError> {
+        let _in_use = InUse::new(self.own_entry(id)?);
+        let sock = self.running_vsock(id, false).await?;
+        let pong = tokio::time::timeout(Duration::from_secs(10), self.inner.guest.ping(&sock))
+            .await
+            .map_err(|_| MError::NotRunning("file capability handshake timeout".into()))?
+            .map_err(not_running_if_unreachable)?;
+        Ok(api::files::FileCapabilities::from_pong(&pong))
+    }
+
     /// A file operation holds use for its whole transfer, including the guest handshake.
     pub async fn file_stream(
         &self,

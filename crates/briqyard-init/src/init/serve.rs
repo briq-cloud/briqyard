@@ -110,6 +110,7 @@ where
                     uptime,
                     main_pid,
                     version: briqyard_api::VERSION.into(),
+                    file_stream_v1: true,
                     ..Default::default()
                 },
             )
@@ -199,6 +200,7 @@ mod tests {
         assert_eq!(f[0].main_pid, 42);
         assert!(f[0].uptime > 0.0, "read from /proc/uptime");
         assert_eq!(f[0].version, briqyard_api::VERSION);
+        assert!(f[0].file_stream_v1);
     }
 
     #[tokio::test]

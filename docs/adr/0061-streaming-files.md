@@ -37,6 +37,25 @@ is no fallback through exec. After a GET's ready, failure is a short stream, nev
 framed error mistaken for file bytes. A download is not a file snapshot: concurrent
 growth is excluded by its initial size; truncation fails the response.
 
+**Probe capability before consuming upload input.** New inits explicitly advertise
+`file_stream_v1: true` in their live pong; absence means false. The daemon's narrow
+`GET /v1/machines/{id}/files/capabilities` returns that flag, the pong's init version,
+and `legacy_max_bytes` (1 MiB) and `native_max_bytes` (1 GiB). The fleet forwards it
+normally. Version numbers do not establish capability: development builds can have the
+same version, and running guests retain their init across host upgrades. Probe failures
+propagate; they never enable fallback. Raw endpoints still refuse an unsupported init.
+
+The CLI probes before reading upload input. An unsupported init keeps one JSON operation
+up to 1 MiB: reject a known larger size before reading, otherwise read at most 1 MiB plus
+one detection byte before deciding; never send an oversized legacy PUT. Legacy response
+JSON and encoded base64 lengths are bounded before decoding. There is no retry of input
+already consumed, disk spooling, chunk-file assembly or guest exec. Legacy checksums are
+unverified. The legacy JSON calls keep their existing mode, symlink and partial-write
+semantics, without the new primitive's atomic or path guarantees. An old init's JSON GET
+uses `fs::read` before encoding: a large file can allocate in that guest before its answer
+is refused; the client-side bound does not remove that limitation. An image change
+rebuilds the root disk with the current init for larger native transfers.
+
 **Write a temporary file beside the destination, then rename.** The guest writes
 `0600` through the open file descriptor, flushes and syncs its contents, sets its
 explicit or preserved mode through the descriptor, and atomically renames it into place.

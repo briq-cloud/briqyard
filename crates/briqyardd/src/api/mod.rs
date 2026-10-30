@@ -122,6 +122,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/machines/:id/exec", get(exec_session).post(exec))
         .route("/v1/machines/:id/files", get(get_file).put(put_file))
         .route(
+            "/v1/machines/:id/files/capabilities",
+            get(files::capabilities),
+        )
+        .route(
             "/v1/machines/:id/files/content",
             get(files::get).put(files::put),
         )

@@ -402,6 +402,11 @@ snapshot, or is whole.
   stays in use during the transfer. Bounds: 16 per daemon, four per guest, 60 s idle,
   900 s total. An old init is refused with its version: an image change rebuilds the root
   disk with the current init. The JSON `/files` API remains available.
+  The CLI probes `/files/capabilities` first: a live `file_stream_v1` flag, not a version
+  comparison. An older guest retains one JSON operation up to 1 MiB with legacy mode,
+  symlink and partial-write semantics; its checksum is unverified. Upload and response
+  buffers are bounded in the client. An old JSON GET can still allocate the whole file
+  inside the old guest before encoding fails. Capability errors propagate without fallback.
 - `briqyard machine stats <id>`: CPU time, memory and disk it uses now, from its cgroup and its
   datasets. `briqyard machine set-sleep <id> 3h|never` changes the window without a restart.
 - What a machine runs (ADR 0024): `briqyard machine set <id> --image … --memory … -e K=V -- cmd…`

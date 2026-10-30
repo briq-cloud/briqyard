@@ -145,6 +145,13 @@ pub struct Response {
     /// SHA-256 of a committed streaming upload.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sha256: String,
+    /// Explicit live capability: version numbers alone do not distinguish development builds.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub file_stream_v1: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// How the main process ended, sent by the init on [`EXIT_PORT`] before the machine resets.

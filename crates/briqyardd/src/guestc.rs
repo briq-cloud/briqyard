@@ -26,6 +26,9 @@ pub trait Guest: Send + Sync {
     async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>>;
     async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()>;
     async fn get(&self, vsock: &Path, path: &str) -> Result<Vec<u8>>;
+    async fn ping(&self, _vsock: &Path) -> Result<Response> {
+        Err(anyhow!("guest ping unavailable"))
+    }
     /// Open a raw file stream after its ready handshake (ADR 0061).
     async fn file_stream(
         &self,
@@ -41,6 +44,9 @@ pub struct Vsock;
 
 #[async_trait]
 impl Guest for Vsock {
+    async fn ping(&self, vsock: &Path) -> Result<Response> {
+        ping(vsock).await
+    }
     async fn file_stream(
         &self,
         vsock: &Path,
