@@ -1,0 +1,768 @@
+[
+  {
+    "run": "initial-burst",
+    "kind": "boot",
+    "action": "first",
+    "seconds": 4.239399758000218
+  },
+  {
+    "run": "initial-burst",
+    "kind": "boot",
+    "action": "cold",
+    "seconds": 3.0989356899954146
+  },
+  {
+    "run": "initial-burst",
+    "kind": "boot",
+    "action": "resume",
+    "seconds": 0.22438904400041793
+  },
+  {
+    "run": "initial-burst",
+    "kind": "load",
+    "phase": "1000m-throughput-16",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 11.126785714,
+      "requests": 22642,
+      "rps": 2034.9093243982643,
+      "latency_ms": {
+        "p50": 5.243853999997938,
+        "p95": 19.3177079999991
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 6731318\nuser_usec 3087871\nsystem_usec 3643446\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 79\nnr_throttled 12\nthrottled_usec 12801\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "13565952",
+        "memory.peak": "81588224"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 9690543\nuser_usec 6739135\nsystem_usec 2951408\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 121\nnr_throttled 1\nthrottled_usec 630\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "161136640",
+        "memory.peak": "161378304"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 17196393\nuser_usec 7680495\nsystem_usec 9515897\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 219\nnr_throttled 102\nthrottled_usec 1464428\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "24547328",
+        "memory.peak": "81588224"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 29016757\nuser_usec 14304035\nsystem_usec 14712721\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 263\nnr_throttled 1\nthrottled_usec 630\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "272195584",
+        "memory.peak": "272297984"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 24768512,
+      "fixture": 272297984
+    }
+  },
+  {
+    "run": "initial-burst",
+    "kind": "load",
+    "phase": "1000m-streams-100",
+    "exit_code": 0,
+    "result": {
+      "mode": "streams",
+      "concurrency": 100,
+      "established": 100,
+      "completed": 100,
+      "peak_live_connections": 100,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 37.41845256,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": {
+        "p50": 6640.120378499999,
+        "p95": 6730.195128000002
+      },
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 17303068\nuser_usec 7752437\nsystem_usec 9550630\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 221\nnr_throttled 102\nthrottled_usec 1464428\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "25174016",
+        "memory.peak": "81588224"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 29017481\nuser_usec 14304392\nsystem_usec 14713088\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 264\nnr_throttled 1\nthrottled_usec 630\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "272130048",
+        "memory.peak": "272297984"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 25687480\nuser_usec 12583404\nsystem_usec 13104075\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 615\nnr_throttled 122\nthrottled_usec 1509780\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "42393600",
+        "memory.peak": "81588224"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 49754620\nuser_usec 30002812\nsystem_usec 19751808\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 665\nnr_throttled 7\nthrottled_usec 4475\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "346947584",
+        "memory.peak": "346947584"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 42508288,
+      "fixture": 346947584
+    }
+  },
+  {
+    "run": "initial-burst",
+    "kind": "load",
+    "phase": "1000m-streams-1000",
+    "exit_code": 1,
+    "result": {
+      "mode": "streams",
+      "concurrency": 1000,
+      "established": 118,
+      "completed": 117,
+      "peak_live_connections": 119,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 96.102906546,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": {
+        "p50": 91429.493731,
+        "p95": 91563.39337699999
+      },
+      "errors": [
+        "TimeoutError: ",
+        "TimeoutError: ",
+        "TimeoutError: ",
+        "TimeoutError: ",
+        "TimeoutError: "
+      ],
+      "error_count": 883
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 25749950\nuser_usec 12632815\nsystem_usec 13117134\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 615\nnr_throttled 122\nthrottled_usec 1509780\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "42696704",
+        "memory.peak": "81588224"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 49755165\nuser_usec 30003141\nsystem_usec 19752024\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 665\nnr_throttled 7\nthrottled_usec 4475\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "346435584",
+        "memory.peak": "346947584"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 89622411\nuser_usec 46885206\nsystem_usec 42737204\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1589\nnr_throttled 356\nthrottled_usec 2454219\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "72228864",
+        "memory.peak": "81588224"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 191323909\nuser_usec 134757286\nsystem_usec 56566623\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1640\nnr_throttled 59\nthrottled_usec 259387\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "557518848",
+        "memory.peak": "557518848"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 72552448,
+      "fixture": 557518848
+    }
+  },
+  {
+    "run": "buffer-default",
+    "kind": "boot",
+    "action": "first",
+    "seconds": 3.3944280089999666
+  },
+  {
+    "run": "buffer-default",
+    "kind": "boot",
+    "action": "cold",
+    "seconds": 3.439020341997093
+  },
+  {
+    "run": "buffer-default",
+    "kind": "boot",
+    "action": "resume",
+    "seconds": 0.2288550499943085
+  },
+  {
+    "run": "buffer-default",
+    "kind": "load",
+    "phase": "1000m-proxy-bodies-8",
+    "exit_code": 1,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.011645499998991227,
+          "p95": 0.42716699999800767,
+          "max": 0.42716699999800767
+        },
+        "ramp_delay": {
+          "p50": 200.90887500000144,
+          "p95": 422.21541600000023,
+          "max": 422.21541600000023
+        },
+        "tcp_connect": {
+          "p50": 18.404750000000192,
+          "p95": 98.18408299999959,
+          "max": 98.18408299999959
+        },
+        "connect_response": {
+          "p50": 990.4133964999993,
+          "p95": 6002.236752999998,
+          "max": 6002.236752999998
+        },
+        "tls_handshake": {
+          "p50": 3351.775272500001,
+          "p95": 5420.896669000002,
+          "max": 5420.896669000002
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 3.1641250000021133,
+        "p95": 133.49737500000174,
+        "max": 10011.791712999997
+      },
+      "error_stages": {
+        "request": 8
+      },
+      "concurrency": 8,
+      "established": 8,
+      "completed": 0,
+      "peak_live_connections": 8,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 34.10404285,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [
+        "request: TimeoutError: ",
+        "request: TimeoutError: ",
+        "request: TimeoutError: ",
+        "request: TimeoutError: ",
+        "request: TimeoutError: "
+      ],
+      "error_count": 8
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 7324911\nuser_usec 3402721\nsystem_usec 3922189\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 79\nnr_throttled 8\nthrottled_usec 26808\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "13316096",
+        "memory.peak": "81600512"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 10109325\nuser_usec 7125756\nsystem_usec 2983569\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 132\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "164917248",
+        "memory.peak": "165171200"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 37879738\nuser_usec 27194595\nsystem_usec 10685142\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 547\nnr_throttled 185\nthrottled_usec 343592\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "181084160",
+        "memory.peak": "181575680"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 82430884\nuser_usec 67336241\nsystem_usec 15094642\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 669\nnr_throttled 47\nthrottled_usec 329344\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "435003392",
+        "memory.peak": "435101696"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 181575680,
+      "fixture": 435101696
+    }
+  },
+  {
+    "run": "paced-lower-body-load",
+    "kind": "boot",
+    "action": "first",
+    "seconds": 3.223066464997828
+  },
+  {
+    "run": "paced-lower-body-load",
+    "kind": "boot",
+    "action": "cold",
+    "seconds": 2.9525667210036772
+  },
+  {
+    "run": "paced-lower-body-load",
+    "kind": "boot",
+    "action": "resume",
+    "seconds": 0.25756122000166215
+  },
+  {
+    "run": "paced-lower-body-load",
+    "kind": "load",
+    "phase": "1000m-proxy-bodies-2",
+    "exit_code": 0,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.08431250000029422,
+          "p95": 0.22225000000020145,
+          "max": 0.22225000000020145
+        },
+        "ramp_delay": {
+          "p50": 13.379312499998797,
+          "p95": 26.67312499999852,
+          "max": 26.67312499999852
+        },
+        "tcp_connect": {
+          "p50": 20.06104200000003,
+          "p95": 31.154292000000083,
+          "max": 31.154292000000083
+        },
+        "connect_response": {
+          "p50": 187.35164549999973,
+          "p95": 312.0744999999996,
+          "max": 312.0744999999996
+        },
+        "tls_handshake": {
+          "p50": 840.1637919999994,
+          "p95": 1291.6317089999989,
+          "max": 1291.6317089999989
+        },
+        "request": {
+          "p50": 9647.041400500002,
+          "p95": 11130.892006,
+          "max": 11130.892006
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.317646000001102,
+        "p95": 16.312209000003005,
+        "max": 2303.7295009999984
+      },
+      "error_stages": {},
+      "concurrency": 2,
+      "established": 2,
+      "completed": 2,
+      "peak_live_connections": 2,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 12.295855131,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 6564839\nuser_usec 2987122\nsystem_usec 3577717\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 71\nnr_throttled 9\nthrottled_usec 21599\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "13594624",
+        "memory.peak": "81522688"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 9838851\nuser_usec 6578460\nsystem_usec 3260391\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 125\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "159232000",
+        "memory.peak": "159232000"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 11658960\nuser_usec 6985193\nsystem_usec 4673766\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 190\nnr_throttled 25\nthrottled_usec 60129\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "79306752",
+        "memory.peak": "81522688"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 20114453\nuser_usec 15312724\nsystem_usec 4801729\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 274\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "329023488",
+        "memory.peak": "329297920"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 79306752,
+      "fixture": 329297920
+    }
+  },
+  {
+    "run": "paced-lower-body-load",
+    "kind": "load",
+    "phase": "1000m-proxy-throughput-16",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.004063000000442685,
+          "p95": 0.2544170000007284,
+          "max": 0.5007090000006542
+        },
+        "ramp_delay": {
+          "p50": 161.03777050000014,
+          "p95": 2112.021501000001,
+          "max": 2112.021501000001
+        },
+        "tcp_connect": {
+          "p50": 20.82254150000118,
+          "p95": 1894.4501259999988,
+          "max": 1894.4501259999988
+        },
+        "connect_response": {
+          "p50": 159.58825000000053,
+          "p95": 293.01054200000465,
+          "max": 293.01054200000465
+        },
+        "tls_handshake": {
+          "p50": 186.51210450000022,
+          "p95": 1887.370083999997,
+          "max": 1887.370083999997
+        },
+        "request": {
+          "p50": 10004.674546,
+          "p95": 10019.143296000002,
+          "max": 10019.143296000002
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.2695829999998383,
+        "p95": 23.888417000006253,
+        "max": 1774.5422930000004
+      },
+      "error_stages": {},
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 12.564472172999999,
+      "requests": 16203,
+      "rps": 1289.5885936871184,
+      "latency_ms": {
+        "p50": 6.505874999994887,
+        "p95": 22.90562499999993,
+        "max": 1820.5384179999983
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 11803925\nuser_usec 7097851\nsystem_usec 4706073\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 192\nnr_throttled 25\nthrottled_usec 60129\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "79749120",
+        "memory.peak": "81522688"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 20149181\nuser_usec 15340617\nsystem_usec 4808563\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 276\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "329285632",
+        "memory.peak": "329297920"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 24003031\nuser_usec 13519199\nsystem_usec 10483832\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 337\nnr_throttled 113\nthrottled_usec 1446389\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "81002496",
+        "memory.peak": "81522688"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 42271366\nuser_usec 27488686\nsystem_usec 14782679\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 429\nnr_throttled 8\nthrottled_usec 4262\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "335626240",
+        "memory.peak": "335716352"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 81162240,
+      "fixture": 335716352
+    }
+  },
+  {
+    "run": "paced-lower-body-load",
+    "kind": "load",
+    "phase": "1000m-direct-streams-100",
+    "exit_code": 0,
+    "result": {
+      "mode": "streams",
+      "route": "direct",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 100,
+      "all_streams_seconds": 30.15809814,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.07720799999688666,
+          "p95": 2180.9868339999953,
+          "max": 2189.740458999999
+        },
+        "ramp_delay": {
+          "p50": 1264.1847925000036,
+          "p95": 2069.737668000002,
+          "max": 2070.144917999997
+        },
+        "tcp_connect": {
+          "p50": 226.40377100000464,
+          "p95": 602.2696670000016,
+          "max": 707.9140840000023
+        },
+        "tls_handshake": {
+          "p50": 395.2184999999986,
+          "p95": 716.0978749999956,
+          "max": 841.1249580000017
+        },
+        "request": {
+          "p50": 0.023771500000435708,
+          "p95": 0.43199999999643524,
+          "max": 2.819084000002192
+        },
+        "response_headers": {
+          "p50": 42.77889549999969,
+          "p95": 441.6628749999987,
+          "max": 498.7005419999946
+        },
+        "first_event": {
+          "p50": 0.010520499998278865,
+          "p95": 0.24524999999897545,
+          "max": 1.1319170000021472
+        },
+        "stream_read": {
+          "p50": 33078.402141,
+          "p95": 34749.177558,
+          "max": 34822.488475
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.1652920000074092,
+        "p95": 16.726207999998618,
+        "max": 706.0287080000023
+      },
+      "error_stages": {},
+      "concurrency": 100,
+      "established": 100,
+      "completed": 100,
+      "peak_live_connections": 100,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 35.981188809,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": {
+        "p50": 1548.832104499997,
+        "p95": 3044.8915019999986,
+        "max": 3044.9409590000014
+      },
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 24075532\nuser_usec 13568017\nsystem_usec 10507515\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 338\nnr_throttled 113\nthrottled_usec 1446389\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "81014784",
+        "memory.peak": "81522688"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 42346340\nuser_usec 27553407\nsystem_usec 14792932\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 431\nnr_throttled 8\nthrottled_usec 4262\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "335753216",
+        "memory.peak": "335753216"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 25187609\nuser_usec 14392179\nsystem_usec 10795430\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 513\nnr_throttled 113\nthrottled_usec 1446389\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "81735680",
+        "memory.peak": "81772544"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 60826713\nuser_usec 42671402\nsystem_usec 18155310\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 810\nnr_throttled 15\nthrottled_usec 7322\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "393117696",
+        "memory.peak": "393379840"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 81772544,
+      "fixture": 393379840
+    }
+  },
+  {
+    "run": "paced-lower-body-load",
+    "kind": "load",
+    "phase": "1000m-proxy-streams-100",
+    "exit_code": 0,
+    "result": {
+      "mode": "streams",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 100,
+      "all_streams_seconds": 30.165891473000002,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.09660450000836818,
+          "p95": 2728.681418000008,
+          "max": 3372.3244600000016
+        },
+        "ramp_delay": {
+          "p50": 1040.4854384999994,
+          "p95": 1922.3940010000006,
+          "max": 1990.181500999995
+        },
+        "tcp_connect": {
+          "p50": 25.227708500004553,
+          "p95": 78.258500000004,
+          "max": 168.69029199999375
+        },
+        "connect_response": {
+          "p50": 157.39375000000422,
+          "p95": 568.8642089999973,
+          "max": 755.2214580000083
+        },
+        "tls_handshake": {
+          "p50": 183.98477099999866,
+          "p95": 492.4147079999983,
+          "max": 586.2096259999987
+        },
+        "request": {
+          "p50": 0.09152049999983092,
+          "p95": 1.0220420000024433,
+          "max": 2.7510829999926045
+        },
+        "response_headers": {
+          "p50": 289.83137500000566,
+          "p95": 1496.0506259999988,
+          "max": 1508.1770429999892
+        },
+        "first_event": {
+          "p50": 0.01616699999829052,
+          "p95": 0.7545830000026399,
+          "max": 3.3942919999958576
+        },
+        "stream_read": {
+          "p50": 34008.99555800001,
+          "p95": 35432.341308,
+          "max": 35587.996433
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.0200829999973822,
+        "p95": 12.225416999993396,
+        "max": 513.3532089999989
+      },
+      "error_stages": {},
+      "concurrency": 100,
+      "established": 100,
+      "completed": 100,
+      "peak_live_connections": 100,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 36.299065892,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": {
+        "p50": 1049.8275009999957,
+        "p95": 3758.7773350000048,
+        "max": 3805.8542520000033
+      },
+      "errors": [],
+      "error_count": 0
+    },
+    "counters_before": {
+      "gateway": {
+        "cpu.stat": "usage_usec 25260894\nuser_usec 14450351\nsystem_usec 10810542\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 514\nnr_throttled 113\nthrottled_usec 1446389\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "82370560",
+        "memory.peak": "82382848"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 60916373\nuser_usec 42746605\nsystem_usec 18169767\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 812\nnr_throttled 15\nthrottled_usec 7322\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "393142272",
+        "memory.peak": "393379840"
+      }
+    },
+    "counters_after": {
+      "gateway": {
+        "cpu.stat": "usage_usec 33540637\nuser_usec 19084002\nsystem_usec 14456634\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 802\nnr_throttled 149\nthrottled_usec 1547568\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "83017728",
+        "memory.peak": "83443712"
+      },
+      "fixture": {
+        "cpu.stat": "usage_usec 77337738\nuser_usec 54606332\nsystem_usec 22731405\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 1199\nnr_throttled 18\nthrottled_usec 10382\nnr_bursts 0\nburst_usec 0",
+        "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+        "memory.current": "395239424",
+        "memory.peak": "395321344"
+      }
+    },
+    "sampled_memory_peak": {
+      "gateway": 83431424,
+      "fixture": 395321344
+    }
+  }
+]

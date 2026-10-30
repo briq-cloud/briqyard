@@ -739,7 +739,8 @@ async fn each_refusal_is_counted_by_what_ran_out_and_the_room_is_shown() {
         api::Unschedulable {
             memory: 2,
             disk: 1,
-            pressure: 1
+            pressure: 1,
+            cpu: 0,
         }
     );
     assert_eq!(regions[1].free, Some(api::Room::default()), "gra: full");

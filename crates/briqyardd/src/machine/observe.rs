@@ -110,7 +110,7 @@ impl Manager {
         host.namespaces = self.inner.namespaces.lock().unwrap().len();
         host.endpoints = self.inner.endpoints.lock().unwrap().len();
         host.memory_mb = (used.memory_mb, cap.memory_mb);
-        host.vcpus = (used.vcpus, cap.vcpus);
+        host.cpu_millis = (used.cpu_millis(), cap.cpu_millis());
         host.pool = *self.inner.pool.lock().unwrap();
         host.conditions = self.conditions();
         host.events = self.inner.events.emitted();
@@ -214,7 +214,8 @@ impl Manager {
 
     pub fn capacity(&self) -> api::Capacity {
         let c = self.inner.cfg.capacity;
-        api::Capacity {
+        let mut cap = api::Capacity {
+            cpu_millis: None,
             memory_mb: if c.memory_mb > 0 {
                 c.memory_mb
             } else {
@@ -226,7 +227,9 @@ impl Manager {
                 let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
                 default_vcpus(threads as u32, c.reserved_threads)
             },
-        }
+        };
+        cap.cpu_millis = Some(cap.cpu_millis());
+        cap
     }
 
     /// Where the ingress adds the bytes it passes to and from a machine's endpoints.

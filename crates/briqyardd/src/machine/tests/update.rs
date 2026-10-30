@@ -285,6 +285,7 @@ async fn a_new_size_is_reserved_at_the_start_and_refused_past_the_host() {
     let grown = api::Size {
         vcpus: 2,
         memory_mb: 768,
+        cpu_millis: None,
     };
     let patched =
         h.m.update(&a.id, spec(|s| s.size = Some(grown)), None)
@@ -315,7 +316,8 @@ async fn a_new_size_is_reserved_at_the_start_and_refused_past_the_host() {
         h.m.usage().0,
         api::Capacity {
             memory_mb: 768,
-            vcpus: 2
+            vcpus: 2,
+            cpu_millis: Some(2000),
         }
     );
     assert_eq!(h.host.booted.lock().unwrap().get(&a.id), Some(&grown));
@@ -595,6 +597,7 @@ async fn create_and_patch_refuse_a_bad_spec_in_the_same_words() {
                 s.size = Some(api::Size {
                     vcpus: 0,
                     memory_mb: 256,
+                    cpu_millis: None,
                 })
             }),
             "size.vcpus must be 1..32",
@@ -674,4 +677,45 @@ async fn a_boot_records_what_the_init_says_and_what_ran_it() {
         (m.init_version.as_str(), m.vmm_version.as_str()),
         ("0.2.0+b", "v1.18.0/test")
     );
+}
+
+#[tokio::test]
+async fn pending_cpu_size_is_admitted_at_start_without_losing_it_on_refusal() {
+    let h = harness_config(|cfg| {
+        cfg.jailer = "test-jailer".into();
+        cfg.capacity.memory_mb = 4096;
+        cfg.capacity.vcpus = 1;
+    })
+    .await;
+    h.ready().await;
+    let mut a = h.request("quarter");
+    a.size.cpu_millis = Some(250);
+    let a = h.m.create_made(a).await.unwrap();
+    let mut b = h.request("rest");
+    b.size.cpu_millis = Some(750);
+    let b = h.m.create_made(b).await.unwrap();
+    let larger = api::Size {
+        cpu_millis: Some(500),
+        ..a.size
+    };
+    h.m.update(&a.id, spec(|s| s.size = Some(larger)), None)
+        .await
+        .unwrap();
+    assert_eq!(h.m.usage().0.cpu_millis(), 1000);
+    h.m.stop(&a.id, Duration::from_secs(1), false, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        h.m.start(&a.id, None).await,
+        Err(MError::Capacity(_))
+    ));
+    assert_eq!(h.m.get(&a.id).unwrap().size.cpu_millis(), 250);
+    assert!(h.m.get(&a.id).unwrap().pending.is_some());
+    h.m.stop(&b.id, Duration::from_secs(1), false, None)
+        .await
+        .unwrap();
+    let started = h.m.start(&a.id, None).await.unwrap();
+    assert_eq!(started.size, larger);
+    assert!(started.pending.is_none());
+    assert_eq!(h.m.usage().0.cpu_millis(), 500);
 }

@@ -66,6 +66,13 @@ impl Manager {
             };
             match serde_json::from_slice::<api::Backup>(&data) {
                 Ok(mut b) => {
+                    if b.size.is_none() {
+                        b.size = b
+                            .machine
+                            .as_ref()
+                            .and_then(|r| r.get("size"))
+                            .and_then(|size| serde_json::from_value(size.clone()).ok());
+                    }
                     b.machine = None;
                     b.sealed = None;
                     out.push(b);

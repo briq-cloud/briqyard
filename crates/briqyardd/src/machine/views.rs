@@ -169,15 +169,22 @@ impl Manager {
             let need = api::QuotaUse {
                 memory_mb: size.memory_mb,
                 vcpus: size.vcpus,
+                cpu_millis: Some(size.cpu_millis()),
                 ..Default::default()
             };
             let mut held = namespace_use(&machines, &namespace);
             held.memory_mb = held.memory_mb.saturating_sub(own.memory_mb);
+            held.cpu_millis = Some(held.cpu_millis().saturating_sub(own.cpu_millis()));
             held.vcpus = held.vcpus.saturating_sub(own.vcpus);
             match over_quota(&namespace, &quota, &held, &need) {
                 Some(x) => Some(x),
                 None => {
                     let (used, _) = committed(&machines);
+                    admit_cpu(
+                        used.cpu_millis().saturating_sub(own.cpu_millis()),
+                        self.capacity().cpu_millis(),
+                        size.cpu_millis(),
+                    )?;
                     let used = used.memory_mb.saturating_sub(own.memory_mb);
                     admit(used, self.capacity().memory_mb, size.memory_mb)?;
                     e.set_state(state::STARTING, |r| {

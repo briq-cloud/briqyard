@@ -65,10 +65,12 @@ fn seed(st: &AppState, id: &str, cap: u32, used: u32, machines: usize, namespace
     h.capacity = api::Capacity {
         memory_mb: cap,
         vcpus: 32,
+        cpu_millis: Some(32_000),
     };
     h.used = api::Capacity {
         memory_mb: used,
         vcpus: 0,
+        cpu_millis: None,
     };
     h.machines = machines;
     h.namespaces = namespaces.iter().map(|t| t.to_string()).collect();
@@ -205,6 +207,7 @@ fn create_body(namespace: &str, name: &str, memory_mb: u32) -> serde_json::Value
         size: api::Size {
             vcpus: 1,
             memory_mb,
+            cpu_millis: None,
         },
         ..Default::default()
     })
@@ -215,7 +218,7 @@ fn create_body(namespace: &str, name: &str, memory_mb: u32) -> serde_json::Value
 fn heartbeat(url: &str, memory_mb: u32, namespaces: &[&str]) -> serde_json::Value {
     serde_json::json!({
         "id": "h_daemon", "url": url, "region": "par",
-        "capacity": {"memory_mb": memory_mb, "vcpus": 32}, "used": {"memory_mb": 512, "vcpus": 1},
+        "capacity": {"memory_mb": memory_mb, "vcpus": 32, "cpu_millis": 32000}, "used": {"memory_mb": 512, "vcpus": 1},
         "machines": namespaces.len(), "namespaces": namespaces, "version": "0.1", "disk_free_mb": 5000
     })
 }

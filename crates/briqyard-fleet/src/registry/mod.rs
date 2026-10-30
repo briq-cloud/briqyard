@@ -121,6 +121,7 @@ pub struct HostRec {
 pub struct Hold {
     id: u64,
     memory_mb: u32,
+    cpu_millis: u32,
     disk_mb: u64,
     /// What it took from `disk_free_mb`: less than `disk_mb` when the host had less.
     took_disk_mb: u64,
@@ -147,8 +148,19 @@ impl HostRec {
         self.capacity.memory_mb.saturating_sub(self.used.memory_mb)
     }
 
+    pub fn free_cpu_millis(&self) -> u32 {
+        self.capacity
+            .cpu_millis()
+            .saturating_sub(self.used.cpu_millis())
+    }
+
+    fn has_cpu(&self, need: u32) -> bool {
+        self.capacity.cpu_millis.is_some() && self.free_cpu_millis() >= need
+    }
+
     /// Takes what a hold asks from the host's figures and keeps it.
     fn take(&mut self, mut hold: Hold) {
+        self.used.cpu_millis = Some(self.used.cpu_millis().saturating_add(hold.cpu_millis));
         self.used.memory_mb = self.used.memory_mb.saturating_add(hold.memory_mb);
         hold.took_disk_mb = hold.disk_mb.min(self.disk_free_mb);
         self.disk_free_mb -= hold.took_disk_mb;
@@ -462,6 +474,7 @@ impl Registry {
         region: &str,
         need_mb: u32,
         need_disk_mb: u64,
+        need_cpu_millis: u32,
         policy: &Policy,
     ) -> Option<String> {
         let id = match self.namespaces.get(namespace) {
@@ -475,6 +488,7 @@ impl Registry {
                             && (region.is_empty() || h.region == region)
                             && h.free_memory_mb() >= need_mb
                             && h.has_disk(need_disk_mb)
+                            && h.has_cpu(need_cpu_millis)
                     })
                     .max_by_key(|h| h.free_memory_mb())?;
                 let id = best.id.clone();
@@ -489,7 +503,13 @@ impl Registry {
     /// Counts a machine about to be created on a host as used (ADR 0044): its id, for the
     /// caller to `made` once the host made it, or to `release` when it did not. 0: no such
     /// host, nothing held.
-    pub fn hold(&mut self, host: &str, need_mb: u32, need_disk_mb: u64) -> u64 {
+    pub fn hold(
+        &mut self,
+        host: &str,
+        need_mb: u32,
+        need_disk_mb: u64,
+        need_cpu_millis: u32,
+    ) -> u64 {
         let Some(h) = self.hosts.get_mut(host) else {
             return 0;
         };
@@ -497,6 +517,7 @@ impl Registry {
         h.take(Hold {
             id: self.last_hold,
             memory_mb: need_mb,
+            cpu_millis: need_cpu_millis,
             disk_mb: need_disk_mb,
             ..Default::default()
         });
@@ -525,6 +546,7 @@ impl Registry {
             return;
         };
         let hold = h.holds.remove(i);
+        h.used.cpu_millis = Some(h.used.cpu_millis().saturating_sub(hold.cpu_millis));
         h.used.memory_mb = h.used.memory_mb.saturating_sub(hold.memory_mb);
         h.disk_free_mb += hold.took_disk_mb;
     }
@@ -588,6 +610,7 @@ impl Registry {
         region: &str,
         need_mb: u32,
         need_disk_mb: u64,
+        need_cpu_millis: u32,
         policy: &Policy,
     ) -> Resource {
         let roomy: Vec<&HostRec> = self
@@ -602,7 +625,14 @@ impl Registry {
         if roomy.is_empty() {
             return Resource::Memory;
         }
-        let Some(pressed) = roomy
+        let cpu_room: Vec<_> = roomy
+            .into_iter()
+            .filter(|h| h.has_cpu(need_cpu_millis))
+            .collect();
+        if cpu_room.is_empty() {
+            return Resource::Cpu;
+        }
+        let Some(pressed) = cpu_room
             .iter()
             .filter(|h| h.has_disk(need_disk_mb))
             .max_by_key(|h| h.free_memory_mb())
@@ -639,6 +669,7 @@ impl Registry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Resource {
     Memory,
+    Cpu,
     Disk,
     /// The host the create is bound to (a pinned namespace's, a fork's source's) is under a
     /// condition (ADR 0021): a new host does not fix it.
@@ -646,11 +677,17 @@ pub enum Resource {
 }
 
 impl Resource {
-    pub const ALL: [Resource; 3] = [Resource::Memory, Resource::Disk, Resource::Pressure];
+    pub const ALL: [Resource; 4] = [
+        Resource::Memory,
+        Resource::Cpu,
+        Resource::Disk,
+        Resource::Pressure,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Resource::Memory => "memory",
+            Resource::Cpu => "cpu",
             Resource::Disk => "disk",
             Resource::Pressure => "pressure",
         }

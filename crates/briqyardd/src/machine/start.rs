@@ -31,6 +31,7 @@ impl Manager {
         let need = api::QuotaUse {
             memory_mb: r.size.memory_mb,
             vcpus: r.size.vcpus,
+            cpu_millis: Some(r.size.cpu_millis()),
             ..Default::default()
         };
         {
@@ -43,6 +44,11 @@ impl Manager {
             }
             let (used, _) = committed(&machines);
             admit(used.memory_mb, self.capacity().memory_mb, r.size.memory_mb)?;
+            admit_cpu(
+                used.cpu_millis(),
+                self.capacity().cpu_millis(),
+                r.size.cpu_millis(),
+            )?;
             e.rec.lock().unwrap().start = true;
         }
         self.save(e)?;
@@ -97,6 +103,12 @@ impl Manager {
         if rec.state == state::ERROR && !rec.has_disks() {
             return Err(made_never(&rec));
         }
+        self.check_host_size(
+            rec.pending
+                .as_ref()
+                .and_then(|p| p.size.as_ref())
+                .unwrap_or(&rec.size),
+        )?;
         // A pending change's image is pulled and built before anything moves (ADR 0024): a
         // failure is the boot's, and the change waits for the next start.
         let image = match rec.pending.as_ref().and_then(|p| p.image.clone()) {
@@ -398,7 +410,7 @@ impl Manager {
             base: cfg.jail_base(),
             uid,
             gid: uid,
-            cpus: rec.size.vcpus,
+            cpu_millis: rec.size.cpu_millis(),
             // Guest memory, plus what Firecracker itself needs around it.
             memory_mb: rec.size.memory_mb + 256,
         })

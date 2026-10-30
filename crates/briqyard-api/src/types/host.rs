@@ -20,6 +20,16 @@ pub struct Image {
 pub struct Capacity {
     pub memory_mb: u32,
     pub vcpus: u32,
+    /// CPU budget in millicores; legacy records use vcpus × 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u32>,
+}
+
+impl Capacity {
+    pub fn cpu_millis(&self) -> u32 {
+        self.cpu_millis
+            .unwrap_or_else(|| self.vcpus.saturating_mul(1000))
+    }
 }
 
 /// Host condition types (ADR 0021), as Kubernetes's node conditions. Each is a pressure:
@@ -294,6 +304,12 @@ pub struct Unschedulable {
     /// The host the create is bound to (the namespace's, a fork's source's) is under a condition
     /// (ADR 0021). A new host does not fix it: that host must be freed.
     pub pressure: u64,
+    #[serde(default, skip_serializing_if = "zero_cpu_refusals")]
+    pub cpu: u64,
+}
+
+fn zero_cpu_refusals(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Every error response's body.

@@ -460,7 +460,7 @@ fn jail_paths() {
         base: base.to_path_buf(),
         uid: 100_002,
         gid: 100_002,
-        cpus: 1,
+        cpu_millis: 1000,
         memory_mb: 512,
     };
     let root = jail_root(base, "m_abc123");
@@ -566,7 +566,7 @@ fn the_jailer_is_told_the_cgroup_parent_and_the_limits() {
         base: "/var/lib/briqyard/jail".into(),
         uid: 100_002,
         gid: 100_002,
-        cpus: 2,
+        cpu_millis: 2000,
         memory_mb: 768,
     };
     let args: Vec<String> = jailer_args(&jail, "m_abc123", Path::new("/usr/local/bin/firecracker"))
@@ -601,7 +601,7 @@ fn the_jailer_is_told_the_cgroup_parent_and_the_limits() {
     );
     // No limit, no cgroup argument.
     let free = Jail {
-        cpus: 0,
+        cpu_millis: 0,
         memory_mb: 0,
         ..jail
     };
@@ -670,4 +670,24 @@ async fn console_lines_are_stamped() {
     }
     // The last line gets its newline even when the source had none.
     assert!(text.ends_with("two\n"));
+}
+#[test]
+fn fractional_cpu_quota_respects_kernel_granularity() {
+    assert_eq!(cpu_quota(250), (25000, 100000));
+    assert_eq!(cpu_quota(1), (1000, 1000000));
+    assert_eq!(cpu_quota(10), (1000, 100000));
+    let jail = Jail {
+        jailer: "jailer".into(),
+        base: "/tmp/jail".into(),
+        uid: 1,
+        gid: 1,
+        cpu_millis: 250,
+        memory_mb: 128,
+    };
+    let args: Vec<_> = jailer_args(&jail, "m_abc123", Path::new("firecracker"))
+        .into_iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(args.iter().any(|a| a == "cpu.max=25000 100000"));
+    assert!(args.iter().any(|a| a == "cpu.weight=25"));
 }

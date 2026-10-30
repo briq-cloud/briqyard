@@ -297,6 +297,7 @@ fn endpoint_namespace_and_image_commands() {
                 envs,
                 files,
                 cmd,
+                ..
             } = *a;
             assert_eq!(files, ["/etc/proxy.yaml=proxy.yaml"]);
             assert_eq!(

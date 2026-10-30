@@ -191,6 +191,29 @@ pub(super) async fn by_machine(
     if method == Method::POST && uri.path() == format!("{own}/move") {
         return moves::move_machine(&st, host, &id, &headers, body).await;
     }
+    if method == Method::PATCH && uri.path() == own {
+        if let Ok(req) = serde_json::from_slice::<api::UpdateMachineRequest>(&body) {
+            if req
+                .spec
+                .size
+                .as_ref()
+                .is_some_and(|size| size.cpu_millis.is_some())
+                && st
+                    .reg
+                    .lock()
+                    .unwrap()
+                    .hosts
+                    .get(&host.id)
+                    .is_some_and(|h| h.capacity.cpu_millis.is_none())
+            {
+                return Err(err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "capacity",
+                    "host must be upgraded to report and enforce CPU millis",
+                ));
+            }
+        }
+    }
     let is_delete = method == Method::DELETE && uri.path() == own;
     let plain_get = method == Method::GET && uri.path() == own;
     let adds_endpoint = method == Method::POST && uri.path() == format!("{own}/endpoints");

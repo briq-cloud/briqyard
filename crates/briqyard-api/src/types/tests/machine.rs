@@ -12,14 +12,16 @@ fn size_and_capacity() {
         c,
         Capacity {
             memory_mb: 65536,
-            vcpus: 16
+            vcpus: 16,
+            cpu_millis: None,
         }
     );
     assert_eq!(
         Capacity::default(),
         Capacity {
             memory_mb: 0,
-            vcpus: 0
+            vcpus: 0,
+            cpu_millis: None,
         }
     );
 }
