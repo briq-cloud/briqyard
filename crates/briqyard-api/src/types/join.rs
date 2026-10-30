@@ -17,6 +17,10 @@ pub struct CreateJoinTokenRequest {
     /// The id the host must join as; empty: the joiner names itself.
     #[serde(default)]
     pub host: String,
+    /// The address (`10.42.0.12`) or network (`10.42.0.0/24`) the join must come from; empty:
+    /// from anywhere. A token bound to the server it is for is useless from any other.
+    #[serde(default)]
+    pub address: String,
 }
 
 /// A join token as the fleet lists it. The secret is never in it.
@@ -34,6 +38,9 @@ pub struct JoinToken {
     /// The id the token is bound to, when it is.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub host: String,
+    /// The address or network the token is bound to, when it is.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub address: String,
     /// Who used it, when it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_by: Option<JoinTokenUse>,

@@ -27,6 +27,10 @@ pub struct JoinTokenRec {
     /// The host id the token is bound to; empty: any valid id.
     #[serde(default)]
     pub host: String,
+    /// The address (`10.42.0.12`) or network (`10.42.0.0/24`) the join must come from; empty:
+    /// from anywhere.
+    #[serde(default)]
+    pub address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_by: Option<api::JoinTokenUse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,6 +44,7 @@ pub struct TokenSpec {
     pub region: String,
     pub labels: BTreeMap<String, String>,
     pub host: String,
+    pub address: String,
 }
 
 /// Why a presented token is not taken. The caller is told one thing for all of them; the log
@@ -49,6 +54,8 @@ pub enum TokenError {
     Malformed,
     Unknown,
     WrongSecret,
+    /// Not from the address or network the token is bound to.
+    WrongAddress,
     Expired,
     Used,
     Revoked,
@@ -60,6 +67,7 @@ impl std::fmt::Display for TokenError {
             TokenError::Malformed => "not shaped <id>.<secret>",
             TokenError::Unknown => "no such token",
             TokenError::WrongSecret => "wrong secret",
+            TokenError::WrongAddress => "not from the address the token is bound to",
             TokenError::Expired => "expired",
             TokenError::Used => "already used",
             TokenError::Revoked => "revoked",
@@ -88,6 +96,16 @@ fn hash(secret: &str) -> String {
         .collect()
 }
 
+/// A token's address binding: an IPv4 address (a network of one) or an `a.b.c.d/n` network.
+pub fn parse_address(s: &str) -> anyhow::Result<crate::bootstrap::Network> {
+    let bad = || anyhow::anyhow!("{s:?}: want an IPv4 address or network, a.b.c.d or a.b.c.d/n");
+    if s.contains('/') {
+        return crate::bootstrap::Network::parse(s).map_err(|_| bad());
+    }
+    let addr: std::net::Ipv4Addr = s.parse().map_err(|_| bad())?;
+    Ok(crate::bootstrap::Network { addr, prefix: 32 })
+}
+
 impl JoinTokenRec {
     /// `active`, `used`, `expired` or `revoked`.
     pub fn state(&self, now: DateTime<Utc>) -> &'static str {
@@ -111,9 +129,15 @@ impl JoinTokenRec {
             region: self.region.clone(),
             labels: self.labels.clone(),
             host: self.host.clone(),
+            address: self.address.clone(),
             used_by: self.used_by.clone(),
             revoked_at: self.revoked_at,
         }
+    }
+
+    /// Whether a join from `ip` may use it: always when it is bound to no address.
+    pub fn allows(&self, ip: std::net::Ipv4Addr) -> bool {
+        self.address.is_empty() || parse_address(&self.address).is_ok_and(|net| net.contains(ip))
     }
 
     /// When it stopped being usable.
@@ -146,6 +170,7 @@ impl Registry {
             region: spec.region,
             labels: spec.labels,
             host: spec.host,
+            address: spec.address,
             used_by: None,
             revoked_at: None,
         };
@@ -201,8 +226,9 @@ impl Registry {
         }
     }
 
-    /// Ends a token that no host has used. A revoked or expired one stays revoked.
-    pub fn revoke_token(&mut self, id: &str, now: DateTime<Utc>) -> Result<(), RevokeError> {
+    /// Ends a token that no host has used. A revoked or expired one stays revoked. True when
+    /// this call ended it (so a failed write can take it back, [`Registry::unrevoke_token`]).
+    pub fn revoke_token(&mut self, id: &str, now: DateTime<Utc>) -> Result<bool, RevokeError> {
         let t = self
             .join_tokens
             .iter_mut()
@@ -211,8 +237,17 @@ impl Registry {
         if t.used_by.is_some() {
             return Err(RevokeError::Used);
         }
+        let fresh = t.revoked_at.is_none();
         t.revoked_at.get_or_insert(now);
-        Ok(())
+        Ok(fresh)
+    }
+
+    /// Takes a revoke back: the registry could not be written, and a restart would otherwise
+    /// bring the token back active.
+    pub fn unrevoke_token(&mut self, id: &str) {
+        if let Some(t) = self.join_tokens.iter_mut().find(|t| t.id == id) {
+            t.revoked_at = None;
+        }
     }
 }
 
@@ -319,7 +354,10 @@ mod tests {
         let mut reg = Registry::default();
         let (first, a) = reg.mint_token(TokenSpec::default(), at(0));
         let (second, b) = reg.mint_token(TokenSpec::default(), at(0));
-        reg.revoke_token(&a.id, at(1)).unwrap();
+        assert!(
+            reg.revoke_token(&a.id, at(1)).unwrap(),
+            "ended by this call"
+        );
         assert_eq!(
             reg.check_token(&first, at(2)).unwrap_err(),
             TokenError::Revoked
@@ -354,6 +392,61 @@ mod tests {
             rec.id,
             "still good"
         );
+    }
+
+    #[test]
+    fn a_revoke_taken_back_leaves_the_token_active_and_a_second_revoke_is_not_new() {
+        let mut reg = Registry::default();
+        let (token, rec) = reg.mint_token(TokenSpec::default(), at(0));
+        assert_eq!(reg.revoke_token(&rec.id, at(1)), Ok(true));
+        assert_eq!(reg.revoke_token(&rec.id, at(2)), Ok(false));
+        assert_eq!(
+            reg.join_tokens[0].revoked_at,
+            Some(at(1)),
+            "the first time kept"
+        );
+        reg.unrevoke_token(&rec.id);
+        assert!(reg.check_token(&token, at(3)).is_ok());
+    }
+
+    #[test]
+    fn an_address_binding_is_an_ip_or_a_network() {
+        for ok in ["10.42.0.12", "10.42.0.0/24", "0.0.0.0/0"] {
+            assert!(parse_address(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "host",
+            "10.42.0",
+            "10.42.0.12/33",
+            "::1",
+            "10.0.0.0/x",
+            "10.0.0.1/",
+        ] {
+            assert!(parse_address(bad).is_err(), "{bad:?}");
+        }
+        let ip = |s: &str| s.parse::<std::net::Ipv4Addr>().unwrap();
+        let mut reg = Registry::default();
+        let mut bound = |address: &str| {
+            reg.mint_token(
+                TokenSpec {
+                    address: address.into(),
+                    ..Default::default()
+                },
+                at(0),
+            )
+            .1
+        };
+        let one = bound("10.42.0.12");
+        assert!(one.allows(ip("10.42.0.12")));
+        assert!(!one.allows(ip("10.42.0.13")));
+        let net = bound("10.42.0.0/24");
+        assert!(net.allows(ip("10.42.0.255")) && !net.allows(ip("10.42.1.1")));
+        assert!(
+            bound("").allows(ip("203.0.113.9")),
+            "unbound: from anywhere"
+        );
+        assert_eq!(net.to_api(at(1)).address, "10.42.0.0/24");
     }
 
     #[test]

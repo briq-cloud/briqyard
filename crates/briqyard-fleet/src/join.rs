@@ -53,6 +53,9 @@ pub(super) async fn create_token(
     for (k, v) in &req.labels {
         api::Label::parse(&format!("{k}={v}")).map_err(invalid)?;
     }
+    if !req.address.is_empty() {
+        registry::parse_address(&req.address).map_err(|e| invalid(format!("address {e:#}")))?;
+    }
     let now = Utc::now();
     let (token, rec) = st.reg.lock().unwrap().mint_token(
         registry::TokenSpec {
@@ -60,6 +63,7 @@ pub(super) async fn create_token(
             region: req.region,
             labels: req.labels,
             host: req.host,
+            address: req.address,
         },
         now,
     );
@@ -77,6 +81,7 @@ pub(super) async fn create_token(
         expires_at = %rec.expires_at,
         region = rec.region,
         host = rec.host,
+        address = rec.address,
         "join token made"
     );
     let created = api::JoinTokenCreated {
@@ -111,11 +116,24 @@ pub(super) async fn revoke_token(
                 format!("token {id} was used: it cannot be taken back"),
             ))
         }
-        Ok(()) => {}
+        Ok(fresh) => {
+            if let Err(e) = st.save().await {
+                // Not written, not revoked: a restart would bring the token back otherwise.
+                if fresh {
+                    st.reg.lock().unwrap().unrevoke_token(&id);
+                }
+                return Err(registry_error(e));
+            }
+        }
     }
-    st.save().await.map_err(registry_error)?;
     tracing::warn!(token = id, "join token revoked");
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// A host that joined and has not heartbeated since: no daemon holds its token, nothing runs on
+/// it, so a new join may take its place.
+fn never_heartbeated(h: &HostRec) -> bool {
+    h.provider == "join" && h.state == "joining" && h.tls_fingerprint.is_empty()
 }
 
 /// The refusal for a token that cannot be used, whatever the reason: the caller is told one
@@ -182,6 +200,9 @@ pub(super) async fn join_host(
             .map_err(|why| denied(why, &peer))?
             .clone();
         let ip = caller_address(caller, &req.address)?;
+        if !token.allows(ip) {
+            return Err(denied(registry::TokenError::WrongAddress, &peer));
+        }
         if !matches!(req.arch.as_str(), "x86_64" | "aarch64") {
             return Err(invalid(format!("arch {:?}: x86_64 or aarch64", req.arch)));
         }
@@ -206,17 +227,33 @@ pub(super) async fn join_host(
         };
         let id = host_id(asked, ip)?;
         let url = bootstrap::host_url(&ip.to_string());
-        if let Some(other) = reg
+        // A host that joined and never heartbeated holds nothing but a token no daemon has (a
+        // failed install): a fresh token replaces it, rotating its token. Any other host at the
+        // id or the address is a conflict.
+        let in_the_way: Vec<HostRec> = reg
             .hosts
             .values()
-            .find(|o| o.id == id || (!o.url.is_empty() && url_host(&o.url) == ip.to_string()))
-        {
+            .filter(|o| o.id == id || (!o.url.is_empty() && url_host(&o.url) == ip.to_string()))
+            .cloned()
+            .collect();
+        if let Some(other) = in_the_way.iter().find(|o| !never_heartbeated(o)) {
             return Err(err(
                 StatusCode::CONFLICT,
                 "conflict",
                 format!("host {} is already at {}", other.id, url_host(&other.url)),
             ));
         }
+        let replaced = in_the_way;
+        let note_replaced = match replaced.as_slice() {
+            [] => String::new(),
+            r => format!(
+                "; replaces {} (joined, never heartbeated)",
+                r.iter()
+                    .map(|o| o.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
         let host = HostRec {
             id: id.clone(),
             url,
@@ -226,7 +263,7 @@ pub(super) async fn join_host(
             state: "joining".into(),
             last_seen: now,
             note: format!(
-                "joined with token {} from {peer} ({}, {} vCPUs, {} MB); waiting for its first heartbeat",
+                "joined with token {} from {peer} ({}, {} vCPUs, {} MB){note_replaced}; waiting for its first heartbeat",
                 token.id, req.arch, req.vcpus, req.memory_mb
             ),
             public_tcp_ports: Some(b.public_tcp_ports.clone()),
@@ -240,13 +277,25 @@ pub(super) async fn join_host(
         };
         reg.consume_token(presented, now, by)
             .map_err(|why| denied(why, &peer))?;
+        for o in &replaced {
+            tracing::warn!(
+                host = o.id,
+                peer,
+                "joining host replaced: it never heartbeated"
+            );
+            reg.hosts.remove(&o.id);
+        }
         reg.hosts.insert(host.id.clone(), host.clone());
-        host
+        (host, replaced)
     };
+    let (rec, replaced) = rec;
     if let Err(e) = st.save().await {
         // The host never got its answer: the token is whole again, and no host is recorded.
         let mut reg = st.reg.lock().unwrap();
         reg.hosts.remove(&rec.id);
+        for o in replaced {
+            reg.hosts.insert(o.id.clone(), o);
+        }
         if let Some(t) = presented.split_once('.').map(|(id, _)| id) {
             reg.release_token(t);
         }
@@ -278,10 +327,30 @@ pub(super) async fn install_script(State(st): S) -> Result<Response, Refusal> {
     Ok(text(INSTALL.to_string()))
 }
 
-/// `GET /bootstrap-host.sh`: the script `install.sh` runs, the one the SSH bootstrap sends. It
-/// holds no secret.
-pub(super) async fn bootstrap_script(State(st): S) -> Result<Response, Refusal> {
+/// What `GET /bootstrap-host.sh` is asked with: the URL the host advertises, as the join
+/// answered it (`ADVERTISE`), to find its record by.
+#[derive(serde::Deserialize)]
+pub(super) struct ScriptQuery {
+    #[serde(default)]
+    url: String,
+}
+
+/// `GET /bootstrap-host.sh?url=<ADVERTISE>`: the script `install.sh` runs, the one the SSH
+/// bootstrap sends, for a host that presents its own token from its own address, as `POST
+/// /v1/hosts/key` is served. It is the operator's `bootstrap.script` when set, whose contents
+/// the fleet cannot vouch for, so it is not served to anyone else.
+pub(super) async fn bootstrap_script(
+    State(st): S,
+    info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
+    Query(q): Query<ScriptQuery>,
+) -> Result<Response, Refusal> {
     bootstrap_on(&st.cfg.bootstrap)?;
+    let caller = Caller::of(&st, info, &headers);
+    {
+        let reg = st.reg.lock().unwrap();
+        the_host(&reg, &q.url, &headers, caller, "bootstrap script")?;
+    }
     let script = bootstrap::script(&st.cfg.bootstrap).map_err(|e| {
         err(
             StatusCode::INTERNAL_SERVER_ERROR,

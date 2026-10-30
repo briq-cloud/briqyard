@@ -246,7 +246,7 @@ pub fn tls_matches(pinned: &str, reported: &str, url: &str) -> Result<(), String
         return Err(if pinned.is_empty() {
             format!(
                 "the host serves TLS (certificate {reported}) and no fingerprint is pinned for it: \
-                 the bootstrap pins it, or hosts[].tls_fingerprint"
+                 the bootstrap pins it (a host that joined, at its first heartbeat), or hosts[].tls_fingerprint"
             )
         } else if reported.is_empty() {
             format!("the host serves plain HTTP and certificate {pinned} is pinned for it")

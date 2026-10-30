@@ -333,11 +333,29 @@ pub(super) async fn register_host(
             return Err(err(StatusCode::FORBIDDEN, "tls_mismatch", why));
         }
         let id = rec.id.clone();
+        if joining {
+            // Trust on first use, made auditable: the operator compares this with
+            // `briqyardd tls-fingerprint` on the server.
+            tracing::warn!(
+                host = id,
+                peer = caller.peer.map(|p| p.to_string()).unwrap_or_default(),
+                fingerprint = req.tls_fingerprint,
+                "certificate pinned at the host's first heartbeat"
+            );
+        }
+        let pinned_note = joining.then(|| {
+            format!(
+                "{}; api certificate {} pinned at its first heartbeat ({})",
+                rec.note,
+                req.tls_fingerprint,
+                now.to_rfc3339()
+            )
+        });
         // What the host reports, applied to its record: the id, token, pin, provider fields
         // and state are the record's own (`heartbeat` leaves them).
         reg.heartbeat(
             HostRec {
-                id,
+                id: id.clone(),
                 url: req.url,
                 ssh: String::new(),
                 token: String::new(),
@@ -368,6 +386,11 @@ pub(super) async fn register_host(
             },
             now,
         );
+        if let Some(note) = pinned_note {
+            if let Some(h) = reg.hosts.get_mut(&id) {
+                h.note = note;
+            }
+        }
     }
     st.save().await.map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())

@@ -2,11 +2,11 @@
 
 use super::*;
 
-fn peer(last: u8) -> std::net::IpAddr {
+pub(super) fn peer(last: u8) -> std::net::IpAddr {
     std::net::IpAddr::from([10, 0, 0, last])
 }
 
-fn joinable() -> Fleet {
+pub(super) fn joinable() -> Fleet {
     fleet(config::Config {
         token: "api".into(),
         bootstrap: config::Bootstrap {
@@ -24,18 +24,18 @@ fn joinable() -> Fleet {
 }
 
 /// A token minted through the API: the whole token and its listing.
-async fn mint(f: &Fleet, body: serde_json::Value) -> (String, serde_json::Value) {
+pub(super) async fn mint(f: &Fleet, body: serde_json::Value) -> (String, serde_json::Value) {
     let (s, _, text) = call(&f.st, "POST", "/v1/hosts/tokens", "api", Some(body)).await;
     assert_eq!(s, StatusCode::CREATED, "{text}");
     let v = json(&text);
     (v["token"].as_str().unwrap().to_string(), v)
 }
 
-fn facts(name: &str) -> serde_json::Value {
+pub(super) fn facts(name: &str) -> serde_json::Value {
     serde_json::json!({ "name": name, "arch": "x86_64", "memory_mb": 64000, "vcpus": 16 })
 }
 
-async fn join(
+pub(super) async fn join(
     f: &Fleet,
     from: std::net::IpAddr,
     token: &str,
@@ -45,7 +45,7 @@ async fn join(
     (s, text)
 }
 
-fn state_of(f: &Fleet, token: &str) -> String {
+pub(super) fn state_of(f: &Fleet, token: &str) -> String {
     let id = token.split('.').next().unwrap();
     let reg = f.st.reg.lock().unwrap();
     let rec = reg.join_tokens.iter().find(|t| t.id == id).unwrap();
@@ -433,7 +433,7 @@ async fn nothing_joins_when_the_bootstrap_is_off_or_has_no_release() {
         ("POST", "/v1/hosts/tokens"),
         ("POST", "/v1/hosts/join"),
         ("GET", "/install.sh"),
-        ("GET", "/bootstrap-host.sh"),
+        ("GET", "/bootstrap-host.sh?url=https://10.0.0.9:7420"),
     ] {
         let (s, _, text) = call(&off.st, method, path, "api", Some(facts(""))).await;
         assert_eq!(s, StatusCode::CONFLICT, "{path}: {text}");
@@ -454,7 +454,7 @@ async fn nothing_joins_when_the_bootstrap_is_off_or_has_no_release() {
 }
 
 #[tokio::test]
-async fn the_scripts_are_served_to_anyone_and_hold_no_secret() {
+async fn install_sh_is_open_and_holds_no_secret() {
     let f = joinable();
     let (s, headers, install) = call(&f.st, "GET", "/install.sh", "", None).await;
     assert_eq!(s, StatusCode::OK);
@@ -463,16 +463,7 @@ async fn the_scripts_are_served_to_anyone_and_hold_no_secret() {
         .unwrap()
         .starts_with("text/plain"));
     assert!(install.starts_with("#!/bin/sh"));
-    let (s, _, script) = call(&f.st, "GET", "/bootstrap-host.sh", "", None).await;
-    assert_eq!(s, StatusCode::OK);
-    assert_eq!(
-        script,
-        bootstrap::script(&f.st.cfg.bootstrap).unwrap(),
-        "the one the SSH path sends"
-    );
-    for text in [install, script] {
-        assert!(!text.contains("rel-secret"), "no value of the fleet's");
-    }
+    assert!(!install.contains("rel-secret"), "no value of the fleet's");
 }
 
 #[tokio::test]
