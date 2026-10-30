@@ -319,7 +319,7 @@ mod tests {
         let mut reg = Registry::default();
         let (token, rec) = reg.mint_token(TokenSpec::default(), at(0));
         let (id, secret) = token.split_once('.').unwrap();
-        assert_eq!((id.len(), secret.len()), (6, 16), "{token}");
+        assert_eq!((id.len(), secret.len()), (6, 16), "kubeadm's shape");
         assert!(token
             .bytes()
             .all(|c| c == b'.' || c.is_ascii_lowercase() || c.is_ascii_digit()));
@@ -452,7 +452,7 @@ mod tests {
             assert_eq!(
                 reg.consume_token(presented, at(1), by("h1")).unwrap_err(),
                 why,
-                "{presented:?}"
+                "expected {why:?}"
             );
         }
         assert_eq!(
