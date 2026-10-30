@@ -10,6 +10,7 @@ mod lifecycle;
 mod metering;
 mod mock;
 mod moves;
+mod namespace_lifecycle;
 mod network;
 mod observe;
 mod probing;
@@ -214,6 +215,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             endpoint_events,
             policies: Mutex::new(HashMap::new()),
             namespace_create: tokio::sync::Mutex::new(()),
+            namespace_lifecycle: tokio::sync::RwLock::new(()),
             backups,
             boot_gate: tokio::sync::Semaphore::new(2),
             probe_gate: tokio::sync::Semaphore::new(probes::PROBES_AT_ONCE),

@@ -16,6 +16,7 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::MoveResult, MError> {
         check_namespace_id(namespace)?;
+        let _admission = self.inner.namespace_lifecycle.read().await;
         let e = self.own_entry(id)?;
         let first = e.snapshot();
         if first.namespace == namespace {

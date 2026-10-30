@@ -47,12 +47,13 @@ impl Manager {
         self.check_host_size(&req.size)?;
         // Pulled before the namespace's lock: a pull may take minutes.
         let im = self.inner.images.ensure(&req.image).await?;
+        let _admission = self.inner.namespace_lifecycle.read().await;
         let t = self.ensure_namespace(namespace).await?;
         let _turn = t.lock.lock().await;
         match self.gateway_of(namespace) {
             None => {
                 // Made before the answer: the namespace's lock orders its gateway's changes.
-                let (gw, how) = self.record(req, Some(Role::Gateway)).await?;
+                let (gw, how) = self.record_admitted(req, Some(Role::Gateway)).await?;
                 self.make(&gw, how).await?;
             }
             Some(gw) => self.replace_gateway(&gw, req, im).await?,

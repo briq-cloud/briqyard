@@ -43,6 +43,16 @@ impl Manager {
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
+        let _admission = self.inner.namespace_lifecycle.read().await;
+        self.record_admitted(req, role).await
+    }
+
+    /// The caller already holds namespace admission (a gateway put keeps it through boot).
+    pub(super) async fn record_admitted(
+        &self,
+        req: api::CreateMachineRequest,
+        role: Option<Role>,
+    ) -> Result<(Arc<Entry>, Make), MError> {
         check_namespace_id(&req.namespace)?;
         if let Some(rs) = &req.restore {
             if !api::valid_id(&rs.machine_id) {

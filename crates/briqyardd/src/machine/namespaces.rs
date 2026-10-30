@@ -66,6 +66,8 @@ impl Manager {
     /// is success.
     pub async fn delete_namespace(&self, id: &str) -> Result<(), MError> {
         check_namespace_id(id)?;
+        // Admission cannot pass the empty check while asynchronous bridge teardown is in flight.
+        let _deleting = self.inner.namespace_lifecycle.write().await;
         let t = match self.namespace_of(id) {
             Some(t) => t,
             None => return Ok(()),

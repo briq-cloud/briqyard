@@ -80,6 +80,9 @@ pub(super) struct Mock {
     pub(super) roots: Mutex<HashMap<String, (PathBuf, Option<PathBuf>)>>,
     /// A live change of disk limits fails, as a Firecracker that refuses the PATCH.
     pub(super) refuse_disk_rate: AtomicBool,
+    pub(super) pause_bridge_delete: AtomicBool,
+    pub(super) bridge_delete_started: tokio::sync::Notify,
+    pub(super) bridge_delete_release: tokio::sync::Notify,
 }
 
 impl Mock {
@@ -110,6 +113,9 @@ impl Mock {
             disks: Mutex::new(HashMap::new()),
             roots: Mutex::new(HashMap::new()),
             refuse_disk_rate: AtomicBool::new(false),
+            pause_bridge_delete: AtomicBool::new(false),
+            bridge_delete_started: tokio::sync::Notify::new(),
+            bridge_delete_release: tokio::sync::Notify::new(),
         })
     }
 
@@ -544,6 +550,13 @@ impl host::Net for Mock {
     }
 
     async fn delete_bridge(&self, index: u32) -> Result<()> {
+        if self
+            .pause_bridge_delete
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.bridge_delete_started.notify_one();
+            self.bridge_delete_release.notified().await;
+        }
         self.record(format!("delete_bridge {}", netw::bridge_name(index)));
         Ok(())
     }
