@@ -15,12 +15,15 @@ Set `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `MACHINE_ID`, `RUNTIME_COMMIT` and optiona
 for the build that will issue the request. The token stays in the local environment and curl's
 stdin config, never in command arguments or the saved result. The machine must be running.
 
+Read `FC_PID` on the daemon host from the machine's private record; the public machine view does
+not expose host PIDs. Set `DATA_DIR` to the daemon's configured `data_dir` (default
+`/var/lib/briqyard`). Print only the PID, since the rest of the record can contain namespace secrets.
+If the caller runs elsewhere, transfer this PID to that shell before issuing the stop request.
+
 ```sh
-FC_PID=$(
-  printf 'header = "Authorization: Bearer %s"\n' "$BRIQYARD_TOKEN" |
-    curl --config - --fail --silent --show-error \
-      "$BRIQYARD_URL/v1/machines/$MACHINE_ID" | jq -r '.pid'
-)
+DATA_DIR=/var/lib/briqyard  # the daemon host's configured data_dir
+FC_PID=$(sudo jq -er '.pid | select(type == "number" and . > 0)' \
+  "$DATA_DIR/state/machines/$MACHINE_ID.json")
 PROFILE_REQUEST_ID=$(openssl rand -hex 8)
 PROFILE_STARTED_AT=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 printf 'header = "Authorization: Bearer %s"\n' "$BRIQYARD_TOKEN" |
