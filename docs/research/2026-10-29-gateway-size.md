@@ -1,7 +1,8 @@
 # Gateway resource measurements
 
-Status: economy profile chosen after bounded native stress and recovery checks; see ADR 0058. Firecracker 1.17 on nested aarch 64 KVM;
-128 MiB guest, one vCPU, host quota 100000/100000 µs. Timings describe this development
+Status: economy profile chosen after bounded native stress and recovery checks; see ADR 0058.
+Initial measurements used Firecracker 1.17 on nested aarch64 KVM, a 128 MiB guest, one
+vCPU and host quota 100000/100000 µs; later native CPU limits are identified below. Timings describe this development
 host; repeat throughput and latency checks on the target architecture before treating them
 as production capacity. The fixture uses synthetic credentials and a local HTTPS upstream.
 The gateway image adds a local upstream CA and a process-memory probe for measurement.
@@ -30,8 +31,9 @@ After resume, guest pages are faulted lazily; an immediate RSS sample is not the
 idle figure and cannot be used to claim reduced memory requirements.
 
 Machine-readable phase results: [data/gateway-size-2026-10-29.json](data/gateway-size-2026-10-29.json).
-Still required: matched upload concurrency, 1,000 overlapping streams, 100/250/500m CPU,
-64 MiB boot floor, sustained-load recovery, tenant-gateway lifecycle, and capacity accounting.
+At this initial stage, follow-ups were matched uploads, 1,000 overlapping streams,
+100/250/500m CPU, a 64 MiB boot floor, repeated-load recovery, native lifecycle and capacity
+accounting. Their successful and failed outcomes are recorded below.
 
 ## Matched follow-up, 2026-10-30
 

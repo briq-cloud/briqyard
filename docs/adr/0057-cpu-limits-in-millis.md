@@ -37,6 +37,6 @@ Upgrade hosts before the fleet. Old reports lack precise CPU accounting; the new
 excludes those hosts from placement and refuses CPU-bearing updates that an old host
 would silently ignore. Reads and cleanup remain available during the upgrade.
 
-The gateway's selected memory, CPU and admission profile remains pending the completed
-stress and fault measurements. This primitive applies to every machine; no gateway-specific
+The gateway's measured economy profile and admission boundaries are recorded in
+[ADR 0058](0058-small-gateway-profile.md). This primitive applies to every machine; no gateway-specific
 resource class or credential handling enters the runtime.
