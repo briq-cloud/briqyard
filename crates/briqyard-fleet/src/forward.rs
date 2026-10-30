@@ -263,3 +263,81 @@ pub(super) fn error_code(body: &[u8]) -> String {
         .map(|e| e.code)
         .unwrap_or_default()
 }
+
+/// Raw files are streamed in both directions without the JSON forwarding body's limit.
+pub(super) async fn file_stream(
+    State(st): S,
+    Path(id): Path<String>,
+    req: Request,
+) -> Result<Response, Refusal> {
+    use briqyard_api::files as wire;
+    let host = locate(&st, Indexed::Machine, &id)
+        .await
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "machine not found"))?;
+    if let Some(refused) = down(&host) {
+        return Ok(refused);
+    }
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or_default();
+    let mut to = to_host(&st, &host, req.method().clone(), path, req.headers())?;
+    if req.method() == Method::PUT {
+        if let Some(value) = req.headers().get(header::CONTENT_LENGTH) {
+            let length = value
+                .to_str()
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid", "invalid Content-Length"))?;
+            wire::check_size(length).map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", e))?;
+            to = to.header(header::CONTENT_LENGTH, length);
+        }
+    }
+    let to = to
+        .body(reqwest::Body::wrap_stream(
+            req.into_body().into_data_stream(),
+        ))
+        .timeout(std::time::Duration::from_secs(wire::TRANSFER_SEC));
+    let resp = match to.send().await {
+        Ok(r) => r,
+        Err(e) => return Ok(unreachable_host(&host, e)),
+    };
+    if !resp.status().is_success() {
+        return Ok(relay(resp, &host).await);
+    }
+    let mut out = Response::new(Body::empty());
+    *out.status_mut() = resp.status();
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::HeaderName::from_static("x-request-id"),
+    ] {
+        if let Some(value) = resp.headers().get(&name) {
+            out.headers_mut().insert(name, value.clone());
+        }
+    }
+    out.headers_mut()
+        .insert("x-briqyard-host", host_header(&host));
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        let transfer = async {
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let failed = chunk.is_err();
+                if tx.send(chunk).await.is_err() || failed {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            _ = tx.closed() => {},
+            _ = tokio::time::timeout(std::time::Duration::from_secs(wire::TRANSFER_SEC), transfer) => {},
+        }
+    });
+    *out.body_mut() = Body::from_stream(futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|chunk| (chunk, rx))
+    }));
+    Ok(out)
+}

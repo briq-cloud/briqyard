@@ -266,25 +266,10 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 local,
                 guest_path,
             } => {
-                let data = std::fs::read(&local).with_context(|| local.clone())?;
-                let req = api::PutFileRequest {
-                    path: guest_path,
-                    base64: api::guest::base64_encode(&data),
-                    mode: None,
-                };
-                c.raw(PUT, &format!("/v1/machines/{id}/files"), Some(&req))
-                    .await?;
+                c.put_file(&id, &local, &guest_path).await?;
             }
             MachineCmd::GetFile { id, guest_path } => {
-                let res: api::FileResponse = c
-                    .call(
-                        GET,
-                        &format!("/v1/machines/{id}/files?path={guest_path}"),
-                        NONE,
-                    )
-                    .await?;
-                let data = api::guest::base64_decode(&res.base64).map_err(|e| anyhow!(e))?;
-                std::io::stdout().write_all(&data)?;
+                c.get_file(&id, &guest_path).await?;
             }
             MachineCmd::Set(a) => {
                 let changing_size =

@@ -362,6 +362,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]
@@ -425,10 +427,13 @@ dependencies = [
  "briqyard-testing",
  "ctor",
  "futures",
+ "hex",
  "libc",
  "nix 0.29.0",
  "rtnetlink",
+ "rustix",
  "serde_json",
+ "sha2 0.10.9",
  "tar",
  "tempfile",
  "tokio",

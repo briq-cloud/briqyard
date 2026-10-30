@@ -394,6 +394,21 @@ snapshot, or is whole.
   Each session is a `session_opened` event (`briqyard events --machine <id>`) and an `exec
   session ended` log line with its code and length. A machine with a session open does not go
   to sleep; a client silent for 90 s is dropped and its command ended.
+- Files (ADR 0061): `briqyard machine put <id> local/path /guest/path` and
+  `briqyard machine get-file <id> /guest/path > local/path` stream raw bytes, at most 1 GiB.
+  HTTP is `GET/PUT /v1/machines/{id}/files/content?path=<encoded-absolute-path>`; PUT accepts
+  optional `Content-Length` and `mode=0644`; absent mode preserves regular file permissions
+  (new files default to `0644`). A successful PUT returns JSON `{size, sha256}` from the guest. Uploads atomically replace the destination;
+  interrupted uploads keep the old file. Parent symlinks are refused; use the resolved
+  directory path. GET refuses symlinks and special files. The machine must be running and
+  stays in use during the transfer. Bounds: 16 per daemon, four per guest, 60 s idle,
+  900 s total. An old init is refused with its version: an image change rebuilds the root
+  disk with the current init. The JSON `/files` API remains available.
+  The CLI probes `/files/capabilities` first: a live `file_stream_v1` flag, not a version
+  comparison. An older guest retains one JSON operation up to 1 MiB with legacy mode,
+  symlink and partial-write semantics; its checksum is unverified. Upload and response
+  buffers are bounded in the client. An old JSON GET can still allocate the whole file
+  inside the old guest before encoding fails. Capability errors propagate without fallback.
 - `briqyard machine stats <id>`: CPU time, memory and disk it uses now, from its cgroup and its
   datasets. `briqyard machine set-sleep <id> 3h|never` changes the window without a restart.
 - What a machine runs (ADR 0024): `briqyard machine set <id> --image … --memory … -e K=V -- cmd…`

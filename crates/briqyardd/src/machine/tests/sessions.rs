@@ -407,3 +407,27 @@ async fn an_exec_that_wakes_a_machine_runs_once_it_is_ready() {
     eventually("not ready", || !h.m.get(&m.id).unwrap().ready).await;
     h.m.running_vsock(&m.id, true).await.unwrap();
 }
+
+#[tokio::test]
+async fn file_capabilities_are_live_even_when_versions_are_identical() {
+    let h = harness("10.64.0.0/16", 4096).await;
+    h.ready().await;
+    *h.host.init_version.lock().unwrap() = "0.1.7".into();
+    let machine = h.m.create_made(h.request("files")).await.unwrap();
+    let old = h.m.file_capabilities(&machine.id).await.unwrap();
+    h.host.file_stream_v1.store(true, Relaxed);
+    let new = h.m.file_capabilities(&machine.id).await.unwrap();
+    assert_eq!(old.init_version, new.init_version);
+    assert!(!old.file_stream_v1);
+    assert!(new.file_stream_v1);
+    assert_eq!(new.legacy_max_bytes, 1 << 20);
+    assert_eq!(new.native_max_bytes, 1 << 30);
+    assert!(matches!(
+        h.m.file_capabilities("m_missing").await,
+        Err(MError::NotFound)
+    ));
+    h.m.stop(&machine.id, Duration::ZERO, false, None)
+        .await
+        .unwrap();
+    assert!(h.m.file_capabilities(&machine.id).await.is_err());
+}

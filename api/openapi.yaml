@@ -205,6 +205,64 @@ paths:
             schema: { $ref: "#/components/schemas/PutFileRequest" }
       responses:
         "204": { description: written }
+  /v1/machines/{id}/files/capabilities:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Probe the running guest's current file capabilities
+      description: "A fresh pong, never inferred from the init version or cached across calls. Choose the transfer path before consuming input. file_stream_v1=false permits bounded small JSON operations with legacy semantics; an image change installs the current init. An error is a failed probe, never permission to fall back."
+      responses:
+        "200":
+          description: live guest support and protocol limits
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [file_stream_v1, init_version, legacy_max_bytes, native_max_bytes]
+                properties:
+                  file_stream_v1: { type: boolean }
+                  init_version: { type: string }
+                  legacy_max_bytes: { type: integer, enum: [1048576] }
+                  native_max_bytes: { type: integer, enum: [1073741824] }
+        "409": { description: machine not running or guest probe timed out }
+  /v1/machines/{id}/files/content:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: path, in: query, required: true, schema: { type: string, maxLength: 4096 }, description: "absolute file path; no empty, . or .. components; symlinks in parent directories are refused" }
+    get:
+      summary: Stream a regular file from a running machine
+      description: "Raw bytes, at most 1 GiB, with Content-Length. Symlinks and special files are refused. The machine stays in use for the transfer. A file that changes during the read is not a snapshot; truncation ends the response early. Requires a streaming-capable init (ADR 0061)."
+      responses:
+        "200":
+          description: raw file bytes
+          headers:
+            Content-Length: { schema: { type: integer, minimum: 0, maximum: 1073741824 } }
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        "400": { description: invalid path or file too large }
+        "409": { description: machine not running, old init, or transfer limit reached }
+    put:
+      summary: Atomically replace a file in a running machine from raw bytes
+      description: "Content-Length is optional; both declared and counted sizes are limited to 1 GiB. Missing parent directories are created. The final path is replaced, including a symlink or hard link itself; its target is never written. On cancellation or an incomplete body the destination is unchanged. Answers the committed size and guest-computed SHA-256. Transfer bounds: 16 per daemon, 4 per guest, 60 s idle, 900 s total. Requires a streaming-capable init (ADR 0061)."
+      parameters:
+        - { name: Content-Length, in: header, required: false, schema: { type: integer, minimum: 0, maximum: 1073741824 } }
+        - { name: mode, in: query, schema: { type: string, pattern: "^0*[0-7]{1,3}$" }, description: "octal permission bits, 0000 through 0777; absent preserves an existing regular file mode, otherwise 0644" }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: { type: string, format: binary } }
+      responses:
+        "200":
+          description: complete file committed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [size, sha256]
+                properties:
+                  size: { type: integer, minimum: 0, maximum: 1073741824 }
+                  sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        "400": { description: invalid path, mode, size or body }
+        "409": { description: machine not running, old init, or transfer limit reached }
   /v1/machines/{id}/logs:
     parameters:
       - { $ref: "#/components/parameters/id" }

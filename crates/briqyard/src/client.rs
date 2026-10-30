@@ -16,6 +16,124 @@ pub(super) const WATCH_SILENCE: Duration = Duration::from_secs(90);
 pub(super) const UPGRADE_TIMEOUT: Duration = Duration::from_secs(2400);
 
 impl Client {
+    fn file_request(
+        &self,
+        method: reqwest::Method,
+        id: &str,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder> {
+        api::files::check_path(path).map_err(|e| anyhow!(e))?;
+        let mut url = url::Url::parse(&format!("{}/v1/machines/{id}/files/content", self.base))?;
+        url.query_pairs_mut().append_pair("path", path);
+        let mut request = self
+            .http
+            .request(method, url)
+            .timeout(Duration::from_secs(api::files::TRANSFER_SEC));
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        Ok(request)
+    }
+
+    async fn file_capabilities(&self, id: &str) -> Result<api::files::FileCapabilities> {
+        self.call(
+            reqwest::Method::GET,
+            &format!("/v1/machines/{id}/files/capabilities"),
+            NONE,
+        )
+        .await
+    }
+
+    pub(super) async fn put_file(&self, id: &str, local: &str, path: &str) -> Result<()> {
+        let caps = self.file_capabilities(id).await?;
+        let file = tokio::fs::File::open(local)
+            .await
+            .with_context(|| local.to_string())?;
+        let metadata = file.metadata().await?;
+        if !metadata.is_file() {
+            bail!("{local}: need a regular file");
+        }
+        if !caps.file_stream_v1 {
+            if metadata.len() > api::files::LEGACY_MAX_SIZE {
+                bail!("init {} supports files only through 1 MiB; an image change installs streaming support", caps.init_version);
+            }
+            use tokio::io::AsyncReadExt;
+            let mut data = Vec::new();
+            file.take(api::files::LEGACY_MAX_SIZE + 1)
+                .read_to_end(&mut data)
+                .await?;
+            if data.len() as u64 > api::files::LEGACY_MAX_SIZE {
+                bail!("legacy file exceeds 1 MiB; an image change installs streaming support");
+            }
+            self.raw(
+                reqwest::Method::PUT,
+                &format!("/v1/machines/{id}/files"),
+                Some(&api::PutFileRequest {
+                    path: path.into(),
+                    base64: api::guest::base64_encode(&data),
+                    mode: None,
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
+        api::files::check_size(metadata.len()).map_err(|e| anyhow!(e))?;
+        let response = self
+            .file_request(reqwest::Method::PUT, id, path)?
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(reqwest::header::CONTENT_LENGTH, metadata.len())
+            .body(reqwest::Body::wrap_stream(
+                tokio_util::io::ReaderStream::with_capacity(file, api::files::CHUNK_SIZE),
+            ))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(refusal(response).await);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn get_file(&self, id: &str, path: &str) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let caps = self.file_capabilities(id).await?;
+        if !caps.file_stream_v1 {
+            let mut query = url::form_urlencoded::Serializer::new(String::new());
+            query.append_pair("path", path);
+            let response = self
+                .send(
+                    reqwest::Method::GET,
+                    &format!("/v1/machines/{id}/files?{}", query.finish()),
+                    NONE,
+                    Some(CALL_TIMEOUT),
+                )
+                .await?;
+            let file: api::FileResponse =
+                serde_json::from_slice(&bounded_legacy_json(response).await?)?;
+            let data = api::files::legacy_bytes(&file.base64).map_err(|e| anyhow!(e))?;
+            let mut stdout = tokio::io::stdout();
+            stdout.write_all(&data).await?;
+            stdout.flush().await?;
+            return Ok(());
+        }
+        let mut response = self
+            .file_request(reqwest::Method::GET, id, path)?
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(refusal(response).await);
+        }
+        let size = response
+            .content_length()
+            .ok_or_else(|| anyhow!("file response omitted Content-Length"))?;
+        api::files::check_size(size).map_err(|e| anyhow!(e))?;
+        let mut stdout = tokio::io::stdout();
+        while let Some(chunk) = response.chunk().await? {
+            stdout.write_all(&chunk).await?;
+        }
+        stdout.flush().await?;
+        Ok(())
+    }
+
     pub(super) async fn call<T: serde::de::DeserializeOwned>(
         &self,
         method: reqwest::Method,
@@ -148,6 +266,18 @@ impl Client {
             }
         }
     }
+}
+
+/// Bound the encoded response before JSON parsing or base64 allocation.
+async fn bounded_legacy_json(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    let mut data = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if chunk.len() > api::files::LEGACY_MAX_JSON.saturating_sub(data.len()) {
+            bail!("legacy file response exceeds 1 MiB; an image change installs streaming support");
+        }
+        data.extend_from_slice(&chunk);
+    }
+    Ok(data)
 }
 
 /// The error an answer that is not a success carries: its `ApiError`, else its status and body.

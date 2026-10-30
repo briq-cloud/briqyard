@@ -66,6 +66,7 @@ cleanup() {
       sleep 2
     done
   done
+  [ -z "${STREAM_FILES:-}" ] || rm -rf "$STREAM_FILES"
   suite_early_end "$rc"
 }
 trap cleanup EXIT
@@ -88,6 +89,17 @@ check "stderr"       '[ "$(briqyard machine exec "$A" -- sh -c "echo e >&2" 2>&1
 check "timeout"      'out=$(briqyard machine exec --timeout 2s "$A" -- sleep 30 2>&1 || true); echo "$out" | grep -q "timed out"'
 echo hello-file > /tmp/by-e2e.txt
 check "put/get file" 'briqyard machine put "$A" /tmp/by-e2e.txt /root/f.txt && [ "$(briqyard machine get-file "$A" /root/f.txt)" = hello-file ]'
+# Raw streams exceed both the JSON request bound and the guest frame bound (ADR 0061).
+STREAM_FILES=$(mktemp -d)
+dd if=/dev/urandom of="$STREAM_FILES/input" bs=1M count=5 status=none
+: > "$STREAM_FILES/empty"
+check "raw file: 5 MiB binary and an encoded path" 'briqyard machine put "$A" "$STREAM_FILES/input" "/root/a & b.bin" && briqyard machine get-file "$A" "/root/a & b.bin" > "$STREAM_FILES/output" && cmp "$STREAM_FILES/input" "$STREAM_FILES/output"'
+check "raw file: empty replaces nonempty" 'briqyard machine put "$A" "$STREAM_FILES/empty" "/root/a & b.bin" && [ -z "$(briqyard machine get-file "$A" "/root/a & b.bin")" ]'
+check "raw file: mode applied" '[ "$("${CURL[@]}" -s -o /dev/null -w "%{http_code}" -X PUT ${auth[@]+"${auth[@]}"} --data-binary @"$STREAM_FILES/empty" "$BRIQYARD_URL/v1/machines/$A/files/content?path=%2Froot%2Fmode&mode=0600")" = 200 ] && [ "$(briqyard machine exec "$A" -- stat -c %a /root/mode)" = 600 ]'
+check "raw file: unknown length, guest hash and preserved mode" '"${CURL[@]}" -fsS -X PUT ${auth[@]+"${auth[@]}"} -H "Transfer-Encoding: chunked" --data-binary @"$STREAM_FILES/input" "$BRIQYARD_URL/v1/machines/$A/files/content?path=%2Froot%2Fmode" > "$STREAM_FILES/result" && [ "$(jq -r .size "$STREAM_FILES/result")" = 5242880 ] && [ "$(jq -r .sha256 "$STREAM_FILES/result")" = "$(sha256sum "$STREAM_FILES/input" | cut -d " " -f1)" ] && [ "$(briqyard machine exec "$A" -- stat -c %a /root/mode)" = 600 ]'
+briqyard machine exec "$A" -- ln -s /root /tmp/stream-link
+check "raw file: parent symlink refused" '! briqyard machine put "$A" "$STREAM_FILES/empty" /tmp/stream-link/escaped 2>/dev/null && briqyard machine exec "$A" -- test ! -e /root/escaped'
+check "raw file: traversal refused" '! briqyard machine put "$A" "$STREAM_FILES/empty" /root/../escape 2>/dev/null'
 check "own name"     'briqyard machine exec "$A" -- nslookup alp.internal 2>&1 | grep -q "10\.6[4-9]\."'
 check "egress"       'briqyard machine exec "$A" -- wget -qO- -T 10 https://example.com | grep -qi "example domain"'
 check "logs"         'briqyard machine logs "$A" --limit 5000 | grep -q "\[briqyard\] started"'

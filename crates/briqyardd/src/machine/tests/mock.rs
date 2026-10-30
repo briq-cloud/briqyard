@@ -73,6 +73,7 @@ pub(super) struct Mock {
     pub(super) vmm_version: Mutex<String>,
     /// The version the guests' inits answer with.
     pub(super) init_version: Mutex<String>,
+    pub(super) file_stream_v1: AtomicBool,
     /// The limits each machine's disks have now: given at boot, changed live, and
     /// whether the volume was given them too.
     pub(super) disks: Mutex<HashMap<String, (fc::DiskRate, bool)>>,
@@ -110,6 +111,7 @@ impl Mock {
             booted: Mutex::new(HashMap::new()),
             vmm_version: Mutex::new("v1.17.0/test".into()),
             init_version: Mutex::new("0.1.0+init".into()),
+            file_stream_v1: AtomicBool::new(false),
             disks: Mutex::new(HashMap::new()),
             roots: Mutex::new(HashMap::new()),
             refuse_disk_rate: AtomicBool::new(false),
@@ -442,6 +444,20 @@ impl fc::Vmm for Mock {
 
 #[async_trait::async_trait]
 impl guestc::Guest for Mock {
+    async fn ping(&self, vsock: &Path) -> Result<guest::Response> {
+        let (pid, _, exited) = self.proc_at(vsock)?;
+        self.record(format!("ping {pid}"));
+        if *exited.borrow() {
+            return Err(guestc::Unreachable("guest exited".into()).into());
+        }
+        Ok(guest::Response {
+            kind: "pong".into(),
+            version: self.init_version.lock().unwrap().clone(),
+            file_stream_v1: self.file_stream_v1.load(Relaxed),
+            ..Default::default()
+        })
+    }
+
     /// Answers as the real wait does: only at the deadline when the init is silent.
     async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<String> {
         let (pid, boots, exited) = self.proc_at(vsock)?;

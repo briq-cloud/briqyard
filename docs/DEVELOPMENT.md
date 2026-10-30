@@ -309,7 +309,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   token). What still needs the host: a namespace's first create (its bridge and
   the DNS listener on the gateway), a volume (`mkfs.ext4`), the jailer, real `zfs send` and
   `receive`, an image pull and its event, the API handlers; those stay with the e2e suite).
-- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, files, a create
+- `hack/e2e.sh`: the end-to-end suite against a running daemon: boot, exec, raw files above the JSON/frame bounds, atomic file replacement and safe paths, a create
   answered at once (ADR 0048: 201 `creating`, running after its pull, `pulling` then `created`,
   sent again a 409 with the first, an image on the host, a pull that fails `pull_failed`), image
   layers (busybox's hard links, Debian's merged `/usr`), an image's user with a supplementary
@@ -373,7 +373,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   into another namespace and a fork into one (ADR 0056: a rename with the address, the
   uptime marker and the disk kept; into a namespace that exists a new address, a boot and the
   neighbour reached by name; a `moved` event in each namespace; the fork on a network of its own
-  with its source's disk). 257 checks, 253 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  with its source's disk). 263 checks, 259 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl

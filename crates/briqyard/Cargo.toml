@@ -17,6 +17,8 @@ tokio = { workspace = true }
 humantime = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+tokio-util = { workspace = true }
+url = { workspace = true }
 libc = { workspace = true }
 tokio-tungstenite = { workspace = true }
 

@@ -110,12 +110,14 @@ where
                     uptime,
                     main_pid,
                     version: briqyard_api::VERSION.into(),
+                    file_stream_v1: true,
                     ..Default::default()
                 },
             )
             .await;
         }
         "exec" => exec_op(&st, input, stream, req).await,
+        "put_stream" | "get_stream" => files::serve(input, stream, req).await,
         "put" => {
             let res = (|| -> std::io::Result<()> {
                 if let Some(parent) = Path::new(&req.path).parent() {
@@ -198,6 +200,7 @@ mod tests {
         assert_eq!(f[0].main_pid, 42);
         assert!(f[0].uptime > 0.0, "read from /proc/uptime");
         assert_eq!(f[0].version, briqyard_api::VERSION);
+        assert!(f[0].file_stream_v1);
     }
 
     #[tokio::test]
