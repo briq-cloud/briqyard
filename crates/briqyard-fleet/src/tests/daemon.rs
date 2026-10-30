@@ -180,37 +180,29 @@ pub(super) async fn start_daemon_on(
         })
     }
     async fn namespaces(State(d): D) -> Json<Vec<api::Namespace>> {
-        let ms = d.machines.lock().unwrap();
-        let mut ids: Vec<String> = ms.iter().map(|m| m.namespace.clone()).collect();
+        let mut ids: Vec<String> = {
+            let ms = d.machines.lock().unwrap();
+            ms.iter().map(|m| m.namespace.clone()).collect()
+        };
         ids.sort();
         ids.dedup();
-        Json(
-            ids.into_iter()
-                .map(|id| api::Namespace {
-                    id,
-                    subnet: "10.1.0.0/24".into(),
-                    router: "10.1.0.1".into(),
-                    machines: 1,
-                    created_at: Utc::now(),
-                    host: String::new(),
-                    region: String::new(),
-                    gateway: None,
-                })
-                .collect(),
-        )
+        Json(ids.iter().filter_map(|id| namespace_of(&d, id)).collect())
     }
     fn namespace_of(d: &Daemon, id: &str) -> Option<api::Namespace> {
         let machines = d.machines.lock().unwrap();
         let gateway = d.gateways.lock().unwrap().iter().any(|(t, _)| t == id);
         let n = machines.iter().filter(|m| m.namespace == id).count();
+        // A subnet of the daemon's own, so a listing says which host answered.
+        let net = d.id.trim_start_matches('d');
         (gateway || n > 0).then(|| api::Namespace {
             id: id.into(),
-            subnet: "10.1.0.0/24".into(),
-            router: "10.1.0.1".into(),
+            subnet: format!("10.{net}.0.0/24"),
+            router: format!("10.{net}.0.1"),
             machines: n,
             created_at: Utc::now(),
             host: String::new(),
             region: String::new(),
+            host_state: String::new(),
             gateway: gateway.then(|| api::GatewayView {
                 state: api::state::CREATED.into(),
                 ip: "10.1.0.2".into(),
