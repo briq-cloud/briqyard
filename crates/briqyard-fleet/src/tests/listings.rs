@@ -409,3 +409,41 @@ async fn the_namespaces_are_listed_as_their_hosts_know_them() {
     assert!(v[0].get("host_state").is_none(), "{v}");
     assert_eq!(v[2]["host_state"], "unreachable");
 }
+
+#[tokio::test]
+async fn a_host_that_answers_too_late_is_listed_unreachable_at_once() {
+    let (mut f, ds) = fleet_with_daemons(2).await;
+    ds[0].stub.add("t1", "web", 512);
+    ds[1].stub.add("t2", "web", 512);
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        for (t, h) in [("t1", "d1"), ("t2", "d2")] {
+            reg.namespaces.insert(t.into(), h.into());
+        }
+    }
+    // d2 takes the connection and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    f.st.reg.lock().unwrap().hosts.get_mut("d2").unwrap().url =
+        format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((conn, _)) = listener.accept().await {
+            open.push(conn);
+        }
+    });
+    Arc::get_mut(&mut f.st).unwrap().list_timeout = std::time::Duration::from_millis(300);
+    let began = std::time::Instant::now();
+    let (s, _, body) = call(&f.st, "GET", "/v1/namespaces", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+    let ts: Vec<api::Namespace> = serde_json::from_str(&body).unwrap();
+    let got: Vec<_> = ts
+        .iter()
+        .map(|t| (t.id.as_str(), t.machines, t.host_state.as_str()))
+        .collect();
+    assert_eq!(got, [("t1", 1, ""), ("t2", 0, "unreachable")]);
+}

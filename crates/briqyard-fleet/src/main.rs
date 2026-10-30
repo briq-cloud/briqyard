@@ -89,6 +89,8 @@ struct AppState {
     /// Key requests take turns: a key just made is answered, to its host or any other ask,
     /// only once it is written, and taken back when it could not be (ADR 0026).
     key_turn: tokio::sync::Mutex<()>,
+    /// How long a host has to answer a list built from several (`LIST_TIMEOUT`).
+    list_timeout: std::time::Duration,
     /// Restores forwarded and not over: what a backup's key is served for (ADR 0035).
     restores: restores::Restores,
     /// Creates refused for want of room, for an external scaler (ADR 0042).
@@ -191,6 +193,9 @@ type S = State<Arc<AppState>>;
 /// kernel's queue for the next process.
 const DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
 const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+/// What a host is given to answer a list the fleet puts together from several hosts: one that
+/// takes longer is listed as unreachable, so a single host never holds the list.
+const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn main() {
     let args = Args::parse();
@@ -294,6 +299,7 @@ async fn run(args: Args) -> Result<()> {
         upgrade: Default::default(),
         backup: backup::Backup::open(&cfg.backup)?,
         key_turn: Default::default(),
+        list_timeout: LIST_TIMEOUT,
         restores: Default::default(),
         refusals: Default::default(),
         written: Default::default(),

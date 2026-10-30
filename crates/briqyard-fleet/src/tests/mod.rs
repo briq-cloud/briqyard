@@ -44,6 +44,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         upgrade: Default::default(),
         backup,
         key_turn: Default::default(),
+        list_timeout: LIST_TIMEOUT,
         restores: Default::default(),
         refusals: Default::default(),
         written: Default::default(),

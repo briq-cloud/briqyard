@@ -4,8 +4,9 @@ use super::*;
 
 /// The fleet's namespaces: those it pinned, each as its host reports it (subnet, router, machines,
 /// creation time, gateway), with the host and its region. Every host holding one is asked at
-/// once. A namespace whose host is down or does not answer stays listed with what the fleet
-/// knows (its host and region) and `host_state` saying why the rest is missing.
+/// once, each within `LIST_TIMEOUT`. A namespace whose host is down or does not answer stays
+/// listed with what the fleet knows (its host and region) and `host_state` saying why the rest
+/// is missing.
 pub(super) async fn list_namespaces(State(st): S, headers: HeaderMap) -> Json<Vec<api::Namespace>> {
     let pins: Vec<(String, String)> = {
         let reg = st.reg.lock().unwrap();
@@ -72,7 +73,8 @@ pub(super) async fn list_namespaces(State(st): S, headers: HeaderMap) -> Json<Ve
 }
 
 /// What a host lists as its namespaces, or why it cannot: `down` (the fleet marked it so and did
-/// not ask) or `unreachable` (it did not answer, or not with a readable list).
+/// not ask) or `unreachable` (it did not answer within `LIST_TIMEOUT`, or not with a readable
+/// list).
 async fn asked_namespaces(
     st: &AppState,
     host: &HostRec,
@@ -81,15 +83,17 @@ async fn asked_namespaces(
     if host.state == "down" {
         return Err("down");
     }
-    let resp = forward(
+    let asked = forward(
         st,
         host,
         Method::GET,
         "/v1/namespaces",
         headers,
         Bytes::new(),
-    )
-    .await;
+    );
+    let Ok(resp) = tokio::time::timeout(st.list_timeout, asked).await else {
+        return Err("unreachable");
+    };
     if !resp.status().is_success() {
         return Err("unreachable");
     }
