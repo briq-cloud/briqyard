@@ -309,7 +309,12 @@ impl Manager {
         p: &api::Probe,
         mut decide: impl FnMut(&Tally) -> Option<T>,
     ) -> Option<T> {
-        let mut next = first_run(Instant::now(), self.inner.began, p, rand::random());
+        let mut next = first_run(
+            Instant::now(),
+            self.inner.began,
+            p,
+            (self.inner.probe_spread)(),
+        );
         let mut tally = Tally::default();
         loop {
             tokio::time::sleep_until(next).await;

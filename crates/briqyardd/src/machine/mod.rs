@@ -768,6 +768,9 @@ struct Inner {
     /// When this daemon started: a probe that starts within its period of it spreads its
     /// first run (`probes::first_run`).
     began: tokio::time::Instant,
+    /// Where in a period a spread first run lands, 0 to 1 (`probes::first_run`): random in
+    /// production, a fixed sequence in tests.
+    probe_spread: Box<dyn Fn() -> f64 + Send + Sync>,
     /// The hours of usage not closed yet.
     usage: Mutex<Ledger>,
     /// What happened on the host (ADR 0019).
