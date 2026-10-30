@@ -9,6 +9,7 @@ mod config;
 mod create;
 mod forward;
 mod hosts;
+mod join;
 mod lists;
 mod locate;
 mod moves;
@@ -37,6 +38,7 @@ use std::sync::{Arc, Mutex};
 use create::*;
 use forward::*;
 use hosts::*;
+use join::*;
 use lists::*;
 use locate::*;
 use namespaces::*;
@@ -236,6 +238,8 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
         conditions: vec![],
         started: Default::default(),
         pool_key: Default::default(),
+        labels: Default::default(),
+        join_token: String::new(),
         unknown: Default::default(),
         holds: Vec::new(),
     }
@@ -464,6 +468,11 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/hosts", get(list_hosts).post(add_host))
         .route("/v1/hosts/register", post(register_host))
         .route("/v1/hosts/key", post(host_key))
+        .route("/v1/hosts/join", post(join_host))
+        .route("/v1/hosts/tokens", get(list_tokens).post(create_token))
+        .route("/v1/hosts/tokens/:id", axum::routing::delete(revoke_token))
+        .route("/install.sh", get(install_script))
+        .route("/bootstrap-host.sh", get(bootstrap_script))
         .route("/v1/hosts/:id/drain", post(drain_host))
         .route("/v1/hosts/:id/undrain", post(undrain_host))
         .route("/v1/hosts/:id/upgrade", post(upgrade::upgrade_host))
@@ -558,8 +567,16 @@ fn tokens_for<'a>(cfg: &'a config::Config, path: &str) -> Vec<&'a str> {
 async fn auth(State(st): S, req: Request, next: axum::middleware::Next) -> Response {
     let path = req.uri().path().to_string();
     // A heartbeat and a key request present the host's own token, checked against its record
-    // by the handler.
-    let open = path == "/healthz" || path == "/v1/hosts/register" || path == "/v1/hosts/key";
+    // by the handler; a join presents a join token, and the scripts hold no secret (ADR 0059).
+    let open = matches!(
+        path.as_str(),
+        "/healthz"
+            | "/v1/hosts/register"
+            | "/v1/hosts/key"
+            | "/v1/hosts/join"
+            | "/install.sh"
+            | "/bootstrap-host.sh"
+    );
     let tokens = tokens_for(&st.cfg, &path);
     let got = bearer(req.headers()).as_bytes();
     if !open && !tokens.is_empty() && !tokens.iter().any(|t| api::constant_eq(got, t.as_bytes())) {

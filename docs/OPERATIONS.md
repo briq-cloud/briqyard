@@ -492,7 +492,7 @@ An `https://` URL needs its `tls_fingerprint` and a fingerprint needs `https://`
 start otherwise): the fleet accepts that one certificate from the host and nothing else, no CA,
 and refuses a heartbeat reporting another (`tls_mismatch`). A host on plain HTTP (a loopback
 daemon you forwarded) has neither.
-A heartbeat from an address no entry or `host add` expects is refused (`unknown_host`), so no host
+A heartbeat from an address no entry, `host add` or join expects is refused (`unknown_host`), so no host
 can speak for another. The registry is `<state_dir>/registry.json` (`0600`, its directory
 `0700`); a write that fails is an `error` in the fleet's log, and a 500 `registry` on a request
 that had not reached a host yet; once a host acted, its answer stands and the next write (a
@@ -729,6 +729,37 @@ The host is `bootstrapped` once the script succeeds and `ready` at its first hea
 that cannot be installed after `max_attempts` is `failed`, with the last error in its note.
 Without the bootstrap, run the script yourself with `FLEET_URL`, `ADVERTISE` and the
 `BRIQYARD_TOKEN` the fleet holds for the host (an entry under `hosts:`).
+
+#### A server that joins on its own (ADR 0059)
+
+For a server the fleet cannot reach over SSH, or one made from an image: a bootstrap token, as `kubeadm token create`, and one line on the server (needs `bootstrap.enabled` and `bootstrap.release`). A token joins any number of servers until it expires or is revoked.
+
+```bash
+briqyard host token create --address 203.0.113.0/28 --ttl 2h --description "gra racks" --region gra --labels rack=a1   # prints <id>.<secret>, once
+briqyard host token ls                                              # id, state, expiry, uses, last use, description
+briqyard host token revoke ab12cd                                   # no new join takes it; hosts that joined stay
+```
+
+On the server, as root (`fleet.example` is `bootstrap.fleet_url`, as the server reaches it):
+
+```bash
+curl -fsSL --proto '=https' --proto-redir '=https' https://fleet.example/install.sh | FLEET_URL=https://fleet.example JOIN_TOKEN=<id>.<secret> sh
+```
+
+| Variable | |
+|---|---|
+| `FLEET_URL`, `JOIN_TOKEN` | required. `https://` only; `http://` needs `ALLOW_INSECURE_HTTP=1` (the secrets cross in clear) |
+| `HOST_NAME` | the id to join as; default `h_` and the address. A token made with `--host` takes that id only |
+| `BRIQYARD_POOL_DEVICE` | this server's drives; default the fleet's `bootstrap.pool_device` |
+
+| `host token create` | |
+|---|---|
+| `--ttl <duration>` | how long it can be used: `30m`, `2h`, `7d`; default 24 hours; **`--ttl 0` never expires**; at most ten years otherwise. An expired token is refused and listed `expired` |
+| `--description <text>` | free text, one line, shown in `host token ls` |
+| `--address <IP or CIDR>` | **our addition to kubeadm's model.** The join must come from this address or network; from anywhere else the token is refused (the same `invalid_token`, the reason in the fleet's log). Without it, any holder of the token can join from anywhere, as with kubeadm |
+| `--host`, `--region`, `--labels` | the id the host must join as, and the region and labels it is put in |
+
+The token is reusable: each join is counted (`USES`) and the last is shown (host, address, time); every join is also a `warn` line in the fleet's log and in the host's note, both naming the token (the refusal lines are limited to one a minute per address). The fleet keeps the hash of the secret. **A leaked token joins hosts until it expires or is revoked**, and a host that joins is placed workloads once ready and is handed the release credentials (`bootstrap.release_token`) and, through its own host token, `bootstrap.script`: so a token holder reads whatever you wrote in that script, and nothing should be in it that your servers should not all hold. Keep the TTL short, `host token revoke` a token once the servers are in (hosts that joined stay), and **bind it with `--address`** whenever you know where the servers are; leave `--address` out for an image that boots on an address you do not know, and `--ttl 0` for a token you mean to keep in such an image, and revoke it when it leaves use. Expired and revoked tokens stay listed 30 days, with their uses, then are dropped. The call must come from the address the host will serve its API at, and the fleet must see it (its own TLS, or a loopback proxy setting `X-Forwarded-For`); a host on the private network joins over it. The fleet records the host `joining` and answers the settings `host add` would send over SSH. `install.sh` checks the server first (root, Ubuntu, KVM, the drives) and joins last; it then fetches `bootstrap-host.sh` from the fleet, which serves it only to the host that joined, on its own token from its own address (`bootstrap.script` may hold what the fleet cannot vouch for). The script is the one `host add` runs: it downloads the release's binaries and checks them against its `SHA256SUMS`. If the install fails after the join, run the same line again: a new join replaces the `joining` record when it comes from that record's address or with the token that made it (any other join at its id is a `conflict`; a host that heartbeated is never replaced). The host's first heartbeat pins its certificate, which the fleet logs and writes into the host's note: compare it with `briqyardd tls-fingerprint` on the server. The token is printed once, on stdout. The machines' store credentials are written on the host as for any other (`briqyardd.env`, ADR 0041). `host upgrade` reaches a joined host only if the fleet's SSH key is authorized on it.
 
 The fleet is given no SSH host key with the server, so the bootstrap pins the key it sees:
 the first attempt that succeeds appends it to `<state_dir>/known_hosts` and writes its

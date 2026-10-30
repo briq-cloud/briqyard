@@ -119,6 +119,8 @@ briqyard host add <ssh address> --address <API address> --region <region>
 briqyard host upgrade <id> --release <version or URL>   # its machines keep running
 ```
 
+Or let a server join on its own: `briqyard host token create --address <server IP>`, then on the server `curl -fsSL --proto '=https' --proto-redir '=https' https://<fleet>/install.sh | FLEET_URL=https://<fleet> JOIN_TOKEN=<token> sh`.
+
 Step by step, with every option, a fleet and a Mac for development: [docs/INSTALL.md](docs/INSTALL.md).
 TLS, public names and access control come from a proxy in front: [docs/OPERATIONS.md](docs/OPERATIONS.md#a-proxy-in-front).
 

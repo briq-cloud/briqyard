@@ -259,7 +259,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   words), labels, quotas and logs follow (a listing by labels, the quota at create, fork,
   start and the gateway with its message and event, its use; a follow from the start and
   from a cursor, across rotations, ending at the destroy, its heartbeat and shutdown;
-  placement by region and the cross-region refusal through stub hosts in two regions), disk
+  placement by region and the cross-region refusal through stub hosts in two regions), join tokens (reuse and its count, calls at once all counted, expiry and `ttl 0`, revoke, one answer for every refusal, only the address the call came from, the certificate pinned at the first heartbeat, no secret in the registry file or a listing; ADR 0059), disk
   limits (the host's per vCPU under a machine's own at boot, a new size's at the next boot, a
   live change and a refused one, a stopped machine's at its start, the drive and metrics
   requests Firecracker gets, metrics lines added per machine across boots, the jail's

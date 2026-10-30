@@ -320,9 +320,16 @@ pub(super) async fn register_host(
         let mut reg = st.reg.lock().unwrap();
         let call = format!("heartbeat of {}", req.id);
         let rec = the_host(&reg, &req.url, &headers, caller, &call)?;
-        if let Err(why) =
-            registry::tls_matches(&rec.tls_fingerprint, &req.tls_fingerprint, &req.url)
-        {
+        // A host that joined has no certificate pinned yet (ADR 0059): its first heartbeat, made
+        // with its own token from its own address over the fleet's channel, pins the one it
+        // reports. Every other host's pin comes from the bootstrap or the operator.
+        let joining = rec.state == "joining" && rec.tls_fingerprint.is_empty();
+        let pin = if joining {
+            &req.tls_fingerprint
+        } else {
+            &rec.tls_fingerprint
+        };
+        if let Err(why) = registry::tls_matches(pin, &req.tls_fingerprint, &req.url) {
             tracing::warn!(
                 host = rec.id,
                 daemon = req.id,
@@ -334,15 +341,37 @@ pub(super) async fn register_host(
             return Err(err(StatusCode::FORBIDDEN, "tls_mismatch", why));
         }
         let id = rec.id.clone();
+        if joining {
+            // Trust on first use, made auditable: the operator compares this with
+            // `briqyardd tls-fingerprint` on the server.
+            tracing::warn!(
+                host = id,
+                peer = caller.peer.map(|p| p.to_string()).unwrap_or_default(),
+                fingerprint = req.tls_fingerprint,
+                "certificate pinned at the host's first heartbeat"
+            );
+        }
+        let pinned_note = joining.then(|| {
+            format!(
+                "{}; api certificate {} pinned at its first heartbeat ({})",
+                rec.note,
+                req.tls_fingerprint,
+                now.to_rfc3339()
+            )
+        });
         // What the host reports, applied to its record: the id, token, pin, provider fields
         // and state are the record's own (`heartbeat` leaves them).
         reg.heartbeat(
             HostRec {
-                id,
+                id: id.clone(),
                 url: req.url,
                 ssh: String::new(),
                 token: String::new(),
-                tls_fingerprint: String::new(),
+                tls_fingerprint: if joining {
+                    req.tls_fingerprint.clone()
+                } else {
+                    String::new()
+                },
                 region: req.region,
                 provider: String::new(),
                 state: String::new(),
@@ -359,11 +388,18 @@ pub(super) async fn register_host(
                 conditions: req.conditions,
                 started: req.started,
                 pool_key: Default::default(),
+                labels: Default::default(),
+                join_token: String::new(),
                 unknown: Default::default(),
                 holds: Vec::new(),
             },
             now,
         );
+        if let Some(note) = pinned_note {
+            if let Some(h) = reg.hosts.get_mut(&id) {
+                h.note = note;
+            }
+        }
     }
     st.save().await.map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -441,6 +477,23 @@ pub(super) async fn add_host(
     Ok((StatusCode::ACCEPTED, Json(h.to_api())).into_response())
 }
 
+/// The id a host is given: the one asked for, else `h_` and its address.
+pub(super) fn host_id(asked: String, ip: std::net::Ipv4Addr) -> Result<String, Refusal> {
+    let id = if asked.is_empty() {
+        format!("h_{}", ip.to_string().replace(['.', ':'], "-"))
+    } else {
+        asked
+    };
+    if !api::valid_id(&id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            format!("id {id:?}: a-z, 0-9, _ and -"),
+        ));
+    }
+    Ok(id)
+}
+
 /// The record of a server added by hand, or why the request is refused.
 pub(super) fn new_added_host(
     b: &config::Bootstrap,
@@ -484,14 +537,7 @@ pub(super) fn new_added_host(
             b.private_network
         )));
     }
-    let id = if req.id.is_empty() {
-        format!("h_{}", ip.to_string().replace(['.', ':'], "-"))
-    } else {
-        req.id
-    };
-    if !api::valid_id(&id) {
-        return Err(invalid(format!("id {id:?}: a-z, 0-9, _ and -")));
-    }
+    let id = host_id(req.id, ip)?;
     let public_tcp_ports = Some(
         req.public_tcp_ports
             .unwrap_or_else(|| b.public_tcp_ports.clone()),
@@ -525,6 +571,8 @@ pub(super) fn new_added_host(
         conditions: vec![],
         started: Default::default(),
         pool_key: Default::default(),
+        labels: Default::default(),
+        join_token: String::new(),
         unknown: Default::default(),
         holds: Vec::new(),
     })

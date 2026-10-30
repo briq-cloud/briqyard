@@ -6,6 +6,9 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+mod tokens;
+pub use tokens::*;
+
 /// What a registry or host record holds that this fleet does not know, kept as it was and
 /// written back: a fleet older than its registry (a rollback) loses nothing at its next write.
 pub type Unknown = BTreeMap<String, serde_json::Value>;
@@ -64,10 +67,10 @@ pub struct HostRec {
     pub tls_fingerprint: String,
     #[serde(default)]
     pub region: String,
-    /// How the host came: `static` (`hosts:`) or `manual` (`host add`).
+    /// How the host came: `static` (`hosts:`), `manual` (`host add`) or `join` (a join token).
     #[serde(default)]
     pub provider: String,
-    /// ready, draining, retiring, upgrading, down, provisioning, bootstrapped, failed
+    /// ready, draining, retiring, upgrading, down, provisioning, bootstrapped, joining, failed
     pub state: String,
     #[serde(default)]
     pub capacity: Capacity,
@@ -99,6 +102,12 @@ pub struct HostRec {
     /// Memory and disk pressure, from the last heartbeat (ADR 0021).
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    /// The labels of the join token the host came with (ADR 0059).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// The id of the join token the host came with (ADR 0059); empty: it did not join.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub join_token: String,
     /// The key of the host's pool (ADR 0026), made the first time the host asks for it and
     /// served to that host alone; never in `to_api`, gone with the record.
     #[serde(default, skip_serializing_if = "PoolKey::is_empty")]
@@ -202,6 +211,7 @@ impl HostRec {
             version: self.version.clone(),
             note: self.note.clone(),
             tls_fingerprint: self.tls_fingerprint.clone(),
+            labels: self.labels.clone(),
             public_tcp_ports: self.public_tcp_ports.clone().unwrap_or_default(),
             conditions: self.conditions.clone(),
             started: self.started,
@@ -251,7 +261,7 @@ pub fn tls_matches(pinned: &str, reported: &str, url: &str) -> Result<(), String
         return Err(if pinned.is_empty() {
             format!(
                 "the host serves TLS (certificate {reported}) and no fingerprint is pinned for it: \
-                 the bootstrap pins it, or hosts[].tls_fingerprint"
+                 the bootstrap pins it (a host that joined, at its first heartbeat), or hosts[].tls_fingerprint"
             )
         } else if reported.is_empty() {
             format!("the host serves plain HTTP and certificate {pinned} is pinned for it")
@@ -316,6 +326,9 @@ pub struct Registry {
     /// key, so the key outlives the record, for a restore on another host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_keys: Vec<RetiredKey>,
+    /// The join tokens (ADR 0059): their hashes, never a secret.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub join_tokens: Vec<JoinTokenRec>,
     /// Fields this fleet does not know, written back as they were.
     #[serde(flatten)]
     pub unknown: Unknown,
