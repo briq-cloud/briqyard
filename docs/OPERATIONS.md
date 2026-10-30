@@ -382,6 +382,8 @@ snapshot, or is whole.
   itself (`image_removed` events).
 - Logs: one JSON line per event on stderr (journald under systemd): `journalctl -u briqyardd
   -o cat | jq`. Level with `BRIQYARD_LOG=debug` (or any `tracing` filter).
+- Suspend timing: opt-in debug stages and offline analysis in [Suspend profiling](SUSPEND-PROFILING.md)
+  (ADR 0063); snapshot syncing and stop deadlines are unchanged.
 - A machine: `briqyard machine get <id>` (state, why it stopped, its process's exit), `briqyard
   machine logs <id>` (its console; `-f` streams each new line until the machine is destroyed).
   `briqyard machine ls -l app=web -l tier` selects by labels (its `metadata`; `run -l K=V` sets them).
