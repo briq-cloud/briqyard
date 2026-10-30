@@ -62,6 +62,13 @@ briqyard host ls
 briqyard host upgrade <id> --release <version or URL>   # drained, upgraded, back; its machines keep running
 ```
 
+A server the fleet cannot reach over SSH joins on its own, with a one-time token ([OPERATIONS.md, A server that joins on its own](OPERATIONS.md#a-server-that-joins-on-its-own-adr-0057)):
+
+```bash
+briqyard host token create --ttl 1h        # on your machine
+curl -fsSL https://<fleet>/install.sh | FLEET_URL=https://<fleet> JOIN_TOKEN=<token> sh   # on the server, as root
+```
+
 The fleet buys no server. When a create finds no room, it says where and what ran out on its `/metrics` ([OPERATIONS.md, Capacity signals](OPERATIONS.md#capacity-signals-adr-0042)); you, or a scaler of yours, buy a server and add it.
 
 A first dedicated server with a private network, step by step: [OPERATIONS.md, First OVH host](OPERATIONS.md#first-ovh-host).

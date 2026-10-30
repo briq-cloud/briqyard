@@ -492,7 +492,7 @@ An `https://` URL needs its `tls_fingerprint` and a fingerprint needs `https://`
 start otherwise): the fleet accepts that one certificate from the host and nothing else, no CA,
 and refuses a heartbeat reporting another (`tls_mismatch`). A host on plain HTTP (a loopback
 daemon you forwarded) has neither.
-A heartbeat from an address no entry or `host add` expects is refused (`unknown_host`), so no host
+A heartbeat from an address no entry, `host add` or join expects is refused (`unknown_host`), so no host
 can speak for another. The registry is `<state_dir>/registry.json` (`0600`, its directory
 `0700`); a write that fails is an `error` in the fleet's log, and a 500 `registry` on a request
 that had not reached a host yet; once a host acted, its answer stands and the next write (a
@@ -632,6 +632,30 @@ The host is `bootstrapped` once the script succeeds and `ready` at its first hea
 that cannot be installed after `max_attempts` is `failed`, with the last error in its note.
 Without the bootstrap, run the script yourself with `FLEET_URL`, `ADVERTISE` and the
 `BRIQYARD_TOKEN` the fleet holds for the host (an entry under `hosts:`).
+
+#### A server that joins on its own (ADR 0057)
+
+For a server the fleet cannot reach over SSH, or one made from an image: a one-time token and one line on the server (needs `bootstrap.enabled` and `bootstrap.release`).
+
+```bash
+briqyard host token create --ttl 1h --region gra --labels rack=a1   # prints <id>.<secret>, once
+briqyard host token ls                                              # active, used (by which host), expired, revoked
+briqyard host token revoke ab12cd                                   # a token no host has used
+```
+
+On the server, as root (`fleet.example` is `bootstrap.fleet_url`, as the server reaches it):
+
+```bash
+curl -fsSL https://fleet.example/install.sh | FLEET_URL=https://fleet.example JOIN_TOKEN=<id>.<secret> sh
+```
+
+| Variable | |
+|---|---|
+| `FLEET_URL`, `JOIN_TOKEN` | required. `https://` only; `http://` needs `ALLOW_INSECURE_HTTP=1` (the secrets cross in clear) |
+| `HOST_NAME` | the id to join as; default `h_` and the address. A token made with `--host` takes that id only |
+| `BRIQYARD_POOL_DEVICE` | this server's drives; default the fleet's `bootstrap.pool_device` |
+
+The token lasts an hour by default (at most 30 days), joins one host, and then only shows who used it. The fleet keeps the hash of its secret. The call must come from the address the host will serve its API at, and the fleet must see it (its own TLS, or a loopback proxy setting `X-Forwarded-For`); a host on the private network joins over it. The fleet records the host `joining` and answers the settings `host add` would send over SSH; `install.sh` then runs the same `bootstrap-host.sh` (the fleet serves it at `/bootstrap-host.sh`), which downloads the release's binaries and checks them against its `SHA256SUMS`. The host's first heartbeat pins its certificate and makes it `ready`. The machines' store credentials are written on the host as for any other (`briqyardd.env`, ADR 0041). `host upgrade` reaches a joined host only if the fleet's SSH key is authorized on it.
 
 The fleet is given no SSH host key with the server, so the bootstrap pins the key it sees:
 the first attempt that succeeds appends it to `<state_dir>/known_hosts` and writes its
