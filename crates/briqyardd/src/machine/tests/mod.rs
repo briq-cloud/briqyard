@@ -58,6 +58,7 @@ pub(in crate::machine) fn record() -> Record {
         size: api::Size {
             vcpus: 1,
             memory_mb: 512,
+            cpu_millis: None,
         },
         volume: Some(api::VolumeSpec {
             size_gb: 2,
@@ -402,6 +403,7 @@ impl fc::Vmm for Mock {
         let size = api::Size {
             vcpus: b.vcpus,
             memory_mb: b.memory_mb,
+            cpu_millis: None,
         };
         self.booted.lock().unwrap().insert(b.id.clone(), size);
         self.disks
@@ -813,6 +815,7 @@ pub(super) async fn harness_with(
         cfg.capacity = crate::config::Capacity {
             memory_mb,
             vcpus: 1000,
+
             ..Default::default()
         };
         cfg.egress_limits = egress_limits;
@@ -948,6 +951,7 @@ impl Harness {
             size: api::Size {
                 vcpus: 1,
                 memory_mb: 256,
+                cpu_millis: None,
             },
             sleep: "30m".into(),
             ..Default::default()

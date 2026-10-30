@@ -322,12 +322,17 @@ async def main():
 asyncio.run(main())
 '
 gw() { briqyard namespace get "$GT" | jq -r ".gateway.$1"; }
-setgw() { briqyard namespace gateway set "$GT" --image python:3.12-alpine --port 3128 -- python3 -c "$PROXY" | jq -r .gateway.machine_id; }
+setgw() { briqyard namespace gateway set "$GT" --image python:3.12-alpine --port 3128 --vcpus 1 --memory 128 --cpu-millis 250 -- python3 -c "$PROXY" | jq -r .gateway.machine_id; }
 GW=$(setgw)
 check "gateway made, not started"   '[ "$(gw state)" = created ]'
 check "via:gateway needs a gateway" '! briqyard machine run --image alpine:3.20 --name nogw --namespace "$T-nogw" --memory 128 --egress via:gateway -- sleep 60 >/dev/null 2>&1'
+GWCPU_BEFORE=$(briqyard status | jq .used.cpu_millis)
 C=$(briqyard machine run --image python:3.12-alpine --name gwc --namespace "$GT" --memory 256 --egress via:gateway -- sleep 3600 | jq -r .id)
 check "its start boots the gateway" '[ "$(gw state)" = running ]'
+check "gateway: fractional size"    '[ "$(briqyard machine get "$GW" | jq -c "[.size.vcpus,.size.memory_mb,.size.cpu_millis]")" = "[1,128,250]" ]'
+check "gateway: CPU quota enforced" '[ "$(sudo -n cat /sys/fs/cgroup/firecracker/${GW//_/-}/cpu.max)" = "25000 100000" ]'
+check "gateway: CPU reservation"    '[ "$(( $(briqyard status | jq .used.cpu_millis) - GWCPU_BEFORE ))" = 1250 ]'
+
 check "gateway not in machine ls"   '! briqyard machine ls | grep -q "$GW" && [ "$(briqyard namespace get "$GT" | jq .machines)" = 1 ]'
 check "gateway console readable"    'briqyard machine logs "$GW" --limit 5000 | grep -q "\[briqyard\] started"'
 # busybox wget sends a proxy a plain GET, not CONNECT: Python's client does what any SDK does.

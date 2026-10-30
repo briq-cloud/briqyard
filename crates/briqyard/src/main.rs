@@ -355,6 +355,9 @@ struct RunArgs {
     labels: Vec<String>,
     #[arg(long, default_value_t = 1)]
     vcpus: u32,
+    /// CPU-time limit in millicores; omitted is 1000 per guest vCPU
+    #[arg(long)]
+    cpu_millis: Option<u32>,
     /// Memory in MB
     #[arg(long, default_value_t = 512)]
     memory: u32,
@@ -412,6 +415,8 @@ struct SetArgs {
     image: Option<String>,
     #[arg(long)]
     vcpus: Option<u32>,
+    #[arg(long)]
+    cpu_millis: Option<u32>,
     /// Memory in MB
     #[arg(long)]
     memory: Option<u32>,
@@ -442,14 +447,22 @@ impl SetArgs {
     /// The PATCH, checked as the daemon checks it. `size_now` fills the half of the size the
     /// flags leave out.
     fn request(&self, size_now: Option<api::Size>) -> Result<api::UpdateMachineRequest> {
-        let size = match (self.vcpus, self.memory, size_now) {
-            (None, None, _) => None,
-            (Some(vcpus), Some(memory_mb), _) => Some(api::Size { vcpus, memory_mb }),
-            (vcpus, memory, Some(now)) => Some(api::Size {
-                vcpus: vcpus.unwrap_or(now.vcpus),
-                memory_mb: memory.unwrap_or(now.memory_mb),
-            }),
-            (_, _, None) => bail!("--vcpus or --memory alone needs the machine's size"),
+        let size = if self.vcpus.is_none() && self.memory.is_none() && self.cpu_millis.is_none() {
+            None
+        } else {
+            let vcpus = self
+                .vcpus
+                .or(size_now.map(|s| s.vcpus))
+                .ok_or_else(|| anyhow!("--vcpus or --memory alone needs the machine's size"))?;
+            let memory_mb = self
+                .memory
+                .or(size_now.map(|s| s.memory_mb))
+                .ok_or_else(|| anyhow!("--vcpus or --memory alone needs the machine's size"))?;
+            Some(api::Size {
+                vcpus,
+                memory_mb,
+                cpu_millis: self.cpu_millis.or(size_now.and_then(|s| s.cpu_millis)),
+            })
         };
         let spec = api::SpecChange {
             image: self.image.clone(),
@@ -602,6 +615,8 @@ enum NamespaceCmd {
         /// Through a fleet: where to place a namespace that has no host yet
         #[arg(long)]
         region: Option<String>,
+        #[arg(long)]
+        cpu_millis: Option<u32>,
     },
 }
 
@@ -617,6 +632,12 @@ enum GatewayCmd {
 #[derive(Args)]
 struct GatewaySetArgs {
     namespace: String,
+    #[arg(long)]
+    vcpus: Option<u32>,
+    #[arg(long)]
+    memory: Option<u32>,
+    #[arg(long)]
+    cpu_millis: Option<u32>,
     /// Through a fleet: where to place a namespace that has no host yet
     #[arg(long)]
     region: Option<String>,
@@ -1043,6 +1064,7 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     size: api::Size {
                         vcpus: a.vcpus,
                         memory_mb: a.memory,
+                        cpu_millis: a.cpu_millis,
                     },
                     volume,
                     ports: a.ports.clone(),
@@ -1266,7 +1288,10 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 std::io::stdout().write_all(&data)?;
             }
             MachineCmd::Set(a) => {
-                let half = a.vcpus.is_some() != a.memory.is_some();
+                let changing_size =
+                    a.vcpus.is_some() || a.memory.is_some() || a.cpu_millis.is_some();
+                let half = changing_size
+                    && (a.vcpus.is_none() || a.memory.is_none() || a.cpu_millis.is_none());
                 let size_now = match half {
                     true => {
                         let m: api::Machine =
@@ -1478,6 +1503,9 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             NamespaceCmd::Gateway(GatewayCmd::Set(a)) => {
                 let GatewaySetArgs {
                     namespace,
+                    vcpus,
+                    memory,
+                    cpu_millis,
                     region,
                     start,
                     image,
@@ -1488,6 +1516,15 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     cmd,
                 } = *a;
                 let spec = api::GatewaySpec {
+                    size: if vcpus.is_some() || memory.is_some() || cpu_millis.is_some() {
+                        Some(api::Size {
+                            vcpus: vcpus.unwrap_or(1),
+                            memory_mb: memory.unwrap_or(256),
+                            cpu_millis,
+                        })
+                    } else {
+                        None
+                    },
                     image,
                     cmd: if cmd.is_empty() { None } else { Some(cmd) },
                     env: env_args(&envs)?,
@@ -1524,12 +1561,14 @@ async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 vcpus,
                 disk_gb,
                 region,
+                cpu_millis,
             } => {
                 let q = api::Quota {
                     machines,
                     memory_mb,
                     vcpus,
                     disk_gb,
+                    cpu_millis,
                 };
                 let shown: api::NamespaceQuota = if q == api::Quota::default() {
                     c.call(GET, &format!("/v1/namespaces/{id}/quota"), NONE)
@@ -1949,7 +1988,7 @@ fn reason_of(m: &api::Machine) -> &str {
 
 fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
+        "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
         "ID",
         "NAMESPACE",
         "NAME",
@@ -1958,6 +1997,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
         "READY",
         "IP",
         "SIZE",
+        "CPU m",
         "SLEEP",
         "EGRESS",
         "LIMITS",
@@ -1975,7 +2015,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             None => "-".into(),
         };
         out.push_str(&format!(
-            "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {}\n",
+            "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {}\n",
             m.id,
             m.namespace,
             m.name,
@@ -1984,6 +2024,7 @@ fn machine_table(ms: &[api::Machine]) -> String {
             if m.ready { "yes" } else { "no" },
             m.ip,
             format!("{}c/{}M", m.size.vcpus, m.size.memory_mb),
+            m.size.cpu_millis(),
             m.sleep,
             egress_label(&m.egress),
             limits_label(&m.limits),
@@ -2088,7 +2129,7 @@ fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, String)>) {
 fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
         "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<10} {:<20} LAST SEEN\n",
-        "ID", "URL", "STATE", "REGION", "MEMORY MB", "VCPUS", "MACHINES", "NAMESPACES", "VERSION"
+        "ID", "URL", "STATE", "REGION", "MEMORY MB", "CPU m", "MACHINES", "NAMESPACES", "VERSION"
     );
     for h in hs {
         out.push_str(&format!(
@@ -2098,7 +2139,7 @@ fn host_table(hs: &[api::Host]) -> String {
             h.state,
             if h.region.is_empty() { "-" } else { &h.region },
             format!("{}/{}", h.used.memory_mb, h.capacity.memory_mb),
-            format!("{}/{}", h.used.vcpus, h.capacity.vcpus),
+            format!("{}/{}", h.used.cpu_millis(), h.capacity.cpu_millis()),
             h.machines,
             h.namespaces.len(),
             if h.version.is_empty() {
@@ -2335,6 +2376,7 @@ fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
         "Size",
         format!("{} vCPU, {} MB", m.size.vcpus, m.size.memory_mb),
     ));
+    lines.push(("CPU limit", format!("{}m", m.size.cpu_millis())));
     if let Some(v) = &m.volume {
         lines.push(("Volume", format!("{} GB at {}", v.size_gb, v.mount)));
     }

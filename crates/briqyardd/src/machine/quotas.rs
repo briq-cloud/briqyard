@@ -10,6 +10,16 @@ pub(super) fn admit(used: u32, cap: u32, need: u32) -> Result<(), MError> {
     }
 }
 
+/// The CPU-time budget is reserved under the same lock as memory.
+pub(super) fn admit_cpu(used: u32, cap: u32, need: u32) -> Result<(), MError> {
+    match used.checked_add(need) {
+        Some(total) if total <= cap => Ok(()),
+        _ => Err(MError::Capacity(format!(
+            "{used} CPU millis used of {cap}, {need} more asked"
+        ))),
+    }
+}
+
 /// A limit of a namespace's quota that a create or a start would pass (ADR 0025).
 #[derive(Debug, PartialEq)]
 pub(super) struct Exceeded {
@@ -50,7 +60,12 @@ pub(super) fn over_quota(
         ("machines", quota.machines, used.machines, need.machines),
         ("disk_gb", quota.disk_gb, used.disk_gb, need.disk_gb),
         ("memory_mb", quota.memory_mb, used.memory_mb, need.memory_mb),
-        ("vcpus", quota.vcpus, used.vcpus, need.vcpus),
+        (
+            "cpu_millis",
+            quota.cpu_millis(),
+            used.cpu_millis(),
+            need.cpu_millis(),
+        ),
     ]
     .into_iter()
     .find_map(|(resource, limit, used, need)| {
@@ -73,6 +88,7 @@ pub(super) fn quota_need(r: &Record, starting: bool) -> api::QuotaUse {
         machines: 1,
         memory_mb: if runs { r.size.memory_mb } else { 0 },
         vcpus: if runs { r.size.vcpus } else { 0 },
+        cpu_millis: Some(if runs { r.size.cpu_millis() } else { 0 }),
         disk_gb: r.volume.as_ref().map_or(0, |v| v.size_gb),
     }
 }
@@ -82,13 +98,17 @@ pub(super) fn namespace_use(
     machines: &HashMap<String, Arc<Entry>>,
     namespace: &str,
 ) -> api::QuotaUse {
-    let mut u = api::QuotaUse::default();
+    let mut u = api::QuotaUse {
+        cpu_millis: Some(0),
+        ..Default::default()
+    };
     for e in machines.values() {
         let r = e.rec.lock().unwrap();
         if r.namespace == namespace {
             let n = quota_need(&r, false);
             u.machines += n.machines;
             u.memory_mb += n.memory_mb;
+            u.cpu_millis = Some(u.cpu_millis().saturating_add(n.cpu_millis()));
             u.vcpus += n.vcpus;
             u.disk_gb += n.disk_gb;
         }
@@ -138,13 +158,17 @@ impl Manager {
 /// What the machines in the map hold now: memory and vCPUs committed (a create that will start
 /// them included, ADR 0048), and how many are up.
 pub(super) fn committed(machines: &HashMap<String, Arc<Entry>>) -> (api::Capacity, usize) {
-    let mut used = api::Capacity::default();
+    let mut used = api::Capacity {
+        cpu_millis: Some(0),
+        ..Default::default()
+    };
     let mut up = 0;
     for e in machines.values() {
         let r = e.rec.lock().unwrap();
         if commits_memory(&r) {
             up += usize::from(holds_memory(&r.state));
             used.memory_mb += r.size.memory_mb;
+            used.cpu_millis = Some(used.cpu_millis().saturating_add(r.size.cpu_millis()));
             used.vcpus += r.size.vcpus;
         }
     }

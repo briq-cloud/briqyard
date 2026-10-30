@@ -121,6 +121,7 @@ pub struct HostRec {
 pub struct Hold {
     id: u64,
     memory_mb: u32,
+    cpu_millis: u32,
     disk_mb: u64,
     /// What it took from `disk_free_mb`: less than `disk_mb` when the host had less.
     took_disk_mb: u64,
@@ -147,8 +148,19 @@ impl HostRec {
         self.capacity.memory_mb.saturating_sub(self.used.memory_mb)
     }
 
+    pub fn free_cpu_millis(&self) -> u32 {
+        self.capacity
+            .cpu_millis()
+            .saturating_sub(self.used.cpu_millis())
+    }
+
+    fn has_cpu(&self, need: u32) -> bool {
+        self.capacity.cpu_millis.is_some() && self.free_cpu_millis() >= need
+    }
+
     /// Takes what a hold asks from the host's figures and keeps it.
     fn take(&mut self, mut hold: Hold) {
+        self.used.cpu_millis = Some(self.used.cpu_millis().saturating_add(hold.cpu_millis));
         self.used.memory_mb = self.used.memory_mb.saturating_add(hold.memory_mb);
         hold.took_disk_mb = hold.disk_mb.min(self.disk_free_mb);
         self.disk_free_mb -= hold.took_disk_mb;
@@ -462,6 +474,7 @@ impl Registry {
         region: &str,
         need_mb: u32,
         need_disk_mb: u64,
+        need_cpu_millis: u32,
         policy: &Policy,
     ) -> Option<String> {
         let id = match self.namespaces.get(namespace) {
@@ -475,6 +488,7 @@ impl Registry {
                             && (region.is_empty() || h.region == region)
                             && h.free_memory_mb() >= need_mb
                             && h.has_disk(need_disk_mb)
+                            && h.has_cpu(need_cpu_millis)
                     })
                     .max_by_key(|h| h.free_memory_mb())?;
                 let id = best.id.clone();
@@ -489,7 +503,13 @@ impl Registry {
     /// Counts a machine about to be created on a host as used (ADR 0044): its id, for the
     /// caller to `made` once the host made it, or to `release` when it did not. 0: no such
     /// host, nothing held.
-    pub fn hold(&mut self, host: &str, need_mb: u32, need_disk_mb: u64) -> u64 {
+    pub fn hold(
+        &mut self,
+        host: &str,
+        need_mb: u32,
+        need_disk_mb: u64,
+        need_cpu_millis: u32,
+    ) -> u64 {
         let Some(h) = self.hosts.get_mut(host) else {
             return 0;
         };
@@ -497,6 +517,7 @@ impl Registry {
         h.take(Hold {
             id: self.last_hold,
             memory_mb: need_mb,
+            cpu_millis: need_cpu_millis,
             disk_mb: need_disk_mb,
             ..Default::default()
         });
@@ -525,6 +546,7 @@ impl Registry {
             return;
         };
         let hold = h.holds.remove(i);
+        h.used.cpu_millis = Some(h.used.cpu_millis().saturating_sub(hold.cpu_millis));
         h.used.memory_mb = h.used.memory_mb.saturating_sub(hold.memory_mb);
         h.disk_free_mb += hold.took_disk_mb;
     }
@@ -588,6 +610,7 @@ impl Registry {
         region: &str,
         need_mb: u32,
         need_disk_mb: u64,
+        need_cpu_millis: u32,
         policy: &Policy,
     ) -> Resource {
         let roomy: Vec<&HostRec> = self
@@ -602,7 +625,14 @@ impl Registry {
         if roomy.is_empty() {
             return Resource::Memory;
         }
-        let Some(pressed) = roomy
+        let cpu_room: Vec<_> = roomy
+            .into_iter()
+            .filter(|h| h.has_cpu(need_cpu_millis))
+            .collect();
+        if cpu_room.is_empty() {
+            return Resource::Cpu;
+        }
+        let Some(pressed) = cpu_room
             .iter()
             .filter(|h| h.has_disk(need_disk_mb))
             .max_by_key(|h| h.free_memory_mb())
@@ -639,6 +669,7 @@ impl Registry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Resource {
     Memory,
+    Cpu,
     Disk,
     /// The host the create is bound to (a pinned namespace's, a fork's source's) is under a
     /// condition (ADR 0021): a new host does not fix it.
@@ -646,11 +677,17 @@ pub enum Resource {
 }
 
 impl Resource {
-    pub const ALL: [Resource; 3] = [Resource::Memory, Resource::Disk, Resource::Pressure];
+    pub const ALL: [Resource; 4] = [
+        Resource::Memory,
+        Resource::Cpu,
+        Resource::Disk,
+        Resource::Pressure,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Resource::Memory => "memory",
+            Resource::Cpu => "cpu",
             Resource::Disk => "disk",
             Resource::Pressure => "pressure",
         }
@@ -674,10 +711,12 @@ mod tests {
             capacity: Capacity {
                 memory_mb: cap,
                 vcpus: 32,
+                cpu_millis: Some(32_000),
             },
             used: Capacity {
                 memory_mb: used,
                 vcpus: 0,
+                cpu_millis: None,
             },
             machines,
             namespaces: vec![],
@@ -762,7 +801,7 @@ mod tests {
         let mut cleared = host("a", 100_000, 0, 1);
         cleared.conditions = vec![condition(api::condition::DISK_PRESSURE, false)];
         reg.heartbeat(cleared, now);
-        assert_eq!(reg.place("t2", "", 512, 0, &p).as_deref(), Some("a"));
+        assert_eq!(reg.place("t2", "", 512, 0, 0, &p).as_deref(), Some("a"));
     }
 
     /// A host of `region` with `free` MB of memory and `disk` MB of disk free.
@@ -820,7 +859,7 @@ mod tests {
             reg.hosts.insert(h.id.clone(), h);
         }
         let p = Policy::default();
-        let short = |region, mb, disk| reg.shortage(region, mb, disk, &p);
+        let short = |region, mb, disk| reg.shortage(region, mb, disk, 0, &p);
         // No host of gra under its ceiling has 70 GB.
         assert_eq!(short("gra", 70_000, 0), Resource::Memory);
         assert_eq!(short("sgp", 512, 0), Resource::Memory, "no host there");
@@ -830,14 +869,14 @@ mod tests {
         // Under disk pressure: disk.
         reg.hosts.get_mut("pressed").unwrap().conditions =
             vec![condition(api::condition::DISK_PRESSURE, true)];
-        let short = |region, mb, disk| reg.shortage(region, mb, disk, &p);
+        let short = |region, mb, disk| reg.shortage(region, mb, disk, 0, &p);
         assert_eq!(short("gra", 50_000, 10_000), Resource::Disk);
         // No region asked: every region's hosts, and none has 1 TB.
         assert_eq!(short("", 30_000, 1_000_000), Resource::Disk);
         // What place refuses, shortage names; what it takes, it would not be asked about.
-        assert_eq!(reg.place("t1", "gra", 30_000, 10_000, &p), None);
+        assert_eq!(reg.place("t1", "gra", 30_000, 10_000, 0, &p), None);
         assert_eq!(
-            reg.place("t2", "gra", 30_000, 2_000, &p).as_deref(),
+            reg.place("t2", "gra", 30_000, 2_000, 0, &p).as_deref(),
             Some("a")
         );
     }
@@ -854,23 +893,29 @@ mod tests {
         reg.heartbeat(vin.clone(), now);
         let p = Policy::default();
         // vin1 is the emptiest; t1 asks for gra.
-        assert_eq!(reg.place("t1", "gra", 512, 0, &p).as_deref(), Some("gra1"));
+        assert_eq!(
+            reg.place("t1", "gra", 512, 0, 0, &p).as_deref(),
+            Some("gra1")
+        );
         assert_eq!(reg.region_of("t1"), Some("gra"));
         assert_eq!(
-            reg.place("t2", "", 512, 0, &p).as_deref(),
+            reg.place("t2", "", 512, 0, 0, &p).as_deref(),
             Some("vin1"),
             "any"
         );
-        assert_eq!(reg.place("t3", "sgp", 512, 0, &p), None, "no host there");
+        assert_eq!(reg.place("t3", "sgp", 512, 0, 0, &p), None, "no host there");
         assert_eq!(
-            reg.place("t4", "gra", 60_000, 0, &p),
+            reg.place("t4", "gra", 60_000, 0, 0, &p),
             None,
             "the region is full, whatever the others have"
         );
         assert_eq!(reg.region_of("t4"), None, "nothing pinned");
         // Pinned, a namespace's machines go to its host whatever is asked: the caller refuses
         // another region.
-        assert_eq!(reg.place("t1", "vin", 512, 0, &p).as_deref(), Some("gra1"));
+        assert_eq!(
+            reg.place("t1", "vin", 512, 0, 0, &p).as_deref(),
+            Some("gra1")
+        );
         let h = reg.host_of_namespace("t1").unwrap();
         assert_eq!(h.outside("t1", "gra"), None);
         assert_eq!(h.outside("t1", ""), None, "no region asked");
@@ -959,7 +1004,7 @@ mod tests {
         reg.namespaces.insert("tb".into(), "b".into());
         // A placement just pinned t3 to a (the emptier host); a does not list it yet: the pin stays.
         assert_eq!(
-            reg.place("t3", "", 10, 0, &Policy::default()).as_deref(),
+            reg.place("t3", "", 10, 0, 0, &Policy::default()).as_deref(),
             Some("a")
         );
         let mut a = host("a", 1000, 0, 1);
@@ -1018,7 +1063,7 @@ mod tests {
             ["a"]
         );
         assert_eq!(
-            reg.place("t2", "", 10, 0, &Policy::default()),
+            reg.place("t2", "", 10, 0, 0, &Policy::default()),
             None,
             "no placement on a retiring host"
         );
@@ -1029,7 +1074,7 @@ mod tests {
             assert_eq!(reg.hosts["a"].state, state);
             assert!(reg.retirable().is_empty(), "{state}");
             assert_eq!(
-                reg.place("t2", "", 10, 0, &Policy::default()),
+                reg.place("t2", "", 10, 0, 0, &Policy::default()),
                 None,
                 "{state}"
             );
@@ -1048,29 +1093,33 @@ mod tests {
         reg.heartbeat(host("b", 100_000, 20_000, 2), now);
         reg.heartbeat(host("c", 100_000, 50_000, 5), now);
         let p = Policy::default();
-        assert_eq!(reg.place("t1", "", 512, 0, &p).as_deref(), Some("b"));
+        assert_eq!(reg.place("t1", "", 512, 0, 0, &p).as_deref(), Some("b"));
         assert_eq!(
-            reg.place("t1", "", 512, 0, &p).as_deref(),
+            reg.place("t1", "", 512, 0, 0, &p).as_deref(),
             Some("b"),
             "a namespace stays where it is"
         );
         // c is next; a is over the ceiling.
         reg.hosts.get_mut("b").unwrap().used.memory_mb = 99_000;
-        assert_eq!(reg.place("t2", "", 512, 0, &p).as_deref(), Some("c"));
-        assert_eq!(reg.place("t3", "", 60_000, 0, &p), None, "nothing has room");
+        assert_eq!(reg.place("t2", "", 512, 0, 0, &p).as_deref(), Some("c"));
+        assert_eq!(
+            reg.place("t3", "", 60_000, 0, 0, &p),
+            None,
+            "nothing has room"
+        );
         reg.hosts.get_mut("c").unwrap().disk_free_mb = 1000;
         assert_eq!(
-            reg.place("t4", "", 512, 5000, &p),
+            reg.place("t4", "", 512, 5000, 0, &p),
             None,
             "c has memory but no disk"
         );
-        assert_eq!(reg.place("t5", "", 512, 500, &p).as_deref(), Some("c"));
+        assert_eq!(reg.place("t5", "", 512, 500, 0, &p).as_deref(), Some("c"));
     }
 
     /// `place` and `hold`, as a create does them.
     fn placed(reg: &mut Registry, namespace: &str, mb: u32, disk: u64) -> Option<(String, u64)> {
-        let host = reg.place(namespace, "", mb, disk, &Policy::default())?;
-        let hold = reg.hold(&host, mb, disk);
+        let host = reg.place(namespace, "", mb, disk, 0, &Policy::default())?;
+        let hold = reg.hold(&host, mb, disk, 0);
         Some((host, hold))
     }
 
@@ -1097,7 +1146,7 @@ mod tests {
             (70_000, 40_000),
             "the capacity signals see the holds too"
         );
-        assert_eq!(reg.hold("nobody", 5000, 0), 0, "no host, nothing held");
+        assert_eq!(reg.hold("nobody", 5000, 0, 0), 0, "no host, nothing held");
         // A report while both creates are under way: they still count, on its figures.
         let t2 = t0 + Duration::seconds(15);
         let mut report = host("a", 100_000, 1000, 0);
@@ -1129,7 +1178,7 @@ mod tests {
         assert_eq!(reg.hosts["a"].disk_free_mb, 16_000);
         assert!(reg.hosts["a"].holds.is_empty());
         // A hold never takes disk a host does not report, nor gives back more than it took.
-        let t3 = reg.hold("b", 1000, 50_000);
+        let t3 = reg.hold("b", 1000, 50_000, 0);
         assert_eq!(reg.hosts["b"].disk_free_mb, 0, "b reports no disk figure");
         reg.release("b", t3);
         assert_eq!(reg.hosts["b"].disk_free_mb, 0);
@@ -1208,5 +1257,32 @@ mod tests {
         assert_eq!(reg.hosts["a"].state, "down");
         reg.heartbeat(host("a", 1000, 0, 0), now);
         assert_eq!(reg.hosts["a"].state, "ready");
+    }
+    #[test]
+    fn cpu_holds_reserve_fractional_slots_and_cpu_full_hosts_are_not_placed() {
+        let mut reg = Registry::default();
+        let mut h = host("fraction", 4096, 0, 0);
+        h.capacity.cpu_millis = Some(1000);
+        reg.hosts.insert(h.id.clone(), h);
+        let policy = Policy::default();
+        let mut holds = Vec::new();
+        for i in 0..4 {
+            let namespace = format!("n{i}");
+            assert_eq!(
+                reg.place(&namespace, "", 128, 0, 250, &policy).as_deref(),
+                Some("fraction")
+            );
+            holds.push(reg.hold("fraction", 128, 0, 250));
+        }
+        assert_eq!(reg.hosts["fraction"].used.cpu_millis(), 1000);
+        assert!(reg.place("full", "", 128, 0, 250, &policy).is_none());
+        assert_eq!(reg.shortage("", 128, 0, 250, &policy), Resource::Cpu);
+        reg.release("fraction", holds[0]);
+        assert_eq!(
+            reg.place("freed", "", 128, 0, 250, &policy).as_deref(),
+            Some("fraction")
+        );
+        reg.hosts.get_mut("fraction").unwrap().capacity.cpu_millis = None;
+        assert!(reg.place("legacy", "", 128, 0, 250, &policy).is_none());
     }
 }

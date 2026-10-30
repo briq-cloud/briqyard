@@ -236,9 +236,8 @@ pub struct Jail {
     pub base: PathBuf,
     pub uid: u32,
     pub gid: u32,
-    /// CPU time the machine may use, in whole CPUs (its vCPUs: a shared vCPU is one CPU's worth
-    /// at most, so oversubscription stays fair); 0 for no limit.
-    pub cpus: u32,
+    /// CPU time the machine may use, in millicores; 0 for no limit.
+    pub cpu_millis: u32,
     /// Memory the Firecracker process may use, in MB (the guest's memory plus Firecracker's
     /// own); 0 for no limit.
     pub memory_mb: u32,
@@ -421,12 +420,19 @@ fn jailer_args(j: &Jail, id: &str, binary: &Path) -> Vec<std::ffi::OsString> {
         CGROUP_PARENT.into(),
         "--new-pid-ns".into(),
     ];
-    if j.cpus > 0 {
+    if j.cpu_millis > 0 {
         args.push("--cgroup".into());
-        args.push(format!("cpu.max={} 100000", j.cpus as u64 * 100_000).into());
+        args.push(
+            format!(
+                "cpu.max={} {}",
+                cpu_quota(j.cpu_millis).0,
+                cpu_quota(j.cpu_millis).1
+            )
+            .into(),
+        );
         // Under contention CPU goes by size: the default weight (100) per vCPU (ADR 0030).
         args.push("--cgroup".into());
-        args.push(format!("cpu.weight={}", j.cpus * 100).into());
+        args.push(format!("cpu.weight={}", (j.cpu_millis / 10).max(1)).into());
     }
     if j.memory_mb > 0 {
         args.push("--cgroup".into());
@@ -438,6 +444,13 @@ fn jailer_args(j: &Jail, id: &str, binary: &Path) -> Vec<std::ffi::OsString> {
 /// The pid the jailer wrote for Firecracker: with a new pid namespace the jailer forks, the
 /// process we spawned writes its child's pid to this file and exits, and the child is the one
 /// to kill or adopt.
+/// CFS accepts at least 1000µs quota. Preserve 1m precision below 10m with a 1s period;
+/// normal sizes use the existing 100ms period.
+fn cpu_quota(millis: u32) -> (u64, u64) {
+    let period = if millis < 10 { 1_000_000 } else { 100_000 };
+    (u64::from(millis) * period / 1000, period)
+}
+
 fn jailed_pid(root: &Path) -> Result<u32> {
     let path = root.join("firecracker.pid");
     let text =
@@ -1659,7 +1672,7 @@ mod tests {
             base: base.to_path_buf(),
             uid: 100_002,
             gid: 100_002,
-            cpus: 1,
+            cpu_millis: 1000,
             memory_mb: 512,
         };
         let root = jail_root(base, "m_abc123");
@@ -1765,7 +1778,7 @@ mod tests {
             base: "/var/lib/briqyard/jail".into(),
             uid: 100_002,
             gid: 100_002,
-            cpus: 2,
+            cpu_millis: 2000,
             memory_mb: 768,
         };
         let args: Vec<String> =
@@ -1801,7 +1814,7 @@ mod tests {
         );
         // No limit, no cgroup argument.
         let free = Jail {
-            cpus: 0,
+            cpu_millis: 0,
             memory_mb: 0,
             ..jail
         };
@@ -1870,5 +1883,25 @@ mod tests {
         }
         // The last line gets its newline even when the source had none.
         assert!(text.ends_with("two\n"));
+    }
+    #[test]
+    fn fractional_cpu_quota_respects_kernel_granularity() {
+        assert_eq!(cpu_quota(250), (25000, 100000));
+        assert_eq!(cpu_quota(1), (1000, 1000000));
+        assert_eq!(cpu_quota(10), (1000, 100000));
+        let jail = Jail {
+            jailer: "jailer".into(),
+            base: "/tmp/jail".into(),
+            uid: 1,
+            gid: 1,
+            cpu_millis: 250,
+            memory_mb: 128,
+        };
+        let args: Vec<_> = jailer_args(&jail, "m_abc123", Path::new("firecracker"))
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == "cpu.max=25000 100000"));
+        assert!(args.iter().any(|a| a == "cpu.weight=25"));
     }
 }

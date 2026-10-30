@@ -96,6 +96,7 @@ async fn a_gateway_is_a_machine_of_the_daemon_not_of_the_namespace() {
             size: Some(api::Size {
                 vcpus: 0,
                 memory_mb: 256,
+                cpu_millis: None,
             }),
             ..gateway_spec(3128)
         },
@@ -717,4 +718,31 @@ async fn a_put_with_start_runs_the_gateway_before_any_machine_needs_it() {
         b.error
     );
     assert_eq!(h.gateway_view().state, state::ERROR);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unenforceable_gateway_size_leaves_the_running_gateway_unchanged() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let mut spec = gateway_spec(3128);
+    spec.start = true;
+    let before =
+        h.m.set_gateway("t1", spec.clone())
+            .await
+            .unwrap()
+            .gateway
+            .unwrap();
+    let old = h.stored(&before.machine_id).unwrap();
+    h.host.calls();
+    spec.size = Some(api::Size {
+        vcpus: 1,
+        memory_mb: 128,
+        cpu_millis: Some(250),
+    });
+    let err = h.m.set_gateway("t1", spec).await.unwrap_err();
+    assert!(err.to_string().contains("requires the jailer"));
+    let after = h.m.get(&before.machine_id).unwrap();
+    assert_eq!(after.state, state::RUNNING);
+    assert_eq!(after.size, old.size);
+    assert!(h.host.calls().is_empty(), "no stop or boot before refusal");
 }

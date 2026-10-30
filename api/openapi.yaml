@@ -579,7 +579,8 @@ components:
       type: object
       required: [vcpus, memory_mb]
       properties:
-        vcpus: { type: integer, minimum: 1, maximum: 32 }
+        vcpus: { type: integer, minimum: 1, maximum: 32, description: guest CPUs }
+        cpu_millis: { type: integer, minimum: 1, maximum: 32000, description: "CPU time limit in thousandths of a CPU; at most vcpus × 1000. Omitted means vcpus × 1000. Fractional limits require a jailed host." }
         memory_mb: { type: integer, minimum: 128, maximum: 262144 }
     VolumeSpec:
       type: object
@@ -621,6 +622,7 @@ components:
     Backup:
       type: object
       properties:
+        size: { allOf: [{ $ref: "#/components/schemas/Size" }], description: "size captured in the backup; older sealed records may omit it, requiring an explicit restore size through the fleet" }
         id: { type: string, description: "a timestamp to the millisecond (20261021T101500.123Z), later ids sort later" }
         machine_id: { type: string }
         namespace: { type: string }
@@ -958,7 +960,8 @@ components:
       properties:
         machines: { type: integer, minimum: 0, description: "machines, its gateway included" }
         memory_mb: { type: integer, minimum: 0, description: "of its machines starting, running or stopping" }
-        vcpus: { type: integer, minimum: 0, description: of the same }
+        vcpus: { type: integer, minimum: 0, description: "legacy CPU quota, equivalent to vcpus × 1000 millis" }
+        cpu_millis: { type: integer, minimum: 0, description: "CPU time reserved by machines starting, running or stopping; when vcpus is also set, both limits apply" }
         disk_gb: { type: integer, minimum: 0, description: "the volumes' sizes" }
     NamespaceQuota:
       type: object
@@ -972,7 +975,8 @@ components:
           properties:
             machines: { type: integer }
             memory_mb: { type: integer }
-            vcpus: { type: integer }
+            vcpus: { type: integer, description: guest CPU count }
+            cpu_millis: { type: integer, description: "reserved CPU time; absent on older hosts (use vcpus × 1000)" }
             disk_gb: { type: integer }
     GatewaySpec:
       type: object
@@ -999,7 +1003,8 @@ components:
       type: object
       properties:
         memory_mb: { type: integer }
-        vcpus: { type: integer }
+        vcpus: { type: integer, description: guest CPU count }
+        cpu_millis: { type: integer, description: "CPU capacity or reservation; absent on older hosts (use vcpus × 1000)" }
     UsageBucket:
       type: object
       description: One machine in one UTC hour. GB is 2^30 bytes.
@@ -1078,6 +1083,7 @@ components:
           description: "creates refused 503 `capacity` since the fleet started, by what ran out"
           properties:
             memory: { type: integer, description: "no host of the region had the memory free under its fill ceiling, or those with the room are under memory_pressure: a new host fixes it" }
+            cpu: { type: integer, description: "hosts had memory but insufficient CPU capacity or no precise CPU accounting" }
             disk: { type: integer, description: "hosts had the memory, none the disk (a volume plus 2 GB), or those with the room are under disk_pressure: a new host fixes it" }
             pressure: { type: integer, description: "the host the create is bound to (the namespace's, a fork's source's) is under a condition: that host must be freed" }
     Room:

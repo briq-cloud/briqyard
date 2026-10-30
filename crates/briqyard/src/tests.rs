@@ -467,12 +467,14 @@ fn machine_set_changes_what_it_runs() {
     let now = api::Size {
         vcpus: 4,
         memory_mb: 512,
+        cpu_millis: None,
     };
     assert_eq!(
         half.request(Some(now)).unwrap().spec.size,
         Some(api::Size {
             vcpus: 4,
-            memory_mb: 2048
+            memory_mb: 2048,
+            cpu_millis: None,
         })
     );
     assert!(half.request(None).is_err());
@@ -805,6 +807,7 @@ fn endpoint_namespace_and_image_commands() {
                 envs,
                 files,
                 cmd,
+                ..
             } = *a;
             assert_eq!(files, ["/etc/proxy.yaml=proxy.yaml"]);
             assert_eq!(
@@ -1134,6 +1137,7 @@ fn the_machine_table() {
         size: api::Size {
             vcpus: 2,
             memory_mb: 1024,
+            cpu_millis: None,
         },
         sleep: "30m".into(),
         host: "d1".into(),
@@ -1184,7 +1188,7 @@ fn the_machine_table() {
     assert!(out.ends_with('\n'));
     assert_eq!(
         lines[0],
-        "ID               NAMESPACE    NAME           IMAGE                    STATE              READY IP           SIZE      SLEEP  EGRESS             LIMITS                   DISK             BACKUP   PENDING      HOST"
+        "ID               NAMESPACE    NAME           IMAGE                    STATE              READY IP           SIZE      CPU m   SLEEP  EGRESS             LIMITS                   DISK             BACKUP   PENDING      HOST"
     );
     // Every column starts where its header does.
     let cols = [
@@ -1196,12 +1200,13 @@ fn the_machine_table() {
         (89, 5),
         (95, 12),
         (108, 9),
-        (118, 6),
-        (125, 18),
-        (144, 24),
-        (169, 16),
-        (186, 8),
-        (195, 12),
+        (118, 7),
+        (126, 6),
+        (133, 18),
+        (152, 24),
+        (177, 16),
+        (194, 8),
+        (203, 12),
     ];
     let heads: Vec<String> = cols.iter().map(|(at, w)| col(lines[0], *at, *w)).collect();
     assert_eq!(
@@ -1215,6 +1220,7 @@ fn the_machine_table() {
             "READY",
             "IP",
             "SIZE",
+            "CPU m",
             "SLEEP",
             "EGRESS",
             "LIMITS",
@@ -1235,6 +1241,7 @@ fn the_machine_table() {
             "no",
             "",
             "2c/1024M",
+            "2000",
             "never",
             "via:m_0123456789ab",
             "25,465 600/min 100Mbit",
@@ -1248,15 +1255,15 @@ fn the_machine_table() {
     );
     assert_eq!(
         lines[2].len(),
-        195 + 12 + 1,
+        203 + 12 + 1,
         "no host: nothing after the pending fields"
     );
-    assert_eq!(col(lines[1], 169, 16), "-", "no disk limit");
-    assert_eq!(col(lines[1], 186, 8), "-", "no schedule");
-    assert_eq!(col(lines[1], 195, 12), "-", "nothing pending");
+    assert_eq!(col(lines[1], 177, 16), "-", "no disk limit");
+    assert_eq!(col(lines[1], 194, 8), "-", "no schedule");
+    assert_eq!(col(lines[1], 203, 12), "-", "nothing pending");
     assert_eq!(col(lines[1], 89, 5), "yes");
-    assert_eq!(col(lines[1], 125, 18), "open");
-    assert_eq!(col(lines[1], 144, 24), "-", "nothing limited");
+    assert_eq!(col(lines[1], 133, 18), "open");
+    assert_eq!(col(lines[1], 152, 24), "-", "nothing limited");
     // A value wider than its column is not cut: the rest of that row moves right.
     assert!(
         lines[3].contains("a-rather-long-name-indeed ghcr.io/org/some-image:v1.2.3 "),
@@ -1288,6 +1295,7 @@ fn the_region_table() {
             memory: 3,
             disk: 0,
             pressure: 1,
+            cpu: 0,
         },
     };
     // Refusals of creates that asked for no region, while every host has one: no room.
@@ -1324,10 +1332,12 @@ fn the_host_table() {
         capacity: api::Capacity {
             memory_mb: 64000,
             vcpus: 32,
+            cpu_millis: None,
         },
         used: api::Capacity {
             memory_mb: 8192,
             vcpus: 6,
+            cpu_millis: None,
         },
         machines: 3,
         namespaces: vec!["t1".into(), "t2".into()],
@@ -1386,11 +1396,11 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[0],
-        "ID               URL                          STATE        REGION   MEMORY MB      VCPUS      MACHINES  NAMESPACES VERSION              LAST SEEN"
+        "ID               URL                          STATE        REGION   MEMORY MB      CPU m      MACHINES  NAMESPACES VERSION              LAST SEEN"
     );
     assert_eq!(
         lines[1],
-        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6/32       3         2          0.1.0                2026-10-19T08:30:00+00:00"
+        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6000/32000 3         2          0.1.0                2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[2],
@@ -1577,6 +1587,7 @@ fn the_usage_table() {
         size: api::Size {
             vcpus: 1,
             memory_mb: 512,
+            cpu_millis: None,
         },
         usage: api::Usage {
             running_seconds: 1800.0,
@@ -2142,6 +2153,7 @@ fn describe_shows_the_machine_then_its_events() {
         size: api::Size {
             vcpus: 1,
             memory_mb: 256,
+            cpu_millis: None,
         },
         volume: Some(api::VolumeSpec {
             size_gb: 2,
@@ -2188,6 +2200,7 @@ fn describe_shows_the_machine_then_its_events() {
             size: Some(api::Size {
                 vcpus: 2,
                 memory_mb: 512,
+                cpu_millis: None,
             }),
             volume: Some(api::VolumeSize { size_gb: 20 }),
             ..Default::default()
@@ -2259,6 +2272,7 @@ fn describe_shows_the_machine_then_its_events() {
             "               liveness exec test -f /tmp/alive, every 10 s: not run yet",
             "IP:            10.64.1.2",
             "Size:          1 vCPU, 256 MB",
+            "CPU limit:     1000m",
             "Volume:        2 GB at /data",
             "Disk limits:   32MB/s 4000io each, 10s burst",
             "Egress:        via:gateway",
@@ -2446,6 +2460,7 @@ fn labels_regions_and_quotas_from_the_command_line() {
             vcpus,
             disk_gb,
             region,
+            cpu_millis: None,
         }) => {
             assert_eq!(id, "t1");
             assert_eq!(

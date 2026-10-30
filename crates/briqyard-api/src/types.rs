@@ -8,14 +8,28 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Size {
     pub vcpus: u32,
+    /// CPU-time limit in millicores; omitted means one CPU per guest vCPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u32>,
     pub memory_mb: u32,
 }
 
 impl Size {
+    pub fn cpu_millis(&self) -> u32 {
+        self.cpu_millis
+            .unwrap_or_else(|| self.vcpus.saturating_mul(1000))
+    }
+
     /// What a host can boot: 1 to 32 vCPUs, 128 MB to 256 GB.
     pub fn check(&self) -> Result<(), String> {
         if !(1..=32).contains(&self.vcpus) {
             return Err("size.vcpus must be 1..32".into());
+        }
+        if self
+            .cpu_millis
+            .is_some_and(|n| n == 0 || n > self.vcpus * 1000)
+        {
+            return Err("size.cpu_millis must be 1..vcpus*1000".into());
         }
         if !(128..=262144).contains(&self.memory_mb) {
             return Err("size.memory_mb must be 128..262144".into());
@@ -811,6 +825,10 @@ pub struct RestoreSpec {
 /// A backup of a machine's disks in the object store.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Backup {
+    /// Size captured in this backup, for placement before a restore. Older sealed records
+    /// may omit it; their restores through the fleet must supply an explicit size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<Size>,
     /// A timestamp to the millisecond, `20261019T231500.123Z`; later ids sort later.
     pub id: String,
     pub machine_id: String,
@@ -1145,9 +1163,22 @@ pub struct Quota {
     /// vCPUs of the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcpus: Option<u32>,
+    /// CPU budget in millicores; legacy records use vcpus × 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u32>,
     /// The volumes' sizes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_gb: Option<u32>,
+}
+
+impl Quota {
+    pub fn cpu_millis(&self) -> Option<u32> {
+        let legacy = self.vcpus.map(|n| n.saturating_mul(1000));
+        match (self.cpu_millis, legacy) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 /// What a namespace holds now, counted as its quota counts.
@@ -1156,7 +1187,17 @@ pub struct QuotaUse {
     pub machines: u32,
     pub memory_mb: u32,
     pub vcpus: u32,
+    /// CPU budget in millicores; legacy records use vcpus × 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u32>,
     pub disk_gb: u32,
+}
+
+impl QuotaUse {
+    pub fn cpu_millis(&self) -> u32 {
+        self.cpu_millis
+            .unwrap_or_else(|| self.vcpus.saturating_mul(1000))
+    }
 }
 
 /// `GET /v1/namespaces/{id}/quota`: the limits and the use.
@@ -1207,6 +1248,7 @@ impl GatewaySpec {
         self.size.unwrap_or(Size {
             vcpus: 1,
             memory_mb: 256,
+            cpu_millis: None,
         })
     }
 }
@@ -1488,6 +1530,16 @@ pub struct Image {
 pub struct Capacity {
     pub memory_mb: u32,
     pub vcpus: u32,
+    /// CPU budget in millicores; legacy records use vcpus × 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u32>,
+}
+
+impl Capacity {
+    pub fn cpu_millis(&self) -> u32 {
+        self.cpu_millis
+            .unwrap_or_else(|| self.vcpus.saturating_mul(1000))
+    }
 }
 
 /// Host condition types (ADR 0021), as Kubernetes's node conditions. Each is a pressure:
@@ -1762,6 +1814,12 @@ pub struct Unschedulable {
     /// The host the create is bound to (the namespace's, a fork's source's) is under a condition
     /// (ADR 0021). A new host does not fix it: that host must be freed.
     pub pressure: u64,
+    #[serde(default, skip_serializing_if = "zero_cpu_refusals")]
+    pub cpu: u64,
+}
+
+fn zero_cpu_refusals(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Every error response's body.
@@ -1950,14 +2008,16 @@ mod tests {
             c,
             Capacity {
                 memory_mb: 65536,
-                vcpus: 16
+                vcpus: 16,
+                cpu_millis: None,
             }
         );
         assert_eq!(
             Capacity::default(),
             Capacity {
                 memory_mb: 0,
-                vcpus: 0
+                vcpus: 0,
+                cpu_millis: None,
             }
         );
     }
@@ -2413,6 +2473,7 @@ mod tests {
             size: Size {
                 vcpus: 1,
                 memory_mb: 256,
+                cpu_millis: None,
             },
             ..Default::default()
         };
@@ -2769,7 +2830,8 @@ mod tests {
             s.size(),
             Size {
                 vcpus: 1,
-                memory_mb: 256
+                memory_mb: 256,
+                cpu_millis: None,
             }
         );
         let s: GatewaySpec = same(json!({
@@ -3326,5 +3388,35 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(h.namespaces, ["t1"]);
+    }
+    #[test]
+    fn cpu_limits_are_precise_and_legacy_values_stay_valid() {
+        let mut size: Size = serde_json::from_value(json!({"vcpus": 1, "memory_mb": 128})).unwrap();
+        assert_eq!(size.cpu_millis(), 1000);
+        assert!(serde_json::to_value(size)
+            .unwrap()
+            .get("cpu_millis")
+            .is_none());
+        for millis in [1, 250, 1000] {
+            size.cpu_millis = Some(millis);
+            assert!(size.check().is_ok());
+            assert_eq!(size.cpu_millis(), millis);
+        }
+        for millis in [0, 1001] {
+            size.cpu_millis = Some(millis);
+            assert!(size.check().is_err());
+        }
+        let quota = Quota {
+            vcpus: Some(1),
+            cpu_millis: Some(1500),
+            ..Default::default()
+        };
+        assert_eq!(quota.cpu_millis(), Some(1000));
+        let legacy = Capacity {
+            memory_mb: 1024,
+            vcpus: 4,
+            cpu_millis: None,
+        };
+        assert_eq!(legacy.cpu_millis(), 4000);
     }
 }

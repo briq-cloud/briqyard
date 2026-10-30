@@ -587,15 +587,23 @@ async fn metrics(State(st): S) -> Response {
 
 async fn status(State(st): S) -> Json<serde_json::Value> {
     let reg = st.reg.lock().unwrap();
-    let mut cap = api::Capacity::default();
-    let mut used = api::Capacity::default();
+    let mut cap = api::Capacity {
+        cpu_millis: Some(0),
+        ..Default::default()
+    };
+    let mut used = api::Capacity {
+        cpu_millis: Some(0),
+        ..Default::default()
+    };
     let (mut machines, mut ready) = (0, 0);
     for h in reg.hosts.values() {
         if h.state == "ready" {
             ready += 1;
             cap.memory_mb += h.capacity.memory_mb;
+            cap.cpu_millis = Some(cap.cpu_millis().saturating_add(h.capacity.cpu_millis()));
             cap.vcpus += h.capacity.vcpus;
             used.memory_mb += h.used.memory_mb;
+            used.cpu_millis = Some(used.cpu_millis().saturating_add(h.used.cpu_millis()));
             used.vcpus += h.used.vcpus;
             machines += h.machines;
         }
@@ -1541,14 +1549,37 @@ impl Drop for Held<'_> {
 async fn create_machine(
     State(st): S,
     headers: HeaderMap,
-    body: Bytes,
+    mut body: Bytes,
 ) -> Result<Response, Refusal> {
-    let req: api::CreateMachineRequest = serde_json::from_slice(&body)
+    let mut req: api::CreateMachineRequest = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
+    if req.fork.is_some() && req.restore.is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "fork and restore are one or the other",
+        ));
+    }
+    if let (true, Some(rs)) = (req.size == api::Size::default(), req.restore.as_mut()) {
+        let (size, backup) = restore_size(&st, rs).await?;
+        req.size = size;
+        rs.backup = backup.clone();
+        // Preserve any fields the forwarding API does not interpret. Pin latest to the exact
+        // record whose size was reserved, so a concurrent backup cannot change the budget.
+        let mut document: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
+        document["size"] = serde_json::to_value(size).expect("Size serializes");
+        document["restore"]["backup"] = backup.into();
+        body = Bytes::from(serde_json::to_vec(&document).expect("JSON serializes"));
+    }
+    req.size
+        .check()
+        .map_err(|why| err(StatusCode::BAD_REQUEST, "invalid", why))?;
     let ask = Ask {
         namespace: &req.namespace,
         region: &req.region,
         memory_mb: req.size.memory_mb,
+        cpu_millis: req.size.cpu_millis(),
         disk_mb: disk_need(req.volume.as_ref().map(|v| v.size_gb)),
         what: "machine",
     };
@@ -1585,6 +1616,7 @@ async fn create_machine(
                 &req.region,
                 ask.memory_mb,
                 ask.disk_mb,
+                ask.cpu_millis,
                 &st.policy,
             )
         });
@@ -1593,7 +1625,7 @@ async fn create_machine(
         };
         // A fork's new namespace lives where its source does, as a placement would pin it.
         reg.pin(&req.namespace, &host.id);
-        let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb);
+        let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb, ask.cpu_millis);
         (host, first, id)
     };
     let hold = Held {
@@ -1635,6 +1667,96 @@ async fn create_machine(
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
+/// Resolve only an inherited restore size; explicit sizes need no backup lookup.
+/// Listings expose the original backup's size without its environment or sealed contents.
+async fn restore_size(
+    st: &Arc<AppState>,
+    rs: &api::RestoreSpec,
+) -> Result<(api::Size, String), Refusal> {
+    if !api::valid_id(&rs.machine_id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "restore.machine_id is not a machine id",
+        ));
+    }
+    // The store is shared. A restore must remain possible when its original host is down.
+    let hosts = {
+        let reg = st.reg.lock().unwrap();
+        let source = reg.host_of_machine(&rs.machine_id).map(|h| h.id.as_str());
+        let mut hosts = reg.ready();
+        hosts.sort_by_key(|h| Some(h.id.as_str()) != source);
+        hosts
+    };
+    let mut found = None;
+    let mut failure = err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no_host",
+        "no ready host can resolve the restore size",
+    );
+    for host in hosts {
+        let response = forward(
+            st,
+            &host,
+            Method::GET,
+            &format!("/v1/machines/{}/backups", rs.machine_id),
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await;
+        let (parts, bytes) = read(response).await;
+        if !parts.status.is_success() {
+            failure = err(
+                parts.status,
+                "backup_lookup",
+                "cannot list the restore's backups to resolve its size",
+            );
+            continue;
+        }
+        match serde_json::from_slice::<Vec<api::Backup>>(&bytes) {
+            Ok(backups) => {
+                found = Some(backups);
+                break;
+            }
+            Err(_) => {
+                failure = err(
+                    StatusCode::BAD_GATEWAY,
+                    "host_unreachable",
+                    "unreadable backup listing",
+                )
+            }
+        }
+    }
+    let backups = found.ok_or(failure)?;
+    let latest = rs.backup.is_empty() || rs.backup == "latest";
+    let backup = backups
+        .into_iter()
+        .filter(|b| b.machine_id == rs.machine_id && (latest || b.id == rs.backup))
+        .max_by(|a, b| a.id.cmp(&b.id))
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "restore backup not found",
+            )
+        })?;
+    let size = backup.size.ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "this backup has no public size metadata; provide an explicit restore size",
+        )
+    })?;
+    size.check().map_err(|why| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            format!("backup size: {why}"),
+        )
+    })?;
+    Ok((size, backup.id))
+}
+
 /// A create bound to a host of another region than it asks: 400, a namespace never spans
 /// regions (ADR 0025).
 fn refuse_outside(
@@ -1657,6 +1779,7 @@ struct Ask<'a> {
     namespace: &'a str,
     region: &'a str,
     memory_mb: u32,
+    cpu_millis: u32,
     disk_mb: u64,
     /// `machine`, `gateway`, `quota`: for the refusal's message.
     what: &'a str,
@@ -1669,7 +1792,13 @@ fn no_room(st: &AppState, reg: &Registry, ask: &Ask) -> Refusal {
         "" => "no host".to_string(),
         r => format!("no host in region {r}"),
     };
-    let resource = reg.shortage(ask.region, ask.memory_mb, ask.disk_mb, &st.policy);
+    let resource = reg.shortage(
+        ask.region,
+        ask.memory_mb,
+        ask.disk_mb,
+        ask.cpu_millis,
+        &st.policy,
+    );
     unschedulable(st, reg, ask.region, resource, ask, None);
     err(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1690,6 +1819,14 @@ fn refuse_under_pressure(
     let Some(h) = host.and_then(|id| reg.hosts.get(id)) else {
         return Ok(());
     };
+    if h.capacity.cpu_millis.is_none() {
+        unschedulable(st, reg, &h.region, Resource::Cpu, ask, Some(&h.id));
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "capacity",
+            "host must be upgraded to report and enforce CPU millis",
+        ));
+    }
     match h.pressure() {
         Some(why) => {
             unschedulable(st, reg, &h.region, Resource::Pressure, ask, Some(&h.id));
@@ -2142,7 +2279,7 @@ async fn put_on_namespace(
     id: &str,
     what: &str,
     region: &str,
-    (need_mb, need_disk_mb): (u32, u64),
+    (need_mb, need_disk_mb, need_cpu_millis): (u32, u64, u32),
     headers: &HeaderMap,
     body: Bytes,
 ) -> Result<Response, Refusal> {
@@ -2157,6 +2294,7 @@ async fn put_on_namespace(
         namespace: id,
         region,
         memory_mb: need_mb,
+        cpu_millis: need_cpu_millis,
         disk_mb: need_disk_mb,
         what,
     };
@@ -2166,11 +2304,18 @@ async fn put_on_namespace(
         let bound = reg.namespaces.get(id).cloned();
         refuse_outside(&reg, bound.as_deref(), id, region)?;
         refuse_under_pressure(st, &reg, bound.as_deref(), &ask)?;
-        let chosen = reg.place(id, region, need_mb, need_disk_mb, &st.policy);
+        let chosen = reg.place(
+            id,
+            region,
+            need_mb,
+            need_disk_mb,
+            need_cpu_millis,
+            &st.policy,
+        );
         let Some(host) = chosen.and_then(|h| reg.hosts.get(&h).cloned()) else {
             return Err(no_room(st, &reg, &ask));
         };
-        let id = reg.hold(&host.id, need_mb, need_disk_mb);
+        let id = reg.hold(&host.id, need_mb, need_disk_mb, need_cpu_millis);
         (host, first, id)
     };
     let hold = Held {
@@ -2205,7 +2350,14 @@ async fn set_gateway(
 ) -> Result<Response, Refusal> {
     let spec: api::GatewaySpec = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-    let need = (spec.size().memory_mb, disk_need(spec.volume_gb));
+    spec.size()
+        .check()
+        .map_err(|why| err(StatusCode::BAD_REQUEST, "invalid", why))?;
+    let need = (
+        spec.size().memory_mb,
+        disk_need(spec.volume_gb),
+        spec.size().cpu_millis(),
+    );
     put_on_namespace(&st, &id, "gateway", &q.region, need, &headers, body).await
 }
 
@@ -2220,7 +2372,7 @@ async fn set_quota(
 ) -> Result<Response, Refusal> {
     serde_json::from_slice::<api::Quota>(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-    put_on_namespace(&st, &id, "quota", &q.region, (0, 0), &headers, body).await
+    put_on_namespace(&st, &id, "quota", &q.region, (0, 0, 0), &headers, body).await
 }
 
 /// A namespace's quota and use, from its host.
@@ -2444,6 +2596,29 @@ async fn by_machine(
     let own = format!("/v1/machines/{id}");
     if method == Method::POST && uri.path() == format!("{own}/move") {
         return moves::move_machine(&st, host, &id, &headers, body).await;
+    }
+    if method == Method::PATCH && uri.path() == own {
+        if let Ok(req) = serde_json::from_slice::<api::UpdateMachineRequest>(&body) {
+            if req
+                .spec
+                .size
+                .as_ref()
+                .is_some_and(|size| size.cpu_millis.is_some())
+                && st
+                    .reg
+                    .lock()
+                    .unwrap()
+                    .hosts
+                    .get(&host.id)
+                    .is_some_and(|h| h.capacity.cpu_millis.is_none())
+            {
+                return Err(err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "capacity",
+                    "host must be upgraded to report and enforce CPU millis",
+                ));
+            }
+        }
     }
     let is_delete = method == Method::DELETE && uri.path() == own;
     let plain_get = method == Method::GET && uri.path() == own;

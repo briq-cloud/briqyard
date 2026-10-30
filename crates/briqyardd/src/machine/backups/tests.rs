@@ -16,6 +16,7 @@ fn disk(name: &str, id: &str, from: Option<&str>) -> api::BackupDisk {
 /// A backup of the root disk, whole or from another.
 fn b(id: &str, from: Option<&str>) -> api::Backup {
     api::Backup {
+        size: None,
         id: id.into(),
         machine_id: "m_1".into(),
         namespace: "t".into(),
@@ -128,6 +129,7 @@ async fn harness(f: impl FnOnce(&mut config::Backup)) -> Harness {
         cfg.capacity = config::Capacity {
             memory_mb: 4096,
             vcpus: 1000,
+
             ..Default::default()
         };
         cfg.egress_limits = config::EgressLimits {
@@ -1068,4 +1070,42 @@ async fn a_listing_by_machine_reads_that_machine_s_backups_alone() {
     ];
     let read = h.m.read_backups(store, listed).await.unwrap();
     assert_eq!(h.ids(&read), vec![made.id]);
+}
+
+#[tokio::test]
+async fn listings_report_the_backups_size_without_exposing_its_machine() {
+    let h = harness(|_| {}).await;
+    let m = h.machine("sized", Some(None), false).await;
+    let made = h.m.backup(&m.id).await.unwrap();
+    assert_eq!(made.size, Some(m.size));
+    let listed = h.m.backups(&m.id).await.unwrap();
+    assert_eq!(listed[0].size, Some(m.size));
+    assert!(listed[0].machine.is_none() && listed[0].sealed.is_none());
+    let store = h.m.backup_store().unwrap();
+    let path = format!("backups/{}/{}.json", m.id, made.id);
+    let mut record: api::Backup =
+        serde_json::from_slice(&store.get_bytes(&path).await.unwrap()).unwrap();
+    // An older clear record can supply its captured size. Never substitute the live size.
+    record.size = None;
+    record.sealed = None;
+    record.key_id = None;
+    record.machine = Some(
+        serde_json::json!({"size":{"vcpus":1,"memory_mb":128,"cpu_millis":250},"env":{"TOKEN":"private"}}),
+    );
+    store
+        .put_bytes(&path, &serde_json::to_vec(&record).unwrap())
+        .await
+        .unwrap();
+    let listed = h.m.backups(&m.id).await.unwrap();
+    assert_eq!(listed[0].size.as_ref().unwrap().cpu_millis(), 250);
+    assert!(listed[0].machine.is_none());
+    // Older sealed records need an explicit restore size through the fleet.
+    record.machine = None;
+    record.sealed = Some("unopened".into());
+    store
+        .put_bytes(&path, &serde_json::to_vec(&record).unwrap())
+        .await
+        .unwrap();
+    let listed = h.m.backups(&m.id).await.unwrap();
+    assert!(listed[0].size.is_none() && listed[0].sealed.is_none());
 }
