@@ -10,16 +10,16 @@ The gateway image adds a local upstream CA and a process-memory probe for measur
 | --- | --- |
 | Cold start to listening, cached image | 3.10 s |
 | Resume to listening | 0.224 s |
-| Idle host process RSS after cold start | 42, 368 KiB |
-| Idle gateway process RSS in guest | 3, 096 KiB |
-| Initial 1, 000-client connection burst | failed: 883 client timeouts; no OOM events |
+| Idle host process RSS after cold start | 42,368 KiB |
+| Idle gateway process RSS in guest | 3,096 KiB |
+| Initial 1,000-client connection burst | failed: 883 client timeouts; no OOM events |
 | Default buffers, eight concurrent 8 MiB uploads | failed: eight request timeouts; no OOM events |
 | Two buffers, **two** concurrent 8 MiB uploads | passed; this also reduces offered load |
 | Paced direct TLS, 100 streams | passed; 100 streams overlapped for 30.16 s |
 | Paced proxy TLS, 100 streams | passed; 100 streams overlapped for 30.17 s |
 
-The eight-upload failure reached 72, 464 KiB gateway process high-water RSS and 92, 632 KiB
-sampled host process RSS. Guest memory available fell to 16, 340 KiB. The fixture also
+The eight-upload failure reached 72,464 KiB gateway process high-water RSS and 92,632 KiB
+sampled host process RSS. Guest memory available fell to 16,340 KiB. The fixture also
 recorded a 10-second event-loop delay: the failure cannot be attributed to memory alone.
 A comparison must keep the offered body concurrency fixed. The next fixture splits large
 writes and validates bodies incrementally to avoid large synchronous Python operations.
@@ -30,7 +30,7 @@ After resume, guest pages are faulted lazily; an immediate RSS sample is not the
 idle figure and cannot be used to claim reduced memory requirements.
 
 Machine-readable phase results: [data/gateway-size-2026-10-29.json](data/gateway-size-2026-10-29.json).
-Still required: matched upload concurrency, 1, 000 overlapping streams, 100/250/500m CPU,
+Still required: matched upload concurrency, 1,000 overlapping streams, 100/250/500m CPU,
 64 MiB boot floor, sustained-load recovery, tenant-gateway lifecycle, and capacity accounting.
 
 ## Matched follow-up, 2026-10-30
@@ -40,15 +40,15 @@ at 128 MiB and 1 CPU. The fixture splits writes and validates incrementally.
 
 | Buffered requests | Completed | Elapsed | Host RSS peak | Gateway lifetime HWM | Guest available minimum |
 | --- | --- | --- | --- | --- | --- |
-| 8 | 8/8 | 15.97 s | 102, 648 KiB | 81, 576 KiB | 12, 356 KiB |
-| 2 | 8/8 | 11.77 s | 50, 796 KiB |32, 716 KiB |63, 092 KiB |
+| 8 | 8/8 | 15.97 s | 102,648 KiB | 81,576 KiB | 12,356 KiB |
+| 2 | 8/8 | 11.77 s | 50,796 KiB |32,716 KiB |63,092 KiB |
 
-The first 1, 000-stream proxy plateau was a descriptor limit: the guest inherited soft 1024,
+The first 1,000-stream proxy plateau was a descriptor limit: the guest inherited soft 1024,
 hard 4096, allowing roughly 506 pairs of downstream/upstream sockets. Startup now raises
 the soft limit when the hard limit permits it, or refuses to start with a required-limit error.
-A fully Rust direct control passed 1, 000 streams with 32.33 seconds of complete overlap.
+A fully Rust direct control passed 1,000 streams with 32.33 seconds of complete overlap.
 With the descriptor fix, the 128 MiB proxy's process disappeared during the same workload;
-the last samples reached 104, 652 KiB host RSS, 75, 160 KiB application HWM and 6, 568 KiB
+the last samples reached 104,652 KiB host RSS, 75,160 KiB application HWM and 6,568 KiB
 available guest memory. This is a failed profile. Those samples alone do not prove an OOM
 kill; later runs capture failure logs before cleanup. A 256 MiB comparison is pending.
 

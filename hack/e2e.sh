@@ -154,12 +154,19 @@ check "tty: the command runs"           'running "sleep 6061"'
 pkill -9 -P "$held" || true
 check "tty: the client's close hangs it up" 'ended "sleep 6061"'
 wait "$held" 2>/dev/null || true
-sleep 600 | briqyard machine exec -i "$A" -- sleep 6062 >/dev/null 2>&1 &
+exec {session_input}< <(sleep 600)
+session_feeder=$!
+briqyard machine exec -i "$A" -- sleep 6062 <&$session_input >/dev/null 2>&1 &
 held=$!
 for i in $(seq 1 40); do running "sleep 6062" && break; sleep 0.5; done
 check "session: the command runs"       'running "sleep 6062"'
 kill -9 "$held" || true
 check "session: the client's close kills it" 'ended "sleep 6062"'
+kill "$session_feeder" 2>/dev/null || true
+wait "$held" 2>/dev/null || true
+wait "$session_feeder" 2>/dev/null || true
+exec {session_input}<&-
+
 check "session: an event"               'briqyard events --machine "$A" | awk "\$4 == \"session_opened\"" | grep -q .'
 
 echo "== second machine reaches the first by name"
@@ -582,7 +589,9 @@ check "data survived"  '[ "$(briqyard machine exec "$P" -- psql -U postgres -tAc
 echo "== sleep on idle, wake on connect"
 # A machine with a session open is in use: it stays up while the sleeper below goes down.
 W=$(briqyard machine run --image alpine:3.20 --name awake --namespace "$T" --memory 128 --sleep 20s -- sleep 3600 | jq -r .id)
-sleep 600 | briqyard machine exec -i "$W" -- cat >/dev/null 2>&1 &
+exec {awake_input}< <(sleep 600)
+awake_feeder=$!
+briqyard machine exec -i "$W" -- cat <&$awake_input >/dev/null 2>&1 &
 held=$!
 S=$(briqyard machine run --image postgres:16-alpine --name sleeper --namespace "$T" --memory 512 --volume 1G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep 20s | jq -r .id)
 SEP=$(briqyard endpoint add "$S" 5432 | jq -r .address)
@@ -590,6 +599,11 @@ for i in $(seq 1 90); do [ "$(briqyard machine get "$S" | jq -r .state)" = stopp
 check "slept when idle" '[ "$(briqyard machine get "$S" | jq -r .stopped_reason)" = idle ]'
 check "awake while a session is open" '[ "$(briqyard machine get "$W" | jq -r .state)" = running ]'
 kill -9 "$held" || true
+kill "$awake_feeder" 2>/dev/null || true
+wait "$held" 2>/dev/null || true
+wait "$awake_feeder" 2>/dev/null || true
+exec {awake_input}<&-
+
 for i in $(seq 1 45); do [ "$(briqyard machine get "$W" | jq -r .state)" = stopped ] && break; sleep 2; done
 check "asleep once it closed" '[ "$(briqyard machine get "$W" | jq -r .stopped_reason)" = idle ]'
 briqyard machine rm "$W" >/dev/null
@@ -751,7 +765,12 @@ briqyard machine destroy "$FK" >/dev/null
 briqyard machine destroy "$CK" >/dev/null
 
 echo "== namespaces made together get bridges of their own"
-for i in 1 2 3; do briqyard machine run --image alpine:3.20 --name par --namespace "$T-par$i" --memory 128 -- sleep 600 > /tmp/by-par$i.json & done; wait
+parallel_boots=()
+for i in 1 2 3; do
+  timeout 120 briqyard machine run --image alpine:3.20 --name par --namespace "$T-par$i" --memory 128 -- sleep 600 > /tmp/by-par$i.json &
+  parallel_boots+=("$!")
+done
+for boot_pid in "${parallel_boots[@]}"; do wait "$boot_pid"; done
 check "three namespaces at once"  '[ "$(briqyard namespace ls | jq -r "[.[] | select(.id | startswith(\"$T-par\")) | .subnet] | unique | length")" = 3 ]'
 for i in 1 2 3; do briqyard machine destroy "$(jq -r .id /tmp/by-par$i.json)" >/dev/null 2>&1; briqyard namespace rm "$T-par$i" >/dev/null 2>&1 || true; done
 

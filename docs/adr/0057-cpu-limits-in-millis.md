@@ -22,7 +22,10 @@ Host capacity remains the configured shared-CPU budget in `capacity.vcpus`. Repo
 starting, running or stopping. Guest CPU counts remain visible independently. Admission,
 fleet placement and in-flight holds use millis. CPU is reserved under the same lock as
 memory and released when the machine stops. Pending sizes count when applied at start.
-Memory admission and guest memory sizes are unchanged.
+Memory admission and guest memory sizes are unchanged. Backup records expose their captured
+size for placement of a size-omitted restore; the fleet resolves and pins the selected backup
+ID before reserving resources. Older sealed records without size metadata require an explicit
+restore size through the fleet. No secret fields or pool keys are exposed in that metadata.
 
 Namespace quotas gain `cpu_millis`. The legacy `vcpus` quota means `vcpus × 1000` CPU
 millis; if both are present, the stricter CPU limit applies. Old persisted sizes and quota
