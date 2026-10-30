@@ -638,7 +638,7 @@ Without the bootstrap, run the script yourself with `FLEET_URL`, `ADVERTISE` and
 For a server the fleet cannot reach over SSH, or one made from an image: a one-time token and one line on the server (needs `bootstrap.enabled` and `bootstrap.release`).
 
 ```bash
-briqyard host token create --ttl 1h --region gra --labels rack=a1   # prints <id>.<secret>, once
+briqyard host token create --address 203.0.113.12 --ttl 1h --region gra --labels rack=a1   # prints <id>.<secret>, once
 briqyard host token ls                                              # active, used (by which host), expired, revoked
 briqyard host token revoke ab12cd                                   # a token no host has used
 ```
@@ -646,7 +646,7 @@ briqyard host token revoke ab12cd                                   # a token no
 On the server, as root (`fleet.example` is `bootstrap.fleet_url`, as the server reaches it):
 
 ```bash
-curl -fsSL https://fleet.example/install.sh | FLEET_URL=https://fleet.example JOIN_TOKEN=<id>.<secret> sh
+curl -fsSL --proto '=https' --proto-redir '=https' https://fleet.example/install.sh | FLEET_URL=https://fleet.example JOIN_TOKEN=<id>.<secret> sh
 ```
 
 | Variable | |
@@ -655,7 +655,7 @@ curl -fsSL https://fleet.example/install.sh | FLEET_URL=https://fleet.example JO
 | `HOST_NAME` | the id to join as; default `h_` and the address. A token made with `--host` takes that id only |
 | `BRIQYARD_POOL_DEVICE` | this server's drives; default the fleet's `bootstrap.pool_device` |
 
-The token lasts an hour by default (at most 30 days), joins one host, and then only shows who used it. The fleet keeps the hash of its secret. The call must come from the address the host will serve its API at, and the fleet must see it (its own TLS, or a loopback proxy setting `X-Forwarded-For`); a host on the private network joins over it. The fleet records the host `joining` and answers the settings `host add` would send over SSH; `install.sh` then runs the same `bootstrap-host.sh` (the fleet serves it at `/bootstrap-host.sh`), which downloads the release's binaries and checks them against its `SHA256SUMS`. The host's first heartbeat pins its certificate and makes it `ready`. The machines' store credentials are written on the host as for any other (`briqyardd.env`, ADR 0041). `host upgrade` reaches a joined host only if the fleet's SSH key is authorized on it.
+The token lasts an hour by default (at most 30 days), joins one host, and then only shows who used it. The fleet keeps the hash of its secret. **Bind it with `--address <IP or CIDR>`** to the server it is for: a token without it is a bearer credential that any server can use from anywhere, and the host it makes is placed workloads once ready and is handed the release credentials (`bootstrap.release_token`). An address-bound token is refused from any other address (the same `invalid_token`, the reason in the fleet's log); leave it out only for an image that boots on an address you do not know. The call must come from the address the host will serve its API at, and the fleet must see it (its own TLS, or a loopback proxy setting `X-Forwarded-For`); a host on the private network joins over it. The fleet records the host `joining` and answers the settings `host add` would send over SSH. `install.sh` checks the server first (root, Ubuntu, KVM, the drives) and spends the token last; it then fetches `bootstrap-host.sh` from the fleet, which serves it only to the host that joined, on its own token from its own address (`bootstrap.script` may hold what the fleet cannot vouch for). The script is the one `host add` runs: it downloads the release's binaries and checks them against its `SHA256SUMS`. If the install fails after the join, a new token from the same server replaces the `joining` record (a host that heartbeated is never replaced). The host's first heartbeat pins its certificate, which the fleet logs and writes into the host's note: compare it with `briqyardd tls-fingerprint` on the server. The token is printed once, on stdout. The machines' store credentials are written on the host as for any other (`briqyardd.env`, ADR 0041). `host upgrade` reaches a joined host only if the fleet's SSH key is authorized on it.
 
 The fleet is given no SSH host key with the server, so the bootstrap pins the key it sees:
 the first attempt that succeeds appends it to `<state_dir>/known_hosts` and writes its
