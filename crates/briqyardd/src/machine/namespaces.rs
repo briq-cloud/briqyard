@@ -57,6 +57,7 @@ impl Manager {
             created_at: t.rec.created_at,
             host: String::new(),
             region: String::new(),
+            host_state: String::new(),
             gateway,
         }
     }

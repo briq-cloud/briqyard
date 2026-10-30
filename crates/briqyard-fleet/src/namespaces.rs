@@ -2,24 +2,103 @@
 
 use super::*;
 
-pub(super) async fn list_namespaces(State(st): S) -> Json<Vec<api::Namespace>> {
-    let reg = st.reg.lock().unwrap();
-    let mut out: Vec<api::Namespace> = reg
-        .namespaces
-        .iter()
-        .map(|(t, h)| api::Namespace {
-            id: t.clone(),
-            subnet: String::new(),
-            router: String::new(),
-            machines: 0,
-            created_at: Utc::now(),
-            host: h.clone(),
-            region: reg.region_of(t).unwrap_or_default().into(),
-            gateway: None,
-        })
+/// The fleet's namespaces: those it pinned, each as its host reports it (subnet, router, machines,
+/// creation time, gateway), with the host and its region. Every host holding one is asked at
+/// once, each within `LIST_TIMEOUT`. A namespace whose host is down or does not answer stays
+/// listed with what the fleet knows (its host and region) and `host_state` saying why the rest
+/// is missing.
+pub(super) async fn list_namespaces(State(st): S, headers: HeaderMap) -> Json<Vec<api::Namespace>> {
+    let pins: Vec<(String, String)> = {
+        let reg = st.reg.lock().unwrap();
+        reg.namespaces
+            .iter()
+            .map(|(t, h)| (t.clone(), h.clone()))
+            .collect()
+    };
+    let mut by_host: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (namespace, host) in pins {
+        by_host.entry(host).or_default().push(namespace);
+    }
+    let asked = by_host.into_iter().map(|(id, pinned)| {
+        let st = &st;
+        let headers = &headers;
+        async move {
+            let host = st.reg.lock().unwrap().hosts.get(&id).cloned();
+            let known = match host {
+                Some(h) => asked_namespaces(st, &h, headers).await,
+                None => Err("unreachable"),
+            };
+            pinned
+                .into_iter()
+                .map(|t| {
+                    let region = st
+                        .reg
+                        .lock()
+                        .unwrap()
+                        .region_of(&t)
+                        .unwrap_or_default()
+                        .into();
+                    let mut n = match &known {
+                        Ok(listed) => listed.iter().find(|n| n.id == t).cloned(),
+                        Err(_) => None,
+                    }
+                    .unwrap_or_else(|| api::Namespace {
+                        id: t,
+                        subnet: String::new(),
+                        router: String::new(),
+                        machines: 0,
+                        created_at: Default::default(),
+                        host: String::new(),
+                        region: String::new(),
+                        host_state: String::new(),
+                        gateway: None,
+                    });
+                    n.host = id.clone();
+                    n.region = region;
+                    if let Err(state) = &known {
+                        n.host_state = state.to_string();
+                    }
+                    n
+                })
+                .collect::<Vec<_>>()
+        }
+    });
+    let mut out: Vec<api::Namespace> = futures::future::join_all(asked)
+        .await
+        .into_iter()
+        .flatten()
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Json(out)
+}
+
+/// What a host lists as its namespaces, or why it cannot: `down` (the fleet marked it so and did
+/// not ask) or `unreachable` (it did not answer within `LIST_TIMEOUT`, or not with a readable
+/// list).
+async fn asked_namespaces(
+    st: &AppState,
+    host: &HostRec,
+    headers: &HeaderMap,
+) -> Result<Vec<api::Namespace>, &'static str> {
+    if host.state == "down" {
+        return Err("down");
+    }
+    let asked = forward(
+        st,
+        host,
+        Method::GET,
+        "/v1/namespaces",
+        headers,
+        Bytes::new(),
+    );
+    let Ok(resp) = tokio::time::timeout(st.list_timeout, asked).await else {
+        return Err("unreachable");
+    };
+    if !resp.status().is_success() {
+        return Err("unreachable");
+    }
+    let (_, data) = read(resp).await;
+    serde_json::from_slice(&data).map_err(|_| "unreachable")
 }
 
 pub(super) async fn delete_namespace(

@@ -14,6 +14,7 @@ pub struct Namespace {
     /// The namespace's machines, its gateway not counted.
     #[serde(default)]
     pub machines: usize,
+    #[serde(default)]
     pub created_at: DateTime<Utc>,
     /// The host the namespace lives on (fleet).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -21,6 +22,11 @@ pub struct Namespace {
     /// Its host's region: the namespace's (fleet, ADR 0025).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub region: String,
+    /// Set by the fleet's list when it could not ask the namespace's host: `down` (the fleet marked
+    /// it down and did not ask) or `unreachable` (it did not answer). `subnet`, `router`,
+    /// `machines` and `created_at` (the epoch) are then not known, not zero.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayView>,
 }

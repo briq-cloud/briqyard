@@ -338,3 +338,112 @@ async fn a_machine_on_a_down_host_answers_503() {
         "a failed delete keeps the index entry"
     );
 }
+
+#[tokio::test]
+async fn the_namespaces_are_listed_as_their_hosts_know_them() {
+    let (f, ds) = fleet_with_daemons(3).await;
+    ds[0].stub.add("t1", "web", 512);
+    ds[0].stub.add("t1", "db", 512);
+    ds[1].stub.add("t2", "web", 512);
+    ds[2].stub.add("t3", "web", 512);
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        for (t, h) in [("t1", "d1"), ("t2", "d2"), ("t3", "d3")] {
+            reg.namespaces.insert(t.into(), h.into());
+        }
+    }
+    let list = || async {
+        let (s, _, body) = call(&f.st, "GET", "/v1/namespaces", "api", None).await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        serde_json::from_str::<Vec<api::Namespace>>(&body).unwrap()
+    };
+    let ts = list().await;
+    let got: Vec<_> = ts
+        .iter()
+        .map(|t| {
+            (
+                t.id.as_str(),
+                t.host.as_str(),
+                t.machines,
+                t.subnet.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("t1", "d1", 2, "10.1.0.0/24"),
+            ("t2", "d2", 1, "10.2.0.0/24"),
+            ("t3", "d3", 1, "10.3.0.0/24"),
+        ]
+    );
+    assert!(ts
+        .iter()
+        .all(|t| t.host_state.is_empty() && t.router.ends_with(".0.1")));
+    assert!(ts.iter().all(|t| t.region == "fsn"));
+    // A host the fleet marked down is not asked; its namespace stays, marked.
+    set_state(&f.st, "d2", "down");
+    let d2_before = ds[1].stub.calls().len();
+    let ts = list().await;
+    assert_eq!(
+        ds[1].stub.calls().len(),
+        d2_before,
+        "a down host is not asked"
+    );
+    let t2 = ts.iter().find(|t| t.id == "t2").unwrap();
+    assert_eq!((t2.host.as_str(), t2.host_state.as_str()), ("d2", "down"));
+    assert_eq!((t2.machines, t2.subnet.as_str()), (0, ""));
+    // A host that does not answer is marked the same way; the others keep their numbers.
+    set_state(&f.st, "d2", "ready");
+    f.st.reg.lock().unwrap().hosts.get_mut("d3").unwrap().url = "http://127.0.0.1:1".into();
+    let ts = list().await;
+    let state: Vec<_> = ts.iter().map(|t| t.host_state.as_str()).collect();
+    assert_eq!(state, ["", "", "unreachable"]);
+    assert_eq!(
+        (ts[0].machines, ts[1].machines, ts[1].subnet.as_str()),
+        (2, 1, "10.2.0.0/24")
+    );
+    // The mark is on the wire only when set.
+    let (_, _, body) = call(&f.st, "GET", "/v1/namespaces", "api", None).await;
+    let v = json(&body);
+    assert!(v[0].get("host_state").is_none(), "{v}");
+    assert_eq!(v[2]["host_state"], "unreachable");
+}
+
+#[tokio::test]
+async fn a_host_that_answers_too_late_is_listed_unreachable_at_once() {
+    let (mut f, ds) = fleet_with_daemons(2).await;
+    ds[0].stub.add("t1", "web", 512);
+    ds[1].stub.add("t2", "web", 512);
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        for (t, h) in [("t1", "d1"), ("t2", "d2")] {
+            reg.namespaces.insert(t.into(), h.into());
+        }
+    }
+    // d2 takes the connection and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    f.st.reg.lock().unwrap().hosts.get_mut("d2").unwrap().url =
+        format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((conn, _)) = listener.accept().await {
+            open.push(conn);
+        }
+    });
+    Arc::get_mut(&mut f.st).unwrap().list_timeout = std::time::Duration::from_millis(300);
+    let began = std::time::Instant::now();
+    let (s, _, body) = call(&f.st, "GET", "/v1/namespaces", "api", None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+    let ts: Vec<api::Namespace> = serde_json::from_str(&body).unwrap();
+    let got: Vec<_> = ts
+        .iter()
+        .map(|t| (t.id.as_str(), t.machines, t.host_state.as_str()))
+        .collect();
+    assert_eq!(got, [("t1", 1, ""), ("t2", 0, "unreachable")]);
+}
