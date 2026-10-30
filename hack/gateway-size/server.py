@@ -1,9 +1,45 @@
-import asyncio, json, os, signal, ssl, time
+import asyncio, functools, json, os, random, signal, ssl, time
 from pathlib import Path
 
 SECRET = 'benchmark-secret-value-0123456789'
 PLACEHOLDER = 'briq_secret_a1b2c3d4e5f6a7b8'
 STREAM_GROUPS = {}
+
+SMALL_CONFIG = Path('/tmp/benchmark-small-config')
+
+@functools.lru_cache(maxsize=1)
+def configured_secrets():
+    """Valid synthetic credentials; the primary upstream echo credential stays unchanged."""
+    count = int(os.environ.get('BENCH_SECRET_COUNT', '1'))
+    chars = int(os.environ.get('BENCH_SECRET_CHARS', '64'))
+    charset = os.environ.get('BENCH_SECRET_CHARSET', 'ascii')
+    if not 1 <= count <= 50 or not 1 <= chars <= 32768 or charset not in ('ascii', 'unicode'):
+        raise ValueError('invalid synthetic credential settings')
+    secrets = [{'name': 'TOKEN', 'placeholder': PLACEHOLDER, 'value': SECRET,
+                'hosts': ['bench.internal'], 'locations': ['header', 'body']}]
+    alphabet = ('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-' if charset == 'ascii'
+                else ''.join(chr(0x4e00 + i) for i in range(16384)))
+    for index in range(1, count):
+        rng = random.Random(0xb91 + index)
+        # Distinct first characters guarantee distinct values, even with chars=1. BMP CJK
+        # characters each occupy one JavaScript UTF-16 code unit and three UTF-8 bytes.
+        value = alphabet[index] + ''.join(rng.choices(alphabet, k=chars - 1))
+        secrets.append({'name': f'BENCH_EXTRA_{index:03}',
+                        'placeholder': f'briq_secret_{index:016x}', 'value': value,
+                        'hosts': ['bench.internal'], 'locations': ['header', 'body']})
+    return secrets
+
+@functools.lru_cache(maxsize=2)
+def config_bytes(small):
+    secrets = configured_secrets()[:1] if small else configured_secrets()
+    data = {'secrets': secrets, 'briqs': [{'id': 'bench', 'host': 'bench.internal',
+                                        'secrets': [s['name'] for s in secrets]}]}
+    # Escaping BMP characters would artificially double the on-wire config size.
+    payload = json.dumps(data, ensure_ascii=False).encode('utf-8')
+    if len(payload) > 8 * 1024 * 1024:
+        raise ValueError('synthetic config exceeds the gateway API response limit')
+    return payload
+
 
 async def wait_for_peers(headers, w):
     group_id = headers.get(b'x-benchmark-stream-group', b'')
@@ -99,10 +135,7 @@ async def handle(r, w):
                         raise ValueError('unexpectedly large fixture API body')
                     await asyncio.sleep(0)
             if path.endswith(b'/config'):
-                data = {'secrets': [{'name': 'TOKEN', 'placeholder': PLACEHOLDER, 'value': SECRET,
-                         'hosts': ['bench.internal'], 'locations': ['header', 'body']}],
-                        'briqs': [{'id': 'bench', 'host': 'bench.internal', 'secrets': ['TOKEN']}]}
-                reply = json.dumps(data).encode()
+                reply = config_bytes(SMALL_CONFIG.exists())
             elif path.endswith(b'/ca'):
                 Path('/tmp/gateway-ca.pem').write_text(json.loads(body)['cert'])
                 reply = b'{}'
@@ -132,6 +165,8 @@ async def handle(r, w):
         w.close()
 
 async def main():
+    SMALL_CONFIG.unlink(missing_ok=True)
+    config_bytes(False)  # Prepare large values before the fixture readiness ports open.
     use_rust = os.environ.get('BENCH_TLS_SERVER', 'python') == 'rust'
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -160,6 +195,7 @@ async def main():
             for task in done:
                 await task
     finally:
+        SMALL_CONFIG.unlink(missing_ok=True)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

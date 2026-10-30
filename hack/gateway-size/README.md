@@ -50,3 +50,23 @@ scheduler/cgroup counters before attributing a failure to the gateway.
 barrier while the host runs the gateway's local healthcheck. It rejects1,000 excess sockets,
 closes all admitted streams and verifies a fresh intercepted request. It uses a Python client
 because it measures rejection and recovery, not peak stream throughput.
+
+Native gateway mode respects the runtime's isolation: gateway exec is forbidden. Sampling
+uses host RSS, cgroup counters and the read-only machine stats API; guest process RSS is
+unavailable in this mode. Ordinary-machine controls still sample guest RSS. A one-second
+readiness exec probe checks local health; overload holds its admission barrier until a fresh
+successful probe proves health started while all slots were occupied.
+
+`BENCH_REWRITE_BUDGET_MB` sets the estimated matcher budget (default16 for measurements).
+`BENCH_SECRET_COUNT`, `BENCH_SECRET_CHARS`, `BENCH_SECRET_CHARSET=ascii|unicode` generate
+additional distinct synthetic rules, all named by the fixture consumer. `guard` mode verifies
+capacity refusals for an oversized ruleset, switches to the small configuration and requires
+recovery on the same TLS session. Use `BENCH_REFRESH_MS=1000` for that recovery test.
+
+`BENCH_STREAM_EVENTS` and `BENCH_STREAM_INTERVAL_MS` customize Rust stream workloads
+(default30 events at1Hz). Both fixture and client must use Rust. Keep the same rate in
+direct controls. `BENCH_VM_CHAOS=1` kills the recorded native gateway Firecracker process
+after the load sequence. An active, verified TLS stream must be interrupted, then one fresh
+request must recover using the original CA. The parent checks stable machine ID/IP/size,
+CPU quota/weight, host reservations and readiness; the interrupted request is never replayed.
+Only a namespace gateway with a native CPU reservation supports this scenario.

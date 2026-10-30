@@ -1,6 +1,6 @@
 # ADR 0057: CPU limits in millis
 
-Date: 2026-10-30 · Status: proposed
+Date: 2026-10-30 · Status: accepted
 
 A guest CPU count is its topology, not its CPU-time reservation. Small system machines need
 less than one CPU without sharing a process or a VM with another namespace. The gateway
