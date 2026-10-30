@@ -15,7 +15,7 @@ pub(super) fn reason_of(m: &api::Machine) -> &str {
 
 pub(super) fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
+        "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
         "ID",
         "NAMESPACE",
         "NAME",
@@ -24,6 +24,7 @@ pub(super) fn machine_table(ms: &[api::Machine]) -> String {
         "READY",
         "IP",
         "SIZE",
+        "CPU m",
         "SLEEP",
         "EGRESS",
         "LIMITS",
@@ -41,7 +42,7 @@ pub(super) fn machine_table(ms: &[api::Machine]) -> String {
             None => "-".into(),
         };
         out.push_str(&format!(
-            "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {}\n",
+            "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {}\n",
             m.id,
             m.namespace,
             m.name,
@@ -50,6 +51,7 @@ pub(super) fn machine_table(ms: &[api::Machine]) -> String {
             if m.ready { "yes" } else { "no" },
             m.ip,
             format!("{}c/{}M", m.size.vcpus, m.size.memory_mb),
+            m.size.cpu_millis(),
             m.sleep,
             egress_label(&m.egress),
             limits_label(&m.limits),
@@ -154,7 +156,7 @@ pub(super) fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, Stri
 pub(super) fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
         "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<10} {:<20} LAST SEEN\n",
-        "ID", "URL", "STATE", "REGION", "MEMORY MB", "VCPUS", "MACHINES", "NAMESPACES", "VERSION"
+        "ID", "URL", "STATE", "REGION", "MEMORY MB", "CPU m", "MACHINES", "NAMESPACES", "VERSION"
     );
     for h in hs {
         out.push_str(&format!(
@@ -164,7 +166,7 @@ pub(super) fn host_table(hs: &[api::Host]) -> String {
             h.state,
             if h.region.is_empty() { "-" } else { &h.region },
             format!("{}/{}", h.used.memory_mb, h.capacity.memory_mb),
-            format!("{}/{}", h.used.vcpus, h.capacity.vcpus),
+            format!("{}/{}", h.used.cpu_millis(), h.capacity.cpu_millis()),
             h.machines,
             h.namespaces.len(),
             if h.version.is_empty() {
@@ -405,6 +407,7 @@ pub(super) fn describe(m: &api::Machine, evs: &[api::Event]) -> String {
         "Size",
         format!("{} vCPU, {} MB", m.size.vcpus, m.size.memory_mb),
     ));
+    lines.push(("CPU limit", format!("{}m", m.size.cpu_millis())));
     if let Some(v) = &m.volume {
         lines.push(("Volume", format!("{} GB at {}", v.size_gb, v.mount)));
     }

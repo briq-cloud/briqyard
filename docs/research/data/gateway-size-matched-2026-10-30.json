@@ -1,0 +1,1063 @@
+[
+  {
+    "run": "held8",
+    "phase": "1000m-direct-streams-100",
+    "samples": 18,
+    "host_rss_max_kib": 103456,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 88376
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-direct-streams-100-after",
+    "samples": 1,
+    "host_rss_max_kib": 103508,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 88784
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-direct-streams-100-before",
+    "samples": 1,
+    "host_rss_max_kib": 103040,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 88260
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-bodies-8",
+    "samples": 9,
+    "host_rss_max_kib": 102392,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 12356
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-bodies-8-after",
+    "samples": 1,
+    "host_rss_max_kib": 102648,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 86248
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-bodies-8-before",
+    "samples": 1,
+    "host_rss_max_kib": 9380,
+    "gateway_lifetime_hwm_kib": 3072,
+    "guest_available_min_kib": 90652
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-streams-100",
+    "samples": 21,
+    "host_rss_max_kib": 103868,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 82700
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-streams-100-after",
+    "samples": 1,
+    "host_rss_max_kib": 103904,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 83912
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-streams-100-before",
+    "samples": 1,
+    "host_rss_max_kib": 103520,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 88700
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-throughput-16",
+    "samples": 6,
+    "host_rss_max_kib": 102924,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 86248
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-throughput-16-after",
+    "samples": 1,
+    "host_rss_max_kib": 103016,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 88404
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-throughput-16-before",
+    "samples": 1,
+    "host_rss_max_kib": 102668,
+    "gateway_lifetime_hwm_kib": 81576,
+    "guest_available_min_kib": 86248
+  },
+  {
+    "run": "held8",
+    "phase": "idle-cold",
+    "samples": 1,
+    "host_rss_max_kib": 42472,
+    "gateway_lifetime_hwm_kib": 3072,
+    "guest_available_min_kib": 90652
+  },
+  {
+    "run": "held8",
+    "phase": "idle-first",
+    "samples": 1,
+    "host_rss_max_kib": 42636,
+    "gateway_lifetime_hwm_kib": 3152,
+    "guest_available_min_kib": 90952
+  },
+  {
+    "run": "held8",
+    "phase": "idle-resume",
+    "samples": 1,
+    "host_rss_max_kib": 5556,
+    "gateway_lifetime_hwm_kib": 3072,
+    "guest_available_min_kib": 90640
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-bodies-8",
+    "exit_code": 0,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.010812499999346414,
+          "p95": 0.7150829999993391,
+          "max": 0.7150829999993391
+        },
+        "ramp_delay": {
+          "p50": 199.75106250000073,
+          "p95": 344.82391599999926,
+          "max": 344.82391599999926
+        },
+        "tcp_connect": {
+          "p50": 17.513479499999818,
+          "p95": 27.90754200000123,
+          "max": 27.90754200000123
+        },
+        "connect_response": {
+          "p50": 152.51591700000057,
+          "p95": 295.39199999999965,
+          "max": 295.39199999999965
+        },
+        "tls_handshake": {
+          "p50": 222.10004150000094,
+          "p95": 379.03333299999883,
+          "max": 379.03333299999883
+        },
+        "request": {
+          "p50": 0.005687499998074941,
+          "p95": 0.7429999999999382,
+          "max": 0.7429999999999382
+        },
+        "body_upload": {
+          "p50": 3330.4053975000015,
+          "p95": 4132.793668999998,
+          "max": 4132.793668999998
+        },
+        "body_barrier": {
+          "p50": 877.4146465000001,
+          "p95": 1985.295667999999,
+          "max": 1985.295667999999
+        },
+        "body_hold": {
+          "p50": 5019.2138775,
+          "p95": 5022.005503000002,
+          "max": 5022.005503000002
+        },
+        "body_final_byte": {
+          "p50": 0.8019585000003104,
+          "p95": 12.384457999999654,
+          "max": 12.384457999999654
+        },
+        "body_response": {
+          "p50": 5724.444857,
+          "p95": 6085.232002000002,
+          "max": 6085.232002000002
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.2198339999994063,
+        "p95": 22.865458999999074,
+        "max": 244.34170800000103
+      },
+      "error_stages": {},
+      "concurrency": 8,
+      "established": 8,
+      "completed": 8,
+      "peak_live_connections": 8,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 15.969103007999998,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "sampled_memory_peak": {
+      "gateway": 201781248,
+      "fixture": 303448064
+    }
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-throughput-16",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.0018540000006339596,
+          "p95": 0.16412500000484442,
+          "max": 0.20129199999985303
+        },
+        "ramp_delay": {
+          "p50": 278.9136039999995,
+          "p95": 306.77212500000195,
+          "max": 306.77212500000195
+        },
+        "tcp_connect": {
+          "p50": 9.838395500000985,
+          "p95": 27.331375000002822,
+          "max": 27.331375000002822
+        },
+        "connect_response": {
+          "p50": 165.664146000001,
+          "p95": 320.10558399999667,
+          "max": 320.10558399999667
+        },
+        "tls_handshake": {
+          "p50": 190.51083350000297,
+          "p95": 231.4650420000035,
+          "max": 231.4650420000035
+        },
+        "request": {
+          "p50": 10005.289192,
+          "p95": 10052.278588,
+          "max": 10052.278588
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.4434580000013826,
+        "p95": 18.370167000004752,
+        "max": 523.1159579999953
+      },
+      "error_stages": {},
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 10.723803963000002,
+      "requests": 18329,
+      "rps": 1709.1882752836552,
+      "latency_ms": {
+        "p50": 6.182082999998784,
+        "p95": 20.267832999998348,
+        "max": 787.042249999999
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "sampled_memory_peak": {
+      "gateway": 202661888,
+      "fixture": 308723712
+    }
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-direct-streams-100",
+    "exit_code": 0,
+    "result": {
+      "mode": "streams",
+      "route": "direct",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 100,
+      "all_streams_seconds": 30.67752239,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.0025209999989783682,
+          "p95": 1919.2116669999991,
+          "max": 2539.1694599999964
+        },
+        "ramp_delay": {
+          "p50": 1021.6913130000016,
+          "p95": 2117.6362100000006,
+          "max": 2118.299958999998
+        },
+        "tcp_connect": {
+          "p50": 271.84952100000004,
+          "p95": 562.4364170000007,
+          "max": 782.1062499999982
+        },
+        "tls_handshake": {
+          "p50": 341.4241254999979,
+          "p95": 769.7575420000007,
+          "max": 867.0354590000002
+        },
+        "request": {
+          "p50": 0.016499500002709055,
+          "p95": 0.868541000002665,
+          "max": 5.947083999998881
+        },
+        "response_headers": {
+          "p50": 41.778187500000286,
+          "p95": 427.2664159999948,
+          "max": 857.5047920000003
+        },
+        "first_event": {
+          "p50": 0.010291499997094888,
+          "p95": 0.24650000000292493,
+          "max": 2.4762079999973707
+        },
+        "stream_read": {
+          "p50": 32955.8119325,
+          "p95": 34481.530808,
+          "max": 34486.253142
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.0545415000009912,
+        "p95": 23.287499999992175,
+        "max": 721.8940419999996
+      },
+      "error_stages": {},
+      "concurrency": 100,
+      "established": 100,
+      "completed": 100,
+      "peak_live_connections": 100,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 35.938572601,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": {
+        "p50": 1333.2191884999993,
+        "p95": 2632.3664590000035,
+        "max": 2921.2821260000014
+      },
+      "errors": [],
+      "error_count": 0
+    },
+    "sampled_memory_peak": {
+      "gateway": 203558912,
+      "fixture": 386179072
+    }
+  },
+  {
+    "run": "held8",
+    "phase": "1000m-proxy-streams-100",
+    "exit_code": 0,
+    "result": {
+      "mode": "streams",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 100,
+      "all_streams_seconds": 30.60371739,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.1912710000055995,
+          "p95": 4546.660836000001,
+          "max": 4912.717334999997
+        },
+        "ramp_delay": {
+          "p50": 1181.1551880000052,
+          "p95": 2229.0777520000092,
+          "max": 2229.085875999999
+        },
+        "tcp_connect": {
+          "p50": 6.096978999998726,
+          "p95": 100.78920899999844,
+          "max": 379.42416699999626
+        },
+        "connect_response": {
+          "p50": 190.75262500000179,
+          "p95": 732.8186670000036,
+          "max": 1459.4963750000006
+        },
+        "tls_handshake": {
+          "p50": 226.78235450000273,
+          "p95": 1409.965667999998,
+          "max": 1636.2615839999962
+        },
+        "request": {
+          "p50": 0.09716699999984257,
+          "p95": 2.2662079999946627,
+          "max": 19.508500000000595
+        },
+        "response_headers": {
+          "p50": 463.8255840000056,
+          "p95": 1067.8335419999883,
+          "max": 2362.4387090000027
+        },
+        "first_event": {
+          "p50": 0.01750000000555474,
+          "p95": 0.3240000000062082,
+          "max": 7.3233749999985776
+        },
+        "stream_read": {
+          "p50": 34588.278995999994,
+          "p95": 38249.945976999996,
+          "max": 38830.329269
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.023416999996127,
+        "p95": 18.085750000008712,
+        "max": 1069.5115830000047
+      },
+      "error_stages": {},
+      "concurrency": 100,
+      "established": 100,
+      "completed": 100,
+      "peak_live_connections": 100,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 39.962203560999995,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": {
+        "p50": 3662.2327515000065,
+        "p95": 5676.995045000012,
+        "max": 5935.4042110000055
+      },
+      "errors": [],
+      "error_count": 0
+    },
+    "sampled_memory_peak": {
+      "gateway": 204668928,
+      "fixture": 401342464
+    }
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-direct-streams-100",
+    "samples": 19,
+    "host_rss_max_kib": 51660,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 87564
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-direct-streams-100-after",
+    "samples": 1,
+    "host_rss_max_kib": 51700,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 88524
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-direct-streams-100-before",
+    "samples": 1,
+    "host_rss_max_kib": 51136,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 87564
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-bodies-8",
+    "samples": 7,
+    "host_rss_max_kib": 50404,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 63092
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-bodies-8-after",
+    "samples": 1,
+    "host_rss_max_kib": 50796,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 84252
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-bodies-8-before",
+    "samples": 1,
+    "host_rss_max_kib": 9408,
+    "gateway_lifetime_hwm_kib": 3096,
+    "guest_available_min_kib": 90932
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-streams-100",
+    "samples": 20,
+    "host_rss_max_kib": 52224,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 82832
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-streams-100-after",
+    "samples": 1,
+    "host_rss_max_kib": 52272,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 83808
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-streams-100-before",
+    "samples": 1,
+    "host_rss_max_kib": 51720,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 88388
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-throughput-16",
+    "samples": 6,
+    "host_rss_max_kib": 51036,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 84240
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-throughput-16-after",
+    "samples": 1,
+    "host_rss_max_kib": 51112,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 87648
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-throughput-16-before",
+    "samples": 1,
+    "host_rss_max_kib": 50816,
+    "gateway_lifetime_hwm_kib": 32716,
+    "guest_available_min_kib": 84252
+  },
+  {
+    "run": "held2",
+    "phase": "idle-cold",
+    "samples": 1,
+    "host_rss_max_kib": 42356,
+    "gateway_lifetime_hwm_kib": 3096,
+    "guest_available_min_kib": 90956
+  },
+  {
+    "run": "held2",
+    "phase": "idle-first",
+    "samples": 1,
+    "host_rss_max_kib": 42536,
+    "gateway_lifetime_hwm_kib": 3140,
+    "guest_available_min_kib": 91268
+  },
+  {
+    "run": "held2",
+    "phase": "idle-resume",
+    "samples": 1,
+    "host_rss_max_kib": 5652,
+    "gateway_lifetime_hwm_kib": 3096,
+    "guest_available_min_kib": 90956
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-bodies-8",
+    "exit_code": 0,
+    "result": {
+      "mode": "bodies",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.010520999998320235,
+          "p95": 0.5002909999980432,
+          "max": 0.5002909999980432
+        },
+        "ramp_delay": {
+          "p50": 217.51764650000104,
+          "p95": 407.6017500000013,
+          "max": 407.6017500000013
+        },
+        "tcp_connect": {
+          "p50": 17.497603999999,
+          "p95": 49.82154200000011,
+          "max": 49.82154200000011
+        },
+        "connect_response": {
+          "p50": 203.26822950000258,
+          "p95": 365.5532920000013,
+          "max": 365.5532920000013
+        },
+        "tls_handshake": {
+          "p50": 469.7299585000003,
+          "p95": 494.6897089999993,
+          "max": 494.6897089999993
+        },
+        "request": {
+          "p50": 0.006458500001471634,
+          "p95": 0.7373330000000067,
+          "max": 0.7373330000000067
+        },
+        "body_upload": {
+          "p50": 3796.0221475000008,
+          "p95": 4523.9474599999985,
+          "max": 4523.9474599999985
+        },
+        "body_barrier": {
+          "p50": 275.61150050000015,
+          "p95": 2679.521876999999,
+          "max": 2679.521876999999
+        },
+        "body_hold": {
+          "p50": 5012.2949605,
+          "p95": 5013.276419000001,
+          "max": 5013.276419000001
+        },
+        "body_final_byte": {
+          "p50": 0.2765000000017892,
+          "p95": 1.6346670000011443,
+          "max": 1.6346670000011443
+        },
+        "body_response": {
+          "p50": 1229.1271254999997,
+          "p95": 1585.3434170000007,
+          "max": 1585.3434170000007
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.3037089999990288,
+        "p95": 52.81475000000029,
+        "max": 307.34229199999845
+      },
+      "error_stages": {},
+      "concurrency": 8,
+      "established": 8,
+      "completed": 8,
+      "peak_live_connections": 8,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 11.769647047000003,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "sampled_memory_peak": {
+      "gateway": 95428608,
+      "fixture": 299892736
+    }
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-throughput-16",
+    "exit_code": 0,
+    "result": {
+      "mode": "throughput",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 0,
+      "all_streams_seconds": 0.0,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.002479000000832343,
+          "p95": 0.22962499999934494,
+          "max": 0.3647499999992476
+        },
+        "ramp_delay": {
+          "p50": 207.49620850000028,
+          "p95": 355.5984169999995,
+          "max": 355.5984169999995
+        },
+        "tcp_connect": {
+          "p50": 18.835624999999467,
+          "p95": 95.0298750000016,
+          "max": 95.0298750000016
+        },
+        "connect_response": {
+          "p50": 56.2050205000002,
+          "p95": 152.36366699999948,
+          "max": 152.36366699999948
+        },
+        "tls_handshake": {
+          "p50": 108.40672950000219,
+          "p95": 193.24120899999997,
+          "max": 193.24120899999997
+        },
+        "request": {
+          "p50": 10001.462046,
+          "p95": 10013.870713999999,
+          "max": 10013.870713999999
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.335708000003419,
+        "p95": 9.991750000001783,
+        "max": 328.9990000000003
+      },
+      "error_stages": {},
+      "concurrency": 16,
+      "established": 16,
+      "completed": 16,
+      "peak_live_connections": 16,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 10.657888797000002,
+      "requests": 18817,
+      "rps": 1765.546662984196,
+      "latency_ms": {
+        "p50": 6.141999999996983,
+        "p95": 21.64091600000262,
+        "max": 574.2385839999997
+      },
+      "ttft_ms": null,
+      "errors": [],
+      "error_count": 0
+    },
+    "sampled_memory_peak": {
+      "gateway": 96432128,
+      "fixture": 308441088
+    }
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-direct-streams-100",
+    "exit_code": 0,
+    "result": {
+      "mode": "streams",
+      "route": "direct",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 100,
+      "all_streams_seconds": 30.847444264999993,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.14375050000126066,
+          "p95": 2627.7281670000007,
+          "max": 2748.0461259999984
+        },
+        "ramp_delay": {
+          "p50": 1012.8691879999999,
+          "p95": 1990.1901259999945,
+          "max": 1990.5069590000012
+        },
+        "tcp_connect": {
+          "p50": 78.00639599999926,
+          "p95": 558.8407500000017,
+          "max": 660.0432089999941
+        },
+        "tls_handshake": {
+          "p50": 388.98891650000064,
+          "p95": 908.6936250000051,
+          "max": 984.6363749999938
+        },
+        "request": {
+          "p50": 0.015729500002947816,
+          "p95": 0.4689579999990201,
+          "max": 7.8241670000025465
+        },
+        "response_headers": {
+          "p50": 41.98437500000196,
+          "p95": 731.7436250000001,
+          "max": 796.9332090000023
+        },
+        "first_event": {
+          "p50": 0.010749499999462842,
+          "p95": 0.3911250000001587,
+          "max": 1.3532090000012431
+        },
+        "stream_read": {
+          "p50": 33119.506245,
+          "p95": 35083.547265999994,
+          "max": 35341.272517
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 0.8987909999945004,
+        "p95": 7.143082999999703,
+        "max": 756.4649169999996
+      },
+      "error_stages": {},
+      "concurrency": 100,
+      "established": 100,
+      "completed": 100,
+      "peak_live_connections": 100,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 36.653621975,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": {
+        "p50": 1913.4082509999962,
+        "p95": 3113.1991259999977,
+        "max": 3113.7357929999966
+      },
+      "errors": [],
+      "error_count": 0
+    },
+    "sampled_memory_peak": {
+      "gateway": 97640448,
+      "fixture": 386277376
+    }
+  },
+  {
+    "run": "held2",
+    "phase": "1000m-proxy-streams-100",
+    "exit_code": 0,
+    "result": {
+      "mode": "streams",
+      "route": "proxy",
+      "connect_limit": 16,
+      "ramp_per_second": 50.0,
+      "peak_active_streams": 100,
+      "all_streams_seconds": 30.981871432000005,
+      "python": "3.12.16 (main, Oct 26 2026, 22:51:20) [GCC 15.2.0]",
+      "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+      "stage_ms": {
+        "queued": {
+          "p50": 0.003666500006715978,
+          "p95": 3313.3548769999948,
+          "max": 3715.0186270000063
+        },
+        "ramp_delay": {
+          "p50": 1070.6833125000016,
+          "p95": 1963.1121670000057,
+          "max": 2108.941958999992
+        },
+        "tcp_connect": {
+          "p50": 7.3842290000030175,
+          "p95": 166.1292919999937,
+          "max": 614.6390420000074
+        },
+        "connect_response": {
+          "p50": 103.53466699999814,
+          "p95": 721.5613749999932,
+          "max": 873.884082999993
+        },
+        "tls_handshake": {
+          "p50": 165.1675835000006,
+          "p95": 543.7892500000032,
+          "max": 929.2546260000023
+        },
+        "request": {
+          "p50": 0.06945850000050768,
+          "p95": 3.256916000012211,
+          "max": 7.177208000001656
+        },
+        "response_headers": {
+          "p50": 673.9853130000029,
+          "p95": 997.8731260000018,
+          "max": 1097.0674170000052
+        },
+        "first_event": {
+          "p50": 0.01754150000010668,
+          "p95": 0.779792000002999,
+          "max": 54.03979199999753
+        },
+        "stream_read": {
+          "p50": 35048.740288,
+          "p95": 37490.50051800001,
+          "max": 37534.275935
+        }
+      },
+      "event_loop_lag_ms": {
+        "p50": 1.1247080000032357,
+        "p95": 23.741584000003964,
+        "max": 654.3997090000005
+      },
+      "error_stages": {},
+      "concurrency": 100,
+      "established": 100,
+      "completed": 100,
+      "peak_live_connections": 100,
+      "io_timeout_s": 10,
+      "worker_timeout_s": 100,
+      "seconds": 38.753601519,
+      "requests": 0,
+      "rps": 0.0,
+      "latency_ms": null,
+      "ttft_ms": {
+        "p50": 1929.096292499999,
+        "p95": 4856.083919,
+        "max": 4950.663585000001
+      },
+      "errors": [],
+      "error_count": 0
+    },
+    "sampled_memory_peak": {
+      "gateway": 98594816,
+      "fixture": 389947392
+    }
+  },
+  {
+    "run": "fd4096-128",
+    "phase": "1000m-direct-streams-1000",
+    "samples": 28,
+    "host_rss_max_kib": 12924,
+    "gateway_lifetime_hwm_kib": 3356,
+    "guest_available_min_kib": 91108
+  },
+  {
+    "run": "fd4096-128",
+    "phase": "1000m-direct-streams-1000-after",
+    "samples": 1,
+    "host_rss_max_kib": 13372,
+    "gateway_lifetime_hwm_kib": 3356,
+    "guest_available_min_kib": 91084
+  },
+  {
+    "run": "fd4096-128",
+    "phase": "1000m-direct-streams-1000-before",
+    "samples": 1,
+    "host_rss_max_kib": 10716,
+    "gateway_lifetime_hwm_kib": 3332,
+    "guest_available_min_kib": 91144
+  },
+  {
+    "run": "fd4096-128",
+    "phase": "1000m-proxy-streams-1000",
+    "samples": 27,
+    "host_rss_max_kib": 104652,
+    "gateway_lifetime_hwm_kib": 75160,
+    "guest_available_min_kib": 6568
+  },
+  {
+    "run": "fd4096-128",
+    "phase": "1000m-proxy-streams-1000-before",
+    "samples": 1,
+    "host_rss_max_kib": 13508,
+    "gateway_lifetime_hwm_kib": 3356,
+    "guest_available_min_kib": 90916
+  },
+  {
+    "run": "fd4096-128",
+    "phase": "idle-cold",
+    "samples": 1,
+    "host_rss_max_kib": 42344,
+    "gateway_lifetime_hwm_kib": 3332,
+    "guest_available_min_kib": 90932
+  },
+  {
+    "run": "fd4096-128",
+    "phase": "idle-first",
+    "samples": 1,
+    "host_rss_max_kib": 42500,
+    "gateway_lifetime_hwm_kib": 3400,
+    "guest_available_min_kib": 91016
+  },
+  {
+    "run": "fd4096-128",
+    "phase": "idle-resume",
+    "samples": 1,
+    "host_rss_max_kib": 5592,
+    "gateway_lifetime_hwm_kib": 3332,
+    "guest_available_min_kib": 91168
+  },
+  {
+    "run": "fd4096-128",
+    "phase": "1000m-direct-streams-1000",
+    "exit_code": 0,
+    "result": {
+      "all_streams_seconds": 32.331345765,
+      "client": "rust",
+      "completed": 1000,
+      "concurrency": 1000,
+      "connect_limit": 16,
+      "error_count": 0,
+      "errors": [],
+      "established": 1000,
+      "io_timeout_s": 10,
+      "mode": "streams",
+      "peak_active_streams": 1000,
+      "ramp_per_second": 50.0,
+      "route": "direct",
+      "runtime_lag_ms": {
+        "max": 3201.680668,
+        "p50": 1.7341665,
+        "p95": 22.756999999999998
+      },
+      "seconds": 59.963232196,
+      "stage_ms": {
+        "first_event": {
+          "max": 3.7347080000000004,
+          "p50": 0.0020835,
+          "p95": 0.012792000000000001
+        },
+        "queued": {
+          "max": 3354.1950429999997,
+          "p50": 0.000542,
+          "p95": 3308.531376
+        },
+        "ramp_delay": {
+          "max": 19989.155843,
+          "p50": 9991.857526,
+          "p95": 19750.026551000003
+        },
+        "response_headers": {
+          "max": 2980.144793,
+          "p50": 2.539729,
+          "p95": 70.16320800000001
+        },
+        "stream_read": {
+          "max": 58778.60132,
+          "p50": 46556.098897,
+          "p95": 56221.884235
+        },
+        "tcp_connect": {
+          "max": 2459.9667099999997,
+          "p50": 1.597271,
+          "p95": 62.927416
+        },
+        "tls_handshake": {
+          "max": 424.64691700000003,
+          "p50": 2.3694794999999997,
+          "p95": 108.10729199999999
+        }
+      },
+      "ttft_ms": {
+        "max": 4178.00021,
+        "p50": 6.573687,
+        "p95": 3344.303043
+      },
+      "worker_timeout_s": 100
+    },
+    "sampled_memory_peak": {
+      "gateway": 19234816,
+      "fixture": 360996864
+    }
+  }
+]

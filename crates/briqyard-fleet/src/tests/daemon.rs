@@ -29,6 +29,8 @@ pub(super) struct Daemon {
     pub(super) quotas: Mutex<Vec<(String, api::Quota)>>,
     /// Run by a create before it answers: a test's look at the fleet mid-forward.
     pub(super) on_create: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    pub(super) creates: Mutex<Vec<api::CreateMachineRequest>>,
+    pub(super) backup_records: Mutex<Vec<serde_json::Value>>,
 }
 
 impl Daemon {
@@ -50,6 +52,7 @@ impl Daemon {
             size: api::Size {
                 vcpus: 1,
                 memory_mb,
+                cpu_millis: None,
             },
             sleep: "30m".into(),
             created_at: now,
@@ -147,6 +150,8 @@ pub(super) async fn start_daemon_on(
         conditions: Mutex::new(vec![]),
         quotas: Mutex::new(vec![]),
         on_create: Mutex::new(None),
+        creates: Mutex::new(vec![]),
+        backup_records: Mutex::new(vec![]),
     });
     type D = State<Arc<Daemon>>;
     async fn status(State(d): D) -> Json<api::Status> {
@@ -157,10 +162,12 @@ pub(super) async fn start_daemon_on(
             capacity: api::Capacity {
                 memory_mb: DAEMON_MEMORY_MB,
                 vcpus: 32,
+                cpu_millis: Some(32_000),
             },
             used: api::Capacity {
                 memory_mb: ms.iter().map(|m| m.size.memory_mb).sum(),
                 vcpus: ms.len() as u32,
+                cpu_millis: Some(ms.iter().map(|m| m.size.cpu_millis()).sum()),
             },
             machines: ms.len(),
             running: ms.len(),
@@ -356,6 +363,7 @@ pub(super) async fn start_daemon_on(
     /// Like the daemon: a bad name is refused, and a machine that does not fit in what the
     /// host has left.
     async fn create(State(d): D, Json(req): Json<api::CreateMachineRequest>) -> Response {
+        d.creates.lock().unwrap().push(req.clone());
         if !api::valid_name(&req.name) {
             return err(StatusCode::BAD_REQUEST, "invalid", "name").into_response();
         }
@@ -467,8 +475,8 @@ pub(super) async fn start_daemon_on(
         (StatusCode::CREATED, Json(b)).into_response()
     }
     /// The store is shared: every host answers for every machine id, with nothing here.
-    async fn backups(State(_d): D) -> Json<Vec<serde_json::Value>> {
-        Json(vec![])
+    async fn backups(State(d): D) -> Json<Vec<serde_json::Value>> {
+        Json(d.backup_records.lock().unwrap().clone())
     }
     /// The backups of the daemon's machines, destroyed ones' included: one of a machine named
     /// after the daemon.

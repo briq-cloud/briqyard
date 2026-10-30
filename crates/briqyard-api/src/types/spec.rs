@@ -6,14 +6,28 @@ use super::*;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Size {
     pub vcpus: u32,
+    /// CPU-time limit in millicores; omitted means one CPU per guest vCPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u32>,
     pub memory_mb: u32,
 }
 
 impl Size {
+    pub fn cpu_millis(&self) -> u32 {
+        self.cpu_millis
+            .unwrap_or_else(|| self.vcpus.saturating_mul(1000))
+    }
+
     /// What a host can boot: 1 to 32 vCPUs, 128 MB to 256 GB.
     pub fn check(&self) -> Result<(), String> {
         if !(1..=32).contains(&self.vcpus) {
             return Err("size.vcpus must be 1..32".into());
+        }
+        if self
+            .cpu_millis
+            .is_some_and(|n| n == 0 || n > self.vcpus * 1000)
+        {
+            return Err("size.cpu_millis must be 1..vcpus*1000".into());
         }
         if !(128..=262144).contains(&self.memory_mb) {
             return Err("size.memory_mb must be 128..262144".into());

@@ -65,6 +65,7 @@ fn labels_regions_and_quotas_from_the_command_line() {
             vcpus,
             disk_gb,
             region,
+            cpu_millis: None,
         }) => {
             assert_eq!(id, "t1");
             assert_eq!(

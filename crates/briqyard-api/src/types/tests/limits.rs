@@ -69,6 +69,7 @@ fn a_spec_change_and_its_check() {
         size: Size {
             vcpus: 1,
             memory_mb: 256,
+            cpu_millis: None,
         },
         ..Default::default()
     };
@@ -289,4 +290,35 @@ fn probes_are_checked_with_the_field_named() {
     // A negative or fractional timing is refused by the parse itself.
     assert!(serde_json::from_value::<Probe>(json!({"tcp": 80, "period_sec": -1})).is_err());
     assert!(serde_json::from_value::<Probe>(json!({"tcp": 70000})).is_err());
+}
+
+#[test]
+fn cpu_limits_are_precise_and_legacy_values_stay_valid() {
+    let mut size: Size = serde_json::from_value(json!({"vcpus": 1, "memory_mb": 128})).unwrap();
+    assert_eq!(size.cpu_millis(), 1000);
+    assert!(serde_json::to_value(size)
+        .unwrap()
+        .get("cpu_millis")
+        .is_none());
+    for millis in [1, 250, 1000] {
+        size.cpu_millis = Some(millis);
+        assert!(size.check().is_ok());
+        assert_eq!(size.cpu_millis(), millis);
+    }
+    for millis in [0, 1001] {
+        size.cpu_millis = Some(millis);
+        assert!(size.check().is_err());
+    }
+    let quota = Quota {
+        vcpus: Some(1),
+        cpu_millis: Some(1500),
+        ..Default::default()
+    };
+    assert_eq!(quota.cpu_millis(), Some(1000));
+    let legacy = Capacity {
+        memory_mb: 1024,
+        vcpus: 4,
+        cpu_millis: None,
+    };
+    assert_eq!(legacy.cpu_millis(), 4000);
 }

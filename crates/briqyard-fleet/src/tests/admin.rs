@@ -272,7 +272,7 @@ async fn drain_and_forget() {
         f.st.reg
             .lock()
             .unwrap()
-            .place("t3", "", 512, 0, &f.st.policy)
+            .place("t3", "", 512, 0, 0, &f.st.policy)
             .as_deref(),
         Some("h_b")
     );

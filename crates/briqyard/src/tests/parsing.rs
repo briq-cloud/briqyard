@@ -444,12 +444,14 @@ fn machine_set_changes_what_it_runs() {
     let now = api::Size {
         vcpus: 4,
         memory_mb: 512,
+        cpu_millis: None,
     };
     assert_eq!(
         half.request(Some(now)).unwrap().spec.size,
         Some(api::Size {
             vcpus: 4,
-            memory_mb: 2048
+            memory_mb: 2048,
+            cpu_millis: None,
         })
     );
     assert!(half.request(None).is_err());

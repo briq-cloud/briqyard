@@ -158,6 +158,7 @@ fn describe_shows_the_machine_then_its_events() {
         size: api::Size {
             vcpus: 1,
             memory_mb: 256,
+            cpu_millis: None,
         },
         volume: Some(api::VolumeSpec {
             size_gb: 2,
@@ -204,6 +205,7 @@ fn describe_shows_the_machine_then_its_events() {
             size: Some(api::Size {
                 vcpus: 2,
                 memory_mb: 512,
+                cpu_millis: None,
             }),
             volume: Some(api::VolumeSize { size_gb: 20 }),
             ..Default::default()
@@ -275,6 +277,7 @@ fn describe_shows_the_machine_then_its_events() {
             "               liveness exec test -f /tmp/alive, every 10 s: not run yet",
             "IP:            10.64.1.2",
             "Size:          1 vCPU, 256 MB",
+            "CPU limit:     1000m",
             "Volume:        2 GB at /data",
             "Disk limits:   32MB/s 4000io each, 10s burst",
             "Egress:        via:gateway",

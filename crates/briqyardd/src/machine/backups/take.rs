@@ -218,6 +218,7 @@ impl Manager {
         .await;
         let b = match disks {
             Ok(disks) => api::Backup {
+                size: Some(rec.size),
                 id: bid.clone(),
                 machine_id: rec.id.clone(),
                 namespace: rec.namespace.clone(),

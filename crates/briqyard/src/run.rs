@@ -63,6 +63,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     size: api::Size {
                         vcpus: a.vcpus,
                         memory_mb: a.memory,
+                        cpu_millis: a.cpu_millis,
                     },
                     volume,
                     ports: a.ports.clone(),
@@ -286,7 +287,10 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 std::io::stdout().write_all(&data)?;
             }
             MachineCmd::Set(a) => {
-                let half = a.vcpus.is_some() != a.memory.is_some();
+                let changing_size =
+                    a.vcpus.is_some() || a.memory.is_some() || a.cpu_millis.is_some();
+                let half = changing_size
+                    && (a.vcpus.is_none() || a.memory.is_none() || a.cpu_millis.is_none());
                 let size_now = match half {
                     true => {
                         let m: api::Machine =
@@ -498,6 +502,9 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             NamespaceCmd::Gateway(GatewayCmd::Set(a)) => {
                 let GatewaySetArgs {
                     namespace,
+                    vcpus,
+                    memory,
+                    cpu_millis,
                     region,
                     start,
                     image,
@@ -508,6 +515,15 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     cmd,
                 } = *a;
                 let spec = api::GatewaySpec {
+                    size: if vcpus.is_some() || memory.is_some() || cpu_millis.is_some() {
+                        Some(api::Size {
+                            vcpus: vcpus.unwrap_or(1),
+                            memory_mb: memory.unwrap_or(256),
+                            cpu_millis,
+                        })
+                    } else {
+                        None
+                    },
                     image,
                     cmd: if cmd.is_empty() { None } else { Some(cmd) },
                     env: env_args(&envs)?,
@@ -544,12 +560,14 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                 vcpus,
                 disk_gb,
                 region,
+                cpu_millis,
             } => {
                 let q = api::Quota {
                     machines,
                     memory_mb,
                     vcpus,
                     disk_gb,
+                    cpu_millis,
                 };
                 let shown: api::NamespaceQuota = if q == api::Quota::default() {
                     c.call(GET, &format!("/v1/namespaces/{id}/quota"), NONE)

@@ -188,7 +188,10 @@ async fn a_create_whose_caller_hangs_up_gives_its_hold_back() {
         let body = create_body("t1", "web", 20_000);
         call(&st, "POST", "/v1/machines", "", Some(body)).await
     });
-    forwarded.recv().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), forwarded.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(used(&f), 20_000, "held while the host makes it");
     create.abort();
     assert!(create.await.unwrap_err().is_cancelled());
@@ -238,7 +241,7 @@ async fn a_capacity_answer_unpins_a_namespaces_first_machine_only() {
         "POST",
         "/v1/machines",
         "api",
-        Some(create_body("t2", "Bad Name", 10)),
+        Some(create_body("t2", "Bad Name", 256)),
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
@@ -298,5 +301,195 @@ async fn a_fork_lands_where_its_source_is() {
         f.st.reg.lock().unwrap().hosts["d2"].used.memory_mb,
         1024,
         "the fork is reserved on the source's host"
+    );
+}
+
+#[tokio::test]
+async fn a_cpu_patch_is_refused_before_forwarding_to_a_legacy_host() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let machine = ds[0].stub.add("t1", "legacy", 256);
+    poll_static_hosts_once(&f.st).await;
+    f.st.reg
+        .lock()
+        .unwrap()
+        .hosts
+        .get_mut("d1")
+        .unwrap()
+        .capacity
+        .cpu_millis = None;
+    let path = format!("/v1/machines/{}", machine.id);
+    let (status, _, body) = call(
+        &f.st,
+        "PATCH",
+        &path,
+        "api",
+        Some(serde_json::json!({
+            "size": {"vcpus": 1, "memory_mb": 256, "cpu_millis": 250}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body.contains("must be upgraded"));
+    assert!(
+        !ds[0]
+            .stub
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("PATCH")),
+        "an old daemon would silently ignore the requested CPU limit"
+    );
+}
+
+fn sized_restore_backup(id: &str, millis: u32) -> serde_json::Value {
+    serde_json::json!({
+        "id":id, "machine_id":"m_gone", "namespace":"old", "name":"db",
+        "created_at":"2026-10-29T10:00:00Z", "bytes":1, "incremental":false, "disks":[],
+        "size":{"vcpus":1,"memory_mb":512,"cpu_millis":millis}
+    })
+}
+
+#[tokio::test]
+async fn restore_placement_uses_backup_cpu_and_pins_the_selected_backup() {
+    for which in ["latest", "", "b1"] {
+        let (f, ds) = fleet_with_daemons(2).await;
+        for daemon in &ds {
+            *daemon.stub.backup_records.lock().unwrap() = vec![
+                sized_restore_backup("b2", 500),
+                sized_restore_backup("b1", 250),
+            ];
+        }
+        {
+            let mut reg = f.st.reg.lock().unwrap();
+            let full = reg.hosts.get_mut("d1").unwrap();
+            full.used.cpu_millis = Some(32_000);
+            // With a zero CPU request d1 wins on memory; the resolved request must choose d2.
+            reg.hosts.get_mut("d2").unwrap().capacity.memory_mb = 63_000;
+        }
+        let expected = if which == "b1" { 250 } else { 500 };
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (st, held) = (f.st.clone(), held.clone());
+            *ds[1].stub.on_create.lock().unwrap() = Some(Box::new(move || {
+                let reg = st.reg.lock().unwrap();
+                assert_eq!(reg.hosts["d2"].used.cpu_millis(), expected);
+                assert_eq!(reg.hosts["d2"].used.memory_mb, 512);
+                held.store(true, Ordering::SeqCst);
+            }));
+        }
+        let (status, headers, body) = call(&f.st, "POST", "/v1/machines", "api", Some(serde_json::json!({
+            "namespace":"restored", "name":"copy", "size":{"vcpus":0,"memory_mb":0}, "restore":{"machine_id":"m_gone","backup":which}
+        }))).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(headers["x-briqyard-host"], "d2");
+        assert!(held.load(Ordering::SeqCst));
+        assert!(ds[0].stub.creates.lock().unwrap().is_empty());
+        let creates = ds[1].stub.creates.lock().unwrap();
+        assert_eq!(creates[0].size.cpu_millis(), expected);
+        assert_eq!(
+            creates[0].restore.as_ref().unwrap().backup,
+            if which == "b1" { "b1" } else { "b2" }
+        );
+    }
+}
+
+#[tokio::test]
+async fn unknown_restore_size_is_refused_without_placement_but_explicit_size_still_works() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let mut backup = sized_restore_backup("b1", 250);
+    backup.as_object_mut().unwrap().remove("size");
+    *ds[0].stub.backup_records.lock().unwrap() = vec![backup];
+    let mut request = serde_json::json!({
+        "namespace":"restored", "name":"copy", "size":{"vcpus":0,"memory_mb":0}, "restore":{"machine_id":"m_gone","backup":"b1"}
+    });
+    let (status, _, body) = call(&f.st, "POST", "/v1/machines", "api", Some(request.clone())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("explicit restore size"));
+    assert!(f.st.reg.lock().unwrap().namespaces.is_empty());
+    assert!(ds[0].stub.creates.lock().unwrap().is_empty());
+    request["size"] = serde_json::json!({"vcpus":1,"memory_mb":256,"cpu_millis":250});
+    let (status, _, body) = call(&f.st, "POST", "/v1/machines", "api", Some(request)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(ds[0].stub.creates.lock().unwrap()[0].size.cpu_millis(), 250);
+}
+
+#[tokio::test]
+async fn a_fork_still_requires_an_explicit_valid_size() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let (status, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(serde_json::json!({
+            "namespace":"forked", "name":"copy", "fork":{"machine_id":"m_source"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(ds[0].stub.creates.lock().unwrap().is_empty());
+    assert!(f.st.reg.lock().unwrap().namespaces.is_empty());
+}
+
+#[tokio::test]
+async fn inherited_restore_size_can_be_read_when_the_original_host_is_down() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    *ds[1].stub.backup_records.lock().unwrap() = vec![sized_restore_backup("b1", 250)];
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        reg.machines.insert("m_gone".into(), "d1".into());
+        reg.hosts.get_mut("d1").unwrap().state = "down".into();
+    }
+    let (status, headers, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(serde_json::json!({
+            "namespace":"restored", "name":"copy", "size":{"vcpus":0,"memory_mb":0},
+            "restore":{"machine_id":"m_gone","backup":"latest"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(headers["x-briqyard-host"], "d2");
+    assert_eq!(ds[1].stub.creates.lock().unwrap()[0].size.cpu_millis(), 250);
+}
+
+#[tokio::test]
+async fn cpu_reservations_survive_reports_and_release_exactly_once() {
+    let (f, _) = fleet_with_daemons(1).await;
+    let mut reg = f.st.reg.lock().unwrap();
+    let first = reg.hold("d1", 128, 0, 250);
+    let second = reg.hold("d1", 128, 0, 500);
+    // A legacy used report still means 1000m for each reported guest vCPU.
+    reg.hosts.get_mut("d1").unwrap().report(
+        api::Capacity {
+            memory_mb: 256,
+            vcpus: 1,
+            cpu_millis: None,
+        },
+        100_000,
+        Utc::now(),
+    );
+    assert_eq!(reg.hosts["d1"].used.cpu_millis(), 1750);
+    reg.release("d1", first);
+    reg.release("d1", first);
+    assert_eq!(reg.hosts["d1"].used.cpu_millis(), 1500);
+    reg.made("d1", second, Utc::now());
+    reg.hosts.get_mut("d1").unwrap().report(
+        api::Capacity {
+            memory_mb: 384,
+            vcpus: 2,
+            cpu_millis: Some(1500),
+        },
+        100_000,
+        Utc::now() + Duration::seconds(1),
+    );
+    assert_eq!(reg.hosts["d1"].used.cpu_millis(), 1500);
+    reg.release("d1", second);
+    assert_eq!(
+        reg.hosts["d1"].used.cpu_millis(),
+        1500,
+        "a completed hold incorporated by the host must not be subtracted again"
     );
 }

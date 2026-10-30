@@ -134,7 +134,8 @@ fn gateway_spec() {
         s.size(),
         Size {
             vcpus: 1,
-            memory_mb: 256
+            memory_mb: 256,
+            cpu_millis: None,
         }
     );
     let s: GatewaySpec = same(json!({

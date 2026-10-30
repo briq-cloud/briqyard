@@ -38,9 +38,22 @@ pub struct Quota {
     /// vCPUs of the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcpus: Option<u32>,
+    /// CPU budget in millicores; legacy records use vcpus × 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u32>,
     /// The volumes' sizes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_gb: Option<u32>,
+}
+
+impl Quota {
+    pub fn cpu_millis(&self) -> Option<u32> {
+        let legacy = self.vcpus.map(|n| n.saturating_mul(1000));
+        match (self.cpu_millis, legacy) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 /// What a namespace holds now, counted as its quota counts.
@@ -49,7 +62,17 @@ pub struct QuotaUse {
     pub machines: u32,
     pub memory_mb: u32,
     pub vcpus: u32,
+    /// CPU budget in millicores; legacy records use vcpus × 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u32>,
     pub disk_gb: u32,
+}
+
+impl QuotaUse {
+    pub fn cpu_millis(&self) -> u32 {
+        self.cpu_millis
+            .unwrap_or_else(|| self.vcpus.saturating_mul(1000))
+    }
 }
 
 /// `GET /v1/namespaces/{id}/quota`: the limits and the use.
@@ -100,6 +123,7 @@ impl GatewaySpec {
         self.size.unwrap_or(Size {
             vcpus: 1,
             memory_mb: 256,
+            cpu_millis: None,
         })
     }
 }

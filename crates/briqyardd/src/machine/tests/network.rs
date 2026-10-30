@@ -388,6 +388,7 @@ async fn disks_boot_with_the_host_s_limits_for_the_size_under_the_machine_s_own(
     let grown = api::Size {
         vcpus: 4,
         memory_mb: 256,
+        cpu_millis: None,
     };
     let patched =
         h.m.update(&m.id, spec(|s| s.size = Some(grown)), None)

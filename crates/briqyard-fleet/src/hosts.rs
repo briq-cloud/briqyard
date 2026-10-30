@@ -21,15 +21,23 @@ pub(super) async fn metrics(State(st): S) -> Response {
 
 pub(super) async fn status(State(st): S) -> Json<serde_json::Value> {
     let reg = st.reg.lock().unwrap();
-    let mut cap = api::Capacity::default();
-    let mut used = api::Capacity::default();
+    let mut cap = api::Capacity {
+        cpu_millis: Some(0),
+        ..Default::default()
+    };
+    let mut used = api::Capacity {
+        cpu_millis: Some(0),
+        ..Default::default()
+    };
     let (mut machines, mut ready) = (0, 0);
     for h in reg.hosts.values() {
         if h.state == "ready" {
             ready += 1;
             cap.memory_mb += h.capacity.memory_mb;
+            cap.cpu_millis = Some(cap.cpu_millis().saturating_add(h.capacity.cpu_millis()));
             cap.vcpus += h.capacity.vcpus;
             used.memory_mb += h.used.memory_mb;
+            used.cpu_millis = Some(used.cpu_millis().saturating_add(h.used.cpu_millis()));
             used.vcpus += h.used.vcpus;
             machines += h.machines;
         }

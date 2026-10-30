@@ -300,6 +300,7 @@ impl fc::Vmm for Mock {
         let size = api::Size {
             vcpus: b.vcpus,
             memory_mb: b.memory_mb,
+            cpu_millis: None,
         };
         self.booted.lock().unwrap().insert(b.id.clone(), size);
         self.disks

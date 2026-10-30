@@ -368,6 +368,9 @@ struct RunArgs {
     labels: Vec<String>,
     #[arg(long, default_value_t = 1)]
     vcpus: u32,
+    /// CPU-time limit in millicores; omitted is 1000 per guest vCPU
+    #[arg(long)]
+    cpu_millis: Option<u32>,
     /// Memory in MB
     #[arg(long, default_value_t = 512)]
     memory: u32,
@@ -425,6 +428,8 @@ struct SetArgs {
     image: Option<String>,
     #[arg(long)]
     vcpus: Option<u32>,
+    #[arg(long)]
+    cpu_millis: Option<u32>,
     /// Memory in MB
     #[arg(long)]
     memory: Option<u32>,
@@ -455,14 +460,22 @@ impl SetArgs {
     /// The PATCH, checked as the daemon checks it. `size_now` fills the half of the size the
     /// flags leave out.
     fn request(&self, size_now: Option<api::Size>) -> Result<api::UpdateMachineRequest> {
-        let size = match (self.vcpus, self.memory, size_now) {
-            (None, None, _) => None,
-            (Some(vcpus), Some(memory_mb), _) => Some(api::Size { vcpus, memory_mb }),
-            (vcpus, memory, Some(now)) => Some(api::Size {
-                vcpus: vcpus.unwrap_or(now.vcpus),
-                memory_mb: memory.unwrap_or(now.memory_mb),
-            }),
-            (_, _, None) => bail!("--vcpus or --memory alone needs the machine's size"),
+        let size = if self.vcpus.is_none() && self.memory.is_none() && self.cpu_millis.is_none() {
+            None
+        } else {
+            let vcpus = self
+                .vcpus
+                .or(size_now.map(|s| s.vcpus))
+                .ok_or_else(|| anyhow!("--vcpus or --memory alone needs the machine's size"))?;
+            let memory_mb = self
+                .memory
+                .or(size_now.map(|s| s.memory_mb))
+                .ok_or_else(|| anyhow!("--vcpus or --memory alone needs the machine's size"))?;
+            Some(api::Size {
+                vcpus,
+                memory_mb,
+                cpu_millis: self.cpu_millis.or(size_now.and_then(|s| s.cpu_millis)),
+            })
         };
         let spec = api::SpecChange {
             image: self.image.clone(),
@@ -615,6 +628,8 @@ enum NamespaceCmd {
         /// Through a fleet: where to place a namespace that has no host yet
         #[arg(long)]
         region: Option<String>,
+        #[arg(long)]
+        cpu_millis: Option<u32>,
     },
 }
 
@@ -630,6 +645,12 @@ enum GatewayCmd {
 #[derive(Args)]
 struct GatewaySetArgs {
     namespace: String,
+    #[arg(long)]
+    vcpus: Option<u32>,
+    #[arg(long)]
+    memory: Option<u32>,
+    #[arg(long)]
+    cpu_millis: Option<u32>,
     /// Through a fleet: where to place a namespace that has no host yet
     #[arg(long)]
     region: Option<String>,

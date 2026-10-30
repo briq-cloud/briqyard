@@ -15,6 +15,10 @@ pub struct RestoreSpec {
 /// A backup of a machine's disks in the object store.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Backup {
+    /// Size captured in this backup, for placement before a restore. Older sealed records
+    /// may omit it; their restores through the fleet must supply an explicit size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<Size>,
     /// A timestamp to the millisecond, `20261019T231500.123Z`; later ids sort later.
     pub id: String,
     pub machine_id: String,

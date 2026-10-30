@@ -60,6 +60,7 @@ pub(in crate::machine) fn record() -> Record {
         size: api::Size {
             vcpus: 1,
             memory_mb: 512,
+            cpu_millis: None,
         },
         volume: Some(api::VolumeSpec {
             size_gb: 2,
@@ -157,6 +158,7 @@ pub(super) async fn harness_with(
         cfg.capacity = crate::config::Capacity {
             memory_mb,
             vcpus: 1000,
+
             ..Default::default()
         };
         cfg.egress_limits = egress_limits;
@@ -292,6 +294,7 @@ impl Harness {
             size: api::Size {
                 vcpus: 1,
                 memory_mb: 256,
+                cpu_millis: None,
             },
             sleep: "30m".into(),
             ..Default::default()

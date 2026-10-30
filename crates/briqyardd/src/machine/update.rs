@@ -28,6 +28,9 @@ impl Manager {
             p.check().map_err(invalid)?;
         }
         req.spec.check().map_err(invalid)?;
+        if let Some(size) = &req.spec.size {
+            self.check_host_size(size)?;
+        }
         // Under the entry's lock, like every transition: no start or stop runs in between,
         // and a destroy that ran first has removed the machine, whose record is not written
         // back.

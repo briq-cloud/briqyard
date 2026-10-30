@@ -82,7 +82,7 @@ pub(super) async fn put_on_namespace(
     id: &str,
     what: &str,
     region: &str,
-    (need_mb, need_disk_mb): (u32, u64),
+    (need_mb, need_disk_mb, need_cpu_millis): (u32, u64, u32),
     headers: &HeaderMap,
     body: Bytes,
 ) -> Result<Response, Refusal> {
@@ -97,6 +97,7 @@ pub(super) async fn put_on_namespace(
         namespace: id,
         region,
         memory_mb: need_mb,
+        cpu_millis: need_cpu_millis,
         disk_mb: need_disk_mb,
         what,
     };
@@ -106,11 +107,18 @@ pub(super) async fn put_on_namespace(
         let bound = reg.namespaces.get(id).cloned();
         refuse_outside(&reg, bound.as_deref(), id, region)?;
         refuse_under_pressure(st, &reg, bound.as_deref(), &ask)?;
-        let chosen = reg.place(id, region, need_mb, need_disk_mb, &st.policy);
+        let chosen = reg.place(
+            id,
+            region,
+            need_mb,
+            need_disk_mb,
+            need_cpu_millis,
+            &st.policy,
+        );
         let Some(host) = chosen.and_then(|h| reg.hosts.get(&h).cloned()) else {
             return Err(no_room(st, &reg, &ask));
         };
-        let id = reg.hold(&host.id, need_mb, need_disk_mb);
+        let id = reg.hold(&host.id, need_mb, need_disk_mb, need_cpu_millis);
         (host, first, id)
     };
     let hold = Held {
@@ -145,7 +153,14 @@ pub(super) async fn set_gateway(
 ) -> Result<Response, Refusal> {
     let spec: api::GatewaySpec = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-    let need = (spec.size().memory_mb, disk_need(spec.volume_gb));
+    spec.size()
+        .check()
+        .map_err(|why| err(StatusCode::BAD_REQUEST, "invalid", why))?;
+    let need = (
+        spec.size().memory_mb,
+        disk_need(spec.volume_gb),
+        spec.size().cpu_millis(),
+    );
     put_on_namespace(&st, &id, "gateway", &q.region, need, &headers, body).await
 }
 
@@ -160,7 +175,7 @@ pub(super) async fn set_quota(
 ) -> Result<Response, Refusal> {
     serde_json::from_slice::<api::Quota>(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-    put_on_namespace(&st, &id, "quota", &q.region, (0, 0), &headers, body).await
+    put_on_namespace(&st, &id, "quota", &q.region, (0, 0, 0), &headers, body).await
 }
 
 /// A namespace's quota and use, from its host.

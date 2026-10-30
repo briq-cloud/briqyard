@@ -17,7 +17,7 @@ pub struct Host {
     pub endpoints: usize,
     /// Committed to running machines, and what the host hands out.
     pub memory_mb: (u32, u32),
-    pub vcpus: (u32, u32),
+    pub cpu_millis: (u32, u32),
     /// None until the tick has read the pool.
     pub pool: Option<Pool>,
     pub conditions: Vec<api::Condition>,
@@ -78,7 +78,7 @@ fn one(v: impl ToString) -> Vec<(String, String)> {
     vec![(String::new(), v.to_string())]
 }
 
-fn kinds(pairs: &[(&str, u64)]) -> Vec<(String, String)> {
+fn kinds<T: ToString>(pairs: &[(&str, T)]) -> Vec<(String, String)> {
     pairs
         .iter()
         .map(|(k, v)| (format!("kind=\"{k}\""), v.to_string()))
@@ -258,13 +258,16 @@ pub fn render(h: &Host, machines: &[Machine]) -> String {
         "Memory committed to running machines, and what the host hands out.",
         kinds(&[("used", used as u64), ("capacity", cap as u64)]),
     );
-    let (used, cap) = h.vcpus;
+    let (used, cap) = h.cpu_millis;
     family(
         o,
         "briqyard_vcpus",
         "gauge",
-        "vCPUs of running machines, and what the host hands out.",
-        kinds(&[("used", used as u64), ("capacity", cap as u64)]),
+        "CPU-time budget of running machines in vCPU equivalents, and host capacity.",
+        kinds(&[
+            ("used", used as f64 / 1000.0),
+            ("capacity", cap as f64 / 1000.0),
+        ]),
     );
     if let Some(p) = h.pool {
         family(
