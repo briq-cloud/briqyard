@@ -42,6 +42,7 @@ OUT = Path(sys.argv[2])
 OUT.mkdir(parents=True, exist_ok=True)
 BASE = 'http://127.0.0.1:7420/v1'
 made = []
+diagnostic_ids = []
 
 def interrupted(signum, frame):
     raise KeyboardInterrupt(f'signal {signum}')
@@ -70,6 +71,7 @@ def create(**kw):
     spec = dict(tenant=TENANT, size=kw.pop('size', {'vcpus': 1, 'memory_mb': 128}), sleep='never', **kw)
     m = api('POST', '/machines', spec)
     made.append(m['id'])
+    diagnostic_ids.append(m['id'])
     deadline = time.monotonic() + 300
     target = 'created' if kw.get('start') is False else 'running'
     while m.get('state') != target:
@@ -173,15 +175,17 @@ try:
     if NAMESPACE_GATEWAY:
         ns = api('PUT', '/namespaces/' + TENANT + '/gateway', dict(gateway_spec, port=3128))
         mid = ns['gateway']['machine_id']
+        diagnostic_ids.append(mid)
         gw = api('GET', '/machines/' + mid)
         consumer = create(name='consumer', image=FIXTURE_IMAGE, start=False,
-            size={'vcpus': 1, 'memory_mb': 128, 'cpu_millis': NATIVE_CPU or 1000},
+            size={'vcpus': 1, 'memory_mb': 128, 'cpu_millis': 1000},
             egress={'mode': 'via', 'via': 'gateway'}, cmd=['python', '-c', 'import time; time.sleep(3600)'])
     else:
         gw = create(name='proxy', start=False, **gateway_spec)
         mid = gw['id']
     for action in (['first', 'cold'] if NAMESPACE_GATEWAY else ['first', 'cold', 'resume']):
         if action != 'first':
+            stop_use = api('GET', '/status')['used']
             stop_id = consumer['id'] if NAMESPACE_GATEWAY else mid
             api('POST', '/machines/' + stop_id + '/stop', {'suspend': action == 'resume'})
             if NAMESPACE_GATEWAY:
@@ -190,24 +194,34 @@ try:
                     if time.monotonic() > deadline:
                         raise TimeoutError('namespace gateway did not stop after its consumer')
                     time.sleep(.2)
+                stopped_use = api('GET', '/status')['used']
+                expected_delta = (NATIVE_CPU or VCPUS * 1000) + 1000
+                if stop_use['cpu_millis'] - stopped_use['cpu_millis'] != expected_delta:
+                    raise RuntimeError('host did not release gateway and consumer CPU reservations')
+                emit('reservation_release', before=stop_use, after=stopped_use, expected_delta=expected_delta)
+        gateway_before_start = api('GET', '/machines/' + mid)
         before_use = api('GET', '/status')['used']
         start = time.monotonic()
         start_id = consumer['id'] if NAMESPACE_GATEWAY else mid
         api('POST', '/machines/' + start_id + '/start', {})
         gw = api('GET', '/machines/' + mid)
         ready(gw['ip'], 3128)
-        emit('boot', action=action, seconds=time.monotonic()-start)
+        emit('boot', action=('consumer_restart' if action == 'cold' else action) if NAMESPACE_GATEWAY else action,
+             scope='consumer start API through gateway TCP readiness' if NAMESPACE_GATEWAY else 'gateway start API through gateway TCP readiness',
+             gateway_was_suspended=gateway_before_start.get('suspended', False), seconds=time.monotonic()-start)
         if NAMESPACE_GATEWAY:
-            if gw.get('role') != 'gateway' or gw['size'] != gateway_size:
-                raise RuntimeError('namespace gateway role or size mismatch')
+            binding = api('GET', '/namespaces/' + TENANT)['gateway']
+            if binding['machine_id'] != mid or binding['ip'] != gw['ip'] or gw['size'] != gateway_size:
+                raise RuntimeError('namespace gateway binding or size mismatch')
             used = api('GET', '/status')['used']
-            expected_delta = (NATIVE_CPU or VCPUS * 1000) + (NATIVE_CPU or 1000)
+            expected_delta = (NATIVE_CPU or VCPUS * 1000) + 1000
             if used['cpu_millis'] - before_use['cpu_millis'] != expected_delta:
                 raise RuntimeError('host did not account for gateway and consumer CPU reservations')
             emit('reservation', before=before_use, after=used, expected_delta=expected_delta)
         sample(mid, 'idle-' + action)
     for millis in CPU_MILLIS:
-        expected_cpu_max = f'{millis * 100} 100000'
+        period = 100000 if millis >= 10 else 1000000
+        expected_cpu_max = f'{millis * period // 1000} {period}'
         if NATIVE_CPU:
             if cgroup(mid).joinpath('cpu.max').read_text().strip() != expected_cpu_max:
                 raise RuntimeError('native CPU quota does not match the requested size')
@@ -255,6 +269,19 @@ try:
                                 health_under_overload = True
                         sample(mid, phase, guest_pid)
                         time.sleep(2)
+            except BaseException as error:
+                observed = {}
+                for label, machine_id in [('gateway', mid), ('fixture', bench['id'])]:
+                    try:
+                        observed[label] = counters(machine_id)
+                    except Exception as diagnostic:
+                        observed[label] = {'unavailable': repr(diagnostic)}
+                result_path = OUT / (phase + '.json')
+                emit('load_exception', phase=phase, error=repr(error),
+                     result=result_path.read_text() if result_path.exists() else '',
+                     counters_before=before, counters_after=observed,
+                     sampled_memory_peak=high_water.peaks, host_sample_count=high_water.samples)
+                raise
             finally:
                 if p is not None and p.poll() is None:
                     p.terminate()
@@ -291,7 +318,7 @@ try:
 
 except Exception as err:
     emit('failure', error=repr(err))
-    for failed_id in made:
+    for failed_id in diagnostic_ids:
         try:
             emit('failure_machine', machine=api('GET', '/machines/' + failed_id),
                  logs=api('GET', '/machines/' + failed_id + '/logs?limit=20000'))
