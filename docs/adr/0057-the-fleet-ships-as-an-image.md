@@ -55,7 +55,8 @@ No change to the fleet's code: it already reads its configuration from a path, i
 
 ## Consequences
 
-- The release has a second job, and a GHCR package: while the repository is private so is the image, pulled with a token that reads packages (`docker login ghcr.io`).
+- The release has a second job, and a GHCR package. The image is public, so pulls need no login; the release's own token pushes it.
+- The package's visibility is set to public once, in GitHub's package settings, after the first push (GitHub has no API for it).
 - An upgrade of the fleet is a pull and a container swap; `scp` of the binary and the unit stay for the unit's operators.
 - A file the container reads (the SSH key, `fleet.yaml`) is owned by uid 10001.
 - Reopen when a runtime offers listener hand-over to a container, or when the gap matters to a caller that cannot retry: the unit is the answer then.

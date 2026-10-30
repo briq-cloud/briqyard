@@ -513,7 +513,7 @@ on an encrypted disk: it opens every pool.
 
 The fleet, not the host daemon, ships as an image: `ghcr.io/briq-cloud/briqyard-fleet:<version>`
 (and `:latest` for a release that is not a pre-release; releases before the one that added it have no image), `linux/amd64` and `linux/arm64`, made
-by the release workflow from the release's own binaries. It holds `briqyard-fleet` and the CLI
+by the release workflow from the release's own binaries. The package is public: pulls need no login. It holds `briqyard-fleet` and the CLI
 (`docker exec fleet briqyard host ls`). A host is still installed by `hack/bootstrap-host.sh`
 (ADR 0028): it needs ZFS, `/dev/kvm`, firewall tables, bridges and cgroups, and its machines
 outlive its daemon at a hand-over, which no container gives it.
@@ -539,7 +539,6 @@ install -d -m 0700 -o 10001 -g 10001 /etc/briqyard /var/lib/briqyard-fleet
 ssh-keygen -q -t ed25519 -N '' -f /etc/briqyard/fleet_ssh_key && chown 10001:10001 /etc/briqyard/fleet_ssh_key*
 install -m 0600 -o 10001 -g 10001 /dev/null /etc/briqyard/fleet.env && nano /etc/briqyard/fleet.env   # BRIQYARD_RELEASE_TOKEN=…
 install -m 0600 -o 10001 -g 10001 /dev/null /etc/briqyard/fleet.yaml && nano /etc/briqyard/fleet.yaml # as step 4
-echo "$GHCR_TOKEN" | docker login ghcr.io -u <user> --password-stdin   # while the repository is private: read:packages
 ```
 
 `docker run`, the layout of step 4 (a listener on loopback behind the edge, `tls: off`).
