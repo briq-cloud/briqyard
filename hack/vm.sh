@@ -29,6 +29,7 @@ install() {
   build
   limactl shell "$VM" sudo bash -s <<EOF
 set -e
+command -v conntrack >/dev/null || { apt-get update -qq; apt-get install -y -qq conntrack; }
 T=$TARGET/release
 install -m 0755 "\$T/briqyardd" /usr/local/bin/briqyardd
 install -m 0755 "$TARGET/$(limactl shell "$VM" uname -m | tr -d "\r")-unknown-linux-musl/release/briqyard-init" /usr/local/bin/briqyard-init

@@ -32,6 +32,8 @@ pub(super) struct Proc {
     pub(super) exit: Option<tokio::sync::watch::Sender<Option<guest::ExitReport>>>,
 }
 
+type Attachment = (String, String, Option<nft::Policy>);
+
 /// The host behind the manager, running nothing: a boot makes a `Proc` under a fresh
 /// pid, the guest answers as `boots` says, TAPs are a set of names, and every call is
 /// recorded, one line each, the way the fake `zfs` records its own. Cgroups and the
@@ -46,6 +48,9 @@ pub(super) struct Mock {
     pub(super) calls: Mutex<Vec<String>>,
     /// Policy calls fail, as an `nft` that refuses its input.
     pub(super) refuse_policies: AtomicBool,
+    pub(super) refuse_clear: AtomicBool,
+    pub(super) cleared_ips: Mutex<Vec<String>>,
+    pub(super) attachments: Mutex<HashMap<String, Attachment>>,
     /// No guest port accepts: `wait_port` answers only at its deadline.
     pub(super) silent_ports: AtomicBool,
     /// Each machine's cgroup; none without an entry.
@@ -96,6 +101,9 @@ impl Mock {
             taps: Mutex::new(Default::default()),
             calls: Mutex::new(Vec::new()),
             refuse_policies: AtomicBool::new(false),
+            refuse_clear: AtomicBool::new(false),
+            cleared_ips: Mutex::new(Vec::new()),
+            attachments: Mutex::new(HashMap::new()),
             silent_ports: AtomicBool::new(false),
             cgroups: Mutex::new(HashMap::new()),
             counted: Mutex::new(BTreeMap::new()),
@@ -557,6 +565,27 @@ impl guestc::Guest for Mock {
     }
 }
 
+impl Mock {
+    pub(super) async fn ensure_tap(
+        &self,
+        machine_id: &str,
+        bridge: &str,
+        ip: &str,
+    ) -> Result<String> {
+        let name = netw::tap_name(machine_id);
+        self.record(format!("ensure_tap {name} {bridge} {ip}"));
+        self.taps.lock().unwrap().insert(name.clone());
+        Ok(name)
+    }
+
+    pub(super) async fn delete_tap(&self, machine_id: &str, ip: &str) -> Result<()> {
+        let name = netw::tap_name(machine_id);
+        self.record(format!("delete_tap {name} {ip}"));
+        self.taps.lock().unwrap().remove(&name);
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl host::Net for Mock {
     async fn ensure_bridge(&self, s: &Subnet) -> Result<String> {
@@ -577,20 +606,53 @@ impl host::Net for Mock {
         Ok(())
     }
 
-    async fn ensure_tap(&self, machine_id: &str, bridge: &str, ip: &str) -> Result<String> {
-        let name = netw::tap_name(machine_id);
-        self.record(format!("ensure_tap {name} {bridge} {ip}"));
-        self.taps.lock().unwrap().insert(name.clone());
-        Ok(name)
+    async fn attach(
+        &self,
+        machine: &str,
+        bridge: &str,
+        ip: &str,
+        old: Option<&nft::Policy>,
+        new: Option<&nft::Policy>,
+        new_owner: bool,
+    ) -> Result<String> {
+        let tap = self.ensure_tap(machine, bridge, ip).await?;
+        self.attachments.lock().unwrap().remove(machine);
+        if let Some(old) = old {
+            self.unset_policy(old).await?;
+        }
+        if new_owner {
+            self.clear_connections(ip).await?;
+        }
+        if let Some(new) = new {
+            self.set_policy(new).await?;
+        }
+        self.attachments
+            .lock()
+            .unwrap()
+            .insert(machine.into(), (bridge.into(), ip.into(), new.cloned()));
+        Ok(tap)
     }
-
-    async fn delete_tap(&self, machine_id: &str, ip: &str) -> Result<()> {
-        let name = netw::tap_name(machine_id);
-        self.record(format!("delete_tap {name} {ip}"));
-        self.taps.lock().unwrap().remove(&name);
+    async fn detach(
+        &self,
+        machine: &str,
+        _bridge: &str,
+        ip: &str,
+        policy: Option<&nft::Policy>,
+    ) -> Result<()> {
+        self.delete_tap(machine, ip).await?;
+        if let Some(policy) = policy {
+            self.unset_policy(policy).await?;
+        }
+        self.attachments.lock().unwrap().remove(machine);
         Ok(())
     }
-
+    async fn clear_connections(&self, ip: &str) -> Result<()> {
+        if self.refuse_clear.load(Relaxed) {
+            anyhow::bail!("conntrack refused");
+        }
+        self.cleared_ips.lock().unwrap().push(ip.into());
+        Ok(())
+    }
     async fn delete_link(&self, name: &str) -> Result<()> {
         self.record(format!("delete_link {name}"));
         self.taps.lock().unwrap().remove(name);
@@ -684,7 +746,16 @@ impl Mock {
 /// A policy as the mock records it.
 pub(super) fn policy_line(p: &nft::Policy) -> String {
     match p {
-        nft::Policy::Via { ip, to, host } => format!("via {ip} to {to} host {host}"),
+        nft::Policy::Via {
+            ip,
+            to,
+            host,
+            siblings,
+            ..
+        } => format!(
+            "via {ip} to {to} host {host}{}",
+            if *siblings { " siblings" } else { "" }
+        ),
         nft::Policy::None { ip } => format!("none {ip}"),
         nft::Policy::Open { ip, limits: l } => format!(
             "open {ip} ports {:?} conn {} mbit {}",

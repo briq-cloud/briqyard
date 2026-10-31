@@ -773,6 +773,7 @@ components:
       properties:
         mode: { type: string, enum: [open, via, none], default: open, description: "open: its namespace and the internet; via: only the `via` machine (any port) and its gateway's DNS; none: its namespace, no internet. Under via and none, DNS answers internal names only (NXDOMAIN for the rest)" }
         via: { type: string, description: "for `via` only: a machine of the same namespace, not this one, or `gateway`: the namespace's gateway, started before this machine and kept running while it runs" }
+        siblings: { type: boolean, default: false, description: "via mode only: also permit current pinned members of this exact namespace. Requires egress_siblings_v1 capability. False or absent remains strict via. Namespace membership is a trust boundary; members can proxy for each other (ADR 0064)" }
     EgressLimits:
       type: object
       description: "limits on the machine's internet traffic, through the host's NAT, enforced on the host (ADR 0018); `via` and `none` machines never reach it. In a request an absent field keeps the machine's value (on create, the host's `egress_limits`); in a machine, every field is there: the values in force"
@@ -1166,6 +1167,7 @@ components:
     Status:
       type: object
       properties:
+        egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
         version: { type: string, description: "this build: the release and its commit, `0.1.0+fdad892eeefa` (ADR 0027)" }
         host_id: { type: string }
         capacity: { $ref: "#/components/schemas/Capacity" }
@@ -1241,6 +1243,7 @@ components:
     Host:
       type: object
       properties:
+        egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
         id: { type: string }
         url: { type: string }
         ssh: { type: string, description: "where the fleet reaches the server over SSH, when not at the API's address (its API on the private network); absent otherwise" }
@@ -1321,6 +1324,7 @@ components:
       type: object
       required: [id, url, capacity, used, machines]
       properties:
+        egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
         id: { type: string, description: The daemon's own id, for the fleet's log; the fleet keeps the host under its own }
         url: { type: string }
         region: { type: string }

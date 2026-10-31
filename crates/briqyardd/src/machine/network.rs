@@ -70,16 +70,19 @@ impl Manager {
         counted.sort();
         let running = all.into_iter().filter(|r| r.state == state::RUNNING);
         let mut pins = Vec::new();
+        let mut members = Vec::new();
         for r in running {
             let Ok(policy) = self.policy_for(&r) else {
                 continue;
             };
             pins.push((netw::tap_name(&r.id), r.ip.clone()));
+            members.push((netw::bridge_name(r.subnet_index), r.ip.clone()));
             if let Some((gateway, p)) = policy {
                 self.hold_policy(&r.id, gateway, p);
             }
         }
         pins.sort();
+        members.sort();
         let mut policies: Vec<nft::Policy> = self
             .inner
             .policies
@@ -101,6 +104,7 @@ impl Manager {
             ports: netw::nft::daemon_ports(&cfg.listen, &cfg.ingress.http, &cfg.ingress.tcp_ports)?,
             host_ports: cfg.network.host_ports.clone(),
             pins,
+            members,
             policies,
             counted,
         })
@@ -124,7 +128,7 @@ impl Manager {
     }
 
     /// The address of the machine a `via` policy names: fixed for that machine's life.
-    fn via_target(&self, e: &api::Egress, namespace: &str, me: &str) -> Result<String, MError> {
+    fn via_target(&self, e: &api::Egress, namespace: &str, me: &str) -> Result<Record, MError> {
         let id = if e.via_gateway() {
             self.gateway_of(namespace)
                 .ok_or_else(|| no_gateway(namespace))?
@@ -150,13 +154,14 @@ impl Manager {
                 "egress.via {id}: a machine of another namespace"
             )));
         }
-        Ok(target.ip)
+        Ok(target)
     }
 
     /// The policy a record asks for, resolved against its namespace, with the namespace's gateway:
     /// `None` for open with nothing to limit. An open machine's limits are its own over the
     /// host's (ADR 0018); `via` and `none` never reach the NAT, so they carry none.
     pub(super) fn policy_for(&self, r: &Record) -> Result<Option<(Ipv4Addr, nft::Policy)>, MError> {
+        r.egress.check().map_err(invalid)?;
         let limits = self.inner.cfg.egress_limits.with(&r.limits);
         if r.egress.mode == api::egress::OPEN && limits.is_none() {
             return Ok(None);
@@ -168,11 +173,16 @@ impl Manager {
         let ip = r.ip.clone();
         let p = match r.egress.mode.as_str() {
             api::egress::OPEN => nft::Policy::Open { ip, limits },
-            api::egress::VIA => nft::Policy::Via {
-                ip,
-                to: self.via_target(&r.egress, &r.namespace, &r.id)?,
-                host: gateway.to_string(),
-            },
+            api::egress::VIA => {
+                let target = self.via_target(&r.egress, &r.namespace, &r.id)?;
+                nft::Policy::Via {
+                    ip,
+                    to_tap: netw::tap_name(&target.id),
+                    to: target.ip,
+                    host: gateway.to_string(),
+                    siblings: r.egress.siblings,
+                }
+            }
             _ => nft::Policy::None { ip },
         };
         Ok(Some((gateway, p)))
@@ -278,14 +288,76 @@ impl Manager {
         }
     }
 
-    /// Withdraws what a machine's TAP carries on the host: the TAP, its pin and its egress
-    /// policy. A policy left behind is replaced by the next start, and gone with the tables
-    /// the next daemon renders.
-    pub(super) async fn unplug(&self, id: &str, ip: &str) {
-        let _ = self.inner.net.delete_tap(id, ip).await;
-        if let Err(err) = self.unset_policy(id).await {
-            tracing::warn!(machine = id, err = %err, "egress policy left in the tables");
+    /// Atomic network admission. DNS is restricted before the bridge policy becomes visible.
+    pub(super) async fn attach_network(
+        &self,
+        r: &Record,
+        namespace: &Namespace,
+        new: Option<(Ipv4Addr, nft::Policy)>,
+    ) -> Result<String> {
+        let held = self.inner.policies.lock().unwrap().get(&r.id).cloned();
+        if let Some((gateway, policy)) = &new {
+            self.internal_dns(*gateway, policy, true);
         }
+        let result = self
+            .inner
+            .net
+            .attach(
+                &r.id,
+                &netw::bridge_name(namespace.rec.subnet_index),
+                &r.ip,
+                held.as_ref().map(|(_, p)| p),
+                new.as_ref().map(|(_, p)| p),
+                r.boots == 0,
+            )
+            .await;
+        if result.is_ok() {
+            if let Some((gateway, old)) = &held {
+                let remains_internal = new.as_ref().is_some_and(|(next_gateway, next)| {
+                    next_gateway == gateway && next.internal_only()
+                });
+                if !remains_internal {
+                    self.internal_dns(*gateway, old, false);
+                }
+            }
+            self.inner.policies.lock().unwrap().remove(&r.id);
+            if let Some((gateway, policy)) = new {
+                self.hold_policy(&r.id, gateway, policy);
+            }
+        } else if let Some((gateway, attempted)) = &new {
+            let was_internal = held
+                .as_ref()
+                .is_some_and(|(old_gateway, old)| old_gateway == gateway && old.internal_only());
+            if !was_internal {
+                self.internal_dns(*gateway, attempted, false);
+            }
+        }
+        result
+    }
+
+    /// Revoke membership and policy before the address can be released or reused.
+    pub(super) async fn unplug(&self, id: &str, ip: &str) -> Result<()> {
+        let rec = self.entry(id).map_err(anyhow::Error::from)?.snapshot();
+        let held = self.inner.policies.lock().unwrap().get(id).cloned();
+        if let Err(error) = self
+            .inner
+            .net
+            .detach(
+                id,
+                &netw::bridge_name(rec.subnet_index),
+                ip,
+                held.as_ref().map(|(_, p)| p),
+            )
+            .await
+        {
+            tracing::warn!(machine = id, ip, err = %error, "network revocation failed; address retained");
+            return Err(error);
+        }
+        if let Some((gateway, policy)) = held {
+            self.internal_dns(gateway, &policy, false);
+        }
+        self.inner.policies.lock().unwrap().remove(id);
+        Ok(())
     }
 
     /// Republishes a namespace's names on its gateway.

@@ -30,6 +30,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
     let st = Arc::new(AppState {
         state_path,
         policy: Policy {
+            require_egress_siblings: false,
             fill_ceiling: cfg.placement.fill_ceiling,
             down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
         },
@@ -238,6 +239,7 @@ mod metrics;
 mod placement;
 mod regions;
 mod sessions;
+mod siblings;
 mod tls;
 
 use daemon::*;

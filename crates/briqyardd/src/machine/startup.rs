@@ -57,7 +57,7 @@ impl Manager {
                 version: fc::vmm_version(&cfg.firecracker)?,
             }),
             guest: Arc::new(guestc::Vsock),
-            net: Arc::new(host::HostNet),
+            net: Arc::new(host::HostNet::new().await?),
             cfg,
             store,
             zfs,
@@ -273,7 +273,7 @@ impl Manager {
                     "its process ended while no daemon ran: stopped"
                 }
             };
-            self.unplug(&rec.id, &rec.ip).await;
+            let _ = self.unplug(&rec.id, &rec.ip).await;
             e.set_state(state::STOPPED, |r| {
                 r.stopped_reason = stop::HOST.into();
                 r.pid = 0;

@@ -56,6 +56,9 @@ impl Manager {
                 return Err(MError::BadState(rec.state));
             }
             self.check_movable(&rec, namespace)?;
+            // A stopped record can retain a failed revocation. Do not release its old address.
+            self.unplug(&rec.id, &rec.ip).await?;
+            self.inner.net.clear_connections(&rec.ip).await?;
             // Usage up to now belongs to the namespace it leaves.
             self.meter(std::slice::from_ref(&e), Utc::now()).await;
             let from = rec.namespace.clone();
@@ -72,6 +75,16 @@ impl Manager {
                 r.suspended = false;
                 (ip, left)
             };
+            // New ownership is reserved in the record while stale flows are removed.
+            if let Err(err) = self.inner.net.clear_connections(&ip).await {
+                let mut r = e.rec.lock().unwrap();
+                r.namespace.clone_from(&from);
+                r.subnet_index = rec.subnet_index;
+                r.host_num = rec.host_num;
+                r.ip.clone_from(&left);
+                r.suspended = rec.suspended;
+                return Err(err.into());
+            }
             // The counters follow the address. Refused, the machine is as it was.
             if let Err(err) = self.inner.net.count(&ip).await.context("usage counters") {
                 let mut r = e.rec.lock().unwrap();

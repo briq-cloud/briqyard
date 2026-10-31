@@ -72,5 +72,18 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
+# What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start. The
+# machines carry on; the new daemon reads the configuration again.
+handover() {
+  local pid
+  pid=$(systemctl show -p MainPID --value briqyardd)
+  sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
+  for i in $(seq 1 100); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
+  sudo systemctl start briqyardd
+  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
+}
+
+
 . "$(dirname "${BASH_SOURCE[0]}")/e2e-machines.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/e2e-siblings.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/e2e-storage.sh"

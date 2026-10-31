@@ -18,7 +18,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | PersistentVolume + claim | a machine's volume (a zvol, honest `fsync`) | one per machine |
 | Service DNS | `<name>.internal`, `<id>.vm.internal` | per machine, no load balancing |
 | Ingress / Gateway | endpoints (TCP port, HTTP host) on the host, briq's router in front | |
-| NetworkPolicy | egress policy (`open`, `via`, `none`) | ADR 0015 |
+| NetworkPolicy | egress policy (`open`, `via`, `none`), explicit `via` namespace peers | ADR 0015, 0064 |
 | Egress gateway | the namespace's gateway | ADR 0016 |
 | kubelet + container runtime | the daemon + Firecracker under the jailer | |
 | kube-scheduler | the fleet's placement | a namespace on one host |
@@ -105,9 +105,9 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 | Ingress controller | ✓ L4 ingress per host, private to the edge | | |
 | Pods reaching a `hostNetwork` pod (an edge on the node) | ✓ `network.host_ports`, at the host's addresses, for machines with egress (ADR 0028) | | |
 | Ingress auth, TLS, hostnames | a proxy in front (OPERATIONS, "A proxy in front"), or the control plane's router and edge | | briq |
-| NetworkPolicy, egress | ✓ `open`, `via`, `none` | | |
+| NetworkPolicy, egress | ✓ `open`, `via`, `none`; `via` plus explicit same-namespace peers (`egress.siblings`, ADR 0064) | | |
 | NetworkPolicy, by port and CIDR | ◐ blocked ports, a connection rate, a bandwidth cap per machine (ADR 0018) | allow-lists by CIDR | yard, later |
-| NetworkPolicy, ingress between pods | ✗ | | yard, later |
+| NetworkPolicy, ingress between pods | ◐ strict `via` rejects non-gateway peer ingress; explicit sibling permission checks both peer policies (ADR 0064) | arbitrary selectors and ingress allow-lists | yard, later |
 | Egress gateway | ✓ namespace gateway | | |
 | Static egress IP (cloud NAT) | ✗ every machine leaves through its host's address | an additional IP per host for a class of machines | yard (mechanism), briq (who gets it) |
 | A pod network across nodes | ✗ a namespace on one host | `MESH.md` | yard, later |

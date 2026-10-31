@@ -45,6 +45,7 @@ fn the_machine_table() {
     b.egress = api::Egress {
         mode: "via".into(),
         via: Some("m_0123456789ab".into()),
+        siblings: false,
     };
     b.limits = api::EgressLimits {
         blocked_ports: Some(vec![25, 465]),
@@ -210,6 +211,7 @@ fn the_region_table() {
 #[test]
 fn the_host_table() {
     let ready = api::Host {
+        egress_siblings_v1: false,
         id: "h_byard-1".into(),
         url: "https://10.0.0.9:7420".into(),
         ssh: String::new(),
@@ -381,6 +383,7 @@ fn host_upgrade_takes_a_host_or_all() {
 #[test]
 fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
     let host = |id: &str, state: &str| api::Host {
+        egress_siblings_v1: false,
         id: id.into(),
         url: String::new(),
         ssh: String::new(),

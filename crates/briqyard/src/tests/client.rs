@@ -281,3 +281,44 @@ async fn legacy_read_bounds_encoded_json_before_decoding() {
     assert!(err.to_string().contains("legacy file response exceeds"));
     assert_eq!(stub.seen.lock().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn sibling_opt_in_requires_an_explicit_live_server_capability() {
+    for capability in [r#"{}"#, r#"{"egress_siblings_v1":false}"#] {
+        let (url, stub) = stub(vec![(StatusCode::OK, JSON.to_vec(), capability)]).await;
+        let c = client(&url, Some("test"));
+        let body = serde_json::json!({"egress":{"mode":"via","via":"gateway","siblings":true}});
+        let error = c
+            .call::<serde_json::Value>(reqwest::Method::POST, "/v1/machines", Some(&body))
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not support egress.siblings"));
+        let calls = stub.seen.lock().unwrap();
+        assert_eq!(calls.len(), 1, "no create reaches a legacy server");
+        assert_eq!(calls[0].path, "/v1/status");
+        assert_eq!(calls[0].authorization.as_deref(), Some("Bearer test"));
+    }
+    let (url, stub) = stub(vec![
+        (
+            StatusCode::OK,
+            JSON.to_vec(),
+            r#"{"egress_siblings_v1":true}"#,
+        ),
+        (StatusCode::OK, JSON.to_vec(), r#"{"ok":true}"#),
+    ])
+    .await;
+    let c = client(&url, None);
+    let body = serde_json::json!({"egress":{"mode":"via","via":"gateway","siblings":true}});
+    c.call::<serde_json::Value>(reqwest::Method::PATCH, "/v1/machines/m1", Some(&body))
+        .await
+        .unwrap();
+    let calls = stub.seen.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].method, "PATCH");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&calls[1].body).unwrap(),
+        body
+    );
+}

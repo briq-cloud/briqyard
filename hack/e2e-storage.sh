@@ -281,16 +281,6 @@ briqyard machine rm "$DK" >/dev/null
 check "status: no condition true"         'briqyard status | jq -e "(.conditions | map(.type) | sort) == [\"disk_pressure\", \"memory_pressure\", \"storage_stalled\"] and all(.conditions[]; .status == false)" >/dev/null'
 briqyard machine rm "$M" >/dev/null
 
-# What bootstrap-host.sh does on an upgrade: SIGUSR2 to the daemon alone, then a start. The
-# machines carry on; the new daemon reads the configuration again.
-handover() {
-  local pid
-  pid=$(systemctl show -p MainPID --value briqyardd)
-  sudo systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
-  for i in $(seq 1 100); do [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] && break; sleep 0.1; done
-  sudo systemctl start briqyardd
-  for i in $(seq 1 30); do briqyard status >/dev/null 2>&1 && break; sleep 1; done
-}
 
 if sudo -n true 2>/dev/null && systemctl is-active briqyardd >/dev/null 2>&1 && systemctl is-active briqyard-mirror >/dev/null 2>&1; then
   echo "== a registry mirror: pulls through it, from the registry when it is down (ADR 0036)"

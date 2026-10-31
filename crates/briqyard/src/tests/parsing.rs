@@ -174,12 +174,20 @@ fn an_egress_policy_is_read_as_the_daemon_checks_it() {
     let egress = |mode: &str, via: Option<&str>| api::Egress {
         mode: mode.into(),
         via: via.map(String::from),
+        siblings: false,
     };
     for (arg, want) in [
         ("open", egress("open", None)),
         ("none", egress("none", None)),
         ("via:m_0123456789ab", egress("via", Some("m_0123456789ab"))),
         ("via:gateway", egress("via", Some("gateway"))),
+        (
+            "via:gateway+siblings",
+            api::Egress {
+                siblings: true,
+                ..egress("via", Some("gateway"))
+            },
+        ),
     ] {
         let MachineCmd::Run(a) = machine(parse(&["m", "run", "--image", "x", "--egress", arg]))
         else {
@@ -196,7 +204,16 @@ fn an_egress_policy_is_read_as_the_daemon_checks_it() {
         panic!("not a run");
     };
     assert_eq!(a.egress, None, "the daemon's default: open");
-    for bad in ["all", "via", "via:", "via:../x", "open:m_1", ""] {
+    for bad in [
+        "all",
+        "via",
+        "via:",
+        "via:../x",
+        "open:m_1",
+        "open+siblings",
+        "none+siblings",
+        "",
+    ] {
         assert_eq!(
             fails(&["machine", "run", "--image", "x", "--egress", bad]),
             ErrorKind::ValueValidation,

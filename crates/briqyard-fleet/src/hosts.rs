@@ -44,7 +44,7 @@ pub(super) async fn status(State(st): S) -> Json<serde_json::Value> {
     }
     // The daemon's Status, plus what only a fleet knows.
     Json(serde_json::json!({
-        "version": api::VERSION, "host_id": "fleet",
+        "version": api::VERSION, "host_id": "fleet", "egress_siblings_v1": true,
         "capacity": cap, "used": used, "machines": machines, "running": machines,
         "hosts": reg.hosts.len(), "ready": ready, "namespaces": reg.namespaces.len(),
         "regions": signals::regions(&reg, &st.policy, &st.refusals),
@@ -363,6 +363,7 @@ pub(super) async fn register_host(
         // and state are the record's own (`heartbeat` leaves them).
         reg.heartbeat(
             HostRec {
+                egress_siblings_v1: req.egress_siblings_v1,
                 id: id.clone(),
                 url: req.url,
                 ssh: String::new(),
@@ -546,6 +547,7 @@ pub(super) fn new_added_host(
         return Err(invalid("public_tcp_ports: 0 is not a port".into()));
     }
     Ok(HostRec {
+        egress_siblings_v1: false,
         id,
         url,
         ssh: if address == req.ssh {
@@ -714,6 +716,7 @@ pub(super) async fn poll_static_hosts_once(st: &AppState) -> bool {
                 };
             let now = Utc::now();
             let mut rec = h.clone();
+            rec.egress_siblings_v1 = s.egress_siblings_v1;
             rec.capacity = s.capacity;
             rec.used = s.used;
             rec.machines = s.machines;

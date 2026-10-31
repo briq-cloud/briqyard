@@ -17,7 +17,7 @@ PRIVATE_ADDRESS=10.42.0.11/16 ALLOWED_CLIENTS=10.42.0.0/16 \
 bash bootstrap-host.sh
 ```
 
-It installs the packages (ZFS, nftables, e2fsprogs, gdisk), caps the ZFS cache, turns swap off
+It installs the packages (ZFS, nftables, conntrack-tools, e2fsprogs, gdisk), caps the ZFS cache, turns swap off
 for good, puts the API on the private network and closes the public interface when
 `PRIVATE_ADDRESS` is set, makes the pool encrypted (on the devices given, or on a file for a
 trial; ADR 0026), downloads Firecracker, its jailer and a guest kernel, installs the binaries
@@ -418,6 +418,15 @@ snapshot, or is whole.
   disk at once, its filesystem at the next start (cold); never smaller.
 - `briqyard usage --from <hour> --to <hour> [--namespace T] [--json]`: what each machine used
   per hour (ADR 0017); `nft list set inet briqyard internet_out` shows the raw counters.
+- Namespace peers with a gateway (ADR 0064): `briqyard machine set-egress <id> via:gateway+siblings`.
+  This opts into trusting current peers of the namespace. `via:gateway` restores strict access,
+  including blocking established peer traffic. Check `egress_siblings_v1` on `/v1/status` and
+  the selected host before an API opt-in; absent means unsupported. The CLI checks the server,
+  and the fleet checks each host. `conntrack` is a required host package; install the versioned
+  bootstrap prerequisites before upgrading an existing host. Do not clear the host's whole
+  connection table: the daemon clears only an address at ownership transitions. Warm resume,
+  stop/start and adoption retain the owner's existing flows.
+
 - Egress limits (ADR 0018): `briqyard machine get <id>` shows `limits` and `egress_drops`;
   `briqyard machine set-limits <id> --conn-per-min 0` lifts a rate at once. Raw:
   `nft list set inet briqyard dropped_port` (also `dropped_rate`, `dropped_bandwidth`).

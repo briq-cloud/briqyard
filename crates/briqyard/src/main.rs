@@ -270,7 +270,7 @@ enum MachineCmd {
         #[arg(value_parser = sleep_arg)]
         sleep: String,
     },
-    /// Change where its traffic may go, at once: briqyard machine set-egress ID open|none|via:MACHINE_ID|via:gateway
+    /// Change where its traffic may go, at once: briqyard machine set-egress ID open|none|via:MACHINE_ID|via:gateway[+siblings]
     SetEgress {
         id: String,
         #[arg(value_parser = egress_arg)]

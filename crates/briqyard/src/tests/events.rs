@@ -174,6 +174,7 @@ fn describe_shows_the_machine_then_its_events() {
         egress: api::Egress {
             mode: "via".into(),
             via: Some("gateway".into()),
+            siblings: false,
         },
         endpoints: vec![
             api::Endpoint {

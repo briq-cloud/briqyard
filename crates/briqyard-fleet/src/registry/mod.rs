@@ -50,6 +50,8 @@ impl std::fmt::Debug for PoolKey {
 /// A host as the fleet keeps it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HostRec {
+    #[serde(default)]
+    pub egress_siblings_v1: bool,
     pub id: String,
     pub url: String,
     /// The address the bootstrap reaches the server at over SSH, when it is not the API's
@@ -197,6 +199,7 @@ impl HostRec {
 
     pub fn to_api(&self) -> Host {
         Host {
+            egress_siblings_v1: self.egress_siblings_v1,
             id: self.id.clone(),
             url: self.url.clone(),
             ssh: self.ssh.clone(),
@@ -293,6 +296,8 @@ pub fn tls_matches(pinned: &str, reported: &str, url: &str) -> Result<(), String
 /// Placement settings.
 #[derive(Clone, Debug)]
 pub struct Policy {
+    /// This placement requires the explicit namespace sibling capability.
+    pub require_egress_siblings: bool,
     /// A host above this share of its memory takes no new namespace.
     pub fill_ceiling: f64,
     /// A host silent for this long is down.
@@ -302,6 +307,7 @@ pub struct Policy {
 impl Default for Policy {
     fn default() -> Self {
         Self {
+            require_egress_siblings: false,
             fill_ceiling: 0.85,
             down_after: Duration::seconds(60),
         }
@@ -388,6 +394,7 @@ impl Registry {
         entry.machines = h.machines;
         entry.namespaces = h.namespaces.clone();
         entry.version = h.version;
+        entry.egress_siblings_v1 = h.egress_siblings_v1;
         entry.conditions = h.conditions.clone();
         entry.started = h.started;
         entry.last_seen = now;
@@ -498,6 +505,7 @@ impl Registry {
                     .values()
                     .filter(|h| {
                         h.takes_new_namespaces(policy)
+                            && (!policy.require_egress_siblings || h.egress_siblings_v1)
                             && (region.is_empty() || h.region == region)
                             && h.free_memory_mb() >= need_mb
                             && h.has_disk(need_disk_mb)

@@ -479,3 +479,18 @@ api/openapi.yaml         the API description, served at /v1/openapi.yaml
 hack/                    dev VM, systemd units, dev configs, the shell suites, the stress driver
 docs/adr                 every technical decision; docs/research the numbers behind them
 ```
+
+### Namespace peer packet fixture
+
+After building `cargo build -p briqyardd --example siblings-rules` on Linux, run
+`sudo python3 hack/network-siblings.py target/debug/examples/siblings-rules`. It uses disposable
+network namespaces and local endpoints; it needs iproute2, nftables and Python 3, changes no
+host nft table and removes its own namespaces/processes on every exit. Hold `hack/vm-lock.sh`
+when running it in the shared development VM. The microVM suite also sources
+`hack/e2e-siblings.sh` (13 checks, plus adoption when the daemon's unit is available). Run both
+before pushing a network change. The normal workspace, fleet and stress gates still apply.
+
+Local preparation for ADR 0064: macOS workspace tests passed **780**, with **3 ignored**;
+all-target clippy and formatting passed. The packet fixture's rules generator built and
+produced valid JSON. Linux packet, microVM, fleet and stress checks remain pending before
+push; these native checks do not establish nft kernel semantics.

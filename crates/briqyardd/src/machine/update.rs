@@ -266,11 +266,7 @@ fn change_event(was: &Record, now: &Record) -> Option<Ev> {
         ("limits", was.limits != now.limits),
     ]);
     if !egress.is_empty() {
-        let label = |e: &api::Egress| match &e.via {
-            Some(via) => format!("{}:{via}", e.mode),
-            None => e.mode.clone(),
-        };
-        let (from, to) = (label(&was.egress), label(&now.egress));
+        let (from, to) = (was.egress.label(), now.egress.label());
         let message = match was.egress != now.egress {
             true => format!("egress {from} -> {to}"),
             false => "egress limits changed".to_string(),

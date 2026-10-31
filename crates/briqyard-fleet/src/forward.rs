@@ -57,6 +57,16 @@ pub(super) async fn forward(
     if let Some(refused) = down(host) {
         return refused;
     }
+    if matches!(method, Method::POST | Method::PATCH)
+        && path.starts_with("/v1/machines")
+        && serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .is_some_and(|doc| doc["egress"]["siblings"] == true)
+    {
+        if let Err(refusal) = require_siblings(host) {
+            return refusal.into_response();
+        }
+    }
     let req = match to_host(st, host, method, path, headers) {
         Ok(r) => r.body(body).timeout(FORWARD_TIMEOUT),
         Err(refused) => return refused.into_response(),
@@ -340,4 +350,16 @@ pub(super) async fn file_stream(
         rx.recv().await.map(|chunk| (chunk, rx))
     }));
     Ok(out)
+}
+
+/// Missing capability means legacy semantics, never inferred from a version label.
+pub(super) fn require_siblings(host: &HostRec) -> Result<(), Refusal> {
+    if !host.egress_siblings_v1 {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "capability_unsupported",
+            format!("host {} does not support egress.siblings", host.id),
+        ));
+    }
+    Ok(())
 }

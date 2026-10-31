@@ -60,6 +60,16 @@ pub(super) async fn create_machine(
     req.size
         .check()
         .map_err(|why| err(StatusCode::BAD_REQUEST, "invalid", why))?;
+    if let Some(egress) = &req.egress {
+        egress
+            .check()
+            .map_err(|why| err(StatusCode::BAD_REQUEST, "invalid", why))?;
+    }
+    let needs_siblings = req.egress.as_ref().is_some_and(|egress| egress.siblings);
+    let placement = registry::Policy {
+        require_egress_siblings: needs_siblings,
+        ..st.policy.clone()
+    };
     let ask = Ask {
         namespace: &req.namespace,
         region: &req.region,
@@ -93,6 +103,23 @@ pub(super) async fn create_machine(
         let bound = source
             .clone()
             .or_else(|| reg.namespaces.get(&req.namespace).cloned());
+        if needs_siblings {
+            if let Some(host) = bound.as_ref().and_then(|id| reg.hosts.get(id)) {
+                require_siblings(host)?;
+            }
+        }
+        if needs_siblings
+            && bound.is_none()
+            && !reg.hosts.values().any(|host| {
+                host.egress_siblings_v1 && (req.region.is_empty() || host.region == req.region)
+            })
+        {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "capability_unsupported",
+                "no host supports egress.siblings in the requested region",
+            ));
+        }
         refuse_outside(&reg, bound.as_deref(), &req.namespace, &req.region)?;
         refuse_under_pressure(&st, &reg, bound.as_deref(), &ask)?;
         let chosen = source.or_else(|| {
@@ -102,12 +129,15 @@ pub(super) async fn create_machine(
                 ask.memory_mb,
                 ask.disk_mb,
                 ask.cpu_millis,
-                &st.policy,
+                &placement,
             )
         });
         let Some(host) = chosen.and_then(|id| reg.hosts.get(&id).cloned()) else {
             return Err(no_room(&st, &reg, &ask));
         };
+        if needs_siblings {
+            require_siblings(&host)?;
+        }
         // A fork's new namespace lives where its source does, as a placement would pin it.
         reg.pin(&req.namespace, &host.id);
         let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb, ask.cpu_millis);

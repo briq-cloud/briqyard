@@ -15,8 +15,25 @@ use tokio::process::Command;
 pub trait Net: Send + Sync {
     async fn ensure_bridge(&self, s: &Subnet) -> Result<String>;
     async fn delete_bridge(&self, index: u32) -> Result<()>;
-    async fn ensure_tap(&self, machine_id: &str, bridge: &str, ip: &str) -> Result<String>;
-    async fn delete_tap(&self, machine_id: &str, ip: &str) -> Result<()>;
+    /// Pin, policy and namespace membership become visible in one transaction.
+    async fn attach(
+        &self,
+        machine: &str,
+        bridge: &str,
+        ip: &str,
+        old: Option<&nft::Policy>,
+        new: Option<&nft::Policy>,
+        new_owner: bool,
+    ) -> Result<String>;
+    /// Revoke the attachment before its address can change owners.
+    async fn detach(
+        &self,
+        machine: &str,
+        bridge: &str,
+        ip: &str,
+        policy: Option<&nft::Policy>,
+    ) -> Result<()>;
+    async fn clear_connections(&self, ip: &str) -> Result<()>;
     async fn delete_link(&self, name: &str) -> Result<()>;
     async fn list_taps(&self) -> Result<Vec<String>>;
     async fn set_policy(&self, p: &nft::Policy) -> Result<()>;
@@ -45,7 +62,27 @@ pub trait Net: Send + Sync {
 }
 
 /// iproute2 and nftables on this host.
-pub struct HostNet;
+#[derive(Clone)]
+struct PendingAttachment {
+    tap: String,
+    bridge: String,
+    ip: String,
+    policy: Option<nft::Policy>,
+}
+
+#[derive(Default)]
+pub struct HostNet {
+    // An admission whose final link-up/cleanup failed is retried before any later ownership
+    // operation, even when a stopped record's policy was PATCHed in the meantime.
+    update: tokio::sync::Mutex<HashMap<String, PendingAttachment>>,
+}
+
+impl HostNet {
+    pub async fn new() -> Result<Self> {
+        super::conntrack::available().await?;
+        Ok(Self::default())
+    }
+}
 
 #[async_trait]
 impl Net for HostNet {
@@ -55,11 +92,91 @@ impl Net for HostNet {
     async fn delete_bridge(&self, index: u32) -> Result<()> {
         delete_bridge(index).await
     }
-    async fn ensure_tap(&self, machine_id: &str, bridge: &str, ip: &str) -> Result<String> {
-        ensure_tap(machine_id, bridge, ip).await
+    async fn attach(
+        &self,
+        machine: &str,
+        bridge: &str,
+        ip: &str,
+        old: Option<&nft::Policy>,
+        new: Option<&nft::Policy>,
+        new_owner: bool,
+    ) -> Result<String> {
+        let mut pending = self.update.lock().await;
+        if let Some(prior) = pending.get(machine) {
+            nft::attachment(
+                "delete",
+                &prior.tap,
+                &prior.bridge,
+                &prior.ip,
+                prior.policy.as_ref(),
+            )
+            .await?;
+            pending.remove(machine);
+        }
+        let tap = tap_name(machine);
+        nft::attachment("delete", &tap, bridge, ip, old).await?;
+        let created = ensure_tap(machine, bridge).await?;
+        if new_owner {
+            super::conntrack::clear(ip).await?;
+        }
+        // Keep the attempted policy until admission fully succeeds. A failed final cleanup
+        // must not leave an opt-in behind when a stopped record is later changed to strict.
+        pending.insert(
+            machine.into(),
+            PendingAttachment {
+                tap: tap.clone(),
+                bridge: bridge.into(),
+                ip: ip.into(),
+                policy: new.cloned(),
+            },
+        );
+        // The TAP has no source pin until this atomic admission succeeds.
+        nft::attachment("add", &tap, bridge, ip, new).await?;
+        if let Err(error) = ip_link_up(&tap).await {
+            if nft::attachment("delete", &tap, bridge, ip, new)
+                .await
+                .is_ok()
+            {
+                pending.remove(machine);
+            }
+            let _ = delete_link(&tap).await;
+            return Err(error);
+        }
+        pending.remove(machine);
+        Ok(created)
     }
-    async fn delete_tap(&self, machine_id: &str, ip: &str) -> Result<()> {
-        delete_tap(machine_id, ip).await
+    async fn detach(
+        &self,
+        machine: &str,
+        bridge: &str,
+        ip: &str,
+        policy: Option<&nft::Policy>,
+    ) -> Result<()> {
+        let mut pending = self.update.lock().await;
+        let revoked = async {
+            if let Some(prior) = pending.get(machine) {
+                nft::attachment(
+                    "delete",
+                    &prior.tap,
+                    &prior.bridge,
+                    &prior.ip,
+                    prior.policy.as_ref(),
+                )
+                .await?;
+            }
+            nft::attachment("delete", &tap_name(machine), bridge, ip, policy).await
+        }
+        .await;
+        if revoked.is_ok() {
+            pending.remove(machine);
+        }
+        // Even a failed nft transaction leaves no live TAP. The error keeps the address reserved.
+        let removed = delete_link(&tap_name(machine)).await;
+        revoked.and(removed)
+    }
+    async fn clear_connections(&self, ip: &str) -> Result<()> {
+        let _turn = self.update.lock().await;
+        super::conntrack::clear(ip).await
     }
     async fn delete_link(&self, name: &str) -> Result<()> {
         delete_link(name).await
@@ -68,12 +185,15 @@ impl Net for HostNet {
         list_taps().await
     }
     async fn set_policy(&self, p: &nft::Policy) -> Result<()> {
+        let _turn = self.update.lock().await;
         nft::set_policy(p).await
     }
     async fn unset_policy(&self, p: &nft::Policy) -> Result<()> {
+        let _turn = self.update.lock().await;
         nft::unset_policy(p).await
     }
     async fn swap_policy(&self, old: &nft::Policy, new: &nft::Policy) -> Result<()> {
+        let _turn = self.update.lock().await;
         nft::swap_policy(old, new).await
     }
     async fn count(&self, ip: &str) -> Result<()> {
@@ -234,24 +354,15 @@ pub async fn delete_bridge(index: u32) -> Result<()> {
     Ok(())
 }
 
-/// Makes the machine's TAP, attached to the bridge, up and pinned to the machine's address.
+/// Makes an unpinned, down TAP. Atomic attachment admits it before the link is raised.
 /// Firecracker opens it by name. A TAP lives for one boot: one of that name already there
 /// is a leftover (a start that failed after making it) and is replaced, never shared.
-pub async fn ensure_tap(machine_id: &str, bridge: &str, ip_addr: &str) -> Result<String> {
+async fn ensure_tap(machine_id: &str, bridge: &str) -> Result<String> {
     let name = tap_name(machine_id);
     delete_link(&name).await?;
     ip(&["tuntap", "add", "dev", &name, "mode", "tap", "vnet_hdr"]).await?;
     ip(&["link", "set", &name, "master", bridge]).await?;
-    ip(&["link", "set", &name, "up"]).await?;
-    nft::pin_source(&name, ip_addr).await?;
     Ok(name)
-}
-
-/// Removes the machine's TAP and its pin. Missing is success.
-pub async fn delete_tap(machine_id: &str, ip_addr: &str) -> Result<()> {
-    let name = tap_name(machine_id);
-    delete_link(&name).await?;
-    nft::unpin_source(&name, ip_addr).await
 }
 
 /// Removes a link by name. Missing is success.
@@ -299,6 +410,13 @@ fn default_route_device(out: &str) -> Result<String> {
     }
     Err(anyhow!("no default route"))
 }
+
+async fn ip_link_up(name: &str) -> Result<()> {
+    ip(&["link", "set", name, "up"]).await.map(|_| ())
+}
+
+#[cfg(test)]
+mod attachment_tests;
 
 #[cfg(test)]
 mod tests {
