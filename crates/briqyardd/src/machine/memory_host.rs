@@ -162,7 +162,7 @@ async fn prerequisites() -> Result<(), &'static str> {
         // Absent units can make systemctl exit nonzero. Still require positive stopped
         // state and PID0; missing output, an active masked unit or a transition is unsafe.
         let absent = load.lines().any(|state| state == "not-found");
-        if !oomd_disabled(&load, &active, &pid) || (!(load_ok && active_ok && pid_ok) && !absent) {
+        if !oomd_disabled(&load, &active, &pid) || !(absent || load_ok && active_ok && pid_ok) {
             return Err("oomd_not_stopped");
         }
         let cgroup = read("/proc/self/cgroup")?;
