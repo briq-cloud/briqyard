@@ -227,7 +227,7 @@ fn passed(pid: &str, count: &str, names: &str, me: u32) -> Vec<(String, RawFd)> 
 mod tests {
     use super::*;
     use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
-    use std::io::IoSliceMut;
+    use std::io::{IoSliceMut, Read};
     use std::os::unix::net::UnixDatagram;
 
     #[test]
@@ -294,6 +294,83 @@ mod tests {
         "127.0.0.1:0".parse().unwrap()
     }
 
+    struct CloseProbe {
+        addr: SocketAddr,
+        peer: std::net::TcpStream,
+    }
+
+    impl CloseProbe {
+        fn new(addr: SocketAddr) -> Self {
+            let peer =
+                std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1))
+                    .unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            Self { addr, peer }
+        }
+
+        fn closed(&mut self) -> bool {
+            // An unaccepted connection belongs to this exact listening socket. When
+            // its last reference closes, the kernel ends that queued connection;
+            // another listener reusing the address cannot keep it alive.
+            match self.peer.read(&mut [0u8; 1]) {
+                Ok(0) => true,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    true
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    false
+                }
+                other => panic!("unexpected queued connection result: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn closure_is_observed_on_the_original_socket_after_address_reuse() {
+        let old = bind(any_port()).unwrap();
+        let addr = old.local_addr().unwrap().as_socket().unwrap();
+        let mut probe = CloseProbe::new(addr);
+        drop(old);
+        // An unrelated listener can take the released address. Its presence must not
+        // turn closure of the original socket into a failed lifecycle assertion.
+        let _replacement = bind(addr).unwrap();
+        assert!(
+            probe.closed(),
+            "the original socket at {} closed",
+            probe.addr
+        );
+    }
+
+    #[test]
+    fn a_retained_listener_keeps_its_queued_connection_open() {
+        let old = bind(any_port()).unwrap();
+        let mut probe = CloseProbe::new(old.local_addr().unwrap().as_socket().unwrap());
+        let retained = old.try_clone().unwrap();
+        drop(old);
+        probe
+            .peer
+            .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+            .unwrap();
+        assert!(!probe.closed(), "a retained listener still owns this queue");
+        probe
+            .peer
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        drop(retained);
+        assert!(probe.closed(), "the last listener reference closed");
+    }
+
     #[test]
     fn a_new_listener_is_stored_and_queues_once_its_process_closed_it() {
         let n = Notify::new();
@@ -321,18 +398,17 @@ mod tests {
         let n = Notify::new();
         let old = bind(any_port()).unwrap();
         let other = old.local_addr().unwrap().as_socket().unwrap();
+        let mut probe = CloseProbe::new(other);
         let l = Listeners::new(vec![("http".into(), old.into())], Some(n.path.clone()));
-        let ln = l.tcp("http", any_port()).unwrap();
-        assert_ne!(ln.local_addr().unwrap(), other);
+        // Port zero may legitimately reuse the released address. Keep the returned
+        // listener alive: the store messages and original queue prove replacement.
+        let _ln = l.tcp("http", any_port()).unwrap();
         let msgs: Vec<String> = n.messages().into_iter().map(|(m, _)| m).collect();
         assert_eq!(
             msgs,
             ["FDSTOREREMOVE=1\nFDNAME=http\n", "FDSTORE=1\nFDNAME=http\n"]
         );
-        assert!(
-            std::net::TcpStream::connect(other).is_err(),
-            "the old socket is closed"
-        );
+        assert!(probe.closed(), "the original socket at {other} closed");
     }
 
     #[test]
@@ -362,8 +438,8 @@ mod tests {
     fn a_failed_removal_goes_on_with_the_others() {
         let n = Notify::new();
         let (a, b) = (bind(any_port()).unwrap(), bind(any_port()).unwrap());
-        let ports =
-            [a.local_addr().unwrap(), b.local_addr().unwrap()].map(|x| x.as_socket().unwrap());
+        let mut probes =
+            [&a, &b].map(|sock| CloseProbe::new(sock.local_addr().unwrap().as_socket().unwrap()));
         let l = Listeners::new(
             vec![("ep_a".into(), a.into()), ("ep_b".into(), b.into())],
             Some(n.path.clone()),
@@ -372,8 +448,12 @@ mod tests {
         std::fs::remove_file(&n.path).unwrap();
         assert!(l.release_unused().is_err());
         assert!(l.inherited.lock().unwrap().is_empty());
-        for p in ports {
-            assert!(std::net::TcpStream::connect(p).is_err(), "{p} closed here");
+        for probe in &mut probes {
+            assert!(
+                probe.closed(),
+                "the original socket at {} closed",
+                probe.addr
+            );
         }
     }
 
@@ -382,8 +462,9 @@ mod tests {
         let l = Listeners::none();
         let ln = l.tcp("api", any_port()).unwrap();
         let addr = ln.local_addr().unwrap();
+        let mut probe = CloseProbe::new(addr);
         drop(ln);
-        assert!(std::net::TcpStream::connect(addr).is_err());
+        assert!(probe.closed(), "the original socket at {addr} closed");
         assert!(l.release_unused().unwrap().is_empty());
     }
 }
