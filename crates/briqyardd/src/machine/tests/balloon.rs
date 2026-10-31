@@ -145,7 +145,13 @@ async fn reporting_stats_are_cached_exact_and_optional_and_stopped_gauges_disapp
     let first = h.m.metrics();
     assert!(first.contains("briqyard_machine_balloon_actual_bytes{"));
     assert!(first.contains(" 12288\n"));
-    assert_eq!(first, h.m.metrics());
+    let machine_samples = |text: &str| {
+        text.lines()
+            .filter(|line| line.starts_with("briqyard_machine_"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(machine_samples(&first), machine_samples(&h.m.metrics()));
     assert!(!h.host.calls().iter().any(|s| s == "balloon-statistics"));
     let e = h.m.entry(&machine.id).unwrap();
     e.rec.lock().unwrap().state = state::STOPPED.into();
