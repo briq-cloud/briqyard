@@ -487,7 +487,7 @@ After building `cargo build -p briqyardd --example siblings-rules` on Linux, run
 network namespaces and local endpoints; it needs iproute2, nftables and Python 3, changes no
 host nft table and removes its own namespaces/processes on every exit. Hold `hack/vm-lock.sh`
 when running it in the shared development VM. The microVM suite also sources
-`hack/e2e-siblings.sh` (13 checks, plus adoption when the daemon's unit is available). Run both
+`hack/e2e-siblings.sh` (14 checks, plus adoption when the daemon's unit is available). Run both
 before pushing a network change. The normal workspace, fleet and stress gates still apply.
 
 Local preparation for ADR 0064: macOS workspace tests passed **780**, with **3 ignored**;

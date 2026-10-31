@@ -110,7 +110,11 @@ reverse packets on an established connection after opt-out/member removal, spoof
 IPv6, a selected gateway recreated at its old address, failed-batch atomicity, host ingress,
 host ports, cross-namespace denial and controlled direct egress. It changes no real host table.
 `hack/e2e-siblings.sh` adds PostgreSQL queries and a controlled gateway fixture through real
-microVMs, including live PATCH, stop/start, adoption and moves. These kernel/microVM gates must
+microVMs, including live PATCH, stop/start, adoption and moves. `hack/sibling-overlap.sh`
+holds a gateway response at an explicit event barrier, completes a query on an active SQL
+transaction, then releases the response. Its child supervisors are bounded and reaped on
+all exits; `hack/test-sibling-overlap.py` checks ordering and failed-release cleanup without
+using a daemon (requires GNU timeout, as does the microVM suite). These kernel/microVM gates must
 run under the shared VM lock before push, alongside workspace tests, fleet suites and stress.
 Native test counts and Linux results belong in the PR after execution, not inferred here.
 

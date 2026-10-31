@@ -53,15 +53,16 @@ async fn rollback_race(operation: &'static str) {
     );
     assert_eq!(h.m.get(&machine.id).unwrap().ip, machine.ip);
     assert_eq!(h.stored(&machine.id).unwrap().ip, machine.ip);
-    let machines = h.m.inner.machines.lock().unwrap();
-    let unique: std::collections::HashSet<String> =
-        machines.values().map(|e| e.snapshot().ip).collect();
-    assert_eq!(
-        unique.len(),
-        machines.len(),
-        "rollback created duplicate owners"
-    );
-    drop(machines);
+    {
+        let machines = h.m.inner.machines.lock().unwrap();
+        let unique: std::collections::HashSet<String> =
+            machines.values().map(|e| e.snapshot().ip).collect();
+        assert_eq!(
+            unique.len(),
+            machines.len(),
+            "rollback created duplicate owners"
+        );
+    }
     assert!(h.m.inner.address_holds.lock().unwrap().is_empty());
     *h.host.refuse_clear_ip.lock().unwrap() = None;
     *h.host.refuse_count_ip.lock().unwrap() = None;

@@ -229,6 +229,7 @@ def main():
     nft(fixture["limited_add"])
     nft(fixture["limited_remove"])
     nft(fixture["limited_remove"])  # Named limits/maps also revoke idempotently.
+    nft(fixture["database_add"])  # Complete revocation removed this peer's pins and membership.
     for name in ("client", "strict", "database", "gateway"):
         for ip in ("10.64.1.2", "10.64.1.3", "10.64.1.4", "10.64.1.5"):
             cached(name, ip)

@@ -5,6 +5,8 @@ ST="$T-siblings"
 STREAM_FILES=${STREAM_FILES:-$(mktemp -d)}
 cat > "$STREAM_FILES/sibling-proxy.py" <<'PY'
 import http.server
+import threading
+release = threading.Event()
 class Proxy(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         # A controlled gateway fixture: the caller presents a placeholder; only the gateway
@@ -12,14 +14,31 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         if self.headers.get('X-Fixture-Token') != 'placeholder':
             self.send_error(403)
             return
-        replacement = 'gateway-only-fixture'
-        body = ('injected=' + str(replacement == 'gateway-only-fixture')).encode()
+        if self.path == '/release':
+            release.set()
+            body = b'released'
+        else:
+            replacement = 'gateway-only-fixture'
+            body = ('injected=' + str(replacement == 'gateway-only-fixture')).encode()
+        if self.path == '/overlap':
+            release.clear()
+            first, last = b'gateway-ready\n', body + b'\n'
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(first) + len(last)))
+            self.end_headers()
+            self.wfile.write(first)
+            self.wfile.flush()
+            if release.wait(15):
+                self.wfile.write(last)
+                self.wfile.flush()
+            self.close_connection = True
+            return
         self.send_response(200)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
     def log_message(self, *args): pass
-http.server.HTTPServer(('0.0.0.0',3128),Proxy).serve_forever()
+http.server.ThreadingHTTPServer(('0.0.0.0',3128),Proxy).serve_forever()
 PY
 briqyard namespace gateway set "$ST" --image python:3.12-alpine --memory 128 --port 3128 \
   --file /srv/proxy.py="$STREAM_FILES/sibling-proxy.py" -- python3 /srv/proxy.py >/dev/null
@@ -38,6 +57,7 @@ sibling_ready() { for i in $(seq 1 30); do briqyard machine exec "$SD" -- pg_isr
 sibling_ready
 check "siblings: real database query" '[ "$(sibling_sql "$SC")" = 42 ]'
 check "siblings: selected synthetic gateway still works" '[ "$(sibling_proxy "$SC")" = injected=True ]'
+check "siblings: database query while gateway response is active" 'bash "$(dirname "${BASH_SOURCE[0]}")/sibling-overlap.sh" "$SC"'
 check "siblings: strict default denies database" '! sibling_sql "$SS" >/dev/null 2>&1'
 check "siblings: strict default still reaches gateway" '[ "$(sibling_proxy "$SS")" = injected=True ]'
 sxip=$(briqyard machine get "$SX" | jq -r .ip)
