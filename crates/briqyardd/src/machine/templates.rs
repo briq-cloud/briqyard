@@ -6,6 +6,13 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 const READERS: &str = "clone-readers";
 
+mod policy;
+pub(super) use policy::*;
+mod create;
+mod start;
+pub(super) use create::clone_mac;
+mod sealing;
+
 /// The resolved workload held by a named memory artifact, independent of later edits.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CloneRecipe {
@@ -13,6 +20,8 @@ pub struct CloneRecipe {
     pub image_digest: String,
     pub image_key: String,
     pub size: api::Size,
+    #[serde(default)]
+    pub root_disk_gb: u32,
     pub config: guest::Config,
 }
 
@@ -30,6 +39,8 @@ pub struct CloneArtifact {
     pub schema: u32,
     pub generation: String,
     pub profile: String,
+    #[serde(default)]
+    pub ram_marker: String,
     pub namespace: String,
     pub source_host: String,
     pub init_sha256: String,
@@ -49,12 +60,26 @@ impl PartialEq for CloneArtifact {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum CloneStage {
+pub enum CloneStage {
     Reserved,
     Loading,
+    Configuring,
     IdentityDone,
     Paused,
     Active,
+}
+
+impl CloneStage {
+    pub(super) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reserved => "reserved",
+            Self::Loading => "loading",
+            Self::Configuring => "configuring",
+            Self::IdentityDone => "identity_done",
+            Self::Paused => "paused",
+            Self::Active => "active",
+        }
+    }
 }
 
 /// Reserved before disk/jail/load work, retained for every possible live mapping.
@@ -145,8 +170,13 @@ impl Manager {
             || a.schema != 1
             || a.profile != guest::INIT_READY_V1
             || a.init_protocol != 1
+            || a.recipe.root_disk_gb == 0
+            || a.recipe.root_disk_gb != self.inner.cfg.root_disk_gb
+            || a.ram_marker.len() != 32
             || a.namespace != namespace
             || a.source_host != self.inner.host_id
+            || a.init_sha256 != self.inner.images.init_sha256()
+            || self.inner.vmm.cpu_fingerprint().as_deref() != Some(a.cpu_fingerprint.as_str())
         {
             return Err(invalid(
                 "memory template provenance/profile is incompatible",

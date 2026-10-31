@@ -95,6 +95,8 @@ pub struct Host {
     /// Supports explicit via-mode access to pinned namespace siblings (ADR 0064).
     #[serde(default, skip_serializing_if = "super::limits::is_false")]
     pub egress_siblings_v1: bool,
+    #[serde(default, skip_serializing_if = "super::limits::is_false")]
+    pub named_memory_fork_v1: bool,
     pub id: String,
     pub url: String,
     /// Where the fleet reaches the server over SSH, when not at the API's address (a host
@@ -192,6 +194,8 @@ pub struct RegisterHostRequest {
     /// Supports explicit via-mode access to pinned namespace siblings (ADR 0064).
     #[serde(default, skip_serializing_if = "super::limits::is_false")]
     pub egress_siblings_v1: bool,
+    #[serde(default, skip_serializing_if = "super::limits::is_false")]
+    pub named_memory_fork_v1: bool,
     /// The daemon's own id, for the fleet's log; the fleet keeps the host under its own.
     pub id: String,
     pub url: String,
@@ -252,6 +256,8 @@ pub struct Status {
     /// Supports explicit via-mode access to pinned namespace siblings (ADR 0064).
     #[serde(default, skip_serializing_if = "super::limits::is_false")]
     pub egress_siblings_v1: bool,
+    #[serde(default, skip_serializing_if = "super::limits::is_false")]
+    pub named_memory_fork_v1: bool,
     pub version: String,
     pub host_id: String,
     pub capacity: Capacity,

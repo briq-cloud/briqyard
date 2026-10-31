@@ -83,6 +83,7 @@
       properties:
         machine_id: { type: string }
         copy: { type: string, enum: [disk, config], default: disk }
+        snapshot: { type: string, description: "sealed named memory snapshot ID or name; strict same-owner/source-host restore without cold fallback; config copy and workload overrides are refused" }
     Egress:
       type: object
       description: "where the machine's traffic may go, enforced on the host (ADR 0015); a refusal names the field"
@@ -135,6 +136,7 @@
         backup: { oneOf: [{ $ref: "#/components/schemas/BackupPolicy" }, { type: "null" }], description: "absent: the host's `backup.default_every` and `default_keep` (none unless configured); null: none. A restore or a fork takes this, not its source's" }
         probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "absent: none, or for a restore the backup's" }
         start: { type: boolean, default: true, description: "its create starts it once its disks are made; the answer comes at `creating`: `/wait` for `running` or `ready`" }
+        template_build: { type: string, enum: [init-ready-v1], description: "reviewed pinned public pre-main builder; requires matching init digest and jailer; already-running services are unsupported" }
         fork: { $ref: "#/components/schemas/ForkSpec" }
         restore: { $ref: "#/components/schemas/RestoreSpec" }
     Exit:
@@ -339,6 +341,7 @@
     SnapshotRequest:
       type: object
       properties:
+        template: { type: boolean, default: false, description: "seal a reviewed init-ready builder with memory=true; ordinary machines cannot be promoted" }
         name: { type: string, description: "to find it by again: a-z, 0-9, _ and -, at most 64, not starting with s_; unique on the machine" }
         memory: { type: boolean, description: "its memory too, on a running machine, paused while it is written: a restore resumes its processes where they were" }
     Snapshot:
@@ -350,6 +353,10 @@
         created_at: { type: string, format: date-time }
         disks: { type: array, items: { type: string, enum: [root, data] }, description: "the disks it holds; a new image drops root (ADR 0024)" }
         memory: { type: boolean, description: "it holds the memory: a restore resumes, unless the image, command, env, files or size changed since" }
+        clone_profile: { type: string, description: "present only on an immutable sealed template; init-ready-v1 holds before the first workload exec" }
+        source_host: { type: string }
+        clone_size: { $ref: "#/components/schemas/Size" }
+        clone_ram_marker: { type: string, description: "init RAM marker inherited and checked on memory restore" }
     MachineStats:
       type: object
       properties:

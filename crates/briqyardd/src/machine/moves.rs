@@ -35,6 +35,11 @@ impl Manager {
         let _admission = self.inner.namespace_lifecycle.read().await;
         let e = self.own_entry(id)?;
         let first = e.snapshot();
+        if first.template_birth.is_some() || first.clone_origin.is_some() {
+            return Err(MError::Conflict(
+                "template and memory clone ownership is host-local and namespace-local".into(),
+            ));
+        }
         if first.namespace == namespace {
             return Ok(self.moved(&e, &first, false));
         }

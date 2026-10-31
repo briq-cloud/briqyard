@@ -510,6 +510,7 @@ async fn a_fork_takes_a_larger_volume_never_a_smaller_one() {
     with_volume(&h, "m_v", state::STOPPED, 2).await;
     let fork = |gb: u32, name: &str| api::CreateMachineRequest {
         fork: Some(api::ForkSpec {
+            snapshot: None,
             machine_id: "m_v".into(),
             copy: String::new(),
         }),

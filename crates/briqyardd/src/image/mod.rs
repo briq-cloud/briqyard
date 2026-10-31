@@ -99,6 +99,10 @@ pub struct Builder {
 pub const PULLS_AT_ONCE: usize = 4;
 
 impl Builder {
+    pub fn init_sha256(&self) -> &str {
+        &self.init_hash
+    }
+
     pub fn new(
         zfs: Zfs,
         dir: PathBuf,
@@ -143,7 +147,7 @@ impl Builder {
             .unwrap_or(RegistryAuth::Anonymous)
     }
 
-    fn key(&self, digest: &str) -> String {
+    pub(crate) fn key(&self, digest: &str) -> String {
         let h = Sha256::digest(format!("{digest}|{}|{}", self.init_hash, self.root_gb).as_bytes());
         hex::encode(h)[..20].to_string()
     }

@@ -14,6 +14,18 @@ use tokio::process::Command;
 #[async_trait]
 pub trait Net: Send + Sync {
     async fn ensure_bridge(&self, s: &Subnet) -> Result<String>;
+    async fn quarantine(&self, _machine: &str) -> Result<String> {
+        Err(anyhow!("quarantined TAP creation unavailable"))
+    }
+    async fn activate_quarantined(
+        &self,
+        _machine: &str,
+        _bridge: &str,
+        _ip: &str,
+        _policy: Option<&nft::Policy>,
+    ) -> Result<()> {
+        Err(anyhow!("quarantined TAP activation unavailable"))
+    }
     async fn delete_bridge(&self, index: u32) -> Result<()>;
     /// Pin, policy and namespace membership become visible in one transaction.
     async fn attach(
@@ -86,6 +98,38 @@ impl HostNet {
 
 #[async_trait]
 impl Net for HostNet {
+    async fn quarantine(&self, machine: &str) -> Result<String> {
+        let _turn = self.update.lock().await;
+        let name = tap_name(machine);
+        delete_link(&name).await?;
+        ip(&["tuntap", "add", "dev", &name, "mode", "tap", "vnet_hdr"]).await?;
+        // Fresh TAP has no bridge/master and remains down. No guest traffic can leave.
+        Ok(name)
+    }
+    async fn activate_quarantined(
+        &self,
+        machine: &str,
+        bridge: &str,
+        address: &str,
+        policy: Option<&nft::Policy>,
+    ) -> Result<()> {
+        let _turn = self.update.lock().await;
+        let name = tap_name(machine);
+        ip(&["link", "set", &name, "down"]).await?;
+        nft::attachment("delete", &name, bridge, address, policy).await?;
+        let result = async {
+            ip(&["link", "set", &name, "master", bridge]).await?;
+            nft::attachment("add", &name, bridge, address, policy).await?;
+            ip_link_up(&name).await
+        }
+        .await;
+        if result.is_err() {
+            let _ = ip(&["link", "set", &name, "down"]).await;
+            let _ = nft::attachment("delete", &name, bridge, address, policy).await;
+            let _ = ip(&["link", "set", &name, "nomaster"]).await;
+        }
+        result
+    }
     async fn ensure_bridge(&self, s: &Subnet) -> Result<String> {
         ensure_bridge(s).await
     }

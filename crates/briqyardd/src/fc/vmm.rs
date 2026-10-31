@@ -116,6 +116,10 @@ pub trait Vmm: Send + Sync {
         None
     }
 
+    fn cpu_fingerprint(&self) -> Option<String> {
+        None
+    }
+
     /// Optional bounded telemetry, never used to decide lifecycle or capacity.
     async fn balloon_statistics(&self, _vm: &Vm) -> Result<Option<BalloonStatistics>> {
         Ok(None)
@@ -161,6 +165,9 @@ pub(super) fn version_of(firecracker: &str, kernel: &str) -> Option<String> {
 
 #[async_trait]
 impl Vmm for Firecracker {
+    fn cpu_fingerprint(&self) -> Option<String> {
+        cpu_fingerprint().ok()
+    }
     async fn boot(&self, b: &Boot) -> Result<Vm> {
         anyhow::ensure!(
             !(b.resume && b.memory_clone.is_some()),
@@ -216,6 +223,7 @@ impl Vmm for Firecracker {
                             .ok_or_else(|| anyhow!("memory clone requires the jailer"))?;
                         let state = shared_backing(root, &artifact.state, "clone.state")?;
                         let memory = shared_backing(root, &artifact.memory, "clone.mem")?;
+                        let load_started = std::time::Instant::now();
                         c.snapshot_load_paused(
                             &state,
                             &memory,
@@ -228,6 +236,14 @@ impl Vmm for Firecracker {
                         anyhow::ensure!(
                             info.get("state").and_then(|s| s.as_str()) == Some("Paused"),
                             "named memory clone was not confirmed paused"
+                        );
+                        crate::profile::stage(
+                            "named_memory_clone",
+                            "load_paused",
+                            &b.id,
+                            proc.pid(),
+                            load_started,
+                            true,
                         );
                     } else {
                         c.snapshot_load(

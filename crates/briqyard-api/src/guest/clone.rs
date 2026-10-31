@@ -83,6 +83,9 @@ pub struct CloneIdentity {
 pub struct CloneStatus {
     pub protocol: u32,
     pub profile: String,
+    /// Generated once in init RAM before sealing; inherited by strict memory restores.
+    #[serde(default)]
+    pub ram_marker: String,
     /// builder, identity_done, activating, active, failed.
     pub stage: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

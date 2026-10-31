@@ -21,6 +21,7 @@ pub(super) async fn status(State(st): S) -> Json<api::Status> {
     let (used, running, machines) = st.mgr.usage();
     Json(api::Status {
         egress_siblings_v1: true,
+        named_memory_fork_v1: false,
         version: api::VERSION.into(),
         host_id: st.mgr.host_id().into(),
         capacity: st.mgr.capacity(),

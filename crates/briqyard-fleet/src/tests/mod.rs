@@ -31,6 +31,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         state_path,
         policy: Policy {
             require_egress_siblings: false,
+            require_named_memory: false,
             fill_ceiling: cfg.placement.fill_ceiling,
             down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
         },
@@ -240,6 +241,7 @@ mod placement;
 mod regions;
 mod sessions;
 mod siblings;
+mod templates;
 mod tls;
 
 use daemon::*;

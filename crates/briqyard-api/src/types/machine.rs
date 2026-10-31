@@ -69,6 +69,9 @@ pub struct CreateMachineRequest {
     /// the request sets them. The backup may come from another host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<RestoreSpec>,
+    /// Reviewed pre-main builder; never promotes an ordinary machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_build: Option<String>,
 }
 
 impl CreateMachineRequest {
@@ -98,6 +101,9 @@ pub struct ForkSpec {
     /// "disk" (both disks, the default) or "config" (nothing: a fresh image).
     #[serde(default)]
     pub copy: String,
+    /// A sealed named memory snapshot; strict restore, without cold fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
 }
 
 /// How the main process last ended on its own.
@@ -136,9 +142,25 @@ pub mod stop {
     pub const HOST: &str = "host";
 }
 
+/// The actual memory-restore and identity barrier reached by a named clone.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemoryOrigin {
+    pub source_machine: String,
+    pub snapshot: String,
+    pub source_host: String,
+    pub ram_marker: String,
+    pub generation: String,
+    pub stage: String,
+    pub identity: Option<crate::guest::CloneIdentity>,
+}
+
 /// A machine as the API returns it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Machine {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_origin: Option<MemoryOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_profile: Option<String>,
     pub id: String,
     #[serde(alias = "tenant")]
     pub namespace: String,

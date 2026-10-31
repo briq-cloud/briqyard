@@ -76,6 +76,7 @@ impl Gate {
         Some(CloneStatus {
             protocol: 1,
             profile: INIT_READY_V1.into(),
+            ram_marker: clone_identity::ram_marker(),
             stage: stage.into(),
             identity,
         })

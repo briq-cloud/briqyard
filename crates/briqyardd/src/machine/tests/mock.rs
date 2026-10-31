@@ -85,6 +85,8 @@ pub(super) struct Mock {
     /// The version the guests' inits answer with.
     pub(super) init_version: Mutex<String>,
     pub(super) file_stream_v1: AtomicBool,
+    clone_status: Mutex<HashMap<PathBuf, guest::CloneStatus>>,
+    pub(super) init_digests: Mutex<HashMap<PathBuf, String>>,
     /// The limits each machine's disks have now: given at boot, changed live, and
     /// whether the volume was given them too.
     pub(super) disks: Mutex<HashMap<String, (fc::DiskRate, bool)>>,
@@ -145,6 +147,8 @@ impl Mock {
             vmm_version: Mutex::new("v1.17.0/test".into()),
             init_version: Mutex::new("0.1.0+init".into()),
             file_stream_v1: AtomicBool::new(false),
+            clone_status: Mutex::new(HashMap::new()),
+            init_digests: Mutex::new(HashMap::new()),
             disks: Mutex::new(HashMap::new()),
             roots: Mutex::new(HashMap::new()),
             refuse_disk_rate: AtomicBool::new(false),
@@ -377,7 +381,31 @@ impl fc::Vmm for Mock {
         if b.resume && !snapshot.exists() {
             return Err(fc::ResumeFailed("memory file missing".into()).into());
         }
-        let resumed = b.resume;
+        let resumed = b.resume || b.memory_clone.is_some();
+        let mut tar = tar::Archive::new(std::fs::File::open(&b.config_drive)?);
+        for entry in tar.entries()? {
+            let mut entry = entry?;
+            if entry.path()?.as_ref() == Path::new(guest::CONFIG_NAME) {
+                let cfg: guest::Config = serde_json::from_reader(&mut entry)?;
+                if cfg.template_profile.is_some() {
+                    self.clone_status.lock().unwrap().insert(
+                        vsock.clone(),
+                        guest::CloneStatus {
+                            protocol: 1,
+                            profile: guest::INIT_READY_V1.into(),
+                            ram_marker: "0123456789abcdef0123456789abcdef".into(),
+                            stage: "builder".into(),
+                            identity: None,
+                        },
+                    );
+                    use sha2::{Digest, Sha256};
+                    self.init_digests
+                        .lock()
+                        .unwrap()
+                        .insert(vsock.clone(), hex::encode(Sha256::digest(b"init")));
+                }
+            }
+        }
         let _ = std::fs::remove_file(&snapshot);
         let _ = std::fs::remove_file(b.dir.join("snap.state"));
         let pid = self
@@ -400,12 +428,16 @@ impl fc::Vmm for Mock {
             Boots::Runs(code) => self.exit(pid, code, false),
             _ => {}
         }
+        let chroot = b.jail.as_ref().map(|j| fc::jail_root(&j.base, &b.id));
+        if let Some(root) = &chroot {
+            std::fs::create_dir_all(root)?;
+        }
         Ok(fc::Vm {
             pid,
             api,
             vsock,
             dir: b.dir.clone(),
-            chroot: None,
+            chroot,
             resumed,
             boot_identity: b.boot_identity.clone(),
             incarnation: Some(mock_incarnation(pid)),
@@ -461,8 +493,9 @@ impl fc::Vmm for Mock {
     async fn snapshot(&self, vm: &fc::Vm, durable: bool) -> Result<()> {
         let how = if durable { "synced" } else { "unsynced" };
         self.record(format!("snapshot {} {how}", vm.pid));
-        std::fs::write(vm.dir.join("snap.state"), b"state")?;
-        std::fs::write(vm.dir.join("snap.mem"), b"memory")?;
+        let dir = vm.chroot.as_ref().unwrap_or(&vm.dir);
+        std::fs::write(dir.join("snap.state"), b"state")?;
+        std::fs::write(dir.join("snap.mem"), b"memory")?;
         Ok(())
     }
 
@@ -501,6 +534,10 @@ impl fc::Vmm for Mock {
         self.vmm_version.lock().unwrap().clone()
     }
 
+    fn cpu_fingerprint(&self) -> Option<String> {
+        Some("test_cpu".into())
+    }
+
     fn boot_identity(&self, reporting: bool) -> Option<fc::BootIdentity> {
         Some(
             fc::BootIdentity {
@@ -532,16 +569,69 @@ impl fc::Vmm for Mock {
 
 #[async_trait::async_trait]
 impl guestc::Guest for Mock {
+    async fn clone_control(
+        &self,
+        vsock: &Path,
+        request: guest::Request,
+    ) -> Result<guest::CloneStatus> {
+        self.record(format!("{} {}", request.op, vsock.display()));
+        let mut statuses = self.clone_status.lock().unwrap();
+        let status = statuses
+            .get_mut(vsock)
+            .ok_or_else(|| anyhow!("no clone protocol"))?;
+        match request.op.as_str() {
+            "clone_configure_v1" => {
+                let c = request
+                    .clone_configure
+                    .ok_or_else(|| anyhow!("missing configuration"))?;
+                c.validate().map_err(|e| anyhow!(e))?;
+                anyhow::ensure!(status.stage == "builder", "clone barrier unavailable");
+                status.identity = Some(guest::CloneIdentity {
+                    generation: c.generation,
+                    hostname: c.hostname,
+                    ip: c.ip,
+                    mac: c.mac,
+                    machine_id: "0123456789abcdef0123456789abcdef".into(),
+                });
+                status.stage = "identity_done".into();
+            }
+            "clone_activate_v1" => {
+                anyhow::ensure!(
+                    status
+                        .identity
+                        .as_ref()
+                        .is_some_and(|i| i.generation == request.clone_generation),
+                    "generation conflict"
+                );
+                status.stage = "active".into();
+            }
+            _ => return Err(anyhow!("unsupported clone op")),
+        }
+        Ok(status.clone())
+    }
     async fn ping(&self, vsock: &Path) -> Result<guest::Response> {
         let (pid, _, exited) = self.proc_at(vsock)?;
         self.record(format!("ping {pid}"));
         if *exited.borrow() {
             return Err(guestc::Unreachable("guest exited".into()).into());
         }
+        let clone_status = self.clone_status.lock().unwrap().get(vsock).cloned();
         Ok(guest::Response {
             kind: "pong".into(),
             version: self.init_version.lock().unwrap().clone(),
             file_stream_v1: self.file_stream_v1.load(Relaxed),
+            main_pid: clone_status
+                .as_ref()
+                .filter(|s| s.stage == "active")
+                .map_or(0, |_| 42),
+            clone_status,
+            init_sha256: self
+                .init_digests
+                .lock()
+                .unwrap()
+                .get(vsock)
+                .cloned()
+                .unwrap_or_default(),
             ..Default::default()
         })
     }
@@ -668,6 +758,20 @@ impl Mock {
 
 #[async_trait::async_trait]
 impl host::Net for Mock {
+    async fn quarantine(&self, machine: &str) -> Result<String> {
+        self.record(format!("quarantine {machine}"));
+        Ok(netw::tap_name(machine))
+    }
+    async fn activate_quarantined(
+        &self,
+        machine: &str,
+        bridge: &str,
+        ip: &str,
+        _policy: Option<&nft::Policy>,
+    ) -> Result<()> {
+        self.record(format!("activate_quarantined {machine} {bridge} {ip}"));
+        Ok(())
+    }
     async fn ensure_bridge(&self, s: &Subnet) -> Result<String> {
         let name = netw::bridge_name(s.index);
         self.record(format!("ensure_bridge {name} {}", s.cidr()));

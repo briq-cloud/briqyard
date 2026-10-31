@@ -160,6 +160,7 @@ pub(super) async fn start_daemon_on(
         let ms = d.machines.lock().unwrap();
         Json(api::Status {
             egress_siblings_v1: d.egress_siblings.load(Ordering::SeqCst),
+            named_memory_fork_v1: false,
             version: "0.1-stub".into(),
             host_id: d.id.clone(),
             capacity: api::Capacity {

@@ -209,6 +209,7 @@ async fn named_memory_restore_copies_identity_and_disk_fork_chooses_cold_profile
         h.m.snapshot(
             &machine.id,
             api::SnapshotRequest {
+                template: false,
                 name: None,
                 memory: true,
             },
@@ -349,6 +350,7 @@ async fn failed_observation_retains_metadata_but_unbound_memory_is_ambiguous_and
         h.m.snapshot(
             &machine.id,
             api::SnapshotRequest {
+                template: false,
                 name: None,
                 memory: true,
             },

@@ -51,6 +51,47 @@ pub(super) fn shared_backing(root: &Path, host: &Path, name: &str) -> Result<Pat
     Ok(Path::new("/").join(name))
 }
 
+/// Conservative same-host CPU identity: any visible feature/model/microcode change
+/// invalidates the artifact. Never infer compatibility from host architecture alone.
+pub fn cpu_fingerprint() -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let text = std::fs::read_to_string("/proc/cpuinfo")?;
+    let keys = [
+        "vendor_id",
+        "cpu family",
+        "model",
+        "model name",
+        "stepping",
+        "microcode",
+        "flags",
+        "Features",
+        "CPU implementer",
+        "CPU architecture",
+        "CPU variant",
+        "CPU part",
+        "CPU revision",
+    ];
+    let lines: std::collections::BTreeSet<_> = text
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            keys.contains(&key.trim())
+                .then(|| format!("{}:{}", key.trim(), value.trim()))
+        })
+        .collect();
+    anyhow::ensure!(
+        lines
+            .iter()
+            .any(|s| s.starts_with("flags:") || s.starts_with("Features:")),
+        "CPU feature fingerprint is unavailable"
+    );
+    Ok(hex::encode(Sha256::digest(format!(
+        "{}\n{}",
+        std::env::consts::ARCH,
+        lines.into_iter().collect::<Vec<_>>().join("\n")
+    ))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -72,6 +72,13 @@ impl Manager {
         let mut pins = Vec::new();
         let mut members = Vec::new();
         for r in running {
+            if r.template_birth.is_some()
+                || r.clone_origin
+                    .as_ref()
+                    .is_some_and(|o| o.stage != templates::CloneStage::Active)
+            {
+                continue;
+            }
             let Ok(policy) = self.policy_for(&r) else {
                 continue;
             };
@@ -289,6 +296,24 @@ impl Manager {
     }
 
     /// Atomic network admission. DNS is restricted before the bridge policy becomes visible.
+    pub(super) async fn activate_clone_network(&self, r: &Record) -> Result<()> {
+        let policy = self.policy_for(r)?;
+        self.inner
+            .net
+            .activate_quarantined(
+                &r.id,
+                &netw::bridge_name(r.subnet_index),
+                &r.ip,
+                policy.as_ref().map(|(_, p)| p),
+            )
+            .await?;
+        if let Some((gateway, policy)) = policy {
+            self.internal_dns(gateway, &policy, true);
+            self.hold_policy(&r.id, gateway, policy);
+        }
+        Ok(())
+    }
+
     pub(super) async fn attach_network(
         &self,
         r: &Record,

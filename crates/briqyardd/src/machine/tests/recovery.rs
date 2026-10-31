@@ -263,6 +263,7 @@ impl Harness {
         let mut req = self.request(name);
         req.image = String::new();
         req.fork = Some(api::ForkSpec {
+            snapshot: None,
             machine_id: src.into(),
             copy: String::new(),
         });

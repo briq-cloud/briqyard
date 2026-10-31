@@ -44,6 +44,10 @@ impl SnapshotRec {
             created_at: self.created_at,
             disks: self.disks.clone(),
             memory: self.memory.is_some(),
+            clone_profile: self.clone_artifact.as_ref().map(|a| a.profile.clone()),
+            source_host: self.clone_artifact.as_ref().map(|a| a.source_host.clone()),
+            clone_size: self.clone_artifact.as_ref().map(|a| a.recipe.size),
+            clone_ram_marker: self.clone_artifact.as_ref().map(|a| a.ram_marker.clone()),
         }
     }
 
@@ -131,7 +135,7 @@ impl Manager {
     }
 
     /// A snapshot's memory files: its state and its memory.
-    fn memory_files(&self, r: &Record, snap: &str) -> [PathBuf; 2] {
+    pub(super) fn memory_files(&self, r: &Record, snap: &str) -> [PathBuf; 2] {
         let dir = self.memory_dir(r);
         ["state", "mem"].map(|ext| dir.join(format!("{snap}.{ext}")))
     }
@@ -232,6 +236,9 @@ impl Manager {
         }
         let _lock = e.lock.lock().await;
         let r = e.snapshot();
+        let template_marker = self
+            .check_template_seal(&e, req.memory, req.template)
+            .await?;
         if r.state == state::DESTROYING {
             return Err(MError::BadState(r.state));
         }
@@ -264,7 +271,7 @@ impl Manager {
                 (None, String::new())
             }
         };
-        let s = SnapshotRec {
+        let mut s = SnapshotRec {
             id: snap,
             name: req.name,
             created_at: Utc::now(),
@@ -299,6 +306,9 @@ impl Manager {
             e.note_locked(&mut rec, ev);
         }
         self.save(&e)?;
+        if let Some(marker) = template_marker {
+            self.seal_named_artifact(&e, &mut s, marker)?;
+        }
         Ok(s.view(id))
     }
 
@@ -427,6 +437,7 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
         let turns = e.lock_once_stopped(true).await;
         self.check_version(&e, at)?;
         let r = e.snapshot();

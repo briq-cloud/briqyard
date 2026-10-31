@@ -285,6 +285,10 @@ pub struct Record {
     /// Strong provenance is bound to this actual running process after launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_incarnation: Option<fc::Incarnation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_birth: Option<templates::TemplateBirth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_origin: Option<templates::CloneOrigin>,
     /// What a newer daemon wrote and this one does not know: kept as it is, so a rollback that
     /// rewrites the record does not drop it (ADR 0027).
     #[serde(flatten)]
@@ -392,7 +396,9 @@ fn holds_memory(state: &str) -> bool {
 /// Whether the host counts this machine's memory as taken: it holds it, or its create will
 /// start it (ADR 0048: room is taken when the machine is recorded, not when it boots).
 fn commits_memory(r: &Record) -> bool {
-    holds_memory(&r.state) || (r.state == state::CREATING && r.start)
+    holds_memory(&r.state)
+        || (r.state == state::CREATING && r.start)
+        || (r.state == state::DESTROYING && r.clone_origin.is_some() && r.pid > 0)
 }
 
 /// What a machine in this record's state holds, for its usage.

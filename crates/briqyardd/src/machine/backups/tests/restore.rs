@@ -255,6 +255,7 @@ async fn a_promoted_fork_backs_up_whole_from_its_own_snapshots_only() {
     let sb = h.m.backup(&src.id).await.unwrap();
     let mut req = h.request("fork");
     req.fork = Some(api::ForkSpec {
+        snapshot: None,
         machine_id: src.id.clone(),
         copy: String::new(),
     });

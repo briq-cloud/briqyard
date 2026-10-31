@@ -1,7 +1,7 @@
 # 0072: Identity before memory-clone activation
 
 Date: 2026-10-31
-Status: accepted; guest protocol implemented, host publication unavailable
+Status: accepted; restricted init-ready implementation candidate, native qualification pending
 
 A restored memory image includes kernel and process identity. A distinct TAP or a
 successful ping does not establish that a clone can safely execute work or send
@@ -28,10 +28,11 @@ The host must durably record the acknowledgment before sending
 once. Status distinguishes identity completion, activation request and an actually
 started main process; ping alone is insufficient for readiness.
 
-This protocol does not authorize template publication. Host enforcement must add a
-reviewed digest-pinned public recipe and matching init, quarantine from birth,
-immutable shared artifacts, durable read references, deletion fencing, strict
-memory restore without cold fallback, and full capacity admission. Capability must
+Publication is limited to a
+reviewed digest-pinned public Alpine recipe and matching actual init executable. Host
+enforcement includes quarantine from birth, immutable shared artifacts, durable read
+references, deletion fencing, strict memory restore without cold fallback, and full
+capacity admission. Capability must
 remain unavailable until these paths and native effective-MAC, VMGenID and VMClock
 behavior are qualified against the pinned VMM/kernel. SSH recipes require explicit
 fresh key generation before a listener can be activated.

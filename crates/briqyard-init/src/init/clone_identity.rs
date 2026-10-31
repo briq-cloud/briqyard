@@ -4,6 +4,36 @@ use futures::TryStreamExt;
 use guest::{CloneConfigure, CloneIdentity};
 use netlink_packet_route::route::RouteAttribute;
 
+pub(super) fn ram_marker() -> String {
+    static MARKER: OnceLock<String> = OnceLock::new();
+    MARKER
+        .get_or_init(|| random_id().map(hex::encode).unwrap_or_default())
+        .clone()
+}
+
+pub(super) fn executable_sha256() -> String {
+    static DIGEST: OnceLock<String> = OnceLock::new();
+    DIGEST
+        .get_or_init(|| {
+            use sha2::{Digest, Sha256};
+            (|| -> Result<String> {
+                let mut file = fs::File::open("/proc/self/exe")?;
+                let mut hash = Sha256::new();
+                let mut buf = [0; 65536];
+                loop {
+                    let n = file.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hash.update(&buf[..n]);
+                }
+                Ok(hex::encode(hash.finalize()))
+            })()
+            .unwrap_or_default()
+        })
+        .clone()
+}
+
 /// Keep the builder unaddressed and identity-free. Host TAP quarantine is also required.
 pub(super) async fn prepare_builder() -> Result<()> {
     reset_network(None).await?;

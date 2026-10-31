@@ -1,0 +1,73 @@
+{
+  "index_sha256": "4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412",
+  "platforms": [
+    {
+      "architecture": "amd64",
+      "image": "docker.io/library/alpine@sha256:85f2b723e106c34644cd5851d7e81ee87da98ac54672b29947c052a45d31dc2f",
+      "config_digest": "sha256:706db57fb2063f39f69632c5b5c9c439633fda35110e65587c5d85553fd1cc38",
+      "config": {
+        "Env": [
+          "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ],
+        "Cmd": [
+          "/bin/sh"
+        ],
+        "WorkingDir": "/"
+      }
+    },
+    {
+      "architecture": "arm64",
+      "image": "docker.io/library/alpine@sha256:24bb3511a0db7b5114a4aee033c65a8a4148f39b7b80a398e548546db967a36f",
+      "config_digest": "sha256:171e65262c8018f8f09a360006af2acbb2c0c494cb2be933025b466ea3d672dc",
+      "config": {
+        "Env": [
+          "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ],
+        "Cmd": [
+          "/bin/sh"
+        ],
+        "WorkingDir": "/"
+      }
+    }
+  ],
+  "source_commit": "4dc13cbc7caffe03c98aa99f28e27c2fb6f7e74d",
+  "sources": {
+    "amd64": {
+      "url": "https://raw.githubusercontent.com/alpinelinux/docker-alpine/4dc13cbc7caffe03c98aa99f28e27c2fb6f7e74d/x86_64/Dockerfile",
+      "dockerfile": "FROM scratch\nADD alpine-minirootfs-3.22.2-x86_64.tar.gz /\nCMD [\"/bin/sh\"]\n"
+    },
+    "arm64": {
+      "url": "https://raw.githubusercontent.com/alpinelinux/docker-alpine/4dc13cbc7caffe03c98aa99f28e27c2fb6f7e74d/aarch64/Dockerfile",
+      "dockerfile": "FROM scratch\nADD alpine-minirootfs-3.22.2-aarch64.tar.gz /\nCMD [\"/bin/sh\"]\n"
+    }
+  },
+  "layers": [
+    {
+      "architecture": "amd64",
+      "digest": "sha256:2d35ebdb57d9971fea0cac1582aa78935adf8058b2cc32db163c98822e5dfa1b",
+      "bytes": 3802452,
+      "entries": 519,
+      "forbidden_identity_files_or_ssh_daemon": []
+    },
+    {
+      "architecture": "arm64",
+      "digest": "sha256:6b59a28fa20117e6048ad0616b8d8c901877ef15ff4c7f18db04e4f01f43bc39",
+      "bytes": 4138069,
+      "entries": 519,
+      "forbidden_identity_files_or_ssh_daemon": []
+    }
+  ],
+  "assumption": "Trust official Alpine public source and build provenance; checks constrain template ingress and known identity inputs, not prove arbitrary bytes secret-free.",
+  "profile": "init-ready-v1",
+  "workload": {
+    "cmd": [
+      "/bin/sleep",
+      "2147483647"
+    ],
+    "vcpus": 1,
+    "memory_mb": 256,
+    "network_during_build": "unbridged down TAP; guest eth0 down and unaddressed",
+    "ingress": "status and controlled memory seal only",
+    "init_binding": "exact running executable digest must match operator-bound locally built init; image build cache key includes full init digest"
+  }
+}

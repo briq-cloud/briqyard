@@ -29,6 +29,9 @@ pub trait Guest: Send + Sync {
     async fn ping(&self, _vsock: &Path) -> Result<Response> {
         Err(anyhow!("guest ping unavailable"))
     }
+    async fn clone_control(&self, _vsock: &Path, _request: Request) -> Result<guest::CloneStatus> {
+        Err(anyhow!("clone control unavailable"))
+    }
     /// Open a raw file stream after its ready handshake (ADR 0061).
     async fn file_stream(
         &self,
@@ -44,6 +47,24 @@ pub struct Vsock;
 
 #[async_trait]
 impl Guest for Vsock {
+    async fn clone_control(&self, vsock: &Path, request: Request) -> Result<guest::CloneStatus> {
+        let exchange = async {
+            let mut connection = dial(vsock).await?;
+            write_request(&mut connection, &request).await?;
+            let response: Response = read_frame(&mut connection).await?;
+            anyhow::ensure!(
+                response.kind == "ok",
+                "clone control refused: {}",
+                response.message
+            );
+            response
+                .clone_status
+                .ok_or_else(|| anyhow!("clone control omitted its identity/status acknowledgment"))
+        };
+        tokio::time::timeout(Duration::from_secs(10), exchange)
+            .await
+            .context("clone control timeout")?
+    }
     async fn ping(&self, vsock: &Path) -> Result<Response> {
         ping(vsock).await
     }

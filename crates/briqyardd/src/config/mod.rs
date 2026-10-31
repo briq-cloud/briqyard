@@ -40,6 +40,7 @@ pub struct Config {
     pub pci: bool,
     /// Fixed target-zero reporting device on subsequent cold boots only.
     pub balloon: Balloon,
+    pub templates: Templates,
     /// The briqyard-init binary copied into every root disk.
     pub init: PathBuf,
     pub storage: Storage,
@@ -112,6 +113,7 @@ impl Default for Config {
             kernel_args: String::new(),
             pci: false,
             balloon: Balloon::default(),
+            templates: Templates::default(),
             init: "/usr/local/bin/briqyard-init".into(),
             storage: Storage::default(),
             registries: vec![],

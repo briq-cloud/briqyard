@@ -147,6 +147,7 @@ pub(super) async fn refresh(st: &AppState, host: &HostRec) {
     if let Ok(Some(s)) = tokio::time::timeout(within, status).await {
         if let Some(h) = st.reg.lock().unwrap().hosts.get_mut(&host.id) {
             h.egress_siblings_v1 = s.egress_siblings_v1;
+            h.named_memory_fork_v1 = s.named_memory_fork_v1;
             h.report(s.used, s.disk_free_mb, asked);
         }
     }

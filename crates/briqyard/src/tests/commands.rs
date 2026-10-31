@@ -90,13 +90,13 @@ fn machine_lifecycle_commands() {
         (vec!["machine", "snapshot", "rm", "m1", "s_1"], "rm"),
     ] {
         let got = match machine(parse(&args)) {
-            MachineCmd::Snapshot(SnapshotCmd::Create { name, memory, id }) if id == "m1" => {
-                match (name, memory) {
-                    (None, false) => "create",
-                    (Some(n), true) if n == "before" => "create before with memory",
-                    _ => "?",
-                }
-            }
+            MachineCmd::Snapshot(SnapshotCmd::Create {
+                name, memory, id, ..
+            }) if id == "m1" => match (name, memory) {
+                (None, false) => "create",
+                (Some(n), true) if n == "before" => "create before with memory",
+                _ => "?",
+            },
             MachineCmd::Snapshot(SnapshotCmd::Ls { id }) if id == "m1" => "ls",
             MachineCmd::Snapshot(SnapshotCmd::Restore { id, snap })
                 if id == "m1" && snap == "before" =>
@@ -158,6 +158,7 @@ fn machine_lifecycle_commands() {
             name,
             namespace,
             id,
+            ..
         } => assert_eq!(
             (name.as_deref(), namespace, id.as_str()),
             (Some("copy"), None, "m1")
@@ -595,4 +596,49 @@ fn backup_schedules_and_backup_commands() {
         fails(&["backup", "rm", "m1"]),
         ErrorKind::MissingRequiredArgument
     );
+}
+
+#[test]
+fn template_commands_keep_seal_and_named_memory_selection_explicit() {
+    match machine(parse(&[
+        "machine",
+        "fork",
+        "m1",
+        "--snapshot",
+        "ready",
+        "--name",
+        "clone",
+    ])) {
+        MachineCmd::Fork { snapshot, name, .. } => {
+            assert_eq!(snapshot.as_deref(), Some("ready"));
+            assert_eq!(name.as_deref(), Some("clone"));
+        }
+        _ => panic!("not a fork"),
+    }
+    match machine(parse(&[
+        "machine",
+        "snapshot",
+        "create",
+        "m1",
+        "--memory",
+        "--template",
+    ])) {
+        MachineCmd::Snapshot(SnapshotCmd::Create {
+            memory, template, ..
+        }) => assert!(memory && template),
+        _ => panic!("not a seal"),
+    }
+    match machine(parse(&[
+        "machine",
+        "run",
+        "--image",
+        "docker.io/library/alpine@sha256:85f2b723e106c34644cd5851d7e81ee87da98ac54672b29947c052a45d31dc2f",
+        "--memory",
+        "256",
+        "--template-build",
+        "init-ready-v1",
+    ])) {
+        MachineCmd::Run(a) => assert_eq!(a.template_build.as_deref(), Some("init-ready-v1")),
+        _ => panic!("not a builder"),
+    }
 }

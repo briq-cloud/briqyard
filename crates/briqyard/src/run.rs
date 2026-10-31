@@ -84,6 +84,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     start: if a.no_start { Some(false) } else { None },
                     fork: None,
                     restore: None,
+                    template_build: a.template_build.clone(),
                 };
                 let m: api::Machine = c.call(POST, "/v1/machines", Some(&req)).await?;
                 let m = match a.detach || a.no_start {
@@ -237,10 +238,12 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
             MachineCmd::Fork {
                 name,
                 namespace,
+                snapshot,
                 id,
             } => {
                 let src: api::Machine = c.call(GET, &format!("/v1/machines/{id}"), NONE).await?;
-                let req = api::CreateMachineRequest {
+                let named = snapshot.is_some();
+                let mut req = api::CreateMachineRequest {
                     namespace: namespace.unwrap_or_else(|| src.namespace.clone()),
                     name: name.unwrap_or_else(|| format!("{}-fork", src.name)),
                     size: src.size,
@@ -251,11 +254,20 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     limits: Some(src.limits.clone()),
                     disk_limits: Some(src.disk_limits.clone()),
                     fork: Some(api::ForkSpec {
+                        snapshot,
                         machine_id: id,
                         copy: String::new(),
                     }),
                     ..Default::default()
                 };
+                if named {
+                    req.size = api::Size::default();
+                    req.ports.clear();
+                    req.sleep = "never".into();
+                    req.egress = None;
+                    req.limits = None;
+                    req.disk_limits = None;
+                }
                 print_json(
                     &c.call::<api::Machine>(POST, "/v1/machines", Some(&req))
                         .await?,
@@ -413,8 +425,17 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     .await?,
             ),
             MachineCmd::Snapshot(s) => match s {
-                SnapshotCmd::Create { name, memory, id } => {
-                    let req = api::SnapshotRequest { name, memory };
+                SnapshotCmd::Create {
+                    name,
+                    memory,
+                    template,
+                    id,
+                } => {
+                    let req = api::SnapshotRequest {
+                        name,
+                        memory,
+                        template,
+                    };
                     print_json(
                         &c.call::<api::Snapshot>(
                             POST,

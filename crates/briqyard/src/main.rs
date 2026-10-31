@@ -196,6 +196,9 @@ enum MachineCmd {
     },
     /// A new machine from a snapshot of this one, taken now: briqyard machine fork ID [--name N] [--namespace T]
     Fork {
+        /// Sealed named memory template (init-ready-v1); running services are unsupported
+        #[arg(long)]
+        snapshot: Option<String>,
         #[arg(long)]
         name: Option<String>,
         /// The namespace the copy joins: this machine's by default (made when it does not exist)
@@ -353,6 +356,9 @@ impl DiskArgs {
 
 #[derive(Args)]
 struct RunArgs {
+    /// Reviewed init-ready-v1 builder; requires the pinned public recipe and 256 MB
+    #[arg(long, value_parser = ["init-ready-v1"])]
+    template_build: Option<String>,
     #[arg(long)]
     image: String,
     /// A DNS label; made from the image when absent
@@ -567,6 +573,9 @@ enum SnapshotCmd {
         name: Option<String>,
         #[arg(long)]
         memory: bool,
+        /// Seal a reviewed pre-main builder; does not clone already-running services
+        #[arg(long, requires = "memory")]
+        template: bool,
         id: String,
     },
     /// List a machine's snapshots

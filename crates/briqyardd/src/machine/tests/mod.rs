@@ -110,6 +110,8 @@ pub(in crate::machine) fn record() -> Record {
         vmm_version: String::new(),
         boot_identity: None,
         boot_incarnation: None,
+        template_birth: None,
+        clone_origin: None,
         rest: Default::default(),
         snapshots: Vec::new(),
         restoring: None,
@@ -369,6 +371,25 @@ impl Harness {
     /// The volume's device the machine last booted on.
     pub(super) fn booted_data(&self, id: &str) -> PathBuf {
         self.host.roots.lock().unwrap()[id].1.clone().unwrap()
+    }
+
+    pub(super) fn report_guest_init_digest(&self, id: &str, digest: &str) {
+        let vsock = self
+            .m
+            .entry(id)
+            .unwrap()
+            .live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .vsock
+            .clone();
+        self.host
+            .init_digests
+            .lock()
+            .unwrap()
+            .insert(vsock, digest.into());
     }
 
     pub(super) fn host_calls(&self) -> Vec<String> {

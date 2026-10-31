@@ -18,6 +18,7 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
         if let Some(sl) = &req.sleep {
             api::parse_sleep(sl).map_err(invalid)?;
         }
@@ -155,6 +156,7 @@ impl Manager {
     /// stop, whose events move the version.
     pub async fn restart(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
         self.stop_entry(&e, stop::USER, Duration::ZERO, false, at)
             .await?;
         let _turns = e.lock_for_start().await;
@@ -165,7 +167,9 @@ impl Manager {
     }
 
     pub fn touch(&self, id: &str) -> Result<(), MError> {
-        self.own_entry(id)?.touch();
+        let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
+        e.touch();
         Ok(())
     }
 

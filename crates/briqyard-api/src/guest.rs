@@ -162,6 +162,9 @@ pub struct Response {
     /// Present only for guests born at the reviewed pre-main template barrier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_status: Option<CloneStatus>,
+    /// Digest of the actual running init executable, cached from /proc/self/exe.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub init_sha256: String,
 }
 
 fn is_false(value: &bool) -> bool {

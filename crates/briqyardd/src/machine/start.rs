@@ -5,6 +5,7 @@ use super::*;
 impl Manager {
     pub async fn start(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
         let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;
         match e.snapshot() {
@@ -59,6 +60,7 @@ impl Manager {
     /// one stopped on purpose stays stopped.
     pub async fn wake(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
         let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;
         let r = e.snapshot();
@@ -187,7 +189,13 @@ impl Manager {
             Some(t) => t,
             None => return Err(fail(anyhow!("namespace network is gone"))),
         };
-        let tap = self.attach_network(&rec, &t, policy).await.map_err(fail)?;
+        let quarantined = rec.template_birth.is_some() || self.initial_memory_clone(&rec);
+        let tap = if quarantined {
+            self.inner.net.quarantine(&rec.id).await
+        } else {
+            self.attach_network(&rec, &t, policy).await
+        }
+        .map_err(fail)?;
         let dir = cfg.run_dir().join(&rec.id);
         tokio::fs::create_dir_all(&dir)
             .await
@@ -231,7 +239,7 @@ impl Manager {
             tap,
             mac: netw::mac_for(ip),
             resume: rec.suspended,
-            memory_clone: None,
+            memory_clone: self.clone_backing(&rec).map_err(fail)?,
             boot_identity: rec.boot_identity.clone(),
             disk: self.disk_rate(&rec),
             disk_io: e.disk_io.clone(),
@@ -252,12 +260,19 @@ impl Manager {
             .await
             .map_or(0, |c| c.cpu_usec);
         e.meter.lock().unwrap().boot(cpu);
-        if !boot.resume {
+        if boot.memory_clone.is_some() {
+            self.clone_stage(e, templates::CloneStage::Loading)
+                .map_err(fail)?;
+        }
+        if !boot.resume && boot.memory_clone.is_none() {
             boot.boot_identity = self.persist_cold_identity(e).map_err(fail)?;
         }
         let live = match self.inner.vmm.boot(&boot).await {
             Ok(live) => live,
-            Err(err) if err.downcast_ref::<fc::ResumeFailed>().is_some() => {
+            Err(err)
+                if boot.memory_clone.is_none()
+                    && err.downcast_ref::<fc::ResumeFailed>().is_some() =>
+            {
                 e.note(
                     Ev::warning(reason::STARTING, format!("booting cold: {err:#}"))
                         .data(json!({"resume": false, "fallback": true})),
@@ -266,7 +281,13 @@ impl Manager {
                 boot.boot_identity = self.persist_cold_identity(e).map_err(fail)?;
                 self.inner.vmm.boot(&boot).await.map_err(fail)?
             }
-            Err(err) => return Err(fail(err)),
+            Err(err) => {
+                if let Some(origin) = e.rec.lock().unwrap().clone_origin.as_mut() {
+                    // Vmm::boot errors settle their owned process before returning.
+                    origin.mapping_exited = true;
+                }
+                return Err(fail(err));
+            }
         };
         {
             e.identity_trusted
@@ -286,10 +307,21 @@ impl Manager {
         let _ = self.save(e);
         self.watch(e, &live);
 
-        let ready = self.inner.guest.wait_ready(
-            &live.vsock,
-            Duration::from_secs(cfg.boot_timeout_sec.max(10)),
-        );
+        let ready = async {
+            if self.initial_memory_clone(&e.snapshot()) {
+                self.activate_memory_clone(e, &live).await
+            } else if rec.template_birth.is_some() {
+                self.template_builder_ready(&live, None).await
+            } else {
+                self.inner
+                    .guest
+                    .wait_ready(
+                        &live.vsock,
+                        Duration::from_secs(cfg.boot_timeout_sec.max(10)),
+                    )
+                    .await
+            }
+        };
         let mut exited = live.exited.clone();
         let outcome = tokio::select! {
             r = ready => r.map_err(|err| (format!("the guest did not come up: {err}"), false)),
@@ -305,6 +337,11 @@ impl Manager {
             // `error`, with the init's reason or else the console's last lines, for the
             // caller to read and destroy.
             self.end_process(e, &live, Duration::ZERO).await;
+            if e.snapshot().clone_origin.is_some() && !*live.exited.borrow() {
+                return Err(MError::Conflict(
+                    "clone VMM exit is unconfirmed; reservation retained".into(),
+                ));
+            }
             self.inner.stats.starts_failed.fetch_add(1, Relaxed);
             let why = match said {
                 true => why,
@@ -328,7 +365,9 @@ impl Manager {
             };
             Some(ev.data(json!({ "pid": pid })))
         });
-        self.spawn_probes(e, &live, generation, asked);
+        if rec.template_birth.is_none() {
+            self.spawn_probes(e, &live, generation, asked);
+        }
         let _ = self.save(e);
         tracing::info!(
             machine = rec.id,
@@ -565,6 +604,15 @@ pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
             path: v.mount.clone(),
             fstype: "ext4".into(),
         });
+    }
+    if r.template_birth.is_some() {
+        cfg = templates::builder_config();
+    } else if let Some(origin) = r
+        .clone_origin
+        .as_ref()
+        .filter(|o| o.stage != templates::CloneStage::Active)
+    {
+        cfg = origin.artifact.recipe.config.clone();
     }
     let mut files: Vec<(String, u32, Vec<u8>)> = Vec::new();
     for f in &r.files {

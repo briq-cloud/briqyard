@@ -115,6 +115,7 @@
       type: object
       properties:
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        named_memory_fork_v1: { type: boolean, default: false, description: "explicit complete named memory-clone capability; false until native enforcement is qualified; absent or stale reports are unsupported" }
         version: { type: string, description: "this build: the release and its commit, `0.1.0+fdad892eeefa` (ADR 0027)" }
         host_id: { type: string }
         capacity: { $ref: "#/components/schemas/Capacity" }
@@ -191,6 +192,7 @@
       type: object
       properties:
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        named_memory_fork_v1: { type: boolean, default: false, description: "explicit complete named memory-clone capability; false until native enforcement is qualified; absent or stale reports are unsupported" }
         id: { type: string }
         url: { type: string }
         ssh: { type: string, description: "where the fleet reaches the server over SSH, when not at the API's address (its API on the private network); absent otherwise" }
@@ -272,6 +274,7 @@
       required: [id, url, capacity, used, machines]
       properties:
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        named_memory_fork_v1: { type: boolean, default: false, description: "explicit complete named memory-clone capability; false until native enforcement is qualified; absent or stale reports are unsupported" }
         id: { type: string, description: The daemon's own id, for the fleet's log; the fleet keeps the host under its own }
         url: { type: string }
         region: { type: string }

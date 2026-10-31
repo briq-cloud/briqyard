@@ -21,6 +21,28 @@ impl Manager {
             }
         };
         let rec = e.snapshot();
+        if rec.clone_origin.is_some() {
+            let confirmed = e
+                .live
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|live| *live.exited.borrow());
+            if !confirmed {
+                tracing::error!(
+                    machine,
+                    "clone exit unconfirmed: retaining process and reservation"
+                );
+                return;
+            }
+            e.rec
+                .lock()
+                .unwrap()
+                .clone_origin
+                .as_mut()
+                .unwrap()
+                .mapping_exited = true;
+        }
         let started = Instant::now();
         let revoked = self.unplug(&rec.id, &rec.ip).await;
         stage("settle", "network", &machine, pid, started, revoked.is_ok());
@@ -60,6 +82,19 @@ impl Manager {
     /// A stop asked for `why` is done, its process gone: `stopped` with that reason, or
     /// `suspended` when it kept a memory snapshot.
     pub(super) fn settle_stopped(&self, e: &Entry, why: &str) {
+        if e.snapshot().clone_origin.is_some()
+            && e.live
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|v| !*v.exited.borrow())
+        {
+            tracing::error!(
+                machine = e.snapshot().id,
+                "clone stop exit unconfirmed; reservation retained"
+            );
+            return;
+        }
         let started = Instant::now();
         let (machine, pid) = {
             let rec = e.rec.lock().unwrap();
@@ -234,6 +269,23 @@ impl Manager {
                 let _ = exited.wait_for(|x| *x).await;
             }
         }
+        if e.snapshot().clone_origin.is_some() {
+            if !*exited.borrow() {
+                tracing::error!(
+                    machine = e.snapshot().id,
+                    "clone exit unconfirmed; backing and reservation retained"
+                );
+                return;
+            }
+            e.rec
+                .lock()
+                .unwrap()
+                .clone_origin
+                .as_mut()
+                .unwrap()
+                .mapping_exited = true;
+            let _ = self.save(e);
+        }
         *e.live.lock().unwrap() = None;
         *e.stop_req.lock().unwrap() = None;
         let r = e.snapshot();
@@ -249,6 +301,7 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
         self.stop_entry(&e, stop::USER, timeout, suspend, at)
             .await?;
         Ok(self.view(&e))
@@ -486,6 +539,18 @@ impl Manager {
         let live = e.live.lock().unwrap().clone();
         if let Some(live) = live {
             self.end_process(&e, &live, Duration::from_secs(5)).await;
+            if e.snapshot().clone_origin.is_some() && !*live.exited.borrow() {
+                return Err(MError::Conflict("clone VMM exit is unconfirmed".into()));
+            }
+        }
+        if e.snapshot()
+            .clone_origin
+            .as_ref()
+            .is_some_and(|o| !o.mapping_exited && o.stage != templates::CloneStage::Reserved)
+        {
+            return Err(MError::Conflict(
+                "clone mapping exit proof is unavailable; all backing retained".into(),
+            ));
         }
         for ep in self.endpoints_of(id) {
             let _ = self.delete_endpoint(&ep.id);
@@ -538,6 +603,16 @@ impl Manager {
         for snapshot in &rec.snapshots {
             if snapshot.clone_artifact.is_some() {
                 self.remove_memory(&rec, &snapshot.id);
+            }
+        }
+        if let Some(origin) = &rec.clone_origin {
+            if origin.mapping_exited || origin.stage == templates::CloneStage::Reserved {
+                let (_, gone) = tokio::sync::watch::channel(true);
+                self.release_clone_reader(id, &gone)?;
+            } else {
+                return Err(MError::Conflict(
+                    "clone mapping exit proof is unavailable; backing retained".into(),
+                ));
             }
         }
         // Its backups stay, for a restore: a holder keeps them listed, counted and finite.

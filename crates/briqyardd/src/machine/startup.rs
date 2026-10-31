@@ -231,6 +231,17 @@ impl Manager {
             // again, its partial disks gone first: the record holds what it needs. What a fork
             // or a restore was made from is not on the record: failed, for the caller to create
             // again, and nothing a person must look at (ADR 0048).
+            if rec
+                .clone_origin
+                .as_ref()
+                .is_some_and(|o| o.stage != templates::CloneStage::Active)
+            {
+                tracing::warn!(
+                    machine = rec.id,
+                    "incomplete memory clone retained under quarantine; explicit destroy required"
+                );
+                continue;
+            }
             if rec.state == state::CREATING {
                 self.recover_create(&e).await;
                 continue;
