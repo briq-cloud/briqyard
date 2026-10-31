@@ -1,17 +1,17 @@
 {
   "base": "95f868c8e345b1cc8faccd1a3c910b4989dc3f58",
-  "tree": "d9fad0102b1eb908a57630dd1b82ad1e2af7959f",
+  "tree": "5df055872a6fb02945917fe1b36e87c8968fbc28",
   "series": [
     {
       "path": "01-checked-preparation.patch",
-      "sha256": "8cd0de06dac096997a65131eb72a51f76613e44d1d87c240cb43580deba58db5"
+      "sha256": "53f3d60de93b2b654885a8fe5ecd90aedba2997557e0aa55f567223a82c9ef7f"
     },
     {
       "path": "02-snapshot-regressions.patch",
       "sha256": "e5bba9316ae618363958e06f8e86e76eefb6d7467e451725e8aba144dfa1f60e"
     }
   ],
-  "series_concatenated_sha256": "4a330de5ed90e834257789c49f6ecc863472fe1ce00e056e801b1cd238140abe",
+  "series_concatenated_sha256": "d77186cbdbceaa7c457698bcc3b836b051f2b9eb93338291f38b06ed162271ca",
   "series_file_sha256": "de4921e8e43f96a8819a4d76ed3e23202e7ce2421bf39fdf8bbf378d7c32248a",
   "upstream": "https://github.com/firecracker-microvm/firecracker",
   "toolchain": "1.97.0"

@@ -37,8 +37,9 @@ def prepare(source, artifacts=HERE):
         raise ValueError("aggregate digest mismatch")
     # All digests are checked before the first write. The pair is one logical change.
     paths = [str(artifacts / name) for name in names]
-    subprocess.run(["git", "-C", str(source), "apply", "--check", "--index", *paths], check=True)
-    subprocess.run(["git", "-C", str(source), "apply", "--index", *paths], check=True)
+    subprocess.run(["git", "-C", str(source), "apply", "--check", "--index", "--whitespace=error-all", *paths], check=True)
+    subprocess.run(["git", "-C", str(source), "apply", "--index", "--whitespace=error-all", *paths], check=True)
+    subprocess.run(["git", "-C", str(source), "diff", "--cached", "--check"], check=True)
     if git(source, "write-tree") != pin["tree"]:
         raise ValueError("patched tree mismatch")
     return pin

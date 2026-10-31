@@ -47,3 +47,10 @@ jobs:
             ${{ runner.temp }}/checked-firecracker/*.log
           if-no-files-found: warn
           retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: checked-firecracker-tests-${{ matrix.runner }}
+          path: ${{ runner.temp }}/checked-firecracker/test-binaries/
+          if-no-files-found: error
+          retention-days: 1

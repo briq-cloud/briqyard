@@ -17,10 +17,14 @@ makes a Sync regression fail. Positive and negative builds use separate targets.
 Kernel-dependent tests run only when the corresponding KVM and io_uring probes
 succeed. Their absence is recorded as **unverified**, never as a passed test.
 A successful portable job alone does not satisfy the runtime activation gate.
+Successful jobs retain debug library test executables for one day, with exact
+source/tree, lockfile, toolchain, architecture and binary hashes for isolated
+KVM validation. Obtain them only from a verified successful CI run on the expected
+PR commit; a self-declared manifest alone is not trusted binary provenance.
 These are debug library test builds; upstream uses an empty seccomp policy for
 this build mode. They are not release or deployment artifacts.
 
-This validation does not change deployed Firecracker pins, publish a binary, or
+This validation does not change deployed Firecracker pins, publish a release binary, or
 enable checkpoint capture. Exact deployed-binary provenance, isolated storage
 fault and power-loss checks, and complete checkpoint commit/recovery gates remain
 required before activation. Initial capture eligibility remains Sync-only.

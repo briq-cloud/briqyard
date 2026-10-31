@@ -2,11 +2,13 @@
 import argparse
 import ctypes
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 
 from prepare import HERE, git, prepare
@@ -135,6 +137,25 @@ class Validation:
             raise RuntimeError("unexpected test outcome")
         self.receipt["tests"].append({"name": name, "negative_control": negative, "status": "passed"})
 
+    def export_test_binaries(self, binaries, pin):
+        destination = self.output / "test-binaries"
+        destination.mkdir()
+        manifest = {"base": pin["base"], "tree": pin["tree"],
+                    "series_sha256": pin["series_concatenated_sha256"],
+                    "cargo_lock_sha256": hashlib.sha256((self.source / "Cargo.lock").read_bytes()).hexdigest(),
+                    "toolchain": pin["toolchain"], "architecture": platform.machine(),
+                    "kind": "debug-library-tests", "binaries": {}}
+        for name, source in binaries.items():
+            target = destination / name
+            shutil.copyfile(source, target)
+            target.chmod(0o500)
+            digest = hashlib.sha256()
+            with target.open("rb") as stream:
+                for data in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(data)
+            manifest["binaries"][name] = {"sha256": digest.hexdigest(), "bytes": target.stat().st_size}
+        (destination / "provenance.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
     def run(self):
         pin = json.loads((HERE / "pin.json").read_text())
         if git(self.source, "rev-parse", "HEAD") != pin["base"] or git(self.source, "write-tree") != pin["tree"]:
@@ -169,6 +190,7 @@ class Validation:
         env = dict(self.env, CARGO_TARGET_DIR=str(self.output / "target-negative"))
         negative_binaries = self.build(negative, env, "build-negative", ["vmm"])
         self.test(negative_binaries, *PORTABLE[0], negative=True)
+        self.export_test_binaries(binaries, pin)
         self.receipt["status"] = "portable-validation-passed"
         self.receipt["runtime_activation"] = "unverified; validation does not authorize deployment"
 

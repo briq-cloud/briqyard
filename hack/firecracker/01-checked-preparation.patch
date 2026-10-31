@@ -549,10 +549,18 @@ index df69437f599fe43996dbaaf624b7ae4b6cd98fb9..475a57f83068366e79deac0ee28b116f
  pub mod persist;
  pub mod request;
 diff --git a/src/vmm/src/lib.rs b/src/vmm/src/lib.rs
-index 41b7b8d696af57d62ae257112d77f7de0f537f67..de87a26eeee47ca8cc0c8dc3bb1e831c830d9802 100644
+index 41b7b8d696af57d62ae257112d77f7de0f537f67..53c291fae38daa9b7e296f404d48d4196762a600 100644
 --- a/src/vmm/src/lib.rs
 +++ b/src/vmm/src/lib.rs
-@@ -505,7 +505,11 @@ impl Vmm {
+@@ -124,7 +124,6 @@ use std::time::Duration;
+ 
+ use device_manager::DeviceManager;
+ use event_manager::{EventManager as BaseEventManager, EventOps, Events, MutEventSubscriber};
+-use snapshot::Persist;
+ use vm_memory::GuestMemoryBackend;
+ use vmm_sys_util::epoll::EventSet;
+ use vmm_sys_util::terminal::Terminal;
+@@ -505,7 +504,11 @@ impl Vmm {
          // might modify the VirtIO transport and send an interrupt to the guest. If we save KVM
          // state before we save device state, that interrupt will never be delivered to the guest
          // upon resuming from the snapshot.
