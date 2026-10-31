@@ -75,7 +75,8 @@ impl ObjectStore {
             }
             std::fs::create_dir_all(path).with_context(|| format!("backup store {path}"))?;
             let fs = LocalFileSystem::new_with_prefix(path)
-                .with_context(|| format!("backup store {path}"))?;
+                .with_context(|| format!("backup store {path}"))?
+                .with_automatic_cleanup(true);
             return Ok(Self {
                 inner: Arc::new(fs),
                 scheme: "file",
@@ -458,6 +459,115 @@ mod tests {
         // No escaping the root.
         assert!(store.get("../etc/passwd").await.is_err());
         assert!(store.put_bytes("a//b", b"").await.is_err());
+    }
+
+    /// Removing the last object prunes only its empty ancestors, never the store root.
+    #[tokio::test]
+    async fn deleting_local_objects_prunes_empty_directories_below_the_store_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("configured-store");
+        std::fs::write(dir.path().join("outside"), b"keep").unwrap();
+        let store =
+            ObjectStore::open(&format!("file://{}", root.display()), "", "", "", "").unwrap();
+        store
+            .put_bytes("backups/m_1/root/a.zfs", b"root")
+            .await
+            .unwrap();
+        store
+            .put_bytes("backups/m_1/data/a.zfs", b"data")
+            .await
+            .unwrap();
+        store.delete("backups/m_1/root/a.zfs").await.unwrap();
+        assert!(!root.join("backups/m_1/root").exists());
+        assert_eq!(
+            store.get_bytes("backups/m_1/data/a.zfs").await.unwrap(),
+            b"data"
+        );
+        store.delete("backups/m_1/data/a.zfs").await.unwrap();
+        assert!(!root.join("backups").exists());
+        assert!(root.is_dir());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(std::fs::read(dir.path().join("outside")).unwrap(), b"keep");
+        store.delete("backups/m_1/data/a.zfs").await.unwrap();
+        assert!(
+            root.is_dir(),
+            "an idempotent delete keeps the configured root"
+        );
+        std::fs::create_dir_all(root.join("older/empty")).unwrap();
+        store.delete("older/empty/missing").await.unwrap();
+        assert!(
+            root.join("older/empty").is_dir(),
+            "no scan of older scaffolding"
+        );
+    }
+
+    /// A nonempty ancestor stops pruning: objects and other files remain untouched.
+    #[tokio::test]
+    async fn local_directory_cleanup_preserves_sibling_objects_and_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ObjectStore::open(&format!("file://{}", dir.path().display()), "", "", "", "").unwrap();
+        for key in [
+            "backups/m_1/root/gone",
+            "backups/m_1/root/kept",
+            "backups/m_1/data/kept",
+            "backups/m_10/root/kept",
+            "registry/kept",
+        ] {
+            store.put_bytes(key, key.as_bytes()).await.unwrap();
+        }
+        let unmanaged = dir.path().join("backups/m_1/note");
+        std::fs::write(&unmanaged, b"keep file").unwrap();
+        store.delete("backups/m_1/root/gone").await.unwrap();
+        for key in [
+            "backups/m_1/root/kept",
+            "backups/m_1/data/kept",
+            "backups/m_10/root/kept",
+            "registry/kept",
+        ] {
+            assert_eq!(store.get_bytes(key).await.unwrap(), key.as_bytes());
+        }
+        store.delete("backups/m_1/root/kept").await.unwrap();
+        store.delete("backups/m_1/data/kept").await.unwrap();
+        assert!(!dir.path().join("backups/m_1/root").exists());
+        assert!(!dir.path().join("backups/m_1/data").exists());
+        assert_eq!(std::fs::read(unmanaged).unwrap(), b"keep file");
+        assert_eq!(
+            store.get_bytes("backups/m_10/root/kept").await.unwrap(),
+            b"backups/m_10/root/kept"
+        );
+        assert_eq!(
+            store.get_bytes("registry/kept").await.unwrap(),
+            b"registry/kept"
+        );
+    }
+
+    /// An upload's staged file makes the directory nonempty while another object is deleted.
+    #[tokio::test]
+    async fn local_cleanup_preserves_an_in_progress_upload_in_the_same_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ObjectStore::open(&format!("file://{}", dir.path().display()), "", "", "", "").unwrap();
+        store
+            .put_bytes("backups/m_1/root/old", b"old")
+            .await
+            .unwrap();
+        let key = ObjectStore::path("backups/m_1/root/new").unwrap();
+        let mut upload = store.inner.put_multipart(&key).await.unwrap();
+        upload
+            .put_part(bytes::Bytes::from_static(b"new").into())
+            .await
+            .unwrap();
+        store.delete("backups/m_1/root/old").await.unwrap();
+        assert!(dir.path().join("backups/m_1/root").is_dir());
+        upload.complete().await.unwrap();
+        assert_eq!(
+            store.get_bytes("backups/m_1/root/new").await.unwrap(),
+            b"new"
+        );
+        store.delete("backups/m_1/root/new").await.unwrap();
+        assert!(!dir.path().join("backups").exists());
+        assert!(dir.path().is_dir());
     }
 
     /// A stream that fails midway leaves no object and nothing a list shows.

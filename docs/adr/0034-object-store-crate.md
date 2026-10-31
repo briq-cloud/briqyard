@@ -37,6 +37,12 @@ What comes in: `object_store`, `crc-fast`, `itertools`, `either`, `spin`; second
 | `opendal` | a larger surface (dozens of services), its own layers; we need S3 and a directory |
 | `aws-sdk-s3` | the AWS SDK and its runtime (smithy, aws-lc), hundreds of crates |
 
+## Local directory cleanup (2026-10-31)
+
+**Enable `LocalFileSystem::with_automatic_cleanup(true)` for a `file://` store.** After an object is deleted, `object_store` 0.14.2 uses nonrecursive `remove_dir` on its empty parent directories, stopping at the canonical configured store root or at the first nonempty directory or error. Deleting the last backup stream and record therefore removes the empty machine prefix. Sibling objects, files and an upload's staged file keep their directories nonempty; the configured root stays. A missing object's delete remains success. There is no scan or migration of directories left by earlier deletions, and no recursive removal.
+
+This is best-effort directory cleanup, not a durability guarantee: the vendor's standalone `delete_stream` passes `fsync=false`, even when its write-fsync option is enabled. A concurrent writer either keeps the directory nonempty with its staged file or creates its required directories when it opens a new staged upload. The wrapper adds no locking or retry. Local tests check nested pruning, the configured-root boundary, sibling data, idempotence and an upload held open across a deletion.
+
 ## Consequences
 
 - A backup's upload survives a dropped connection or a provider's 503; up to four parts go at once, so a fast link is used (one part at a time before).
