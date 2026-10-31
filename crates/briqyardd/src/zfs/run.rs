@@ -35,26 +35,30 @@ impl Zfs {
     pub(super) async fn call(&self, args: &[&str], input: Option<Vec<u8>>) -> Result<String> {
         use std::process::Stdio;
         use tokio::io::AsyncWriteExt;
-        let mut child = self
-            .tools
-            .zfs
-            .command()
+        let mut command = self.tools.zfs.command();
+        command
             .args(args)
-            .stdin(match input {
-                Some(_) => Stdio::piped(),
-                None => Stdio::null(),
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
             })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("run zfs")?;
-        let _call = self.begin(&format!("zfs {}", args.join(" ")));
-        if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
-            // A command that exits without reading its input is answered by its status.
-            let _ = stdin.write_all(&input).await;
-        }
-        let out = child.wait_with_output().await.context("run zfs")?;
-        Self::answer(args, out)
+            .stdout(Stdio::piped());
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let what = format!("zfs {}", args.join(" "));
+        let out = self
+            .owned(command, what.clone(), false, move |child| {
+                let stdin = child.stdin.take();
+                let stdout = child.stdout.take().expect("piped stdout");
+                async move {
+                    if let (Some(mut stdin), Some(input)) = (stdin, input) {
+                        let _ = stdin.write_all(&input).await;
+                    }
+                    owned::read_answer(stdout).await
+                }
+            })
+            .await?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
     pub(super) fn begin(&self, what: &str) -> Call {
@@ -72,22 +76,6 @@ impl Zfs {
         let (since, what) = r.calls.values().min_by_key(|(t, _)| *t)?;
         let ran = since.elapsed();
         (ran > after).then(|| (ran, what.clone()))
-    }
-
-    pub(super) fn answer(args: &[&str], out: std::process::Output) -> Result<String> {
-        if !out.status.success() {
-            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(anyhow!(
-                "zfs {}: {}",
-                args.join(" "),
-                if msg.is_empty() {
-                    out.status.to_string()
-                } else {
-                    msg
-                }
-            ));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     pub(super) fn is_missing(err: &anyhow::Error) -> bool {
@@ -123,6 +111,43 @@ mod tests {
         std::fs::remove_file(&hold).unwrap();
         snap.await.unwrap().unwrap();
         assert_eq!(f.zfs.stalled(Duration::ZERO), None);
+    }
+
+    /// A request no longer observing a command does not prove that command exited.
+    #[tokio::test]
+    async fn cancelled_command_keeps_its_running_owner_until_actual_exit() {
+        struct Hold(PathBuf);
+        impl Drop for Hold {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let f = Fake::open("byard").await.unwrap();
+        let hold = Hold(f.dev().join("hold.snapshot"));
+        std::fs::write(&hold.0, "").unwrap();
+        let z = f.zfs.clone();
+        let task = tokio::spawn(async move { z.snapshot("m/x/root", "s_1").await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while f.zfs.stalled(Duration::ZERO).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            f.zfs.stalled(Duration::ZERO).is_some(),
+            "dropping the waiter cannot erase an actual running command"
+        );
+        drop(hold);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while f.zfs.stalled(Duration::ZERO).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     /// Waits until the fake has logged its call: past that line, it waits on its hold.

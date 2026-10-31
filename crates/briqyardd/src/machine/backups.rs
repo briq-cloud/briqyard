@@ -11,6 +11,7 @@ use tokio::sync::OwnedMutexGuard;
 
 mod chain;
 mod holders;
+mod jobs;
 mod list;
 mod take;
 #[cfg(test)]
@@ -153,7 +154,8 @@ impl Holder {
 /// holders of destroyed machines' backups.
 pub(super) struct Backups {
     store: Option<ObjectStore>,
-    gate: tokio::sync::Semaphore,
+    gate: Arc<tokio::sync::Semaphore>,
+    jobs: Arc<jobs::Jobs>,
     /// Listings' store reads (`READS_AT_ONCE`).
     reads: tokio::sync::Semaphore,
     holders: Mutex<HashMap<String, Arc<Holder>>>,
@@ -267,7 +269,8 @@ impl Backups {
             .collect();
         Ok(Self {
             store,
-            gate: tokio::sync::Semaphore::new(cfg.at_once.max(1) as usize),
+            gate: Arc::new(tokio::sync::Semaphore::new(cfg.at_once.max(1) as usize)),
+            jobs: jobs::Jobs::new(cfg.at_once.max(1) as usize),
             reads: tokio::sync::Semaphore::new(READS_AT_ONCE),
             holders: Mutex::new(holders),
         })
@@ -300,5 +303,19 @@ impl Owner {
                 (r.machine_id.clone(), r.namespace.clone())
             }
         }
+    }
+}
+
+impl Manager {
+    /// Stop new backup/expiry admission while already owned jobs continue to settlement.
+    pub fn close_backup_admission(&self) {
+        self.inner.backups.jobs.close();
+        self.inner.zfs.close_io_admission();
+    }
+    /// Await actual whole jobs, not their request waiters. The process shutdown budget
+    /// bounds this await; timeout does not assert publication absence or undo effects.
+    pub async fn drain_backups(&self) {
+        self.inner.backups.jobs.drain().await;
+        self.inner.zfs.drain_io().await;
     }
 }

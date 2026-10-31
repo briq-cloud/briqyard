@@ -145,10 +145,36 @@ impl Manager {
         chain: bool,
     ) -> Result<(), MError> {
         let owner = self.owner(machine_id)?;
+        self.backup_store()?;
+        let turn = owner.turn().lock_owned().await;
+        let admission = self.inner.backups.jobs.reserve().await?;
+        self.inner
+            .backups
+            .jobs
+            .start(
+                self.clone(),
+                jobs::Work::Delete {
+                    owner,
+                    backup_id: backup_id.into(),
+                    chain,
+                },
+                turn,
+                admission,
+            )?
+            .deleted()
+            .await
+    }
+
+    /// The owner's turn and bounded admission belong to the retained job.
+    pub(super) async fn delete_backup_owned(
+        &self,
+        owner: &Owner,
+        backup_id: &str,
+        chain: bool,
+    ) -> Result<(), MError> {
+        let (machine_id, _) = owner.who();
         let store = self.backup_store()?;
-        let turn = owner.turn();
-        let _turn = turn.lock().await;
-        let all = self.backups(machine_id).await?;
+        let all = self.backups(&machine_id).await?;
         let target = all
             .iter()
             .position(|b| b.id == backup_id)
@@ -179,7 +205,7 @@ impl Manager {
             .into_iter()
             .filter(|b| !deleted.contains(&b.id))
             .collect();
-        self.settle(&owner, &left, deleted_event(&deleted, "request"))
+        self.settle(owner, &left, deleted_event(&deleted, "request"))
             .await?;
         match failed {
             Some(err) => Err(err.context(format!("delete backup of {machine_id}")).into()),

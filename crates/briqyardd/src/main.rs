@@ -288,6 +288,7 @@ async fn run(args: Args) -> Result<()> {
     // A request or a connection still open after the drain (a long exec, a WebSocket) is cut:
     // the machines come first.
     ing.stop_accepting();
+    mgr.close_backup_admission();
     mgr.events().close();
     handle.graceful_shutdown(Some(DRAIN));
     let drain = async {

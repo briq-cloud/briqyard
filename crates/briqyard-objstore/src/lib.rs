@@ -39,6 +39,7 @@ fn retry() -> RetryConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct ObjectStore {
     inner: Arc<dyn object_store::ObjectStore>,
     /// `s3` or `file`, for errors.

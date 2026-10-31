@@ -129,8 +129,15 @@ impl Manager {
         &self,
         req: api::CreateMachineRequest,
     ) -> Result<api::Machine, MError> {
-        let (e, how) = self.record(req, None).await?;
-        self.make(&e, how).await?;
+        let scope = self.inner.zfs.io_scope()?;
+        let (e, how, child_scope) = scope
+            .run(async {
+                let (e, how) = self.record(req, None).await?;
+                let child_scope = self.inner.zfs.io_scope()?;
+                Ok::<_, MError>((e, how, child_scope))
+            })
+            .await?;
+        self.make_admitted(child_scope, &e, how).await?;
         Ok(self.view(&e))
     }
 }

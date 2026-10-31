@@ -53,8 +53,15 @@ impl Manager {
         match self.gateway_of(namespace) {
             None => {
                 // Made before the answer: the namespace's lock orders its gateway's changes.
-                let (gw, how) = self.record_admitted(req, Some(Role::Gateway)).await?;
-                self.make(&gw, how).await?;
+                let scope = self.inner.zfs.io_scope()?;
+                let (gw, how, child_scope) = scope
+                    .run(async {
+                        let (gw, how) = self.record_admitted(req, Some(Role::Gateway)).await?;
+                        let child_scope = self.inner.zfs.io_scope()?;
+                        Ok::<_, MError>((gw, how, child_scope))
+                    })
+                    .await?;
+                self.make_admitted(child_scope, &gw, how).await?;
             }
             Some(gw) => self.replace_gateway(&gw, req, im).await?,
         }

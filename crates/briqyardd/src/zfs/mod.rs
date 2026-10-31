@@ -9,11 +9,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
+mod owned;
+#[cfg(test)]
+mod owned_real_tests;
+#[cfg(test)]
+mod owned_tests;
 mod pool;
 mod run;
 mod snapshot;
 mod volume;
 
+pub use owned::IoScope;
 pub use pool::{Pool, Space};
 pub use snapshot::SnapshotOf;
 
@@ -85,6 +91,7 @@ pub struct Zfs {
     dev_root: PathBuf,
     /// The `zfs` commands running now (ADR 0046).
     running: Arc<Mutex<Running>>,
+    owners: Arc<owned::Owners>,
 }
 
 /// The `zfs` commands running, each with when it started and what it is.
@@ -139,6 +146,7 @@ impl Zfs {
             tools: tools.clone(),
             dev_root: dev_root.to_path_buf(),
             running: Arc::default(),
+            owners: Arc::default(),
         };
         z.run(&["list", "-H", "-o", "name", pool])
             .await

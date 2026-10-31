@@ -1,49 +1,21 @@
 use super::*;
 
 impl Zfs {
-    /// Starts `zfs send` of a snapshot (incremental from `from` when given), raw: the blocks
-    /// as the pool holds them, encrypted under its key and compressed (ADR 0035); the caller
-    /// reads the stream from the child's stdout and waits for it.
-    pub fn send(
+    /// Build the send command without spawning it: the shared supervisor owns spawn,
+    /// transfer and positive exit settlement together.
+    pub(super) fn send_command(
         &self,
         name: &str,
         snap: &str,
         from: Option<&str>,
-    ) -> Result<tokio::process::Child> {
-        let target = format!("{}@{snap}", self.ds(name));
-        let mut cmd = self.tools.zfs.command();
-        cmd.arg("send").arg("-w");
-        if let Some(f) = from {
-            cmd.arg("-i").arg(format!("@{f}"));
+    ) -> tokio::process::Command {
+        let mut command = self.tools.zfs.command();
+        command.arg("send").arg("-w");
+        if let Some(base) = from {
+            command.arg("-i").arg(format!("@{base}"));
         }
-        cmd.arg(&target)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        cmd.spawn().with_context(|| format!("zfs send {target}"))
-    }
-
-    /// Starts `zfs receive` into a dataset (made or overwritten); the caller writes the stream
-    /// to the child's stdin and waits for it.
-    pub fn receive(&self, name: &str) -> Result<tokio::process::Child> {
-        let mut cmd = self.tools.zfs.command();
-        cmd.args(["receive", "-F", "-u", &self.ds(name)])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        cmd.spawn()
-            .with_context(|| format!("zfs receive {}", self.ds(name)))
-    }
-
-    /// Waits for a send or receive child and turns a failure into its stderr.
-    pub async fn finish(child: tokio::process::Child, what: &str) -> Result<()> {
-        let out = child.wait_with_output().await.context(what.to_string())?;
-        if !out.status.success() {
-            return Err(anyhow!(
-                "{what}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        Ok(())
+        command.arg(format!("{}@{snap}", self.ds(name)));
+        command
     }
 
     /// What each filesystem and volume under `name` takes, in one call.
