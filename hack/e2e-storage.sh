@@ -273,7 +273,9 @@ check "top lists it"                      'briqyard top --namespace "$T" | grep 
 windowed() { briqyard top --namespace "$T" --json | jq -e ".[] | select(.machine_id == \"$M\") | .window_sec > 0" >/dev/null; }
 for i in $(seq 1 25); do windowed && break; sleep 2; done
 check "top: rates over the last window"   'windowed'
-# The slow writes above, held back by the disk limit: in the next line Firecracker writes.
+# Sibling checks may hand the running machine over to a new daemon. Disk counters start
+# at that daemon's adoption, so exercise the limiter again before checking its next flush.
+check "metrics: disk throttling after adoption" '[ "$(took if=/dev/zero of=/data/f count=32 oflag=direct)" -ge 5 ]'
 throttled() { "${CURL[@]}" -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/metrics" | awk -v m="machine=\"$DK\"" 'index($0, "briqyard_machine_disk_throttled_total{") == 1 && index($0, m) && $2 > 0' | grep -q .; }
 for i in $(seq 1 35); do throttled && break; sleep 2; done
 check "metrics: the disk's throttling counted" 'throttled'
