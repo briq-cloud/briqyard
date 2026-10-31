@@ -55,6 +55,7 @@ impl Manager {
                 pci: cfg.pci,
                 console_max: (cfg.console_max_mb as u64) << 20,
                 version: fc::vmm_version(&cfg.firecracker)?,
+                identity: fc::BootIdentity::read(&cfg.kernel, &cfg.firecracker, cfg.pci)?,
             }),
             guest: Arc::new(guestc::Vsock),
             net: Arc::new(host::HostNet::new().await?),
@@ -421,6 +422,12 @@ impl Manager {
         else {
             return false;
         };
+        if rec.boot_identity.is_none() && vm.boot_identity.is_some() {
+            e.rec.lock().unwrap().boot_identity = vm.boot_identity.clone();
+            if let Err(err) = self.save(e) {
+                tracing::warn!(machine = rec.id, err = %err, "adopted boot identity not saved");
+            }
+        }
         *e.live.lock().unwrap() = Some(vm.clone());
         *e.stop_req.lock().unwrap() = None;
         self.watch(e, &vm);

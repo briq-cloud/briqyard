@@ -38,6 +38,8 @@ pub struct Config {
     pub kernel_args: String,
     /// Firecracker's PCI transport (needs a guest kernel with PCI support).
     pub pci: bool,
+    /// Fixed target-zero reporting device on subsequent cold boots only.
+    pub balloon: Balloon,
     /// The briqyard-init binary copied into every root disk.
     pub init: PathBuf,
     pub storage: Storage,
@@ -109,6 +111,7 @@ impl Default for Config {
             kernel: "/var/lib/briqyard/vmlinux".into(),
             kernel_args: String::new(),
             pci: false,
+            balloon: Balloon::default(),
             init: "/usr/local/bin/briqyard-init".into(),
             storage: Storage::default(),
             registries: vec![],

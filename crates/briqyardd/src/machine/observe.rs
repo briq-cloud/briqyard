@@ -47,6 +47,13 @@ impl Manager {
         let r = e.snapshot();
         let mut st = api::MachineStats {
             state: r.state.clone(),
+            memory_status: if r.state == state::RUNNING {
+                "unavailable"
+            } else {
+                "stopped"
+            }
+            .into(),
+            boot_profile: r.boot_identity.as_ref().map(|i| i.device_profile.clone()),
             ..Default::default()
         };
         if r.state == state::RUNNING {
@@ -56,9 +63,28 @@ impl Manager {
             if let Some(cg) = self.inner.vmm.cgroup(&r.id).await {
                 st.cpu_usec = cg.cpu_usec;
                 st.memory_bytes = cg.memory_bytes;
+                st.memory_anon_bytes = cg.memory_anon_bytes;
+                st.memory_file_bytes = cg.memory_file_bytes;
+                st.memory_status = "available".into();
+                st.memory_read_at = Some(Utc::now());
             }
+            st.balloon = e.meter.lock().unwrap().balloon.clone();
         }
         st.disk_bytes = self.inner.zfs.used(&r.dataset()).await.unwrap_or(0);
+        let current = e.snapshot();
+        if current.pid != r.pid || current.state != state::RUNNING {
+            st.state = current.state.clone();
+            st.memory_status = if current.state == state::RUNNING {
+                "unavailable"
+            } else {
+                "stopped"
+            }
+            .into();
+            st.memory_read_at = None;
+            st.memory_anon_bytes = None;
+            st.memory_file_bytes = None;
+            st.balloon = None;
+        }
         Ok(st)
     }
 
@@ -94,6 +120,10 @@ impl Manager {
                     state: r.state.clone(),
                     counted: m.counted(),
                     memory_bytes: m.memory_bytes,
+                    memory_available: r.state == state::RUNNING && m.memory_available,
+                    memory_anon_bytes: m.memory_anon_bytes.filter(|_| r.state == state::RUNNING),
+                    memory_file_bytes: m.memory_file_bytes.filter(|_| r.state == state::RUNNING),
+                    balloon: m.balloon.clone().filter(|_| r.state == state::RUNNING),
                     memory_limit_bytes: (r.size.memory_mb as u64) << 20,
                     disk_used_bytes: m.disks.used + m.disks.snapshots,
                     restarts: m.restarts,

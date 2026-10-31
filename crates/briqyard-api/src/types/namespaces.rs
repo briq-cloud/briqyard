@@ -154,6 +154,20 @@ pub struct MachineStats {
     pub cpu_usec: u64,
     /// Memory the machine's process holds now, in bytes (guest memory touched plus Firecracker's).
     pub memory_bytes: u64,
+    /// `available`, `unavailable`, or `stopped`; absent on older servers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_read_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_anon_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_file_bytes: Option<u64>,
+    /// Effective incarnation profile; absent for legacy records without provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon: Option<BalloonStats>,
     /// Seconds since the current run started.
     pub uptime_sec: u64,
     /// Disk the machine's datasets take, in bytes.

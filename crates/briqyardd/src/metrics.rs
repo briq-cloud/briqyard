@@ -48,6 +48,10 @@ pub struct Machine {
     /// What its counters added up to since the daemon started.
     pub counted: api::Usage,
     pub memory_bytes: u64,
+    pub memory_available: bool,
+    pub memory_anon_bytes: Option<u64>,
+    pub memory_file_bytes: Option<u64>,
+    pub balloon: Option<api::BalloonStats>,
     pub memory_limit_bytes: u64,
     pub disk_used_bytes: u64,
     pub restarts: u64,
@@ -94,7 +98,7 @@ type Series = (
 );
 
 /// The per-machine series, but the state.
-const MACHINE_SERIES: [Series; 14] = [
+const MACHINE_SERIES: [Series; 29] = [
     (
         "briqyard_machine_cpu_seconds_total",
         "counter",
@@ -105,7 +109,127 @@ const MACHINE_SERIES: [Series; 14] = [
         "briqyard_machine_memory_bytes",
         "gauge",
         "Memory its process holds, from its cgroup.",
-        |m| Some(m.memory_bytes.to_string()),
+        |m| m.memory_available.then(|| m.memory_bytes.to_string()),
+    ),
+    (
+        "briqyard_machine_memory_anon_bytes",
+        "gauge",
+        "Anonymous memory charged to its cgroup.",
+        |m| m.memory_anon_bytes.map(|n| n.to_string()),
+    ),
+    (
+        "briqyard_machine_memory_file_bytes",
+        "gauge",
+        "File memory charged to its cgroup.",
+        |m| m.memory_file_bytes.map(|n| n.to_string()),
+    ),
+    (
+        "briqyard_machine_balloon_available",
+        "gauge",
+        "Whether the latest bounded balloon read succeeded.",
+        |m| {
+            m.balloon
+                .as_ref()
+                .map(|b| u8::from(b.status == "available").to_string())
+        },
+    ),
+    (
+        "briqyard_machine_balloon_read_timestamp_seconds",
+        "gauge",
+        "Host API read time, not a guest sample time.",
+        |m| {
+            m.balloon
+                .as_ref()
+                .map(|b| b.read_at.timestamp().to_string())
+        },
+    ),
+    (
+        "briqyard_machine_balloon_target_bytes",
+        "gauge",
+        "Balloon target pages times 4096.",
+        |m| m.balloon.as_ref()?.target_bytes.map(|n| n.to_string()),
+    ),
+    (
+        "briqyard_machine_balloon_actual_bytes",
+        "gauge",
+        "Balloon actual pages times 4096; reporting can reclaim at zero.",
+        |m| m.balloon.as_ref()?.actual_bytes.map(|n| n.to_string()),
+    ),
+    (
+        "briqyard_machine_balloon_guest_available_bytes",
+        "gauge",
+        "Advisory guest available memory; freshness unknown.",
+        |m| {
+            m.balloon
+                .as_ref()?
+                .guest_available_bytes
+                .map(|n| n.to_string())
+        },
+    ),
+    (
+        "briqyard_machine_balloon_guest_free_bytes",
+        "gauge",
+        "Advisory guest free memory; freshness unknown.",
+        |m| m.balloon.as_ref()?.guest_free_bytes.map(|n| n.to_string()),
+    ),
+    (
+        "briqyard_machine_balloon_guest_cache_bytes",
+        "gauge",
+        "Advisory guest cache memory; freshness unknown.",
+        |m| m.balloon.as_ref()?.guest_cache_bytes.map(|n| n.to_string()),
+    ),
+    (
+        "briqyard_machine_balloon_stats_updates_total",
+        "counter",
+        "FIFO statistics updates observed since daemon start.",
+        |m| m.balloon.as_ref().map(|b| b.stats_updates.to_string()),
+    ),
+    (
+        "briqyard_machine_balloon_stats_update_failures_total",
+        "counter",
+        "FIFO statistics failures since daemon start.",
+        |m| {
+            m.balloon
+                .as_ref()
+                .map(|b| b.stats_update_failures.to_string())
+        },
+    ),
+    (
+        "briqyard_machine_balloon_reported_bytes_total",
+        "counter",
+        "Discard bytes submitted, including repeated pages; not unique reclaim.",
+        |m| {
+            m.balloon
+                .as_ref()
+                .map(|b| b.free_page_reported_bytes.to_string())
+        },
+    ),
+    (
+        "briqyard_machine_balloon_reports_total",
+        "counter",
+        "FIFO report submissions since daemon start.",
+        |m| m.balloon.as_ref().map(|b| b.free_page_reports.to_string()),
+    ),
+    (
+        "briqyard_machine_balloon_stats_update_observed_timestamp_seconds",
+        "gauge",
+        "Host observation of the last FIFO stats increment, not guest sample time.",
+        |m| {
+            m.balloon
+                .as_ref()?
+                .last_stats_update_observed_at
+                .map(|t| t.timestamp().to_string())
+        },
+    ),
+    (
+        "briqyard_machine_balloon_report_failures_total",
+        "counter",
+        "FIFO reporting failures since daemon start.",
+        |m| {
+            m.balloon
+                .as_ref()
+                .map(|b| b.free_page_report_failures.to_string())
+        },
     ),
     (
         "briqyard_machine_memory_limit_bytes",
@@ -365,6 +489,10 @@ mod tests {
                 ..Default::default()
             },
             memory_bytes: 1 << 20,
+            memory_available: true,
+            memory_anon_bytes: None,
+            memory_file_bytes: None,
+            balloon: None,
             memory_limit_bytes: 512 << 20,
             disk_used_bytes: 4096,
             restarts: 1,

@@ -169,6 +169,18 @@ impl Manager {
             let parents = self.remake_root(e).await.map_err(fail)?;
             self.tidy_later(parents);
         }
+        // A named restore may just have supplied different memory provenance.
+        let rec = e.snapshot();
+        if rec.suspended && !self.resume_compatible(&rec) {
+            e.rec.lock().unwrap().suspended = false;
+            e.note(
+                Ev::warning(
+                    reason::STARTING,
+                    "booting cold: snapshot boot identity is incompatible",
+                )
+                .data(json!({"resume": false, "fallback": true})),
+            );
+        }
         // What this boot runs: the record, the change it applied on it.
         let rec = e.snapshot();
         let t = match self.namespace_of(&rec.namespace) {
@@ -205,7 +217,7 @@ impl Manager {
         let console_offset = console::end(&dir).unwrap_or(0);
         e.rec.lock().unwrap().console_offset = console_offset;
         let ip: Ipv4Addr = rec.ip.parse().unwrap();
-        let boot = fc::Boot {
+        let mut boot = fc::Boot {
             id: rec.id.clone(),
             dir,
             jail: self.jail_for(&rec),
@@ -219,6 +231,7 @@ impl Manager {
             tap,
             mac: netw::mac_for(ip),
             resume: rec.suspended,
+            boot_identity: rec.boot_identity.clone(),
             disk: self.disk_rate(&rec),
             disk_io: e.disk_io.clone(),
         };
@@ -238,13 +251,29 @@ impl Manager {
             .await
             .map_or(0, |c| c.cpu_usec);
         e.meter.lock().unwrap().boot(cpu);
-        let live = self.inner.vmm.boot(&boot).await.map_err(fail)?;
+        if !boot.resume {
+            boot.boot_identity = self.persist_cold_identity(e).map_err(fail)?;
+        }
+        let live = match self.inner.vmm.boot(&boot).await {
+            Ok(live) => live,
+            Err(err) if err.downcast_ref::<fc::ResumeFailed>().is_some() => {
+                e.note(
+                    Ev::warning(reason::STARTING, format!("booting cold: {err:#}"))
+                        .data(json!({"resume": false, "fallback": true})),
+                );
+                boot.resume = false;
+                boot.boot_identity = self.persist_cold_identity(e).map_err(fail)?;
+                self.inner.vmm.boot(&boot).await.map_err(fail)?
+            }
+            Err(err) => return Err(fail(err)),
+        };
         {
             *e.live.lock().unwrap() = Some(live.clone());
             *e.stop_req.lock().unwrap() = None;
             let mut r = e.rec.lock().unwrap();
             r.pid = live.pid;
             r.suspended = false;
+            r.boot_identity = live.boot_identity.clone();
             if !live.resumed {
                 r.boots += 1;
                 r.vmm_version = self.inner.vmm.version();
@@ -313,6 +342,32 @@ impl Manager {
             self.inner.stats.boots.fetch_add(1, Relaxed);
         }
         Ok(())
+    }
+
+    pub(super) fn resume_compatible(&self, rec: &Record) -> bool {
+        match (&rec.boot_identity, self.inner.vmm.boot_identity(false)) {
+            (Some(saved), Some(host)) => {
+                rec.vmm_version == self.inner.vmm.version() && saved.compatible(&host)
+            }
+            (Some(_), None) => false,
+            (None, _) => rec.vmm_version == self.inner.vmm.version(),
+        }
+    }
+
+    /// A cold identity must be durable before a VMM may start, including load fallback.
+    fn persist_cold_identity(&self, e: &Entry) -> Result<Option<fc::BootIdentity>> {
+        let identity = self.inner.vmm.boot_identity(self.inner.cfg.balloon.enabled);
+        if self.inner.cfg.balloon.enabled && identity.is_none() {
+            bail!("balloon reporting requires boot artifact identity");
+        }
+        {
+            let mut r = e.rec.lock().unwrap();
+            r.suspended = false;
+            r.boot_identity = identity.clone();
+            r.vmm_version = self.inner.vmm.version();
+        }
+        self.save(e)?;
+        Ok(identity)
     }
 
     /// A boot whose process ended before the init's pong: a main process that ran and exited

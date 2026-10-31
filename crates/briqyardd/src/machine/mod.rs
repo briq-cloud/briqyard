@@ -279,6 +279,8 @@ pub struct Record {
     /// What ran the last boot (`Vmm::version`): a memory snapshot resumes only under it.
     #[serde(default)]
     pub vmm_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_identity: Option<fc::BootIdentity>,
     /// What a newer daemon wrote and this one does not know: kept as it is, so a rollback that
     /// rewrites the record does not drop it (ADR 0027).
     #[serde(flatten)]

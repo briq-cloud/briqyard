@@ -152,6 +152,7 @@ impl Manager {
             pending_since: None,
             init_version: String::new(),
             vmm_version: String::new(),
+            boot_identity: None,
             rest: Default::default(),
             snapshots: Vec::new(),
             restoring: None,

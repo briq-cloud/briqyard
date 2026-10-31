@@ -53,6 +53,7 @@ pub struct DiskIo {
     pub write_bytes: AtomicU64,
     /// Requests the rate limiter held back.
     pub throttled: AtomicU64,
+    pub balloon: BalloonCounters,
 }
 
 impl DiskIo {
@@ -62,6 +63,7 @@ impl DiskIo {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             return;
         };
+        self.balloon.add(&v["balloon"]);
         let b = &v["block"];
         let n = |k: &str| b[k].as_u64().unwrap_or(0);
         self.read_bytes.fetch_add(n("read_bytes"), Relaxed);
@@ -151,6 +153,8 @@ pub struct CgroupUse {
     pub cpu_usec: u64,
     /// Memory its processes hold now.
     pub memory_bytes: u64,
+    pub memory_anon_bytes: Option<u64>,
+    pub memory_file_bytes: Option<u64>,
 }
 
 /// `usage_usec` of a `cpu.stat`.

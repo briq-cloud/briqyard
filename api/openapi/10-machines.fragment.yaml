@@ -355,9 +355,33 @@
       properties:
         state: { type: string }
         cpu_usec: { type: integer }
-        memory_bytes: { type: integer }
+        memory_bytes: { type: integer, description: "cgroup memory.current; consult memory_status for availability" }
+        memory_status: { type: string, enum: [available, unavailable, stopped] }
+        memory_read_at: { type: string, format: date-time }
+        memory_anon_bytes: { type: integer, description: "optional memory.stat anon charge" }
+        memory_file_bytes: { type: integer, description: "optional memory.stat file charge; components need not sum to memory.current" }
+        boot_profile: { type: string, description: "effective incarnation profile; absent for old records" }
+        balloon: { $ref: "#/components/schemas/BalloonStats" }
         uptime_sec: { type: integer }
         disk_bytes: { type: integer }
+    BalloonStats:
+      type: object
+      description: "Optional cached advisory telemetry; never changes admission, quota or billing. API read time is not guest sample time."
+      properties:
+        status: { type: string, enum: [available, unavailable, error] }
+        read_at: { type: string, format: date-time }
+        guest_sample_time_known: { type: boolean, description: "false: Firecracker supplies no guest sample timestamp" }
+        last_stats_update_observed_at: { type: string, format: date-time, description: "host observation of a FIFO update increment" }
+        target_bytes: { type: integer, description: "exact target_pages times 4096" }
+        actual_bytes: { type: integer, description: "exact actual_pages times 4096; reporting can reclaim while this remains zero" }
+        guest_free_bytes: { type: integer }
+        guest_available_bytes: { type: integer }
+        guest_cache_bytes: { type: integer }
+        stats_updates: { type: integer }
+        stats_update_failures: { type: integer }
+        free_page_reports: { type: integer }
+        free_page_reported_bytes: { type: integer, description: "cumulative discard submissions, including repeated pages; not unique resident reclaim" }
+        free_page_report_failures: { type: integer }
     Image:
       type: object
       properties:
