@@ -275,7 +275,7 @@ pub fn tls_matches(pinned: &str, reported: &str, url: &str) -> Result<(), String
             )
         });
     }
-    if url.starts_with("https://") != !pinned.is_empty() {
+    if url.starts_with("https://") == pinned.is_empty() {
         return Err(format!(
             "{url}: a host {} must advertise {}",
             if pinned.is_empty() {
