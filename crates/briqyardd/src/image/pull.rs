@@ -187,6 +187,7 @@ impl Builder {
         let image = Image {
             r#ref: reference.to_string(),
             digest: digest.to_string(),
+            config_digest: manifest.config.digest.clone(),
             key: key.to_string(),
             config,
             size_gb: self.root_gb,

@@ -1,9 +1,18 @@
 use super::*;
-use crate::machine::tests::{harness, Harness};
+use crate::machine::tests::{harness_config, Harness};
 
 async fn source() -> (Harness, Arc<Entry>, String, CloneArtifact) {
-    let h = harness("10.64.0.0/22", 4096).await;
+    let h = harness_config(|cfg| {
+        use sha2::Digest;
+        cfg.network.range = "10.64.0.0/22".into();
+        cfg.capacity.memory_mb = 4096;
+        cfg.jailer = "/mock/jailer".into();
+        cfg.templates.enabled = true;
+        cfg.templates.init_ready_init_sha256 = hex::encode(sha2::Sha256::digest(b"init"));
+    })
+    .await;
     let e = h.add("m_template", state::CREATED, 256);
+    e.rec.lock().unwrap().volume = None;
     h.disks(&e).await;
     let snapshot =
         h.m.snapshot("m_template", api::SnapshotRequest::default())
@@ -33,8 +42,9 @@ async fn source() -> (Harness, Arc<Entry>, String, CloneArtifact) {
         cpu_fingerprint: "test_cpu".into(),
         boot_identity: h.m.inner.vmm.boot_identity(false).unwrap(),
         recipe: CloneRecipe {
-            image: r.image.clone(),
-            image_digest: r.image_digest.clone(),
+            image: ALPINE.into(),
+            image_digest: ALPINE.split('@').nth(1).unwrap().into(),
+            image_config_digest: ALPINE_CONFIG_DIGEST.into(),
             image_key: r.image_key.clone(),
             size: r.size,
             root_disk_gb: h.m.inner.cfg.root_disk_gb,
@@ -172,6 +182,7 @@ async fn reviewed_builder() -> (Harness, api::Machine) {
         cfg.network.range = "10.64.0.0/22".into();
         cfg.capacity.memory_mb = 4096;
         cfg.jailer = "/mock/jailer".into();
+        cfg.templates.enabled = true;
         cfg.templates.init_ready_init_sha256 = hex::encode(sha2::Sha256::digest(b"init"));
     })
     .await;
@@ -180,7 +191,11 @@ async fn reviewed_builder() -> (Harness, api::Machine) {
     config.cmd = vec!["/bin/sh".into()];
     config.workdir = "/".into();
     config.env = builder_config().env;
-    h.m.inner.images.seed(ALPINE, config).await.unwrap();
+    h.m.inner
+        .images
+        .seed_with_config_digest(ALPINE, config, ALPINE_CONFIG_DIGEST)
+        .await
+        .unwrap();
     let mut req = h.request("template");
     req.image = ALPINE.into();
     req.sleep = "never".into();
@@ -341,5 +356,60 @@ async fn actual_guest_init_digest_mismatch_refuses_seal_before_snapshot() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("actual guest init executable"));
+    assert!(!h.host_calls().iter().any(|s| s.starts_with("snapshot ")));
+}
+
+#[tokio::test]
+async fn rollout_availability_requires_enable_and_exact_binding_and_reports_only_init_ready() {
+    let off = harness_config(|_| {}).await;
+    assert!(off.m.named_memory_profiles().is_empty());
+    let wrong = harness_config(|cfg| {
+        cfg.templates.enabled = true;
+        cfg.jailer = "/mock/jailer".into();
+        cfg.templates.init_ready_init_sha256 = "0".repeat(64);
+    })
+    .await;
+    assert!(wrong.m.named_memory_profiles().is_empty());
+    let (enabled, _) = reviewed_builder().await;
+    assert_eq!(enabled.m.named_memory_profiles(), ["init-ready-v1"]);
+}
+
+#[tokio::test]
+async fn index_and_config_digest_levels_are_not_interchangeable_at_seal() {
+    let (h, builder) = reviewed_builder().await;
+    let e = h.m.entry(&builder.id).unwrap();
+    h.host_calls();
+    e.rec.lock().unwrap().image_digest =
+        "sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412".into();
+    assert!(h
+        .m
+        .snapshot(
+            &builder.id,
+            api::SnapshotRequest {
+                memory: true,
+                template: true,
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err());
+    {
+        let mut r = e.rec.lock().unwrap();
+        r.image_digest = ALPINE.split('@').nth(1).unwrap().into();
+        r.image_config_digest =
+            "sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412".into();
+    }
+    assert!(h
+        .m
+        .snapshot(
+            &builder.id,
+            api::SnapshotRequest {
+                memory: true,
+                template: true,
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err());
     assert!(!h.host_calls().iter().any(|s| s.starts_with("snapshot ")));
 }

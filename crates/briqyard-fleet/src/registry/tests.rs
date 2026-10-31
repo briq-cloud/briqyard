@@ -6,6 +6,7 @@ fn host(id: &str, cap: u32, used: u32, machines: usize) -> HostRec {
     HostRec {
         egress_siblings_v1: false,
         named_memory_fork_v1: false,
+        named_memory_profiles: Vec::new(),
         id: id.into(),
         url: format!("http://{id}:7420"),
         ssh: String::new(),

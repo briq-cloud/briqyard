@@ -352,6 +352,7 @@ pub(super) fn apply_pending(
         r.image = reference;
         r.image_key = im.key;
         r.image_digest = im.digest;
+        r.image_config_digest = im.config_digest;
         r.image_config = im.config;
     }
     if let Some(v) = p.entrypoint {

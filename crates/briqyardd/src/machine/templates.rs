@@ -18,6 +18,8 @@ mod sealing;
 pub struct CloneRecipe {
     pub image: String,
     pub image_digest: String,
+    #[serde(default)]
+    pub image_config_digest: String,
     pub image_key: String,
     pub size: api::Size,
     #[serde(default)]
@@ -145,6 +147,15 @@ impl Manager {
         destination: &str,
         namespace: &str,
     ) -> Result<(CloneArtifact, [PathBuf; 2]), MError> {
+        if !self
+            .named_memory_profiles()
+            .iter()
+            .any(|p| p == guest::INIT_READY_V1)
+        {
+            return Err(invalid(
+                "reviewed named memory profile is disabled or unavailable",
+            ));
+        }
         if !api::valid_id(destination) {
             return Err(invalid("invalid clone destination"));
         }
@@ -173,6 +184,9 @@ impl Manager {
             || a.recipe.root_disk_gb == 0
             || a.recipe.root_disk_gb != self.inner.cfg.root_disk_gb
             || a.ram_marker.len() != 32
+            || a.recipe.image != ALPINE
+            || a.recipe.image_digest != ALPINE.split('@').nth(1).unwrap_or("")
+            || a.recipe.image_config_digest != ALPINE_CONFIG_DIGEST
             || a.namespace != namespace
             || a.source_host != self.inner.host_id
             || a.init_sha256 != self.inner.images.init_sha256()

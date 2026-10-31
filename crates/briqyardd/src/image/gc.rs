@@ -59,11 +59,21 @@ impl Builder {
     /// An image as if built, for tests of what clones one: its record, its dataset and the
     /// snapshot machines clone. `reference` pins a digest, so `ensure` asks no registry.
     pub(crate) async fn seed(&self, reference: &str, config: ImageConfig) -> Result<Image> {
+        self.seed_with_config_digest(reference, config, "").await
+    }
+
+    pub(crate) async fn seed_with_config_digest(
+        &self,
+        reference: &str,
+        config: ImageConfig,
+        config_digest: &str,
+    ) -> Result<Image> {
         let r: Reference = reference.parse()?;
         let digest = r.digest().context("the reference pins no digest")?;
         let image = Image {
             r#ref: reference.to_string(),
             digest: digest.to_string(),
+            config_digest: config_digest.into(),
             key: self.key(digest),
             config,
             size_gb: self.root_gb,

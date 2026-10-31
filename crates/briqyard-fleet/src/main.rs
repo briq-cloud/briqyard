@@ -220,6 +220,7 @@ fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
     HostRec {
         egress_siblings_v1: false,
         named_memory_fork_v1: false,
+        named_memory_profiles: Vec::new(),
         id: if h.id.is_empty() {
             h.url.clone()
         } else {

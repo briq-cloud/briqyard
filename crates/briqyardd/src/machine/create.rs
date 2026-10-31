@@ -110,6 +110,7 @@ impl Manager {
             image: String::new(),
             image_key: String::new(),
             image_digest: String::new(),
+            image_config_digest: String::new(),
             image_config: ImageConfig::default(),
             root_key: String::new(),
             entrypoint: req.entrypoint.clone(),
@@ -188,6 +189,7 @@ impl Manager {
             rec.image = was.image;
             rec.image_key = was.image_key;
             rec.image_digest = was.image_digest;
+            rec.image_config_digest = was.image_config_digest;
             rec.image_config = was.image_config;
             // The root disk comes from the backup: made from what it was made from.
             rec.root_key = was.root_key;
@@ -260,6 +262,7 @@ impl Manager {
                 rec.image = sr.image.clone();
                 rec.image_key = sr.image_key.clone();
                 rec.image_digest = sr.image_digest.clone();
+                rec.image_config_digest = sr.image_config_digest.clone();
                 rec.image_config = sr.image_config.clone();
                 match (&req.volume, &sr.volume) {
                     (None, v) => rec.volume = v.clone(),
@@ -384,6 +387,7 @@ impl Manager {
             r.image_key = im.key.clone();
             r.root_key = im.key;
             r.image_digest = im.digest;
+            r.image_config_digest = im.config_digest;
             r.image_config = im.config;
         }
         if let Err(error) = self.check_template_image(&e.snapshot()) {

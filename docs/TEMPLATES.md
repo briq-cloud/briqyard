@@ -7,18 +7,23 @@ unavailable. No startup or memory-sharing performance result is qualified yet.
 
 The reviewed public recipe is recorded in
 [recipes/alpine-init-ready-v1.json](recipes/alpine-init-ready-v1.json), including
-platform OCI/config/layer digests and exact public Dockerfile source. It fixes one
+platform OCI/config/layer digests and exact public Dockerfile source. Runtime
+`image_digest` names the requested manifest or index; `image_config_digest` names
+the OCI config blob. The recipe requires the exact platform-manifest/config tuple,
+so the multi-platform index and config/layer digests are never interchangeable. It fixes one
 vCPU, 256 MB and `/bin/sleep 2147483647` after activation. The image's default shell
 never executes. The recipe trusts the official public build inputs; checking known
 identity files does not prove arbitrary image bytes secret-free.
 
-An operator binds `templates.init_ready_init_sha256` to the SHA-256 of the exact
+An operator enables the default-off `templates.enabled` rollout and binds
+`templates.init_ready_init_sha256` to the SHA-256 of the exact
 locally built `briqyard-init`. Empty is disabled. A jailer and default kernel
 arguments are required. Image-cache keys include the init digest. The guest reports
 the digest of its actual running executable, and mismatches refuse the builder or
 clone. Guest MAC, entropy reset, VMGenID and VMClock behavior still require native
-qualification against the pinned runtime. Fleet capability remains false pending
-that qualification.
+qualification against the pinned runtime. Host/fleet availability is derived from that enabled configuration, boot provenance,
+CPU support and exact init binding. Reports list only `init-ready-v1`; availability
+does not establish native correctness or performance qualification.
 
 On a candidate host configured with that binding, the x86_64 recipe is:
 

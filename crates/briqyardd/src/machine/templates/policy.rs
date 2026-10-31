@@ -7,6 +7,13 @@ pub(super) const ALPINE: &str = "docker.io/library/alpine@sha256:85f2b723e106c34
 #[cfg(target_arch = "aarch64")]
 pub(super) const ALPINE: &str = "docker.io/library/alpine@sha256:24bb3511a0db7b5114a4aee033c65a8a4148f39b7b80a398e548546db967a36f";
 
+#[cfg(target_arch = "x86_64")]
+pub(super) const ALPINE_CONFIG_DIGEST: &str =
+    "sha256:706db57fb2063f39f69632c5b5c9c439633fda35110e65587c5d85553fd1cc38";
+#[cfg(target_arch = "aarch64")]
+pub(super) const ALPINE_CONFIG_DIGEST: &str =
+    "sha256:171e65262c8018f8f09a360006af2acbb2c0c494cb2be933025b466ea3d672dc";
+
 /// Immutable provenance written before the builder's first image pull or boot.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TemplateBirth {
@@ -30,6 +37,33 @@ pub struct CloneOrigin {
 }
 
 impl Manager {
+    /// Availability describes implemented, configured profiles. Hardware correctness and
+    /// performance still require native evidence; no qualification checkbox bypasses checks.
+    pub fn named_memory_profiles(&self) -> Vec<String> {
+        let cfg = &self.inner.cfg;
+        let boot = self.inner.vmm.boot_identity(false);
+        let available = cfg.templates.enabled
+            && cfg.templates.init_ready_init_sha256.len() == 64
+            && cfg.templates.init_ready_init_sha256 == self.inner.images.init_sha256()
+            && !cfg.jailer.as_os_str().is_empty()
+            && cfg.kernel_args.is_empty()
+            && boot
+                .as_ref()
+                .is_some_and(|i| i.schema == 1 && i.compatible(i))
+            && self.inner.vmm.cpu_fingerprint().is_some()
+            && !self.inner.images.registries.iter().any(|(host, _, _)| {
+                matches!(
+                    host.as_str(),
+                    "docker.io" | "index.docker.io" | "registry-1.docker.io"
+                )
+            });
+        if available {
+            vec![guest::INIT_READY_V1.into()]
+        } else {
+            vec![]
+        }
+    }
+
     pub(in crate::machine) fn template_birth(
         &self,
         req: &api::CreateMachineRequest,
@@ -39,11 +73,10 @@ impl Manager {
             return Ok(None);
         };
         let bound = &self.inner.cfg.templates.init_ready_init_sha256;
-        if profile != guest::INIT_READY_V1
-            || bound.len() != 64
-            || bound != self.inner.images.init_sha256()
-            || self.inner.cfg.jailer.as_os_str().is_empty()
-            || !self.inner.cfg.kernel_args.is_empty()
+        if !self
+            .named_memory_profiles()
+            .iter()
+            .any(|supported| supported == profile)
         {
             return Err(invalid(
                 "reviewed init-ready recipe/init/jailer is unavailable",
@@ -103,6 +136,7 @@ impl Manager {
                 && birth.image == ALPINE
                 && r.image == ALPINE
                 && r.image_digest == ALPINE.split('@').nth(1).unwrap_or("")
+                && r.image_config_digest == ALPINE_CONFIG_DIGEST
                 && birth.init_sha256 == self.inner.images.init_sha256()
                 && r.image_key == self.inner.images.key(&r.image_digest)
                 && cfg.entrypoint.is_empty()

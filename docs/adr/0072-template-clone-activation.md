@@ -32,9 +32,10 @@ Publication is limited to a
 reviewed digest-pinned public Alpine recipe and matching actual init executable. Host
 enforcement includes quarantine from birth, immutable shared artifacts, durable read
 references, deletion fencing, strict memory restore without cold fallback, and full
-capacity admission. Capability must
-remain unavailable until these paths and native effective-MAC, VMGenID and VMClock
-behavior are qualified against the pinned VMM/kernel. SSH recipes require explicit
+capacity admission. Default-off availability is derived from the enabled enforced profile, exact init
+binding, jailer and compatibility support. It reports `init-ready-v1` explicitly.
+Native effective-MAC, VMGenID and VMClock behavior must still be qualified against
+the pinned VMM/kernel before release. SSH recipes require explicit
 fresh key generation before a listener can be activated.
 
 `init-ready-v1` holds before the first workload exec. It does not support cloning

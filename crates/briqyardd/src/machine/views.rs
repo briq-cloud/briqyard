@@ -60,6 +60,7 @@ impl Manager {
             name: r.name.clone(),
             image: r.image.clone(),
             image_digest: r.image_digest.clone(),
+            image_config_digest: r.image_config_digest.clone(),
             state: r.state.clone(),
             stopped_reason: r.stopped_reason.clone(),
             exit: r.exit.clone(),

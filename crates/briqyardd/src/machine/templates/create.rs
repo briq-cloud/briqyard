@@ -52,6 +52,7 @@ impl Manager {
         rec.image_key = artifact.recipe.image_key.clone();
         rec.root_key = artifact.recipe.image_key.clone();
         rec.image_digest = artifact.recipe.image_digest.clone();
+        rec.image_config_digest = artifact.recipe.image_config_digest.clone();
         rec.image_config = ImageConfig {
             entrypoint: cfg.entrypoint.clone(),
             cmd: cfg.cmd.clone(),

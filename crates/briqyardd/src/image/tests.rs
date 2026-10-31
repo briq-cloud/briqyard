@@ -10,6 +10,7 @@ use std::path::Path;
 #[test]
 fn a_removal_is_an_event_that_says_why() {
     let im = Image {
+        config_digest: String::new(),
         r#ref: "alpine:3.20".into(),
         digest: "sha256:abc".into(),
         key: "k1".into(),

@@ -365,6 +365,7 @@ pub(super) async fn register_host(
             HostRec {
                 egress_siblings_v1: req.egress_siblings_v1,
                 named_memory_fork_v1: req.named_memory_fork_v1,
+                named_memory_profiles: req.named_memory_profiles,
                 id: id.clone(),
                 url: req.url,
                 ssh: String::new(),
@@ -550,6 +551,7 @@ pub(super) fn new_added_host(
     Ok(HostRec {
         egress_siblings_v1: false,
         named_memory_fork_v1: false,
+        named_memory_profiles: Vec::new(),
         id,
         url,
         ssh: if address == req.ssh {
@@ -720,6 +722,7 @@ pub(super) async fn poll_static_hosts_once(st: &AppState) -> bool {
             let mut rec = h.clone();
             rec.egress_siblings_v1 = s.egress_siblings_v1;
             rec.named_memory_fork_v1 = s.named_memory_fork_v1;
+            rec.named_memory_profiles = s.named_memory_profiles;
             rec.capacity = s.capacity;
             rec.used = s.used;
             rec.machines = s.machines;

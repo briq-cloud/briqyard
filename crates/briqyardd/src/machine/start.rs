@@ -470,6 +470,7 @@ impl Manager {
             let mut r = e.rec.lock().unwrap();
             r.image_key = im.key;
             r.image_digest = im.digest;
+            r.image_config_digest = im.config_digest;
             r.image_config = im.config;
         }
         let r = e.snapshot();

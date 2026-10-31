@@ -17,6 +17,15 @@ impl Manager {
                 "template seal requires a reviewed builder and a full memory snapshot",
             ));
         }
+        if !self
+            .named_memory_profiles()
+            .iter()
+            .any(|p| p == guest::INIT_READY_V1)
+        {
+            return Err(invalid(
+                "reviewed named memory profile is disabled or unavailable",
+            ));
+        }
         self.check_template_image(&r)?;
         let identity = self
             .memory_identity(e, &r)
@@ -121,6 +130,7 @@ impl Manager {
             recipe: CloneRecipe {
                 image: r.image.clone(),
                 image_digest: r.image_digest.clone(),
+                image_config_digest: r.image_config_digest.clone(),
                 image_key: r.image_key.clone(),
                 size: r.size,
                 root_disk_gb: self.inner.cfg.root_disk_gb,

@@ -213,6 +213,7 @@ fn the_host_table() {
     let ready = api::Host {
         egress_siblings_v1: false,
         named_memory_fork_v1: false,
+        named_memory_profiles: Vec::new(),
         id: "h_byard-1".into(),
         url: "https://10.0.0.9:7420".into(),
         ssh: String::new(),
@@ -386,6 +387,7 @@ fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
     let host = |id: &str, state: &str| api::Host {
         egress_siblings_v1: false,
         named_memory_fork_v1: false,
+        named_memory_profiles: Vec::new(),
         id: id.into(),
         url: String::new(),
         ssh: String::new(),

@@ -169,6 +169,8 @@ pub struct Record {
     pub image: String,
     pub image_key: String,
     pub image_digest: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub image_config_digest: String,
     pub image_config: ImageConfig,
     /// The image the root disk was made from: when it is not `image_key`, the next start
     /// makes the root disk again (ADR 0024).

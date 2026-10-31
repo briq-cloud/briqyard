@@ -45,6 +45,17 @@ pub(super) async fn create_machine(
             "fork and restore are one or the other",
         ));
     }
+    if req
+        .template_build
+        .as_deref()
+        .is_some_and(|p| p != "init-ready-v1")
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "requested template profile is unsupported",
+        ));
+    }
     let needs_named_memory =
         req.template_build.is_some() || req.fork.as_ref().is_some_and(|f| f.snapshot.is_some());
     if req.fork.as_ref().is_some_and(|f| f.snapshot.is_some()) {
@@ -132,6 +143,7 @@ pub(super) async fn create_machine(
                 require_named_memory(host, st.policy.down_after)?;
             } else if !reg.hosts.values().any(|h| {
                 h.named_memory_fork_v1
+                    && h.named_memory_profiles.iter().any(|p| p == "init-ready-v1")
                     && h.state == "ready"
                     && (req.region.is_empty() || h.region == req.region)
             }) {
@@ -445,6 +457,10 @@ pub(super) async fn first_refused(st: &AppState, namespace: &str, first: bool, a
 
 fn require_named_memory(host: &HostRec, down_after: chrono::Duration) -> Result<(), Refusal> {
     if !host.named_memory_fork_v1
+        || !host
+            .named_memory_profiles
+            .iter()
+            .any(|p| p == "init-ready-v1")
         || host.state != "ready"
         || Utc::now() - host.last_seen >= down_after
     {

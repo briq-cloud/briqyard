@@ -57,6 +57,9 @@ pub struct ImageConfig {
 pub struct Image {
     pub r#ref: String,
     pub digest: String,
+    /// OCI config JSON digest, distinct from the requested manifest/index digest.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub config_digest: String,
     /// The dataset name under images/: digest plus the init's hash, shortened.
     pub key: String,
     pub config: ImageConfig,

@@ -54,6 +54,8 @@ pub struct HostRec {
     pub egress_siblings_v1: bool,
     #[serde(default)]
     pub named_memory_fork_v1: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_memory_profiles: Vec<String>,
     pub id: String,
     pub url: String,
     /// The address the bootstrap reaches the server at over SSH, when it is not the API's
@@ -203,6 +205,7 @@ impl HostRec {
         Host {
             egress_siblings_v1: self.egress_siblings_v1,
             named_memory_fork_v1: self.named_memory_fork_v1,
+            named_memory_profiles: self.named_memory_profiles.clone(),
             id: self.id.clone(),
             url: self.url.clone(),
             ssh: self.ssh.clone(),
@@ -401,6 +404,7 @@ impl Registry {
         entry.version = h.version;
         entry.egress_siblings_v1 = h.egress_siblings_v1;
         entry.named_memory_fork_v1 = h.named_memory_fork_v1;
+        entry.named_memory_profiles = h.named_memory_profiles;
         entry.conditions = h.conditions.clone();
         entry.started = h.started;
         entry.last_seen = now;
@@ -512,7 +516,11 @@ impl Registry {
                     .filter(|h| {
                         h.takes_new_namespaces(policy)
                             && (!policy.require_egress_siblings || h.egress_siblings_v1)
-                            && (!policy.require_named_memory || h.named_memory_fork_v1)
+                            && (!policy.require_named_memory
+                                || (h.named_memory_fork_v1
+                                    && h.named_memory_profiles
+                                        .iter()
+                                        .any(|p| p == "init-ready-v1")))
                             && (region.is_empty() || h.region == region)
                             && h.free_memory_mb() >= need_mb
                             && h.has_disk(need_disk_mb)

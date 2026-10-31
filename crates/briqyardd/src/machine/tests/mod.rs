@@ -44,6 +44,7 @@ pub(in crate::machine) fn record() -> Record {
         image: "postgres:17".into(),
         image_key: "deadbeef".into(),
         image_digest: "sha256:abc".into(),
+        image_config_digest: String::new(),
         root_key: "deadbeef".into(),
         image_config: ImageConfig {
             entrypoint: vec!["docker-entrypoint.sh".into()],

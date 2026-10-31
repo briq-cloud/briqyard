@@ -97,6 +97,8 @@ pub struct Host {
     pub egress_siblings_v1: bool,
     #[serde(default, skip_serializing_if = "super::limits::is_false")]
     pub named_memory_fork_v1: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_memory_profiles: Vec<String>,
     pub id: String,
     pub url: String,
     /// Where the fleet reaches the server over SSH, when not at the API's address (a host
@@ -196,6 +198,8 @@ pub struct RegisterHostRequest {
     pub egress_siblings_v1: bool,
     #[serde(default, skip_serializing_if = "super::limits::is_false")]
     pub named_memory_fork_v1: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_memory_profiles: Vec<String>,
     /// The daemon's own id, for the fleet's log; the fleet keeps the host under its own.
     pub id: String,
     pub url: String,
@@ -258,6 +262,8 @@ pub struct Status {
     pub egress_siblings_v1: bool,
     #[serde(default, skip_serializing_if = "super::limits::is_false")]
     pub named_memory_fork_v1: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_memory_profiles: Vec<String>,
     pub version: String,
     pub host_id: String,
     pub capacity: Capacity,

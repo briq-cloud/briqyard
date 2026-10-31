@@ -168,6 +168,9 @@ pub struct Machine {
     pub image: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub image_digest: String,
+    /// OCI config digest; image_digest names the requested manifest or index.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub image_config_digest: String,
     pub state: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stopped_reason: String,

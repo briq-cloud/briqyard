@@ -12,6 +12,8 @@ pub struct Balloon {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Templates {
+    /// Default-off rollout for the implemented reviewed init-ready profile.
+    pub enabled: bool,
     pub init_ready_init_sha256: String,
 }
 
