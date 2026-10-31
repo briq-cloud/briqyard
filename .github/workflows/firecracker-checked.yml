@@ -1,0 +1,49 @@
+name: checked Firecracker snapshot preparation
+on:
+  pull_request:
+    paths:
+      - .github/workflows/firecracker-checked.yml
+      - hack/firecracker/**
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: firecracker-microvm/firecracker
+          ref: 95f868c8e345b1cc8faccd1a3c910b4989dc3f58
+          path: .validation/firecracker
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: rustfmt, clippy
+      - name: Install library build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev pkg-config cmake libssl-dev
+      - name: Verify evidence acceptance checks
+        run: python3 -m unittest discover -s hack/firecracker -p "test_*.py"
+      - name: Verify complete patch series
+        run: python3 hack/firecracker/prepare.py .validation/firecracker
+      - name: Compile and validate exact regressions
+        run: python3 hack/firecracker/validate.py .validation/firecracker "$RUNNER_TEMP/checked-firecracker"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checked-firecracker-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/checked-firecracker/receipt.json
+            ${{ runner.temp }}/checked-firecracker/*.log
+          if-no-files-found: warn
+          retention-days: 7

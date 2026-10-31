@@ -1,0 +1,580 @@
+diff --git a/src/firecracker/src/api_server/parsed_request.rs b/src/firecracker/src/api_server/parsed_request.rs
+index 2946b19706718653d9a0728c32571e39f7ce40d5..2ee5cd86712ab4c1559f75561e9d81f11a14de4b 100644
+--- a/src/firecracker/src/api_server/parsed_request.rs
++++ b/src/firecracker/src/api_server/parsed_request.rs
+@@ -1109,3 +1109,6 @@ pub mod tests {
+         ParsedRequest::try_from(&req).unwrap();
+     }
+ }
++
++#[cfg(test)]
++mod checked_snapshot_response_tests;
+diff --git a/src/vmm/src/device_manager/mod.rs b/src/vmm/src/device_manager/mod.rs
+index 37d00db6d8ac338a5568be573d8f0b9b5e4889ed..9c88b433e5dd872531ce5e76b223bcfcc180da6e 100644
+--- a/src/vmm/src/device_manager/mod.rs
++++ b/src/vmm/src/device_manager/mod.rs
+@@ -72,6 +72,8 @@ pub mod mmio;
+ pub mod pci_mngr;
+ /// Device managers (de)serialization support.
+ pub mod persist;
++/// Checked preparation and serialization for snapshot creation.
++pub mod snapshot;
+ 
+ #[derive(Debug, thiserror::Error, displaydoc::Display)]
+ /// Error while creating a new [`DeviceManager`]
+diff --git a/src/vmm/src/device_manager/pci_mngr.rs b/src/vmm/src/device_manager/pci_mngr.rs
+index 283b1f3187e1652d20e9191cbe5c35d0df44da62..cc7c7159d8cb328b2e374569a5b159af492e52db 100644
+--- a/src/vmm/src/device_manager/pci_mngr.rs
++++ b/src/vmm/src/device_manager/pci_mngr.rs
+@@ -345,12 +345,8 @@ impl<'a> Debug for PciDevicesConstructorArgs<'a> {
+     }
+ }
+ 
+-impl<'a> Persist<'a> for PciDevices {
+-    type State = PciDevicesState;
+-    type ConstructorArgs = PciDevicesConstructorArgs<'a>;
+-    type Error = DevicePersistError;
+-
+-    fn save(&self) -> Self::State {
++impl PciDevices {
++    pub(super) fn save_with_prepare(&self, prepare: bool) -> PciDevicesState {
+         let mut state = PciDevicesState::default();
+ 
+         for pci_dev in self.virtio_devices.values() {
+@@ -360,7 +356,13 @@ impl<'a> Persist<'a> for PciDevices {
+             // so that, if we modify the transport state while preparing the device, e.g. sending
+             // an interrupt to the guest, this is correctly captured in the saved transport state.
+             let mut locked_virtio_dev = virtio_dev.lock().expect("Poisoned lock");
+-            locked_virtio_dev.prepare_save();
++            if prepare {
++                locked_virtio_dev.prepare_save();
++            }
++            #[cfg(test)]
++            crate::devices::virtio::block::virtio::snapshot_fault::observe(
++                crate::devices::virtio::block::virtio::snapshot_fault::Stage::TransportState,
++            );
+             let transport_state = locked_pci_dev.state();
+ 
+             let sbdf = transport_state.sbdf;
+@@ -489,6 +491,16 @@ impl<'a> Persist<'a> for PciDevices {
+ 
+         state
+     }
++}
++
++impl<'a> Persist<'a> for PciDevices {
++    type State = PciDevicesState;
++    type ConstructorArgs = PciDevicesConstructorArgs<'a>;
++    type Error = DevicePersistError;
++
++    fn save(&self) -> Self::State {
++        self.save_with_prepare(true)
++    }
+ 
+     fn restore(
+         constructor_args: Self::ConstructorArgs,
+diff --git a/src/vmm/src/device_manager/persist.rs b/src/vmm/src/device_manager/persist.rs
+index 82518eb6ffa474e0c1cd38ff5e767b03e8b66f96..d0d36d2e3feffdafc17f1ca43fc17b4cc8a9e030 100644
+--- a/src/vmm/src/device_manager/persist.rs
++++ b/src/vmm/src/device_manager/persist.rs
+@@ -266,12 +266,8 @@ impl<'a> Persist<'a> for MMIOPlatformDevices {
+     }
+ }
+ 
+-impl<'a> Persist<'a> for MMIOVirtioDevices {
+-    type State = DeviceStates;
+-    type ConstructorArgs = MMIODevManagerConstructorArgs<'a>;
+-    type Error = DevicePersistError;
+-
+-    fn save(&self) -> Self::State {
++impl MMIOVirtioDevices {
++    pub(super) fn save_with_prepare(&self, prepare: bool) -> DeviceStates {
+         let mut states = DeviceStates::default();
+ 
+         let _: Result<(), ()> = self.for_each_virtio_mmio_device(|_, devid, device| {
+@@ -280,7 +276,13 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
+             // We need to call `prepare_save()` on the device before saving the transport
+             // so that, if we modify the transport state while preparing the device, e.g. sending
+             // an interrupt to the guest, this is correctly captured in the saved transport state.
+-            locked_device.prepare_save();
++            if prepare {
++                locked_device.prepare_save();
++            }
++            #[cfg(test)]
++            crate::devices::virtio::block::virtio::snapshot_fault::observe(
++                crate::devices::virtio::block::virtio::snapshot_fault::Stage::TransportState,
++            );
+             let transport_state = mmio_transport_locked.save();
+             let device_info = device.resources;
+             let device_id = devid.clone();
+@@ -397,6 +399,16 @@ impl<'a> Persist<'a> for MMIOVirtioDevices {
+         });
+         states
+     }
++}
++
++impl<'a> Persist<'a> for MMIOVirtioDevices {
++    type State = DeviceStates;
++    type ConstructorArgs = MMIODevManagerConstructorArgs<'a>;
++    type Error = DevicePersistError;
++
++    fn save(&self) -> Self::State {
++        self.save_with_prepare(true)
++    }
+ 
+     fn restore(
+         constructor_args: Self::ConstructorArgs,
+diff --git a/src/vmm/src/device_manager/snapshot.rs b/src/vmm/src/device_manager/snapshot.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..53efb8f3561f334358de5a2ea4b4f80dc83e5d0b
+--- /dev/null
++++ b/src/vmm/src/device_manager/snapshot.rs
+@@ -0,0 +1,88 @@
++// Copyright 2026 Firecracker authors. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++//! Checked preparation before any snapshot transport or VM state is captured.
++
++use super::mmio::MMIOVirtioDevices;
++use super::pci_mngr::{PciDevices, PciDevicesState};
++use super::persist::DeviceStates;
++use super::{DeviceManager, DevicesState, VirtioDevices, VirtioDevicesState};
++use crate::devices::virtio::block::device::{Block, BlockPrepareError};
++use crate::devices::virtio::device::{VirtioDevice, VirtioDeviceType};
++use crate::snapshot::Persist;
++
++/// A failure before checked snapshot serialization can begin.
++#[derive(Debug, thiserror::Error, displaydoc::Display)]
++pub enum SnapshotPrepareError {
++    /// Block preparation failed: {0}
++    Block(#[from] BlockPrepareError),
++    /// Block device implementation is not supported by checked preparation.
++    UnsupportedBlock,
++}
++
++fn prepare_device(device: &mut dyn VirtioDevice) -> Result<(), SnapshotPrepareError> {
++    match device.device_type() {
++        VirtioDeviceType::Block => device
++            .as_mut_any()
++            .downcast_mut::<Block>()
++            .ok_or(SnapshotPrepareError::UnsupportedBlock)?
++            .prepare_snapshot_checked()?,
++        VirtioDeviceType::Balloon
++        | VirtioDeviceType::Net
++        | VirtioDeviceType::Vsock
++        | VirtioDeviceType::Rng
++        | VirtioDeviceType::Pmem
++        | VirtioDeviceType::Mem => device.prepare_save(),
++    }
++    Ok(())
++}
++
++impl MMIOVirtioDevices {
++    /// Prepare every device before saving any transport state.
++    pub fn try_save_for_snapshot(&self) -> Result<DeviceStates, SnapshotPrepareError> {
++        self.for_each_virtio_mmio_device(|_, _, device| {
++            let transport = device.inner.lock().expect("Poisoned lock");
++            let mut device = transport.locked_device();
++            prepare_device(&mut *device)
++        })?;
++        // Do not call Persist::save here: it would prepare devices a second time.
++        Ok(self.save_with_prepare(false))
++    }
++}
++
++impl PciDevices {
++    /// Prepare every device before saving any transport state.
++    pub fn try_save_for_snapshot(&self) -> Result<PciDevicesState, SnapshotPrepareError> {
++        let mut result = Ok(());
++        self.for_each_virtio_device_mut(|_, device| {
++            if result.is_ok() {
++                result = prepare_device(device);
++            }
++        });
++        result?;
++        Ok(self.save_with_prepare(false))
++    }
++}
++
++impl DeviceManager {
++    /// Complete checked preparation before transport, KVM, state or RAM capture.
++    pub fn try_save_for_snapshot(&self) -> Result<DevicesState, SnapshotPrepareError> {
++        let virtio_state = match &self.virtio_devices {
++            VirtioDevices::Mmio(devices) => {
++                VirtioDevicesState::Mmio(devices.try_save_for_snapshot()?)
++            }
++            VirtioDevices::Pci(devices) => {
++                VirtioDevicesState::Pci(devices.try_save_for_snapshot()?)
++            }
++        };
++        Ok(DevicesState {
++            virtio_state,
++            mmio_platform_state: self.mmio_platform_devices.save(),
++            acpi_state: self.acpi_devices.save(),
++            serial_state: self.serial_state(),
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/src/vmm/src/devices/virtio/block/device.rs b/src/vmm/src/devices/virtio/block/device.rs
+index 50a8084448efffbf0da610f049735d2a0204d237..adba01155d4096d70143f9d506d8d3da7a78946e 100644
+--- a/src/vmm/src/devices/virtio/block/device.rs
++++ b/src/vmm/src/devices/virtio/block/device.rs
+@@ -28,7 +28,26 @@ pub enum Block {
+     VhostUser(VhostUserBlock),
+ }
+ 
++/// Errors from checked block preparation, before snapshot state is captured.
++#[derive(Debug, thiserror::Error, displaydoc::Display)]
++pub enum BlockPrepareError {
++    /// Block IO preparation failed: {0}
++    Io(#[from] super::virtio::io::BlockIoError),
++    /// Block backend does not support checked snapshot preparation.
++    UnsupportedBackend,
++    /// Async completion could not be captured.
++    AsyncCompletion,
++}
++
+ impl Block {
++    /// Prepare a supported backend, propagating every preparation failure.
++    pub fn prepare_snapshot_checked(&mut self) -> Result<(), BlockPrepareError> {
++        match self {
++            Self::Virtio(block) => block.prepare_snapshot_checked(),
++            Self::VhostUser(_) => Err(BlockPrepareError::UnsupportedBackend),
++        }
++    }
++
+     pub fn new(config: BlockDeviceConfig) -> Result<Block, BlockError> {
+         if let Ok(config) = VirtioBlockConfig::try_from(&config) {
+             Ok(Self::Virtio(
+diff --git a/src/vmm/src/devices/virtio/block/virtio/device.rs b/src/vmm/src/devices/virtio/block/virtio/device.rs
+index 78c1adde85c6cb15f5ba4f6cf56ef8240a29cb23..2aa83466d1e0a668ea45d4c18e22f8c637268fbe 100644
+--- a/src/vmm/src/devices/virtio/block/virtio/device.rs
++++ b/src/vmm/src/devices/virtio/block/virtio/device.rs
+@@ -642,15 +642,36 @@ impl VirtioBlock {
+     }
+ 
+     fn process_async_completion_queue(&mut self) {
+-        let engine = unwrap_async_file_engine_or_return!(&mut self.disk.file_engine);
++        // The event path retains its existing best-effort behavior.
++        let _ = self.process_async_completion_queue_inner(false);
++    }
++
++    fn process_async_completion_queue_inner(
++        &mut self,
++        checked: bool,
++    ) -> Result<(), crate::devices::virtio::block::device::BlockPrepareError> {
++        use crate::devices::virtio::block::device::BlockPrepareError;
++        let FileEngine::Async(engine) = &mut self.disk.file_engine else {
++            return Ok(());
++        };
+ 
+         // This is safe since we checked in the event handler that the device is activated.
+         let active_state = self.device_state.active_state().unwrap();
+         let queue = &mut self.queues[0];
+ 
+         loop {
++            #[cfg(test)]
++            if checked {
++                super::io::snapshot_fault::check(super::io::snapshot_fault::Stage::AsyncCompletion)
++                    .map_err(|err| {
++                        block_io::BlockIoError::Async(async_io::AsyncIoError::IO(err))
++                    })?;
++            }
+             match engine.pop(&active_state.mem) {
+                 Err(error) => {
++                    if checked {
++                        return Err(block_io::BlockIoError::Async(error).into());
++                    }
+                     error!("Failed to read completed io_uring entry: {:?}", error);
+                     break;
+                 }
+@@ -669,27 +690,32 @@ impl VirtioBlock {
+                         ),
+                     };
+                     let finished = pending.finish(&active_state.mem, res, &self.metrics);
+-                    queue
+-                        .add_used(finished.desc_idx, finished.num_bytes_to_mem)
+-                        .unwrap_or_else(|err| {
+-                            error!(
+-                                "Failed to add available descriptor head {}: {}",
+-                                finished.desc_idx, err
+-                            )
+-                        });
++                    if let Err(err) = queue.add_used(finished.desc_idx, finished.num_bytes_to_mem) {
++                        if checked {
++                            return Err(BlockPrepareError::AsyncCompletion);
++                        }
++                        error!(
++                            "Failed to add available descriptor head {}: {}",
++                            finished.desc_idx, err
++                        );
++                    }
+                 }
+             }
+         }
+         queue.advance_used_ring_idx();
+ 
+-        if queue.prepare_kick() {
+-            active_state
++        if queue.prepare_kick()
++            && active_state
+                 .interrupt
+                 .trigger(VirtioInterruptType::Queue(0))
+-                .unwrap_or_else(|_| {
+-                    self.metrics.event_fails.inc();
+-                });
++                .is_err()
++        {
++            self.metrics.event_fails.inc();
++            if checked {
++                return Err(BlockPrepareError::AsyncCompletion);
++            }
+         }
++        Ok(())
+     }
+ 
+     pub fn process_async_completion_event(&mut self) {
+@@ -742,6 +768,18 @@ impl VirtioBlock {
+         }
+     }
+ 
++    /// Prepare an activated device before checked snapshot serialization.
++    /// Inactive devices have no submitted guest IO and require no IO barrier.
++    pub fn prepare_snapshot_checked(
++        &mut self,
++    ) -> Result<(), crate::devices::virtio::block::device::BlockPrepareError> {
++        if !self.is_activated() {
++            return Ok(());
++        }
++        self.disk.file_engine.drain_and_flush(false)?;
++        self.process_async_completion_queue_inner(true)
++    }
++
+     /// Prepare device for being snapshotted.
+     pub fn prepare_save(&mut self) {
+         if !self.is_activated() {
+@@ -1970,6 +2008,15 @@ mod tests {
+ 
+     #[test]
+     fn test_prepare_save() {
++        check_prepare_save(false);
++    }
++
++    #[test]
++    fn test_prepare_snapshot_checked() {
++        check_prepare_save(true);
++    }
++
++    fn check_prepare_save(checked: bool) {
+         for engine in [FileEngineType::Sync, FileEngineType::Async] {
+             let mut block = default_block(engine);
+ 
+@@ -1982,9 +2029,13 @@ mod tests {
+             // Add a batch of flush requests.
+             add_flush_requests_batch(&mut block, &vq, 5);
+             simulate_queue_event(&mut block, None);
+-            block.prepare_save();
++            if checked {
++                block.prepare_snapshot_checked().unwrap();
++            } else {
++                block.prepare_save();
++            }
+ 
+-            // Check that all the pending flush requests were processed during `prepare_save()`.
++            // Check that all pending flush requests were processed before state capture.
+             check_flush_requests_batch(5, &vq);
+         }
+     }
+diff --git a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs b/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs
+index 26a1f9aa96f852bac51328ff416d871068fb251c..e5423f53d43155e6322458d9708ae34a067a8389 100644
+--- a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs
++++ b/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs
+@@ -211,6 +211,9 @@ impl AsyncFileEngine {
+     }
+ 
+     pub fn drain(&mut self, discard_cqes: bool) -> Result<(), AsyncIoError> {
++        #[cfg(test)]
++        super::snapshot_fault::check(super::snapshot_fault::Stage::AsyncDrain)
++            .map_err(AsyncIoError::Submit)?;
+         self.ring
+             .submit_and_wait_all()
+             .map(|_| ())
+@@ -230,6 +233,9 @@ impl AsyncFileEngine {
+         // Sync data out to physical media on host.
+         // We don't need to call flush first since all the ops are performed through io_uring
+         // and Rust shouldn't manage any data in its internal buffers.
++        #[cfg(test)]
++        super::snapshot_fault::check(super::snapshot_fault::Stage::AsyncSyncAll)
++            .map_err(AsyncIoError::SyncAll)?;
+         self.file.sync_all().map_err(AsyncIoError::SyncAll)?;
+ 
+         Ok(())
+diff --git a/src/vmm/src/devices/virtio/block/virtio/io/mod.rs b/src/vmm/src/devices/virtio/block/virtio/io/mod.rs
+index 0987a89644f0a9c6dc7f19f7f71dde82f65eecd7..45090c40197e6a7fab4157691381a81b03c60de0 100644
+--- a/src/vmm/src/devices/virtio/block/virtio/io/mod.rs
++++ b/src/vmm/src/devices/virtio/block/virtio/io/mod.rs
+@@ -2,6 +2,8 @@
+ // SPDX-License-Identifier: Apache-2.0
+ 
+ pub mod async_io;
++#[cfg(test)]
++pub(crate) mod snapshot_fault;
+ pub mod sync_io;
+ 
+ use std::fmt::Debug;
+diff --git a/src/vmm/src/devices/virtio/block/virtio/io/snapshot_fault.rs b/src/vmm/src/devices/virtio/block/virtio/io/snapshot_fault.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c99fc638ec6b3692cb6fc3e8263dc975b6a93f48
+--- /dev/null
++++ b/src/vmm/src/devices/virtio/block/virtio/io/snapshot_fault.rs
+@@ -0,0 +1,83 @@
++// Copyright 2026 Firecracker authors. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++//! Thread-local fault scope: no environment mutation or cross-test fault leakage.
++
++use std::cell::RefCell;
++use std::io;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum Stage {
++    SyncFlush,
++    SyncAll,
++    AsyncDrain,
++    AsyncSyncAll,
++    AsyncCompletion,
++    TransportState,
++    KvmState,
++}
++
++#[derive(Default)]
++struct State {
++    fail: Option<Stage>,
++    visited: Vec<Stage>,
++    fail_nth: usize,
++}
++
++thread_local! {
++    static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
++}
++
++#[derive(Debug)]
++pub(crate) struct Fault;
++
++impl Fault {
++    pub(crate) fn at(fail: Option<Stage>) -> Self {
++        Self::nth(fail, 1)
++    }
++
++    pub(crate) fn nth(fail: Option<Stage>, fail_nth: usize) -> Self {
++        assert!(fail_nth > 0);
++        STATE.with_borrow_mut(|state| {
++            assert!(state.is_none(), "nested snapshot fault scope");
++            *state = Some(State {
++                fail,
++                visited: Vec::new(),
++                fail_nth,
++            });
++        });
++        Self
++    }
++
++    pub(crate) fn visited(&self) -> Vec<Stage> {
++        STATE.with_borrow(|state| state.as_ref().unwrap().visited.clone())
++    }
++}
++
++impl Drop for Fault {
++    fn drop(&mut self) {
++        STATE.with_borrow_mut(|state| *state = None);
++    }
++}
++
++pub(crate) fn check(stage: Stage) -> io::Result<()> {
++    STATE.with_borrow_mut(|state| {
++        if let Some(state) = state {
++            state.visited.push(stage);
++            if state.fail == Some(stage)
++                && state.visited.iter().filter(|seen| **seen == stage).count() == state.fail_nth
++            {
++                return Err(io::Error::from_raw_os_error(libc::EIO));
++            }
++        }
++        Ok(())
++    })
++}
++
++pub(crate) fn observe(stage: Stage) {
++    STATE.with_borrow_mut(|state| {
++        if let Some(state) = state {
++            state.visited.push(stage);
++        }
++    });
++}
+diff --git a/src/vmm/src/devices/virtio/block/virtio/io/sync_io.rs b/src/vmm/src/devices/virtio/block/virtio/io/sync_io.rs
+index 8ef5225f1b3b28a7353541f580271065ffccbd2b..259b502cc2f6ebe73352a6ac113ffdf69b95f8c9 100644
+--- a/src/vmm/src/devices/virtio/block/virtio/io/sync_io.rs
++++ b/src/vmm/src/devices/virtio/block/virtio/io/sync_io.rs
+@@ -126,8 +126,14 @@ impl SyncFileEngine {
+ 
+     pub fn flush(&mut self) -> Result<(), SyncIoError> {
+         // flush() first to force any cached data out of rust buffers.
++        #[cfg(test)]
++        super::snapshot_fault::check(super::snapshot_fault::Stage::SyncFlush)
++            .map_err(SyncIoError::Flush)?;
+         self.file.flush().map_err(SyncIoError::Flush)?;
+         // Sync data out to physical media on host.
++        #[cfg(test)]
++        super::snapshot_fault::check(super::snapshot_fault::Stage::SyncAll)
++            .map_err(SyncIoError::SyncAll)?;
+         self.file.sync_all().map_err(SyncIoError::SyncAll)
+     }
+ 
+diff --git a/src/vmm/src/devices/virtio/block/virtio/mod.rs b/src/vmm/src/devices/virtio/block/virtio/mod.rs
+index df69437f599fe43996dbaaf624b7ae4b6cd98fb9..475a57f83068366e79deac0ee28b116fccc02a66 100644
+--- a/src/vmm/src/devices/virtio/block/virtio/mod.rs
++++ b/src/vmm/src/devices/virtio/block/virtio/mod.rs
+@@ -5,7 +5,9 @@
+ 
+ pub mod device;
+ mod event_handler;
+-mod io;
++pub(super) mod io;
++#[cfg(test)]
++pub(crate) use io::{FileEngine, snapshot_fault};
+ pub mod metrics;
+ pub mod persist;
+ pub mod request;
+diff --git a/src/vmm/src/lib.rs b/src/vmm/src/lib.rs
+index 41b7b8d696af57d62ae257112d77f7de0f537f67..de87a26eeee47ca8cc0c8dc3bb1e831c830d9802 100644
+--- a/src/vmm/src/lib.rs
++++ b/src/vmm/src/lib.rs
+@@ -505,7 +505,11 @@ impl Vmm {
+         // might modify the VirtIO transport and send an interrupt to the guest. If we save KVM
+         // state before we save device state, that interrupt will never be delivered to the guest
+         // upon resuming from the snapshot.
+-        let device_states = self.device_manager.save();
++        let device_states = self.device_manager.try_save_for_snapshot()?;
++        #[cfg(test)]
++        devices::virtio::block::virtio::snapshot_fault::observe(
++            devices::virtio::block::virtio::snapshot_fault::Stage::KvmState,
++        );
+         let kvm_vm = self
+             .vm
+             .as_kvm()
+diff --git a/src/vmm/src/persist.rs b/src/vmm/src/persist.rs
+index 71a0345cb5bd6288c9a790fc44fe5cf4788b84aa..4325f76a43115215d3069c629007661b6a5d1a8a 100644
+--- a/src/vmm/src/persist.rs
++++ b/src/vmm/src/persist.rs
+@@ -134,6 +134,8 @@ pub enum MicrovmStateError {
+     NotAllowed(String),
+     /// Cannot restore devices: {0}
+     RestoreDevices(#[from] DevicePersistError),
++    /// Cannot prepare devices for snapshot: {0}
++    PrepareDevices(#[from] crate::device_manager::snapshot::SnapshotPrepareError),
+     /// Cannot save Vcpu state: {0}
+     SaveVcpuState(vstate::vcpu::VcpuError),
+     /// Cannot save KvmVm state: {0}
