@@ -156,7 +156,9 @@ impl Client {
             Ok(body) => Ok(Some(serde_json::from_str(&body)?)),
             Err(err)
                 if err.downcast_ref::<ApiError>().is_some_and(|e| {
-                    matches!(e.status, 400 | 404) && e.fault.contains("No balloon device")
+                    matches!(e.status, 400 | 404)
+                        && (e.fault.contains("No balloon device")
+                            || e.fault == "Internal VMM error: Failed perform action on device: Device not found")
                 }) =>
             {
                 Ok(None)

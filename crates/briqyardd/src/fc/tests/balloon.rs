@@ -219,3 +219,18 @@ fn process_start_ticks_parse_comm_parentheses_and_reject_missing_or_invalid_fiel
         None
     );
 }
+
+#[tokio::test]
+async fn pinned_vmm_absent_device_action_error_preserves_legacy_classification() {
+    let (_dir, path) = socket();
+    let server = serve(
+        &path,
+        vec![response(
+            r#"{"fault_message":"Internal VMM error: Failed perform action on device: Device not found"}"#,
+            400,
+        )],
+    );
+    assert!(Client::new(&path).balloon_config().await.unwrap().is_none());
+    let seen = server.await.unwrap();
+    assert!(seen[0].starts_with("GET /balloon "));
+}
