@@ -31,7 +31,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
-| REST resources, OpenAPI | ✓ `api/openapi.yaml`, served | | |
+| REST resources, OpenAPI | ✓ `api/openapi/`, served | | |
 | `resourceVersion`, optimistic concurrency (409 on a stale write) | ✓ a machine's `version`, `If-Match` on PATCH, DELETE, start, stop, wake, restart (ADR 0019) | | |
 | watch (list + watch, informers) | ✓ `GET /v1/events?watch=true` from a cursor; per host, or a namespace or a machine through the fleet; a bookmark every 30 s of quiet (ADR 0047) | | |
 | Events (`kubectl get events`, `describe`) | ✓ an event log per host, a closed list of reasons, `briqyard events`; repeats of uses, refusals and readiness flips folded for 10 minutes into one line with `count` (ADR 0047) | events of endpoints and namespaces; folding the restart chain | yard, later |

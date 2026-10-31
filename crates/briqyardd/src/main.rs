@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-const OPENAPI: &str = include_str!("../../../api/openapi.yaml");
+const OPENAPI: &str = briqyard_api::OPENAPI;
 
 /// What a stop or a hand-over gives the API's requests and the endpoint connections in
 /// flight, one bound for both (ADR 0051): what arrives meanwhile waits in the kernel's queue

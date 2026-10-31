@@ -475,7 +475,7 @@ crates/briqyard-init     PID 1 inside the guest
 crates/briqyard          the CLI
 crates/briqyard-fleet    the orchestrator across hosts
 crates/briqyard-objstore the object store (S3 or a directory), shared by the daemon and the fleet
-api/openapi.yaml         the API description, served at /v1/openapi.yaml
+api/openapi/         the API description, served at /v1/openapi.yaml
 hack/                    dev VM, systemd units, dev configs, the shell suites, the stress driver
 docs/adr                 every technical decision; docs/research the numbers behind them
 ```

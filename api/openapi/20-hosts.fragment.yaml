@@ -1,0 +1,308 @@
+    Namespace:
+      type: object
+      properties:
+        id: { type: string }
+        subnet: { type: string }
+        router: { type: string, description: "the host's address on the namespace's network (`.1`): the machines' route and DNS" }
+        machines: { type: integer, description: the namespace's machines, its gateway not counted }
+        created_at: { type: string, format: date-time }
+        host: { type: string, description: The host the namespace lives on (fleet) }
+        region: { type: string, description: "its host's region (fleet): the namespace's" }
+        gateway: { $ref: "#/components/schemas/GatewayView" }
+    Quota:
+      type: object
+      description: "a limit left out is no limit; no quota is none (the daemon has no defaults)"
+      properties:
+        machines: { type: integer, minimum: 0, description: "machines, its gateway included" }
+        memory_mb: { type: integer, minimum: 0, description: "of its machines starting, running or stopping" }
+        vcpus: { type: integer, minimum: 0, description: "legacy CPU quota, equivalent to vcpus × 1000 millis" }
+        cpu_millis: { type: integer, minimum: 0, description: "CPU time reserved by machines starting, running or stopping; when vcpus is also set, both limits apply" }
+        disk_gb: { type: integer, minimum: 0, description: "the volumes' sizes" }
+    NamespaceQuota:
+      type: object
+      required: [namespace, quota, used]
+      properties:
+        namespace: { type: string }
+        quota: { $ref: "#/components/schemas/Quota" }
+        used:
+          type: object
+          required: [machines, memory_mb, vcpus, disk_gb]
+          properties:
+            machines: { type: integer }
+            memory_mb: { type: integer }
+            vcpus: { type: integer, description: guest CPU count }
+            cpu_millis: { type: integer, description: "reserved CPU time; absent on older hosts (use vcpus × 1000)" }
+            disk_gb: { type: integer }
+    GatewaySpec:
+      type: object
+      required: [image, port]
+      properties:
+        image: { type: string }
+        cmd: { type: array, items: { type: string }, description: replaces the image's command }
+        env: { type: object, additionalProperties: { type: string }, description: write-only, as a machine's }
+        files: { type: array, items: { $ref: "#/components/schemas/File" }, description: "boot files, as a machine's (a proxy's configuration, its CA); write-only" }
+        size: { allOf: [{ $ref: "#/components/schemas/Size" }], description: "default 1 vCPU, 256 MB" }
+        port: { type: integer, minimum: 1, maximum: 65535, description: "the port its program listens on: a start waits for it, within `boot_timeout_sec`" }
+        volume_gb: { type: integer, minimum: 1, description: "a data volume at `/data`, fixed for the gateway's life" }
+        probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "as a machine's; with a startup or readiness probe, a start that needs the gateway waits for its `ready`, not its port" }
+        start: { type: boolean, default: false, description: "start it now and answer once its port accepts (or it is ready); a running one is left as is. Nothing then keeps it running: the daemon stops it until a `via: gateway` machine starts" }
+    GatewayView:
+      type: object
+      properties:
+        state: { type: string, enum: [created, starting, running, stopping, stopped, destroying, error] }
+        ip: { type: string }
+        port: { type: integer }
+        machine_id: { type: string, description: "`GET /v1/machines/{id}` and its `/logs` answer for it" }
+        error: { type: string, description: why it last failed to come up }
+    Capacity:
+      type: object
+      properties:
+        memory_mb: { type: integer }
+        vcpus: { type: integer, description: guest CPU count }
+        cpu_millis: { type: integer, description: "CPU capacity or reservation; absent on older hosts (use vcpus × 1000)" }
+    UsageBucket:
+      type: object
+      description: One machine in one UTC hour. GB is 2^30 bytes.
+      properties:
+        hour: { type: string, format: date-time, description: the hour's start }
+        machine_id: { type: string }
+        namespace: { type: string }
+        role: { type: string, enum: [gateway], description: "the namespace's gateway (ADR 0016); absent for the namespace's machines" }
+        metadata: { type: object, additionalProperties: { type: string }, description: as last in the hour }
+        size: { $ref: "#/components/schemas/Size" }
+        running_seconds: { type: number, description: "with a process: `starting`, `running`, `stopping`" }
+        suspended_seconds: { type: number, description: stopped with a memory snapshot }
+        cpu_seconds: { type: number, description: "CPU time of the machine's cgroup (jailed hosts)" }
+        memory_mb_seconds: { type: number, description: "`size.memory_mb` × running seconds: reserved" }
+        root_gb_hours: { type: number, description: "the root disk's allocated size × hours" }
+        volume_gb_hours: { type: number, description: "the data volume's allocated size × hours" }
+        disk_used_gb_hours: { type: number, description: what the disks take on the pool × hours }
+        snapshot_gb_hours: { type: number, description: "local snapshots, retired disks and memory snapshots included, × hours" }
+        backup_gb_hours: { type: number, description: "the machine's backups in the object store × hours; a destroyed machine's go on in its buckets until they are deleted (ADR 0023)" }
+        internet_out_bytes: { type: integer, description: "to the internet, through the host's NAT" }
+        internet_in_bytes: { type: integer }
+        ingress_out_bytes: { type: integer, description: "to clients of the machine's endpoints" }
+        ingress_in_bytes: { type: integer }
+        egress_dropped_packets: { type: integer, description: "packets the machine's egress limits dropped (ADR 0018)" }
+        closed: { type: boolean, description: "the hour is over: the bucket will not change again" }
+        host: { type: string, description: the host that measured it (fleet) }
+    Event:
+      type: object
+      required: [seq, at, type, reason, message]
+      properties:
+        seq: { type: integer, description: "one more per event on its host, never reused; a folded readiness flip takes one no line carries (its machine's version)" }
+        at: { type: string, format: date-time }
+        type: { type: string, enum: [normal, warning] }
+        reason: { type: string, enum: [created, forked, pulling, pull_failed, create_failed, restored, moved, starting, started, resumed, ready, not_ready, stopping, stopped, suspended, exited, restarting, crash_loop, liveness_failed, startup_failed, boot_failed, start_failed, updated, applied, egress_changed, backed_up, backup_failed, backup_deleted, snapshot_taken, snapshot_deleted, destroyed, gateway_started, gateway_stopped, image_pulled, host_started, adopted, host_condition, image_removed, quota_exceeded, session_opened], description: "ADR 0019's table says when each happens, ADR 0021's for the host's conditions and images, ADR 0022's for the probes and `crash_loop`, ADR 0023's for backups, ADR 0024's for `applied`, ADR 0025's for `quota_exceeded`, ADR 0029's for `session_opened`, ADR 0031's for snapshots and a restore to one, ADR 0048's for a create's `pulling`, `pull_failed` and `create_failed`, ADR 0056's for `moved`" }
+        message: { type: string, description: for a person; at most 1 KB }
+        machine_id: { type: string }
+        namespace: { type: string }
+        host: { type: string, description: "the host it happened on (fleet-wide reads)" }
+        data: { type: object, description: "the reason's facts: `code`, `oom` for `exited`, `reason` for `stopped`…; on a line that folds repeats, the last one's" }
+        count: { type: integer, default: 1, description: "how many times it happened, from `first_at` to `at`: on a line that folds repeats of a use, a refusal or a readiness flip within 10 minutes of the first one's line (ADR 0047); absent: 1" }
+        first_at: { type: string, format: date-time, description: "on a line that folds repeats: the first one's time; `at` is the last one's" }
+    WatchBookmark:
+      type: object
+      required: [bookmark]
+      properties:
+        bookmark: { type: integer, description: "a watch's line after 30 s of quiet: every event up to this seq was looked at, so a watch again from it misses nothing; through the fleet, the host's seq" }
+    EventsPage:
+      type: object
+      properties:
+        events: { type: array, items: { $ref: "#/components/schemas/Event" } }
+        next: { type: string, description: "the `since` to read on from: the last event returned when the page is full, else the host's last seq; through the fleet without a namespace or machine, `<host>:<seq>,…`" }
+    Status:
+      type: object
+      properties:
+        egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        version: { type: string, description: "this build: the release and its commit, `0.1.0+fdad892eeefa` (ADR 0027)" }
+        host_id: { type: string }
+        capacity: { $ref: "#/components/schemas/Capacity" }
+        used: { $ref: "#/components/schemas/Capacity" }
+        machines: { type: integer, description: the namespaces' machines, gateways not counted }
+        running: { type: integer, description: machines up on the host, gateways included }
+        disk_free_mb: { type: integer }
+        tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate, 64 hex digits; empty on plain HTTP (ADR 0020)" }
+        conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
+        started: { $ref: "#/components/schemas/DaemonStart" }
+        vmm_version: { type: string, description: "what a machine booted now runs under: Firecracker's version and the host kernel's release" }
+        regions: { type: array, items: { $ref: "#/components/schemas/RegionRoom" }, description: "fleet only: each region's room and the creates refused for want of it (ADR 0042)" }
+    RegionRoom:
+      type: object
+      description: "A region as the fleet sees it (ADR 0042): its hosts that take a new namespace (ready, under the fill ceiling, no condition), and its refusals"
+      properties:
+        region: { type: string, description: "a host's region; empty for none; `other` counts refusals in a region no host is in" }
+        free: { $ref: "#/components/schemas/Room", description: "absent for a region no host is in (refusals only)" }
+        largest_slot: { $ref: "#/components/schemas/Room", description: "absent as `free` is" }
+        unschedulable:
+          type: object
+          description: "creates refused 503 `capacity` since the fleet started, by what ran out"
+          properties:
+            memory: { type: integer, description: "no host of the region had the memory free under its fill ceiling, or those with the room are under memory_pressure: a new host fixes it" }
+            cpu: { type: integer, description: "hosts had memory but insufficient CPU capacity or no precise CPU accounting" }
+            disk: { type: integer, description: "hosts had the memory, none the disk (a volume plus 2 GB), or those with the room are under disk_pressure: a new host fixes it" }
+            pressure: { type: integer, description: "the host the create is bound to (the namespace's, a fork's source's) is under a condition: that host must be freed" }
+    Room:
+      type: object
+      description: "memory and disk, in MB: summed over the hosts (`free`), or the most on one (`largest_slot`)"
+      properties:
+        memory_mb: { type: integer }
+        disk_mb: { type: integer }
+    DaemonStart:
+      type: object
+      description: "When the daemon started and what it did with the machines the previous one left running (ADR 0027); absent from a daemon older than that"
+      properties:
+        at: { type: string, format: date-time }
+        adopted: { type: integer, description: left running and taken over }
+        stopped: { type: integer, description: "left running, its process still there but not taken over: ended, marked stopped, booted again when its sleep window had not run out; what fails an upgrade" }
+        gone: { type: integer, description: "left running, its process ended while no daemon ran: marked stopped, booted again the same way" }
+    UpgradeHostRequest:
+      type: object
+      required: [release]
+      properties:
+        release: { type: string, description: "a URL where `<binary>-linux-<arch>` are, or a version of the project's releases (`0.2.0`, `v0.2.0`)" }
+    Condition:
+      type: object
+      description: "A host condition (ADR 0021), decided by the daemon's tick. Each is a pressure: the fleet places nothing new on a host while one is true"
+      required: [type, status, since, message]
+      properties:
+        type: { type: string, enum: [memory_pressure, disk_pressure, storage_stalled], description: "`memory_pressure`: committed memory over `conditions.memory_pct` of capacity; `disk_pressure`: the pool's free space under `conditions.disk_free_pct` of its size; `storage_stalled`: a `zfs` command of the daemon's running for over a minute (ADR 0046)" }
+        status: { type: boolean }
+        since: { type: string, format: date-time, description: "when `status` last changed; the daemon's start until it does" }
+        message: { type: string, description: the figures it was decided on }
+    TopMachine:
+      type: object
+      properties:
+        machine_id: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [gateway], description: "the namespace's gateway; absent for the namespace's machines" }
+        cpu_percent: { type: number, description: "CPU time over the window, in percent of one CPU (jailed hosts)" }
+        memory_bytes: { type: integer, description: "what its process holds, from its cgroup (jailed hosts)" }
+        memory_limit_bytes: { type: integer, description: its size's memory }
+        disk_used_bytes: { type: integer, description: "its disks, their snapshots, the disks a restore retired and its memory snapshots on the pool" }
+        internet_in_bytes_per_sec: { type: number }
+        internet_out_bytes_per_sec: { type: number }
+        ingress_in_bytes_per_sec: { type: number }
+        ingress_out_bytes_per_sec: { type: number }
+        window_sec: { type: number, description: "the seconds between the two measures; 0 until there are two, with every rate 0" }
+        host: { type: string, description: the host it runs on (fleet) }
+    Host:
+      type: object
+      properties:
+        egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        id: { type: string }
+        url: { type: string }
+        ssh: { type: string, description: "where the fleet reaches the server over SSH, when not at the API's address (its API on the private network); absent otherwise" }
+        region: { type: string }
+        provider: { type: string, description: "how the host came: `static` (the fleet's `hosts:`), `manual` (`POST /v1/hosts`) or `join` (`POST /v1/hosts/join`)" }
+        state: { type: string, enum: [ready, draining, retiring, upgrading, down, provisioning, bootstrapped, joining, failed, retired], description: "`draining` takes no new namespace; `retiring` neither, and is forgotten once empty (`retired` in the answer to the retire that forgets it); `upgrading` while `host upgrade` runs; `joining` from the join until the host's first heartbeat" }
+        capacity: { $ref: "#/components/schemas/Capacity" }
+        used: { $ref: "#/components/schemas/Capacity" }
+        machines: { type: integer }
+        namespaces: { type: array, items: { type: string } }
+        last_seen: { type: string, format: date-time }
+        version: { type: string }
+        note: { type: string, description: What the bootstrap or the last upgrade said }
+        tls_fingerprint: { type: string, description: "SHA-256 of the host's API certificate, pinned by the fleet; empty on plain HTTP" }
+        labels: { type: object, additionalProperties: { type: string }, description: "the labels of the join token it came with (ADR 0059); absent: none" }
+        public_tcp_ports: { type: array, items: { type: integer }, description: "ports its public interface takes besides SSH, from its bootstrap (ADR 0028); absent: none" }
+        conditions: { type: array, items: { $ref: "#/components/schemas/Condition" }, description: from its last heartbeat }
+        started: { $ref: "#/components/schemas/DaemonStart" }
+    AddHostRequest:
+      type: object
+      required: [ssh]
+      properties:
+        ssh: { type: string, description: "the server's SSH address (its public one)" }
+        address: { type: string, description: "the API's IPv4 address, on the fleet's private network when it has one (the vRack address); default: `ssh`" }
+        region: { type: string }
+        id: { type: string, description: "default: `h_` and the address, dots as dashes" }
+        public_tcp_ports: { type: array, items: { type: integer }, description: "ports its public interface takes besides SSH, and its machines reach on it (an edge's on the host); absent: the fleet's `bootstrap.public_tcp_ports`, empty: none. Kept on the host for every later bootstrap" }
+    CreateJoinTokenRequest:
+      type: object
+      properties:
+        ttl_sec: { type: integer, description: "seconds of life; default 86400 (24 hours); 0: never expires; at most ten years" }
+        description: { type: string, description: "free text shown in the listing; one line, at most 256 characters" }
+        region: { type: string, description: the region the host that joins with it is put in }
+        labels: { type: object, additionalProperties: { type: string }, description: "labels the host carries (`key=value`, as machine labels)" }
+        host: { type: string, description: "the id the host must join as; empty: the joiner names itself" }
+        address: { type: string, description: "our addition to kubeadm's model: an IPv4 address or network (`10.42.0.0/24`) the join must come from; empty: from anywhere" }
+    JoinToken:
+      type: object
+      properties:
+        id: { type: string }
+        state: { type: string, enum: [active, expired, revoked] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, description: "absent: never expires" }
+        description: { type: string }
+        region: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        host: { type: string, description: the id the token is bound to }
+        address: { type: string, description: the address or network the token is bound to }
+        uses: { type: integer, description: how many joins it took }
+        last_used:
+          type: object
+          properties:
+            host: { type: string }
+            at: { type: string, format: date-time }
+            peer: { type: string, description: the address the join came from }
+        revoked_at: { type: string, format: date-time }
+    JoinTokenCreated:
+      allOf:
+        - $ref: "#/components/schemas/JoinToken"
+        - type: object
+          properties:
+            token: { type: string, description: "`<id>.<secret>`, shown this once" }
+    JoinRequest:
+      type: object
+      required: [arch]
+      properties:
+        name: { type: string, description: "the id it asks for; empty: `h_` and its address" }
+        address: { type: string, description: "its API's IPv4 address; empty: the one the call came from, which is the only valid value" }
+        arch: { type: string, enum: [x86_64, aarch64] }
+        memory_mb: { type: integer, description: said, kept in the host's note }
+        vcpus: { type: integer, description: said, kept in the host's note }
+    JoinResponse:
+      type: object
+      properties:
+        id: { type: string }
+        env: { type: object, additionalProperties: { type: string }, description: "the settings of `hack/bootstrap-host.sh` by their environment names (`BRIQYARD_TOKEN`, `ADVERTISE`, `BRIQYARD_RELEASE`, …); empty ones are left out. Holds the host's own API token" }
+    RegisterHostRequest:
+      type: object
+      required: [id, url, capacity, used, machines]
+      properties:
+        egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        id: { type: string, description: The daemon's own id, for the fleet's log; the fleet keeps the host under its own }
+        url: { type: string }
+        region: { type: string }
+        capacity: { $ref: "#/components/schemas/Capacity" }
+        used: { $ref: "#/components/schemas/Capacity" }
+        machines: { type: integer }
+        namespaces: { type: array, items: { type: string } }
+        version: { type: string }
+        disk_free_mb: { type: integer }
+        tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate; a fingerprint other than the pinned one is refused (403 tls_mismatch)" }
+        conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
+        started: { $ref: "#/components/schemas/DaemonStart" }
+    HostKeyRequest:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, description: "The URL the host advertises (`fleet.advertise`): the fleet finds the host's record by its address" }
+        key_id: { type: string, description: "a backup's `key_id`: the key of that id instead of the host's own (ADR 0035)" }
+        restore: { $ref: "#/components/schemas/RestoreSpec", description: "with `key_id`: the restore the key is for, as the fleet forwarded it to this host; served once" }
+    HostKey:
+      type: object
+      required: [key]
+      properties:
+        key: { type: string, description: "The pool's key: 32 bytes as 64 hex digits, ZFS's `hex` key format" }
+    ApiError:
+      type: object
+      properties:
+        error: { type: string }
+        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, namespace_in_use, gateway_in_use, gateway, other_host, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, backup, internal, timeout] }
+        request_id: { type: string }
+        machine:
+          allOf: [{ $ref: "#/components/schemas/Machine" }]
+          description: "with `boot_failed`, the machine left in state `error`; with `conflict` on a stale `If-Match`, the machine as it is"
+        oldest: { type: integer, description: "with `gone`: the oldest event seq kept" }

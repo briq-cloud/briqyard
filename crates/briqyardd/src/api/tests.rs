@@ -38,8 +38,7 @@ fn tenant_is_read_as_namespace_in_a_query() {
 
 #[test]
 fn the_description_lists_the_reasons_the_daemon_has() {
-    let doc: serde_yaml::Value =
-        serde_yaml::from_str(include_str!("../../../../api/openapi.yaml")).unwrap();
+    let doc: serde_yaml::Value = serde_yaml::from_str(api::OPENAPI).unwrap();
     let listed: Vec<&str> = doc["components"]["schemas"]["Event"]["properties"]["reason"]["enum"]
         .as_sequence()
         .unwrap()

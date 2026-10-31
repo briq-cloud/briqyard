@@ -7,6 +7,7 @@ pub mod guest;
 #[cfg(feature = "listeners")]
 pub mod listeners;
 pub mod metrics;
+mod openapi;
 #[cfg(feature = "tls")]
 pub mod poolkey;
 pub mod session;
@@ -16,6 +17,7 @@ pub mod types;
 pub mod version;
 
 pub use auth::constant_eq;
+pub use openapi::OPENAPI;
 pub use types::*;
 pub use version::VERSION;
 
