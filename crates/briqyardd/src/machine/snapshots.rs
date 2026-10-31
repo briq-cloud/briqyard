@@ -30,6 +30,9 @@ pub struct SnapshotRec {
     pub vmm_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_identity: Option<fc::BootIdentity>,
+    /// Immutable, qualified memory clone metadata; absent on every legacy snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_artifact: Option<templates::CloneArtifact>,
 }
 
 impl SnapshotRec {
@@ -138,7 +141,12 @@ impl Manager {
         r.snapshots
             .iter()
             .filter(|s| s.memory.is_some())
-            .flat_map(|s| self.memory_files(r, &s.id))
+            .flat_map(|s| match &s.clone_artifact {
+                Some(a) => self
+                    .artifact_files(&r.id, &s.id, &a.generation)
+                    .unwrap_or_else(|_| self.memory_files(r, &s.id)),
+                None => self.memory_files(r, &s.id),
+            })
             .collect()
     }
 
@@ -172,6 +180,34 @@ impl Manager {
     }
 
     pub(super) fn remove_memory(&self, r: &Record, snap: &str) {
+        if self.check_clone_readers(&r.id, Some(snap)).is_err() {
+            tracing::warn!(
+                machine = r.id,
+                snapshot = snap,
+                "memory backing retained while clone reads are uncertain"
+            );
+            return;
+        }
+        if let Some(a) = r
+            .snapshots
+            .iter()
+            .find(|s| s.id == snap)
+            .and_then(|s| s.clone_artifact.as_ref())
+        {
+            match self.artifact_files(&r.id, snap, &a.generation) {
+                Ok(files) => {
+                    for path in files {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+                Err(error) => tracing::warn!(err = %error, "memory artifact path retained"),
+            }
+            self.inner.verified_templates.lock().unwrap().remove(&(
+                r.id.clone(),
+                snap.into(),
+                a.generation.clone(),
+            ));
+        }
         for f in self.memory_files(r, snap) {
             let _ = std::fs::remove_file(f);
         }
@@ -240,6 +276,7 @@ impl Manager {
             },
             memory,
             vmm_version,
+            clone_artifact: None,
         };
         {
             let mut rec = e.rec.lock().unwrap();
@@ -358,6 +395,7 @@ impl Manager {
             let Some(s) = r.snapshots.iter().find(|s| s.is(snap)).cloned() else {
                 return Ok(());
             };
+            self.check_clone_readers(&r.id, Some(&s.id))?;
             {
                 let mut rec = e.rec.lock().unwrap();
                 rec.snapshots.retain(|x| x.id != s.id);
@@ -398,6 +436,7 @@ impl Manager {
             .find(|s| s.is(snap))
             .cloned()
             .ok_or_else(|| MError::NoSnapshot(format!("{id}/{snap}")))?;
+        self.check_clone_readers(&r.id, None)?;
         let was_running = match r.state.as_str() {
             state::RUNNING => true,
             state::STOPPED | state::CREATED | state::ERROR => false,
@@ -447,6 +486,7 @@ impl Manager {
     /// a resume reads it, the intent cleared and `restored` logged. Run again from the top
     /// when cut short. Returns the machines `tidy` found to tidy next.
     pub(super) async fn finish_restore(&self, e: &Arc<Entry>) -> Result<Vec<String>, MError> {
+        self.check_clone_readers(&e.snapshot().id, None)?;
         let r = e.snapshot();
         let Some(id) = r.restoring.clone() else {
             return Ok(Vec::new());
@@ -621,6 +661,13 @@ impl Manager {
     /// (the disks are snapshotted first), so the daemon's start tidies that machine.
     pub(super) async fn tidy(&self, e: &Entry) -> Result<Vec<String>> {
         let r = e.snapshot();
+        if self
+            .clone_readers()?
+            .iter()
+            .any(|reader| reader.source_machine == r.id)
+        {
+            return Ok(Vec::new());
+        }
         if r.restoring.is_some() {
             return Ok(Vec::new());
         }

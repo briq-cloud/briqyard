@@ -231,6 +231,7 @@ impl Manager {
             tap,
             mac: netw::mac_for(ip),
             resume: rec.suspended,
+            memory_clone: None,
             boot_identity: rec.boot_identity.clone(),
             disk: self.disk_rate(&rec),
             disk_io: e.disk_io.clone(),
@@ -423,6 +424,7 @@ impl Manager {
     /// pulled again when the host removed it since the start resolved it. Returns the
     /// machines whose snapshots the old root disk was cloned from, to tidy.
     async fn remake_root(&self, e: &Entry) -> Result<Vec<String>> {
+        self.check_clone_readers(&e.snapshot().id, None)?;
         let im = self.inner.images.ensure(&e.snapshot().image).await?;
         let base = im.dataset();
         {

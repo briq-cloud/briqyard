@@ -479,6 +479,7 @@ impl Manager {
     ) -> Result<Vec<String>, MError> {
         let e = e.clone();
         self.check_version(&e, at)?;
+        self.check_clone_readers(id, None)?;
         // No event: the destroy is one step, and `destroyed` ends it.
         e.set_state(state::DESTROYING, |_| None);
         let _ = self.save(&e);
@@ -533,6 +534,11 @@ impl Manager {
             let _ =
                 tokio::fs::remove_dir_all(fc::jail_root(&j.base, id).parent().unwrap_or(&j.base))
                     .await;
+        }
+        for snapshot in &rec.snapshots {
+            if snapshot.clone_artifact.is_some() {
+                self.remove_memory(&rec, &snapshot.id);
+            }
         }
         // Its backups stay, for a restore: a holder keeps them listed, counted and finite.
         self.hold_at_destroy(&rec, had_disks, e.backup_turn.clone())

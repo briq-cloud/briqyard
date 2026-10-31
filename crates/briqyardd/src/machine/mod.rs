@@ -43,6 +43,7 @@ mod shutdown;
 mod snapshots;
 mod start;
 mod startup;
+mod templates;
 #[cfg(test)]
 mod tests;
 mod tick;
@@ -744,6 +745,7 @@ pub struct Stats {
 
 struct Inner {
     stats: Stats,
+    verified_templates: Mutex<std::collections::HashSet<(String, String, String)>>,
     cfg: Config,
     store: Store,
     zfs: Zfs,

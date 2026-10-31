@@ -110,6 +110,7 @@ async fn unknown_identity_refuses_memory_load_and_keeps_named_snapshot() {
             memory: Some("untouched".into()),
             vmm_version: h.host.version(),
             boot_identity: Some(future),
+            clone_artifact: None,
         });
     }
     h.m.start("m_future", None).await.unwrap();

@@ -362,6 +362,7 @@ async fn the_sweep_frees_fork_snapshots_with_no_clone() {
         memory: None,
         vmm_version: String::new(),
         boot_identity: None,
+        clone_artifact: None,
     });
     h.m.sweep_orphans().await;
     assert!(!h.snapshot_exists("m/m_kept/root", "fork-gone"));

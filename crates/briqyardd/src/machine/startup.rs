@@ -50,6 +50,7 @@ impl Manager {
         );
         let inner = Arc::new(Inner {
             stats: Stats::default(),
+            verified_templates: Mutex::new(std::collections::HashSet::new()),
             vmm: Arc::new(fc::Firecracker {
                 binary: cfg.firecracker.clone(),
                 pci: cfg.pci,
@@ -89,6 +90,7 @@ impl Manager {
         });
         let m = Self { inner };
         m.load()?;
+        m.verify_clone_artifacts();
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
             .inner
@@ -299,6 +301,17 @@ impl Manager {
         scope
             .run(async {
                 let rec = e.snapshot();
+                match self.clone_readers() {
+                    Ok(readers) if readers.iter().any(|r| r.destination == rec.id || r.source_machine == rec.id) => {
+                        tracing::warn!(machine = rec.id, "incomplete clone with memory reference retained for reconciliation");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::error!(err = %error, "clone references unreadable: create recovery deferred");
+                        return;
+                    }
+                    _ => {}
+                }
                 if !rec.from_source {
                     let child_scope = match self.inner.zfs.io_scope() {
                         Ok(scope) => scope,
@@ -330,7 +343,7 @@ impl Manager {
     /// directory, jail, TAP and disks go. Done once at start, so nothing leaks for good. How
     /// many it found.
     pub(super) async fn sweep_orphans(&self) -> usize {
-        let known: std::collections::HashSet<String> = self
+        let mut known: std::collections::HashSet<String> = self
             .inner
             .machines
             .lock()
@@ -338,6 +351,20 @@ impl Manager {
             .keys()
             .cloned()
             .collect();
+        // Read intents predate staging/load. Retain both sides on ambiguous recovery;
+        // even a recordless VMM may still fault its private artifact mapping.
+        match self.clone_readers() {
+            Ok(readers) => {
+                for reader in readers {
+                    known.insert(reader.source_machine);
+                    known.insert(reader.destination);
+                }
+            }
+            Err(error) => {
+                tracing::error!(err = %error, "clone references unreadable: orphan cleanup deferred");
+                return 0;
+            }
+        }
         let mut swept = 0;
         for (pid, id) in self.inner.vmm.processes() {
             if !known.contains(&id) {

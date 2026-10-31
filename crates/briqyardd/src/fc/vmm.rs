@@ -20,6 +20,8 @@ pub struct Boot {
     pub mac: String,
     /// Resume from the snapshot next to the sockets when there is one.
     pub resume: bool,
+    /// Strict named memory load: distinct from legacy resume/cold-fallback semantics.
+    pub memory_clone: Option<MemoryClone>,
     /// Effective identity persisted by the manager before launch.
     pub boot_identity: Option<BootIdentity>,
     /// The limits on the root disk and the volume.
@@ -160,8 +162,12 @@ pub(super) fn version_of(firecracker: &str, kernel: &str) -> Option<String> {
 #[async_trait]
 impl Vmm for Firecracker {
     async fn boot(&self, b: &Boot) -> Result<Vm> {
-        let resume = b.resume;
-        if resume
+        anyhow::ensure!(
+            !(b.resume && b.memory_clone.is_some()),
+            "legacy resume and named clone are mutually exclusive"
+        );
+        let resume = b.resume || b.memory_clone.is_some();
+        if b.resume
             && !snapshot_files(&b.dir, b.jail.as_ref().map(|j| j.base.as_path()), &b.id)
                 .iter()
                 .all(|p| p.exists())
@@ -203,13 +209,35 @@ impl Vmm for Firecracker {
                     if let Some(d) = &b.data {
                         proc.expose_block(d, "data")?;
                     }
-                    c.snapshot_load(
-                        &proc.inside("snap.state"),
-                        &proc.inside("snap.mem"),
-                        "eth0",
-                        &b.tap,
-                    )
-                    .await?;
+                    if let Some(artifact) = &b.memory_clone {
+                        let root = proc
+                            .chroot
+                            .as_ref()
+                            .ok_or_else(|| anyhow!("memory clone requires the jailer"))?;
+                        let state = shared_backing(root, &artifact.state, "clone.state")?;
+                        let memory = shared_backing(root, &artifact.memory, "clone.mem")?;
+                        c.snapshot_load_paused(
+                            &state,
+                            &memory,
+                            "eth0",
+                            &b.tap,
+                            &proc.inside("vsock.sock"),
+                        )
+                        .await?;
+                        let info = c.info().await?;
+                        anyhow::ensure!(
+                            info.get("state").and_then(|s| s.as_str()) == Some("Paused"),
+                            "named memory clone was not confirmed paused"
+                        );
+                    } else {
+                        c.snapshot_load(
+                            &proc.inside("snap.state"),
+                            &proc.inside("snap.mem"),
+                            "eth0",
+                            &b.tap,
+                        )
+                        .await?;
+                    }
                     // The snapshot holds the limits of the run it paused: today's go on.
                     c.drive_rate("rootfs", &b.disk).await?;
                     if b.data.is_some() {
@@ -222,7 +250,10 @@ impl Vmm for Firecracker {
                     Err(err) => {
                         proc.kill();
                         proc.wait().await;
-                        return Err(ResumeFailed(format!("{err:#}")).into());
+                        return Err(match b.memory_clone {
+                            Some(_) => MemoryCloneFailed(format!("{err:#}")).into(),
+                            None => ResumeFailed(format!("{err:#}")).into(),
+                        });
                     }
                 }
             }

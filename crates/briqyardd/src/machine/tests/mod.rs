@@ -209,6 +209,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
     let m = Manager {
         inner: Arc::new(Inner {
             stats: Stats::default(),
+            verified_templates: Mutex::new(std::collections::HashSet::new()),
             range: Range::parse(&cfg.network.range).unwrap(),
             cfg,
             store,
