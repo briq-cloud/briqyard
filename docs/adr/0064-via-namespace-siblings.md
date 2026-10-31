@@ -68,11 +68,17 @@ running records whose policy can be resolved; unresolved policies get no source 
 The host requires `conntrack` from conntrack-tools. Cleanup targets one IPv4 address in all
 original/reply source/destination tuple positions. No host-wide flush is used. It runs before
 first admission (`boots == 0`), deletion releases an address, and a move releases its old and
-reserves its new address. A new create, fork or backup restore starts with `boots == 0`; a
+reserves its new address. A move reserves both source and destination slots under the allocator
+lock. Its source record remains unchanged while destination cleanup and counter setup run;
+commit rechecks names/quotas and writes the new owner before releasing the source. The source
+slot stays reserved through old-counter removal. Errors/cancellation release the temporary
+holds without exposing a rollback address. A new create, fork or backup restore starts with `boots == 0`; a
 record retained across suspend, stop/start, or adoption keeps its owner identity and address,
 so these operations **do not clear existing flows**. New ownership after unknown/orphan state
 has no positive boot history and clears before admission. Permission/protocol errors keep the
-address reserved; a verified zero-deleted result is success. The prerequisite is part of the
+address reserved; only the exact, complete zero-deleted summary is success. Per-flow stdout
+is discarded. Stderr is fully drained with a 4096-byte retained prefix; the deadline covers
+process exit and draining, and timeout/read failures kill and reap the command before return. The prerequisite is part of the
 versioned host bootstrap and development install.
 
 ## Capability and mixed versions
@@ -84,8 +90,12 @@ host, including forks and live PATCH, with `409 capability_unsupported`; it does
 move the namespace. Fleet status advertises its ability to enforce this gate, separately from
 which registered hosts support it. The CLI preflights live status before an opt-in write and
 never sends it to a server without explicit support. Strict/default requests need no preflight.
-Direct API clients must perform the same capability check before sending an opt-in to an older
-server, whose unknown-field behavior cannot be changed retroactively.
+A restore with omitted egress may inherit a sibling-enabled policy from sealed backup metadata,
+which public listings do not expose. The fleet and CLI conservatively require capability for
+all such restores, including explicit sizes and `latest`. An explicit egress replaces the
+backup policy and permits legacy restores without this additional requirement. Direct API
+clients must perform the same capability check before sending explicit or inherited opt-in to
+an older server, whose unknown-field behavior cannot be changed retroactively.
 
 ## Verification
 

@@ -68,6 +68,7 @@ impl Manager {
             host_id,
             advertise,
             machines: Mutex::new(HashMap::new()),
+            address_holds: Mutex::new(std::collections::HashSet::new()),
             namespaces: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
             endpoint_events,

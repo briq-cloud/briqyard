@@ -49,6 +49,11 @@ pub(super) struct Mock {
     /// Policy calls fail, as an `nft` that refuses its input.
     pub(super) refuse_policies: AtomicBool,
     pub(super) refuse_clear: AtomicBool,
+    pub(super) refuse_clear_ip: Mutex<Option<String>>,
+    pub(super) refuse_count_ip: Mutex<Option<String>>,
+    pub(super) pause_network: Mutex<Option<(&'static str, String)>>,
+    pub(super) network_started: tokio::sync::Notify,
+    pub(super) network_release: tokio::sync::Notify,
     pub(super) cleared_ips: Mutex<Vec<String>>,
     pub(super) attachments: Mutex<HashMap<String, Attachment>>,
     /// No guest port accepts: `wait_port` answers only at its deadline.
@@ -92,6 +97,19 @@ pub(super) struct Mock {
 }
 
 impl Mock {
+    async fn wait_network(&self, operation: &str, ip: &str) {
+        let paused = self
+            .pause_network
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(op, address)| *op == operation && address == ip);
+        if paused {
+            self.network_started.notify_one();
+            self.network_release.notified().await;
+        }
+    }
+
     pub(in crate::machine) fn new() -> Arc<Self> {
         Arc::new(Self {
             boots: Mutex::new(Boots::Ready(Duration::ZERO)),
@@ -102,6 +120,11 @@ impl Mock {
             calls: Mutex::new(Vec::new()),
             refuse_policies: AtomicBool::new(false),
             refuse_clear: AtomicBool::new(false),
+            refuse_clear_ip: Mutex::new(None),
+            refuse_count_ip: Mutex::new(None),
+            pause_network: Mutex::new(None),
+            network_started: tokio::sync::Notify::new(),
+            network_release: tokio::sync::Notify::new(),
             cleared_ips: Mutex::new(Vec::new()),
             attachments: Mutex::new(HashMap::new()),
             silent_ports: AtomicBool::new(false),
@@ -647,7 +670,10 @@ impl host::Net for Mock {
         Ok(())
     }
     async fn clear_connections(&self, ip: &str) -> Result<()> {
-        if self.refuse_clear.load(Relaxed) {
+        self.wait_network("clear", ip).await;
+        if self.refuse_clear.load(Relaxed)
+            || self.refuse_clear_ip.lock().unwrap().as_deref() == Some(ip)
+        {
             anyhow::bail!("conntrack refused");
         }
         self.cleared_ips.lock().unwrap().push(ip.into());
@@ -678,7 +704,10 @@ impl host::Net for Mock {
 
     /// Like nft: again keeps the counts.
     async fn count(&self, ip: &str) -> Result<()> {
-        if self.refuse_count.load(Relaxed) {
+        self.wait_network("count", ip).await;
+        if self.refuse_count.load(Relaxed)
+            || self.refuse_count_ip.lock().unwrap().as_deref() == Some(ip)
+        {
             return Err(anyhow!("nft: refused"));
         }
         self.counted.lock().unwrap().entry(ip.into()).or_default();
@@ -686,6 +715,7 @@ impl host::Net for Mock {
     }
 
     async fn uncount(&self, ip: &str) -> Result<()> {
+        self.wait_network("uncount", ip).await;
         if self.refuse_uncount.load(Relaxed) {
             return Err(anyhow!("nft: refused"));
         }

@@ -65,7 +65,11 @@ pub(super) async fn create_machine(
             .check()
             .map_err(|why| err(StatusCode::BAD_REQUEST, "invalid", why))?;
     }
-    let needs_siblings = req.egress.as_ref().is_some_and(|egress| egress.siblings);
+    // Backup listings omit the sealed machine policy. An omitted egress can inherit an
+    // opt-in, including explicit-size and latest restores. Only a capable host may read it;
+    // callers can provide an explicit strict/open policy to restore on a legacy host.
+    let needs_siblings = req.egress.as_ref().is_some_and(|egress| egress.siblings)
+        || (req.restore.is_some() && req.egress.is_none());
     let placement = registry::Policy {
         require_egress_siblings: needs_siblings,
         ..st.policy.clone()

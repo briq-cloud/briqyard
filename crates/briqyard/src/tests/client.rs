@@ -322,3 +322,20 @@ async fn sibling_opt_in_requires_an_explicit_live_server_capability() {
         body
     );
 }
+
+#[tokio::test]
+async fn an_inherited_restore_policy_is_never_sent_to_a_legacy_server() {
+    let (url, stub) = stub(vec![(StatusCode::OK, JSON.to_vec(), r#"{}"#)]).await;
+    let c = client(&url, None);
+    let body = serde_json::json!({"size":{"vcpus":1,"memory_mb":128},"restore":{"machine_id":"m_source","backup":"latest"}});
+    let error = c
+        .call::<serde_json::Value>(reqwest::Method::POST, "/v1/machines", Some(&body))
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("provide an explicit egress policy"));
+    let calls = stub.seen.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].path, "/v1/status");
+}

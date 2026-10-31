@@ -751,6 +751,8 @@ struct Inner {
     /// The address TCP endpoints are reported at, resolved once.
     advertise: String,
     machines: Mutex<HashMap<String, Arc<Entry>>>,
+    /// Destination slots reserved by moves before their record commits. Allocated under machines.
+    address_holds: Mutex<std::collections::HashSet<(u32, u8)>>,
     namespaces: Mutex<HashMap<String, Namespace>>,
     endpoints: Mutex<HashMap<String, EndpointRec>>,
     endpoint_events: broadcast::Sender<(EndpointRec, bool)>,

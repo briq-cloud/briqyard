@@ -458,7 +458,7 @@ impl Manager {
             drop(machines);
             return Err(MError::NameTaken(Box::new(self.view(&e))));
         }
-        let mut used = Vec::new();
+        let mut used = self.held_addresses(t.rec.subnet_index);
         for e in machines.values() {
             let r = e.rec.lock().unwrap();
             if r.namespace == t.rec.id {

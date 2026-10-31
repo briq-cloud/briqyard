@@ -169,7 +169,9 @@ impl Client {
             || (method == reqwest::Method::PATCH && path.starts_with("/v1/machines/"))
         {
             if let Some(body) = body {
-                if serde_json::to_value(body)?["egress"]["siblings"] == true {
+                let document = serde_json::to_value(body)?;
+                let inherited = !document["restore"].is_null() && document["egress"].is_null();
+                if document["egress"]["siblings"] == true || inherited {
                     let mut check = self
                         .http
                         .get(format!("{}/v1/status", self.base))
@@ -183,6 +185,9 @@ impl Client {
                     }
                     let status: serde_json::Value = response.json().await?;
                     if status["egress_siblings_v1"] != true {
+                        if inherited {
+                            bail!("server cannot safely inherit restore egress; provide an explicit egress policy");
+                        }
                         bail!("server does not support egress.siblings");
                     }
                 }

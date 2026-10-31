@@ -3,6 +3,22 @@
 
 use super::*;
 
+/// A destination is reserved while async network preparation runs. The source stays in its
+/// record until commit, so cancellation or a failed preparation cannot expose either address.
+struct AddressHold {
+    inner: Arc<Inner>,
+    addresses: [(u32, u8); 2],
+}
+
+impl Drop for AddressHold {
+    fn drop(&mut self) {
+        let mut held = self.inner.address_holds.lock().unwrap();
+        for address in self.addresses {
+            held.remove(&address);
+        }
+    }
+}
+
 impl Manager {
     /// Puts the machine in `namespace`. Alone in its namespace and the target not existing: the
     /// namespace is renamed, nothing restarts and the address stays. Otherwise the machine
@@ -62,38 +78,42 @@ impl Manager {
             // Usage up to now belongs to the namespace it leaves.
             self.meter(std::slice::from_ref(&e), Utc::now()).await;
             let from = rec.namespace.clone();
-            let (ip, left) = {
+            let (n, ip, _address) = {
                 let machines = self.inner.machines.lock().unwrap();
                 let n = self.slot_in(&machines, &rec, &t, false)?;
                 let ip = t.subnet.host(n)?.to_string();
-                let mut r = e.rec.lock().unwrap();
-                let left = std::mem::replace(&mut r.ip, ip.clone());
-                r.namespace = namespace.into();
-                r.subnet_index = t.rec.subnet_index;
-                r.host_num = n;
-                // A memory snapshot resumes with the old address: the next start is a boot.
-                r.suspended = false;
-                (ip, left)
+                let address = (t.rec.subnet_index, n);
+                let addresses = [(rec.subnet_index, rec.host_num), address];
+                self.inner.address_holds.lock().unwrap().extend(addresses);
+                (n, ip, AddressHold { inner: self.inner.clone(), addresses })
             };
-            // New ownership is reserved in the record while stale flows are removed.
-            if let Err(err) = self.inner.net.clear_connections(&ip).await {
-                let mut r = e.rec.lock().unwrap();
-                r.namespace.clone_from(&from);
-                r.subnet_index = rec.subnet_index;
-                r.host_num = rec.host_num;
-                r.ip.clone_from(&left);
-                r.suspended = rec.suspended;
-                return Err(err.into());
-            }
-            // The counters follow the address. Refused, the machine is as it was.
-            if let Err(err) = self.inner.net.count(&ip).await.context("usage counters") {
-                let mut r = e.rec.lock().unwrap();
-                r.namespace.clone_from(&from);
-                r.subnet_index = rec.subnet_index;
-                r.host_num = rec.host_num;
-                r.ip = left;
-                r.suspended = rec.suspended;
-                return Err(err.into());
+            // Both addresses remain reserved: the source by its record, the destination by
+            // the hold. No speculative record change is visible to a concurrent create/move.
+            self.inner.net.clear_connections(&ip).await?;
+            self.inner.net.count(&ip).await.context("usage counters")?;
+            let left = rec.ip.clone();
+            {
+                // Do not expose the old address until the new ownership is on disk. No await
+                // occurs under this allocator lock; every failure before commit keeps source.
+                let machines = self.inner.machines.lock().unwrap();
+                self.check_destination(&machines, &rec, &t, false)?;
+                {
+                    let mut r = e.rec.lock().unwrap();
+                    r.ip.clone_from(&ip);
+                    r.namespace = namespace.into();
+                    r.subnet_index = t.rec.subnet_index;
+                    r.host_num = n;
+                    r.suspended = false;
+                }
+                if let Err(error) = self.save(&e) {
+                    let mut r = e.rec.lock().unwrap();
+                    r.ip.clone_from(&rec.ip);
+                    r.namespace.clone_from(&rec.namespace);
+                    r.subnet_index = rec.subnet_index;
+                    r.host_num = rec.host_num;
+                    r.suspended = rec.suspended;
+                    return Err(error.into());
+                }
             }
             if let Err(err) = self.inner.net.uncount(&left).await {
                 tracing::warn!(machine = rec.id, ip = left, err = %err, "usage counter of the old address left");
@@ -165,6 +185,16 @@ impl Manager {
         self.check_egress(&r.egress, namespace, &r.id)
     }
 
+    pub(super) fn held_addresses(&self, subnet: u32) -> Vec<u32> {
+        self.inner
+            .address_holds
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, host)| (*index == subnet).then_some(*host as u32))
+            .collect()
+    }
+
     /// The address, name and quota the machine would have in `t`; the host number it takes.
     fn slot_in(
         &self,
@@ -173,6 +203,32 @@ impl Manager {
         t: &Namespace,
         starting: bool,
     ) -> Result<u8, MError> {
+        let mut used = self.check_destination(machines, r, t, starting)?;
+        used.extend(self.held_addresses(t.rec.subnet_index));
+        // An address a `via` policy of the tables names stays its gateway's (`add_machine`).
+        for (_, p) in self.inner.policies.lock().unwrap().values() {
+            if let nft::Policy::Via { to, .. } = p {
+                if let Ok(to) = to.parse::<Ipv4Addr>() {
+                    if to.octets()[..3] == t.subnet.network.octets()[..3] {
+                        used.push(to.octets()[3] as u32);
+                    }
+                }
+            }
+        }
+        let n = netw::first_free(used, 2, 254).ok_or_else(|| {
+            MError::Capacity(format!("namespace {} has no address left", t.rec.id))
+        })?;
+        Ok(n as u8)
+    }
+
+    /// Rechecked at commit because name/quota consumers may arrive during async preparation.
+    fn check_destination(
+        &self,
+        machines: &HashMap<String, Arc<Entry>>,
+        r: &Record,
+        t: &Namespace,
+        starting: bool,
+    ) -> Result<Vec<u32>, MError> {
         let mut used = Vec::new();
         for o in machines.values() {
             let o = o.rec.lock().unwrap();
@@ -194,20 +250,7 @@ impl Manager {
             self.inner.events.emit(ev.namespace(&t.rec.id));
             return Err(MError::Quota(x.to_string()));
         }
-        // An address a `via` policy of the tables names stays its gateway's (`add_machine`).
-        for (_, p) in self.inner.policies.lock().unwrap().values() {
-            if let nft::Policy::Via { to, .. } = p {
-                if let Ok(to) = to.parse::<Ipv4Addr>() {
-                    if to.octets()[..3] == t.subnet.network.octets()[..3] {
-                        used.push(to.octets()[3] as u32);
-                    }
-                }
-            }
-        }
-        let n = netw::first_free(used, 2, 254).ok_or_else(|| {
-            MError::Capacity(format!("namespace {} has no address left", t.rec.id))
-        })?;
-        Ok(n as u8)
+        Ok(used)
     }
 
     /// The rename: the machine is alone in its namespace and `namespace` does not exist. Done

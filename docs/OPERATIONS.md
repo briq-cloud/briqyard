@@ -422,7 +422,9 @@ snapshot, or is whole.
   This opts into trusting current peers of the namespace. `via:gateway` restores strict access,
   including blocking established peer traffic. Check `egress_siblings_v1` on `/v1/status` and
   the selected host before an API opt-in; absent means unsupported. The CLI checks the server,
-  and the fleet checks each host. `conntrack` is a required host package; install the versioned
+  and the fleet checks each host. A restore with omitted egress also requires capability,
+  because its sealed backup may inherit sibling access; provide an explicit egress to restore
+  on a legacy host. `conntrack` is a required host package; install the versioned
   bootstrap prerequisites before upgrading an existing host. Do not clear the host's whole
   connection table: the daemon clears only an address at ownership transitions. Warm resume,
   stop/start and adoption retain the owner's existing flows.
