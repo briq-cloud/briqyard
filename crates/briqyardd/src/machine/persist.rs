@@ -98,6 +98,8 @@ impl Manager {
     /// daemon starts each one again (ADR 0027), resumed when nothing under it changed. Then
     /// what the next daemon goes on from is written.
     pub async fn close(&self) {
+        self.close_backup_admission();
+        self.drain_backups().await;
         let entries: Vec<Arc<Entry>> = self
             .inner
             .machines
@@ -134,6 +136,8 @@ impl Manager {
     /// answers, until the process ends. Then the last
     /// uses the records lack and the usage up to now are written, and nothing else.
     pub async fn hand_over(&self) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+        self.close_backup_admission();
+        self.drain_backups().await;
         let mut entries: Vec<Arc<Entry>> = self
             .inner
             .machines

@@ -229,21 +229,7 @@ impl Manager {
             // or a restore was made from is not on the record: failed, for the caller to create
             // again, and nothing a person must look at (ADR 0048).
             if rec.state == state::CREATING {
-                if !rec.from_source {
-                    let z = &self.inner.zfs;
-                    if z.exists(&rec.dataset()).await.unwrap_or(false) {
-                        if let Err(err) = z.destroy(&rec.dataset()).await {
-                            tracing::warn!(machine = rec.id, err = %err, "disks of a cut create");
-                        }
-                    }
-                    tracing::info!(machine = rec.id, "create cut by a restart, taken up again");
-                    self.spawn_make(e.clone(), Make::Image);
-                    continue;
-                }
-                let why = "its create was cut short by a restart of the host's daemon";
-                tracing::warn!(machine = rec.id, "{why}");
-                self.create_failed(&e, reason::CREATE_FAILED, why.into())
-                    .await;
+                self.recover_create(&e).await;
                 continue;
             }
             if !matches!(
@@ -298,6 +284,44 @@ impl Manager {
             });
         }
         (adopted, stopped, gone)
+    }
+
+    /// Admission precedes partial-disk cleanup; closed startup work leaves its source alone.
+    async fn recover_create(&self, e: &Arc<Entry>) {
+        let scope = match self.inner.zfs.io_scope() {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::warn!(err = %error, "create recovery admission closed");
+                return;
+            }
+        };
+        scope
+            .run(async {
+                let rec = e.snapshot();
+                if !rec.from_source {
+                    let child_scope = match self.inner.zfs.io_scope() {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            tracing::warn!(err = %error, "create recovery reservation failed");
+                            return;
+                        }
+                    };
+                    let z = &self.inner.zfs;
+                    if z.exists(&rec.dataset()).await.unwrap_or(false) {
+                        if let Err(err) = z.destroy(&rec.dataset()).await {
+                            tracing::warn!(machine = rec.id, err = %err, "disks of a cut create");
+                        }
+                    }
+                    tracing::info!(machine = rec.id, "create cut by a restart, taken up again");
+                    self.spawn_make_admitted(child_scope, e.clone(), Make::Image);
+                } else {
+                    let why = "its create was cut short by a restart of the host's daemon";
+                    tracing::warn!(machine = rec.id, "{why}");
+                    self.create_failed(e, reason::CREATE_FAILED, why.into())
+                        .await;
+                }
+            })
+            .await;
     }
 
     /// Resources a previous daemon left with no record to own them: a crash between a resource

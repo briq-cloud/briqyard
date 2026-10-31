@@ -59,8 +59,19 @@ impl Manager {
     pub async fn backup(&self, id: &str) -> Result<api::Backup, MError> {
         let e = self.own_entry(id)?;
         self.backup_store()?;
-        let _turn = e.backup_turn.lock().await;
-        self.backup_entry(&e, Utc::now()).await
+        let turn = e.backup_turn.clone().lock_owned().await;
+        let admission = self.inner.backups.jobs.reserve().await?;
+        self.inner
+            .backups
+            .jobs
+            .start(
+                self.clone(),
+                jobs::Work::Requested(e, Utc::now()),
+                turn,
+                admission,
+            )?
+            .result()
+            .await
     }
 
     /// One backup of a machine whose turn the caller holds, started `now`: sent, recorded and
@@ -198,14 +209,15 @@ impl Manager {
                 z.snapshot(&ds, &snap).await?;
                 snapped.push(ds.clone());
                 let key = format!("backups/{}/{disk}/{bid}.zfs", rec.id);
-                let mut child = z.send(&ds, &snap, base.as_deref())?;
-                let stdout = child.stdout.take().expect("piped");
+                let target = store.clone();
+                let object_key = key.clone();
                 sent.push(key.clone());
-                let bytes = store
-                    .put(&key, stdout)
+                let bytes = z
+                    .send_with(&ds, &snap, base.as_deref(), move |stdout| async move {
+                        target.put(&object_key, stdout).await
+                    })
                     .await
                     .with_context(|| format!("backup {disk} of {}", rec.id))?;
-                Zfs::finish(child, "zfs send").await?;
                 disks.push(api::BackupDisk {
                     disk: disk.into(),
                     key,

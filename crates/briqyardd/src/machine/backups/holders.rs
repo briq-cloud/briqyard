@@ -79,7 +79,7 @@ impl Manager {
         &self,
         now: DateTime<Utc>,
     ) -> Vec<tokio::task::JoinHandle<()>> {
-        if self.inner.backups.store.is_none() {
+        if self.inner.backups.store.is_none() || self.inner.backups.jobs.is_closed() {
             return Vec::new();
         }
         let due: Vec<(Arc<Entry>, OwnedMutexGuard<()>)> = self
@@ -111,24 +111,30 @@ impl Manager {
             .collect();
         let mut tasks = Vec::new();
         for (e, turn) in due {
-            let m = self.clone();
-            tasks.push(tokio::spawn(async move {
-                let _turn = turn;
-                let Ok(_slot) = m.inner.backups.gate.acquire().await else {
-                    return;
-                };
-                m.scheduled_backup(&e, now).await;
-            }));
+            let Some(admission) = self.inner.backups.jobs.try_reserve() else {
+                break;
+            };
+            if let Ok(ticket) = self.inner.backups.jobs.start(
+                self.clone(),
+                jobs::Work::Scheduled(e, now),
+                turn,
+                admission,
+            ) {
+                tasks.push(tokio::spawn(ticket.finished()));
+            }
         }
         for (h, turn) in expired {
-            let m = self.clone();
-            tasks.push(tokio::spawn(async move {
-                let _turn = turn;
-                let Ok(_slot) = m.inner.backups.gate.acquire().await else {
-                    return;
-                };
-                m.expire(&h).await;
-            }));
+            let Some(admission) = self.inner.backups.jobs.try_reserve() else {
+                break;
+            };
+            if let Ok(ticket) =
+                self.inner
+                    .backups
+                    .jobs
+                    .start(self.clone(), jobs::Work::Expire(h), turn, admission)
+            {
+                tasks.push(tokio::spawn(ticket.finished()));
+            }
         }
         tasks
     }
@@ -291,14 +297,19 @@ impl Manager {
             };
             self.inner.zfs.create_parent(&ds).await?;
             for step in chain {
-                let mut child = self.inner.zfs.receive(&ds)?;
-                let mut stdin = child.stdin.take().expect("piped");
-                let mut reader = store.get(&step.key).await?;
-                tokio::io::copy(&mut reader, &mut stdin)
-                    .await
-                    .with_context(|| format!("restore {}", step.key))?;
-                drop(stdin);
-                Zfs::finish(child, "zfs receive").await?;
+                let source = store.clone();
+                let object_key = step.key.clone();
+                self.inner
+                    .zfs
+                    .receive_with(&ds, move |mut stdin| async move {
+                        let mut reader = source.get(&object_key).await?;
+                        tokio::io::copy(&mut reader, &mut stdin)
+                            .await
+                            .with_context(|| format!("restore {object_key}"))?;
+                        drop(stdin);
+                        Ok(())
+                    })
+                    .await?;
             }
             if let Some(key) = key {
                 self.inner.zfs.inherit_key(&ds, key).await?;

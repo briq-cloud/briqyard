@@ -9,20 +9,24 @@ impl Manager {
     /// image, disks and start follow in a task of its own, which leaves it running (or
     /// `created`), or in `error` with the reason. The caller waits with `/wait` or reads it.
     pub async fn create(&self, req: api::CreateMachineRequest) -> Result<api::Machine, MError> {
-        let (e, how) = self.record(req, None).await?;
-        let made = self.view(&e);
-        self.spawn_make(e, how);
-        Ok(made)
+        let scope = self.inner.zfs.io_scope()?;
+        scope
+            .run(async {
+                let (e, how) = self.record(req, None).await?;
+                let made = self.view(&e);
+                let child_scope = self.inner.zfs.io_scope()?;
+                self.spawn_make_admitted(child_scope, e, how);
+                Ok(made)
+            })
+            .await
     }
 
-    /// `make` in a task of its own: a create's background, from `create` or taken up again by
-    /// `recover`.
-    pub(super) fn spawn_make(&self, e: Arc<Entry>, how: Make) {
+    /// The exact reservation crosses the accepted record boundary synchronously, before
+    /// the worker can be queued or admission closed. The worker owns it through settlement.
+    pub(super) fn spawn_make_admitted(&self, scope: crate::zfs::IoScope, e: Arc<Entry>, how: Make) {
         let m = self.clone();
         tokio::spawn(async move {
-            // Its outcome is on the machine, for a `/wait` or a read; logged once, here or
-            // where the create failed (`create_failed`).
-            match m.make(&e, how).await {
+            match scope.run(m.make_owned(&e, how)).await {
                 Ok(())
                 | Err(MError::NotFound | MError::PullFailed(_) | MError::CreateFailed(_)) => {}
                 Err(MError::BootFailed(v)) => {
@@ -279,7 +283,22 @@ impl Manager {
     /// made and the start done under it. A failure leaves the machine in `error` with the
     /// reason (`pull_failed`, `create_failed`, or the start's), its disks gone, for the caller
     /// to read and destroy; nothing is tried again. A machine destroyed meanwhile is left be.
-    pub(super) async fn make(&self, e: &Arc<Entry>, how: Make) -> Result<(), MError> {
+    pub(super) async fn make_admitted(
+        &self,
+        scope: crate::zfs::IoScope,
+        e: &Arc<Entry>,
+        how: Make,
+    ) -> Result<(), MError> {
+        let (manager, entry) = (self.clone(), e.clone());
+        // This task, including its lifecycle lock and children, outlives an observer.
+        match tokio::spawn(async move { scope.run(manager.make_owned(&entry, how)).await }).await {
+            Ok(result) => result,
+            // A lost make owner is not a settled error permitting caller cleanup.
+            Err(_) => std::future::pending().await,
+        }
+    }
+
+    async fn make_owned(&self, e: &Arc<Entry>, how: Make) -> Result<(), MError> {
         let reference = e.snapshot().image;
         let image = match how {
             Make::Image => {
