@@ -6,7 +6,7 @@ pub(super) enum Gate {
     Ordinary,
     Builder,
     Configured {
-        request: CloneConfigure,
+        request: Box<CloneConfigure>,
         identity: CloneIdentity,
         active: bool,
         activating: bool,
@@ -101,7 +101,7 @@ pub(super) async fn configure(st: &State, request: Option<CloneConfigure>) -> Re
     match &*gate {
         Gate::Configured {
             request: previous, ..
-        } if previous == &request => return response(&gate),
+        } if previous.as_ref() == &request => return response(&gate),
         Gate::Builder => {}
         _ => return Response::error("clone generation conflict or unavailable barrier"),
     }
@@ -110,7 +110,7 @@ pub(super) async fn configure(st: &State, request: Option<CloneConfigure>) -> Re
     match clone_identity::configure(&request).await {
         Ok(identity) => {
             *gate = Gate::Configured {
-                request,
+                request: Box::new(request),
                 identity,
                 active: false,
                 activating: false,
@@ -182,7 +182,7 @@ mod tests {
             machine_id: "0123456789abcdef0123456789abcdef".into(),
         };
         *st.clone_gate.try_lock().unwrap() = Gate::Configured {
-            request: request.clone(),
+            request: Box::new(request.clone()),
             identity,
             active: false,
             activating: false,

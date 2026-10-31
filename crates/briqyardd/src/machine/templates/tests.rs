@@ -187,10 +187,12 @@ async fn reviewed_builder() -> (Harness, api::Machine) {
     })
     .await;
     h.namespace("t1");
-    let mut config = ImageConfig::default();
-    config.cmd = vec!["/bin/sh".into()];
-    config.workdir = "/".into();
-    config.env = builder_config().env;
+    let config = ImageConfig {
+        cmd: vec!["/bin/sh".into()],
+        workdir: "/".into(),
+        env: builder_config().env,
+        ..Default::default()
+    };
     h.m.inner
         .images
         .seed_with_config_digest(ALPINE, config, ALPINE_CONFIG_DIGEST)

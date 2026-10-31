@@ -110,7 +110,7 @@ impl Manager {
         if self
             .clone_readers()?
             .iter()
-            .any(|r| r.source_machine == source && snapshot.map_or(true, |s| r.snapshot == s))
+            .any(|r| r.source_machine == source && snapshot.is_none_or(|s| r.snapshot == s))
         {
             return Err(MError::Conflict(
                 "named memory snapshot still has clone readers".into(),

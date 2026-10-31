@@ -535,7 +535,7 @@ async fn named_memory_size(
         })?;
     if snapshot.clone_profile.as_deref() != Some("init-ready-v1")
         || !snapshot.memory
-        || snapshot.source_host.as_deref().map_or(true, str::is_empty)
+        || snapshot.source_host.as_deref().is_none_or(str::is_empty)
     {
         return Err(err(
             StatusCode::CONFLICT,

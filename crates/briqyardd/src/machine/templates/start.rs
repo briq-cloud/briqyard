@@ -86,8 +86,7 @@ impl Manager {
             "template init is not at its pre-main barrier"
         );
         anyhow::ensure!(
-            status.ram_marker.len() == 32
-                && expected_marker.map_or(true, |m| m == status.ram_marker),
+            status.ram_marker.len() == 32 && expected_marker.is_none_or(|m| m == status.ram_marker),
             "restored init RAM marker differs from sealed artifact"
         );
         Ok(pong.version)
