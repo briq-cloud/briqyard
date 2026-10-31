@@ -260,7 +260,7 @@ impl Config {
                     .map_err(|e| anyhow::anyhow!("hosts {name}: tls_fingerprint {e}"))?;
             }
             let https = h.url.starts_with("https://");
-            if https != !h.tls_fingerprint.is_empty() {
+            if https == h.tls_fingerprint.is_empty() {
                 bail!(
                     "hosts {name}: {} wants {}",
                     h.url,

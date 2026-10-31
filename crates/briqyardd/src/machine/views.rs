@@ -179,14 +179,25 @@ impl Manager {
             match over_quota(&namespace, &quota, &held, &need) {
                 Some(x) => Some(x),
                 None => {
+                    self.memory_admission(&machines)?;
                     let (used, _) = committed(&machines);
                     admit_cpu(
                         used.cpu_millis().saturating_sub(own.cpu_millis()),
                         self.capacity().cpu_millis(),
                         size.cpu_millis(),
                     )?;
-                    let used = used.memory_mb.saturating_sub(own.memory_mb);
-                    admit(used, self.capacity().memory_mb, size.memory_mb)?;
+                    let own_host = if own.memory_mb == 0 {
+                        0
+                    } else {
+                        host_memory(own.memory_mb)?
+                    };
+                    let used = used.memory_mb.saturating_sub(own_host);
+                    admit(
+                        used,
+                        self.capacity().memory_mb,
+                        host_memory(size.memory_mb)?,
+                    )?;
+                    *e.memory_protection.lock().unwrap() = None;
                     e.set_state(state::STARTING, |r| {
                         r.error.clear();
                         r.error_reason.clear();

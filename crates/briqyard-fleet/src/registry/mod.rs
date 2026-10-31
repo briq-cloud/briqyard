@@ -77,6 +77,8 @@ pub struct HostRec {
     /// What the host reported last, plus what its holds took since (ADR 0044).
     #[serde(default)]
     pub used: Capacity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_policy: Option<api::MemoryPolicy>,
     #[serde(default)]
     pub machines: usize,
     #[serde(default)]
@@ -130,6 +132,7 @@ pub struct HostRec {
 pub struct Hold {
     id: u64,
     memory_mb: u32,
+    memory_policy: Option<api::MemoryPolicy>,
     cpu_millis: u32,
     disk_mb: u64,
     /// What it took from `disk_free_mb`: less than `disk_mb` when the host had less.
@@ -153,6 +156,26 @@ pub fn url_host(url: &str) -> &str {
 }
 
 impl HostRec {
+    /// Heartbeat usage is already physical. Only a new hold adds this host's allowance.
+    pub fn reservation_mb(&self, guest_mb: u32) -> Option<u32> {
+        if guest_mb == 0 {
+            return Some(0);
+        }
+        match self.memory_policy {
+            None => Some(guest_mb),
+            Some(p) => p.reservation(guest_mb),
+        }
+    }
+
+    fn memory_policy_unresolved(&self) -> bool {
+        self.memory_policy
+            .is_some_and(|p| p != api::MemoryPolicy::CURRENT)
+            || self
+                .holds
+                .iter()
+                .any(|hold| hold.memory_policy != self.memory_policy)
+    }
+
     pub fn free_memory_mb(&self) -> u32 {
         self.capacity.memory_mb.saturating_sub(self.used.memory_mb)
     }
@@ -196,7 +219,17 @@ impl HostRec {
     }
 
     pub fn to_api(&self) -> Host {
+        let mut conditions = self.conditions.clone();
+        if self.memory_policy_unresolved() {
+            conditions.push(api::Condition {
+                kind: api::condition::MEMORY_ACCOUNTING.into(),
+                status: true,
+                since: self.last_seen,
+                message: "host memory accounting policy or pending holds unresolved".into(),
+            });
+        }
         Host {
+            memory_policy: self.memory_policy,
             id: self.id.clone(),
             url: self.url.clone(),
             ssh: self.ssh.clone(),
@@ -213,13 +246,16 @@ impl HostRec {
             tls_fingerprint: self.tls_fingerprint.clone(),
             labels: self.labels.clone(),
             public_tcp_ports: self.public_tcp_ports.clone().unwrap_or_default(),
-            conditions: self.conditions.clone(),
+            conditions,
             started: self.started,
         }
     }
 
     /// Why the host takes nothing new: a condition that is true (ADR 0021).
     pub fn pressure(&self) -> Option<String> {
+        if self.memory_policy_unresolved() {
+            return Some("host memory accounting policy or pending holds unresolved".into());
+        }
         api::under_pressure(&self.conditions)
             .map(|c| format!("host {} is under {}: {}", self.id, c.kind, c.message))
     }
@@ -272,7 +308,7 @@ pub fn tls_matches(pinned: &str, reported: &str, url: &str) -> Result<(), String
             )
         });
     }
-    if url.starts_with("https://") != !pinned.is_empty() {
+    if url.starts_with("https://") == pinned.is_empty() {
         return Err(format!(
             "{url}: a host {} must advertise {}",
             if pinned.is_empty() {
@@ -384,6 +420,7 @@ impl Registry {
             entry.region = h.region;
         }
         entry.capacity = h.capacity;
+        entry.memory_policy = h.memory_policy;
         entry.report(h.used, h.disk_free_mb, now);
         entry.machines = h.machines;
         entry.namespaces = h.namespaces.clone();
@@ -491,7 +528,12 @@ impl Registry {
         policy: &Policy,
     ) -> Option<String> {
         let id = match self.namespaces.get(namespace) {
-            Some(h) => h.clone(),
+            Some(h) => {
+                if self.hosts.get(h)?.memory_policy_unresolved() {
+                    return None;
+                }
+                h.clone()
+            }
             None => {
                 let best = self
                     .hosts
@@ -499,7 +541,8 @@ impl Registry {
                     .filter(|h| {
                         h.takes_new_namespaces(policy)
                             && (region.is_empty() || h.region == region)
-                            && h.free_memory_mb() >= need_mb
+                            && h.reservation_mb(need_mb)
+                                .is_some_and(|need| h.free_memory_mb() >= need)
                             && h.has_disk(need_disk_mb)
                             && h.has_cpu(need_cpu_millis)
                     })
@@ -530,6 +573,7 @@ impl Registry {
         h.take(Hold {
             id: self.last_hold,
             memory_mb: need_mb,
+            memory_policy: h.memory_policy,
             cpu_millis: need_cpu_millis,
             disk_mb: need_disk_mb,
             ..Default::default()
@@ -632,7 +676,8 @@ impl Registry {
             .filter(|h| {
                 h.has_memory_for_namespaces(policy)
                     && (region.is_empty() || h.region == region)
-                    && h.free_memory_mb() >= need_mb
+                    && h.reservation_mb(need_mb)
+                        .is_some_and(|need| h.free_memory_mb() >= need)
             })
             .collect();
         if roomy.is_empty() {

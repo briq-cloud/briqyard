@@ -197,7 +197,10 @@ pub(super) async fn put_on_namespace(
         let Some(host) = chosen.and_then(|h| reg.hosts.get(&h).cloned()) else {
             return Err(no_room(st, &reg, &ask));
         };
-        let id = reg.hold(&host.id, need_mb, need_disk_mb, need_cpu_millis);
+        let physical = host
+            .reservation_mb(need_mb)
+            .ok_or_else(|| no_room(st, &reg, &ask))?;
+        let id = reg.hold(&host.id, physical, need_disk_mb, need_cpu_millis);
         (host, first, id)
     };
     let hold = Held {

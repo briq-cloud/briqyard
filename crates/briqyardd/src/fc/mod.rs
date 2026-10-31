@@ -17,11 +17,13 @@ use tokio::process::{Child, Command};
 use tokio::sync::watch;
 
 mod client;
+mod memory;
 mod process;
 #[cfg(test)]
 mod tests;
 mod vmm;
 
 pub use client::*;
+pub use memory::{enforce as enforce_memory, MemoryProtection};
 pub use process::*;
 pub use vmm::*;

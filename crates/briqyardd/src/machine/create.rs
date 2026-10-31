@@ -478,11 +478,12 @@ impl Manager {
             return Err(MError::Quota(x.to_string()));
         }
         if rec.start {
+            self.memory_admission(&machines)?;
             let (used, _) = committed(&machines);
             admit(
                 used.memory_mb,
                 self.capacity().memory_mb,
-                rec.size.memory_mb,
+                host_memory(rec.size.memory_mb)?,
             )?;
             admit_cpu(
                 used.cpu_millis(),
@@ -575,7 +576,7 @@ impl Manager {
             let dev = z
                 .create(&r.data_dataset(), (v.size_gb as u64) << 30)
                 .await?;
-            let out = tokio::process::Command::new("mkfs.ext4")
+            let out = crate::host_process::command("mkfs.ext4")
                 .args([
                     "-q",
                     "-F",
@@ -601,6 +602,7 @@ impl Manager {
 
     pub(super) fn check_host_size(&self, size: &api::Size) -> Result<(), MError> {
         check_size(size)?;
+        host_memory(size.memory_mb)?;
         if size.cpu_millis() < size.vcpus.saturating_mul(1000)
             && self.inner.cfg.jailer.as_os_str().is_empty()
         {

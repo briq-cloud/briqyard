@@ -135,7 +135,7 @@ async fn a_start_through_the_gateway_boots_it_first() {
     // The namespace has one machine; the host runs two and commits both.
     assert_eq!(h.m.namespace("t1").unwrap().machines, 1);
     let (used, running, total) = h.m.usage();
-    assert_eq!((used.memory_mb, running, total), (512, 2, 1));
+    assert_eq!((used.memory_mb, running, total), (1024, 2, 1));
     // The tables a daemon start renders name the gateway too.
     let rules = h.m.rules().unwrap();
     assert!(rules.policies.iter().any(|p| matches!(p,

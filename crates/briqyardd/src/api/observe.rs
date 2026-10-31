@@ -20,6 +20,7 @@ pub(super) async fn metrics(State(st): S) -> Response {
 pub(super) async fn status(State(st): S) -> Json<api::Status> {
     let (used, running, machines) = st.mgr.usage();
     Json(api::Status {
+        memory_policy: Some(api::MemoryPolicy::CURRENT),
         version: api::VERSION.into(),
         host_id: st.mgr.host_id().into(),
         capacity: st.mgr.capacity(),

@@ -69,6 +69,7 @@ pub(super) struct Mock {
     pub(super) http_codes: Mutex<HashMap<(Ipv4Addr, u16), u16>>,
     /// The size each machine last booted with, as Firecracker is given it.
     pub(super) booted: Mutex<HashMap<String, api::Size>>,
+    pub(super) memory_policy: Mutex<Option<fc::MemoryProtection>>,
     /// What the VMM says it is (ADR 0027): another value is an upgraded Firecracker.
     pub(super) vmm_version: Mutex<String>,
     /// The version the guests' inits answer with.
@@ -109,6 +110,7 @@ impl Mock {
             probed: Mutex::new(Vec::new()),
             http_codes: Mutex::new(HashMap::new()),
             booted: Mutex::new(HashMap::new()),
+            memory_policy: Mutex::new(None),
             vmm_version: Mutex::new("v1.17.0/test".into()),
             init_version: Mutex::new("0.1.0+init".into()),
             file_stream_v1: AtomicBool::new(false),
@@ -302,6 +304,21 @@ impl Mock {
 
 #[async_trait::async_trait]
 impl fc::Vmm for Mock {
+    fn memory_policy(
+        &self,
+        _vm: &fc::Vm,
+        _id: &str,
+        _jailed: bool,
+        expected_mb: u32,
+        _class: briqyard_api::host_process::OomClass,
+    ) -> fc::MemoryProtection {
+        self.memory_policy
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| fc::MemoryProtection::verified(expected_mb))
+    }
+
     async fn boot(&self, b: &fc::Boot) -> Result<fc::Vm> {
         let boots = self.boots.lock().unwrap().clone();
         self.record(format!("boot {} tap={} resume={}", b.id, b.tap, b.resume));

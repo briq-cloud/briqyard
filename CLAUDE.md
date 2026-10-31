@@ -22,7 +22,7 @@ crates/briqyard          the CLI
 crates/briqyard-fleet    placement, forwarding, host registry, bootstrap, capacity signals, the registry's backup
 crates/briqyard-objstore the object store (S3 or a directory): machine backups, the registry's backup
 crates/briqyard-testing  test binaries only: each exits once its parent is gone (ADR 0049)
-api/openapi.yaml         the API, served at /v1/openapi.yaml
+api/openapi/             the API, served at /v1/openapi.yaml
 fuzz/                    cargo fuzz targets for what untrusted parties write (nightly, by hand)
 hack/                    dev VM, systemd units, dev configs, the shell suites, the stress driver
 docs/                    architecture, operations, development, mesh design, adr/, research/

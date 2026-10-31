@@ -297,7 +297,7 @@ impl Builder {
             .zfs
             .create(&image.dataset(), (self.root_gb as u64) << 30)
             .await?;
-        let out = tokio::process::Command::new("mkfs.ext4")
+        let out = crate::host_process::command("mkfs.ext4")
             .args([
                 "-q",
                 "-F",

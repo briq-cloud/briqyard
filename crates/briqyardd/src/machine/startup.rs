@@ -83,9 +83,12 @@ impl Manager {
             events,
             pool: Mutex::new(None),
             conditions: Mutex::new(Conditions::new(Utc::now())),
+            memory_host: Mutex::new(None),
+            memory_condition: Mutex::new(None),
             started: Mutex::new(api::DaemonStart::default()),
         });
         let m = Self { inner };
+        m.refresh_memory_host().await;
         m.load()?;
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
@@ -396,6 +399,7 @@ impl Manager {
         else {
             return false;
         };
+        self.retain_memory_policy(e, &vm);
         *e.live.lock().unwrap() = Some(vm.clone());
         *e.stop_req.lock().unwrap() = None;
         self.watch(e, &vm);
@@ -481,7 +485,7 @@ pub(super) fn advertise_address(advertise: &str, bind: &str, host_ip: Option<Ipv
 
 /// The first IPv4 address of an interface.
 async fn host_ip(interface: &str) -> Option<Ipv4Addr> {
-    let out = tokio::process::Command::new("ip")
+    let out = crate::host_process::command("ip")
         .args(["-4", "-o", "addr", "show", "dev", interface])
         .output()
         .await
@@ -510,12 +514,11 @@ pub(super) fn meminfo_total_mb(text: &str) -> Option<u32> {
 
 /// What the host hands out when the configuration does not say: its memory less what it
 /// keeps for itself and its other services (`capacity.reserved_memory_mb`, 2 GB) and less the
-/// ZFS cache's ceiling when one is set (ADR 0028), at least 1 GB.
+/// ZFS cache's ceiling when one is set (ADR 0028); zero means no allocatable memory.
 pub(super) fn default_memory_mb(host_mb: u32, reserved_mb: u32, arc_max_mb: u32) -> u32 {
     host_mb
         .saturating_sub(reserved_mb)
         .saturating_sub(arc_max_mb)
-        .max(1024)
 }
 
 /// Four shared vCPUs a hardware thread, less the threads kept for the host's other services

@@ -428,7 +428,7 @@ async fn metrics_open_to_the_metrics_token_or_the_apis_and_nothing_else_to_the_f
         token: "api".into(),
         metrics_token: "scrape".into(),
         loopback: false,
-        openapi: "",
+        openapi: api::OPENAPI,
         tls_fingerprint: String::new(),
     });
     let ln = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -457,4 +457,12 @@ async fn metrics_open_to_the_metrics_token_or_the_apis_and_nothing_else_to_the_f
     }
     assert_eq!(get("/v1/status", "scrape").await.unwrap().status(), 401);
     assert_eq!(get("/v1/status", "api").await.unwrap().status(), 200);
+    assert_eq!(
+        get("/v1/openapi.yaml", "scrape").await.unwrap().status(),
+        401
+    );
+    let description = get("/v1/openapi.yaml", "api").await.unwrap();
+    assert_eq!(description.status(), 200);
+    assert_eq!(description.headers()["content-type"], "application/yaml");
+    assert_eq!(description.text().await.unwrap(), api::OPENAPI);
 }

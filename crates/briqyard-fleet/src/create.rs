@@ -110,7 +110,10 @@ pub(super) async fn create_machine(
         };
         // A fork's new namespace lives where its source does, as a placement would pin it.
         reg.pin(&req.namespace, &host.id);
-        let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb, ask.cpu_millis);
+        let physical = host
+            .reservation_mb(ask.memory_mb)
+            .ok_or_else(|| no_room(&st, &reg, &ask))?;
+        let id = reg.hold(&host.id, physical, ask.disk_mb, ask.cpu_millis);
         (host, first, id)
     };
     let hold = Held {

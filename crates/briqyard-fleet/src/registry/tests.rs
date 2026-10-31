@@ -4,6 +4,7 @@ use super::*;
 
 fn host(id: &str, cap: u32, used: u32, machines: usize) -> HostRec {
     HostRec {
+        memory_policy: None,
         id: id.into(),
         url: format!("http://{id}:7420"),
         ssh: String::new(),
@@ -590,4 +591,108 @@ fn cpu_holds_reserve_fractional_slots_and_cpu_full_hosts_are_not_placed() {
     );
     reg.hosts.get_mut("fraction").unwrap().capacity.cpu_millis = None;
     assert!(reg.place("legacy", "", 128, 0, 250, &policy).is_none());
+}
+
+#[test]
+fn placement_converts_guest_memory_per_candidate_not_per_fleet() {
+    let mut reg = Registry::default();
+    let mut protected = host("protected", 300, 0, 0);
+    protected.memory_policy = Some(api::MemoryPolicy::CURRENT);
+    reg.hosts.insert(protected.id.clone(), protected);
+    reg.hosts.insert("legacy".into(), host("legacy", 200, 0, 0));
+    assert_eq!(
+        reg.place("n1", "", 128, 0, 1000, &Policy::default())
+            .as_deref(),
+        Some("legacy")
+    );
+    reg.hosts.remove("legacy");
+    assert!(reg
+        .place("n2", "", 128, 0, 1000, &Policy::default())
+        .is_none());
+    reg.hosts.get_mut("protected").unwrap().capacity.memory_mb = 384;
+    assert_eq!(
+        reg.place("n3", "", 128, 0, 1000, &Policy::default())
+            .as_deref(),
+        Some("protected")
+    );
+    assert_eq!(reg.hosts["protected"].reservation_mb(128), Some(384));
+    assert_eq!(reg.hosts["protected"].reservation_mb(u32::MAX), None);
+    assert_eq!(reg.hosts["protected"].reservation_mb(0), Some(0));
+}
+
+#[test]
+fn physical_holds_reconcile_once_and_release_the_selected_charge() {
+    let mut reg = Registry::default();
+    let mut h = host("h", 4096, 512, 1);
+    h.memory_policy = Some(api::MemoryPolicy::CURRENT);
+    reg.hosts.insert("h".into(), h.clone());
+    let physical = h.reservation_mb(256).unwrap();
+    let id = reg.hold("h", physical, 0, 1000);
+    assert_eq!(reg.hosts["h"].used.memory_mb, 1024);
+    let now = Utc::now();
+    reg.heartbeat(h.clone(), now);
+    assert_eq!(
+        reg.hosts["h"].used.memory_mb, 1024,
+        "pending hold is physical already"
+    );
+    reg.release("h", id);
+    assert_eq!(reg.hosts["h"].used.memory_mb, 512);
+    let id = reg.hold("h", physical, 0, 1000);
+    reg.made("h", id, now);
+    h.used.memory_mb = 1024;
+    reg.heartbeat(h, now + Duration::seconds(1));
+    assert_eq!(
+        reg.hosts["h"].used.memory_mb, 1024,
+        "reported usage includes overhead already"
+    );
+    reg.release("h", id);
+    assert_eq!(
+        reg.hosts["h"].used.memory_mb, 1024,
+        "a reflected hold must not be subtracted twice"
+    );
+}
+
+#[test]
+fn policy_change_with_outstanding_holds_and_unknown_policies_fail_closed() {
+    let mut reg = Registry::default();
+    let h = host("h", 4096, 0, 0);
+    reg.hosts.insert("h".into(), h.clone());
+    let held = reg.hold("h", 256, 0, 1000);
+    let mut next = h;
+    next.memory_policy = Some(api::MemoryPolicy::CURRENT);
+    reg.heartbeat(next, Utc::now());
+    assert!(reg.hosts["h"].pressure().is_some());
+    assert!(reg
+        .place("n", "", 256, 0, 1000, &Policy::default())
+        .is_none());
+    reg.release("h", held);
+    assert!(reg.hosts["h"].pressure().is_none());
+    assert_eq!(
+        reg.place("n", "", 256, 0, 1000, &Policy::default())
+            .as_deref(),
+        Some("h")
+    );
+    reg.hosts.get_mut("h").unwrap().memory_policy = Some(api::MemoryPolicy {
+        version: 2,
+        vmm_overhead_mb: 256,
+    });
+    assert!(reg.hosts["h"].pressure().is_some());
+    assert_eq!(reg.hosts["h"].reservation_mb(256), None);
+}
+
+#[test]
+fn memory_policy_is_additive_in_legacy_records_and_retains_unknown_versions() {
+    let h = host("h", 1024, 0, 0);
+    let legacy = serde_json::to_value(&h).unwrap();
+    assert!(legacy.get("memory_policy").is_none());
+    let mut decoded: HostRec = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.memory_policy, None);
+    decoded.memory_policy = Some(api::MemoryPolicy {
+        version: 99,
+        vmm_overhead_mb: 1024,
+    });
+    let roundtrip: HostRec =
+        serde_json::from_value(serde_json::to_value(decoded).unwrap()).unwrap();
+    assert_eq!(roundtrip.memory_policy.unwrap().version, 99);
+    assert!(roundtrip.pressure().is_some());
 }

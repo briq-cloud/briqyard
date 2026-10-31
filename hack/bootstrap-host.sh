@@ -129,6 +129,22 @@ fetch() {
   mv "$tmp" "$dest"
 }
 
+# Read-only safety checks before maintenance which could reclaim host memory.
+[ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ] || fail "cgroup v2 is required"
+grep -qw memory /sys/fs/cgroup/cgroup.controllers || fail "cgroup memory controller is required"
+awk 'NR > 1 && $4 > 0 { bad = 1 } END { exit bad }' /proc/swaps || fail "swap holds pages: drain the host before disabling it"
+for counter in /sys/kernel/mm/ksm/pages_shared /sys/kernel/mm/ksm/pages_sharing; do
+  [ ! -e "$counter" ] || [ "$(cat "$counter")" = 0 ] || fail "KSM holds merged pages: drain the host before maintenance"
+done
+(
+  probe=/sys/fs/cgroup/briqyard-memory-check-$$
+  mkdir "$probe" || fail "cannot verify memory cgroup controls"
+  trap 'rmdir "$probe" 2>/dev/null || true' EXIT
+  for control in memory.max memory.oom.group memory.swap.max memory.events.local; do
+    [ -e "$probe/$control" ] || fail "missing memory cgroup control: $control"
+  done
+)
+
 echo "== packages"
 # needrestart, run by apt's hook (unattended upgrades included), restarts a service that maps a
 # library just updated: the daemon's restart suspends every machine (ADR 0050). Written always
@@ -162,10 +178,29 @@ echo "   at most $ARC_GB GB"
 echo "== no swap"
 # Guest memory the kernel pages out would land on a disk in clear (ADR 0026): swap goes, and
 # stays gone across reboots (fstab lines commented out, swap units masked).
+# Package installation may have taken time since the initial read-only check.
+awk 'NR > 1 && $4 > 0 { bad = 1 } END { exit bad }' /proc/swaps || fail "swap now holds pages: drain the host before disabling it"
 swapoff -a
 sed -i -E 's|^([^#].*[[:space:]]swap[[:space:]].*)$|# briqyard, no swap: \1|' /etc/fstab
 for unit in $(systemctl list-units --type swap --all --plain --no-legend | awk '{print $1}'); do
   systemctl mask "$unit" >/dev/null
+done
+
+echo "== memory-pressure prerequisites"
+# Disable merging, never unmerge existing pages. The read-only check above rejects those.
+for unit in systemd-oomd.service systemd-oomd.socket ksm.service ksmtuned.service; do
+  if systemctl cat "$unit" >/dev/null 2>&1; then
+    systemctl disable --now "$unit" >/dev/null 2>&1 || true
+    systemctl mask "$unit" >/dev/null
+  fi
+done
+if [ -e /sys/kernel/mm/ksm/run ]; then
+  echo 0 > /sys/kernel/mm/ksm/run
+  mkdir -p /etc/tmpfiles.d
+  echo 'w /sys/kernel/mm/ksm/run - - - - 0' > /etc/tmpfiles.d/briqyard-memory.conf
+fi
+for property in ManagedOOMSwap ManagedOOMMemoryPressure; do
+  ! systemctl show --value --property="$property" -- -.slice system.slice | grep -qx kill || fail "ancestor $property=kill: resolve in drained maintenance"
 done
 
 echo "== no crash dumps"
@@ -247,6 +282,8 @@ Before=network-pre.target
 Wants=network-pre.target
 
 [Service]
+OOMScoreAdjust=-900
+OOMPolicy=continue
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /etc/briqyard/firewall.nft
@@ -485,6 +522,8 @@ After=network-online.target zfs.target
 Wants=network-online.target
 
 [Service]
+OOMScoreAdjust=-900
+OOMPolicy=continue
 ExecStart=/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml
 # Only the daemon gets the signal: the machines (Firecracker processes in this cgroup) outlive
 # it. A stop (SIGTERM) suspends them, and the next start boots them again; SIGUSR2 (an upgrade)

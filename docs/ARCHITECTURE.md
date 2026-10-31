@@ -166,6 +166,16 @@ through a pipe in the jail, a line a minute: disk bytes and throttled requests p
 `/metrics`. CPU is bounded by the jail's cgroup: `cpu.max` at the machine's vCPUs, `cpu.weight`
 100 per vCPU, so a host short of CPU shares it by size.
 
+Physical admission reserves guest memory plus 256 MiB per committed VMM using the same checked
+hard-ceiling function,
+while namespace quotas retain guest memory. Host status advertises its accounting policy so a
+fleet can reserve each candidate's physical charge. Supervisors are protected, host utilities
+reset OOM inheritance, and each jailed VMM has its own OOM group with swap disabled. Positive
+adoption survives unresolved enforcement, retains the observed ceiling and blocks incremental
+admission; guests are not restarted to change policy. See [ADR 0065](adr/0065-oom-protection-and-physical-memory.md)
+and the [memory-policy runbook](MEMORY-POLICY.md). OOM preference, overhead reservation and
+pressure eviction are separate mechanisms; pressure eviction is not implemented.
+
 The root disk is not mounted by the host, ever: the host writes nothing into guest filesystems.
 Image extraction happens once per image into a directory the host controls: layers in manifest
 order, whiteouts applied, every path resolved inside the directory by the kernel (`openat2` with

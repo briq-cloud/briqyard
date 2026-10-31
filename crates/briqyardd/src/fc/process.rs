@@ -121,6 +121,10 @@ pub struct Process {
     pub(super) gid: u32,
     child: Child,
     pid: u32,
+    #[cfg(target_os = "linux")]
+    identity: Option<super::memory::ProcessIdentity>,
+    #[cfg(target_os = "linux")]
+    oom_evidence: Option<super::memory::OomEvidence>,
     done: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -214,6 +218,10 @@ pub(super) fn jailer_args(j: &Jail, id: &str, binary: &Path) -> Vec<std::ffi::Os
     if j.memory_mb > 0 {
         args.push("--cgroup".into());
         args.push(format!("memory.max={}", (j.memory_mb as u64) << 20).into());
+        for value in ["memory.oom.group=1", "memory.swap.max=0"] {
+            args.push("--cgroup".into());
+            args.push(value.into());
+        }
     }
     args
 }
@@ -273,12 +281,18 @@ impl Process {
     /// API. Nothing is configured yet.
     pub async fn start(
         binary: &Path,
-        id: &str,
-        dir: &Path,
+        boot: &super::Boot,
         pci: bool,
-        jail: Option<&Jail>,
         console_max: u64,
     ) -> Result<Self> {
+        let (id, dir, jail, oom_class) = (
+            boot.id.as_str(),
+            boot.dir.as_path(),
+            boot.jail.as_ref(),
+            boot.oom_class,
+        );
+        let expected_mb =
+            api::vmm_memory_mb(boot.memory_mb).context("VMM memory ceiling overflow")?;
         tokio::fs::create_dir_all(dir).await?;
         let (api, vsock, console, fclog) = paths_for(dir, jail, id);
         let _ = tokio::fs::remove_file(&api).await;
@@ -350,6 +364,7 @@ impl Process {
         for v in briqyard_api::listeners::ENV {
             cmd.env_remove(v);
         }
+        briqyard_api::host_process::set_class(cmd.as_std_mut(), oom_class);
         cmd.process_group(0);
         cmd.kill_on_drop(false);
         let mut child = cmd.spawn().context("start firecracker")?;
@@ -366,7 +381,7 @@ impl Process {
             let _ = t2.await;
             let _ = tx.send(true);
         });
-        let p = Self {
+        let mut p = Self {
             dir: dir.to_path_buf(),
             api: api.clone(),
             vsock,
@@ -377,13 +392,16 @@ impl Process {
             gid,
             child,
             pid,
+            #[cfg(target_os = "linux")]
+            identity: None,
+            #[cfg(target_os = "linux")]
+            oom_evidence: None,
             done: rx,
         };
         if let Err(e) = p.client.wait_api(Duration::from_secs(10)).await {
-            p.kill();
+            p.abort(id);
             return Err(e);
         }
-        let mut p = p;
         if let Some(root) = p.chroot.clone() {
             // The process we spawned is the jailer's parent: it exits once it has written the
             // pid file, so its exit is the wait, and the file is then there or never will be.
@@ -391,11 +409,35 @@ impl Process {
             match jailed_pid(&root) {
                 Ok(pid) => p.pid = pid,
                 Err(e) => {
-                    // A Firecracker that cannot be named is killed through its cgroup.
-                    let _ = std::fs::write(cgroup_dir(id).join("cgroup.kill"), "1");
+                    p.abort(id);
                     return Err(e.context("jailer pid"));
                 }
             }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            p.identity = super::memory::ProcessIdentity::open(id, p.pid()).ok();
+        }
+        #[cfg(target_os = "linux")]
+        if jail.is_some() && p.identity.is_none() {
+            p.abort(id);
+            return Err(anyhow!("VMM process identity unavailable before boot"));
+        }
+        let policy = enforce_memory(id, p.pid(), jail.is_some(), expected_mb, oom_class);
+        if let Some(reason) = policy.degraded {
+            // The process has not received boot/load/resume commands yet.
+            p.abort(id);
+            return Err(anyhow!("VMM memory policy: {reason}"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            p.oom_evidence = super::memory::OomEvidence::capture(id, p.pid());
+        }
+        if !policy.contained {
+            tracing::warn!(
+                machine = id,
+                "unjailed VMM: memory cgroup containment unavailable"
+            );
         }
         Ok(p)
     }
@@ -463,9 +505,28 @@ impl Process {
         self.done.clone()
     }
 
+    /// A pre-boot failure may precede the jailer's pidfile or API readiness.
+    fn abort(&self, id: &str) {
+        self.kill();
+        #[cfg(target_os = "linux")]
+        if self.chroot.is_some() {
+            super::memory::abort_owned_leaf(id);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = id;
+    }
+
     pub fn kill(&self) {
-        unsafe {
-            libc::kill(self.pid as i32, libc::SIGKILL);
+        #[cfg(target_os = "linux")]
+        if let Some(identity) = &self.identity {
+            identity.kill();
+            return;
+        }
+        // An unreaped direct child retains its PID; the forked VMM requires its pidfd.
+        if self.child.id() == Some(self.pid) {
+            unsafe {
+                libc::kill(self.pid as i32, libc::SIGKILL);
+            }
         }
     }
 
@@ -477,6 +538,15 @@ impl Process {
             if done.changed().await.is_err() {
                 break;
             }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(evidence) = self.oom_evidence.take() {
+            let id = self
+                .dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            evidence.record(id);
         }
     }
 }

@@ -7,7 +7,7 @@ async fn a_reservation_is_one_step() {
     // Eight starts race for the memory of two: never more than two may take it,
     // however they interleave.
     for _ in 0..20 {
-        let h = harness("10.64.0.0/22", 1024).await;
+        let h = harness("10.64.0.0/22", 1536).await;
         let entries: Vec<Arc<Entry>> = (0..8)
             .map(|i| h.add(&format!("m_{i}"), state::STOPPED, 512))
             .collect();
@@ -24,10 +24,10 @@ async fn a_reservation_is_one_step() {
         });
         assert_eq!(admitted, 2);
         let (used, up, _) = h.m.usage();
-        assert_eq!((used.memory_mb, up), (1024, 2));
+        assert_eq!((used.memory_mb, up), (1536, 2));
     }
     // What was admitted is `starting`; what was not is untouched.
-    let h = harness("10.64.0.0/22", 512).await;
+    let h = harness("10.64.0.0/22", 768).await;
     let a = h.add("m_a", state::STOPPED, 512);
     let b = h.add("m_b", state::STOPPED, 512);
     assert!(h.m.reserve(&a, None).is_ok());
@@ -230,7 +230,7 @@ async fn a_create_boots_the_machine_to_running() {
     );
     assert_eq!(h.host.alive(), vec![1000]);
     let (used, up, total) = h.m.usage();
-    assert_eq!((used.memory_mb, up, total), (256, 1, 1));
+    assert_eq!((used.memory_mb, up, total), (512, 1, 1));
     assert_eq!(h.m.list(Some("t1"), &[])[0].id, m.id);
     // A second machine of that name is refused before anything is made.
     assert!(matches!(
@@ -431,7 +431,7 @@ async fn a_start_and_a_destroy_racing_leave_nothing_behind() {
 
 #[tokio::test]
 async fn two_starts_past_capacity_admit_one() {
-    let h = harness("10.64.0.0/22", 512).await;
+    let h = harness("10.64.0.0/22", 768).await;
     h.namespace("t1");
     for id in ["m_a", "m_b"] {
         let e = h.add(id, state::STOPPED, 512);
@@ -443,11 +443,11 @@ async fn two_starts_past_capacity_admit_one() {
     outcomes.sort_by_key(|r| r.is_err());
     assert_eq!(outcomes[0].as_ref().unwrap().state, state::RUNNING);
     match &outcomes[1] {
-        Err(MError::Capacity(why)) => assert_eq!(why, "512 MB used of 512"),
+        Err(MError::Capacity(why)) => assert_eq!(why, "768 MB used of 768"),
         other => panic!("{other:?}"),
     }
     let (used, up, _) = h.m.usage();
-    assert_eq!((used.memory_mb, up), (512, 1));
+    assert_eq!((used.memory_mb, up), (768, 1));
     // The refused one was not touched: still stopped, nothing booted for it.
     assert_eq!(
         h.host
@@ -593,7 +593,7 @@ async fn a_create_answers_once_recorded_then_runs() {
     let running = h.m.wait(&m.id, Until::Ready, Duration::from_secs(5)).await;
     assert_eq!(running.unwrap().state, state::RUNNING);
     let (used, up, _) = h.m.usage();
-    assert_eq!((used.memory_mb, up), (256, 1));
+    assert_eq!((used.memory_mb, up), (512, 1));
     let reasons: Vec<String> =
         h.m.events_page(0, events::Filter::default(), 100)
             .await
@@ -608,7 +608,7 @@ async fn a_create_answers_once_recorded_then_runs() {
 
 #[tokio::test]
 async fn a_create_takes_its_memory_when_recorded() {
-    let h = harness("10.64.0.0/22", 512).await;
+    let h = harness("10.64.0.0/22", 768).await;
     h.ready().await;
     h.host.boots(Boots::Silent);
     let mut req = h.request("a");
@@ -618,7 +618,7 @@ async fn a_create_takes_its_memory_when_recorded() {
     req.image = image_at(&addr, 1);
     let a = h.m.create(req).await.unwrap();
     assert_eq!(a.state, state::CREATING);
-    assert_eq!(h.m.usage().0.memory_mb, 384);
+    assert_eq!(h.m.usage().0.memory_mb, 640);
     assert!(matches!(
         h.m.create(h.request("b")).await,
         Err(MError::Capacity(_))
@@ -628,7 +628,7 @@ async fn a_create_takes_its_memory_when_recorded() {
     c.image = image_at(&addr, 2);
     c.start = Some(false);
     let c = h.m.create(c).await.unwrap();
-    assert_eq!(h.m.usage().0.memory_mb, 384);
+    assert_eq!(h.m.usage().0.memory_mb, 640);
     assert!(matches!(
         h.m.start(&c.id, None).await,
         Err(MError::Capacity(_))
@@ -637,7 +637,7 @@ async fn a_create_takes_its_memory_when_recorded() {
     let c = h.m.start(&c.id, None).await.unwrap();
     assert_eq!(
         (c.state.as_str(), h.m.usage().0.memory_mb),
-        (state::CREATING, 256)
+        (state::CREATING, 512)
     );
     assert!(h.stored(&c.id).unwrap().start);
 }
@@ -791,7 +791,7 @@ async fn a_create_cut_by_a_restart_is_taken_up_again_or_failed() {
         (state::ERROR, reason::CREATE_FAILED)
     );
     assert!(!h.pool.zfs.exists(&r.dataset()).await.unwrap());
-    assert_eq!(h.m.usage().0.memory_mb, 256, "the one that runs");
+    assert_eq!(h.m.usage().0.memory_mb, 512, "the one that runs");
     let got =
         h.m.wait("m_forked", Until::Ready, Duration::from_secs(1))
             .await;

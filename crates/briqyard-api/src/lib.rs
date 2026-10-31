@@ -4,9 +4,13 @@
 pub mod auth;
 pub mod files;
 pub mod guest;
+#[cfg(feature = "host-process")]
+pub mod host_process;
 #[cfg(feature = "listeners")]
 pub mod listeners;
 pub mod metrics;
+mod openapi;
+pub use openapi::OPENAPI;
 #[cfg(feature = "tls")]
 pub mod poolkey;
 pub mod session;

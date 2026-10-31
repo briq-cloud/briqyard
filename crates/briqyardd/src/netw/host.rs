@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
-use tokio::process::Command;
 
 /// The host network as the manager drives it: the bridges, TAPs, pins and egress policies
 /// below on the host, a mock in the manager's tests.
@@ -170,7 +169,7 @@ pub async fn wait_port(addr: SocketAddr, timeout: Duration) -> Result<()> {
 }
 
 async fn ip(args: &[&str]) -> Result<String> {
-    let out = Command::new("ip")
+    let out = crate::host_process::command("ip")
         .args(args)
         .output()
         .await
@@ -186,7 +185,7 @@ async fn ip(args: &[&str]) -> Result<String> {
 }
 
 async fn link_exists(name: &str) -> bool {
-    Command::new("ip")
+    crate::host_process::command("ip")
         .args(["link", "show", "dev", name])
         .output()
         .await

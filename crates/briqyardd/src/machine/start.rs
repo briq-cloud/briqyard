@@ -43,7 +43,12 @@ impl Manager {
                 return Err(MError::Quota(x.to_string()));
             }
             let (used, _) = committed(&machines);
-            admit(used.memory_mb, self.capacity().memory_mb, r.size.memory_mb)?;
+            self.memory_admission(&machines)?;
+            admit(
+                used.memory_mb,
+                self.capacity().memory_mb,
+                host_memory(r.size.memory_mb)?,
+            )?;
             admit_cpu(
                 used.cpu_millis(),
                 self.capacity().cpu_millis(),
@@ -215,6 +220,7 @@ impl Manager {
             id: rec.id.clone(),
             dir,
             jail: self.jail_for(&rec),
+            oom_class: rec.oom_class(),
             vcpus: rec.size.vcpus,
             memory_mb: rec.size.memory_mb,
             kernel: cfg.kernel.clone(),
@@ -246,6 +252,7 @@ impl Manager {
         e.meter.lock().unwrap().boot(cpu);
         let live = self.inner.vmm.boot(&boot).await.map_err(fail)?;
         {
+            self.retain_memory_policy(e, &live);
             *e.live.lock().unwrap() = Some(live.clone());
             *e.stop_req.lock().unwrap() = None;
             let mut r = e.rec.lock().unwrap();
@@ -412,7 +419,7 @@ impl Manager {
             gid: uid,
             cpu_millis: rec.size.cpu_millis(),
             // Guest memory, plus what Firecracker itself needs around it.
-            memory_mb: rec.size.memory_mb + 256,
+            memory_mb: api::vmm_memory_mb(rec.size.memory_mb).unwrap_or(u32::MAX),
         })
     }
 

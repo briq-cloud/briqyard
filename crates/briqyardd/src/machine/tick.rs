@@ -49,6 +49,7 @@ impl Manager {
 
     pub(super) async fn tick(&self) {
         let now = Utc::now();
+        self.refresh_memory_host().await;
         self.measure(now).await;
         self.assess(now).await;
         if let Err(err) =

@@ -25,6 +25,7 @@ pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, m
     loop {
         let (used, _, total) = mgr.usage();
         let req = api::RegisterHostRequest {
+            memory_policy: Some(api::MemoryPolicy::CURRENT),
             id: mgr.host_id().to_string(),
             url: cfg.advertise.clone(),
             region: cfg.region.clone(),

@@ -52,7 +52,7 @@ impl Tool {
     }
 
     fn command(&self) -> Command {
-        let mut c = Command::new(&self.program);
+        let mut c = crate::host_process::command(&self.program);
         c.args(&self.leading);
         c
     }

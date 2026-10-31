@@ -240,7 +240,7 @@ async fn ssh(
     input: &[u8],
     limit: Duration,
 ) -> anyhow::Result<std::process::Output> {
-    let mut child = tokio::process::Command::new("ssh")
+    let mut child = tokio::process::Command::from(briqyard_api::host_process::command("ssh"))
         .args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

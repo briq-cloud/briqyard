@@ -17,6 +17,7 @@ fn host() {
     let h: Host = round_trip(input, expected);
     assert_eq!(h.note, "");
     let h: Host = same(json!({
+        "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
         "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1", "provider": "manual",
         "state": "draining", "capacity": {"memory_mb": 65536, "vcpus": 16},
         "used": {"memory_mb": 1024, "vcpus": 2}, "machines": 2, "namespaces": ["t1", "t2"],
@@ -51,6 +52,7 @@ fn host_requests() {
     );
     assert_eq!(r.region, "");
     let r: RegisterHostRequest = same(json!({
+        "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
         "id": "h1", "url": "http://10.0.0.5:7420", "region": "fsn1",
         "capacity": {"memory_mb": 65536, "vcpus": 16}, "used": {"memory_mb": 512, "vcpus": 1},
         "machines": 1, "namespaces": ["t1"], "version": "0.1.0", "disk_free_mb": 100000,
@@ -81,6 +83,7 @@ fn status() {
     );
     assert_eq!(s.running, 1);
     let s: Status = same(json!({
+        "memory_policy": {"version": 1, "vmm_overhead_mb": 256},
         "version": "0.1.0", "host_id": "h1",
         "capacity": {"memory_mb": 1000, "vcpus": 16}, "used": {"memory_mb": 990, "vcpus": 2},
         "machines": 3, "running": 3, "disk_free_mb": 10, "tls_fingerprint": "",
@@ -103,7 +106,13 @@ fn status() {
     );
     assert_eq!(
         condition::ALL,
-        ["memory_pressure", "disk_pressure", "storage_stalled"]
+        [
+            "memory_pressure",
+            "disk_pressure",
+            "storage_stalled",
+            "memory_protection",
+            "memory_accounting"
+        ]
     );
 }
 

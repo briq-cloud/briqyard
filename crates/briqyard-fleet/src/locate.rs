@@ -146,6 +146,7 @@ pub(super) async fn refresh(st: &AppState, host: &HostRec) {
     let within = std::time::Duration::from_secs(5);
     if let Ok(Some(s)) = tokio::time::timeout(within, status).await {
         if let Some(h) = st.reg.lock().unwrap().hosts.get_mut(&host.id) {
+            h.memory_policy = s.memory_policy;
             h.report(s.used, s.disk_free_mb, asked);
         }
     }

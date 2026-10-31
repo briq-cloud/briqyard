@@ -597,6 +597,10 @@ fn the_jailer_is_told_the_cgroup_parent_and_the_limits() {
             "cpu.weight=200",
             "--cgroup",
             "memory.max=805306368",
+            "--cgroup",
+            "memory.oom.group=1",
+            "--cgroup",
+            "memory.swap.max=0",
         ]
     );
     // No limit, no cgroup argument.

@@ -9,6 +9,7 @@ pub struct Boot {
     /// The machine's run dir: its sockets when not jailed, its console always.
     pub dir: PathBuf,
     pub jail: Option<Jail>,
+    pub oom_class: briqyard_api::host_process::OomClass,
     pub vcpus: u32,
     pub memory_mb: u32,
     pub kernel: PathBuf,
@@ -76,6 +77,22 @@ pub trait Vmm: Send + Sync {
         disk_io: Arc<DiskIo>,
     ) -> Option<Vm>;
 
+    fn host_memory_checks(&self) -> bool {
+        false
+    }
+
+    /// Separate from adoption: enforcement failure must retain the identified live VM.
+    fn memory_policy(
+        &self,
+        _vm: &Vm,
+        _id: &str,
+        _jailed: bool,
+        expected_mb: u32,
+        _class: briqyard_api::host_process::OomClass,
+    ) -> MemoryProtection {
+        MemoryProtection::verified(expected_mb)
+    }
+
     /// Gives a running machine's disks these limits now: the root disk, and the volume when
     /// it has one.
     async fn disk_rate(&self, vm: &Vm, rate: &DiskRate, volume: bool) -> Result<()>;
@@ -121,7 +138,7 @@ pub struct Firecracker {
 /// memory snapshot is tied to. Firecracker promises no snapshot across its versions, and
 /// calls one across host kernels unstable (ADR 0027).
 pub fn vmm_version(binary: &Path) -> Result<String> {
-    let out = std::process::Command::new(binary)
+    let out = briqyard_api::host_process::command(binary)
         .arg("--version")
         .output()
         .with_context(|| format!("{} --version", binary.display()))?;
@@ -144,18 +161,13 @@ pub(super) fn version_of(firecracker: &str, kernel: &str) -> Option<String> {
 
 #[async_trait]
 impl Vmm for Firecracker {
+    fn host_memory_checks(&self) -> bool {
+        true
+    }
     async fn boot(&self, b: &Boot) -> Result<Vm> {
         let mut resume = b.resume;
         let (proc, exit) = loop {
-            let mut proc = Process::start(
-                &self.binary,
-                &b.id,
-                &b.dir,
-                self.pci,
-                b.jail.as_ref(),
-                self.console_max,
-            )
-            .await?;
+            let mut proc = Process::start(&self.binary, b, self.pci, self.console_max).await?;
             let exit = match listen_exit(&proc.vsock, proc.uid, proc.gid, proc.done()) {
                 Ok(rx) => rx,
                 Err(err) => {
@@ -290,9 +302,15 @@ impl Vmm for Firecracker {
             tracing::warn!(machine = id, err = %err, "disk metrics not read");
         }
         let machine = id.to_string();
+        #[cfg(target_os = "linux")]
+        let oom_evidence = super::memory::OomEvidence::capture(id, pid);
         tokio::spawn(async move {
             while machine_of(pid).as_deref() == Some(machine.as_str()) {
                 tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(evidence) = oom_evidence {
+                evidence.record(&machine);
             }
             let _ = exited_tx.send(true);
         });
@@ -306,6 +324,17 @@ impl Vmm for Firecracker {
             exited,
             exit,
         })
+    }
+
+    fn memory_policy(
+        &self,
+        vm: &Vm,
+        id: &str,
+        jailed: bool,
+        expected_mb: u32,
+        class: briqyard_api::host_process::OomClass,
+    ) -> MemoryProtection {
+        enforce_memory(id, vm.pid, jailed, expected_mb, class)
     }
 
     async fn disk_rate(&self, vm: &Vm, rate: &DiskRate, volume: bool) -> Result<()> {
