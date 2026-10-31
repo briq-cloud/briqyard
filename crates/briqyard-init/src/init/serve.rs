@@ -96,7 +96,23 @@ where
         Err(_) => return,
     };
     let stream = Arc::new(tokio::sync::Mutex::new(output));
+    if !st.clone_gate.lock().await.allows(&req.op) {
+        send(
+            &stream,
+            &Response::error("clone barrier: operation unavailable"),
+        )
+        .await;
+        return;
+    }
     match req.op.as_str() {
+        "clone_configure_v1" => {
+            let response = clone::configure(&st, req.clone_configure).await;
+            send(&stream, &response).await;
+        }
+        "clone_activate_v1" => {
+            let response = clone::activate(&st, &req.clone_generation).await;
+            send(&stream, &response).await;
+        }
         "ping" => {
             let uptime = fs::read_to_string("/proc/uptime")
                 .ok()
@@ -111,6 +127,7 @@ where
                     main_pid,
                     version: briqyard_api::VERSION.into(),
                     file_stream_v1: true,
+                    clone_status: st.clone_gate.lock().await.status(),
                     ..Default::default()
                 },
             )
@@ -181,6 +198,44 @@ mod tests {
         client.read_to_end(&mut out).await.unwrap();
         task.await.unwrap();
         frames(&out)
+    }
+
+    #[tokio::test]
+    async fn template_barrier_denies_files_and_exec_before_activation() {
+        let st = state_with(Config {
+            template_profile: Some(guest::INIT_READY_V1.into()),
+            ..Default::default()
+        });
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("forbidden");
+        for op in ["exec", "put", "get", "put_stream", "get_stream", "shutdown"] {
+            let frames = roundtrip(
+                &st,
+                Request {
+                    op: op.into(),
+                    path: path.to_string_lossy().into(),
+                    cmd: vec!["/bin/true".into()],
+                    data: b"forbidden".to_vec(),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].kind, "error");
+            assert!(frames[0].message.starts_with("clone barrier:"));
+        }
+        assert!(!path.exists());
+        assert!(!*st.requested.lock().unwrap());
+        let pong = roundtrip(
+            &st,
+            Request {
+                op: "ping".into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(pong[0].main_pid, 0);
+        assert_eq!(pong[0].clone_status.as_ref().unwrap().stage, "builder");
     }
 
     #[tokio::test]

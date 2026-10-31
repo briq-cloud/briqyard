@@ -555,6 +555,7 @@ pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
         mounts: vec![],
         files: vec![],
         stop_timeout_sec: 10,
+        template_profile: None,
     };
     if let Some(v) = &r.volume {
         cfg.mounts.push(guest::Mount {
