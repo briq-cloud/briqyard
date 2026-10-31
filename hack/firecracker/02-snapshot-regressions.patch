@@ -1,15 +1,14 @@
 diff --git a/src/firecracker/src/api_server/parsed_request/checked_snapshot_response_tests.rs b/src/firecracker/src/api_server/parsed_request/checked_snapshot_response_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c88b176afd4427f111951693f17f3e61266a39d0
+index 0000000000000000000000000000000000000000..177a6e05fb12538351b0de12e1ed7da5ef4bc52b
 --- /dev/null
 +++ b/src/firecracker/src/api_server/parsed_request/checked_snapshot_response_tests.rs
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,21 @@
 +// Copyright 2026 Firecracker authors. All Rights Reserved.
 +// SPDX-License-Identifier: Apache-2.0
 +
 +use std::io::Cursor;
 +
-+use vmm::device_manager::snapshot::SnapshotPrepareError;
 +use vmm::devices::virtio::block::device::BlockPrepareError;
 +use vmm::persist::{CreateSnapshotError, MicrovmStateError};
 +use vmm::rpc_interface::VmmActionError;
@@ -19,9 +18,7 @@ index 0000000000000000000000000000000000000000..c88b176afd4427f111951693f17f3e61
 +#[test]
 +fn checked_preparation_failure_is_http_error_not_snapshot_success() {
 +    let error = VmmActionError::CreateSnapshot(CreateSnapshotError::MicrovmState(
-+        MicrovmStateError::PrepareDevices(SnapshotPrepareError::Block(
-+            BlockPrepareError::UnsupportedBackend,
-+        )),
++        MicrovmStateError::PrepareDevices(BlockPrepareError::UnsupportedBackend.into()),
 +    ));
 +    let response = ParsedRequest::convert_to_response(&Err(error));
 +    let mut wire = Cursor::new(Vec::new());
