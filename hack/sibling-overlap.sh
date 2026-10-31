@@ -5,6 +5,7 @@ set -euo pipefail
 client=${1:?usage: sibling-overlap.sh CONSUMER_ID}
 work=$(mktemp -d)
 pids=()
+phase=database-ready
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM HUP
@@ -13,6 +14,7 @@ cleanup() {
   for pid in "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
   for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
   exec 3>&- 4>&- 5>&-
+  if [ "$rc" != 0 ]; then printf 'sibling overlap failed: %s\n' "$phase" >&2; fi
   rm -rf "$work"
   exit "$rc"
 }
@@ -45,23 +47,30 @@ timeout --kill-after=2 20 briqyard machine exec -i "$client" -- env \
 sql=$!; pids+=("$sql")
 printf 'BEGIN;\nSELECT 42;\n\\echo database-ready\n' >&3
 marker 4 database-ready
-timeout --kill-after=2 20 briqyard machine exec "$client" -- wget -qO- -T 18 \
+phase=gateway-ready
+# -i selects streaming exec; EOF closes only guest stdin, leaving response output live.
+timeout --kill-after=2 20 briqyard machine exec -i "$client" -- wget -qO- -T 18 \
   --header 'X-Fixture-Token: placeholder' http://gateway.internal:3128/overlap \
-  >"$work/http.out" 2>"$work/http.err" &
+  </dev/null >"$work/http.out" 2>"$work/http.err" &
 http=$!; pids+=("$http")
 marker 5 gateway-ready
 # The gateway has flushed its first bytes and is blocked on its release event. Query the
 # peer over the still-open SQL connection before allowing that HTTP response to finish.
+phase=database-overlap
 printf 'SELECT 43;\n\\echo database-overlap\n' >&3
 marker 4 43
 marker 4 database-overlap
+phase=gateway-release
 timeout --kill-after=2 5 briqyard machine exec "$client" -- wget -qO- -T 3 \
   --header 'X-Fixture-Token: placeholder' http://gateway.internal:3128/release >"$work/released" &
 release=$!; pids+=("$release")
 wait_owned "$release"
 [ "$(cat "$work/released")" = released ]
+phase=gateway-complete
 marker 5 injected=True
+phase=database-complete
 printf 'COMMIT;\n\\q\n' >&3
 wait_owned "$sql"
+phase='http-exit'
 wait_owned "$http"
 pids=()

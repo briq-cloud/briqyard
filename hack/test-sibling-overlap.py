@@ -25,6 +25,9 @@ if 'psql' in sys.argv:
         elif line=='\\q':
             (state/'sql').unlink();break
 elif sys.argv[-1].endswith('/overlap'):
+    assert '-i' in sys.argv[1:sys.argv.index('--')], 'HTTP output requires streaming exec'
+    assert sys.stdin.read() == '', 'HTTP exec must receive EOF without input'
+    (state/'http-streaming').touch()
     assert (state/'sql').exists(), 'gateway started without an active database transaction'
     (state/'http').touch();print('gateway-ready',flush=True)
     with (state/'release').open() as f:assert f.readline()=='release\n'
@@ -65,7 +68,10 @@ class Overlap(unittest.TestCase):
                 raise
             result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
             self.assertEqual(result.returncode == 0, not fail_release, result.stdout + result.stderr)
+            self.assertTrue((state / 'http-streaming').exists(), 'HTTP exec did not stream after stdin EOF')
             self.assertTrue((state / 'overlap').exists(), 'no query completed during the gateway response')
+            if fail_release:
+                self.assertEqual(result.stderr.strip(), 'sibling overlap failed: gateway-release')
             for pid in (state / 'pids').read_text().splitlines():
                 with self.assertRaises(ProcessLookupError, msg='fixture child survived cleanup: ' + pid):
                     os.kill(int(pid), 0)
