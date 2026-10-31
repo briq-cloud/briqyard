@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-const OPENAPI: &str = include_str!("../../../api/openapi.yaml");
+const OPENAPI: &str = briqyard_api::OPENAPI;
 
 /// What a stop or a hand-over gives the API's requests and the endpoint connections in
 /// flight, one bound for both (ADR 0051): what arrives meanwhile waits in the kernel's queue
@@ -110,6 +110,8 @@ async fn run(args: Args) -> Result<()> {
             "briqyardd must run as root (ZFS, TAP devices, nftables)"
         ));
     }
+    // Fixed-domain ownership is acquired before host helpers, not after recovery begins.
+    let startup = briqyardd::fc::Startup::acquire().await?;
     for p in [&cfg.firecracker, &cfg.kernel, &cfg.init] {
         std::fs::metadata(p).with_context(|| p.display().to_string())?;
     }
@@ -164,7 +166,8 @@ async fn run(args: Args) -> Result<()> {
         .map(|r| (r.host.clone(), r.username.clone(), r.password.clone()))
         .collect();
     let dns = netw::dns::Resolver::new(&cfg.network.upstream_dns);
-    let mgr = machine::Manager::new(cfg.clone(), store, zfs, images, dns).await?;
+    let mgr =
+        machine::Manager::new_with_startup(cfg.clone(), store, zfs, images, dns, startup).await?;
     let adopted_ms = began.elapsed().as_millis() as u64;
     // The listeners the previous daemon left in systemd's store (ADR 0051).
     let listeners = Arc::new(briqyard_api::listeners::Listeners::from_env());

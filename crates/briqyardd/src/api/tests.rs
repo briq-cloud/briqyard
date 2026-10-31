@@ -38,8 +38,7 @@ fn tenant_is_read_as_namespace_in_a_query() {
 
 #[test]
 fn the_description_lists_the_reasons_the_daemon_has() {
-    let doc: serde_yaml::Value =
-        serde_yaml::from_str(include_str!("../../../../api/openapi.yaml")).unwrap();
+    let doc: serde_yaml::Value = serde_yaml::from_str(api::OPENAPI).unwrap();
     let listed: Vec<&str> = doc["components"]["schemas"]["Event"]["properties"]["reason"]["enum"]
         .as_sequence()
         .unwrap()
@@ -47,6 +46,20 @@ fn the_description_lists_the_reasons_the_daemon_has() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert_eq!(listed, api::reason::ALL);
+    let conditions: Vec<&str> = doc["components"]["schemas"]["Condition"]["properties"]["type"]
+        ["enum"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(conditions, api::condition::ALL);
+    for schema in ["Status", "Host", "RegisterHostRequest"] {
+        assert_eq!(
+            doc["components"]["schemas"][schema]["properties"]["memory_policy"]["$ref"].as_str(),
+            Some("#/components/schemas/MemoryPolicy")
+        );
+    }
 }
 
 #[test]

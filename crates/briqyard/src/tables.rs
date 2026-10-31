@@ -155,12 +155,21 @@ pub(super) fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, Stri
 /// each condition that is true and its note when the bootstrap or an upgrade left one.
 pub(super) fn host_table(hs: &[api::Host]) -> String {
     let mut out = format!(
-        "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<10} {:<20} LAST SEEN\n",
-        "ID", "URL", "STATE", "REGION", "MEMORY MB", "CPU m", "MACHINES", "NAMESPACES", "VERSION"
+        "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<10} {:<20} {:<18} LAST SEEN\n",
+        "ID",
+        "URL",
+        "STATE",
+        "REGION",
+        "MEMORY MB",
+        "CPU m",
+        "MACHINES",
+        "NAMESPACES",
+        "VERSION",
+        "MEM POLICY"
     );
     for h in hs {
         out.push_str(&format!(
-            "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<10} {:<20} {}\n",
+            "{:<16} {:<28} {:<12} {:<8} {:<14} {:<10} {:<9} {:<10} {:<20} {:<18} {}\n",
             h.id,
             if h.url.is_empty() { "-" } else { &h.url },
             h.state,
@@ -174,6 +183,10 @@ pub(super) fn host_table(hs: &[api::Host]) -> String {
             } else {
                 &h.version
             },
+            h.memory_policy.map_or_else(
+                || "legacy".to_string(),
+                |p| format!("v{}:+{}MB", p.version, p.vmm_overhead_mb)
+            ),
             h.last_seen.to_rfc3339()
         ));
         if !h.ssh.is_empty() {

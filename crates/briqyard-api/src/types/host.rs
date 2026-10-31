@@ -41,7 +41,15 @@ pub mod condition {
     pub const DISK_PRESSURE: &str = "disk_pressure";
     /// A `zfs` command of the daemon's running for over a minute: the pool may be hung.
     pub const STORAGE_STALLED: &str = "storage_stalled";
-    pub const ALL: &[&str] = &[MEMORY_PRESSURE, DISK_PRESSURE, STORAGE_STALLED];
+    pub const MEMORY_PROTECTION: &str = "memory_protection";
+    pub const MEMORY_ACCOUNTING: &str = "memory_accounting";
+    pub const ALL: &[&str] = &[
+        MEMORY_PRESSURE,
+        DISK_PRESSURE,
+        STORAGE_STALLED,
+        MEMORY_PROTECTION,
+        MEMORY_ACCOUNTING,
+    ];
 }
 
 /// A host condition as the daemon's tick last found it.
@@ -109,6 +117,8 @@ pub struct Host {
     pub state: String,
     pub capacity: Capacity,
     pub used: Capacity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_policy: Option<MemoryPolicy>,
     pub machines: usize,
     #[serde(default, alias = "tenants")]
     pub namespaces: Vec<String>,
@@ -193,6 +203,8 @@ pub struct RegisterHostRequest {
     pub region: String,
     pub capacity: Capacity,
     pub used: Capacity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_policy: Option<MemoryPolicy>,
     pub machines: usize,
     #[serde(default, alias = "tenants")]
     pub namespaces: Vec<String>,
@@ -247,6 +259,8 @@ pub struct Status {
     pub host_id: String,
     pub capacity: Capacity,
     pub used: Capacity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_policy: Option<MemoryPolicy>,
     pub machines: usize,
     pub running: usize,
     /// Free space for disks, in MB.

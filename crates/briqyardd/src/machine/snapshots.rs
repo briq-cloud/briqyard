@@ -397,7 +397,7 @@ impl Manager {
             other => return Err(MError::BadState(other.into())),
         };
         if was_running {
-            self.stop_locked(&e, format!("to restore {}", s.id)).await;
+            self.stop_locked(&e, format!("to restore {}", s.id)).await?;
         }
         {
             // The intent first: a restore cut short is finished by the next one, the next
@@ -420,7 +420,7 @@ impl Manager {
 
     /// Ends a running machine's process under its lock: `stopping`, then `stopped` on
     /// request once Firecracker is gone. The watcher finds nothing left to settle.
-    async fn stop_locked(&self, e: &Arc<Entry>, why: String) {
+    async fn stop_locked(&self, e: &Arc<Entry>, why: String) -> Result<()> {
         e.set_state(state::STOPPING, |_| {
             Some(
                 Ev::normal(reason::STOPPING, format!("stopping ({why})"))
@@ -430,9 +430,10 @@ impl Manager {
         let _ = self.save(e);
         let live = e.live.lock().unwrap().clone();
         if let Some(live) = live {
-            self.end_process(e, &live, Duration::from_secs(10)).await;
+            self.end_process(e, &live, Duration::from_secs(10)).await?;
         }
         self.settle_stopped(e, stop::USER);
+        Ok(())
     }
 
     /// The restore the record's intent names, its lock (and turn) held: each disk swapped for

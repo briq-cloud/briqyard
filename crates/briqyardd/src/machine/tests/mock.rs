@@ -16,6 +16,10 @@ pub(super) enum Boots {
     Runs(i32),
     /// The VMM panics: a bug in a transition.
     Panics,
+    /// A positive no-spawn failure, with no child whose death needs proof.
+    RefusedLaunch,
+    /// The factory lost its launch reply/identity while an owned child survives.
+    UnsettledLaunch(&'static str),
 }
 
 /// A process the mock host runs: a pid, the console the manager reads, how its guest
@@ -55,6 +59,11 @@ pub(super) struct Mock {
     /// `uncount` fails, as an `nft` that refuses its input.
     pub(super) refuse_uncount: AtomicBool,
     pub(super) refuse_count: AtomicBool,
+    pub(super) refuse_retirement: AtomicBool,
+    pub(super) spawning_open: AtomicBool,
+    pub(super) recovery_initialized: AtomicBool,
+    pub(super) refuse_recovery: AtomicBool,
+    pub(super) refuse_final_meter: AtomicBool,
     /// What an exec of a command (its argv joined by spaces) exits with; 0 when absent.
     pub(super) exec_codes: Mutex<HashMap<String, i32>>,
     /// How long an exec takes, and how many run at once now and at most.
@@ -69,6 +78,7 @@ pub(super) struct Mock {
     pub(super) http_codes: Mutex<HashMap<(Ipv4Addr, u16), u16>>,
     /// The size each machine last booted with, as Firecracker is given it.
     pub(super) booted: Mutex<HashMap<String, api::Size>>,
+    pub(super) memory_policy: Mutex<Option<fc::MemoryProtection>>,
     /// What the VMM says it is (ADR 0027): another value is an upgraded Firecracker.
     pub(super) vmm_version: Mutex<String>,
     /// The version the guests' inits answer with.
@@ -101,6 +111,11 @@ impl Mock {
             counted: Mutex::new(BTreeMap::new()),
             refuse_uncount: AtomicBool::new(false),
             refuse_count: AtomicBool::new(false),
+            refuse_retirement: AtomicBool::new(false),
+            spawning_open: AtomicBool::new(true),
+            recovery_initialized: AtomicBool::new(false),
+            refuse_recovery: AtomicBool::new(false),
+            refuse_final_meter: AtomicBool::new(false),
             exec_codes: Mutex::new(HashMap::new()),
             exec_takes: Mutex::new(Duration::ZERO),
             execs_now: Default::default(),
@@ -109,6 +124,7 @@ impl Mock {
             probed: Mutex::new(Vec::new()),
             http_codes: Mutex::new(HashMap::new()),
             booted: Mutex::new(HashMap::new()),
+            memory_policy: Mutex::new(None),
             vmm_version: Mutex::new("v1.17.0/test".into()),
             init_version: Mutex::new("0.1.0+init".into()),
             file_stream_v1: AtomicBool::new(false),
@@ -276,7 +292,7 @@ impl Mock {
         let mut procs = self.procs.lock().unwrap();
         if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
             p.exit = None;
-            let _ = p.exited.send(true);
+            p.exited.send_replace(true);
         }
     }
 
@@ -302,7 +318,107 @@ impl Mock {
 
 #[async_trait::async_trait]
 impl fc::Vmm for Mock {
+    async fn initialize_recovery(&self, machines: &[fc::RecoveryMachine]) -> Result<()> {
+        // Explicit synthetic supervision: this does not construct any native authority.
+        self.spawning_open.store(false, Relaxed);
+        if self.refuse_recovery.load(Relaxed) {
+            anyhow::bail!("synthetic supervision is unresolved");
+        }
+        let ids: std::collections::HashSet<_> = machines.iter().map(|m| (&m.id, m.pid)).collect();
+        if ids.len() != machines.len() {
+            anyhow::bail!("synthetic recovery identity collision");
+        }
+        self.record("recovery-initialized".into());
+        self.recovery_initialized.store(true, Relaxed);
+        Ok(())
+    }
+    fn open_recovery(&self) -> Result<()> {
+        if !self.recovery_initialized.load(Relaxed) {
+            anyhow::bail!("synthetic startup barrier unavailable");
+        }
+        self.record("recovery-open".into());
+        self.spawning_open.store(true, Relaxed);
+        Ok(())
+    }
+    async fn recover_stopped(&self, id: &str) -> Result<()> {
+        if self.refuse_recovery.load(Relaxed) {
+            anyhow::bail!("synthetic process ownership unresolved");
+        }
+        self.record(format!("recover-stopped {id}"));
+        for (pid, owner) in self.processes() {
+            if owner == id {
+                self.kill(pid);
+            }
+        }
+        Ok(())
+    }
+    async fn prepare_orphans(&self, known: &[String]) -> Result<usize> {
+        let mut orphaned: std::collections::BTreeSet<_> = self
+            .cgroups
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|id| !known.contains(id))
+            .cloned()
+            .collect();
+        orphaned.extend(
+            self.processes()
+                .into_iter()
+                .map(|(_, id)| id)
+                .filter(|id| !known.contains(id)),
+        );
+        for id in &orphaned {
+            self.recover_stopped(id).await?;
+            self.retire_cgroup(id, false)?;
+        }
+        Ok(orphaned.len())
+    }
+    fn final_cgroup_use(&self, id: &str, _jailed: bool) -> Result<fc::FinalCgroupUse> {
+        if self.refuse_final_meter.load(Relaxed) {
+            anyhow::bail!("synthetic final counter read unavailable");
+        }
+        Ok(match self.cgroups.lock().unwrap().get(id).copied() {
+            Some(reading) => fc::FinalCgroupUse::Present(reading),
+            None => fc::FinalCgroupUse::Absent,
+        })
+    }
+    fn launch_settlement(&self, id: &str) -> fc::LaunchSettlement {
+        if self.processes().iter().any(|(_, owner)| owner == id) {
+            fc::LaunchSettlement::Unresolved
+        } else {
+            fc::LaunchSettlement::Settled
+        }
+    }
+    fn retire_cgroup(&self, id: &str, _jailed: bool) -> Result<()> {
+        self.record(format!("retire-cgroup {id}"));
+        if self.refuse_retirement.load(Relaxed)
+            || self.processes().iter().any(|(_, owner)| owner == id)
+        {
+            anyhow::bail!("synthetic VMM retirement refused");
+        }
+        self.cgroups.lock().unwrap().remove(id);
+        Ok(())
+    }
+
+    fn memory_policy(
+        &self,
+        _vm: &fc::Vm,
+        _id: &str,
+        _jailed: bool,
+        expected_mb: u32,
+        _class: briqyard_api::host_process::OomClass,
+    ) -> fc::MemoryProtection {
+        self.memory_policy
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| fc::MemoryProtection::verified(expected_mb))
+    }
+
     async fn boot(&self, b: &fc::Boot) -> Result<fc::Vm> {
+        if !self.spawning_open.load(Relaxed) {
+            anyhow::bail!("synthetic managed spawning closed");
+        }
         let boots = self.boots.lock().unwrap().clone();
         self.record(format!("boot {} tap={} resume={}", b.id, b.tap, b.resume));
         let size = api::Size {
@@ -321,6 +437,9 @@ impl fc::Vmm for Mock {
             .insert(b.id.clone(), (b.root.clone(), b.data.clone()));
         if let Boots::Panics = boots {
             panic!("the VMM panicked");
+        }
+        if let Boots::RefusedLaunch = boots {
+            anyhow::bail!("launch refused before spawning");
         }
         tokio::fs::create_dir_all(&b.dir).await?;
         let (api, vsock, console, _) = fc::paths(&b.dir);
@@ -343,11 +462,14 @@ impl fc::Vmm for Mock {
             exit: Some(exit_tx),
         });
         match boots {
+            Boots::UnsettledLaunch(why) => return Err(anyhow!(why)),
             Boots::Exits(code, error) => self.report(pid, code, false, false, error),
             Boots::Runs(code) => self.exit(pid, code, false),
             _ => {}
         }
         Ok(fc::Vm {
+            #[cfg(target_os = "linux")]
+            identity: None,
             pid,
             api,
             vsock,
@@ -374,6 +496,8 @@ impl fc::Vmm for Mock {
             .find(|p| p.pid == pid && p.id == id && !*p.exited.borrow())?;
         let (api, _, _, _) = fc::paths(dir);
         Some(fc::Vm {
+            #[cfg(target_os = "linux")]
+            identity: None,
             pid,
             api,
             vsock: p.vsock.clone(),
@@ -408,6 +532,12 @@ impl fc::Vmm for Mock {
 
     async fn resume(&self, vm: &fc::Vm) -> Result<()> {
         self.record(format!("resume {}", vm.pid));
+        Ok(())
+    }
+
+    fn kill_checked(&self, vm: &fc::Vm) -> Result<()> {
+        // The synthetic factory's unreused PID is its explicit incarnation handle.
+        self.kill(vm.pid);
         Ok(())
     }
 

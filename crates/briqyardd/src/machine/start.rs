@@ -43,7 +43,12 @@ impl Manager {
                 return Err(MError::Quota(x.to_string()));
             }
             let (used, _) = committed(&machines);
-            admit(used.memory_mb, self.capacity().memory_mb, r.size.memory_mb)?;
+            self.memory_admission(&machines)?;
+            admit(
+                used.memory_mb,
+                self.capacity().memory_mb,
+                host_memory(r.size.memory_mb)?,
+            )?;
             admit_cpu(
                 used.cpu_millis(),
                 self.capacity().cpu_millis(),
@@ -93,6 +98,7 @@ impl Manager {
     /// `asked`: a caller asked for this run (a create, a start, a wake), not the restart
     /// policy; its startup probe failing is a failed boot (ADR 0022).
     pub(super) async fn start_entry(&self, e: &Arc<Entry>, asked: bool) -> Result<(), MError> {
+        self.refresh_launch_reservation(e);
         let cfg = &self.inner.cfg;
         let rec = e.snapshot();
         match rec.state.as_str() {
@@ -215,6 +221,7 @@ impl Manager {
             id: rec.id.clone(),
             dir,
             jail: self.jail_for(&rec),
+            oom_class: rec.oom_class(),
             vcpus: rec.size.vcpus,
             memory_mb: rec.size.memory_mb,
             kernel: cfg.kernel.clone(),
@@ -244,9 +251,21 @@ impl Manager {
             .await
             .map_or(0, |c| c.cpu_usec);
         e.meter.lock().unwrap().boot(cpu);
-        let live = self.inner.vmm.boot(&boot).await.map_err(fail)?;
+        e.launch_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let launched = self.inner.vmm.boot(&boot).await;
+        if launched.is_err() {
+            e.launch_pending.store(
+                self.inner.vmm.launch_settlement(&rec.id) != fc::LaunchSettlement::Settled,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+        let live = launched.map_err(fail)?;
         {
+            self.retain_memory_policy(e, &live);
             *e.live.lock().unwrap() = Some(live.clone());
+            e.launch_pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             *e.stop_req.lock().unwrap() = None;
             let mut r = e.rec.lock().unwrap();
             r.pid = live.pid;
@@ -277,7 +296,7 @@ impl Manager {
             // finds nothing to settle and no restart policy applies. The machine stays in
             // `error`, with the init's reason or else the console's last lines, for the
             // caller to read and destroy.
-            self.end_process(e, &live, Duration::ZERO).await;
+            self.end_process(e, &live, Duration::ZERO).await?;
             self.inner.stats.starts_failed.fetch_add(1, Relaxed);
             let why = match said {
                 true => why,
@@ -412,7 +431,7 @@ impl Manager {
             gid: uid,
             cpu_millis: rec.size.cpu_millis(),
             // Guest memory, plus what Firecracker itself needs around it.
-            memory_mb: rec.size.memory_mb + 256,
+            memory_mb: api::vmm_memory_mb(rec.size.memory_mb).unwrap_or(u32::MAX),
         })
     }
 

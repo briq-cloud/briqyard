@@ -425,7 +425,8 @@ async fn recovery_says_what_it_adopted_and_what_it_stopped() {
         None
     });
     h.host.calls();
-    assert_eq!(h.m.recover().await, (1, 1, 1));
+    assert_eq!(h.m.recover().await.unwrap(), (1, 1, 1));
+    h.m.resume_recovery_workers();
     assert!(h.host.calls().contains(&format!("kill {cut_pid}")));
     let cut = h.events_of("m_cut").pop().unwrap();
     assert_eq!(

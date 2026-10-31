@@ -152,7 +152,9 @@ impl Manager {
 
     /// The host's conditions as the tick last decided them.
     pub fn conditions(&self) -> Vec<api::Condition> {
-        self.inner.conditions.lock().unwrap().list()
+        let mut conditions = self.inner.conditions.lock().unwrap().list();
+        conditions.push(self.memory_condition());
+        conditions
     }
 
     /// This daemon's start (ADR 0027).

@@ -15,7 +15,6 @@ use briqyard_api::EgressDrops;
 use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
 /// The networks a namespace may not reach, whatever the host routes to them.
 const PRIVATE_NETS: &str =
@@ -417,7 +416,7 @@ pub struct Counters {
 pub async fn counters() -> Result<HashMap<String, Counters>> {
     let mut sets: [HashMap<String, (u64, u64)>; 5] = Default::default();
     for (set, into) in COUNTERS.iter().zip(sets.iter_mut()) {
-        let out = Command::new("nft")
+        let out = crate::host_process::command("nft")
             .args(["-j", "list", "set", "inet", "briqyard", set])
             .output()
             .await
@@ -539,7 +538,7 @@ fn missing_is_fine(r: Result<()>) -> Result<()> {
 
 /// Runs a script through `nft -f -`: one transaction, applied whole or not at all.
 async fn nft(script: &str) -> Result<()> {
-    let mut child = Command::new("nft")
+    let mut child = crate::host_process::command("nft")
         .args(["-f", "-"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())

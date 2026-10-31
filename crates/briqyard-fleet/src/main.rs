@@ -218,6 +218,7 @@ fn main() {
 
 fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
     HostRec {
+        memory_policy: None,
         id: if h.id.is_empty() {
             h.url.clone()
         } else {

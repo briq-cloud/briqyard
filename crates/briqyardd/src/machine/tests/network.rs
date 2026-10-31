@@ -293,7 +293,8 @@ async fn the_tables_at_start_hold_the_running_policies() {
     assert_eq!(h.m.inner.policies.lock().unwrap().len(), 2);
     // None of them is adopted (no process): each is unplugged, policy included.
     h.host.calls();
-    h.m.recover().await;
+    h.m.recover().await.unwrap();
+    h.m.resume_recovery_workers();
     let calls = h.host.calls();
     assert!(calls.contains(&format!("unset_policy {VIA}")), "{calls:?}");
     assert!(calls.contains(&"unset_policy none 10.64.1.4".to_string()));

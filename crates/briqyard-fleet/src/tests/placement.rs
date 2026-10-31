@@ -169,33 +169,42 @@ async fn room_comes_back_at_a_failed_create_and_at_a_destroy() {
 /// host takes the connection and never answers.
 #[tokio::test]
 async fn a_create_whose_caller_hangs_up_gives_its_hold_back() {
-    let f = fleet(config::Config::default());
-    seed(&f.st, "h_a", 64_000, 0, 0, &[]);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    f.st.reg.lock().unwrap().hosts.get_mut("h_a").unwrap().url =
-        format!("http://{}", listener.local_addr().unwrap());
-    let (asked, mut forwarded) = tokio::sync::mpsc::channel(1);
-    tokio::spawn(async move {
-        let mut open = Vec::new();
-        while let Ok((conn, _)) = listener.accept().await {
-            open.push(conn);
-            let _ = asked.try_send(());
+    for policy in [None, Some(api::MemoryPolicy::CURRENT)] {
+        let f = fleet(config::Config::default());
+        seed(&f.st, "h_a", 64_000, 0, 0, &[]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        {
+            let mut reg = f.st.reg.lock().unwrap();
+            let host = reg.hosts.get_mut("h_a").unwrap();
+            host.url = format!("http://{}", listener.local_addr().unwrap());
+            host.memory_policy = policy;
         }
-    });
-    let used = |f: &Fleet| f.st.reg.lock().unwrap().hosts["h_a"].used.memory_mb;
-    let st = f.st.clone();
-    let create = tokio::spawn(async move {
-        let body = create_body("t1", "web", 20_000);
-        call(&st, "POST", "/v1/machines", "", Some(body)).await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(2), forwarded.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(used(&f), 20_000, "held while the host makes it");
-    create.abort();
-    assert!(create.await.unwrap_err().is_cancelled());
-    assert_eq!(used(&f), 0, "given back");
+        let (asked, mut forwarded) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((conn, _)) = listener.accept().await {
+                open.push(conn);
+                let _ = asked.try_send(());
+            }
+        });
+        let used = |f: &Fleet| f.st.reg.lock().unwrap().hosts["h_a"].used.memory_mb;
+        let st = f.st.clone();
+        let create = tokio::spawn(async move {
+            let body = create_body("t1", "web", 20_000);
+            call(&st, "POST", "/v1/machines", "", Some(body)).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), forwarded.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let expected = policy.map_or(20_000, |p: api::MemoryPolicy| {
+            p.reservation(20_000).unwrap()
+        });
+        assert_eq!(used(&f), expected, "physical hold while the host makes it");
+        create.abort();
+        assert!(create.await.unwrap_err().is_cancelled());
+        assert_eq!(used(&f), 0, "given back");
+    }
 }
 
 #[tokio::test]

@@ -377,6 +377,7 @@ pub(super) async fn register_host(
                 state: String::new(),
                 capacity: req.capacity,
                 used: req.used,
+                memory_policy: req.memory_policy,
                 machines: req.machines,
                 namespaces: req.namespaces,
                 last_seen: now,
@@ -546,6 +547,7 @@ pub(super) fn new_added_host(
         return Err(invalid("public_tcp_ports: 0 is not a port".into()));
     }
     Ok(HostRec {
+        memory_policy: None,
         id,
         url,
         ssh: if address == req.ssh {
@@ -716,11 +718,13 @@ pub(super) async fn poll_static_hosts_once(st: &AppState) -> bool {
             let mut rec = h.clone();
             rec.capacity = s.capacity;
             rec.used = s.used;
+            rec.memory_policy = s.memory_policy;
             rec.machines = s.machines;
             rec.namespaces = namespaces;
             rec.version = s.version;
             rec.disk_free_mb = s.disk_free_mb;
             rec.conditions = s.conditions;
+            rec.memory_policy = s.memory_policy;
             rec.started = s.started;
             st.reg.lock().unwrap().heartbeat(rec, now);
         } else if h.capacity.memory_mb == 0 {

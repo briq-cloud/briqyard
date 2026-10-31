@@ -9,6 +9,7 @@ pub mod events;
 pub mod fc;
 pub mod guestc;
 pub mod heartbeat;
+mod host_process;
 pub mod image;
 pub mod ingress;
 pub mod machine;

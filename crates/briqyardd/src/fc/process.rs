@@ -120,7 +120,12 @@ pub struct Process {
     pub(super) uid: u32,
     pub(super) gid: u32,
     child: Child,
+    settlement: super::settlement::Attempt,
     pid: u32,
+    #[cfg(target_os = "linux")]
+    identity: Option<Arc<super::memory::ProcessIdentity>>,
+    #[cfg(target_os = "linux")]
+    oom_evidence: Option<super::memory::OomEvidence>,
     done: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -214,6 +219,10 @@ pub(super) fn jailer_args(j: &Jail, id: &str, binary: &Path) -> Vec<std::ffi::Os
     if j.memory_mb > 0 {
         args.push("--cgroup".into());
         args.push(format!("memory.max={}", (j.memory_mb as u64) << 20).into());
+        for value in ["memory.oom.group=1", "memory.swap.max=0"] {
+            args.push("--cgroup".into());
+            args.push(value.into());
+        }
     }
     args
 }
@@ -271,14 +280,24 @@ pub fn paths(dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
 impl Process {
     /// Launches Firecracker for machine `id` with runtime files under `dir` and waits for its
     /// API. Nothing is configured yet.
-    pub async fn start(
+    pub(super) async fn start(
         binary: &Path,
-        id: &str,
-        dir: &Path,
+        boot: &super::Boot,
         pci: bool,
-        jail: Option<&Jail>,
         console_max: u64,
+        mut settlement: super::settlement::Attempt,
     ) -> Result<Self> {
+        let (id, dir, jail, oom_class) = (
+            boot.id.as_str(),
+            boot.dir.as_path(),
+            boot.jail.as_ref(),
+            boot.oom_class,
+        );
+        if jail.is_some_and(|j| j.uid == 0 || j.gid == 0) {
+            return Err(anyhow!("jailed VMM requires an unprivileged identity"));
+        }
+        let expected_mb =
+            api::vmm_memory_mb(boot.memory_mb).context("VMM memory ceiling overflow")?;
         tokio::fs::create_dir_all(dir).await?;
         let (api, vsock, console, fclog) = paths_for(dir, jail, id);
         let _ = tokio::fs::remove_file(&api).await;
@@ -313,7 +332,15 @@ impl Process {
                 for d in [&root, &root.join("run")] {
                     std::os::unix::fs::chown(d, Some(j.uid), Some(j.gid))?;
                 }
-                let mut cmd = Command::new(&j.jailer);
+                #[cfg(target_os = "linux")]
+                let program = settlement.jailer_program(&j.jailer)?;
+                #[cfg(not(target_os = "linux"))]
+                let program = j.jailer.clone();
+                let mut cmd = Command::new(program);
+                {
+                    use std::os::unix::process::CommandExt;
+                    cmd.as_std_mut().arg0(&j.jailer);
+                }
                 cmd.args(jailer_args(j, id, binary));
                 cmd.arg("--").arg("--").arg("--level").arg("Warning");
                 if pci {
@@ -350,9 +377,11 @@ impl Process {
         for v in briqyard_api::listeners::ENV {
             cmd.env_remove(v);
         }
+        briqyard_api::host_process::set_class(cmd.as_std_mut(), oom_class);
         cmd.process_group(0);
         cmd.kill_on_drop(false);
         let mut child = cmd.spawn().context("start firecracker")?;
+        settlement.spawned();
         let pid = child.id().unwrap_or(0);
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
@@ -366,7 +395,7 @@ impl Process {
             let _ = t2.await;
             let _ = tx.send(true);
         });
-        let p = Self {
+        let mut p = Self {
             dir: dir.to_path_buf(),
             api: api.clone(),
             vsock,
@@ -376,26 +405,77 @@ impl Process {
             uid,
             gid,
             child,
+            settlement,
             pid,
+            #[cfg(target_os = "linux")]
+            identity: None,
+            #[cfg(target_os = "linux")]
+            oom_evidence: None,
             done: rx,
         };
         if let Err(e) = p.client.wait_api(Duration::from_secs(10)).await {
-            p.kill();
+            p.abort(id);
+            let _ = tokio::time::timeout(Duration::from_secs(10), p.wait()).await;
             return Err(e);
         }
-        let mut p = p;
         if let Some(root) = p.chroot.clone() {
             // The process we spawned is the jailer's parent: it exits once it has written the
             // pid file, so its exit is the wait, and the file is then there or never will be.
-            let _ = p.child.wait().await;
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(10), p.child.wait()).await,
+                Ok(Ok(_))
+            ) {
+                p.abort(id);
+                let _ = tokio::time::timeout(Duration::from_secs(10), p.wait()).await;
+                return Err(anyhow!("jailer launcher did not positively settle"));
+            }
             match jailed_pid(&root) {
                 Ok(pid) => p.pid = pid,
                 Err(e) => {
-                    // A Firecracker that cannot be named is killed through its cgroup.
-                    let _ = std::fs::write(cgroup_dir(id).join("cgroup.kill"), "1");
+                    p.abort(id);
+                    let _ = tokio::time::timeout(Duration::from_secs(10), p.wait()).await;
                     return Err(e.context("jailer pid"));
                 }
             }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            p.identity = super::memory::ProcessIdentity::open(id, p.pid())
+                .ok()
+                .map(Arc::new);
+        }
+        #[cfg(target_os = "linux")]
+        if jail.is_some() && p.identity.is_none() {
+            p.abort(id);
+            let _ = tokio::time::timeout(Duration::from_secs(10), p.wait()).await;
+            return Err(anyhow!("VMM process identity unavailable before boot"));
+        }
+        #[cfg(target_os = "linux")]
+        if jail.is_some()
+            && p.identity
+                .as_ref()
+                .is_none_or(|identity| identity.confirm_unprivileged().is_err())
+        {
+            p.abort(id);
+            let _ = tokio::time::timeout(Duration::from_secs(10), p.wait()).await;
+            return Err(anyhow!("jailed VMM confinement identity unavailable"));
+        }
+        let policy = enforce_memory(id, p.pid(), jail.is_some(), expected_mb, oom_class);
+        if let Some(reason) = policy.degraded {
+            // The process has not received boot/load/resume commands yet.
+            p.abort(id);
+            let _ = tokio::time::timeout(Duration::from_secs(10), p.wait()).await;
+            return Err(anyhow!("VMM memory policy: {reason}"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            p.oom_evidence = super::memory::OomEvidence::capture(id, p.pid());
+        }
+        if !policy.contained {
+            tracing::warn!(
+                machine = id,
+                "unjailed VMM: memory cgroup containment unavailable"
+            );
         }
         Ok(p)
     }
@@ -458,25 +538,103 @@ impl Process {
         self.pid
     }
 
-    /// `true` once the process is gone and its console fully written.
+    /// The exact process handle retained across lifecycle termination.
+    #[cfg(target_os = "linux")]
+    pub(super) fn identity(&self) -> Option<Arc<super::memory::ProcessIdentity>> {
+        self.identity.clone()
+    }
+
+    pub(super) fn settled(&self) -> watch::Receiver<bool> {
+        self.settlement.receiver()
+    }
+
+    /// Console completion only; not process-death authority.
     pub fn done(&self) -> watch::Receiver<bool> {
         self.done.clone()
     }
 
+    /// A pre-boot failure may precede the jailer's pidfile or API readiness.
+    fn abort(&mut self, id: &str) {
+        #[cfg(target_os = "linux")]
+        if self.identity.is_none() {
+            let pid = self
+                .chroot
+                .as_ref()
+                .and_then(|root| jailed_pid(root).ok())
+                .unwrap_or(self.pid);
+            self.identity = super::memory::ProcessIdentity::open(id, pid)
+                .ok()
+                .map(Arc::new);
+            self.oom_evidence = super::memory::OomEvidence::capture(id, pid);
+        }
+        self.kill();
+        #[cfg(target_os = "linux")]
+        if self.chroot.is_some() {
+            super::memory::abort_owned_leaf(id);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = id;
+    }
+
     pub fn kill(&self) {
-        unsafe {
-            libc::kill(self.pid as i32, libc::SIGKILL);
+        #[cfg(target_os = "linux")]
+        if let Some(identity) = &self.identity {
+            identity.kill();
+            return;
+        }
+        // An unreaped direct child retains its PID; the forked VMM requires its pidfd.
+        if self.child.id() == Some(self.pid) {
+            unsafe {
+                libc::kill(self.pid as i32, libc::SIGKILL);
+            }
         }
     }
 
     /// Waits for the process to exit and its console to be fully written.
-    pub async fn wait(&mut self) {
-        let _ = self.child.wait().await;
+    pub async fn wait(&mut self) -> Result<()> {
+        self.child.wait().await.context("reap VMM launcher")?;
+        #[cfg(target_os = "linux")]
+        if let Some(identity) = &self.identity {
+            identity.wait_dead().await?;
+        }
+        #[cfg(target_os = "linux")]
+        if self.chroot.is_some() {
+            // Successful direct launcher reap closes pre-join creation. The exact approved
+            // lease and no-fork pre-exec contract put every post-join descendant in this
+            // epoch's leaf, including a launch that ended before any pidfile was captured.
+            let id = self
+                .dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("machine identity")?;
+            self.settlement.confirm_empty_scope(id)?;
+        }
         let mut done = self.done.clone();
         while !*done.borrow() {
             if done.changed().await.is_err() {
-                break;
+                return Err(anyhow!("console completion unavailable"));
             }
         }
+        #[cfg(target_os = "linux")]
+        if let Some(evidence) = self.oom_evidence.take() {
+            let id = self
+                .dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            evidence.record(id);
+        } else if self.chroot.is_some() {
+            tracing::warn!(
+                machine = self
+                    .dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown"),
+                reason = "vmm_oom_evidence_unavailable",
+                "VMM local memory events baseline unavailable"
+            );
+        }
+        self.settlement.complete();
+        Ok(())
     }
 }

@@ -31,7 +31,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
-| REST resources, OpenAPI | ✓ `api/openapi.yaml`, served | | |
+| REST resources, OpenAPI | ✓ `api/openapi/`, served | | |
 | `resourceVersion`, optimistic concurrency (409 on a stale write) | ✓ a machine's `version`, `If-Match` on PATCH, DELETE, start, stop, wake, restart (ADR 0019) | | |
 | watch (list + watch, informers) | ✓ `GET /v1/events?watch=true` from a cursor; per host, or a namespace or a machine through the fleet; a bookmark every 30 s of quiet (ADR 0047) | | |
 | Events (`kubectl get events`, `describe`) | ✓ an event log per host, a closed list of reasons, `briqyard events`; repeats of uses, refusals and readiness flips folded for 10 minutes into one line with `count` (ADR 0047) | events of endpoints and namespaces; folding the restart chain | yard, later |
@@ -155,13 +155,17 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
+| Pod Overhead / runtime memory reservation | ✓ one checked guest + 256-MiB VMM ceiling reserved against host capacity; namespace memory quotas retain guest sizes; per-host accounting policy and exact fleet holds (ADR 0065) | measured overhead optimization | yard |
+| Kernel OOM preference / cgroup containment | ◐ supervisors -900, helpers 0, ordinary VMMs +500, runtime-owned gateway +250; leaf OOM groups and no swap; positive adoption retained/degraded on policy failure (ADR 0065) | workload QoS classes and user-selectable priorities | yard |
+| PriorityClass, preemption | ✗ fixed runtime roles only | authorized workload-priority policy and preemption | yard, later |
+| Node-pressure eviction | ✗ conditions block new admissions; no pressure victim selection or eviction | bounded pressure eviction | yard, later |
 | RuntimeClass (gVisor, Kata) | ★ every machine is a microVM under the jailer | | |
 | Pod security, seccomp | ★ Firecracker's own seccomp; the guest is root in its VM only | | |
 | ResourceQuota, LimitRange per namespace | ◐ a quota per namespace: machines, memory, vCPUs, disk, set by briq (ADR 0025) | LimitRange (a size per machine): the control plane's check | yard (values from briq) |
 | Egress abuse (outside core) | ✓ blocked ports, a connection rate, a bandwidth cap per machine, drops counted (ADR 0018) | | yard; the response to abuse is briq's |
 | Private endpoints, tokens | | | briq |
 | Workload identity (a token to a cloud API) | | the credential gateway | briq |
-| PodDisruptionBudget, PriorityClass, HPA, VPA, RWX volumes | weighed, not needed: one machine per briq, no replicas | | — |
+| PodDisruptionBudget, HPA, VPA, RWX volumes | weighed, not needed: one machine per briq, no replicas | | — |
 
 ## Operations
 

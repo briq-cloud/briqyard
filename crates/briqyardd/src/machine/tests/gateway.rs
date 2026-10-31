@@ -135,7 +135,7 @@ async fn a_start_through_the_gateway_boots_it_first() {
     // The namespace has one machine; the host runs two and commits both.
     assert_eq!(h.m.namespace("t1").unwrap().machines, 1);
     let (used, running, total) = h.m.usage();
-    assert_eq!((used.memory_mb, running, total), (512, 2, 1));
+    assert_eq!((used.memory_mb, running, total), (1024, 2, 1));
     // The tables a daemon start renders name the gateway too.
     let rules = h.m.rules().unwrap();
     assert!(rules.policies.iter().any(|p| matches!(p,
@@ -644,7 +644,8 @@ async fn recovery_starts_the_gateway_an_adopted_machine_needs() {
     // A namespace whose adopted machine does not send through its gateway.
     let unneeded = gateway("m_gw2", "t2");
     adopted("m_open", "t2", 4, api::Egress::default());
-    h.m.recover().await;
+    h.m.recover().await.unwrap();
+    h.m.resume_recovery_workers();
     // Started detached, as a start that needs it would: boot, then its port.
     tokio::time::timeout(Duration::from_secs(5), async {
         while needed.snapshot().state != state::RUNNING {

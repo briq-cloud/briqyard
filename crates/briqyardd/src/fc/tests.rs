@@ -597,6 +597,10 @@ fn the_jailer_is_told_the_cgroup_parent_and_the_limits() {
             "cpu.weight=200",
             "--cgroup",
             "memory.max=805306368",
+            "--cgroup",
+            "memory.oom.group=1",
+            "--cgroup",
+            "memory.swap.max=0",
         ]
     );
     // No limit, no cgroup argument.
@@ -707,6 +711,8 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
             let (_gone, exited) = watch::channel(false);
             let (_report, exit) = watch::channel(None);
             let vm = Vm {
+                #[cfg(target_os = "linux")]
+                identity: None,
                 pid: 42,
                 api: path,
                 vsock: dir.path().join("vsock"),
@@ -720,7 +726,10 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
                 std::fs::write(dir.path().join(name), b"partial").unwrap();
             }
             let vmm = Firecracker {
+                launches: Default::default(),
+                startup: Default::default(),
                 binary: PathBuf::new(),
+                jailer: PathBuf::new(),
                 pci: false,
                 console_max: 0,
                 version: String::new(),
