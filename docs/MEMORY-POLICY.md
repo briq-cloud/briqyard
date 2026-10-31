@@ -24,7 +24,9 @@ briqyard host ls
 
 Missing KSM files are acceptable when the facility is absent. Inspect any additional service
 ancestors; a `ManagedOOM*=kill` policy is independent of kernel `oom_score_adj`. Installed
-systemd-oomd service/socket must be masked. Verify each supervisor's actual
+systemd-oomd service/socket must be masked and explicitly inactive, with service `MainPID=0`.
+A mask alone does not stop an already active unit. Absent units need the same positive
+inactive/zero-PID evidence. Verify each supervisor's actual
 `/proc/<MainPID>/oom_score_adj` is -900; unit declarations alone do not prove process state.
 The daemon reports a bounded `memory_protection` condition when host or live-VMM enforcement
 is unresolved. Unjailed development reports containment unavailable and is not protected

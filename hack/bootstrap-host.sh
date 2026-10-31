@@ -189,9 +189,24 @@ done
 echo "== memory-pressure prerequisites"
 # Disable merging, never unmerge existing pages. The read-only check above rejects those.
 for unit in systemd-oomd.service systemd-oomd.socket ksm.service ksmtuned.service; do
-  if systemctl cat "$unit" >/dev/null 2>&1; then
-    systemctl disable --now "$unit" >/dev/null 2>&1 || true
-    systemctl mask "$unit" >/dev/null
+  load=$(systemctl show --value --property=LoadState -- "$unit" 2>/dev/null) || [ "$load" = not-found ] || fail "$unit: load state unavailable"
+  case "$load" in
+    loaded|masked)
+      systemctl stop "$unit" >/dev/null || fail "$unit: stop failed"
+      [ "$load" = masked ] || systemctl disable "$unit" >/dev/null || fail "$unit: disable failed"
+      systemctl mask "$unit" >/dev/null || fail "$unit: mask failed"
+      ;;
+    not-found) ;;
+    *) fail "$unit: unrecognized load state" ;;
+  esac
+  # A mask prevents the next activation; it does not stop an already running process/socket.
+  load=$(systemctl show --value --property=LoadState -- "$unit" 2>/dev/null) || [ "$load" = not-found ] || fail "$unit: final load state unavailable"
+  case "$load" in masked|not-found) ;; *) fail "$unit: not masked" ;; esac
+  active=$(systemctl show --value --property=ActiveState -- "$unit" 2>/dev/null) || [ "$load" = not-found ] || fail "$unit: active state unavailable"
+  [ "$active" = inactive ] || fail "$unit: not positively inactive"
+  if [[ "$unit" = *.service ]]; then
+    pid=$(systemctl show --value --property=MainPID -- "$unit" 2>/dev/null) || [ "$load" = not-found ] || fail "$unit: main PID unavailable"
+    [ "$pid" = 0 ] || fail "$unit: no positive zero-PID proof"
   fi
 done
 if [ -e /sys/kernel/mm/ksm/run ]; then
@@ -282,8 +297,6 @@ Before=network-pre.target
 Wants=network-pre.target
 
 [Service]
-OOMScoreAdjust=-900
-OOMPolicy=continue
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /etc/briqyard/firewall.nft

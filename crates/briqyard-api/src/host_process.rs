@@ -88,6 +88,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn firewall_helper_unit_has_no_supervisor_protection() {
+        let bootstrap = include_str!("../../../hack/bootstrap-host.sh");
+        let firewall = bootstrap
+            .split("cat > /etc/systemd/system/briqyard-firewall.service <<'EOF'\n")
+            .nth(1)
+            .unwrap()
+            .split("\nEOF")
+            .next()
+            .unwrap();
+        assert!(firewall.contains("ExecStart=/usr/sbin/nft"));
+        assert!(!firewall.contains("OOMScoreAdjust=-900"));
+        assert!(!firewall.contains("OOMPolicy=continue"));
+    }
+
+    #[test]
+    fn bootstrap_checks_stop_results_and_positive_inactive_evidence() {
+        let bootstrap = include_str!("../../../hack/bootstrap-host.sh");
+        let start =
+            "for unit in systemd-oomd.service systemd-oomd.socket ksm.service ksmtuned.service; do";
+        let block = bootstrap
+            .split(start)
+            .nth(1)
+            .unwrap()
+            .split("\nif [ -e /sys/kernel/mm/ksm/run ]; then")
+            .next()
+            .unwrap();
+        // Execute the actual bootstrap block with a local shell function in place of systemctl.
+        // No host systemd call, filesystem change or privileged operation is possible here.
+        let standin = r#"
+set -eu
+scenario=$1
+stopped=no
+systemctl() {
+  action=$1
+  case "$action" in
+    show)
+      property=${3#--property=}
+      unit=$5
+      missing=no
+      case "$unit" in ksm.service|ksmtuned.service) missing=yes ;; esac
+      [ "$scenario" != absent ] || missing=yes
+      case "$property" in
+        LoadState) if [ "$missing" = yes ]; then printf 'not-found\n'; else printf 'masked\n'; fi ;;
+        ActiveState)
+          if [ "$scenario" = unknown ]; then printf 'unknown\n'
+          elif [ "$scenario" = still-active ]; then printf 'active\n'
+          elif [ "$stopped" = yes ] || [ "$missing" = yes ]; then printf 'inactive\n'
+          else printf 'active\n'; fi ;;
+        MainPID) if [ "$scenario" = stale-pid ]; then printf '123\n'; else printf '0\n'; fi ;;
+        *) return 99 ;;
+      esac
+      [ "$missing" = no ] || return 4
+      ;;
+    stop) [ "$scenario" != stop-failed ] || return 1; stopped=yes ;;
+    disable|mask) ;;
+    *) return 99 ;;
+  esac
+}
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+"#;
+        for scenario in [
+            "stops",
+            "absent",
+            "stop-failed",
+            "still-active",
+            "unknown",
+            "stale-pid",
+        ] {
+            let script = format!("{standin}\n{start}{block}\nprintf 'verified\\n'");
+            let output = command("bash")
+                .args(["-c", &script, "bootstrap-test", scenario])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                matches!(scenario, "stops" | "absent"),
+                "{scenario}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if output.status.success() {
+                assert_eq!(output.stdout, b"verified\n");
+            }
+        }
+    }
+
+    #[test]
     fn roles_are_fixed() {
         assert_eq!(OomClass::Helper.score(), 0);
         assert_eq!(OomClass::Machine.score(), 500);

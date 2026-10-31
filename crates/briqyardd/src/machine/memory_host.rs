@@ -23,12 +23,15 @@ fn ksm_clear(run: &str, shared: &str, sharing: &str) -> bool {
         .into_iter()
         .all(|s| s.trim().parse::<u64>() == Ok(0))
 }
-fn oomd_disabled(text: &str) -> bool {
-    let lines: Vec<_> = text.lines().filter(|s| !s.trim().is_empty()).collect();
-    lines.len() == 2
-        && lines
+fn oomd_disabled(load: &str, active: &str, pid: &str) -> bool {
+    let loads: Vec<_> = load.lines().filter(|s| !s.trim().is_empty()).collect();
+    let states: Vec<_> = active.lines().filter(|s| !s.trim().is_empty()).collect();
+    loads.len() == 2
+        && loads
             .iter()
             .all(|line| matches!(*line, "masked" | "not-found"))
+        && states == ["inactive", "inactive"]
+        && pid.trim() == "0"
 }
 
 fn ancestor_policy_safe(text: &str, units: usize) -> bool {
@@ -152,13 +155,15 @@ async fn prerequisites() -> Result<(), &'static str> {
         .try_exists()
         .map_err(|_| "host_prerequisite_unreadable")?
     {
-        let states = systemd_values(
-            "LoadState",
-            &["systemd-oomd.service".into(), "systemd-oomd.socket".into()],
-        )
-        .await?;
-        if !oomd_disabled(&states) {
-            return Err("oomd_not_masked");
+        let units = ["systemd-oomd.service".into(), "systemd-oomd.socket".into()];
+        let (load, load_ok) = systemd_values("LoadState", &units).await?;
+        let (active, active_ok) = systemd_values("ActiveState", &units).await?;
+        let (pid, pid_ok) = systemd_values("MainPID", &units[..1]).await?;
+        // Absent units can make systemctl exit nonzero. Still require positive stopped
+        // state and PID0; missing output, an active masked unit or a transition is unsafe.
+        let absent = load.lines().any(|state| state == "not-found");
+        if !oomd_disabled(&load, &active, &pid) || (!(load_ok && active_ok && pid_ok) && !absent) {
+            return Err("oomd_not_stopped");
         }
         let cgroup = read("/proc/self/cgroup")?;
         let path = cgroup
@@ -176,8 +181,8 @@ async fn prerequisites() -> Result<(), &'static str> {
             units.push(part.to_string());
         }
         for property in ["ManagedOOMSwap", "ManagedOOMMemoryPressure"] {
-            let values = systemd_values(property, &units).await?;
-            if !ancestor_policy_safe(&values, units.len()) {
+            let (values, success) = systemd_values(property, &units).await?;
+            if !success || !ancestor_policy_safe(&values, units.len()) {
                 return Err("oom_ancestor_policy_unresolved");
             }
         }
@@ -194,7 +199,7 @@ async fn prerequisites() -> Result<(), &'static str> {
 }
 
 /// Fixed property names, argv units, bounded output and one deadline covering child exit.
-async fn systemd_values(property: &str, units: &[String]) -> Result<String, &'static str> {
+async fn systemd_values(property: &str, units: &[String]) -> Result<(String, bool), &'static str> {
     let mut command = crate::host_process::command("systemctl");
     command
         .args(["show", "--value", &format!("--property={property}"), "--"])
@@ -219,10 +224,12 @@ async fn systemd_values(property: &str, units: &[String]) -> Result<String, &'st
             .wait()
             .await
             .map_err(|_| "systemd_policy_unavailable")?;
-        if out.len() > 8192 || (!status.success() && property != "LoadState") {
+        if out.len() > 8192 {
             return Err("systemd_policy_unavailable");
         }
-        String::from_utf8(out).map_err(|_| "systemd_policy_unavailable")
+        String::from_utf8(out)
+            .map(|text| (text, status.success()))
+            .map_err(|_| "systemd_policy_unavailable")
     })
     .await;
     result.unwrap_or(Err("systemd_policy_timeout"))
@@ -231,6 +238,48 @@ async fn systemd_values(property: &str, units: &[String]) -> Result<String, &'st
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn masked_but_running_oomd_or_socket_is_not_stopped() {
+        assert!(!oomd_disabled(
+            "masked\nmasked\n",
+            "active\ninactive\n",
+            "123\n"
+        ));
+        assert!(!oomd_disabled(
+            "masked\nmasked\n",
+            "inactive\nactive\n",
+            "0\n"
+        ));
+        assert!(!oomd_disabled(
+            "masked\nmasked\n",
+            "inactive\ninactive\n",
+            "123\n"
+        ));
+    }
+
+    #[test]
+    fn stopped_oomd_requires_complete_inactive_and_zero_pid_evidence() {
+        for load in [
+            "masked\nmasked\n",
+            "not-found\nnot-found\n",
+            "masked\nnot-found\n",
+        ] {
+            assert!(oomd_disabled(load, "inactive\ninactive\n", "0\n"));
+            for active in [
+                "",
+                "inactive\n",
+                "inactive\ndeactivating\n",
+                "activating\ninactive\n",
+                "inactive\nunknown\n",
+            ] {
+                assert!(!oomd_disabled(load, active, "0\n"));
+            }
+            for pid in ["", "unknown", "12", "0\n0\n"] {
+                assert!(!oomd_disabled(load, "inactive\ninactive\n", pid));
+            }
+        }
+    }
+
     #[test]
     fn physical_reservations_and_host_prerequisites_fail_closed() {
         assert!(capacity_valid(4096, 1024, 2048, 1024));
@@ -247,9 +296,17 @@ mod tests {
         assert!(ksm_clear("0", "0", "0"));
         assert!(!ksm_clear("0", "0", "1"));
         assert!(!ksm_clear("1", "0", "0"));
-        assert!(oomd_disabled("masked\nnot-found\n"));
-        assert!(!oomd_disabled("loaded\nmasked\n"));
-        assert!(!oomd_disabled("masked\n"));
+        assert!(oomd_disabled(
+            "masked\nnot-found\n",
+            "inactive\ninactive\n",
+            "0\n"
+        ));
+        assert!(!oomd_disabled(
+            "loaded\nmasked\n",
+            "inactive\ninactive\n",
+            "0\n"
+        ));
+        assert!(!oomd_disabled("masked\n", "inactive\n", "0\n"));
         assert!(ancestor_policy_safe("auto\nauto\n", 2));
         assert!(!ancestor_policy_safe("auto\nkill\n", 2));
         assert!(!ancestor_policy_safe("auto\n", 2));
