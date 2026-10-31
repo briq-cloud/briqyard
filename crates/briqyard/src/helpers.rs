@@ -123,14 +123,19 @@ pub(super) fn probe_arg(s: &str) -> Result<api::Probe, String> {
 /// An egress policy, `open`, `none` or `via:MACHINE_ID` (`via:gateway`), checked as the daemon
 /// checks it.
 pub(super) fn egress_arg(s: &str) -> Result<api::Egress, String> {
+    let (s, siblings) = s
+        .strip_suffix("+siblings")
+        .map_or((s, false), |s| (s, true));
     let e = match s.split_once(':') {
         Some((api::egress::VIA, id)) => api::Egress {
             mode: api::egress::VIA.into(),
             via: Some(id.into()),
+            siblings,
         },
         _ => api::Egress {
             mode: s.into(),
             via: None,
+            siblings,
         },
     };
     e.check()?;
@@ -199,10 +204,7 @@ pub(super) fn with_since(path: &str, since: &str) -> String {
 
 /// An egress policy as `egress_arg` reads it.
 pub(super) fn egress_label(e: &api::Egress) -> String {
-    match &e.via {
-        Some(id) => format!("{}:{id}", e.mode),
-        None => e.mode.clone(),
-    }
+    e.label()
 }
 
 /// The limits in force, short: the blocked ports, the rate, the cap (`25,465 600/min

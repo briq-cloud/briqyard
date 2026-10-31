@@ -187,8 +187,9 @@ the forward chain drops by default and accepts only a namespace's way to the int
 egress interface, never to a private network, another namespace or in IPv6; the input chain lets a
 namespace reach its gateway's DNS and ping and nothing else of the host, and lets only
 `ingress.allowed_clients` reach the API, the HTTP ingress and the TCP endpoints; a `bridge`
-family chain pins every TAP to its machine's address (IP and ARP), so a guest that changes its
-address sends nothing. A machine start adds its pin, a stop removes it; a namespace changes no rule.
+family chain pins every TAP to its machine's address and MAC (IPv4 and ARP), so a guest that changes its
+identity sends nothing. A start atomically admits its pins, namespace membership and policy; a stop
+revokes them. A namespace changes no rule.
 The daemon answers DNS on every gateway: `<alias>.internal` follows the machine's alias (what a sibling's
 env holds), `<id>.vm.internal` is that exact machine; everything else is forwarded upstream.
 Packets are decoded and encoded by `hickory-proto` (ADR 0033); one that does not parse is dropped.
@@ -204,14 +205,19 @@ A fork may name another namespace of its source's host.
 Each machine has an egress policy (`egress` on create and PATCH, ADR 0015): `open` (the
 default), `none` (its namespace, no internet: `egress_none` in the inet forward chain) or
 `via: <machine>` (only that sibling, any port, and the gateway's DNS: `via_sources` and
-`via_allowed` in the bridge chain, IP and ARP, before the pins). Under `via` and `none` the
-resolver answers internal names only, NXDOMAIN for the rest. An `open` machine's policy is its
+`via_allowed` in the bridge chain, IP and ARP, after source pins). `egress.siblings: true`, valid
+only with `via`, also admits current pinned members of that exact namespace (ADR 0064). False or
+absent stays strict. TAP-to-TAP forward checks apply both peers' policies on every packet, so
+opt-out also revokes established reverse traffic; host-origin ingress retains its existing path.
+The selected gateway's TAP identity prevents an address replacement inheriting that permission.
+Namespace peers can proxy for each other: membership is a trust boundary. Under `via` and `none`
+the resolver answers internal names only, NXDOMAIN for the rest. An `open` machine's policy is its
 limits on internet traffic (`limits`, ADR 0018: blocked ports, new connections a minute, Mbit/s;
 the host's `egress_limits` under the machine's own): `blocked_ports` (address . port, TCP reset,
 UDP unreachable), and a named `limit` per rate found through `conn_limits` and
 `bandwidth_limits`, in the inet forward chain before the reply accept and the internet counters;
 three counter sets count what they drop. The policy is set at every start
-right after the pin, taken out with it, swapped live on a running machine in one transaction, and rendered from
+in the same transaction as its pins and membership, taken out with them, swapped live on a running machine in one transaction, and rendered from
 the running records at daemon start.
 
 A namespace may have a gateway (ADR 0016): `PUT /v1/namespaces/{id}/gateway` (an image, its command,

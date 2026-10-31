@@ -175,13 +175,7 @@ impl Manager {
             Some(t) => t,
             None => return Err(fail(anyhow!("namespace network is gone"))),
         };
-        let tap = self
-            .inner
-            .net
-            .ensure_tap(&rec.id, &netw::bridge_name(t.rec.subnet_index), &rec.ip)
-            .await
-            .map_err(fail)?;
-        self.set_policy(&rec.id, policy).await.map_err(fail)?;
+        let tap = self.attach_network(&rec, &t, policy).await.map_err(fail)?;
         let dir = cfg.run_dir().join(&rec.id);
         tokio::fs::create_dir_all(&dir)
             .await

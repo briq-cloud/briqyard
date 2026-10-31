@@ -1,6 +1,7 @@
 //! The host network: a bridge per namespace, a TAP per machine, addresses, nftables and the
 //! gateway's DNS.
 
+mod conntrack;
 pub mod dns;
 pub mod host;
 pub mod nft;

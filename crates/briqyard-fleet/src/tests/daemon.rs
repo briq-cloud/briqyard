@@ -30,6 +30,7 @@ pub(super) struct Daemon {
     /// Run by a create before it answers: a test's look at the fleet mid-forward.
     pub(super) on_create: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(super) creates: Mutex<Vec<api::CreateMachineRequest>>,
+    pub(super) egress_siblings: std::sync::atomic::AtomicBool,
     pub(super) backup_records: Mutex<Vec<serde_json::Value>>,
 }
 
@@ -151,12 +152,14 @@ pub(super) async fn start_daemon_on(
         quotas: Mutex::new(vec![]),
         on_create: Mutex::new(None),
         creates: Mutex::new(vec![]),
+        egress_siblings: std::sync::atomic::AtomicBool::new(true),
         backup_records: Mutex::new(vec![]),
     });
     type D = State<Arc<Daemon>>;
     async fn status(State(d): D) -> Json<api::Status> {
         let ms = d.machines.lock().unwrap();
         Json(api::Status {
+            egress_siblings_v1: d.egress_siblings.load(Ordering::SeqCst),
             version: "0.1-stub".into(),
             host_id: d.id.clone(),
             capacity: api::Capacity {

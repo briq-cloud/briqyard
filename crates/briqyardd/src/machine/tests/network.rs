@@ -8,6 +8,7 @@ pub(super) fn egress(mode: &str, via: Option<&str>) -> api::Egress {
     api::Egress {
         mode: mode.into(),
         via: via.map(String::from),
+        siblings: false,
     }
 }
 
@@ -265,7 +266,9 @@ async fn the_tables_at_start_hold_the_running_policies() {
             nft::Policy::Via {
                 ip: "10.64.1.3".into(),
                 to: "10.64.1.2".into(),
-                host: "10.64.1.1".into()
+                to_tap: "btgw".into(),
+                host: "10.64.1.1".into(),
+                siblings: false,
             },
             nft::Policy::None {
                 ip: "10.64.1.4".into()

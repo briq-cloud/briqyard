@@ -218,6 +218,7 @@ fn main() {
 
 fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
     HostRec {
+        egress_siblings_v1: false,
         id: if h.id.is_empty() {
             h.url.clone()
         } else {
@@ -284,6 +285,7 @@ async fn run(args: Args) -> Result<()> {
     }
     upgrade::interrupted(&mut reg);
     let policy = Policy {
+        require_egress_siblings: false,
         fill_ceiling: cfg.placement.fill_ceiling,
         down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
     };

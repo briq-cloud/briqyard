@@ -6,7 +6,7 @@ use super::*;
 pub mod egress {
     /// The namespace, and the internet through NAT (the default).
     pub const OPEN: &str = "open";
-    /// One machine of the namespace and the gateway's DNS, nothing else.
+    /// One machine and the gateway's DNS; explicit sibling permission may add namespace peers.
     pub const VIA: &str = "via";
     /// The namespace, no internet.
     pub const NONE: &str = "none";
@@ -20,10 +20,17 @@ pub struct Egress {
     /// "open" (default), "via" or "none".
     #[serde(default = "default_egress_mode")]
     pub mode: String,
-    /// For `via`: the machine of the same namespace that is the only one this machine reaches,
+    /// For `via`: the selected machine of the same namespace, reachable in strict mode,
     /// or `"gateway"` for the namespace's gateway, which then runs while this machine does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    /// For `via` only: also reach current pinned members of this exact namespace.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub siblings: bool,
+}
+
+pub(super) fn is_false(value: &bool) -> bool {
+    !value
 }
 
 fn default_egress_mode() -> String {
@@ -35,11 +42,24 @@ impl Default for Egress {
         Self {
             mode: default_egress_mode(),
             via: None,
+            siblings: false,
         }
     }
 }
 
 impl Egress {
+    /// Compact, reversible CLI/event label; strict mode keeps its existing spelling.
+    pub fn label(&self) -> String {
+        match &self.via {
+            Some(id) => format!(
+                "{}:{id}{}",
+                self.mode,
+                if self.siblings { "+siblings" } else { "" }
+            ),
+            None => self.mode.clone(),
+        }
+    }
+
     /// Sends through the namespace's gateway.
     pub fn via_gateway(&self) -> bool {
         self.mode == egress::VIA && self.via.as_deref() == Some(egress::GATEWAY)
@@ -48,6 +68,9 @@ impl Egress {
     /// The mode is one of the three, and `via` names a machine (or `"gateway"`) exactly when
     /// the mode is `via`.
     pub fn check(&self) -> Result<(), String> {
+        if self.siblings && self.mode != egress::VIA {
+            return Err("egress.siblings goes with mode \"via\" only".into());
+        }
         match (self.mode.as_str(), &self.via) {
             (egress::OPEN | egress::NONE, None) => Ok(()),
             (egress::OPEN | egress::NONE, Some(_)) => {

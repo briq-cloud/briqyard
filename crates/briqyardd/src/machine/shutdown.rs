@@ -22,8 +22,8 @@ impl Manager {
         };
         let rec = e.snapshot();
         let started = Instant::now();
-        self.unplug(&rec.id, &rec.ip).await;
-        stage("settle", "network", &machine, pid, started, true);
+        let revoked = self.unplug(&rec.id, &rec.ip).await;
+        stage("settle", "network", &machine, pid, started, revoked.is_ok());
         *e.live.lock().unwrap() = None;
         // The init's report, or none: the process is gone, so the wait ends either way. A
         // process that ended without the init's word (killed, a kernel panic) reads as 255;
@@ -237,7 +237,7 @@ impl Manager {
         *e.live.lock().unwrap() = None;
         *e.stop_req.lock().unwrap() = None;
         let r = e.snapshot();
-        self.unplug(&r.id, &r.ip).await;
+        let _ = self.unplug(&r.id, &r.ip).await;
         e.changed.notify_waiters();
     }
 
@@ -485,7 +485,8 @@ impl Manager {
             let _ = self.delete_endpoint(&ep.id);
         }
         let rec = e.snapshot();
-        self.unplug(id, &rec.ip).await;
+        self.unplug(id, &rec.ip).await?;
+        self.inner.net.clear_connections(&rec.ip).await?;
         // Its last use, measured while its disks and counters are still there; the bucket
         // stays after it (ADR 0017).
         self.meter(std::slice::from_ref(&e), Utc::now()).await;

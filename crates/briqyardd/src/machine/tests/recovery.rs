@@ -196,13 +196,11 @@ async fn the_sweep_ends_what_has_no_record() {
     let ghost = h
         .host
         .left_running("m_ghost", &h.m.inner.cfg.run_dir().join("m_ghost"));
-    h.m.inner
-        .net
+    h.host
         .ensure_tap("m_ghost", "by1", "10.64.1.9")
         .await
         .unwrap();
-    h.m.inner
-        .net
+    h.host
         .ensure_tap("m_kept", "by1", "10.64.1.2")
         .await
         .unwrap();

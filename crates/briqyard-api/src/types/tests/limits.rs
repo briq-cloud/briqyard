@@ -322,3 +322,17 @@ fn cpu_limits_are_precise_and_legacy_values_stay_valid() {
     };
     assert_eq!(legacy.cpu_millis(), 4000);
 }
+
+#[test]
+fn sibling_access_is_explicit_and_only_valid_through_a_gateway() {
+    let strict: Egress = serde_json::from_value(json!({"mode":"via","via":"m_gateway"})).unwrap();
+    assert_eq!(serde_json::to_value(&strict).unwrap().get("siblings"), None);
+    let allowed: Egress =
+        serde_json::from_value(json!({"mode":"via","via":"m_gateway","siblings":true})).unwrap();
+    assert!(allowed.check().is_ok());
+    assert_eq!(serde_json::to_value(&allowed).unwrap()["siblings"], true);
+    for mode in ["open", "none"] {
+        let invalid: Egress = serde_json::from_value(json!({"mode":mode,"siblings":true})).unwrap();
+        assert!(invalid.check().is_err(), "siblings cannot widen {mode}");
+    }
+}

@@ -20,6 +20,7 @@ pub(super) async fn metrics(State(st): S) -> Response {
 pub(super) async fn status(State(st): S) -> Json<api::Status> {
     let (used, running, machines) = st.mgr.usage();
     Json(api::Status {
+        egress_siblings_v1: true,
         version: api::VERSION.into(),
         host_id: st.mgr.host_id().into(),
         capacity: st.mgr.capacity(),

@@ -475,7 +475,27 @@ crates/briqyard-init     PID 1 inside the guest
 crates/briqyard          the CLI
 crates/briqyard-fleet    the orchestrator across hosts
 crates/briqyard-objstore the object store (S3 or a directory), shared by the daemon and the fleet
-api/openapi.yaml         the API description, served at /v1/openapi.yaml
+api/openapi/         the API description, served at /v1/openapi.yaml
 hack/                    dev VM, systemd units, dev configs, the shell suites, the stress driver
 docs/adr                 every technical decision; docs/research the numbers behind them
 ```
+
+### Namespace peer packet fixture
+
+After building `cargo build -p briqyardd --example siblings-rules` on Linux, run
+`sudo python3 hack/network-siblings.py target/debug/examples/siblings-rules`. It uses disposable
+network namespaces and local endpoints; it needs iproute2, nftables and Python 3, changes no
+host nft table and removes its own namespaces/processes on every exit. Hold `hack/vm-lock.sh`
+when running it in the shared development VM. The microVM suite also sources
+`hack/e2e-siblings.sh` (14 checks, plus adoption when the daemon's unit is available). Run both
+before pushing a network change. The normal workspace, fleet and stress gates still apply.
+
+Local preparation for ADR 0064: macOS workspace tests passed **780**, with **3 ignored**;
+all-target clippy and formatting passed. The packet fixture's rules generator built and
+produced valid JSON. Linux packet, microVM, fleet and stress checks remain pending before
+push; these native checks do not establish nft kernel semantics.
+
+ADR 0064 follow-up adds barrier regressions for move allocation/rollback and source-counter
+cleanup, capability checks for inherited restores, and bounded conntrack diagnostics with
+kill/reap coverage. Each reviewed failure was reproduced before its fix; Linux network and
+microVM gates remain required before push.

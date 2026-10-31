@@ -258,6 +258,7 @@ async fn a_machine_others_send_their_traffic_through_stays() {
     b.egress = Some(api::Egress {
         mode: api::egress::VIA.into(),
         via: Some(a.id.clone()),
+        siblings: false,
     });
     h.m.create_made(b).await.unwrap();
     let err = h.m.move_machine(&a.id, "t2", None).await.unwrap_err();

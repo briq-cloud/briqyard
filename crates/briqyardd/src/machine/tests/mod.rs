@@ -9,6 +9,7 @@ mod gateway;
 mod lifecycle;
 mod metering;
 mod mock;
+mod move_addresses;
 mod moves;
 mod namespace_lifecycle;
 mod network;
@@ -17,6 +18,7 @@ mod probing;
 mod quotas;
 mod recovery;
 mod sessions;
+mod siblings;
 mod tick;
 mod units;
 mod update;
@@ -210,6 +212,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             host_id: "h_test".into(),
             advertise: "127.0.0.1".into(),
             machines: Mutex::new(HashMap::new()),
+            address_holds: Mutex::new(std::collections::HashSet::new()),
             namespaces: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
             endpoint_events,

@@ -144,7 +144,7 @@ EOF
 echo "   needrestart leaves briqyardd and briqyard-fleet running"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq zfsutils-linux nftables e2fsprogs gdisk curl jq ca-certificates >/dev/null
+apt-get install -y -qq zfsutils-linux nftables conntrack e2fsprogs gdisk curl jq ca-certificates >/dev/null
 modprobe zfs
 
 # The ARC is a cache the kernel must shrink when a machine touches its memory: capped, it

@@ -165,6 +165,34 @@ impl Client {
         body: Option<&impl serde::Serialize>,
         timeout: Option<Duration>,
     ) -> Result<reqwest::Response> {
+        if (method == reqwest::Method::POST && path == "/v1/machines")
+            || (method == reqwest::Method::PATCH && path.starts_with("/v1/machines/"))
+        {
+            if let Some(body) = body {
+                let document = serde_json::to_value(body)?;
+                let inherited = !document["restore"].is_null() && document["egress"].is_null();
+                if document["egress"]["siblings"] == true || inherited {
+                    let mut check = self
+                        .http
+                        .get(format!("{}/v1/status", self.base))
+                        .timeout(Duration::from_secs(10));
+                    if let Some(token) = &self.token {
+                        check = check.bearer_auth(token);
+                    }
+                    let response = check.send().await?;
+                    if !response.status().is_success() {
+                        return Err(refusal(response).await);
+                    }
+                    let status: serde_json::Value = response.json().await?;
+                    if status["egress_siblings_v1"] != true {
+                        if inherited {
+                            bail!("server cannot safely inherit restore egress; provide an explicit egress policy");
+                        }
+                        bail!("server does not support egress.siblings");
+                    }
+                }
+            }
+        }
         let mut req = self.http.request(method, format!("{}{}", self.base, path));
         if let Some(t) = &self.token {
             req = req.bearer_auth(t);
