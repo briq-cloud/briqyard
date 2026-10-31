@@ -31,7 +31,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Install library build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev pkg-config cmake libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev pkg-config cmake libssl-dev libseccomp-dev
       - name: Verify evidence acceptance checks
         run: python3 -m unittest discover -s hack/firecracker -p "test_*.py"
       - name: Verify complete patch series
