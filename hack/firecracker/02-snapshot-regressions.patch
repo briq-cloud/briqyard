@@ -1,0 +1,461 @@
+diff --git a/src/firecracker/src/api_server/parsed_request/checked_snapshot_response_tests.rs b/src/firecracker/src/api_server/parsed_request/checked_snapshot_response_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..177a6e05fb12538351b0de12e1ed7da5ef4bc52b
+--- /dev/null
++++ b/src/firecracker/src/api_server/parsed_request/checked_snapshot_response_tests.rs
+@@ -0,0 +1,21 @@
++// Copyright 2026 Firecracker authors. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++use std::io::Cursor;
++
++use vmm::devices::virtio::block::device::BlockPrepareError;
++use vmm::persist::{CreateSnapshotError, MicrovmStateError};
++use vmm::rpc_interface::VmmActionError;
++
++use super::ParsedRequest;
++
++#[test]
++fn checked_preparation_failure_is_http_error_not_snapshot_success() {
++    let error = VmmActionError::CreateSnapshot(CreateSnapshotError::MicrovmState(
++        MicrovmStateError::PrepareDevices(BlockPrepareError::UnsupportedBackend.into()),
++    ));
++    let response = ParsedRequest::convert_to_response(&Err(error));
++    let mut wire = Cursor::new(Vec::new());
++    response.write_all(&mut wire).unwrap();
++    assert!(wire.get_ref().starts_with(b"HTTP/1.1 400 "));
++}
+diff --git a/src/vmm/src/device_manager/snapshot/api.rs b/src/vmm/src/device_manager/snapshot/api.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9756c9153d8f93e317b1172084c79d41815c0be1
+--- /dev/null
++++ b/src/vmm/src/device_manager/snapshot/api.rs
+@@ -0,0 +1,121 @@
++// Copyright 2026 Firecracker authors. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++use super::*;
++use crate::device_manager::snapshot::SnapshotPrepareError;
++use crate::devices::virtio::block::device::BlockPrepareError;
++use crate::devices::virtio::block::virtio::snapshot_fault::{Fault, Stage};
++use crate::persist::{CreateSnapshotError, MicrovmStateError};
++use crate::rpc_interface::{RuntimeApiController, VmmAction, VmmActionError};
++use crate::vmm_config::instance_info::VmState;
++use crate::vmm_config::snapshot::{CreateSnapshotParams, SnapshotType};
++
++#[test]
++fn checked_snapshot_api_refuses_io_failure_before_output_publication() {
++    for pci in [false, true] {
++        for (engine, stage, visited) in [
++            (
++                FileEngineType::Sync,
++                Stage::SyncFlush,
++                vec![Stage::SyncFlush],
++            ),
++            (
++                FileEngineType::Sync,
++                Stage::SyncAll,
++                vec![Stage::SyncFlush, Stage::SyncAll],
++            ),
++            (
++                FileEngineType::Async,
++                Stage::AsyncDrain,
++                vec![Stage::AsyncDrain],
++            ),
++            (
++                FileEngineType::Async,
++                Stage::AsyncSyncAll,
++                vec![Stage::AsyncDrain, Stage::AsyncSyncAll],
++            ),
++            (
++                FileEngineType::Async,
++                Stage::AsyncCompletion,
++                vec![
++                    Stage::AsyncDrain,
++                    Stage::AsyncSyncAll,
++                    Stage::AsyncCompletion,
++                ],
++            ),
++        ] {
++            for precreated in [false, true] {
++                let (mut vmm, _files) = fixture(pci, engine, true);
++                vmm.instance_info.state = VmState::Paused;
++                let vmm = Arc::new(Mutex::new(vmm));
++                let mut runtime = RuntimeApiController::new(vmm.clone());
++                let mut events = crate::EventManager::new().unwrap();
++                let mut state = TempFile::new().unwrap();
++                let mut memory = TempFile::new().unwrap();
++                let state_path = state.as_path().to_owned();
++                let memory_path = memory.as_path().to_owned();
++                if precreated {
++                    std::fs::write(&state_path, b"unchanged state").unwrap();
++                    std::fs::write(&memory_path, b"unchanged memory").unwrap();
++                } else {
++                    state.remove().unwrap();
++                    memory.remove().unwrap();
++                }
++                let scope = Fault::at(Some(stage));
++                let result = runtime.handle_request(
++                    VmmAction::CreateSnapshot(CreateSnapshotParams {
++                        snapshot_type: SnapshotType::Full,
++                        snapshot_path: state_path.clone(),
++                        mem_file_path: memory_path.clone(),
++                        sync_snapshot_files: true,
++                    }),
++                    &mut events,
++                );
++                assert!(
++                    matches!(
++                        &result,
++                        Err(VmmActionError::CreateSnapshot(
++                            CreateSnapshotError::MicrovmState(MicrovmStateError::PrepareDevices(
++                                SnapshotPrepareError::Block(BlockPrepareError::Io(_))
++                            ))
++                        ))
++                    ),
++                    "unexpected snapshot result: {result:?}"
++                );
++                assert_eq!(scope.visited(), visited);
++                assert_eq!(vmm.lock().unwrap().instance_info.state, VmState::Paused);
++                if precreated {
++                    assert_eq!(std::fs::read(&state_path).unwrap(), b"unchanged state");
++                    assert_eq!(std::fs::read(&memory_path).unwrap(), b"unchanged memory");
++                } else {
++                    assert!(!state_path.exists());
++                    assert!(!memory_path.exists());
++                }
++            }
++        }
++    }
++}
++
++#[test]
++fn checked_snapshot_refuses_unsupported_backend_on_both_buses() {
++    for pci in [false, true] {
++        let (mut vmm, _files) = fixture(pci, FileEngineType::Sync, false);
++        vmm.device_manager
++            .with_virtio_device::<Block, _, _>("root", |block| {
++                *block = super::block::unsupported();
++            })
++            .unwrap();
++        assert!(matches!(
++            vmm.device_manager.try_save_for_snapshot(),
++            Err(SnapshotPrepareError::Block(
++                BlockPrepareError::UnsupportedBackend
++            ))
++        ));
++        // The normal VMM eligibility check also rejects this backend before capture.
++        let info = crate::persist::VmInfo::from(&vmm);
++        assert!(matches!(
++            vmm.save_state(&info),
++            Err(MicrovmStateError::NotAllowed(_))
++        ));
++    }
++}
+diff --git a/src/vmm/src/device_manager/snapshot/block.rs b/src/vmm/src/device_manager/snapshot/block.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..11ce68db9d4c70867800a954972bd91cd95e85a6
+--- /dev/null
++++ b/src/vmm/src/device_manager/snapshot/block.rs
+@@ -0,0 +1,210 @@
++// Copyright 2026 Firecracker authors. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++use std::fs::File;
++use std::os::fd::OwnedFd;
++use std::os::unix::net::UnixStream;
++
++use super::*;
++use crate::device_manager::snapshot::SnapshotPrepareError;
++use crate::devices::virtio::block::device::BlockPrepareError;
++use crate::devices::virtio::block::virtio::snapshot_fault::{Fault, Stage};
++use crate::devices::virtio::block::virtio::test_utils::default_block;
++use crate::devices::virtio::test_utils::default_mem;
++use crate::snapshot::Persist;
++
++fn active(engine: FileEngineType) -> Block {
++    let mut block = default_block(engine);
++    let mem = default_mem();
++    let queue = VirtQueue::new(GuestAddress(0), &mem, 16);
++    block.queues[0] = queue.create_queue();
++    block.activate(mem, default_interrupt()).unwrap();
++    Block::Virtio(block)
++}
++
++#[test]
++fn checked_inactive_has_no_io_and_preserves_serialized_state() {
++    for pci in [false, true] {
++        for engine in [FileEngineType::Sync, FileEngineType::Async] {
++            let (vmm, _files) = fixture(pci, engine, false);
++            let scope = Fault::at(Some(Stage::SyncFlush));
++            let checked = vmm.device_manager.try_save_for_snapshot().unwrap();
++            let legacy = vmm.device_manager.save();
++            assert_eq!(
++                serde_json::to_value(checked).unwrap(),
++                serde_json::to_value(legacy).unwrap()
++            );
++            assert_eq!(
++                scope.visited(),
++                [Stage::TransportState, Stage::TransportState]
++            );
++        }
++    }
++}
++
++#[test]
++fn checked_prepares_once_without_unchecked_second_pass() {
++    for pci in [false, true] {
++        for (engine, expected) in [
++            (
++                FileEngineType::Sync,
++                vec![Stage::SyncFlush, Stage::SyncAll, Stage::TransportState],
++            ),
++            (
++                FileEngineType::Async,
++                vec![
++                    Stage::AsyncDrain,
++                    Stage::AsyncSyncAll,
++                    Stage::AsyncCompletion,
++                    Stage::TransportState,
++                ],
++            ),
++        ] {
++            let (vmm, _files) = fixture(pci, engine, true);
++            let scope = Fault::at(None);
++            vmm.device_manager.try_save_for_snapshot().unwrap();
++            assert_eq!(scope.visited(), expected);
++        }
++    }
++}
++
++#[test]
++fn checked_propagates_real_sync_syscall_failure() {
++    // A socket FD accepts File::flush but cannot be fsynced. No mocked Result here.
++    let mut block = active(FileEngineType::Sync);
++    let (socket, _peer) = UnixStream::pair().unwrap();
++    let file = File::from(OwnedFd::from(socket));
++    let Block::Virtio(virtio) = &mut block else {
++        unreachable!()
++    };
++    virtio.disk.file_engine = FileEngine::from_file(file, FileEngineType::Sync).unwrap();
++    assert!(matches!(
++        block.prepare_snapshot_checked(),
++        Err(BlockPrepareError::Io(_))
++    ));
++}
++
++#[test]
++fn drain_failure_cannot_reach_sync_or_completion() {
++    let mut block = active(FileEngineType::Async);
++    let scope = Fault::at(Some(Stage::AsyncDrain));
++    assert!(matches!(
++        block.prepare_snapshot_checked(),
++        Err(BlockPrepareError::Io(_))
++    ));
++    assert_eq!(scope.visited(), [Stage::AsyncDrain]);
++}
++
++#[test]
++fn checked_refuses_unhandled_block_implementation() {
++    let mut block = unsupported();
++    assert!(matches!(
++        super::super::prepare_device(&mut block),
++        Err(SnapshotPrepareError::Block(
++            BlockPrepareError::UnsupportedBackend
++        ))
++    ));
++}
++
++pub(super) fn unsupported() -> Block {
++    use crate::devices::virtio::block::vhost_user::device::VhostUserBlock;
++    use crate::devices::virtio::device::DeviceState;
++    use crate::devices::virtio::queue::Queue;
++    use crate::devices::virtio::vhost_user::{VhostUserHandleBackend, VhostUserHandleImpl};
++    use crate::devices::virtio::vhost_user_metrics::VhostUserMetricsPerDevice;
++    use vhost::vhost_user::Frontend;
++    use vmm_sys_util::eventfd::EventFd;
++
++    // Construct an unnegotiated unsupported backend over a local socket pair.
++    // Checked preparation must refuse it without sending any backend messages.
++    let (socket, _peer) = UnixStream::pair().unwrap();
++    Block::VhostUser(VhostUserBlock {
++        avail_features: 0,
++        acked_features: 0,
++        config_space: vec![],
++        activate_evt: EventFd::new(libc::EFD_NONBLOCK).unwrap(),
++        queues: vec![Queue::new(256)],
++        queue_evts: [EventFd::new(libc::EFD_NONBLOCK).unwrap()],
++        device_state: DeviceState::Inactive,
++        id: "root".into(),
++        partuuid: None,
++        cache_type: CacheType::Writeback,
++        root_device: true,
++        read_only: false,
++        vu_handle: VhostUserHandleImpl {
++            vu: <Frontend as VhostUserHandleBackend>::from_stream(socket, 1),
++            socket_path: String::new(),
++        },
++        vu_acked_protocol_features: 0,
++        metrics: VhostUserMetricsPerDevice::alloc("checked-unsupported".into()),
++    })
++}
++
++#[test]
++fn checked_sync_errors_are_returned_and_inactive_is_no_io() {
++    for (stage, expected) in [
++        (Stage::SyncFlush, vec![Stage::SyncFlush]),
++        (Stage::SyncAll, vec![Stage::SyncFlush, Stage::SyncAll]),
++    ] {
++        let mut block = active(FileEngineType::Sync);
++        let scope = Fault::at(Some(stage));
++        assert!(matches!(
++            block.prepare_snapshot_checked(),
++            Err(BlockPrepareError::Io(_))
++        ));
++        assert_eq!(scope.visited(), expected);
++    }
++    let mut block = Block::Virtio(default_block(FileEngineType::Sync));
++    let scope = Fault::at(Some(Stage::SyncFlush));
++    block.prepare_snapshot_checked().unwrap();
++    assert!(scope.visited().is_empty());
++}
++
++#[test]
++fn checked_async_errors_are_returned_before_completion_can_succeed() {
++    for (stage, expected) in [
++        (Stage::AsyncDrain, vec![Stage::AsyncDrain]),
++        (
++            Stage::AsyncSyncAll,
++            vec![Stage::AsyncDrain, Stage::AsyncSyncAll],
++        ),
++        (
++            Stage::AsyncCompletion,
++            vec![
++                Stage::AsyncDrain,
++                Stage::AsyncSyncAll,
++                Stage::AsyncCompletion,
++            ],
++        ),
++    ] {
++        let mut block = active(FileEngineType::Async);
++        let scope = Fault::at(Some(stage));
++        assert!(matches!(
++            block.prepare_snapshot_checked(),
++            Err(BlockPrepareError::Io(_))
++        ));
++        assert_eq!(scope.visited(), expected);
++    }
++}
++
++#[test]
++fn later_device_failure_precedes_every_transport_and_kvm_save() {
++    for pci in [false, true] {
++        let (mut vmm, _files) = fixture_drives(pci, FileEngineType::Sync, true, 2);
++        let info = crate::persist::VmInfo::from(&vmm);
++        let scope = Fault::nth(Some(Stage::SyncAll), 2);
++        assert!(matches!(
++            vmm.save_state(&info),
++            Err(crate::persist::MicrovmStateError::PrepareDevices(_))
++        ));
++        assert_eq!(
++            scope.visited(),
++            [
++                Stage::SyncFlush,
++                Stage::SyncAll,
++                Stage::SyncFlush,
++                Stage::SyncAll
++            ]
++        );
++    }
++}
+diff --git a/src/vmm/src/device_manager/snapshot/tests.rs b/src/vmm/src/device_manager/snapshot/tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..44eceffca73c47aedb6e86976535fe3224fb5bb7
+--- /dev/null
++++ b/src/vmm/src/device_manager/snapshot/tests.rs
+@@ -0,0 +1,85 @@
++// Copyright 2026 Firecracker authors. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++use std::sync::{Arc, Mutex};
++
++use vmm_sys_util::tempfile::TempFile;
++
++use crate::Vmm;
++use crate::builder::tests::{
++    CustomBlockConfig, default_kernel_cmdline, default_vmm, default_vmm_with_pci,
++    insert_block_devices,
++};
++use crate::devices::virtio::block::CacheType;
++use crate::devices::virtio::block::device::Block;
++use crate::devices::virtio::block::virtio::FileEngine;
++use crate::devices::virtio::block::virtio::device::FileEngineType;
++use crate::devices::virtio::device::VirtioDevice;
++use crate::devices::virtio::test_utils::{VirtQueue, default_interrupt};
++use crate::vstate::memory::GuestAddress;
++
++#[path = "api.rs"]
++mod api;
++#[path = "block.rs"]
++mod block;
++
++fn fixture(pci: bool, engine: FileEngineType, activated: bool) -> (Vmm, Vec<TempFile>) {
++    fixture_drives(pci, engine, activated, 1)
++}
++
++fn fixture_drives(
++    pci: bool,
++    engine: FileEngineType,
++    activated: bool,
++    count: usize,
++) -> (Vmm, Vec<TempFile>) {
++    let ids = ["root", "data"];
++    let mut vmm = if pci {
++        default_vmm_with_pci()
++    } else {
++        default_vmm()
++    };
++    let mut events = crate::EventManager::new().unwrap();
++    let files = insert_block_devices(
++        &mut vmm,
++        &mut default_kernel_cmdline(),
++        &mut events,
++        ids[..count]
++            .iter()
++            .map(|id| {
++                CustomBlockConfig::new(
++                    (*id).into(),
++                    *id == "root",
++                    None,
++                    false,
++                    CacheType::Writeback,
++                )
++            })
++            .collect(),
++    );
++    let mem = vmm.vm.as_kvm().unwrap().guest_memory().clone();
++    for (index, id) in ids[..count].iter().enumerate() {
++        vmm.device_manager
++            .with_virtio_device::<Block, _, _>(id, |block| {
++                let Block::Virtio(block) = block else {
++                    unreachable!()
++                };
++                block.disk.file_engine = FileEngine::from_file(
++                    block.disk.file_engine.file().try_clone().unwrap(),
++                    engine,
++                )
++                .unwrap();
++                if activated {
++                    let queue = VirtQueue::new(
++                        GuestAddress(u64::try_from(index).unwrap() * 0x1000),
++                        &mem,
++                        16,
++                    );
++                    block.queues[0] = queue.create_queue();
++                    block.activate(mem.clone(), default_interrupt()).unwrap();
++                }
++            })
++            .unwrap();
++    }
++    (vmm, files)
++}

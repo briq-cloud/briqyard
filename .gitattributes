@@ -1,0 +1,2 @@
+# Unified-diff context uses a single space for an unchanged empty line.
+hack/firecracker/*.patch -whitespace
