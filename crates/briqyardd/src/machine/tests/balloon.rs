@@ -258,3 +258,121 @@ fn rollout_switch_is_default_off_and_rejects_unknown_controls() {
     assert!(!Config::default().balloon.enabled);
     assert!(serde_yaml::from_str::<Config>("balloon:\n  amount_mib: 128\n").is_err());
 }
+
+#[tokio::test]
+async fn adoption_detects_stale_reporting_metadata_from_an_older_cold_boot() {
+    let h = reporting_harness().await;
+    let machine = h.m.create_made(h.request("reporting")).await.unwrap();
+    let e = h.m.entry(&machine.id).unwrap();
+    let pid = e.snapshot().pid;
+    // An old daemon preserved unknown metadata but cold-booted without the device.
+    h.host
+        .procs
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|p| p.pid == pid)
+        .unwrap()
+        .boot_identity = None;
+    h.host.calls();
+    assert!(h.m.adopt(&e, pid, true).await);
+    let identity = h.stored(&machine.id).unwrap().boot_identity.unwrap();
+    assert_eq!(
+        (identity.schema, identity.device_profile.as_str()),
+        (0, fc::LEGACY_PROFILE)
+    );
+    assert!(!h.m.resume_compatible(&e.snapshot()));
+    assert!(!h.host.calls().iter().any(|c| c.starts_with("kill ")));
+}
+
+#[tokio::test]
+async fn adoption_missing_or_changed_binding_cannot_recertify_matching_devices() {
+    for reporting in [false, true] {
+        let h = harness_config(|c| {
+            c.network.range = "10.64.0.0/22".into();
+            c.capacity.memory_mb = 4096;
+            c.balloon.enabled = reporting;
+        })
+        .await;
+        h.ready().await;
+        let machine = h.m.create_made(h.request("bound")).await.unwrap();
+        let e = h.m.entry(&machine.id).unwrap();
+        let pid = e.snapshot().pid;
+        let original = e.snapshot().boot_identity.unwrap();
+        assert!(e.snapshot().boot_incarnation.is_some());
+        for missing in [false, true] {
+            {
+                let mut rec = e.rec.lock().unwrap();
+                rec.boot_identity = Some(original.clone());
+                if missing {
+                    rec.boot_incarnation = None;
+                } else {
+                    rec.boot_incarnation.as_mut().unwrap().start_ticks += 1;
+                }
+            }
+            assert!(h.m.adopt(&e, pid, true).await);
+            let identity = h.stored(&machine.id).unwrap().boot_identity.unwrap();
+            assert_eq!(identity.schema, 0);
+            assert_eq!(identity.device_profile, original.device_profile);
+            assert!(!e.identity_trusted.load(Relaxed));
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_observation_retains_metadata_but_unbound_memory_is_ambiguous_and_stop_works() {
+    let h = reporting_harness().await;
+    let machine = h.m.create_made(h.request("reporting")).await.unwrap();
+    let e = h.m.entry(&machine.id).unwrap();
+    let pid = e.snapshot().pid;
+    let original = e.snapshot().boot_identity;
+    e.rec.lock().unwrap().boot_incarnation = None;
+    h.host
+        .procs
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|p| p.pid == pid)
+        .unwrap()
+        .boot_identity = Some(fc::BootIdentity::ambiguous(fc::UNAVAILABLE_PROFILE));
+    assert!(h.m.adopt(&e, pid, true).await);
+    assert_eq!(e.snapshot().boot_identity, original);
+    assert!(!e.identity_trusted.load(Relaxed));
+    let snapshot =
+        h.m.snapshot(
+            &machine.id,
+            api::SnapshotRequest {
+                name: None,
+                memory: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        h.stored(&machine.id)
+            .unwrap()
+            .snapshots
+            .iter()
+            .find(|s| s.id == snapshot.id)
+            .unwrap()
+            .boot_identity
+            .as_ref()
+            .unwrap()
+            .schema,
+        0
+    );
+    h.m.stop(&machine.id, Duration::ZERO, true, None)
+        .await
+        .unwrap();
+    assert_eq!(e.snapshot().boot_identity.as_ref().unwrap().schema, 0);
+    h.m.start(&machine.id, None).await.unwrap();
+    assert_eq!(h.reasons(&machine.id).last().unwrap(), "started");
+    assert!(h
+        .events_of(&machine.id)
+        .iter()
+        .any(|ev| ev.message.contains("boot identity incompatible")));
+    h.m.stop(&machine.id, Duration::ZERO, false, None)
+        .await
+        .unwrap();
+    assert_eq!(h.m.get(&machine.id).unwrap().state, state::STOPPED);
+}

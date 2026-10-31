@@ -31,7 +31,15 @@ Adoption preserves a running incarnation. It reads the balloon configuration wit
 changing devices. If durable provenance is missing but a device is observed, it
 records an ambiguous schema-0 identity: the VMM stays alive, telemetry can identify
 the observed profile, and future memory loads require a cold fallback. Current
-artifacts cannot establish what a historical VMM loaded.
+artifacts cannot establish what a historical VMM loaded. A successful device
+observation contradicting saved metadata also makes provenance ambiguous: a rollback
+to an older daemon can preserve unknown metadata across a cold boot. Failed telemetry
+reads preserve a known identity. Artifact provenance is also bound to the actual
+VMM PID, Linux process start ticks and host boot ID after launch. Adoption requires
+that binding before treating preserved metadata as strong provenance, even when the
+device profile matches. Unconfirmed metadata is retained on read failure, but suspend
+and named memory snapshots publish only an ambiguous identity and therefore require
+an explicit cold fallback on their next start. Plain stops remain available.
 
 Memory telemetry is additive. `memory_bytes` remains cgroup `memory.current`;
 optional anon/file charges need not sum to it. The existing tick caches bounded

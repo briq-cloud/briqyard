@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 pub const REPORTING_PROFILE: &str = "balloon-reporting-v1";
 pub const LEGACY_PROFILE: &str = "legacy-no-balloon";
+pub const UNAVAILABLE_PROFILE: &str = "unavailable-device-profile";
 
 /// Device topology is fixed by the profile; mutable target/actual pages belong to snapshots.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +93,27 @@ impl BootIdentity {
             && !self.kernel_sha256.is_empty()
             && !self.vmm_sha256.is_empty()
             && self == &host.with_reporting(self.device_profile == REPORTING_PROFILE)
+    }
+
+    /// Old daemons retain unknown record fields, so a rollback's cold boot can leave
+    /// stale provenance. Only a successful contradictory observation invalidates it.
+    pub fn after_adoption(
+        saved: Option<&Self>,
+        observed: Option<&Self>,
+        bound: bool,
+    ) -> Option<Self> {
+        let profile = observed.map_or(LEGACY_PROFILE, |i| i.device_profile.as_str());
+        match saved {
+            Some(identity)
+                if identity.schema > 1
+                    || profile == UNAVAILABLE_PROFILE
+                    || (bound && identity.device_profile == profile) =>
+            {
+                Some(identity.clone())
+            }
+            Some(_) => Some(Self::ambiguous(profile)),
+            None => observed.cloned(),
+        }
     }
 
     /// Observed live device with no durable artifact provenance: keep it alive, refuse

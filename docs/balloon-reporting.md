@@ -43,7 +43,7 @@ pressure, overcommit or process-control race experiments.
 
 Record the runtime commit and binary digest, image digests, guest kernel digest,
 VMM binary digest and pinned source tree, host kernel, architecture, transport,
-configured size/CPU and effective `boot_identity` for every run. Use the patched
+configured size/CPU, effective `boot_identity` and `boot_incarnation` for every run. Use the patched
 Firecracker tree selected by `hack/firecracker/pin.json`, including checked snapshot
 preparation. A matching version string alone does not establish the binary's tree.
 Verify the guest kernel is the checked bootstrap artifact with VIRTIO_BALLOON and

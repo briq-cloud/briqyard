@@ -422,8 +422,19 @@ impl Manager {
         else {
             return false;
         };
-        if rec.boot_identity.is_none() && vm.boot_identity.is_some() {
-            e.rec.lock().unwrap().boot_identity = vm.boot_identity.clone();
+        let bound = rec
+            .boot_incarnation
+            .as_ref()
+            .zip(vm.incarnation.as_ref())
+            .is_some_and(|(saved, actual)| saved == actual);
+        e.identity_trusted.store(bound, Relaxed);
+        let identity = fc::BootIdentity::after_adoption(
+            rec.boot_identity.as_ref(),
+            vm.boot_identity.as_ref(),
+            bound,
+        );
+        if identity != rec.boot_identity {
+            e.rec.lock().unwrap().boot_identity = identity;
             if let Err(err) = self.save(e) {
                 tracing::warn!(machine = rec.id, err = %err, "adopted boot identity not saved");
             }

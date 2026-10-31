@@ -268,12 +268,15 @@ impl Manager {
             Err(err) => return Err(fail(err)),
         };
         {
+            e.identity_trusted
+                .store(live.incarnation.is_some(), Relaxed);
             *e.live.lock().unwrap() = Some(live.clone());
             *e.stop_req.lock().unwrap() = None;
             let mut r = e.rec.lock().unwrap();
             r.pid = live.pid;
             r.suspended = false;
             r.boot_identity = live.boot_identity.clone();
+            r.boot_incarnation = live.incarnation.clone();
             if !live.resumed {
                 r.boots += 1;
                 r.vmm_version = self.inner.vmm.version();
@@ -344,6 +347,17 @@ impl Manager {
         Ok(())
     }
 
+    /// Memory publication may not turn unconfirmed adoption metadata into a strong claim.
+    pub(super) fn memory_identity(&self, e: &Entry, rec: &Record) -> Option<fc::BootIdentity> {
+        rec.boot_identity.as_ref().map(|identity| {
+            if identity.schema != 0 && !e.identity_trusted.load(Relaxed) {
+                fc::BootIdentity::ambiguous(&identity.device_profile)
+            } else {
+                identity.clone()
+            }
+        })
+    }
+
     pub(super) fn resume_compatible(&self, rec: &Record) -> bool {
         match (&rec.boot_identity, self.inner.vmm.boot_identity(false)) {
             (Some(saved), Some(host)) => {
@@ -364,6 +378,7 @@ impl Manager {
             let mut r = e.rec.lock().unwrap();
             r.suspended = false;
             r.boot_identity = identity.clone();
+            r.boot_incarnation = None;
             r.vmm_version = self.inner.vmm.version();
         }
         self.save(e)?;

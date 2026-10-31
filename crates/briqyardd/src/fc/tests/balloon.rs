@@ -138,3 +138,84 @@ fn memory_stat_components_are_optional_and_do_not_claim_to_sum_to_current() {
     assert_eq!(memory_stat_bytes("anon invalid", "anon"), None);
     assert_eq!(memory_stat_bytes("anon 123", "file"), None);
 }
+
+#[test]
+fn adoption_invalidates_contradictions_but_preserves_identity_on_telemetry_failure() {
+    let reporting = BootIdentity {
+        schema: 1,
+        device_profile: REPORTING_PROFILE.into(),
+        kernel_sha256: "kernel".into(),
+        vmm_sha256: "vmm".into(),
+        host_kernel: "test".into(),
+        transport: "mmio".into(),
+    };
+    let observed_reporting = BootIdentity::ambiguous(REPORTING_PROFILE);
+    let unavailable = BootIdentity::ambiguous(UNAVAILABLE_PROFILE);
+    assert_eq!(
+        BootIdentity::after_adoption(Some(&reporting), Some(&unavailable), true),
+        Some(reporting.clone())
+    );
+    assert_eq!(
+        BootIdentity::after_adoption(Some(&reporting), Some(&observed_reporting), true),
+        Some(reporting.clone())
+    );
+    let legacy = BootIdentity::after_adoption(Some(&reporting), None, true).unwrap();
+    assert_eq!(
+        (legacy.schema, legacy.device_profile.as_str()),
+        (0, LEGACY_PROFILE)
+    );
+    let observed = BootIdentity::after_adoption(
+        Some(&reporting.with_reporting(false)),
+        Some(&observed_reporting),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        (observed.schema, observed.device_profile.as_str()),
+        (0, REPORTING_PROFILE)
+    );
+    let mut future = reporting;
+    future.schema = 2;
+    assert_eq!(
+        BootIdentity::after_adoption(Some(&future), None, true),
+        Some(future)
+    );
+}
+
+#[test]
+fn matching_device_without_incarnation_cannot_certify_artifacts() {
+    let legacy = BootIdentity {
+        schema: 1,
+        device_profile: LEGACY_PROFILE.into(),
+        kernel_sha256: "old-kernel".into(),
+        vmm_sha256: "old-vmm".into(),
+        host_kernel: "test".into(),
+        transport: "mmio".into(),
+    };
+    let identity = BootIdentity::after_adoption(Some(&legacy), None, false).unwrap();
+    assert_eq!(identity.schema, 0);
+    assert_eq!(identity.device_profile, LEGACY_PROFILE);
+    let reporting = legacy.with_reporting(true);
+    let observation = BootIdentity::ambiguous(REPORTING_PROFILE);
+    assert_eq!(
+        BootIdentity::after_adoption(Some(&reporting), Some(&observation), false)
+            .unwrap()
+            .schema,
+        0
+    );
+}
+
+#[test]
+fn process_start_ticks_parse_comm_parentheses_and_reject_missing_or_invalid_fields() {
+    let prior = (4..22).map(|n| n.to_string()).collect::<Vec<_>>().join(" ");
+    let stat = format!("123 (a b) c) S {prior} 98765 0 0");
+    assert_eq!(super::super::incarnation::start_ticks(&stat), Some(98765));
+    assert_eq!(
+        super::super::incarnation::start_ticks("123 (short) S 0"),
+        None
+    );
+    assert_eq!(
+        super::super::incarnation::start_ticks(&stat.replace("98765", "invalid")),
+        None
+    );
+}

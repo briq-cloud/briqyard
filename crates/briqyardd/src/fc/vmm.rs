@@ -43,6 +43,7 @@ pub struct Vm {
     /// Resumed from a snapshot rather than booted.
     pub resumed: bool,
     pub boot_identity: Option<BootIdentity>,
+    pub incarnation: Option<Incarnation>,
     /// `true` once the process is gone and its console fully written.
     pub exited: watch::Receiver<bool>,
     /// What the init reported when the main process ended; `None` until then, and the
@@ -270,6 +271,7 @@ impl Vmm for Firecracker {
             chroot: proc.chroot.clone(),
             resumed: resume,
             boot_identity: b.boot_identity.clone(),
+            incarnation: Incarnation::read(proc.pid()),
             exited,
             exit,
         };
@@ -332,7 +334,8 @@ impl Vmm for Firecracker {
             {
                 Some(BootIdentity::ambiguous(REPORTING_PROFILE))
             }
-            _ => Some(BootIdentity::ambiguous("unknown-device-profile")),
+            Ok(Some(_)) => Some(BootIdentity::ambiguous("unknown-device-profile")),
+            Err(_) => Some(BootIdentity::ambiguous(UNAVAILABLE_PROFILE)),
         };
         Some(Vm {
             pid,
@@ -342,6 +345,7 @@ impl Vmm for Firecracker {
             chroot,
             resumed: false,
             boot_identity,
+            incarnation: Incarnation::read(pid),
             exited,
             exit,
         })

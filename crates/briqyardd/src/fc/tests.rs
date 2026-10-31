@@ -716,6 +716,7 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
                 chroot: None,
                 resumed: false,
                 boot_identity: None,
+                incarnation: None,
                 exited,
                 exit,
             };

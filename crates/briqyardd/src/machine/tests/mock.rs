@@ -408,6 +408,7 @@ impl fc::Vmm for Mock {
             chroot: None,
             resumed,
             boot_identity: b.boot_identity.clone(),
+            incarnation: Some(mock_incarnation(pid)),
             exited: rx,
             exit,
         })
@@ -438,6 +439,7 @@ impl fc::Vmm for Mock {
                 .boot_identity
                 .as_ref()
                 .map(|i| fc::BootIdentity::ambiguous(&i.device_profile)),
+            incarnation: Some(mock_incarnation(pid)),
             exited: p.exited.subscribe(),
             exit: Self::exit_of(p),
         })
@@ -846,5 +848,13 @@ pub(super) fn policy_line(p: &nft::Policy) -> String {
             "open {ip} ports {:?} conn {} mbit {}",
             l.blocked_ports, l.new_connections_per_minute, l.bandwidth_mbit
         ),
+    }
+}
+
+fn mock_incarnation(pid: u32) -> fc::Incarnation {
+    fc::Incarnation {
+        pid,
+        start_ticks: u64::from(pid),
+        host_boot_id: "test-host-boot".into(),
     }
 }

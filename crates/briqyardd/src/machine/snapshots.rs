@@ -234,7 +234,7 @@ impl Manager {
             created_at: Utc::now(),
             disks: disks.iter().map(|d| d.to_string()).collect(),
             boot_identity: if memory.is_some() {
-                r.boot_identity.clone()
+                self.memory_identity(&e, &r)
             } else {
                 None
             },
