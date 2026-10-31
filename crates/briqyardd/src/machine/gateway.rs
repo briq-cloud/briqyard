@@ -247,7 +247,7 @@ impl Manager {
             return Ok(());
         };
         if gw.live.lock().unwrap().as_ref().map(|l| l.pid) == Some(live.pid) {
-            self.end_process(gw, &live, Duration::ZERO).await;
+            self.end_process(gw, &live, Duration::ZERO).await?;
         }
         let tail = self.last_console_lines(&r, 5);
         Err(self.boot_failed(gw, format!("{why}: {tail}")))

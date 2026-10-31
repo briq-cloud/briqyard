@@ -389,7 +389,9 @@ fn holds_memory(state: &str) -> bool {
 /// Whether the host counts this machine's memory as taken: it holds it, or its create will
 /// start it (ADR 0048: room is taken when the machine is recorded, not when it boots).
 fn commits_memory(r: &Record) -> bool {
-    holds_memory(&r.state) || (r.state == state::CREATING && r.start)
+    holds_memory(&r.state)
+        || r.state == state::DESTROYING
+        || (r.state == state::CREATING && r.start)
 }
 
 /// What a machine in this record's state holds, for its usage.
@@ -508,6 +510,10 @@ struct Entry {
     rec: Mutex<Record>,
     live: Mutex<Option<fc::Vm>>,
     memory_protection: Mutex<Option<fc::MemoryProtection>>,
+    /// A boot attempt not yet positively settled or represented by a managed live handle.
+    launch_pending: AtomicBool,
+    /// Adopted lifecycle dispatch waits until the startup spawn gate opens.
+    pending_adoption: Mutex<Option<(fc::Vm, bool)>>,
     /// The reason set before asking the guest to stop; `None` when it ends on its own.
     stop_req: Mutex<Option<String>>,
     /// Signalled on every state change: what `wait` and a stop wait on.
@@ -545,6 +551,8 @@ impl Entry {
             rec: Mutex::new(rec),
             live: Mutex::new(None),
             memory_protection: Mutex::new(None),
+            launch_pending: AtomicBool::new(false),
+            pending_adoption: Mutex::new(None),
             stop_req: Mutex::new(None),
             changed: Notify::new(),
             unsaved_use: AtomicBool::new(false),

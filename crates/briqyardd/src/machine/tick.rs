@@ -49,6 +49,24 @@ impl Manager {
 
     pub(super) async fn tick(&self) {
         let now = Utc::now();
+        let pending: Vec<_> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| {
+                entry
+                    .launch_pending
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            })
+            .cloned()
+            .collect();
+        for entry in pending {
+            if let Ok(_turn) = entry.lock.try_lock() {
+                self.refresh_launch_reservation(&entry);
+            }
+        }
         self.refresh_memory_host().await;
         self.measure(now).await;
         self.assess(now).await;
@@ -272,6 +290,30 @@ impl Manager {
     /// its last measure to its meter, and takes that into the ledger. A source that cannot be
     /// read adds nothing this time, and its next reading covers it.
     pub(super) async fn meter(&self, entries: &[Arc<Entry>], now: DateTime<Utc>) {
+        self.meter_readings(entries, now, None).await;
+    }
+
+    pub(super) async fn final_meter(&self, e: &Arc<Entry>, now: DateTime<Utc>) -> Result<()> {
+        let rec = e.snapshot();
+        let final_use = self
+            .inner
+            .vmm
+            .final_cgroup_use(&rec.id, self.jail_for(&rec).is_some())?;
+        self.meter_readings(
+            std::slice::from_ref(e),
+            now,
+            Some((&rec.id, final_use.reading())),
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn meter_readings(
+        &self,
+        entries: &[Arc<Entry>],
+        now: DateTime<Utc>,
+        final_use: Option<(&str, Option<fc::CgroupUse>)>,
+    ) {
         let disks = match self.inner.zfs.space_under("m").await {
             Ok(spaces) => Some(disks_by_machine(&spaces)),
             Err(err) => {
@@ -301,7 +343,10 @@ impl Manager {
             .to_vec();
             files.extend(self.memory_snapshot_files(&r));
             let memory_snapshot = usage::file_bytes(&files);
-            let cgroup = self.inner.vmm.cgroup(&r.id).await;
+            let cgroup = match final_use {
+                Some((id, reading)) if id == r.id => reading,
+                _ => self.inner.vmm.cgroup(&r.id).await,
+            };
             let (who, used) = {
                 let r = e.rec.lock().unwrap();
                 let mut m = e.meter.lock().unwrap();

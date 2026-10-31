@@ -644,7 +644,8 @@ async fn recovery_starts_the_gateway_an_adopted_machine_needs() {
     // A namespace whose adopted machine does not send through its gateway.
     let unneeded = gateway("m_gw2", "t2");
     adopted("m_open", "t2", 4, api::Egress::default());
-    h.m.recover().await;
+    h.m.recover().await.unwrap();
+    h.m.resume_recovery_workers();
     // Started detached, as a start that needs it would: boot, then its port.
     tokio::time::timeout(Duration::from_secs(5), async {
         while needed.snapshot().state != state::RUNNING {

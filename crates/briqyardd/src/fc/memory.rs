@@ -165,7 +165,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd},
+        fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
         unix::fs::OpenOptionsExt,
     },
     path::Path,
@@ -425,9 +425,93 @@ mod tests {
     }
 }
 
+/// Additional gate for the trusted launcher and root-only nondelegated cgroup contract.
+#[cfg(any(target_os = "linux", test))]
+fn unprivileged(status: &str) -> bool {
+    let field = |name: &str| {
+        let values: Vec<_> = status
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(key, _)| *key == name)
+            .collect();
+        (values.len() == 1).then(|| values[0].1.trim())
+    };
+    let Some(uid) = field("Uid") else {
+        return false;
+    };
+    let uids: Vec<_> = uid.split_whitespace().map(str::parse::<u32>).collect();
+    if uids.len() != 4
+        || uids
+            .iter()
+            .any(|uid| uid.as_ref().ok().is_none_or(|uid| *uid == 0))
+        || uids.windows(2).any(|uids| uids[0] != uids[1])
+    {
+        return false;
+    }
+    ["CapEff", "CapPrm", "CapAmb"]
+        .iter()
+        .all(|key| field(key).and_then(|value| u64::from_str_radix(value, 16).ok()) == Some(0))
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    #[test]
+    fn root_capable_or_unreadable_members_never_grant_fixed_leaf_confinement() {
+        let status = concat!(
+            "Uid:\t100002 100002 100002 100002\n",
+            "CapEff:\t0000000000000000\n",
+            "CapPrm:\t0000000000000000\n",
+            "CapAmb:\t0000000000000000\n",
+        );
+        assert!(unprivileged(status));
+        for invalid in [
+            status.replace("100002", "0"),
+            status.replace("CapEff:\t0000000000000000", "CapEff:\t0000000000000001"),
+            status.replace("CapAmb:\t0000000000000000\n", ""),
+            format!("{status}Uid: 100002 100002 100002 100002\n"),
+        ] {
+            assert!(!unprivileged(&invalid));
+        }
+    }
+}
+
+/// Registration owns the duplicated descriptor through readiness and deregistration.
+#[cfg(any(target_os = "linux", test))]
+async fn wait_owned_readable(owned: OwnedFd) -> std::io::Result<()> {
+    // SAFETY: OwnedFd is moved into AsyncFd by value. This function neither exposes nor
+    // mutates its inner descriptor, so every as_raw_fd call names the same open file
+    // description until AsyncFd deregisters and drops its exclusively owned descriptor.
+    let registered = unsafe {
+        tokio::io::unix::AsyncFd::register_with_interest(owned, tokio::io::Interest::READABLE)
+    }?;
+    let _ready = registered.readable().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    #[tokio::test]
+    async fn registration_keeps_owned_descriptor_after_the_original_is_dropped() {
+        let (receiver, mut sender) = std::os::unix::net::UnixStream::pair().unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let owned = receiver.as_fd().try_clone_to_owned().unwrap();
+        drop(receiver);
+        let waiting = tokio::spawn(wait_owned_readable(owned));
+        sender.write_all(b"ready").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+}
+
 /// A pidfd pins the exact incarnation for an owned-launch abort; no numeric-PID signal race.
 #[cfg(target_os = "linux")]
 pub struct ProcessIdentity {
+    pid: u32,
     process: ProcessRef,
     pidfd: File,
 }
@@ -445,7 +529,55 @@ impl ProcessIdentity {
         if !process.same() {
             return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
         }
-        Ok(Self { process, pidfd })
+        Ok(Self {
+            pid,
+            process,
+            pidfd,
+        })
+    }
+    pub fn confirm_unprivileged(&self) -> std::io::Result<()> {
+        if !self.process.same() || !unprivileged(&self.process.dir.read(c"status")?) {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        Ok(())
+    }
+    pub fn confirm_group(&self, id: &str, pid: u32) -> std::io::Result<()> {
+        let expected = leaf(id).ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        if self.pid != pid || self.process.id != id || !self.process.in_group(&expected) {
+            return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+        }
+        self.confirm_unprivileged()
+    }
+    /// Readiness of this pidfd proves exit of the pinned incarnation; name lookup and
+    /// console closure do not. The descriptor remains held until the watcher settles.
+    pub async fn wait_dead(&self) -> std::io::Result<()> {
+        let owned = self.pidfd.as_fd().try_clone_to_owned()?;
+        wait_owned_readable(owned).await?;
+        let mut poll = libc::pollfd {
+            fd: self.pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut poll, 1, 0) } != 1 || poll.revents & libc::POLLIN == 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EIO));
+        }
+        Ok(())
+    }
+    pub fn signal_kill(&self) -> std::io::Result<()> {
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.pidfd.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     }
     pub fn kill(&self) {
         if self.process.same() {
@@ -601,6 +733,53 @@ mod event_tests {
 mod identity_tests {
     use super::*;
     use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    async fn pidfd_death_is_not_console_eof_and_old_handles_never_signal_a_sibling() {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let launch = || {
+            let mut command = briqyard_api::host_process::command("sh");
+            command
+                .arg0("firecracker")
+                .args(["-c", "exec 1>&- 2>&-; read -r line", "--id", "m-owned"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+            Child(command.spawn().unwrap())
+        };
+        let mut owned = launch();
+        let mut sibling = launch();
+        let identity = ProcessIdentity::open("m_owned", owned.0.id()).unwrap();
+        let mut eof = Vec::new();
+        owned
+            .0
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_end(&mut eof)
+            .unwrap();
+        assert!(owned.0.try_wait().unwrap().is_none());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), identity.wait_dead())
+                .await
+                .is_err()
+        );
+        identity.signal_kill().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), identity.wait_dead())
+            .await
+            .unwrap()
+            .unwrap();
+        owned.0.wait().unwrap();
+        assert!(sibling.0.try_wait().unwrap().is_none());
+        let result = identity.signal_kill();
+        assert!(result.is_err());
+        assert!(sibling.0.try_wait().unwrap().is_none());
+    }
 
     #[test]
     fn pidfd_abort_requires_the_exact_owned_command_and_keeps_siblings_alive() {

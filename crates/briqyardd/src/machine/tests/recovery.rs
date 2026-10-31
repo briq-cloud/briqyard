@@ -115,7 +115,8 @@ async fn recovery_adopts_our_process_and_signals_no_other() {
     });
     // Caught moving: nothing to adopt, stopped by the host.
     let moving = h.add("m_moving", state::STARTING, 256);
-    h.m.recover().await;
+    h.m.recover().await.unwrap();
+    h.m.resume_recovery_workers();
     assert_eq!(ours.snapshot().state, state::RUNNING);
     assert!(ours.live.lock().unwrap().is_some());
     for e in [&other, &moving] {
@@ -208,7 +209,7 @@ async fn the_sweep_ends_what_has_no_record() {
         .unwrap();
     h.pool.calls();
     h.host.calls();
-    h.m.sweep_orphans().await;
+    h.m.sweep_orphans().await.unwrap();
     let calls = h.host.calls();
     assert!(calls.contains(&format!("kill {ghost}")), "{calls:?}");
     assert!(
@@ -364,7 +365,7 @@ async fn the_sweep_frees_fork_snapshots_with_no_clone() {
         memory: None,
         vmm_version: String::new(),
     });
-    h.m.sweep_orphans().await;
+    h.m.sweep_orphans().await.unwrap();
     assert!(!h.snapshot_exists("m/m_kept/root", "fork-gone"));
     assert!(h.snapshot_exists("m/m_kept/root", "fork-m_child"));
     assert!(h.snapshot_exists("m/m_kept/root", "s_mine"));
@@ -441,7 +442,8 @@ async fn a_hand_over_leaves_every_machine_running_for_the_next_daemon() {
         "the last use is on the record"
     );
     // What the next daemon's start finds: the machine, still running, adopted.
-    assert_eq!(h.m.recover().await, (1, 0, 0));
+    assert_eq!(h.m.recover().await.unwrap(), (1, 0, 0));
+    h.m.resume_recovery_workers();
 }
 
 #[tokio::test]
@@ -473,11 +475,13 @@ async fn readiness_crosses_a_hand_over() {
     drop(held);
     // The next daemon's adoption: its probes start over, the ready one stays ready, and
     // the one that was not has to pass its probe.
-    assert_eq!(h.m.recover().await, (2, 0, 0));
+    assert_eq!(h.m.recover().await.unwrap(), (2, 0, 0));
+    h.m.resume_recovery_workers();
     assert!(h.m.get(&up.id).unwrap().ready, "ready as handed over");
     assert!(!h.m.get(&down.id).unwrap().ready);
     // Read once: a later start (a crash's adoption) carries nothing.
-    assert_eq!(h.m.recover().await, (2, 0, 0));
+    assert_eq!(h.m.recover().await.unwrap(), (2, 0, 0));
+    h.m.resume_recovery_workers();
     assert!(!h.m.get(&up.id).unwrap().ready, "a crash carries nothing");
 }
 

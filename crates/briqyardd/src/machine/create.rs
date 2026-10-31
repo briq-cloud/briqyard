@@ -509,6 +509,15 @@ impl Manager {
         rec.host_num = n as u8;
         rec.ip = t.subnet.host(n as u8)?.to_string();
         let id = rec.id.clone();
+        if machines
+            .keys()
+            .any(|other| fc::fc_id(other) == fc::fc_id(&id))
+        {
+            return Err(MError::Conflict(
+                "machine cgroup identity is already owned".into(),
+            ));
+        }
+        self.inner.vmm.register_new(&id)?;
         let e = Entry::new(rec, self.inner.events.clone());
         machines.insert(id, e.clone());
         drop(machines);

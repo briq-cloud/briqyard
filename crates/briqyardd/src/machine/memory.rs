@@ -16,6 +16,18 @@ pub(super) fn host_memory(guest_mb: u32) -> Result<u32, MError> {
 }
 
 impl Entry {
+    pub(super) fn unresolved_launch(&self, rec: &Record) -> bool {
+        self.launch_pending
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || (self.live.lock().unwrap().is_some() && !holds_memory(&rec.state))
+    }
+    pub(super) fn commits_memory(&self, rec: &Record) -> bool {
+        commits_memory(rec)
+            || self
+                .launch_pending
+                .load(std::sync::atomic::Ordering::SeqCst)
+            || self.live.lock().unwrap().is_some()
+    }
     /// A positive live adoption may have a larger or unknown existing ceiling.
     pub(super) fn memory_charge(&self, rec: &Record) -> u32 {
         let expected = api::vmm_memory_mb(rec.size.memory_mb).unwrap_or(u32::MAX);
@@ -28,6 +40,16 @@ impl Entry {
 }
 
 impl Manager {
+    /// Requires the entry lifecycle lock: a concurrent boot must not expose its previous
+    /// settled epoch between setting the reservation and invalidating the factory epoch.
+    pub(super) fn refresh_launch_reservation(&self, e: &Entry) {
+        if e.launch_pending.load(std::sync::atomic::Ordering::SeqCst)
+            && self.inner.vmm.launch_settlement(&e.snapshot().id) == fc::LaunchSettlement::Settled
+        {
+            e.launch_pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
     pub(super) fn retain_memory_policy(&self, e: &Entry, vm: &fc::Vm) {
         let rec = e.snapshot();
         let policy = self.inner.vmm.memory_policy(
@@ -66,12 +88,14 @@ impl Manager {
             )));
         }
         if machines.values().any(|e| {
-            commits_memory(&e.snapshot())
-                && e.memory_protection
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|p| p.degraded.is_some())
+            e.unresolved_launch(&e.snapshot())
+                || e.snapshot().state == state::DESTROYING
+                || (e.commits_memory(&e.snapshot())
+                    && e.memory_protection
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|p| p.degraded.is_some()))
         }) {
             return Err(MError::Capacity(
                 "live VMM memory protection unresolved".into(),

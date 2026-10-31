@@ -519,7 +519,7 @@ async fn a_restore_cut_short_is_finished_by_the_daemon_or_a_start() {
         h.m.snapshot(&m.id, api::SnapshotRequest::default()).await,
         Err(MError::BadState(_))
     ));
-    h.m.sweep_orphans().await;
+    h.m.sweep_orphans().await.unwrap();
     assert_eq!(h.datasets(&m.id).await, std::slice::from_ref(&root));
     assert!(h.snapshot_exists(&root, &s.id));
     assert!(h.stored(&m.id).unwrap().restoring.is_none());

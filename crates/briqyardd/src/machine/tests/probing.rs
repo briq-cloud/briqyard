@@ -523,7 +523,8 @@ async fn an_adopted_machine_runs_its_probes_again() {
         None
     });
     h.host.http("10.64.1.2", 8080, 503);
-    assert_eq!(h.m.recover().await, (1, 0, 0));
+    assert_eq!(h.m.recover().await.unwrap(), (1, 0, 0));
+    h.m.resume_recovery_workers();
     // Not ready until its readiness probe passes again: results are not kept.
     let m = h.m.get("m_ours").unwrap();
     assert_eq!((m.state.as_str(), m.ready), (state::RUNNING, false));
@@ -613,7 +614,8 @@ async fn probes_of_machines_adopted_at_a_start_are_spread_over_their_period() {
         });
     }
     let began = tokio::time::Instant::now();
-    assert_eq!(h.m.recover().await.0, 16);
+    assert_eq!(h.m.recover().await.unwrap().0, 16);
+    h.m.resume_recovery_workers();
     let adopted = tokio::time::Instant::now() - began;
     tokio::time::sleep(Duration::from_secs(25)).await;
     // Each machine's first probe at a point of a period from its adoption, not all at

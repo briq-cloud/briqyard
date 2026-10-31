@@ -214,7 +214,12 @@ impl Manager {
     /// kills after `grace` (at once when zero), waits for Firecracker to be gone, then clears
     /// the entry itself, since the watcher cannot take the lock to settle it, and wakes whoever
     /// waited for that.
-    pub(super) async fn end_process(&self, e: &Arc<Entry>, live: &fc::Vm, grace: Duration) {
+    pub(super) async fn end_process(
+        &self,
+        e: &Arc<Entry>,
+        live: &fc::Vm,
+        grace: Duration,
+    ) -> Result<()> {
         let mut exited = live.exited.clone();
         if !*exited.borrow() {
             let asked = !grace.is_zero()
@@ -223,15 +228,17 @@ impl Manager {
                     self.inner.guest.shutdown(&live.vsock, grace),
                 )
                 .await
-                .map(|r| r.is_ok())
-                .unwrap_or(false);
+                .is_ok_and(|r| r.is_ok());
             let gone = asked
                 && tokio::time::timeout(grace + Duration::from_secs(5), exited.wait_for(|x| *x))
                     .await
-                    .is_ok();
+                    .is_ok_and(|r| r.is_ok());
             if !gone {
-                self.inner.vmm.kill(live.pid);
-                let _ = exited.wait_for(|x| *x).await;
+                self.inner.vmm.kill_checked(live)?;
+                tokio::time::timeout(Duration::from_secs(10), exited.wait_for(|x| *x))
+                    .await
+                    .context("VMM termination deadline")?
+                    .context("VMM termination proof channel closed")?;
             }
         }
         *e.live.lock().unwrap() = None;
@@ -239,6 +246,7 @@ impl Manager {
         let r = e.snapshot();
         self.unplug(&r.id, &r.ip).await;
         e.changed.notify_waiters();
+        Ok(())
     }
 
     pub async fn stop(
@@ -476,10 +484,10 @@ impl Manager {
         self.check_version(&e, at)?;
         // No event: the destroy is one step, and `destroyed` ends it.
         e.set_state(state::DESTROYING, |_| None);
-        let _ = self.save(&e);
+        self.save(&e)?;
         let live = e.live.lock().unwrap().clone();
         if let Some(live) = live {
-            self.end_process(&e, &live, Duration::from_secs(5)).await;
+            self.end_process(&e, &live, Duration::from_secs(5)).await?;
         }
         for ep in self.endpoints_of(id) {
             let _ = self.delete_endpoint(&ep.id);
@@ -488,7 +496,24 @@ impl Manager {
         self.unplug(id, &rec.ip).await;
         // Its last use, measured while its disks and counters are still there; the bucket
         // stays after it (ADR 0017).
-        self.meter(std::slice::from_ref(&e), Utc::now()).await;
+        self.final_meter(&e, Utc::now())
+            .await
+            .context("final machine counters before retirement")?;
+        {
+            // Hold the identity registry through synchronous retirement. A distinct original
+            // ID that encodes to this leaf is not an owner we may clean up.
+            let machines = self.inner.machines.lock().unwrap();
+            if machines
+                .keys()
+                .any(|other| other != id && fc::fc_id(other) == fc::fc_id(id))
+            {
+                return Err(anyhow!("cgroup machine identity collision").into());
+            }
+            self.inner
+                .vmm
+                .retire_cgroup(id, self.jail_for(&rec).is_some())
+                .context("retire machine cgroup before disk teardown")?;
+        }
         self.inner
             .net
             .uncount(&rec.ip)
@@ -533,6 +558,7 @@ impl Manager {
             .await?;
         self.forget(&e)?;
         self.remove_machine(&e);
+        self.inner.vmm.forget_machine(id);
         self.inner
             .events
             .emit(Ev::normal(reason::DESTROYED, "destroyed").of(id, &rec.namespace));

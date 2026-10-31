@@ -779,7 +779,8 @@ async fn a_create_cut_by_a_restart_is_taken_up_again_or_failed() {
         r.start = true;
     }
     h.disks(&f).await;
-    h.m.recover().await;
+    h.m.recover().await.unwrap();
+    h.m.resume_recovery_workers();
     let ran =
         h.m.wait("m_cut", Until::Running, Duration::from_secs(5))
             .await;

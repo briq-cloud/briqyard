@@ -9,8 +9,22 @@ impl Manager {
         cfg: Config,
         store: Store,
         zfs: Zfs,
+        images: Builder,
+        dns: Resolver,
+    ) -> Result<Self> {
+        let startup = fc::Startup::acquire().await?;
+        Self::new_with_startup(cfg, store, zfs, images, dns, startup).await
+    }
+
+    /// Startup ownership acquired before the executable launches host helpers.
+    #[doc(hidden)]
+    pub async fn new_with_startup(
+        cfg: Config,
+        store: Store,
+        zfs: Zfs,
         mut images: Builder,
         dns: Resolver,
+        startup: fc::Startup,
     ) -> Result<Self> {
         let range = Range::parse(&cfg.network.range).context("network.range")?;
         let host_id = match store.get_meta("host_id")? {
@@ -51,6 +65,9 @@ impl Manager {
         let inner = Arc::new(Inner {
             stats: Stats::default(),
             vmm: Arc::new(fc::Firecracker {
+                launches: Default::default(),
+                startup: tokio::sync::Mutex::new(Some(startup)),
+                jailer: cfg.jailer.clone(),
                 binary: cfg.firecracker.clone(),
                 pci: cfg.pci,
                 console_max: (cfg.console_max_mb as u64) << 20,
@@ -88,8 +105,27 @@ impl Manager {
             started: Mutex::new(api::DaemonStart::default()),
         });
         let m = Self { inner };
-        m.refresh_memory_host().await;
         m.load()?;
+        let recovered: Vec<_> = m
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .map(|entry| {
+                let rec = entry.snapshot();
+                fc::RecoveryMachine {
+                    id: rec.id,
+                    pid: rec.pid,
+                }
+            })
+            .collect();
+        m.inner
+            .vmm
+            .initialize_recovery(&recovered)
+            .await
+            .context("native recovery barrier")?;
+        m.refresh_memory_host().await;
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
             .inner
@@ -104,8 +140,9 @@ impl Manager {
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
-        let (adopted, stopped, gone) = m.recover().await;
-        let swept = m.sweep_orphans().await;
+        let (adopted, stopped, gone) = m.recover().await?;
+        let swept = m.sweep_orphans().await?;
+        m.inner.vmm.open_recovery()?;
         let machines = m.inner.machines.lock().unwrap().len();
         *m.inner.started.lock().unwrap() = api::DaemonStart {
             at: Utc::now(),
@@ -124,6 +161,7 @@ impl Manager {
                 "swept": swept,
             })),
         );
+        m.resume_recovery_workers();
         m.start_stopped_by_host();
         let sleeper = m.clone();
         tokio::spawn(async move { sleeper.sleeper().await });
@@ -213,7 +251,7 @@ impl Manager {
     /// killed: after a reboot the pid is someone else's) and marked stopped by the host, so
     /// the next use wakes them. A create it left is failed (ADR 0048). Destroys cut short are
     /// resumed by the sleeper's tick. How many were adopted, and how many marked stopped.
-    pub(super) async fn recover(&self) -> (usize, usize, usize) {
+    pub(super) async fn recover(&self) -> Result<(usize, usize, usize)> {
         let entries: Vec<Arc<Entry>> = self
             .inner
             .machines
@@ -226,6 +264,12 @@ impl Manager {
         let ready = self.take_handed_ready();
         for e in entries {
             let rec = e.snapshot();
+            if !matches!(
+                rec.state.as_str(),
+                state::RUNNING | state::STARTING | state::STOPPING
+            ) {
+                self.inner.vmm.recover_stopped(&rec.id).await?;
+            }
             // Its create's task went with the previous daemon. One from an image is taken up
             // again, its partial disks gone first: the record holds what it needs. What a fork
             // or a restore was made from is not on the record: failed, for the caller to create
@@ -239,7 +283,8 @@ impl Manager {
                         }
                     }
                     tracing::info!(machine = rec.id, "create cut by a restart, taken up again");
-                    self.spawn_make(e.clone(), Make::Image);
+                    // The worker is resumed only after the complete startup barrier and
+                    // orphan teardown; recovery itself creates no VMM tasks.
                     continue;
                 }
                 let why = "its create was cut short by a restart of the host's daemon";
@@ -268,7 +313,6 @@ impl Manager {
             let why = match alive {
                 true => {
                     stopped += 1;
-                    self.inner.vmm.kill(rec.pid);
                     "left running by a previous daemon that could not hand it over: stopped"
                 }
                 false => {
@@ -276,6 +320,7 @@ impl Manager {
                     "its process ended while no daemon ran: stopped"
                 }
             };
+            self.inner.vmm.recover_stopped(&rec.id).await?;
             self.unplug(&rec.id, &rec.ip).await;
             e.set_state(state::STOPPED, |r| {
                 r.stopped_reason = stop::HOST.into();
@@ -289,8 +334,48 @@ impl Manager {
             );
             let _ = self.save(&e);
         }
-        // An adopted machine that sends through its namespace's gateway needs it, and the
-        // gateway's own process may not have survived: it starts as a start would start it.
+        Ok((adopted, stopped, gone))
+    }
+
+    /// No create or gateway start is dispatched until native recovery and orphan teardown
+    /// are complete and the factory opens its managed-spawn gate.
+    pub(super) fn resume_recovery_workers(&self) {
+        let adopted: Vec<_> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for entry in adopted {
+            let pending = entry.pending_adoption.lock().unwrap().take();
+            if let Some((vm, ready)) = pending {
+                self.watch(&entry, &vm);
+                if !*vm.exited.borrow() {
+                    let (_, _, generation) = self.reset_probes(&entry);
+                    if ready {
+                        entry.probe.lock().unwrap().ready = true;
+                    }
+                    self.spawn_probes(&entry, &vm, generation, false);
+                }
+            }
+        }
+        let creates: Vec<_> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| {
+                let rec = entry.snapshot();
+                rec.state == state::CREATING && !rec.from_source
+            })
+            .cloned()
+            .collect();
+        for entry in creates {
+            self.spawn_make(entry, Make::Image);
+        }
         for gw in self.gateways_out_of_step(false) {
             let (m, namespace) = (self.clone(), gw.snapshot().namespace);
             tokio::spawn(async move {
@@ -299,14 +384,13 @@ impl Manager {
                 }
             });
         }
-        (adopted, stopped, gone)
     }
 
     /// Resources a previous daemon left with no record to own them: a crash between a resource
     /// and its record, or a destroy cut short. A Firecracker nobody knows is ended; its run
     /// directory, jail, TAP and disks go. Done once at start, so nothing leaks for good. How
     /// many it found.
-    pub(super) async fn sweep_orphans(&self) -> usize {
+    pub(super) async fn sweep_orphans(&self) -> Result<usize> {
         let known: std::collections::HashSet<String> = self
             .inner
             .machines
@@ -315,14 +399,8 @@ impl Manager {
             .keys()
             .cloned()
             .collect();
-        let mut swept = 0;
-        for (pid, id) in self.inner.vmm.processes() {
-            if !known.contains(&id) {
-                self.inner.vmm.kill(pid);
-                tracing::warn!(machine = id, pid, "firecracker with no record, ended");
-                swept += 1;
-            }
-        }
+        let known_ids: Vec<_> = known.iter().cloned().collect();
+        let mut swept = self.inner.vmm.prepare_orphans(&known_ids).await?;
         if let Ok(mut rd) = tokio::fs::read_dir(self.inner.cfg.run_dir()).await {
             while let Ok(Some(e)) = rd.next_entry().await {
                 let name = e.file_name().to_string_lossy().into_owned();
@@ -379,7 +457,7 @@ impl Manager {
         if swept > 0 {
             tracing::info!(swept, "orphans swept at start");
         }
-        swept
+        Ok(swept)
     }
 
     /// Takes over a VMM a previous daemon left running (it crashed; a shutdown suspends
@@ -402,14 +480,7 @@ impl Manager {
         self.retain_memory_policy(e, &vm);
         *e.live.lock().unwrap() = Some(vm.clone());
         *e.stop_req.lock().unwrap() = None;
-        self.watch(e, &vm);
-        // Its probes run again from the top; nobody waits on this run, so a startup that
-        // fails is a crash for the restart policy, not a failed boot.
-        let (_, _, generation) = self.reset_probes(e);
-        if ready {
-            e.probe.lock().unwrap().ready = true;
-        }
-        self.spawn_probes(e, &vm, generation, false);
+        *e.pending_adoption.lock().unwrap() = Some((vm, ready));
         e.note(
             Ev::normal(
                 reason::ADOPTED,
@@ -430,8 +501,14 @@ impl Manager {
     pub(super) fn watch(&self, e: &Arc<Entry>, vm: &fc::Vm) {
         let (m, e, pid, mut exited) = (self.clone(), e.clone(), vm.pid, vm.exited.clone());
         tokio::spawn(async move {
-            let _ = exited.wait_for(|gone| *gone).await;
-            m.settle_exit(&e, pid).await;
+            if exited.wait_for(|gone| *gone).await.is_ok() {
+                m.settle_exit(&e, pid).await;
+            } else {
+                tracing::warn!(
+                    machine = e.snapshot().id,
+                    "VMM exit proof unavailable; live ownership retained"
+                );
+            }
         });
     }
 

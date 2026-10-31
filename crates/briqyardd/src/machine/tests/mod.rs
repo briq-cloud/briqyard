@@ -17,6 +17,7 @@ mod observe;
 mod probing;
 mod quotas;
 mod recovery;
+mod retirement;
 mod sessions;
 mod tick;
 mod units;

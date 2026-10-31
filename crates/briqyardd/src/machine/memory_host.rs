@@ -77,12 +77,13 @@ impl Manager {
     pub(super) fn memory_condition(&self) -> api::Condition {
         let host = *self.inner.memory_host.lock().unwrap();
         let live_degraded = self.inner.machines.lock().unwrap().values().any(|e| {
-            commits_memory(&e.snapshot())
-                && e.memory_protection
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|p| p.degraded.is_some())
+            e.unresolved_launch(&e.snapshot())
+                || (e.commits_memory(&e.snapshot())
+                    && e.memory_protection
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|p| p.degraded.is_some()))
         });
         let unjailed =
             self.inner.vmm.host_memory_checks() && self.inner.cfg.jailer.as_os_str().is_empty();

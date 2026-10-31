@@ -475,7 +475,10 @@ impl Manager {
             _ => Ev::warning(reason::LIVENESS_FAILED, format!("{what}: ending it"))
                 .data(json!({ "failures": failures })),
         });
-        self.end_process(e, &live, END_GRACE).await;
+        if let Err(err) = self.end_process(e, &live, END_GRACE).await {
+            tracing::warn!(machine = r.id, err = %err, "probe termination remains unresolved");
+            return;
+        }
         if boot {
             self.inner
                 .stats

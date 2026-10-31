@@ -30,6 +30,8 @@ pub struct Boot {
 /// A machine's VMM as the manager keeps it: the process, its sockets, and when it is gone.
 #[derive(Clone)]
 pub struct Vm {
+    #[cfg(target_os = "linux")]
+    pub(crate) identity: Option<Arc<super::memory::ProcessIdentity>>,
     pub pid: u32,
     /// The VMM's API socket.
     pub api: PathBuf,
@@ -58,6 +60,28 @@ impl Vm {
     }
 }
 
+/// Whether the factory can positively exclude a remaining launch incarnation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LaunchSettlement {
+    Settled,
+    Unresolved,
+}
+
+/// A final reading from the factory's positively settled original identity.
+#[derive(Clone, Copy)]
+pub enum FinalCgroupUse {
+    Absent,
+    Present(CgroupUse),
+}
+impl FinalCgroupUse {
+    pub(crate) fn reading(self) -> Option<CgroupUse> {
+        match self {
+            Self::Absent => None,
+            Self::Present(reading) => Some(reading),
+        }
+    }
+}
+
 /// How machines are run: Firecracker on the host, a mock in the manager's tests.
 #[async_trait]
 pub trait Vmm: Send + Sync {
@@ -76,6 +100,43 @@ pub trait Vmm: Send + Sync {
         pid: u32,
         disk_io: Arc<DiskIo>,
     ) -> Option<Vm>;
+
+    /// Runs with managed spawning closed, before recovery or background workers.
+    async fn initialize_recovery(&self, _machines: &[RecoveryMachine]) -> Result<()> {
+        Err(anyhow!("native startup barrier unsupported"))
+    }
+    fn open_recovery(&self) -> Result<()> {
+        Err(anyhow!("native startup barrier unavailable"))
+    }
+    async fn recover_stopped(&self, _id: &str) -> Result<()> {
+        Err(anyhow!("recovered process settlement unsupported"))
+    }
+    async fn prepare_orphans(&self, _known: &[String]) -> Result<usize> {
+        Err(anyhow!("checked orphan settlement unsupported"))
+    }
+
+    /// Distinguishes authoritative no-leaf from unavailable data on an existing leaf.
+    fn final_cgroup_use(&self, _id: &str, _jailed: bool) -> Result<FinalCgroupUse> {
+        Err(anyhow!("checked final VMM counters unsupported"))
+    }
+
+    fn launch_settlement(&self, _id: &str) -> LaunchSettlement {
+        LaunchSettlement::Unresolved
+    }
+
+    /// Register a newly allocated original identity before any launch. Loading an old
+    /// record must not manufacture this never-launched receipt.
+    fn register_new(&self, _id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn forget_machine(&self, _id: &str) {}
+
+    /// Under the entry lifecycle lock, after exact death/OOM capture and final metering.
+    /// Implementations must positively settle their own launchers before retiring a leaf.
+    fn retire_cgroup(&self, _id: &str, _jailed: bool) -> Result<()> {
+        Err(anyhow!("VMM factory does not implement checked retirement"))
+    }
 
     fn host_memory_checks(&self) -> bool {
         false
@@ -109,6 +170,11 @@ pub trait Vmm: Send + Sync {
     /// SIGKILL to the process and to its group.
     fn kill(&self, pid: u32);
 
+    /// Signal the exact incarnation retained by this VM, never an unpinned numeric PID.
+    fn kill_checked(&self, _vm: &Vm) -> Result<()> {
+        Err(anyhow!("exact VMM signal unsupported"))
+    }
+
     /// The machine id the process carries, when it is a VMM of ours.
     fn machine_of(&self, pid: u32) -> Option<String>;
 
@@ -125,7 +191,10 @@ pub trait Vmm: Send + Sync {
 
 /// The Firecracker on this host.
 pub struct Firecracker {
+    pub(crate) launches: super::settlement::Launches,
+    pub(crate) startup: tokio::sync::Mutex<Option<Startup>>,
     pub binary: PathBuf,
+    pub(crate) jailer: PathBuf,
     /// Firecracker's PCI transport.
     pub pci: bool,
     /// A console past this size is rotated while the machine runs (ADR 0021).
@@ -161,25 +230,131 @@ pub(super) fn version_of(firecracker: &str, kernel: &str) -> Option<String> {
 
 #[async_trait]
 impl Vmm for Firecracker {
+    async fn initialize_recovery(&self, machines: &[RecoveryMachine]) -> Result<()> {
+        if !self.version.starts_with("v1.17.0/") {
+            return Err(anyhow!("unsupported jailer lifecycle contract"));
+        }
+        let startup = self
+            .startup
+            .lock()
+            .await
+            .take()
+            .context("startup authority unavailable")?;
+        self.launches.initialize(
+            startup
+                .finish(machines, &self.jailer, &self.version)
+                .await?,
+        )
+    }
+    fn open_recovery(&self) -> Result<()> {
+        self.launches.open()
+    }
+    async fn recover_stopped(&self, id: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.launches.settle_recovered(id).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = id;
+            Err(anyhow!("native recovery requires Linux"))
+        }
+    }
+    async fn prepare_orphans(&self, known: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for id in self
+            .launches
+            .ids()
+            .into_iter()
+            .filter(|id| !known.contains(id))
+        {
+            self.recover_stopped(&id).await?;
+            let usage = self
+                .final_cgroup_use(&id, true)?
+                .reading()
+                .context("orphan leaf disappeared before final counters")?;
+            tracing::info!(
+                machine = id,
+                cpu_usec = usage.cpu_usec,
+                "orphan final VMM counters"
+            );
+            self.retire_cgroup(&id, true)?;
+            self.forget_machine(&id);
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    fn final_cgroup_use(&self, id: &str, jailed: bool) -> Result<FinalCgroupUse> {
+        self.launches.check(id)?;
+        if !jailed {
+            return Ok(FinalCgroupUse::Absent);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            match super::retirement::Leaf::capture(id)? {
+                Some(leaf) => Ok(FinalCgroupUse::Present(leaf.final_usage(id)?)),
+                None => Ok(FinalCgroupUse::Absent),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(anyhow!("jailed final counters require Linux"))
+        }
+    }
+
+    fn launch_settlement(&self, id: &str) -> LaunchSettlement {
+        match self.launches.check(id) {
+            Ok(()) => LaunchSettlement::Settled,
+            Err(_) => LaunchSettlement::Unresolved,
+        }
+    }
+    fn register_new(&self, id: &str) -> Result<()> {
+        self.launches.new_machine(id)
+    }
+
+    fn forget_machine(&self, id: &str) {
+        self.launches.forget(id);
+    }
+
+    fn retire_cgroup(&self, id: &str, jailed: bool) -> Result<()> {
+        self.launches.check(id)?;
+        if jailed {
+            #[cfg(target_os = "linux")]
+            if let Some(leaf) = super::retirement::Leaf::capture(id)? {
+                leaf.remove(id).context("retire VMM cgroup")?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(anyhow!("jailed cgroup retirement requires Linux"));
+        }
+        Ok(())
+    }
     fn host_memory_checks(&self) -> bool {
         true
     }
     async fn boot(&self, b: &Boot) -> Result<Vm> {
         let mut resume = b.resume;
         let (proc, exit) = loop {
-            let mut proc = Process::start(&self.binary, b, self.pci, self.console_max).await?;
+            let mut proc = Process::start(
+                &self.binary,
+                b,
+                self.pci,
+                self.console_max,
+                self.launches.begin(&b.id)?,
+            )
+            .await?;
             let exit = match listen_exit(&proc.vsock, proc.uid, proc.gid, proc.done()) {
                 Ok(rx) => rx,
                 Err(err) => {
                     proc.kill();
-                    proc.wait().await;
+                    let _ = proc.wait().await;
                     return Err(err);
                 }
             };
             let c = proc.client.clone();
             if let Err(err) = proc.metrics_to(b.disk_io.clone()).await {
                 proc.kill();
-                proc.wait().await;
+                let _ = proc.wait().await;
                 return Err(err.context("firecracker metrics"));
             }
             let (snap_state, snap_mem) = (proc.outside("snap.state"), proc.outside("snap.mem"));
@@ -213,7 +388,7 @@ impl Vmm for Firecracker {
                     Err(err) => {
                         tracing::warn!(machine = b.id, err = %err, "resume from snapshot failed, booting cold");
                         proc.kill();
-                        proc.wait().await;
+                        let _ = proc.wait().await;
                         resume = false;
                         continue;
                     }
@@ -241,7 +416,7 @@ impl Vmm for Firecracker {
             };
             if let Err(err) = configure.await {
                 proc.kill();
-                proc.wait().await;
+                let _ = proc.wait().await;
                 return Err(anyhow!("configure firecracker: {err}"));
             }
             break (proc, exit);
@@ -249,8 +424,10 @@ impl Vmm for Firecracker {
         // A snapshot is for one resume: stale files would be loaded into a different boot.
         let _ = tokio::fs::remove_file(proc.outside("snap.state")).await;
         let _ = tokio::fs::remove_file(proc.outside("snap.mem")).await;
-        let (exited_tx, exited) = watch::channel(false);
+        let exited = proc.settled();
         let vm = Vm {
+            #[cfg(target_os = "linux")]
+            identity: proc.identity(),
             pid: proc.pid(),
             api: proc.api.clone(),
             vsock: proc.vsock.clone(),
@@ -262,14 +439,16 @@ impl Vmm for Firecracker {
         };
         tokio::spawn(async move {
             let mut proc = proc;
-            proc.wait().await;
-            let _ = exited_tx.send(true);
+            if let Err(err) = proc.wait().await {
+                tracing::warn!(err = %err, "VMM exit remains unresolved");
+            }
         });
         Ok(vm)
     }
 
     /// The process must be alive, be Firecracker, and answer on the machine's API socket as
-    /// running. It is nobody's child, so its pid is polled for `exited`.
+    /// running. It is nobody's child: retain its exact pidfd and publish `exited` only
+    /// after that incarnation exits and local OOM evidence has been recorded.
     async fn adopt(
         &self,
         id: &str,
@@ -278,9 +457,11 @@ impl Vmm for Firecracker {
         pid: u32,
         disk_io: Arc<DiskIo>,
     ) -> Option<Vm> {
-        if self.machine_of(pid).as_deref() != Some(id) {
+        if !cfg!(target_os = "linux") || self.machine_of(pid).as_deref() != Some(id) {
             return None;
         }
+        #[cfg(target_os = "linux")]
+        let identity = self.launches.recovered_identity(id, pid).ok()?;
         let (api, vsock, _, _) = paths_for(dir, jail, id);
         let client = Client::new(&api);
         let running = match tokio::time::timeout(Duration::from_secs(3), client.info()).await {
@@ -290,7 +471,13 @@ impl Vmm for Firecracker {
         if !running {
             return None;
         }
-        let (exited_tx, exited) = watch::channel(false);
+        #[cfg(target_os = "linux")]
+        identity.confirm_group(id, pid).ok()?;
+        #[cfg(target_os = "linux")]
+        let settlement = self.launches.adopt(id, pid).ok()?;
+        #[cfg(not(target_os = "linux"))]
+        let settlement = self.launches.begin(id).ok()?;
+        let exited = settlement.receiver();
         // The previous daemon's listener died with it; the guest connects at its exit, so
         // a new one on the same path takes the report.
         let (uid, gid) = jail.map(|j| (j.uid, j.gid)).unwrap_or((0, 0));
@@ -301,20 +488,40 @@ impl Vmm for Firecracker {
         if let Err(err) = read_metrics(&pipe, disk_io, exited.clone()) {
             tracing::warn!(machine = id, err = %err, "disk metrics not read");
         }
+        #[cfg(target_os = "linux")]
         let machine = id.to_string();
+        #[cfg(target_os = "linux")]
+        let monitor_identity = identity.clone();
         #[cfg(target_os = "linux")]
         let oom_evidence = super::memory::OomEvidence::capture(id, pid);
         tokio::spawn(async move {
-            while machine_of(pid).as_deref() == Some(machine.as_str()) {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+            #[cfg(target_os = "linux")]
+            let dead = monitor_identity.wait_dead().await.is_ok();
+            #[cfg(not(target_os = "linux"))]
+            let dead = false;
+            if !dead {
+                return;
             }
+            #[cfg(target_os = "linux")]
+            if settlement.confirm_empty_scope(&machine).is_err() {
+                return;
+            }
+
             #[cfg(target_os = "linux")]
             if let Some(evidence) = oom_evidence {
                 evidence.record(&machine);
+            } else {
+                tracing::warn!(
+                    machine,
+                    reason = "vmm_oom_evidence_unavailable",
+                    "VMM local memory events baseline unavailable"
+                );
             }
-            let _ = exited_tx.send(true);
+            settlement.complete();
         });
         Some(Vm {
+            #[cfg(target_os = "linux")]
+            identity: Some(identity),
             pid,
             api,
             vsock,
@@ -394,6 +601,26 @@ impl Vmm for Firecracker {
 
     async fn resume(&self, vm: &Vm) -> Result<()> {
         Client::new(&vm.api).resume().await.context("resume")
+    }
+
+    fn kill_checked(&self, vm: &Vm) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let identity = vm
+                .identity
+                .as_ref()
+                .context("exact VMM identity unavailable")?;
+            match identity.signal_kill() {
+                Ok(()) => Ok(()),
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = vm;
+            Err(anyhow!("exact detached VMM signal requires Linux"))
+        }
     }
 
     fn kill(&self, pid: u32) {

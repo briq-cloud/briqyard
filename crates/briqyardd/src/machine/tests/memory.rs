@@ -86,7 +86,8 @@ async fn positive_adoption_survives_policy_failure_and_blocks_new_admission() {
         degraded: Some("policy_write_denied"),
         contained: false,
     });
-    h.m.recover().await;
+    h.m.recover().await.unwrap();
+    h.m.resume_recovery_workers();
     assert_eq!(ours.snapshot().state, state::RUNNING);
     assert_eq!(ours.snapshot().pid, pid);
     assert!(ours.live.lock().unwrap().is_some());

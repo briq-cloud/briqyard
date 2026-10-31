@@ -166,7 +166,7 @@ pub(super) fn committed(machines: &HashMap<String, Arc<Entry>>) -> (api::Capacit
     let mut up = 0;
     for e in machines.values() {
         let r = e.rec.lock().unwrap();
-        if commits_memory(&r) {
+        if e.commits_memory(&r) {
             up += usize::from(holds_memory(&r.state));
             used.memory_mb = used.memory_mb.saturating_add(e.memory_charge(&r));
             used.cpu_millis = Some(used.cpu_millis().saturating_add(r.size.cpu_millis()));
