@@ -368,7 +368,10 @@ impl Fixture {
 
 #[test]
 fn native_fixture_scope_refuses_root_foreign_or_missing_binding() {
-    let nonce = "0123456789abcdef0123456789abcdef";
+    let mut random = [0_u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut random);
+    let encoded = hex::encode(random);
+    let nonce = encoded.as_str();
     assert!(scope(&format!("bqown-{nonce}/fixture"), nonce).is_ok());
     for wrong in ["", "byard", "byard/m/m_foreign", "bqown-x/fixture"] {
         assert!(scope(wrong, nonce).is_err());
