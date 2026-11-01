@@ -91,25 +91,34 @@ pub(super) fn accept_route(reg: &mut Registry, route: &SandboxRoute) {
     }
 }
 pub(super) fn namespace_unresolved(reg: &Registry, namespace: &str) -> bool {
-    crate::sandbox_admissions::namespace_pending(reg, namespace)
+    reg.namespace_moves
+        .values()
+        .any(|m| m.namespace == namespace)
+        || crate::sandbox_admissions::namespace_pending(reg, namespace)
         || reg
             .sandbox_requests
             .values()
             .any(|route| route.namespace == namespace && !route.accepted)
 }
 pub(super) fn host_unresolved(reg: &Registry, host: &str) -> bool {
-    reg.sandbox_admissions
-        .values()
-        .any(|a| a.pending_seed() && a.host.as_deref() == Some(host))
+    reg.namespace_moves.values().any(|m| m.host == host)
+        || reg
+            .sandbox_admissions
+            .values()
+            .any(|a| a.pending_seed() && a.host.as_deref() == Some(host))
         || reg
             .sandbox_requests
             .values()
             .any(|route| route.host == host && !route.accepted)
 }
 pub(super) fn relocation_unresolved(reg: &Registry, namespace: &str, host: Option<&str>) -> bool {
-    reg.sandbox_admissions
+    reg.namespace_moves
         .values()
-        .any(|a| a.namespace == namespace && a.pending_seed() && a.host.as_deref() != host)
+        .any(|m| m.namespace == namespace && Some(m.host.as_str()) != host)
+        || reg
+            .sandbox_admissions
+            .values()
+            .any(|a| a.namespace == namespace && a.pending_seed() && a.host.as_deref() != host)
         || reg.sandbox_requests.values().any(|route| {
             route.namespace == namespace && !route.accepted && Some(route.host.as_str()) != host
         })

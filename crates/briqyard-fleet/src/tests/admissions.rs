@@ -478,3 +478,230 @@ async fn admission_authentication_strict_input_and_gateway_hint_fail_closed() {
         StatusCode::CONFLICT
     );
 }
+
+#[tokio::test]
+async fn seed_admission_before_move_refuses_cross_host_destination_without_forwarding() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    source(&f, &ds[1], "m_seed");
+    let machine = ds[0].stub.add("original", "web", 256);
+    f.st.reg
+        .lock()
+        .unwrap()
+        .machines
+        .insert(machine.id.clone(), ds[0].stub.id.clone());
+    assert_eq!(
+        admit(&f, "destination", "req_one", "m_seed").await.0,
+        StatusCode::OK
+    );
+    let path = format!("/v1/machines/{}/move", machine.id);
+    let (s, _, b) = call(
+        &f.st,
+        "POST",
+        &path,
+        "api",
+        Some(serde_json::json!({"namespace":"destination"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{b}");
+    assert!(ds[0].stub.calls().iter().all(|c| !c.contains("/move")));
+    assert_eq!(ds[0].stub.machines.lock().unwrap()[0].namespace, "original");
+    assert_eq!(
+        f.st.reg.lock().unwrap().namespaces["destination"],
+        ds[1].stub.id
+    );
+}
+
+#[tokio::test]
+async fn move_reserves_durable_destination_before_admission_and_releases_only_on_confirmed_success()
+{
+    let (f, ds) = fleet_with_daemons(2).await;
+    source(&f, &ds[1], "m_seed");
+    let machine = ds[0].stub.add("original", "web", 256);
+    f.st.reg
+        .lock()
+        .unwrap()
+        .machines
+        .insert(machine.id.clone(), ds[0].stub.id.clone());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *ds[0].stub.move_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let path = format!("/v1/machines/{}/move", machine.id);
+    let st = f.st.clone();
+    let moving = tokio::spawn(async move {
+        call(
+            &st,
+            "POST",
+            &path,
+            "api",
+            Some(serde_json::json!({"namespace":"destination"})),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let durable = Registry::load(&f.st.state_path).unwrap();
+    assert_eq!(durable.namespaces["destination"], ds[0].stub.id);
+    assert_eq!(durable.namespace_moves.len(), 1);
+    let (s, b) = admit(&f, "destination", "req_one", "m_seed").await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(json(&b)["mode"], "cold");
+    release.notify_one();
+    assert_eq!(moving.await.unwrap().0, StatusCode::OK);
+    assert!(f.st.reg.lock().unwrap().namespace_moves.is_empty());
+    assert!(Registry::load(&f.st.state_path)
+        .unwrap()
+        .namespace_moves
+        .is_empty());
+    assert_eq!(
+        ds[0].stub.machines.lock().unwrap()[0].namespace,
+        "destination"
+    );
+    assert_eq!(
+        json(&admit(&f, "destination", "req_one", "m_seed").await.1)["mode"],
+        "cold"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_delayed_move_keeps_durable_fence_through_heartbeat_restart_and_late_commit() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    source(&f, &ds[1], "m_seed");
+    let machine = ds[0].stub.add("original", "web", 256);
+    f.st.reg
+        .lock()
+        .unwrap()
+        .machines
+        .insert(machine.id.clone(), ds[0].stub.id.clone());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let finished = Arc::new(tokio::sync::Notify::new());
+    *ds[0].stub.move_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+    *ds[0].stub.move_finished.lock().unwrap() = Some(finished.clone());
+    let path = format!("/v1/machines/{}/move", machine.id);
+    let st = f.st.clone();
+    let moving = tokio::spawn(async move {
+        call(
+            &st,
+            "POST",
+            &path,
+            "api",
+            Some(serde_json::json!({"namespace":"destination"})),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    moving.abort();
+    assert!(moving.await.unwrap_err().is_cancelled());
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        let mut host = reg.hosts[&ds[0].stub.id].clone();
+        host.namespaces.clear();
+        reg.heartbeat(host, Utc::now() + Duration::minutes(11));
+        reg.unpin("destination");
+        reg.forget(&ds[0].stub.id);
+        assert_eq!(reg.namespaces["destination"], ds[0].stub.id);
+        assert!(reg.hosts.contains_key(&ds[0].stub.id));
+    }
+    f.st.save().await.unwrap();
+    *f.st.reg.lock().unwrap() = Registry::load(&f.st.state_path).unwrap();
+    assert_eq!(
+        call(&f.st, "DELETE", "/v1/namespaces/destination", "api", None)
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        call(
+            &f.st,
+            "POST",
+            "/v1/namespaces/destination/unpin",
+            "api",
+            None
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let (s, b) = admit(&f, "destination", "req_one", "m_seed").await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(json(&b)["mode"], "cold");
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), finished.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        ds[0].stub.machines.lock().unwrap()[0].namespace,
+        "destination"
+    );
+    // The host finishing does not retroactively confirm the cancelled fleet response.
+    assert_eq!(
+        Registry::load(&f.st.state_path)
+            .unwrap()
+            .namespace_moves
+            .len(),
+        1
+    );
+    assert_eq!(f.st.reg.lock().unwrap().namespace_moves.len(), 1);
+}
+
+#[tokio::test]
+async fn overlapping_move_completion_settles_only_its_own_monotonic_generation() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    let machine = ds[0].stub.add("original", "web", 256);
+    f.st.reg
+        .lock()
+        .unwrap()
+        .machines
+        .insert(machine.id.clone(), ds[0].stub.id.clone());
+    let mut jobs = Vec::new();
+    let mut releases = Vec::new();
+    let mut generations = Vec::new();
+    for _ in 0..2 {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *ds[0].stub.move_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let st = f.st.clone();
+        let path = format!("/v1/machines/{}/move", machine.id);
+        jobs.push(tokio::spawn(async move {
+            call(
+                &st,
+                "POST",
+                &path,
+                "api",
+                Some(serde_json::json!({"namespace":"destination"})),
+            )
+            .await
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        generations.push(f.st.reg.lock().unwrap().namespace_version("destination"));
+        releases.push(release);
+    }
+    assert!(generations[1] > generations[0]);
+    assert_eq!(f.st.reg.lock().unwrap().namespace_moves.len(), 2);
+    releases[0].notify_one();
+    assert_eq!(jobs.remove(0).await.unwrap().0, StatusCode::OK);
+    assert_eq!(f.st.reg.lock().unwrap().namespace_moves.len(), 1);
+    assert_eq!(
+        Registry::load(&f.st.state_path)
+            .unwrap()
+            .namespace_moves
+            .len(),
+        1
+    );
+    assert_eq!(
+        call(&f.st, "DELETE", "/v1/namespaces/destination", "api", None)
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    releases[1].notify_one();
+    assert_eq!(jobs.remove(0).await.unwrap().0, StatusCode::OK);
+    let reg = f.st.reg.lock().unwrap();
+    assert!(reg.namespace_moves.is_empty());
+    assert_eq!(reg.namespace_version("destination"), generations[1]);
+}

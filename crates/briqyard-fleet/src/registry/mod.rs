@@ -340,6 +340,8 @@ pub struct Registry {
     #[serde(default)]
     pub sandbox_admissions: HashMap<String, crate::sandbox_admissions::Admission>,
     #[serde(default)]
+    pub namespace_moves: HashMap<String, crate::moves::MoveFence>,
+    #[serde(default)]
     pub namespace_versions: HashMap<String, u64>,
     /// machine id → host id, learned from creates and listings.
     pub machines: HashMap<String, String>,
@@ -436,10 +438,12 @@ impl Registry {
         let pinned_at = &self.pinned_at;
         let routes = &self.sandbox_requests;
         let admissions = &self.sandbox_admissions;
+        let moves = &self.namespace_moves;
         self.namespaces.retain(|t, host| {
-            admissions
-                .values()
-                .any(|a| a.namespace == *t && a.pending_seed())
+            moves.values().any(|m| m.namespace == *t)
+                || admissions
+                    .values()
+                    .any(|a| a.namespace == *t && a.pending_seed())
                 || routes
                     .values()
                     .any(|route| route.namespace == *t && !route.accepted)

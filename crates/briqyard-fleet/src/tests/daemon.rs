@@ -30,6 +30,8 @@ pub(super) struct Daemon {
     /// Run by a create before it answers: a test's look at the fleet mid-forward.
     pub(super) on_delete_namespace: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(super) create_finished: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    pub(super) move_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    pub(super) move_finished: Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub(super) create_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     pub(super) on_create: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(super) creates: Mutex<Vec<api::CreateMachineRequest>>,
@@ -158,6 +160,8 @@ pub(super) async fn start_daemon_on(
         quotas: Mutex::new(vec![]),
         on_delete_namespace: Mutex::new(None),
         create_finished: Mutex::new(None),
+        move_gate: Mutex::new(None),
+        move_finished: Mutex::new(None),
         create_gate: Mutex::new(None),
         on_create: Mutex::new(None),
         creates: Mutex::new(vec![]),
@@ -473,6 +477,15 @@ pub(super) async fn start_daemon_on(
         Path(id): Path<String>,
         Json(req): Json<api::MoveRequest>,
     ) -> Response {
+        // Production moves are detached: losing the client cannot cancel host-side work.
+        tokio::spawn(move_inner(d, id, req)).await.unwrap()
+    }
+    async fn move_inner(d: Arc<Daemon>, id: String, req: api::MoveRequest) -> Response {
+        let gate = d.move_gate.lock().unwrap().clone();
+        if let Some((entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
         let mut ms = d.machines.lock().unwrap();
         let joins = ms.iter().any(|m| m.namespace == req.namespace);
         let Some(m) = ms.iter_mut().find(|m| m.id == id) else {
@@ -482,6 +495,9 @@ pub(super) async fn start_daemon_on(
         m.namespace = req.namespace;
         if joins {
             m.ip = "10.9.0.7".into();
+        }
+        if let Some(done) = d.move_finished.lock().unwrap().as_ref() {
+            done.notify_one();
         }
         Json(api::MoveResult {
             machine: m.clone(),
