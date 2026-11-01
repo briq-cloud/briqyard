@@ -89,7 +89,15 @@ pub(super) fn quota_need(r: &Record, starting: bool) -> api::QuotaUse {
         memory_mb: if runs { r.size.memory_mb } else { 0 },
         vcpus: if runs { r.size.vcpus } else { 0 },
         cpu_millis: Some(if runs { r.size.cpu_millis() } else { 0 }),
-        disk_gb: r.volume.as_ref().map_or(0, |v| v.size_gb),
+        disk_gb: r.volume.as_ref().map_or(0, |v| v.size_gb).saturating_add(
+            if r.warm_slot.is_some() {
+                r.clone_origin
+                    .as_ref()
+                    .map_or(0, |o| o.artifact.recipe.root_disk_gb)
+            } else {
+                0
+            },
+        ),
     }
 }
 

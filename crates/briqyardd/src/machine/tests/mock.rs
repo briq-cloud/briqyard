@@ -1,6 +1,8 @@
 //! The mock host: a stand-in VMM, guest and network, with its processes on record.
 
 use super::*;
+mod clone_recovery;
+mod warm;
 
 /// How the next boots go: what the guest does once its process is up.
 #[derive(Clone, Debug)]
@@ -41,6 +43,8 @@ type Attachment = (String, String, Option<nft::Policy>);
 /// internet counters are values a test sets.
 pub(super) struct Mock {
     pub(super) boots: Mutex<Boots>,
+    pub(super) host_boot_id: Mutex<Option<String>>,
+    pub(super) refuse_clone_exit: AtomicBool,
     /// How long a guest takes to stop once asked.
     pub(super) stops: Mutex<Duration>,
     pub(super) next_pid: std::sync::atomic::AtomicU32,
@@ -85,6 +89,9 @@ pub(super) struct Mock {
     /// The version the guests' inits answer with.
     pub(super) init_version: Mutex<String>,
     pub(super) file_stream_v1: AtomicBool,
+    pub(super) paused: Mutex<std::collections::HashSet<u32>>,
+    clone_status: Mutex<HashMap<PathBuf, guest::CloneStatus>>,
+    pub(super) init_digests: Mutex<HashMap<PathBuf, String>>,
     /// The limits each machine's disks have now: given at boot, changed live, and
     /// whether the volume was given them too.
     pub(super) disks: Mutex<HashMap<String, (fc::DiskRate, bool)>>,
@@ -105,7 +112,7 @@ impl Mock {
             .lock()
             .unwrap()
             .as_ref()
-            .is_some_and(|(op, address)| *op == operation && address == ip);
+            .is_some_and(|(op, address)| *op == operation && (address == "*" || address == ip));
         if paused {
             self.network_started.notify_one();
             self.network_release.notified().await;
@@ -115,6 +122,8 @@ impl Mock {
     pub(in crate::machine) fn new() -> Arc<Self> {
         Arc::new(Self {
             boots: Mutex::new(Boots::Ready(Duration::ZERO)),
+            host_boot_id: Mutex::new(Some("11111111-1111-4111-8111-111111111111".into())),
+            refuse_clone_exit: AtomicBool::new(false),
             stops: Mutex::new(Duration::ZERO),
             next_pid: std::sync::atomic::AtomicU32::new(1000),
             procs: Mutex::new(Vec::new()),
@@ -145,6 +154,9 @@ impl Mock {
             vmm_version: Mutex::new("v1.17.0/test".into()),
             init_version: Mutex::new("0.1.0+init".into()),
             file_stream_v1: AtomicBool::new(false),
+            paused: Mutex::new(std::collections::HashSet::new()),
+            clone_status: Mutex::new(HashMap::new()),
+            init_digests: Mutex::new(HashMap::new()),
             disks: Mutex::new(HashMap::new()),
             roots: Mutex::new(HashMap::new()),
             refuse_disk_rate: AtomicBool::new(false),
@@ -337,6 +349,13 @@ impl Mock {
 
 #[async_trait::async_trait]
 impl fc::Vmm for Mock {
+    async fn warm_test_barrier(&self, phase: &str, id: &str) {
+        self.wait_network(phase, id).await;
+    }
+
+    fn paused_slots_supported(&self) -> bool {
+        true
+    }
     async fn boot(&self, b: &fc::Boot) -> Result<fc::Vm> {
         let boots = self.boots.lock().unwrap().clone();
         // The manager must durably publish the selected identity before any VMM launches.
@@ -377,7 +396,31 @@ impl fc::Vmm for Mock {
         if b.resume && !snapshot.exists() {
             return Err(fc::ResumeFailed("memory file missing".into()).into());
         }
-        let resumed = b.resume;
+        let resumed = b.resume || b.memory_clone.is_some();
+        let mut tar = tar::Archive::new(std::fs::File::open(&b.config_drive)?);
+        for entry in tar.entries()? {
+            let mut entry = entry?;
+            if entry.path()?.as_ref() == Path::new(guest::CONFIG_NAME) {
+                let cfg: guest::Config = serde_json::from_reader(&mut entry)?;
+                if cfg.template_profile.is_some() {
+                    self.clone_status.lock().unwrap().insert(
+                        vsock.clone(),
+                        guest::CloneStatus {
+                            protocol: 1,
+                            profile: guest::INIT_READY_V1.into(),
+                            ram_marker: "0123456789abcdef0123456789abcdef".into(),
+                            stage: "builder".into(),
+                            identity: None,
+                        },
+                    );
+                    use sha2::{Digest, Sha256};
+                    self.init_digests
+                        .lock()
+                        .unwrap()
+                        .insert(vsock.clone(), hex::encode(Sha256::digest(b"init")));
+                }
+            }
+        }
         let _ = std::fs::remove_file(&snapshot);
         let _ = std::fs::remove_file(b.dir.join("snap.state"));
         let pid = self
@@ -400,12 +443,16 @@ impl fc::Vmm for Mock {
             Boots::Runs(code) => self.exit(pid, code, false),
             _ => {}
         }
+        let chroot = b.jail.as_ref().map(|j| fc::jail_root(&j.base, &b.id));
+        if let Some(root) = &chroot {
+            std::fs::create_dir_all(root)?;
+        }
         Ok(fc::Vm {
             pid,
             api,
             vsock,
             dir: b.dir.clone(),
-            chroot: None,
+            chroot,
             resumed,
             boot_identity: b.boot_identity.clone(),
             incarnation: Some(mock_incarnation(pid)),
@@ -445,6 +492,30 @@ impl fc::Vmm for Mock {
         })
     }
 
+    fn host_boot_id(&self) -> Option<String> {
+        self.host_boot_id.lock().unwrap().clone()
+    }
+    async fn settle_clone_process(&self, id: &str, saved: &fc::Incarnation) -> Result<bool> {
+        self.settle_clone(id, saved)
+    }
+
+    async fn pause(&self, vm: &fc::Vm) -> Result<()> {
+        self.park_slot(vm.pid)
+    }
+    async fn resume_paused(&self, vm: &fc::Vm) -> Result<()> {
+        self.resume_slot(vm.pid)
+    }
+    async fn adopt_paused(
+        &self,
+        id: &str,
+        dir: &Path,
+        jail: Option<&fc::Jail>,
+        pid: u32,
+        disk_io: Arc<fc::DiskIo>,
+    ) -> Option<fc::Vm> {
+        self.adopt_pool_slot(id, dir, jail, pid, disk_io).await
+    }
+
     async fn disk_rate(&self, vm: &fc::Vm, rate: &fc::DiskRate, volume: bool) -> Result<()> {
         self.record(format!(
             "disk-rate {} {}mb {}iops",
@@ -459,11 +530,7 @@ impl fc::Vmm for Mock {
     }
 
     async fn snapshot(&self, vm: &fc::Vm, durable: bool) -> Result<()> {
-        let how = if durable { "synced" } else { "unsynced" };
-        self.record(format!("snapshot {} {how}", vm.pid));
-        std::fs::write(vm.dir.join("snap.state"), b"state")?;
-        std::fs::write(vm.dir.join("snap.mem"), b"memory")?;
-        Ok(())
+        self.write_snapshot(vm, durable)
     }
 
     async fn resume(&self, vm: &fc::Vm) -> Result<()> {
@@ -501,6 +568,10 @@ impl fc::Vmm for Mock {
         self.vmm_version.lock().unwrap().clone()
     }
 
+    fn cpu_fingerprint(&self) -> Option<String> {
+        Some("test_cpu".into())
+    }
+
     fn boot_identity(&self, reporting: bool) -> Option<fc::BootIdentity> {
         Some(
             fc::BootIdentity {
@@ -532,16 +603,69 @@ impl fc::Vmm for Mock {
 
 #[async_trait::async_trait]
 impl guestc::Guest for Mock {
+    async fn clone_control(
+        &self,
+        vsock: &Path,
+        request: guest::Request,
+    ) -> Result<guest::CloneStatus> {
+        self.record(format!("{} {}", request.op, vsock.display()));
+        let mut statuses = self.clone_status.lock().unwrap();
+        let status = statuses
+            .get_mut(vsock)
+            .ok_or_else(|| anyhow!("no clone protocol"))?;
+        match request.op.as_str() {
+            "clone_configure_v1" => {
+                let c = request
+                    .clone_configure
+                    .ok_or_else(|| anyhow!("missing configuration"))?;
+                c.validate().map_err(|e| anyhow!(e))?;
+                anyhow::ensure!(status.stage == "builder", "clone barrier unavailable");
+                status.identity = Some(guest::CloneIdentity {
+                    generation: c.generation,
+                    hostname: c.hostname,
+                    ip: c.ip,
+                    mac: c.mac,
+                    machine_id: "0123456789abcdef0123456789abcdef".into(),
+                });
+                status.stage = "identity_done".into();
+            }
+            "clone_activate_v1" => {
+                anyhow::ensure!(
+                    status
+                        .identity
+                        .as_ref()
+                        .is_some_and(|i| i.generation == request.clone_generation),
+                    "generation conflict"
+                );
+                status.stage = "active".into();
+            }
+            _ => return Err(anyhow!("unsupported clone op")),
+        }
+        Ok(status.clone())
+    }
     async fn ping(&self, vsock: &Path) -> Result<guest::Response> {
         let (pid, _, exited) = self.proc_at(vsock)?;
         self.record(format!("ping {pid}"));
         if *exited.borrow() {
             return Err(guestc::Unreachable("guest exited".into()).into());
         }
+        let clone_status = self.clone_status.lock().unwrap().get(vsock).cloned();
         Ok(guest::Response {
             kind: "pong".into(),
             version: self.init_version.lock().unwrap().clone(),
             file_stream_v1: self.file_stream_v1.load(Relaxed),
+            main_pid: clone_status
+                .as_ref()
+                .filter(|s| s.stage == "active")
+                .map_or(0, |_| 42),
+            clone_status,
+            init_sha256: self
+                .init_digests
+                .lock()
+                .unwrap()
+                .get(vsock)
+                .cloned()
+                .unwrap_or_default(),
             ..Default::default()
         })
     }
@@ -668,6 +792,20 @@ impl Mock {
 
 #[async_trait::async_trait]
 impl host::Net for Mock {
+    async fn quarantine(&self, machine: &str) -> Result<String> {
+        self.record(format!("quarantine {machine}"));
+        Ok(netw::tap_name(machine))
+    }
+    async fn activate_quarantined(
+        &self,
+        machine: &str,
+        bridge: &str,
+        ip: &str,
+        _policy: Option<&nft::Policy>,
+    ) -> Result<()> {
+        self.record(format!("activate_quarantined {machine} {bridge} {ip}"));
+        Ok(())
+    }
     async fn ensure_bridge(&self, s: &Subnet) -> Result<String> {
         let name = netw::bridge_name(s.index);
         self.record(format!("ensure_bridge {name} {}", s.cidr()));
@@ -855,6 +993,6 @@ fn mock_incarnation(pid: u32) -> fc::Incarnation {
     fc::Incarnation {
         pid,
         start_ticks: u64::from(pid),
-        host_boot_id: "test-host-boot".into(),
+        host_boot_id: "11111111-1111-4111-8111-111111111111".into(),
     }
 }

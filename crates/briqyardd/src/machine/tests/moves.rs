@@ -331,6 +331,7 @@ async fn a_fork_may_name_another_namespace() {
     let mut f = h.request("a");
     f.namespace = "t2".into();
     f.fork = Some(api::ForkSpec {
+        snapshot: None,
         machine_id: a.id.clone(),
         copy: String::new(),
     });

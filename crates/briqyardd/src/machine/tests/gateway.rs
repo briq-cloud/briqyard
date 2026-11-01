@@ -558,6 +558,7 @@ async fn the_gateway_is_read_only_through_the_machine_routes() {
     let mut fork = h.request("fork");
     fork.image = String::new();
     fork.fork = Some(api::ForkSpec {
+        snapshot: None,
         machine_id: gw.clone(),
         copy: String::new(),
     });

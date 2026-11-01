@@ -19,6 +19,7 @@ mod restores;
 mod scrape;
 mod signals;
 mod upgrade;
+mod warm;
 
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
@@ -42,6 +43,7 @@ use join::*;
 use lists::*;
 use locate::*;
 use namespaces::*;
+use warm::*;
 
 #[derive(Parser)]
 #[command(name = "briqyard-fleet", version = api::VERSION, about = "briqyard across hosts")]
@@ -219,6 +221,9 @@ fn main() {
 fn static_host(h: &config::StaticHost, now: chrono::DateTime<Utc>) -> HostRec {
     HostRec {
         egress_siblings_v1: false,
+        named_memory_fork_v1: false,
+        named_memory_profiles: Vec::new(),
+        warm_pool_profiles: Vec::new(),
         id: if h.id.is_empty() {
             h.url.clone()
         } else {
@@ -286,6 +291,7 @@ async fn run(args: Args) -> Result<()> {
     upgrade::interrupted(&mut reg);
     let policy = Policy {
         require_egress_siblings: false,
+        require_named_memory: false,
         fill_ceiling: cfg.placement.fill_ceiling,
         down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
     };
@@ -463,6 +469,15 @@ fn namespace_routes(prefix: &str) -> Router<Arc<AppState>> {
         .route(
             &format!("{prefix}/:id/quota"),
             get(get_quota).put(set_quota),
+        )
+        .route(&format!("{prefix}/:id/warm-pools"), get(warm_pools))
+        .route(
+            &format!("{prefix}/:id/warm-pools/:name"),
+            put(put_warm_pool).delete(delete_warm_pool),
+        )
+        .route(
+            &format!("{prefix}/:id/warm-pools/:name/claims"),
+            post(claim_warm_pool),
         )
         .route(&format!("{prefix}/:id/unpin"), post(unpin_namespace))
 }

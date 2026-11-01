@@ -58,6 +58,7 @@ impl Manager {
     /// A backup now, on request: after any backup of the machine under way.
     pub async fn backup(&self, id: &str) -> Result<api::Backup, MError> {
         let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
         self.backup_store()?;
         let turn = e.backup_turn.clone().lock_owned().await;
         let admission = self.inner.backups.jobs.reserve().await?;

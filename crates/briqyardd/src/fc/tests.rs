@@ -745,3 +745,32 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
         }
     }
 }
+
+#[tokio::test]
+async fn named_clone_load_is_file_backed_paused_and_uses_its_own_vsock() {
+    let (_dir, path) = socket();
+    let server = serve(&path, vec![NO_CONTENT]);
+    Client::new(&path)
+        .snapshot_load_paused(
+            Path::new("/clone.state"),
+            Path::new("/clone.mem"),
+            "eth0",
+            "tap-clone",
+            Path::new("/vsock.sock"),
+        )
+        .await
+        .unwrap();
+    let seen = server.await.unwrap();
+    let value = body(&seen[0]);
+    assert_eq!(value["resume_vm"], false);
+    assert_eq!(
+        value["mem_backend"],
+        json!({"backend_type":"File", "backend_path":"/clone.mem"})
+    );
+    assert_eq!(value["vsock_override"]["uds_path"], "/vsock.sock");
+    assert_eq!(
+        value["network_overrides"],
+        json!([{"iface_id":"eth0", "host_dev_name":"tap-clone"}])
+    );
+    assert!(value["network_overrides"][0].get("guest_mac").is_none());
+}

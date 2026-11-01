@@ -212,6 +212,9 @@ fn the_region_table() {
 fn the_host_table() {
     let ready = api::Host {
         egress_siblings_v1: false,
+        named_memory_fork_v1: false,
+        named_memory_profiles: Vec::new(),
+        warm_pool_profiles: Vec::new(),
         id: "h_byard-1".into(),
         url: "https://10.0.0.9:7420".into(),
         ssh: String::new(),
@@ -384,6 +387,9 @@ fn host_upgrade_takes_a_host_or_all() {
 fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
     let host = |id: &str, state: &str| api::Host {
         egress_siblings_v1: false,
+        named_memory_fork_v1: false,
+        named_memory_profiles: Vec::new(),
+        warm_pool_profiles: Vec::new(),
         id: id.into(),
         url: String::new(),
         ssh: String::new(),
@@ -515,6 +521,10 @@ fn the_usage_table() {
 fn the_snapshot_table() {
     let ss = [
         api::Snapshot {
+            clone_profile: None,
+            source_host: None,
+            clone_size: None,
+            clone_ram_marker: None,
             id: "s_0123456789ab".into(),
             machine_id: "m_01".into(),
             name: Some("before-migration".into()),
@@ -523,6 +533,10 @@ fn the_snapshot_table() {
             memory: true,
         },
         api::Snapshot {
+            clone_profile: None,
+            source_host: None,
+            clone_size: None,
+            clone_ram_marker: None,
             id: "s_ba9876543210".into(),
             machine_id: "m_01".into(),
             name: None,

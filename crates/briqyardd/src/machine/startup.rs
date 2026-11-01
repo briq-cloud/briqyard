@@ -50,6 +50,9 @@ impl Manager {
         );
         let inner = Arc::new(Inner {
             stats: Stats::default(),
+            warm_lock: tokio::sync::Mutex::new(()),
+            warm_names: Mutex::new(HashMap::new()),
+            verified_templates: Mutex::new(std::collections::HashSet::new()),
             vmm: Arc::new(fc::Firecracker {
                 binary: cfg.firecracker.clone(),
                 pci: cfg.pci,
@@ -89,6 +92,7 @@ impl Manager {
         });
         let m = Self { inner };
         m.load()?;
+        m.verify_clone_artifacts();
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
             .inner
@@ -103,6 +107,7 @@ impl Manager {
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
+        m.recover_warm_names()?;
         let (adopted, stopped, gone) = m.recover().await;
         let swept = m.sweep_orphans().await;
         let machines = m.inner.machines.lock().unwrap().len();
@@ -225,10 +230,26 @@ impl Manager {
         let ready = self.take_handed_ready();
         for e in entries {
             let rec = e.snapshot();
+            if warm::ready_slot(&rec) {
+                if self.recover_warm_slot(&e).await {
+                    adopted += 1;
+                } else {
+                    stopped += 1;
+                }
+                continue;
+            }
             // Its create's task went with the previous daemon. One from an image is taken up
             // again, its partial disks gone first: the record holds what it needs. What a fork
             // or a restore was made from is not on the record: failed, for the caller to create
             // again, and nothing a person must look at (ADR 0048).
+            if rec
+                .clone_origin
+                .as_ref()
+                .is_some_and(|o| o.stage != templates::CloneStage::Active)
+            {
+                self.recover_incomplete_clone(&e).await;
+                continue;
+            }
             if rec.state == state::CREATING {
                 self.recover_create(&e).await;
                 continue;
@@ -244,6 +265,11 @@ impl Manager {
                 && self.adopt(&e, rec.pid, ready.contains(&rec.id)).await
             {
                 adopted += 1;
+                continue;
+            }
+            if rec.warm_slot.is_some() {
+                self.recover_incomplete_clone(&e).await;
+                stopped += 1;
                 continue;
             }
             // Its process still there but not answering for it (not handed over), or gone: it
@@ -299,6 +325,17 @@ impl Manager {
         scope
             .run(async {
                 let rec = e.snapshot();
+                match self.clone_readers() {
+                    Ok(readers) if readers.iter().any(|r| r.destination == rec.id || r.source_machine == rec.id) => {
+                        tracing::warn!(machine = rec.id, "incomplete clone with memory reference retained for reconciliation");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::error!(err = %error, "clone references unreadable: create recovery deferred");
+                        return;
+                    }
+                    _ => {}
+                }
                 if !rec.from_source {
                     let child_scope = match self.inner.zfs.io_scope() {
                         Ok(scope) => scope,
@@ -330,7 +367,7 @@ impl Manager {
     /// directory, jail, TAP and disks go. Done once at start, so nothing leaks for good. How
     /// many it found.
     pub(super) async fn sweep_orphans(&self) -> usize {
-        let known: std::collections::HashSet<String> = self
+        let mut known: std::collections::HashSet<String> = self
             .inner
             .machines
             .lock()
@@ -338,6 +375,20 @@ impl Manager {
             .keys()
             .cloned()
             .collect();
+        // Read intents predate staging/load. Retain both sides on ambiguous recovery;
+        // even a recordless VMM may still fault its private artifact mapping.
+        match self.clone_readers() {
+            Ok(readers) => {
+                for reader in readers {
+                    known.insert(reader.source_machine);
+                    known.insert(reader.destination);
+                }
+            }
+            Err(error) => {
+                tracing::error!(err = %error, "clone references unreadable: orphan cleanup deferred");
+                return 0;
+            }
+        }
         let mut swept = 0;
         for (pid, id) in self.inner.vmm.processes() {
             if !known.contains(&id) {

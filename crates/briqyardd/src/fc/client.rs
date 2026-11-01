@@ -202,6 +202,30 @@ impl Client {
         .await
     }
 
+    /// Strict clone restore into a paused VM, with a fresh per-jail vsock backend.
+    /// Effective guest MAC is configured through trusted init before host unquarantine.
+    pub async fn snapshot_load_paused(
+        &self,
+        state: &Path,
+        mem: &Path,
+        iface: &str,
+        tap: &str,
+        vsock: &Path,
+    ) -> Result<()> {
+        self.put(
+            "/snapshot/load",
+            &json!({
+                "snapshot_path": state,
+                "mem_backend": {"backend_type": "File", "backend_path": mem},
+                "resume_vm": false,
+                "network_overrides": [{"iface_id": iface, "host_dev_name": tap}],
+                "vsock_override": {"uds_path": vsock},
+                "clock_realtime": cfg!(target_arch = "x86_64")
+            }),
+        )
+        .await
+    }
+
     pub async fn info(&self) -> Result<serde_json::Value> {
         let s = self.call("GET", "/", None).await?;
         Ok(serde_json::from_str(&s)?)

@@ -54,9 +54,12 @@ impl Store {
             "usage",
             "events",
             "holders",
+            "clone-readers",
+            "warm-pools",
         ] {
             private_dir(&root.join(d))?;
         }
+        std::fs::File::open(root)?.sync_all()?;
         Ok(Self {
             root: root.to_path_buf(),
         })
@@ -79,6 +82,19 @@ impl Store {
 
     pub fn put<T: Serialize>(&self, kind: &str, key: &str, v: &T) -> Result<()> {
         write_private(&self.path(kind, key)?, &serde_json::to_vec_pretty(v)?)
+    }
+
+    /// Crash-durable record boundary for immutable snapshot publication and read intents.
+    pub fn put_durable<T: Serialize>(&self, kind: &str, key: &str, v: &T) -> Result<()> {
+        self.put(kind, key, v)?;
+        std::fs::File::open(self.dir(kind))?.sync_all()?;
+        Ok(())
+    }
+
+    pub fn delete_durable(&self, kind: &str, key: &str) -> Result<()> {
+        self.delete(kind, key)?;
+        std::fs::File::open(self.dir(kind))?.sync_all()?;
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -176,6 +192,8 @@ mod tests {
             "usage",
             "events",
             "holders",
+            "clone-readers",
+            "warm-pools",
         ] {
             assert!(dir.path().join("state").join(d).is_dir(), "{d}");
         }
@@ -286,6 +304,8 @@ mod tests {
             "usage",
             "events",
             "holders",
+            "clone-readers",
+            "warm-pools",
         ] {
             assert_eq!(mode(&state.join(d)), 0o700, "{d}");
         }

@@ -57,7 +57,38 @@ impl Manager {
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
+        self.record_with_warm_slot(req, role, None).await
+    }
+
+    pub(super) async fn record_warm_slot(
+        &self,
+        req: api::CreateMachineRequest,
+        slot: warm::Slot,
+    ) -> Result<(Arc<Entry>, Make), MError> {
+        #[cfg(test)]
+        self.inner
+            .vmm
+            .warm_test_barrier("warm_admission", "*")
+            .await;
+        let _admission = self.inner.namespace_lifecycle.read().await;
+        self.record_with_warm_slot(req, None, Some(slot)).await
+    }
+
+    async fn record_with_warm_slot(
+        &self,
+        req: api::CreateMachineRequest,
+        role: Option<Role>,
+        warm_slot: Option<warm::Slot>,
+    ) -> Result<(Arc<Entry>, Make), MError> {
+        if warm_slot.is_some()
+            && (req.fork.as_ref().is_none_or(|f| f.snapshot.is_none()) || role.is_some())
+        {
+            return Err(invalid(
+                "internal warm slot requires a strict named memory source",
+            ));
+        }
         check_namespace_id(&req.namespace)?;
+        let template_birth = self.template_birth(&req, role)?;
         if let Some(rs) = &req.restore {
             if !api::valid_id(&rs.machine_id) {
                 return Err(invalid("restore.machine_id is not a machine id"));
@@ -76,7 +107,10 @@ impl Manager {
         let size_from_backup = req.restore.is_some() && req.size == api::Size::default();
         // What it runs, checked as a PATCH of it is (ADR 0024).
         let mut spec = req.spec();
-        if size_from_backup {
+        if size_from_backup
+            || (req.fork.as_ref().is_some_and(|f| f.snapshot.is_some())
+                && req.size == api::Size::default())
+        {
             spec.size = None;
         }
         spec.check().map_err(invalid)?;
@@ -106,6 +140,7 @@ impl Manager {
             image: String::new(),
             image_key: String::new(),
             image_digest: String::new(),
+            image_config_digest: String::new(),
             image_config: ImageConfig::default(),
             root_key: String::new(),
             entrypoint: req.entrypoint.clone(),
@@ -154,10 +189,24 @@ impl Manager {
             vmm_version: String::new(),
             boot_identity: None,
             boot_incarnation: None,
+            template_birth: None,
+            clone_origin: None,
+            warm_slot,
             rest: Default::default(),
             snapshots: Vec::new(),
             restoring: None,
         };
+        if let Some(birth) = template_birth {
+            rec.template_birth = Some(birth);
+            rec.egress = api::Egress {
+                mode: api::egress::NONE.into(),
+                ..Default::default()
+            };
+            rec.sleep = "never".into();
+            rec.backup = Schedule::default();
+            rec.entrypoint = Some(vec![]);
+            rec.cmd = Some(templates::builder_config().cmd);
+        }
         self.check_egress(&rec.egress, &rec.namespace, &rec.id)?;
         let mut src: Option<(Arc<Entry>, api::ForkSpec)> = None;
         let mut restore_from: Option<(api::Backup, Option<String>)> = None;
@@ -171,6 +220,7 @@ impl Manager {
             rec.image = was.image;
             rec.image_key = was.image_key;
             rec.image_digest = was.image_digest;
+            rec.image_config_digest = was.image_config_digest;
             rec.image_config = was.image_config;
             // The root disk comes from the backup: made from what it was made from.
             rec.root_key = was.root_key;
@@ -227,28 +277,34 @@ impl Manager {
                 other => other,
             })?;
             let sr = s.snapshot();
-            if !sr.has_disks() {
-                return Err(invalid(format!(
-                    "fork source has no disks: it is {} {}",
-                    sr.state, sr.error_reason
-                )));
-            }
-            if !req.image.is_empty() && req.image != sr.image {
-                return Err(invalid("a fork keeps its source's image"));
-            }
-            rec.image = sr.image.clone();
-            rec.image_key = sr.image_key.clone();
-            rec.image_digest = sr.image_digest.clone();
-            rec.image_config = sr.image_config.clone();
-            match (&req.volume, &sr.volume) {
-                (None, v) => rec.volume = v.clone(),
-                (Some(a), Some(b)) if a.mount != b.mount => {
-                    return Err(invalid("a fork keeps its source's volume mount"))
+            if fork.snapshot.is_some() {
+                self.named_clone_spec(&req, &mut rec, &sr, fork)?;
+            } else {
+                self.ordinary_operation(&sr)?;
+                if !sr.has_disks() {
+                    return Err(invalid(format!(
+                        "fork source has no disks: it is {} {}",
+                        sr.state, sr.error_reason
+                    )));
                 }
-                (Some(a), Some(b)) if a.size_gb < b.size_gb => {
-                    return Err(never_shrinks(a.size_gb, b.size_gb))
+                if !req.image.is_empty() && req.image != sr.image {
+                    return Err(invalid("a fork keeps its source's image"));
                 }
-                _ => {}
+                rec.image = sr.image.clone();
+                rec.image_key = sr.image_key.clone();
+                rec.image_digest = sr.image_digest.clone();
+                rec.image_config_digest = sr.image_config_digest.clone();
+                rec.image_config = sr.image_config.clone();
+                match (&req.volume, &sr.volume) {
+                    (None, v) => rec.volume = v.clone(),
+                    (Some(a), Some(b)) if a.mount != b.mount => {
+                        return Err(invalid("a fork keeps its source's volume mount"))
+                    }
+                    (Some(a), Some(b)) if a.size_gb < b.size_gb => {
+                        return Err(never_shrinks(a.size_gb, b.size_gb))
+                    }
+                    _ => {}
+                }
             }
             src = Some((s, fork.clone()));
         } else {
@@ -262,6 +318,34 @@ impl Manager {
         }
         let t = self.ensure_namespace(&req.namespace).await?;
         let e = self.add_machine(rec, &t)?;
+        if let Some(origin) = e.snapshot().clone_origin {
+            let reserved = self
+                .reserve_named_clone(
+                    &origin.source_machine,
+                    &origin.snapshot,
+                    &e.snapshot().id,
+                    &req.namespace,
+                )
+                .await;
+            match reserved {
+                Ok((artifact, _)) => {
+                    let mut r = e.rec.lock().unwrap();
+                    let ip = r.ip.clone();
+                    let name = r.name.clone();
+                    let origin = r.clone_origin.as_mut().unwrap();
+                    origin.artifact = artifact;
+                    origin.configure.hostname = name;
+                    origin.configure.ip = format!("{ip}/24");
+                    origin.configure.gateway = t.subnet.gateway().to_string();
+                    origin.configure.dns = vec![t.subnet.gateway().to_string()];
+                    origin.configure.mac = templates::clone_mac(&ip)?;
+                }
+                Err(error) => {
+                    self.remove_machine(&e);
+                    return Err(error);
+                }
+            }
+        }
         let ip = e.snapshot().ip;
         let counted = self.inner.net.count(&ip).await.context("usage counters");
         // Written before the answer: a machine the caller was told of survives a restart, and
@@ -334,7 +418,13 @@ impl Manager {
             r.image_key = im.key.clone();
             r.root_key = im.key;
             r.image_digest = im.digest;
+            r.image_config_digest = im.config_digest;
             r.image_config = im.config;
+        }
+        if let Err(error) = self.check_template_image(&e.snapshot()) {
+            return Err(self
+                .create_failed_locked(e, reason::CREATE_FAILED, error.to_string())
+                .await);
         }
         let made = match &how {
             Make::Restore(b, key) => self.receive_disks(e, b, key.as_deref()).await,
@@ -471,6 +561,17 @@ impl Manager {
                 t.rec.id
             )));
         }
+        if self
+            .inner
+            .warm_names
+            .lock()
+            .unwrap()
+            .contains_key(&(rec.namespace.clone(), rec.name.clone()))
+        {
+            return Err(MError::Conflict(
+                "name reserved by a durable warm claim".into(),
+            ));
+        }
         let taken = machines.values().find(|e| {
             let r = e.rec.lock().unwrap();
             r.namespace == rec.namespace && r.name == rec.name && r.state != state::DESTROYING
@@ -540,6 +641,11 @@ impl Manager {
         *e.removed.lock().unwrap() = true;
         let rec = e.snapshot();
         self.inner.machines.lock().unwrap().remove(&rec.id);
+        self.inner
+            .warm_names
+            .lock()
+            .unwrap()
+            .retain(|_, id| id != &rec.id);
         if let Some(t) = self.namespace_of(&rec.namespace) {
             self.refresh_dns(&t);
         }
@@ -573,6 +679,23 @@ impl Manager {
                     "fork source {}: a restore to {snap} is unfinished",
                     s.id
                 ));
+            }
+            if let Some(origin) = &r.clone_origin {
+                let a = s
+                    .snapshots
+                    .iter()
+                    .find(|snap| snap.id == origin.snapshot)
+                    .and_then(|snap| snap.clone_artifact.as_ref())
+                    .ok_or_else(|| anyhow!("named memory artifact is unavailable"))?;
+                anyhow::ensure!(
+                    a.generation == origin.artifact.generation,
+                    "named memory artifact generation changed"
+                );
+                let started = std::time::Instant::now();
+                z.clone_snapshot(&s.root_dataset(), &origin.snapshot, &r.root_dataset())
+                    .await?;
+                crate::profile::stage("named_memory_clone", "disk_clone", &r.id, 0, started, true);
+                return Ok(());
             }
             let snap = format!("fork-{}", r.id);
             z.snapshot(&s.root_dataset(), &snap).await?;

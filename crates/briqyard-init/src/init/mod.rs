@@ -53,9 +53,13 @@ struct State {
     main_pid: Mutex<Option<i32>>,
     main_done: Notify,
     requested: Mutex<bool>,
+    clone_gate: tokio::sync::Mutex<clone::Gate>,
+    activate: Notify,
 }
 
 mod boot;
+mod clone;
+mod clone_identity;
 mod exec;
 mod files;
 mod network;
@@ -150,15 +154,29 @@ async fn run() -> ExitReport {
         Ok(v) => v,
         Err(e) => return failed(125, format!("config drive: {e:#}")),
     };
+    let gate = match clone::Gate::from_config(&cfg) {
+        Ok(g) => g,
+        Err(e) => return failed(125, format!("template: {e:#}")),
+    };
+    let template = cfg.template_profile.is_some();
+    if template && !files.is_empty() {
+        return failed(125, "template config drive contains boot files".into());
+    }
     if let Err(e) = setup_mounts(&cfg) {
         return failed(125, format!("mounts: {e:#}"));
     }
     if let Err(e) = write_files(&files) {
         return failed(125, format!("boot files: {e:#}"));
     }
-    setup_names(&cfg);
-    if let Err(e) = setup_network(&cfg).await {
-        log!("network: {e:#}");
+    if template {
+        if let Err(e) = clone_identity::prepare_builder().await {
+            return failed(125, format!("template quarantine: {e:#}"));
+        }
+    } else {
+        setup_names(&cfg);
+        if let Err(e) = setup_network(&cfg).await {
+            log!("network: {e:#}");
+        }
     }
     let env = build_env(&cfg.env);
     let st = Arc::new(State {
@@ -167,7 +185,19 @@ async fn run() -> ExitReport {
         main_pid: Mutex::new(None),
         main_done: Notify::new(),
         requested: Mutex::new(false),
+        clone_gate: tokio::sync::Mutex::new(gate),
+        activate: Notify::new(),
     });
+    if template {
+        tokio::spawn(serve(st.clone()));
+        loop {
+            let activate = st.activate.notified();
+            if st.clone_gate.lock().await.activation_requested() {
+                break;
+            }
+            activate.await;
+        }
+    }
     let mut cmd = match main_command(&st) {
         Ok(c) => c,
         Err(e) => return failed(126, format!("command: {e:#}")),
@@ -188,7 +218,11 @@ async fn run() -> ExitReport {
     *st.main_pid.lock().unwrap() = Some(pid);
     // The host's first pong means the main process runs: a guest that fails before it is a
     // failed boot, whichever of the pong and the exit report the host sees first.
-    tokio::spawn(serve(st.clone()));
+    if template {
+        st.clone_gate.lock().await.mark_active();
+    } else {
+        tokio::spawn(serve(st.clone()));
+    }
     log!("started pid={pid} {}", argv_string(cmd.as_std()));
     let status = child.wait().await;
     TRACKED.lock().unwrap().remove(pid);

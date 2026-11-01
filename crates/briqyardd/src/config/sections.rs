@@ -7,6 +7,18 @@ pub struct Balloon {
     pub enabled: bool,
 }
 
+/// Bind the reviewed init-ready recipe to an exact locally built init binary. Empty is
+/// disabled. Image/runtime inputs are fixed by the reviewed recipe, not request shell text.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Templates {
+    /// Default-off rollout for the implemented reviewed init-ready profile.
+    pub enabled: bool,
+    pub init_ready_init_sha256: String,
+    /// Paused pool rollout, requiring the same exact qualified template inputs.
+    pub warm_pools: bool,
+}
+
 /// The thresholds of the host's conditions (ADR 0021), in percent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]

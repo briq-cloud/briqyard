@@ -44,6 +44,7 @@ pub(in crate::machine) fn record() -> Record {
         image: "postgres:17".into(),
         image_key: "deadbeef".into(),
         image_digest: "sha256:abc".into(),
+        image_config_digest: String::new(),
         root_key: "deadbeef".into(),
         image_config: ImageConfig {
             entrypoint: vec!["docker-entrypoint.sh".into()],
@@ -110,6 +111,9 @@ pub(in crate::machine) fn record() -> Record {
         vmm_version: String::new(),
         boot_identity: None,
         boot_incarnation: None,
+        template_birth: None,
+        clone_origin: None,
+        warm_slot: None,
         rest: Default::default(),
         snapshots: Vec::new(),
         restoring: None,
@@ -209,6 +213,9 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
     let m = Manager {
         inner: Arc::new(Inner {
             stats: Stats::default(),
+            warm_lock: tokio::sync::Mutex::new(()),
+            warm_names: Mutex::new(HashMap::new()),
+            verified_templates: Mutex::new(std::collections::HashSet::new()),
             range: Range::parse(&cfg.network.range).unwrap(),
             cfg,
             store,
@@ -266,6 +273,26 @@ pub(super) const IMAGE: &str =
     "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000001";
 
 impl Harness {
+    pub(super) fn pause_warm_barrier(&self, phase: &'static str) {
+        *self.host.pause_network.lock().unwrap() = Some((phase, "*".into()));
+    }
+    pub(super) async fn wait_warm_barrier(&self) {
+        tokio::time::timeout(Duration::from_secs(3), self.host.network_started.notified())
+            .await
+            .unwrap();
+    }
+    pub(super) fn release_warm_barriers(&self) {
+        self.host.network_release.notify_waiters();
+    }
+
+    pub(super) fn set_host_boot_id(&self, value: Option<&str>) {
+        *self.host.host_boot_id.lock().unwrap() = value.map(str::to_string);
+    }
+
+    pub(super) fn refuse_clone_exit(&self, refused: bool) {
+        self.host.refuse_clone_exit.store(refused, Relaxed);
+    }
+
     /// Registers a machine in `state`, as if loaded, and returns its entry.
     pub(super) fn add(&self, id: &str, state: &str, memory_mb: u32) -> Arc<Entry> {
         let mut r = record();
@@ -368,6 +395,25 @@ impl Harness {
     /// The volume's device the machine last booted on.
     pub(super) fn booted_data(&self, id: &str) -> PathBuf {
         self.host.roots.lock().unwrap()[id].1.clone().unwrap()
+    }
+
+    pub(super) fn report_guest_init_digest(&self, id: &str, digest: &str) {
+        let vsock = self
+            .m
+            .entry(id)
+            .unwrap()
+            .live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .vsock
+            .clone();
+        self.host
+            .init_digests
+            .lock()
+            .unwrap()
+            .insert(vsock, digest.into());
     }
 
     pub(super) fn host_calls(&self) -> Vec<String> {

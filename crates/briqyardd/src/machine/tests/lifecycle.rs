@@ -733,6 +733,7 @@ async fn a_pull_that_fails_leaves_the_machine_in_error_without_disks() {
     ));
     let mut fork = h.request("fork");
     fork.fork = Some(api::ForkSpec {
+        snapshot: None,
         machine_id: m.id.clone(),
         copy: String::new(),
     });

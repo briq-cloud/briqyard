@@ -63,6 +63,7 @@ impl Manager {
         req: api::CreateEndpointRequest,
     ) -> Result<api::Endpoint, MError> {
         let e = self.own_entry(machine_id)?;
+        self.ordinary_operation(&e.snapshot())?;
         if req.port == 0 {
             return Err(invalid("port must be 1..65535"));
         }

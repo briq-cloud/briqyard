@@ -49,7 +49,7 @@
     GatewayView:
       type: object
       properties:
-        state: { type: string, enum: [created, starting, running, stopping, stopped, destroying, error] }
+        state: { type: string, enum: [created, starting, running, warm, stopping, stopped, destroying, error] }
         ip: { type: string }
         port: { type: integer }
         machine_id: { type: string, description: "`GET /v1/machines/{id}` and its `/logs` answer for it" }
@@ -115,6 +115,9 @@
       type: object
       properties:
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        named_memory_fork_v1: { type: boolean, default: false, description: "explicit availability of configured named memory cloning; supported profiles are listed separately; absent or stale reports are unsupported" }
+        named_memory_profiles: { type: array, items: { type: string, enum: [init-ready-v1] }, description: "implemented configured profiles; init-ready does not clone already-running services" }
+        warm_pool_profiles: { type: array, items: { type: string }, description: "implemented configured paused-pool profiles; absent means unsupported" }
         version: { type: string, description: "this build: the release and its commit, `0.1.0+fdad892eeefa` (ADR 0027)" }
         host_id: { type: string }
         capacity: { $ref: "#/components/schemas/Capacity" }
@@ -191,6 +194,9 @@
       type: object
       properties:
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        named_memory_fork_v1: { type: boolean, default: false, description: "explicit availability of configured named memory cloning; supported profiles are listed separately; absent or stale reports are unsupported" }
+        named_memory_profiles: { type: array, items: { type: string, enum: [init-ready-v1] }, description: "implemented configured profiles; init-ready does not clone already-running services" }
+        warm_pool_profiles: { type: array, items: { type: string }, description: "implemented configured paused-pool profiles; absent means unsupported" }
         id: { type: string }
         url: { type: string }
         ssh: { type: string, description: "where the fleet reaches the server over SSH, when not at the API's address (its API on the private network); absent otherwise" }
@@ -272,6 +278,9 @@
       required: [id, url, capacity, used, machines]
       properties:
         egress_siblings_v1: { type: boolean, default: false, description: "explicit support for via-mode sibling access; absent means unsupported, never inferred from version" }
+        named_memory_fork_v1: { type: boolean, default: false, description: "explicit availability of configured named memory cloning; supported profiles are listed separately; absent or stale reports are unsupported" }
+        named_memory_profiles: { type: array, items: { type: string, enum: [init-ready-v1] }, description: "implemented configured profiles; init-ready does not clone already-running services" }
+        warm_pool_profiles: { type: array, items: { type: string }, description: "implemented configured paused-pool profiles; absent means unsupported" }
         id: { type: string, description: The daemon's own id, for the fleet's log; the fleet keeps the host under its own }
         url: { type: string }
         region: { type: string }
@@ -300,9 +309,53 @@
       type: object
       properties:
         error: { type: string }
-        code: { type: string, enum: [invalid, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, namespace_in_use, gateway_in_use, gateway, other_host, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, backup, internal, timeout] }
+        code: { type: string, enum: [invalid, pool_empty, not_found, conflict, not_running, not_ready, bad_state, boot_failed, capacity, quota, namespace_in_use, gateway_in_use, gateway, other_host, gone, unauthorized, unknown_host, tls_mismatch, host_unreachable, host_down, registry, pool_key, backup, internal, timeout] }
         request_id: { type: string }
         machine:
           allOf: [{ $ref: "#/components/schemas/Machine" }]
           description: "with `boot_failed`, the machine left in state `error`; with `conflict` on a stale `If-Match`, the machine as it is"
         oldest: { type: integer, description: "with `gone`: the oldest event seq kept" }
+    PutWarmPoolRequest:
+      type: object
+      additionalProperties: false
+      required: [source_machine, snapshot, desired]
+      properties:
+        source_machine: { type: string }
+        snapshot: { type: string, description: "Resolved once to an immutable snapshot ID and generation" }
+        desired: { type: integer, minimum: 0, maximum: 32 }
+    ClaimWarmPoolRequest:
+      type: object
+      additionalProperties: false
+      required: [name, request_id]
+      properties:
+        name: { type: string, description: "Machine metadata name; the preassigned guest hostname and identity stay fixed" }
+        request_id: { type: string, description: "Stable idempotency key: retained after machine destruction; cannot consume a second slot" }
+        fail_fast: { type: boolean, default: false, description: "True avoids waiting for the pool allocation lock; false can wait for that lock, then also returns pool_empty if empty. Neither waits for refill or allocates fresh capacity. Existing-claim retries can wait for that same machine's readiness." }
+    WarmPool:
+      type: object
+      required: [namespace, name, source_machine, snapshot, generation, profile, source_host, desired, creating, ready, claimed, failed]
+      properties:
+        namespace: { type: string }
+        name: { type: string }
+        source_machine: { type: string }
+        snapshot: { type: string }
+        generation: { type: string }
+        profile: { type: string, description: "Qualified template profile, bound with its complete immutable recipe fingerprint" }
+        source_host: { type: string }
+        desired: { type: integer }
+        closed: { type: boolean }
+        slots: { type: array, items: { $ref: "#/components/schemas/WarmPoolSlot" } }
+        creating: { type: integer }
+        ready: { type: integer }
+        claimed: { type: integer, description: "Existing claimed machine records, including failed claims awaiting destruction" }
+        claim_receipts: { type: integer, description: "Durable historical request receipts, retained after machine destruction" }
+        failed: { type: integer }
+        error: { type: string }
+    WarmPoolSlot:
+      type: object
+      properties:
+        machine_id: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [creating, ready, claimed, failed] }
+        machine_state: { type: string }
+        request_id: { type: string }

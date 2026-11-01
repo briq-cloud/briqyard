@@ -57,6 +57,9 @@ pub struct ImageConfig {
 pub struct Image {
     pub r#ref: String,
     pub digest: String,
+    /// OCI config JSON digest, distinct from the requested manifest/index digest.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub config_digest: String,
     /// The dataset name under images/: digest plus the init's hash, shortened.
     pub key: String,
     pub config: ImageConfig,
@@ -99,6 +102,10 @@ pub struct Builder {
 pub const PULLS_AT_ONCE: usize = 4;
 
 impl Builder {
+    pub fn init_sha256(&self) -> &str {
+        &self.init_hash
+    }
+
     pub fn new(
         zfs: Zfs,
         dir: PathBuf,
@@ -143,7 +150,7 @@ impl Builder {
             .unwrap_or(RegistryAuth::Anonymous)
     }
 
-    fn key(&self, digest: &str) -> String {
+    pub(crate) fn key(&self, digest: &str) -> String {
         let h = Sha256::digest(format!("{digest}|{}|{}", self.init_hash, self.root_gb).as_bytes());
         hex::encode(h)[..20].to_string()
     }

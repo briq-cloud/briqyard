@@ -19,6 +19,7 @@ use tokio::sync::watch;
 mod balloon;
 mod balloon_metrics;
 mod client;
+mod clone;
 mod incarnation;
 mod process;
 #[cfg(test)]
@@ -28,6 +29,7 @@ mod vmm;
 pub use balloon::*;
 pub use balloon_metrics::*;
 pub use client::*;
+pub use clone::*;
 pub use incarnation::*;
 pub use process::*;
 pub use vmm::*;

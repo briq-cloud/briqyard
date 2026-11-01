@@ -45,6 +45,36 @@ pub(super) async fn create_machine(
             "fork and restore are one or the other",
         ));
     }
+    if req
+        .template_build
+        .as_deref()
+        .is_some_and(|p| p != "init-ready-v1")
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "requested template profile is unsupported",
+        ));
+    }
+    let needs_named_memory =
+        req.template_build.is_some() || req.fork.as_ref().is_some_and(|f| f.snapshot.is_some());
+    if req.fork.as_ref().is_some_and(|f| f.snapshot.is_some()) {
+        let (size, snapshot) = named_memory_size(&st, req.fork.as_ref().unwrap()).await?;
+        if req.size != api::Size::default() && req.size != size {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "invalid",
+                "named memory clone keeps its template size",
+            ));
+        }
+        req.size = size;
+        req.fork.as_mut().unwrap().snapshot = Some(snapshot.clone());
+        let mut document: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", e.to_string()))?;
+        document["size"] = serde_json::to_value(size).expect("Size serializes");
+        document["fork"]["snapshot"] = snapshot.into();
+        body = Bytes::from(serde_json::to_vec(&document).expect("JSON serializes"));
+    }
     if let (true, Some(rs)) = (req.size == api::Size::default(), req.restore.as_mut()) {
         let (size, backup) = restore_size(&st, rs).await?;
         req.size = size;
@@ -72,6 +102,7 @@ pub(super) async fn create_machine(
         || (req.restore.is_some() && req.egress.is_none());
     let placement = registry::Policy {
         require_egress_siblings: needs_siblings,
+        require_named_memory: needs_named_memory,
         ..st.policy.clone()
     };
     let ask = Ask {
@@ -107,6 +138,22 @@ pub(super) async fn create_machine(
         let bound = source
             .clone()
             .or_else(|| reg.namespaces.get(&req.namespace).cloned());
+        if needs_named_memory {
+            if let Some(host) = bound.as_ref().and_then(|id| reg.hosts.get(id)) {
+                require_named_memory(host, st.policy.down_after)?;
+            } else if !reg.hosts.values().any(|h| {
+                h.named_memory_fork_v1
+                    && h.named_memory_profiles.iter().any(|p| p == "init-ready-v1")
+                    && h.state == "ready"
+                    && (req.region.is_empty() || h.region == req.region)
+            }) {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "capability_unsupported",
+                    "no host supports named memory templates in the requested region",
+                ));
+            }
+        }
         if needs_siblings {
             if let Some(host) = bound.as_ref().and_then(|id| reg.hosts.get(id)) {
                 require_siblings(host)?;
@@ -141,6 +188,9 @@ pub(super) async fn create_machine(
         };
         if needs_siblings {
             require_siblings(&host)?;
+        }
+        if needs_named_memory {
+            require_named_memory(&host, st.policy.down_after)?;
         }
         // A fork's new namespace lives where its source does, as a placement would pin it.
         reg.pin(&req.namespace, &host.id);
@@ -403,4 +453,102 @@ pub(super) async fn first_refused(st: &AppState, namespace: &str, first: bool, a
         st.reg.lock().unwrap().unpin(namespace);
         st.save_after_host().await;
     }
+}
+
+fn require_named_memory(host: &HostRec, down_after: chrono::Duration) -> Result<(), Refusal> {
+    if !host.named_memory_fork_v1
+        || !host
+            .named_memory_profiles
+            .iter()
+            .any(|p| p == "init-ready-v1")
+        || host.state != "ready"
+        || Utc::now() - host.last_seen >= down_after
+    {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "capability_unsupported",
+            "source host has no fresh named-memory capability",
+        ));
+    }
+    Ok(())
+}
+
+async fn named_memory_size(
+    st: &Arc<AppState>,
+    fork: &api::ForkSpec,
+) -> Result<(api::Size, String), Refusal> {
+    if !api::valid_id(&fork.machine_id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "invalid fork source",
+        ));
+    }
+    let host = st
+        .reg
+        .lock()
+        .unwrap()
+        .host_of_machine(&fork.machine_id)
+        .cloned()
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "named memory source host is unavailable",
+            )
+        })?;
+    require_named_memory(&host, st.policy.down_after)?;
+    let response = forward(
+        st,
+        &host,
+        Method::GET,
+        &format!("/v1/machines/{}/snapshots", fork.machine_id),
+        &HeaderMap::new(),
+        Bytes::new(),
+    )
+    .await;
+    let (parts, bytes) = read(response).await;
+    if !parts.status.is_success() {
+        return Err(err(
+            parts.status,
+            "invalid",
+            "source snapshot listing failed",
+        ));
+    }
+    let snapshots: Vec<api::Snapshot> = serde_json::from_slice(&bytes).map_err(|_| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            "host_unreachable",
+            "invalid source snapshot listing",
+        )
+    })?;
+    let selector = fork.snapshot.as_deref().unwrap_or("");
+    let snapshot = snapshots
+        .into_iter()
+        .find(|s| s.id == selector || s.name.as_deref() == Some(selector))
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "named memory snapshot not found",
+            )
+        })?;
+    if snapshot.clone_profile.as_deref() != Some("init-ready-v1")
+        || !snapshot.memory
+        || snapshot.source_host.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "capability_unsupported",
+            "snapshot is not a compatible source-host memory template",
+        ));
+    }
+    let size = snapshot.clone_size.ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "template has no immutable size",
+        )
+    })?;
+    Ok((size, snapshot.id))
 }

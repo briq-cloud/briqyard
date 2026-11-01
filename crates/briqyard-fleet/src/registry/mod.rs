@@ -52,6 +52,12 @@ impl std::fmt::Debug for PoolKey {
 pub struct HostRec {
     #[serde(default)]
     pub egress_siblings_v1: bool,
+    #[serde(default)]
+    pub named_memory_fork_v1: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_memory_profiles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warm_pool_profiles: Vec<String>,
     pub id: String,
     pub url: String,
     /// The address the bootstrap reaches the server at over SSH, when it is not the API's
@@ -200,6 +206,9 @@ impl HostRec {
     pub fn to_api(&self) -> Host {
         Host {
             egress_siblings_v1: self.egress_siblings_v1,
+            named_memory_fork_v1: self.named_memory_fork_v1,
+            named_memory_profiles: self.named_memory_profiles.clone(),
+            warm_pool_profiles: self.warm_pool_profiles.clone(),
             id: self.id.clone(),
             url: self.url.clone(),
             ssh: self.ssh.clone(),
@@ -298,6 +307,7 @@ pub fn tls_matches(pinned: &str, reported: &str, url: &str) -> Result<(), String
 pub struct Policy {
     /// This placement requires the explicit namespace sibling capability.
     pub require_egress_siblings: bool,
+    pub require_named_memory: bool,
     /// A host above this share of its memory takes no new namespace.
     pub fill_ceiling: f64,
     /// A host silent for this long is down.
@@ -308,6 +318,7 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             require_egress_siblings: false,
+            require_named_memory: false,
             fill_ceiling: 0.85,
             down_after: Duration::seconds(60),
         }
@@ -395,6 +406,9 @@ impl Registry {
         entry.namespaces = h.namespaces.clone();
         entry.version = h.version;
         entry.egress_siblings_v1 = h.egress_siblings_v1;
+        entry.named_memory_fork_v1 = h.named_memory_fork_v1;
+        entry.named_memory_profiles = h.named_memory_profiles;
+        entry.warm_pool_profiles = h.warm_pool_profiles;
         entry.conditions = h.conditions.clone();
         entry.started = h.started;
         entry.last_seen = now;
@@ -506,6 +520,11 @@ impl Registry {
                     .filter(|h| {
                         h.takes_new_namespaces(policy)
                             && (!policy.require_egress_siblings || h.egress_siblings_v1)
+                            && (!policy.require_named_memory
+                                || (h.named_memory_fork_v1
+                                    && h.named_memory_profiles
+                                        .iter()
+                                        .any(|p| p == "init-ready-v1")))
                             && (region.is_empty() || h.region == region)
                             && h.free_memory_mb() >= need_mb
                             && h.has_disk(need_disk_mb)

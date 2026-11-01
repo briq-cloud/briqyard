@@ -132,6 +132,7 @@ impl Manager {
                 r.image = req.image;
                 r.image_key = im.key;
                 r.image_digest = im.digest;
+                r.image_config_digest = im.config_digest;
                 r.image_config = im.config;
                 r.cmd = req.cmd;
                 r.env = req.env;

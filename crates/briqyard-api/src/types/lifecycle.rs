@@ -288,6 +288,9 @@ pub struct SnapshotRequest {
     /// Its memory too, on a running machine: a restore resumes its processes where they were.
     #[serde(default)]
     pub memory: bool,
+    /// Seal an immutable reviewed pre-main template for named memory cloning.
+    #[serde(default, skip_serializing_if = "super::limits::is_false")]
+    pub template: bool,
 }
 
 /// A point-in-time copy of a machine's disks, and of its memory when taken with it (ADR 0031).
@@ -304,6 +307,14 @@ pub struct Snapshot {
     pub disks: Vec<String>,
     #[serde(default)]
     pub memory: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_size: Option<Size>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_ram_marker: Option<String>,
 }
 
 /// A snapshot's name: an id's characters, and not the shape of a snapshot id (`s_…`), so a

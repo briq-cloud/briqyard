@@ -17,6 +17,7 @@ mod probes;
 mod spec;
 #[cfg(test)]
 mod tests;
+mod warm;
 
 pub use balloon::*;
 pub use events::*;
@@ -29,3 +30,4 @@ pub use names::*;
 pub use namespaces::*;
 pub use probes::*;
 pub use spec::*;
+pub use warm::*;

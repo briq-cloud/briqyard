@@ -38,16 +38,36 @@ impl Manager {
         };
         let (ready, probes_status) = {
             let run = e.probe.lock().unwrap();
-            (running && run.ready, run.status.clone())
+            (
+                running && run.ready && r.template_birth.is_none(),
+                run.status.clone(),
+            )
         };
         let waiting_restart = r.state == state::STOPPED && r.stopped_reason == stop::EXIT;
         api::Machine {
+            template_profile: r.template_birth.as_ref().map(|b| b.profile.clone()),
+            memory_origin: r.clone_origin.as_ref().map(|o| api::MemoryOrigin {
+                source_machine: o.source_machine.clone(),
+                snapshot: o.snapshot.clone(),
+                source_host: o.artifact.source_host.clone(),
+                ram_marker: o.artifact.ram_marker.clone(),
+                generation: o.artifact.generation.clone(),
+                stage: o.stage.as_str().into(),
+                identity: o.identity.clone(),
+            }),
             id: r.id.clone(),
             namespace: r.namespace.clone(),
             name: r.name.clone(),
             image: r.image.clone(),
             image_digest: r.image_digest.clone(),
-            state: r.state.clone(),
+            image_config_digest: r.image_config_digest.clone(),
+            state: if warm::ready_slot(&r)
+                && r.warm_slot.as_ref().is_some_and(|s| s.claimed.is_none())
+            {
+                state::WARM.into()
+            } else {
+                r.state.clone()
+            },
             stopped_reason: r.stopped_reason.clone(),
             exit: r.exit.clone(),
             error: r.error.clone(),

@@ -29,6 +29,7 @@ async fn harness() -> Harness {
 
 fn named(name: &str) -> api::SnapshotRequest {
     api::SnapshotRequest {
+        template: false,
         name: Some(name.into()),
         memory: false,
     }
@@ -36,6 +37,7 @@ fn named(name: &str) -> api::SnapshotRequest {
 
 fn with_memory() -> api::SnapshotRequest {
     api::SnapshotRequest {
+        template: false,
         name: None,
         memory: true,
     }

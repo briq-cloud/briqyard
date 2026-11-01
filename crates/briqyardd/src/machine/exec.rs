@@ -7,6 +7,7 @@ impl Manager {
 
     pub(super) async fn running_vsock(&self, id: &str, wake: bool) -> Result<PathBuf, MError> {
         let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
         let (st, reason, live) = {
             let r = e.rec.lock().unwrap();
             (
@@ -157,6 +158,7 @@ impl Manager {
             .execs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
         // In use from the call (ADR 0053): the sleeper leaves a machine it wakes for this.
         let in_use = InUse::new(e.clone());
         let sock = self.running_vsock(id, wake).await?;
@@ -201,6 +203,7 @@ impl Manager {
         req: guest::Request,
     ) -> Result<(Box<dyn guestc::Conn>, Option<u64>, InUse), MError> {
         let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
         let in_use = InUse::new(e);
         let sock = self.running_vsock(id, false).await?;
         let (conn, size) = tokio::time::timeout(

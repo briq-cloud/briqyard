@@ -110,6 +110,7 @@ async fn unknown_identity_refuses_memory_load_and_keeps_named_snapshot() {
             memory: Some("untouched".into()),
             vmm_version: h.host.version(),
             boot_identity: Some(future),
+            clone_artifact: None,
         });
     }
     h.m.start("m_future", None).await.unwrap();
@@ -208,6 +209,7 @@ async fn named_memory_restore_copies_identity_and_disk_fork_chooses_cold_profile
         h.m.snapshot(
             &machine.id,
             api::SnapshotRequest {
+                template: false,
                 name: None,
                 memory: true,
             },
@@ -348,6 +350,7 @@ async fn failed_observation_retains_metadata_but_unbound_memory_is_ambiguous_and
         h.m.snapshot(
             &machine.id,
             api::SnapshotRequest {
+                template: false,
                 name: None,
                 memory: true,
             },

@@ -18,6 +18,9 @@
 //! unknown fields are ignored; an unknown `op` is answered `error` "unknown op <op>"; an
 //! unknown response `type` in a stream is skipped. The init says its version in `pong`.
 
+mod clone;
+pub use clone::{CloneConfigure, CloneIdentity, CloneStatus, INIT_READY_V1};
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -60,6 +63,9 @@ pub struct Config {
     pub files: Vec<FileMeta>,
     /// How long the main process gets after SIGTERM before SIGKILL.
     pub stop_timeout_sec: u64,
+    /// Internal, reviewed template recipe; absent retains ordinary boot behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_profile: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -117,6 +123,14 @@ pub struct Request {
     /// Streaming upload permissions; absent preserves a regular destination's mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_configure: Option<CloneConfigure>,
+    /// Clone activation is bound to the acknowledged generation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub clone_generation: String,
+    /// Fresh host wall time applied only before the first activation, never on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_activation_realtime_sec: Option<u64>,
 }
 
 /// Responses: stdout and stderr chunks then exit; or ok, file, pong, ready, error.
@@ -148,6 +162,12 @@ pub struct Response {
     /// Explicit live capability: version numbers alone do not distinguish development builds.
     #[serde(default, skip_serializing_if = "is_false")]
     pub file_stream_v1: bool,
+    /// Present only for guests born at the reviewed pre-main template barrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_status: Option<CloneStatus>,
+    /// Digest of the actual running init executable, cached from /proc/self/exe.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub init_sha256: String,
 }
 
 fn is_false(value: &bool) -> bool {

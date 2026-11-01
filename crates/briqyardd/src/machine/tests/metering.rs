@@ -355,6 +355,7 @@ async fn a_destroyed_machine_keeps_its_buckets_and_its_counters_go() {
     let mut fork = h.request("fork");
     fork.image.clear();
     fork.fork = Some(api::ForkSpec {
+        snapshot: None,
         machine_id: "m_src".into(),
         copy: String::new(),
     });

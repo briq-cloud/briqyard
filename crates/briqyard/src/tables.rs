@@ -66,19 +66,32 @@ pub(super) fn machine_table(ms: &[api::Machine]) -> String {
 
 /// `machine snapshot ls`.
 pub(super) fn snapshot_table(ss: &[api::Snapshot]) -> String {
+    let templates = ss.iter().any(|s| s.clone_profile.is_some());
     let mut out = format!(
-        "{:<16} {:<20} {:<21} {:<10} MEMORY\n",
+        "{:<16} {:<20} {:<21} {:<10} MEMORY",
         "ID", "NAME", "CREATED", "DISKS"
     );
+    if templates {
+        out.push_str(" PROFILE SOURCE_HOST");
+    }
+    out.push('\n');
     for s in ss {
         out.push_str(&format!(
-            "{:<16} {:<20} {:<21} {:<10} {}\n",
+            "{:<16} {:<20} {:<21} {:<10} {}",
             s.id,
             s.name.as_deref().unwrap_or("-"),
             s.created_at.format("%Y-%m-%d %H:%M:%S"),
             s.disks.join(","),
             if s.memory { "yes" } else { "no" }
         ));
+        if templates {
+            out.push_str(&format!(
+                " {} {}",
+                s.clone_profile.as_deref().unwrap_or("-"),
+                s.source_host.as_deref().unwrap_or("-")
+            ));
+        }
+        out.push('\n');
     }
     out
 }

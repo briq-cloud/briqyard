@@ -124,6 +124,7 @@ impl Manager {
                 tracing::warn!(machine = id, err = %err, "resume destroy");
             }
         }
+        self.warm_step().await;
         // Detached: they run past this tick.
         drop(self.backup_step(now));
     }
