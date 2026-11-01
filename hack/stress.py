@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from stress_safety import Safety, BudgetExpired
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -42,7 +43,8 @@ HANGUP_IMAGE = "alpine:3.20"
 
 
 class Api:
-    def __init__(self, url, token):
+    def __init__(self, url, token, safety=None):
+        self.safety = safety
         self.url = url.rstrip("/")
         self.token = token
         self.lock = threading.Lock()
@@ -50,6 +52,11 @@ class Api:
         self.failures = []  # (op, target, status, message)
 
     def request(self, method, path, body=None, op=None, timeout=300):
+        if self.safety:
+            return self.safety.request(self._request, method, path, body, op, timeout)
+        return self._request(method, path, body, op, timeout)
+
+    def _request(self, method, path, body=None, op=None, timeout=300):
         """One call, timed; returns (status, text). Status 0: no answer (refused, timed out)."""
         op = op or f"{method} {path.split('/')[2] if path.count('/') > 2 else path}"
         data = json.dumps(body).encode() if body is not None else None
@@ -65,6 +72,12 @@ class Api:
         except urllib.error.HTTPError as e:
             status, text = e.code, e.read().decode(errors="replace")
         except Exception as e:  # connection refused, timeout
+            cause = e.reason if isinstance(e, urllib.error.URLError) else e
+            if (isinstance(cause, TimeoutError) and self.safety
+                    and self.safety.deadline is not None
+                    and time.monotonic() >= self.safety.deadline
+                    and not (method == 'POST' and path == '/v1/machines')):
+                raise BudgetExpired('stress time budget exhausted') from e
             status, text = 0, f"{type(e).__name__}: {e}"
         dt = time.monotonic() - t0
         with self.lock:
@@ -119,9 +132,10 @@ PHASES = ["exec_all", "endpoints_all", "stop_start_all", "fork_some", "crash", "
 class Run:
     def __init__(self, a):
         self.a = a
-        self.api = Api(a.url, a.token)
+        self.safety = Safety(a.duration, a.cleanup_grace)
+        self.api = Api(a.url, a.token, self.safety)
         self.rng = random.Random(a.seed)
-        self.prefix = f"st{a.seed % 1000:03d}"
+        self.prefix = self.safety.identity
         self.namespaces = [f"{self.prefix}-t{i}" for i in range(a.namespaces)]
         self.machines = {}  # (namespace, name) -> machine dict
         self.endpoints = {}  # machine id -> endpoint dict
@@ -135,6 +149,7 @@ class Run:
         self.log_lines.append(line)
 
     def phase(self, name):
+        self.safety.cap(1)
         self.log(f"== {name}")
 
     def mget(self, mid):
@@ -144,7 +159,7 @@ class Run:
         return self.api.call("GET", "/v1/machines", op="list")
 
     def mine(self):
-        return [m for m in self.mlist() if m["namespace"].startswith(self.prefix)]
+        return [m for m in self.mlist() if self.safety.matches(m)]
 
     def find_named(self, namespace, name):
         return next((m for m in self.mlist() if m["namespace"] == namespace and m["name"] == name), None)
@@ -167,9 +182,10 @@ class Run:
                 raise RuntimeError(f"{mid} exited: {m.get('exit')}")
             if time.monotonic() > deadline:
                 raise RuntimeError(f"{mid} still {m['state']} after {timeout}s")
-            time.sleep(0.5)
+            self.safety.sleep(0.5)
 
     def exec(self, mid, cmd, timeout_ms=30000, stdin="", wake=True):
+        timeout_ms = max(1, int(self.safety.cap(timeout_ms / 1000) * 1000))
         r = self.api.call(
             "POST",
             f"/v1/machines/{mid}/exec",
@@ -191,6 +207,7 @@ class Run:
             capture_output=True,
             text=True,
             env=env,
+            timeout=self.safety.cap(300),
         )
         out = p.stdout.strip()
         for line in out.splitlines():
@@ -302,7 +319,7 @@ class Run:
                 return
             host, port = ep["address"].rsplit(":", 1)
             host = host if host != "0.0.0.0" else "127.0.0.1"
-            c = http.client.HTTPConnection(host, int(port), timeout=60)
+            c = http.client.HTTPConnection(host, int(port), timeout=self.safety.cap(60))
             c.request("GET", "/")
             r = c.getresponse()
             body = r.read().decode()
@@ -336,7 +353,7 @@ class Run:
             if ep:
                 host, port = ep["address"].rsplit(":", 1)
                 host = host if host != "0.0.0.0" else "127.0.0.1"
-                c = http.client.HTTPConnection(host, int(port), timeout=90)
+                c = http.client.HTTPConnection(host, int(port), timeout=self.safety.cap(90))
                 c.request("GET", "/")
                 assert c.getresponse().status == 200
             return True
@@ -377,21 +394,21 @@ class Run:
             while self.mget(mid)["state"] != "stopped":
                 if time.monotonic() > deadline:
                     raise RuntimeError("did not sleep")
-                time.sleep(2)
+                self.safety.sleep(2)
             assert self.mget(mid)["stopped_reason"] == "idle"
             # wake by a connection to the endpoint
             ep = self.endpoints.get(mid)
             if ep:
                 host, port = ep["address"].rsplit(":", 1)
                 host = host if host != "0.0.0.0" else "127.0.0.1"
-                c = http.client.HTTPConnection(host, int(port), timeout=120)
+                c = http.client.HTTPConnection(host, int(port), timeout=self.safety.cap(120))
                 c.request("GET", "/")
                 assert c.getresponse().status == 200
                 assert self.mget(mid)["state"] == "running"
                 while self.mget(mid)["state"] != "stopped":
                     if time.monotonic() > deadline + 120:
                         raise RuntimeError("did not sleep again")
-                    time.sleep(2)
+                    self.safety.sleep(2)
             # wake by an exec
             assert self.exec(mid, ["hostname"]).strip() == m["name"]
             self.api.call("PATCH", f"/v1/machines/{mid}", {"sleep": "never"}, op="set_sleep")
@@ -403,7 +420,8 @@ class Run:
 
     def crash(self):
         self.phase("kill the daemon with SIGKILL; machines must be adopted")
-        p = subprocess.run(["bash", "-c", "sudo kill -9 $(systemctl show -p MainPID --value briqyardd)"], capture_output=True, text=True)
+        self.safety.cap(1)
+        p = subprocess.run(["bash", "-c", "sudo kill -9 $(systemctl show -p MainPID --value briqyardd)"], capture_output=True, text=True, timeout=self.safety.cap(30))
         if p.returncode != 0:
             self.log(f"   cannot kill the daemon here ({p.stderr.strip()[:80]}); skipped")
             return
@@ -412,7 +430,7 @@ class Run:
         while self.api.request("GET", "/v1/status", op="status", timeout=5)[0] != 200:
             if time.monotonic() > deadline:
                 raise RuntimeError("daemon did not come back")
-            time.sleep(1)
+            self.safety.sleep(1)
         _, errs = parallel(list(self.machines.values()), lambda m: self.exec(m["id"], ["hostname"]), self.a.workers)
         self.report_errors("exec after crash", errs)
         bad = [m["id"] for m in self.machines.values() if self.mget(m["id"])["state"] != "running"]
@@ -435,7 +453,7 @@ class Run:
             while m and m["state"] in ("creating", "created", "starting"):
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"{m['id']} still {m['state']} {self.a.boot_timeout}s after the hang-up")
-                time.sleep(0.5)
+                self.safety.sleep(0.5)
                 m = self.find_named(t, name)
             self.log(f"   the machine is {m['state']}" if m else "   no machine was made")
             # The image's build must not be left waiting on the dropped request.
@@ -491,7 +509,7 @@ class Run:
                     break
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"still {state} 120s after start {answers['start'][0]} / destroy {answers['destroy'][0]}")
-                time.sleep(0.5)
+                self.safety.sleep(0.5)
             self.log(f"   {mid}: start {answers['start'][0]}, destroy {answers['destroy'][0]}, then {final}")
             if final == "gone":
                 self.machines.pop(key, None)
@@ -528,7 +546,7 @@ class Run:
             while not done.is_set():
                 live = sum(m["size"]["memory_mb"] for m in self.mlist() if m["state"] in LIVE)
                 worst["mb"] = max(worst["mb"], live)
-                time.sleep(0.2)
+                self.safety.sleep(0.2)
 
         sampler = threading.Thread(target=sample)
         sampler.start()
@@ -566,18 +584,9 @@ class Run:
         def one(m):
             self.api.call("DELETE", f"/v1/machines/{m['id']}", op="destroy", timeout=180)
 
-        _, errs = parallel(list(self.machines.values()), one, self.a.workers)
+        # Only accepted IDs whose current ownership still matches may be removed.
+        _, errs = parallel([{"id": mid} for mid in list(self.safety.owned)], one, self.a.workers)
         self.report_errors("destroy", errs)
-        # Whatever a failed phase left in these namespaces (a fork, a retry's twin) goes too.
-        left = self.mine()
-        if left:
-            self.log(f"   {len(left)} machine(s) left by failed phases, destroying them")
-            parallel(left, one, self.a.workers)
-        for t in self.namespaces:
-            try:
-                self.api.call("DELETE", f"/v1/namespaces/{t}", op="namespace rm", expect={200, 204, 404})
-            except ApiError:
-                pass
         self.machines.clear()
         self.endpoints.clear()
         self.invariants("destroy")
@@ -586,7 +595,7 @@ class Run:
     def rss(self):
         """The daemon's resident memory in MB, from its /metrics; None when it does not say."""
         url = self.a.invariants_url or self.a.url
-        api = Api(url, self.a.token)
+        api = Api(url, self.a.token, self.safety)
         status, text = api.request("GET", "/metrics", op="metrics", timeout=30)
         for line in text.splitlines() if status == 200 else []:
             if line.startswith("process_resident_memory_bytes "):
@@ -632,14 +641,14 @@ class Run:
                 deadline = time.monotonic() + 30
                 for _ in range(5):
                     while True:
-                        conn = http.client.HTTPConnection(host, int(port), timeout=90)
+                        conn = http.client.HTTPConnection(host, int(port), timeout=self.safety.cap(90))
                         try:
                             conn.request("GET", "/")
                             break
                         except ConnectionRefusedError:
                             if time.monotonic() > deadline:
                                 raise
-                            time.sleep(0.2)
+                            self.safety.sleep(0.2)
                     assert conn.getresponse().status == 200
                     conn.close()
                 self.api.call("POST", f"/v1/machines/{mid}/snapshots", {"name": "one"}, op="snapshot")
@@ -678,7 +687,7 @@ class Run:
             _, errs = parallel(list(enumerate(self.namespaces)), lambda it: cycle(c, it[1], it[0]), self.a.workers)
             self.report_errors(f"churn {c}", errs, self.namespaces)
             # Idle first: jemalloc gives freed pages back after 10 s (ADR 0052).
-            time.sleep(12)
+            self.safety.sleep(12)
             mb = self.rss()
             sizes.append(mb)
             self.log(f"   cycle {c}: daemon RSS {'unknown' if mb is None else f'{mb:.1f} MB'}")
@@ -699,9 +708,15 @@ class Run:
 
     # ---- reporting ----
     def report_errors(self, phase, errs, names=None):
+        expired = any(isinstance(e, BudgetExpired) for e in errs.values())
+        errs = {k: e for k, e in errs.items() if not isinstance(e, BudgetExpired)}
         for k, e in errs.items():
             who = names[k] if names and k < len(names) else f"#{k}"
             self.log(f"   FAIL {phase} {who}: {str(e)[:200]}")
+        if errs:
+            self.broken.append((phase, f"{len(errs)} operation(s) failed"))
+        if expired:
+            raise BudgetExpired("stress time budget exhausted")
         if not errs:
             self.log(f"   ok   {phase}")
 
@@ -714,6 +729,10 @@ class Run:
             p95 = ts[min(len(ts) - 1, int(len(ts) * 0.95))]
             print(f"{op:<18} {len(ts):>5} {p50:>7.2f} {p95:>7.2f} {ts[-1]:>7.2f}")
         print()
+        print(f"ownership receipt: {self.safety.receipt}; unresolved create: {self.safety.unresolved}")
+        print(f"retained namespace names (not deleted): {self.namespaces}")
+        print(f"outstanding accepted IDs: {sorted(self.safety.owned)}")
+        print(f"unresolved create intents: {self.safety.intents}")
         print(f"api failures: {len(self.api.failures)}")
         for op, path, status, text in self.api.failures[:40]:
             print(f"   {op} {path} -> {status} {text}")
@@ -723,6 +742,7 @@ class Run:
 
     def run(self):
         self.log(f"stress {self.prefix}: {self.a.namespaces} namespaces × {self.a.per_namespace} machines, {self.a.rounds} round(s), {self.a.workers} workers, {self.a.url}")
+        self.log(f"ownership receipt: {self.safety.receipt}")
         self.invariants("start")
         want = set(self.a.phases.split(",")) if self.a.phases else set(PHASES)
         for r in range(1, self.a.rounds + 1):
@@ -737,8 +757,7 @@ class Run:
         if self.a.churn:
             self.churn()
             self.destroy_all()
-        self.report()
-        return 0 if not self.api.failures and not self.broken else 1
+        return 0 if not self.api.failures and not self.broken and not self.safety.unresolved else 1
 
 
 def interrupted(signum, frame):
@@ -757,6 +776,8 @@ def main():
     p.add_argument("--memory", type=int, default=128)
     p.add_argument("--image", default="python:3.12-alpine", help="needs python3 (the web server) and busybox (nslookup, wget)")
     p.add_argument("--boot-timeout", type=int, default=300)
+    p.add_argument("--duration", type=float, help="optional workload duration in seconds")
+    p.add_argument("--cleanup-grace", type=float, default=180, help="separate final cleanup budget in seconds")
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
     p.add_argument("--crash", action="store_true", help="SIGKILL the daemon in round 1 (needs sudo on the host)")
     p.add_argument("--churn", type=int, default=0, help="then this many cycles of every feature per namespace, the daemon's RSS read after each")
@@ -768,6 +789,8 @@ def main():
     unknown = set(filter(None, a.phases.split(","))) - set(PHASES)
     if unknown:
         p.error(f"unknown phases: {','.join(sorted(unknown))}")
+    if (a.duration is not None and a.duration <= 0) or a.cleanup_grace <= 0:
+        p.error("duration and cleanup grace must be positive")
     run = Run(a)
     # A kill or a closed terminal ends the run as Ctrl-C does: with the destroy below.
     signal.signal(signal.SIGTERM, interrupted)
@@ -775,18 +798,28 @@ def main():
     code = 1
     try:
         code = run.run()
+    except BudgetExpired as e:
+        run.log(str(e))
+        code = 0
+    except RuntimeError as e:
+        run.log(str(e))
     except KeyboardInterrupt:
         run.log("interrupted")
         code = 130
     finally:
-        # Each round destroys what it made; a failed or interrupted one, its namespaces included,
+        # Each round destroys what it made; a failed or interrupted one
         # leaves it to this. A daemon that does not answer is logged; the run keeps its code.
+        run.safety.begin_cleanup()
         if run.namespaces:
             run.log("destroying what was made")
             try:
                 run.destroy_all()
-            except ApiError as e:
+            except (ApiError, RuntimeError) as e:
                 run.log(f"cleanup failed: {e}")
+                code = 1
+        if run.broken or run.api.failures or run.safety.unresolved or run.safety.owned:
+            code = code or 1
+        run.report()
     sys.exit(code)
 
 
