@@ -6,6 +6,42 @@ async fn settle(h: &Harness) {
 }
 
 #[tokio::test]
+async fn durable_paused_claim_can_finish_after_catalog_removal_and_pool_drain() {
+    use sha2::Digest;
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    {
+        let _completed = e.lock.lock().await;
+    }
+    // Crash boundary: receipt is durable, but the machine marker/name are still paused.
+    let mut saved =
+        h.m.inner
+            .store
+            .list::<serde_json::Value>("warm-pools")
+            .unwrap()
+            .remove(0);
+    saved["claims"] = json!({"pending": {"machine": e.snapshot().id, "name": "owned"}});
+    let pool_key = hex::encode(sha2::Sha256::digest(b"t1\0tools"));
+    h.m.inner
+        .store
+        .put_durable("warm-pools", &pool_key, &saved)
+        .unwrap();
+    h.m.recover_warm_names().unwrap();
+    h.m.inner.warm_policy.lock().unwrap().catalog.clear();
+    h.m.delete_warm_pool("t1", "tools").await.unwrap();
+    h.m.warm_step().await;
+    assert!(h.m.entry(&e.snapshot().id).is_ok());
+    let before = h.m.quota("t1").unwrap().used;
+    let made =
+        h.m.claim_warm_pool("t1", "tools", claim("owned", "pending"))
+            .await
+            .unwrap();
+    assert!(made.ready);
+    assert_eq!(made.id, e.snapshot().id);
+    assert_eq!(h.m.quota("t1").unwrap().used, before);
+}
+
+#[tokio::test]
 async fn configured_target_above_32_is_accepted_but_operator_ceiling_is_authoritative() {
     let (h, _) = pool(0).await;
     h.m.inner.warm_policy.lock().unwrap().catalog[0].max_ready = 64;

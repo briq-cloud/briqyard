@@ -254,10 +254,7 @@ impl Manager {
         if self.inner.zfs.stalled(crate::zfs::STALL_AFTER).is_some() {
             return Ok(Some(blocked("pressure", "storage stalled")));
         }
-        let liability = u
-            .filling_memory
-            .checked_add(need.memory_mb)
-            .unwrap_or(u32::MAX);
+        let liability = u.filling_memory.saturating_add(need.memory_mb);
         if sample
             .memory_mb
             .checked_sub(liability)
