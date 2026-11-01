@@ -97,7 +97,7 @@ address (the host's `hosts:` entry, below).
 | `ALLOWED_CLIENTS` | none | Comma-separated IPv4 CIDRs (a bare address is a `/32`) allowed to connect: the fleet's and the routers' networks. Written as `ingress.allowed_clients` |
 | `ALLOW_PUBLIC` | none | `1` writes `ingress.allow_public: true`: anyone can connect, a firewall of your own is in front |
 | `BRIQYARD_KEY_FILE` | `/etc/briqyard/pool.key` | Without `FLEET_URL`: the pool's key file, made when missing, written as `storage.key: file:…` |
-| `FIRECRACKER_VERSION`, `FIRECRACKER_SHA256` | `v1.17.0` and its release digest | The Firecracker and jailer every host runs |
+| `FIRECRACKER_VERSION`, `FIRECRACKER_SHA256` | `v1.17.0` and its release digest | Upstream Firecracker and jailer for a local `./bin` install only; release installs require the checked bundle from that release |
 | `KERNEL_URL`, `KERNEL_SHA256` | the CI build of `vmlinux-6.18.54` | The guest kernel; the digest is checked after the download |
 
 A public `LISTEN` needs `ALLOWED_CLIENTS` or `ALLOW_PUBLIC`: with neither, the script binds
@@ -304,9 +304,53 @@ upgrade at a time per fleet. A static host (`hosts:`) needs the fleet's SSH key 
 `bootstrap.release` to the release, for the hosts added next.
 
 A release is a URL where `<binary>-linux-<arch>` are (`briqyardd`, `briqyard-init`, `briqyard`,
-`briqyard-fleet`) with their `SHA256SUMS-<arch>`, or a version of the project's releases; a
+`briqyard-fleet`) and `firecracker-checked-linux-<arch>.tar.gz`, all covered by
+`SHA256SUMS-<arch>`, or a version of the project's releases; a
 private repository's is read with `bootstrap.release_token`. Without a fleet, on the host:
 `BRIQYARD_RELEASE=<url> bash bootstrap-host.sh` does the same install and hand-over.
+
+From v0.1.11, a release install requires the checked Firecracker bundle; a missing bundle is
+an error, with no fallback to upstream binaries. Both Firecracker and jailer are checked by
+digest, even when the upstream and checked builds print the same version. The package includes
+production seccomp bytecode and its source, build provenance, the validation receipt, the
+source pin and patch series, and upstream LICENSE, NOTICE and THIRD-PARTY files.
+
+Firecracker, jailer and init are staged at `/usr/local/lib/briqyard/runtime/<sha256>/<name>`.
+The kernel keeps its configured path when its digest matches; a changed kernel is staged at
+an immutable path too. The script validates a candidate configuration with the new daemon,
+then atomically renames that configuration before the existing SIGUSR2 handover. The previous
+configuration remains at `/etc/briqyard/config.yaml.before-<sha256>`. Old runtime files remain
+in place: an old daemon's launch or image pull may still read them after staging starts. Do
+not remove or overwrite those inputs during an upgrade. Retention cleanup is manual, after
+all old processes and builds finish and rollback is no longer needed.
+
+**Preparing a release.** Pushing a version tag builds native x86_64 and aarch64 candidates in
+`release.yml`: the pinned checked Firecracker is validated and built once per architecture,
+and each resulting package joins that architecture's checksums. The workflow creates a GitHub
+draft release and a version-only fleet image. Neither publishes a stable GitHub release nor
+moves the fleet's `latest` tag. A draft can be installed using `BRIQYARD_RELEASE_TOKEN` with
+access to that draft; use a task-owned fixture, retaining its previous configuration and
+binaries for rollback.
+
+Before promotion, qualify the exact release digests on the previous release: a running VM
+must survive daemon handover with its process unchanged, suspend/resume across the upstream
+to checked transition must establish compatibility or the safe cold fallback, and template
+clock, network and vsock overrides must work. Exercise rollback using the retained prior
+configuration and binaries, with immutable runtime inputs still in place. Do not run an old
+bootstrap script over the new immutable inputs. These gates do not change `bootstrap.release`
+or touch other hosts.
+
+After those checks pass, publish the same draft (`gh release edit <tag> --draft=false
+--latest`) and promote the already qualified fleet manifest, without rebuilding it:
+
+```bash
+image=ghcr.io/briq-cloud/briqyard-fleet
+# Record the version manifest digest during qualification; promote that exact digest.
+docker buildx imagetools create --tag "$image:latest" "$image@sha256:<qualified-digest>"
+```
+
+For a prerelease, publish with `--prerelease --latest=false` and leave the fleet's `latest`
+tag unchanged. Set `bootstrap.release` only after qualification and publication.
 
 What the machines see:
 
@@ -323,7 +367,9 @@ The wire between versions is additive (ADR 0027): a newer daemon reads every ini
 newer fleet every host one version behind. A caller uses a field new in a release once
 `host ls` shows every host on it: an older host ignores a field it does not know. A
 configuration field new in a release goes into the file after the upgrade (an older binary
-refuses it), and out of it before a rollback, which is an upgrade to the older release.
+refuses it), and out of it before a rollback. For releases with checked runtime packages,
+a rollback can use the same bootstrap; for older releases, restore the retained configuration
+and prior binaries by rename before handover, keeping the runtime paths they reference.
 
 **A reboot** (an OS or host kernel upgrade): `briqyard host drain <id>`, then on the host
 `systemctl stop briqyardd` (every machine suspended), the upgrade and the reboot; the daemon's
