@@ -90,7 +90,7 @@ fail() { echo "$*" >&2; exit 1; }
 put() { install -m 0755 "$1" "$2.new"; mv -f "$2.new" "$2"; }
 release_file() { cp "$RELEASE/$1" "$2"; }
 fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
-''' + HELPERS + section + '\nprintf handed-over > "$HANDOVER"\n'
+''' + HELPERS + section + '\n[ "${FAULT_AFTER_CONFIG:-0}" != 1 ] || false\nprintf handed-over > "$HANDOVER"\n'
         env = dict(os.environ, RELEASE=str(self.release), RELEASE_TOKEN="", ARCH="x86_64",
                    KERNEL_SHA256=self.kernel_sha, KERNEL_URL=str(self.root / "new-kernel"),
                    LIVE_CONFIG=str(self.config), OLD_CONFIG=str(self.old_config),
@@ -103,7 +103,8 @@ fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
         self.assertFalse((self.root / "handover").exists())
         self.assertIn("upstream", self.old_paths["firecracker"].read_text())
         self.assertEqual(self.old_paths["init"].read_text(), "init old\n")
-        self.assertEqual((self.root / "usr/local/bin/briqyardd").read_text(), "briqyardd old running binary\n")
+        for name in ("briqyard", "briqyard-fleet", "briqyardd"):
+            self.assertEqual((self.root / "usr/local/bin" / name).read_text(), name + " old running binary\n")
 
     def test_same_version_new_digest_atomic_paths_and_idempotence(self):
         result = self.run_install()
@@ -191,6 +192,143 @@ fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
         install.chmod(0o755)
         self.assert_untouched(self.run_install(PATH=str(tools) + ":" + os.environ["PATH"]))
         self.assertTrue((self.root / "validated").exists())
+
+    def test_yaml_credentials_comments_aliases_and_nested_values_are_byte_preserved(self):
+        # These scalar spellings are strings to Rust, but YAML 1.1 loaders coerce
+        # on and 0123 to a boolean/integer. Only runtime value spans may change.
+        unrelated = ("# preserve credentials and comments\r\n"
+                     "token: on # keep this exact spelling\r\n"
+                     "metrics_token: &credential 0123\r\n"
+                     "registries:\r\n"
+                     "  - host: ghcr.io\r\n"
+                     "    username: *credential\r\n"
+                     "    password: 0123 # leading zero is significant\r\n"
+                     "registry_mirrors: {docker.io: 'http://10.0.0.2:7440'}\r\n"
+                     "templates:\r\n"
+                     "  enabled: false\r\n"
+                     "  init_ready_init_sha256: '000123'\r\n"
+                     "  warm_pools: false # preserve nested rollout settings\r\n")
+        original_values = {key: "'" + str(path) + "'" for key, path in self.old_paths.items()}
+        runtime = "".join(key + ": " + value + " # runtime " + key + "\r\n"
+                          for key, value in original_values.items())
+        self.original = (unrelated + runtime + "...\r\n").encode()
+        self.config.write_bytes(self.original)
+        self.old_config.write_bytes(self.original)
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        current = self.config.read_bytes().decode()
+        paths = yaml.safe_load(current)
+        restored = current
+        for key, value in original_values.items():
+            restored = restored.replace(key + ": " + json.dumps(paths[key]) + " # runtime " + key,
+                                        key + ": " + value + " # runtime " + key)
+        self.assertEqual(restored.encode(), self.original)
+        # Existing scalar tokens, aliases and all nested content are unchanged.
+        self.assertIn(unrelated.encode(), self.config.read_bytes())
+
+    def test_absent_runtime_fields_are_inserted_before_document_end(self):
+        self.original = ("token: on # keep\n" + "kernel: '" + str(self.old_paths["kernel"]) + "'\n...\n").encode()
+        self.config.write_bytes(self.original)
+        self.old_config.write_bytes(self.original)
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.config.read_text().startswith("token: on # keep\n"))
+        self.assertTrue(self.config.read_text().endswith("...\n"))
+        self.assertEqual(set(yaml.safe_load(self.config.read_text())), {"token", "firecracker", "jailer", "kernel", "init"})
+
+    def test_ambiguous_runtime_aliases_merges_and_duplicate_keys_fail_closed(self):
+        base = self.original.decode()
+        for suffix in ("init: *credential\n", "init: &runtime_path '/old/init'\n",
+                       "init: |\n  /old/init\n", "<<: {init: '/old/init'}\n"):
+            with self.subTest(suffix=suffix):
+                # Remove the original init line, then supply an unsupported runtime form.
+                changed = "metrics_token: &credential 'preserve'\n" + "\n".join(
+                    line for line in base.splitlines() if not line.startswith("init:")) + "\n" + suffix
+                self.original = changed.encode()
+                self.config.write_bytes(self.original)
+                self.old_config.write_bytes(self.original)
+                self.assert_untouched(self.run_install())
+        self.original = (base + "init: '/duplicate'\n").encode()
+        self.config.write_bytes(self.original)
+        self.old_config.write_bytes(self.original)
+        self.assert_untouched(self.run_install())
+
+    def test_complete_verified_rollback_is_retained_before_activation(self):
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rollback, = self.config.parent.glob("rollback.*")
+        self.assertEqual((rollback / "config.yaml").read_bytes(), self.original)
+        for name in ("briqyard", "briqyard-fleet", "briqyardd"):
+            self.assertEqual((rollback / name).read_text(), name + " old running binary\n")
+        check = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=rollback, capture_output=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_backup_and_each_late_activation_failure_restore_prior_operation(self):
+        tools = self.root / "fault-tools"
+        tools.mkdir()
+        cases = [
+            ("cp", 'case "$3" in */rollback.*/config.yaml) true;; *) false;; esac', False),
+            ("cp", 'case "$3" in */rollback.*/briqyardd) true;; *) false;; esac', False),
+            ("cp", 'case "$3" in */config.yaml.before-*) true;; *) false;; esac', False),
+            ("install", '[ "$4" = "' + str(self.root / "usr/local/bin/briqyard-fleet.new") + '" ]', False),
+            ("mv", '[ "$3" = "' + str(self.root / "usr/local/bin/briqyardd") + '" ]', False),
+            ("mv", '[ "$3" = "' + str(self.root / "usr/local/bin/briqyardd") + '" ]', True),
+            ("mv", '[ "$3" = "' + str(self.config) + '" ]', False),
+            ("mv", '[ "$3" = "' + str(self.config) + '" ]', True),
+        ]
+        for command, condition, after in cases:
+            with self.subTest(command=command, condition=condition, after=after):
+                for old in tools.iterdir():
+                    old.unlink()
+                marker = self.root / "fault"
+                marker.unlink(missing_ok=True)
+                real = shutil.which(command)
+                wrapper = tools / command
+                wrapper.write_text('#!/bin/bash\nif [ ! -e "$FAULT_MARK" ] && { ' + condition + '; }; then\n'
+                                   '  touch "$FAULT_MARK"\n' + ('  ' + real + ' "$@" || exit $?\n' if after else '')
+                                   + '  exit 1\nfi\nexec ' + real + ' "$@"\n')
+                wrapper.chmod(0o755)
+                self.assert_untouched(self.run_install(PATH=str(tools) + ":" + os.environ["PATH"], FAULT_MARK=str(marker)))
+                self.assertTrue(marker.exists(), "injection boundary was not reached")
+                self.assertTrue((self.root / "validated").exists())
+                # Verified rollback sets survive later activation failures; incomplete
+                # snapshots are removed before any executable can change.
+                for rollback in self.config.parent.glob("rollback.*"):
+                    check = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=rollback, capture_output=True)
+                    self.assertEqual(check.returncode, 0, check.stderr)
+                # Let the next case exercise the legacy configuration backup again.
+                for backup in self.config.parent.glob("config.yaml.before-*"):
+                    backup.unlink()
+
+    def test_failure_after_configuration_switch_restores_prior_operation(self):
+        self.assert_untouched(self.run_install(FAULT_AFTER_CONFIG="1"))
+        rollback, = self.config.parent.glob("rollback.*")
+        check = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=rollback, capture_output=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_path_editor_preserves_nested_warm_policy_and_registry_auth(self):
+        # The path editor has no schema for unrelated settings. In particular, it must
+        # preserve a future warm policy through the coordinated release source update.
+        nested = ("warm_policy: # administrator policy\n"
+                  "  memory_mb: 2048\n"
+                  "  entries:\n"
+                  "    - template: '0123'\n"
+                  "      max_instances: 2\n"
+                  "registries:\n"
+                  "  - host: ghcr.io\n"
+                  "    username: &username on\n"
+                  "    password: 0123\n"
+                  "  - host: registry.internal\n"
+                  "    username: *username\n"
+                  "    password: 'false' # literal password\n")
+        candidate = self.root / "nested-config"
+        candidate.write_text(nested)
+        result = subprocess.run(["bash", "-c", HELPERS + '\nruntime_config "$@"', "paths", str(candidate),
+                                 "/fc", "/jailer", "/kernel", "/init"], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(candidate.read_text().startswith(nested))
+        self.assertEqual(candidate.read_text()[len(nested):],
+                         'firecracker: "/fc"\njailer: "/jailer"\nkernel: "/kernel"\ninit: "/init"\n')
 
     def test_changed_kernel_is_immutable_and_prior_kernel_survives(self):
         new_kernel = self.root / "new-kernel"

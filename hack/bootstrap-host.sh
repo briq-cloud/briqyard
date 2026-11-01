@@ -445,18 +445,105 @@ immutable_runtime() {
 }
 
 runtime_config() {
-  python3 - "$@" <<'PY'
+  python3 - "$@" <<'PYCONFIG'
+import json
 from pathlib import Path
 import sys
 import yaml
 
 path = Path(sys.argv[1])
-config = yaml.safe_load(path.read_text())
-if not isinstance(config, dict):
-    raise ValueError("configuration must be a mapping")
-config.update(zip(("firecracker", "jailer", "kernel", "init"), sys.argv[2:]))
-path.write_text(yaml.safe_dump(config, sort_keys=False))
-PY
+text = path.read_bytes().decode("utf-8")
+try:
+    config = yaml.compose(text)
+    tokens = list(yaml.scan(text))
+except yaml.YAMLError:
+    raise SystemExit("cannot parse runtime configuration") from None
+if not isinstance(config, yaml.MappingNode) or config.flow_style:
+    raise SystemExit("runtime paths require a block configuration mapping")
+paths = dict(zip(("firecracker", "jailer", "kernel", "init"), sys.argv[2:]))
+edits = []
+seen = set()
+for key, value in config.value:
+    if not isinstance(key, yaml.ScalarNode):
+        raise SystemExit("runtime configuration has a complex mapping key")
+    if key.value == "<<":
+        raise SystemExit("runtime paths cannot be updated through a root merge")
+    if key.value not in paths:
+        continue
+    if key.value in seen:
+        raise SystemExit("duplicate runtime path in configuration")
+    seen.add(key.value)
+    start, end = value.start_mark.index, value.end_mark.index
+    # Aliases point to a different source span; anchors can be referenced by unrelated
+    # fields. Refuse those cases rather than silently changing their meaning.
+    if (not isinstance(value, yaml.ScalarNode) or start <= key.end_mark.index
+            or "\n" in text[start:end] or "\r" in text[start:end]
+            or any(isinstance(t, (yaml.AnchorToken, yaml.AliasToken))
+                   and key.start_mark.index <= t.start_mark.index < end for t in tokens)):
+        raise SystemExit("runtime paths must be unanchored single-line scalars")
+    edits.append((start, end, json.dumps(paths[key.value])))
+# Insert absent fields before an explicit document end, preserving every other byte.
+missing = "".join(name + ": " + json.dumps(value) + "\n"
+                  for name, value in paths.items() if name not in seen)
+if missing:
+    end = next((t.start_mark.index for t in tokens if isinstance(t, yaml.DocumentEndToken)), len(text))
+    edits.append((end, end, ("" if end == 0 or text[end - 1] == "\n" else "\n") + missing))
+for start, end, replacement in sorted(edits, reverse=True):
+    text = text[:start] + replacement + text[end:]
+try:
+    yaml.compose(text)
+except yaml.YAMLError:
+    raise SystemExit("cannot preserve runtime configuration syntax") from None
+path.write_bytes(text.encode("utf-8"))
+PYCONFIG
+}
+
+runtime_kernel() {
+  python3 - "$1" <<'PYKERNEL'
+from pathlib import Path
+import sys
+import yaml
+
+try:
+    config = yaml.compose(Path(sys.argv[1]).read_text())
+except yaml.YAMLError:
+    raise SystemExit("cannot parse runtime configuration") from None
+if not isinstance(config, yaml.MappingNode):
+    raise SystemExit("configuration must be a mapping")
+for key, value in config.value:
+    if isinstance(key, yaml.ScalarNode) and key.value == "kernel":
+        if not isinstance(value, yaml.ScalarNode):
+            raise SystemExit("kernel path must be a scalar")
+        print(value.value)
+        break
+else:
+    print("/var/lib/briqyard/vmlinux")
+PYKERNEL
+}
+# A failed activation restores installed executables before leaving the old daemon running.
+# The verified rollback directory also remains available for an explicit later rollback.
+cleanup_runtime_install() {
+  local result=$? b restored=1
+  trap - EXIT
+  if [ "$result" != 0 ] && [ "$activation_pending" = 1 ] && [ "$rollback_ready" = 1 ]; then
+    for b in briqyard briqyard-fleet briqyardd; do
+      if [ -f "$rollback/$b" ]; then
+        cp -p "$rollback/$b" "$binary_dir/$b.rollback" && mv -f "$binary_dir/$b.rollback" "$binary_dir/$b" || restored=0
+      fi
+    done
+    if ! cmp -s "$rollback/config.yaml" "$config_path"; then
+      cp -p "$rollback/config.yaml" "$config_path.rollback" && mv -f "$config_path.rollback" "$config_path" || restored=0
+    fi
+    if [ "$restored" = 0 ]; then
+      echo "   activation failed; automatic restoration incomplete: retained rollback at $rollback" >&2
+    else
+      echo "   activation failed; previous executables and configuration restored ($rollback)" >&2
+    fi
+  fi
+  rm -rf "$new"
+  [ -z "$candidate" ] || rm -f "$candidate"
+  if [ -n "$rollback" ] && [ "$rollback_ready" = 0 ]; then rm -rf "$rollback"; fi
+  exit "$result"
 }
 # End runtime installation helpers.
 
@@ -477,7 +564,12 @@ release_file() {
 echo "== binaries${RELEASE:+ from $RELEASE}"
 new=$(mktemp -d)
 candidate=""
-trap 'rm -rf "$new"; [ -z "$candidate" ] || rm -f "$candidate"' EXIT
+rollback=""
+rollback_ready=0
+activation_pending=0
+config_path=/etc/briqyard/config.yaml
+binary_dir=/usr/local/bin
+trap cleanup_runtime_install EXIT
 if [ -n "$RELEASE" ]; then
   if [ -n "$RELEASE_TOKEN" ]; then
     repo=${RELEASE#https://github.com/}; tag=${repo##*/releases/download/}; repo=${repo%%/releases/download/*}
@@ -512,7 +604,7 @@ init=$(immutable_runtime "$new/briqyard-init" briqyard-init)
 # Keep the configured kernel path when its digest is unchanged. Never replace its bytes.
 kernel=/var/lib/briqyard/vmlinux
 if [ -f /etc/briqyard/config.yaml ]; then
-  kernel=$(python3 -c 'import sys,yaml; print(yaml.safe_load(open(sys.argv[1])).get("kernel", "/var/lib/briqyard/vmlinux"))' /etc/briqyard/config.yaml)
+  kernel=$(runtime_kernel /etc/briqyard/config.yaml)
 fi
 if ! echo "$KERNEL_SHA256  $kernel" | sha256sum -c --quiet - 2>/dev/null; then
   fetch "$KERNEL_URL" "$KERNEL_SHA256" "$new/vmlinux"
@@ -562,15 +654,36 @@ fi
 runtime_config "$candidate" "$firecracker" "$jailer" "$kernel" "$init"
 chmod 0600 "$candidate"
 fingerprint=$("$new/briqyardd" --config "$candidate" tls-fingerprint) || fail "the new briqyardd refuses the staged configuration: nothing activated"
-# Init and the runtime inputs stay at immutable paths. The old daemon may still read them.
-for b in briqyard briqyard-fleet briqyardd; do put "$new/$b" "/usr/local/bin/$b"; done
-if [ -f /etc/briqyard/config.yaml ]; then
-  config_sha=$(sha256sum /etc/briqyard/config.yaml | awk '{print $1}')
+# Retain a complete rollback set before the first installed executable changes. Its
+# checksums cover the exact prior configuration and executables, including the daemon.
+if [ -f "$config_path" ]; then
+  rollback=$(mktemp -d /etc/briqyard/rollback.XXXXXX)
+  retained=(config.yaml)
+  cp -p "$config_path" "$rollback/config.yaml"
+  cmp -s "$config_path" "$rollback/config.yaml" || fail "configuration changed while retaining rollback"
+  for b in briqyard briqyard-fleet briqyardd; do
+    if [ -f "$binary_dir/$b" ]; then
+      cp -p "$binary_dir/$b" "$rollback/$b"
+      cmp -s "$binary_dir/$b" "$rollback/$b" || fail "installed executable changed while retaining rollback"
+      retained+=("$b")
+    fi
+  done
+  (cd "$rollback" && sha256sum "${retained[@]}" > SHA256SUMS && sha256sum -c --quiet SHA256SUMS)
+  config_sha=$(sha256sum "$rollback/config.yaml" | awk '{print $1}')
   backup="/etc/briqyard/config.yaml.before-$config_sha"
-  [ -e "$backup" ] || cp -p /etc/briqyard/config.yaml "$backup"
+  if [ -e "$backup" ]; then
+    cmp -s "$rollback/config.yaml" "$backup" || fail "retained configuration backup differs"
+  else
+    cp -p "$rollback/config.yaml" "$backup"
+  fi
+  rollback_ready=1
+  echo "   previous executables and configuration retained at $rollback"
 fi
+# Init and runtime inputs stay immutable. The old daemon may still read them.
+activation_pending=1
+for b in briqyard briqyard-fleet briqyardd; do put "$new/$b" "$binary_dir/$b"; done
 # The rename is on the configuration filesystem, before the existing SIGUSR2 handover.
-mv -f "$candidate" /etc/briqyard/config.yaml
+mv -f "$candidate" "$config_path"
 candidate=""
 
 echo "== api certificate"
@@ -628,7 +741,9 @@ systemctl enable briqyardd >/dev/null
 # starts the new one at once, the listeners kept (ADR 0051); the new one adopts the machines. The
 # start below covers a daemon from before ADR 0051, which exits 0. `systemctl restart` would
 # suspend every machine instead.
+# Once handover can begin, recovery uses the retained rollback set explicitly.
 pid=$(systemctl show -p MainPID --value briqyardd)
+activation_pending=0
 if [ "${pid:-0}" != 0 ]; then
   echo "== handing the machines over to the new daemon"
   systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd

@@ -319,9 +319,19 @@ Firecracker, jailer and init are staged at `/usr/local/lib/briqyard/runtime/<sha
 The kernel keeps its configured path when its digest matches; a changed kernel is staged at
 an immutable path too. The script validates a candidate configuration with the new daemon,
 then atomically renames that configuration before the existing SIGUSR2 handover. The previous
-configuration remains at `/etc/briqyard/config.yaml.before-<sha256>`. Old runtime files remain
+configuration remains at `/etc/briqyard/config.yaml.before-<sha256>`. Before replacing any
+installed executable, the script also retains the previous configuration and installed
+`briqyard`, `briqyard-fleet` and `briqyardd` in the printed `/etc/briqyard/rollback.<suffix>`
+directory, with `SHA256SUMS`. A backup failure prevents activation. A failure during binary
+or configuration replacement restores that set automatically; if restoration cannot finish,
+the error names the retained set for recovery. The running daemon is not signalled on those
+failures. Old runtime files remain
 in place: an old daemon's launch or image pull may still read them after staging starts. Do
-not remove or overwrite those inputs during an upgrade. Retention cleanup is manual, after
+not remove or overwrite those inputs during an upgrade. Runtime path edits preserve all
+other configuration text and scalar spellings, including credentials. Root merges, anchored
+or aliased runtime paths, multiline runtime values and ambiguous duplicate runtime keys are
+refused before activation; write those four paths as ordinary single-line scalars first.
+Retention cleanup is manual, after
 all old processes and builds finish and rollback is no longer needed.
 
 **Preparing a release.** Pushing a version tag builds native x86_64 and aarch64 candidates in
@@ -370,6 +380,25 @@ configuration field new in a release goes into the file after the upgrade (an ol
 refuses it), and out of it before a rollback. For releases with checked runtime packages,
 a rollback can use the same bootstrap; for older releases, restore the retained configuration
 and prior binaries by rename before handover, keeping the runtime paths they reference.
+Use the rollback directory printed by that upgrade, after checking compatibility with the
+prior daemon and while coordinating the host's normal upgrade gate:
+
+```bash
+rollback=/etc/briqyard/rollback.REPLACE_WITH_PRINTED_SUFFIX
+(cd "$rollback" && sha256sum -c SHA256SUMS) || exit 1
+for b in briqyard briqyard-fleet briqyardd; do
+  [ ! -f "$rollback/$b" ] || {
+    cp -p "$rollback/$b" "/usr/local/bin/$b.rollback" &&
+      mv -f "/usr/local/bin/$b.rollback" "/usr/local/bin/$b" || exit 1
+  }
+done
+cp -p "$rollback/config.yaml" /etc/briqyard/config.yaml.rollback &&
+  mv -f /etc/briqyard/config.yaml.rollback /etc/briqyard/config.yaml || exit 1
+systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
+```
+
+Do not delete that rollback directory or its referenced runtime inputs until the rollback
+window is closed.
 
 **A reboot** (an OS or host kernel upgrade): `briqyard host drain <id>`, then on the host
 `systemctl stop briqyardd` (every machine suspended), the upgrade and the reboot; the daemon's
