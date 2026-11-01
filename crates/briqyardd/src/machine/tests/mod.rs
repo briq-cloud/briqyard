@@ -416,6 +416,15 @@ impl Harness {
             .insert(vsock, digest.into());
     }
 
+    pub(super) fn set_cgroup(&self, id: &str, sample: Option<fc::CgroupUse>) {
+        let mut cgroups = self.host.cgroups.lock().unwrap();
+        if let Some(sample) = sample {
+            cgroups.insert(id.into(), sample);
+        } else {
+            cgroups.remove(id);
+        }
+    }
+
     pub(super) fn host_calls(&self) -> Vec<String> {
         self.host.calls()
     }

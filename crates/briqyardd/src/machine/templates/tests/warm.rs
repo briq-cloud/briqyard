@@ -61,6 +61,90 @@ async fn fill(h: &Harness) -> Arc<Entry> {
     e
 }
 
+async fn desired(h: &Harness, desired: u16) -> api::WarmPool {
+    let view = h.m.warm_pools("t1").unwrap().remove(0);
+    h.m.put_warm_pool(
+        "t1",
+        "tools",
+        api::PutWarmPoolRequest {
+            source_machine: view.source_machine,
+            snapshot: view.snapshot,
+            desired,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn increased_demand_refills_without_tick_and_put_does_not_wait_for_ready() {
+    let (h, _) = pool(0).await;
+    h.pause_warm_barrier("warm_parked");
+    let view = desired(&h, 1).await;
+    assert_eq!((view.desired, view.ready, view.creating), (1, 0, 0));
+    // The PUT has returned before its worker reaches the existing park barrier.
+    h.wait_warm_barrier().await;
+    let view = h.m.warm_pools("t1").unwrap().remove(0);
+    assert_eq!(view.slots.len(), 1);
+    assert_eq!(view.ready, 1);
+    h.release_warm_barriers();
+    fill(&h).await;
+}
+
+#[tokio::test]
+async fn queued_demand_increase_observes_later_decrease_and_drain() {
+    for drain in [false, true] {
+        let (h, _) = pool(0).await;
+        desired(&h, 1).await;
+        // No await has yielded to the queued refill: it must read the newer pool.
+        if drain {
+            h.m.delete_warm_pool("t1", "tools").await.unwrap();
+        } else {
+            desired(&h, 0).await;
+        }
+        tokio::task::yield_now().await;
+        let _settled = h.m.inner.warm_lock.lock().await;
+        assert!(h.m.warm_pools("t1").unwrap()[0].slots.is_empty());
+        assert_eq!(h.m.inner.machines.lock().unwrap().len(), 1);
+        assert!(h.m.clone_readers().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn queued_increases_serialize_at_latest_demand_without_extra_slots() {
+    let (h, _) = pool(0).await;
+    h.pause_warm_barrier("warm_parked");
+    desired(&h, 1).await;
+    desired(&h, 2).await;
+    desired(&h, 1).await;
+    h.wait_warm_barrier().await;
+    // Both queued passes see the final desired count and the same reservation.
+    let _settled = h.m.inner.warm_lock.lock().await;
+    let view = h.m.warm_pools("t1").unwrap().remove(0);
+    assert_eq!((view.desired, view.slots.len()), (1, 1));
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
+    drop(_settled);
+    h.release_warm_barriers();
+    fill(&h).await;
+}
+
+#[tokio::test]
+async fn unchanged_demand_does_not_refill_after_claim() {
+    let (h, _) = pool(1).await;
+    fill(&h).await;
+    // Let the initial demand task finish before consuming its slot.
+    tokio::task::yield_now().await;
+    h.m.claim_warm_pool("t1", "tools", claim("worker", "unchanged"))
+        .await
+        .unwrap();
+    let view = desired(&h, 1).await;
+    assert_eq!((view.ready, view.claimed), (0, 1));
+    tokio::task::yield_now().await;
+    let _settled = h.m.inner.warm_lock.lock().await;
+    assert_eq!(h.m.warm_pools("t1").unwrap()[0].slots.len(), 1);
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
+}
+
 fn claim(name: &str, request_id: &str) -> api::ClaimWarmPoolRequest {
     api::ClaimWarmPoolRequest {
         name: name.into(),
@@ -403,4 +487,146 @@ async fn queued_namespace_writer_cannot_deadlock_refill_and_claim_lock_order() {
     if result.is_err() {
         fill(&h).await;
     } // Settle the existing fill before fixture teardown.
+}
+
+#[tokio::test]
+async fn paused_resident_stats_report_physical_use_and_warm_state_without_resuming() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    let r = e.snapshot();
+    let reserved = h.m.usage().0.memory_mb;
+    let quota = h.m.quota("t1").unwrap().used.memory_mb;
+    h.set_cgroup(
+        &r.id,
+        Some(fc::CgroupUse {
+            cpu_usec: 1234,
+            memory_bytes: 5754880,
+            memory_anon_bytes: Some(4096),
+            memory_file_bytes: Some(8192),
+        }),
+    );
+    h.host_calls();
+    h.m.measure(Utc::now()).await;
+    let stats = h.m.stats(&r.id).await.unwrap();
+    assert_eq!(stats.state, state::WARM);
+    assert_eq!(stats.memory_status, "available");
+    assert_eq!((stats.cpu_usec, stats.memory_bytes), (1234, 5754880));
+    assert_eq!(
+        (stats.memory_anon_bytes, stats.memory_file_bytes),
+        (Some(4096), Some(8192))
+    );
+    assert!(stats.memory_read_at.is_some());
+    assert!(stats.balloon.is_none(), "legacy profile has no balloon");
+    let metrics = h.m.metrics();
+    for (name, value) in [
+        ("memory_bytes", 5754880),
+        ("memory_anon_bytes", 4096),
+        ("memory_file_bytes", 8192),
+    ] {
+        assert!(
+            metrics.lines().any(|line| line
+                .starts_with(&format!("briqyard_machine_{name}{{machine=\"{}\"", r.id))
+                && line.ends_with(&format!(" {value}"))),
+            "{metrics}"
+        );
+    }
+    assert!(metrics.lines().any(|line| line
+        .starts_with(&format!("briqyard_machine_state{{machine=\"{}\"", r.id))
+        && line.ends_with("state=\"warm\"} 1")));
+    assert!(metrics.contains("briqyard_machines{state=\"warm\"} 1"));
+    assert_eq!(h.m.usage().0.memory_mb, reserved);
+    assert_eq!(h.m.quota("t1").unwrap().used.memory_mb, quota);
+    assert_eq!(e.snapshot().pid, r.pid);
+    assert_eq!(e.snapshot().clone_origin.unwrap().stage, CloneStage::Paused);
+    assert!(!h
+        .host_calls()
+        .iter()
+        .any(|c| c.starts_with("resume") || c.starts_with("clone-activate")));
+    // A failed read is unavailable, never a successful zero or configured-RAM sample.
+    h.set_cgroup(&r.id, None);
+    h.m.measure(Utc::now()).await;
+    let stats = h.m.stats(&r.id).await.unwrap();
+    assert_eq!(stats.memory_status, "unavailable");
+    assert_eq!(stats.memory_bytes, 0);
+    assert!(stats.memory_read_at.is_none());
+    assert!(stats.memory_anon_bytes.is_none());
+    assert!(!h.m.metrics().lines().any(|line| line.starts_with(&format!(
+        "briqyard_machine_memory_bytes{{machine=\"{}\"",
+        r.id
+    ))));
+}
+
+#[tokio::test]
+async fn paused_resident_telemetry_requires_bound_live_incarnation_and_paused_stage() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    let original = e.snapshot();
+    h.set_cgroup(
+        &original.id,
+        Some(fc::CgroupUse {
+            memory_bytes: 99,
+            ..Default::default()
+        }),
+    );
+    for case in 0..5 {
+        *e.rec.lock().unwrap() = original.clone();
+        let saved_live = e.live.lock().unwrap().clone();
+        match case {
+            0 => e.rec.lock().unwrap().boot_incarnation = None,
+            1 => {
+                e.rec
+                    .lock()
+                    .unwrap()
+                    .boot_incarnation
+                    .as_mut()
+                    .unwrap()
+                    .start_ticks += 1
+            }
+            2 => *e.live.lock().unwrap() = None,
+            3 => {
+                e.rec.lock().unwrap().clone_origin.as_mut().unwrap().stage =
+                    CloneStage::IdentityDone
+            }
+            _ => {
+                e.live.lock().unwrap().as_mut().unwrap().exited =
+                    tokio::sync::watch::channel(true).1
+            }
+        }
+        h.m.measure(Utc::now()).await;
+        let stats = h.m.stats(&original.id).await.unwrap();
+        assert_ne!(stats.memory_status, "available", "case {case}");
+        assert_eq!(stats.memory_bytes, 0);
+        assert!(stats.memory_read_at.is_none());
+        assert!(!e.meter.lock().unwrap().memory_available);
+        assert!(!h.m.metrics().lines().any(|line| line.starts_with(&format!(
+            "briqyard_machine_memory_bytes{{machine=\"{}\"",
+            original.id
+        ))));
+        *e.live.lock().unwrap() = saved_live;
+    }
+}
+
+#[tokio::test]
+async fn paused_resident_balloon_read_preserves_unknown_guest_sample_time() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    // Exercise reporting-device telemetry using the same mock as the balloon tests.
+    e.rec
+        .lock()
+        .unwrap()
+        .boot_identity
+        .as_mut()
+        .unwrap()
+        .device_profile = fc::REPORTING_PROFILE.into();
+    h.m.measure(Utc::now()).await;
+    let stats = h.m.stats(&e.snapshot().id).await.unwrap();
+    let balloon = stats.balloon.unwrap();
+    assert_eq!(balloon.actual_bytes, Some(3 * 4096));
+    assert!(!balloon.guest_sample_time_known);
+    assert!(balloon.last_stats_update_observed_at.is_none());
+    assert!(h.host_calls().iter().any(|c| c == "balloon-statistics"));
+    assert!(h.m.metrics().lines().any(|line| line.starts_with(&format!(
+        "briqyard_machine_balloon_actual_bytes{{machine=\"{}\"",
+        e.snapshot().id
+    ))));
 }

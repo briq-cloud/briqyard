@@ -2,6 +2,28 @@
 
 use super::*;
 
+/// A parked slot is resident only while its recorded VMM is still bound and live.
+/// Ordinary starts retain their existing reporting behavior until they reach running.
+pub(super) fn resident(r: &Record, live: Option<&fc::Vm>) -> bool {
+    r.state == state::RUNNING
+        || (warm::ready_slot(r)
+            && live.is_some_and(|vm| {
+                r.pid != 0
+                    && vm.pid == r.pid
+                    && r.boot_incarnation.is_some()
+                    && r.boot_incarnation == vm.incarnation
+                    && !*vm.exited.borrow()
+            }))
+}
+
+fn reported_state(r: &Record) -> &str {
+    if warm::ready_slot(r) && r.warm_slot.as_ref().is_some_and(|s| s.claimed.is_none()) {
+        state::WARM
+    } else {
+        &r.state
+    }
+}
+
 impl Manager {
     /// The images on the host.
     pub async fn images(&self) -> Result<Vec<api::Image>, MError> {
@@ -45,9 +67,11 @@ impl Manager {
     pub async fn stats(&self, id: &str) -> Result<api::MachineStats, MError> {
         let e = self.entry(id)?;
         let r = e.snapshot();
+        let live = e.live.lock().unwrap().clone();
+        let resident = resident(&r, live.as_ref());
         let mut st = api::MachineStats {
-            state: r.state.clone(),
-            memory_status: if r.state == state::RUNNING {
+            state: reported_state(&r).into(),
+            memory_status: if r.state == state::RUNNING || warm::ready_slot(&r) {
                 "unavailable"
             } else {
                 "stopped"
@@ -56,7 +80,7 @@ impl Manager {
             boot_profile: r.boot_identity.as_ref().map(|i| i.device_profile.clone()),
             ..Default::default()
         };
-        if r.state == state::RUNNING {
+        if resident {
             if let Some(t) = r.started_at {
                 st.uptime_sec = (Utc::now() - t).num_seconds().max(0) as u64;
             }
@@ -71,15 +95,21 @@ impl Manager {
             st.balloon = e.meter.lock().unwrap().balloon.clone();
         }
         st.disk_bytes = self.inner.zfs.used(&r.dataset()).await.unwrap_or(0);
+        let live = e.live.lock().unwrap().clone();
         let current = e.snapshot();
-        if current.pid != r.pid || current.state != state::RUNNING {
-            st.state = current.state.clone();
-            st.memory_status = if current.state == state::RUNNING {
+        st.state = reported_state(&current).into();
+        if current.pid != r.pid
+            || current.boot_incarnation != r.boot_incarnation
+            || !self::resident(&current, live.as_ref())
+        {
+            st.memory_status = if current.state == state::RUNNING || warm::ready_slot(&current) {
                 "unavailable"
             } else {
                 "stopped"
             }
             .into();
+            st.cpu_usec = 0;
+            st.memory_bytes = 0;
             st.memory_read_at = None;
             st.memory_anon_bytes = None;
             st.memory_file_bytes = None;
@@ -105,9 +135,11 @@ impl Manager {
         let machines: Vec<metrics::Machine> = entries
             .iter()
             .map(|e| {
+                let live = e.live.lock().unwrap().clone();
                 let r = e.rec.lock().unwrap();
                 let m = e.meter.lock().unwrap();
-                *host.by_state.entry(r.state.clone()).or_default() += 1;
+                let resident = resident(&r, live.as_ref());
+                *host.by_state.entry(reported_state(&r).into()).or_default() += 1;
                 if r.state == state::STOPPED {
                     *host.stopped.entry(r.stopped_reason.clone()).or_default() += 1;
                 }
@@ -117,13 +149,13 @@ impl Manager {
                     namespace: r.namespace.clone(),
                     name: r.name.clone(),
                     role: role_name(r.role),
-                    state: r.state.clone(),
+                    state: reported_state(&r).into(),
                     counted: m.counted(),
                     memory_bytes: m.memory_bytes,
-                    memory_available: r.state == state::RUNNING && m.memory_available,
-                    memory_anon_bytes: m.memory_anon_bytes.filter(|_| r.state == state::RUNNING),
-                    memory_file_bytes: m.memory_file_bytes.filter(|_| r.state == state::RUNNING),
-                    balloon: m.balloon.clone().filter(|_| r.state == state::RUNNING),
+                    memory_available: resident && m.memory_available,
+                    memory_anon_bytes: m.memory_anon_bytes.filter(|_| resident),
+                    memory_file_bytes: m.memory_file_bytes.filter(|_| resident),
+                    balloon: m.balloon.clone().filter(|_| resident),
                     memory_limit_bytes: (r.size.memory_mb as u64) << 20,
                     disk_used_bytes: m.disks.used + m.disks.snapshots,
                     restarts: m.restarts,
