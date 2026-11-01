@@ -9,7 +9,12 @@ impl Manager {
             .store
             .get::<Record>("machines", &run.machine)?
             .context("run machine record missing")?;
-        let prior = launch_identity::record_fingerprint(&machine)? == run.prior_control_sha256;
+        let old_machine = intent
+            .predecessor
+            .as_ref()
+            .map_or(&run.prior, |old| &old.target);
+        let prior = launch_identity::record_fingerprint(&machine)?
+            == launch_identity::record_fingerprint(old_machine)?;
         let target = launch_identity::record_fingerprint(&machine)?
             == launch_identity::record_fingerprint(&run.target)?;
         anyhow::ensure!(
@@ -18,21 +23,38 @@ impl Manager {
         );
         let current = self.inner.store.get::<Current>(RUNS, &run.machine)?;
         let reader = self.inner.store.get::<Reader>(READERS, &run.machine)?;
+        let new_current = current.as_ref().is_some_and(|value| {
+            serde_json::to_value(value).ok() == serde_json::to_value(run).ok()
+        });
+        let old_current = match (&current, &intent.predecessor) {
+            (None, None) => true,
+            (Some(value), Some(old)) => serde_json::to_value(value)? == serde_json::to_value(old)?,
+            _ => false,
+        };
+        let new_reader = reader.as_ref().is_some_and(|value| {
+            serde_json::to_value(value).ok() == serde_json::to_value(&intent.reader).ok()
+        });
+        let old_reader = match (&reader, &intent.predecessor) {
+            (None, None) => true,
+            (Some(value), Some(old)) => {
+                serde_json::to_value(value)? == serde_json::to_value(old.reader()?)?
+            }
+            _ => false,
+        };
         anyhow::ensure!(
-            current.as_ref().is_none_or(
-                |current| serde_json::to_value(current).ok() == serde_json::to_value(run).ok()
-            ) && reader
-                .as_ref()
-                .is_none_or(|reader| serde_json::to_value(reader).ok()
-                    == serde_json::to_value(&intent.reader).ok()),
-            "current run or reader conflicts with durable intent"
+            new_current || old_current,
+            "current run conflicts with durable intent"
         );
         anyhow::ensure!(
-            !target || current.is_some(),
+            new_reader || old_reader,
+            "run reader conflicts with durable intent"
+        );
+        anyhow::ensure!(
+            !(target && !prior) || new_current,
             "machine advanced before current-run authority"
         );
         anyhow::ensure!(
-            reader.is_none() || (current.is_some() && target),
+            !new_reader || (new_current && target),
             "run reader advanced before owning records"
         );
         self.inner.store.put_durable(RUNS, &run.machine, run)?;
@@ -47,7 +69,7 @@ impl Manager {
         self.inner.store.delete_durable(INTENTS, &run.machine)
     }
 
-    fn check_run_creation_authority(&self, run: &Current) -> Result<()> {
+    pub(super) fn check_run_creation_authority(&self, run: &Current) -> Result<()> {
         let receipt = self
             .inner
             .store
@@ -153,44 +175,48 @@ impl Manager {
 
     pub(in crate::machine) async fn verify_assigned_run_backing(&self) -> Result<()> {
         for current in self.inner.store.list::<Current>(RUNS)? {
-            current.check()?;
-            anyhow::ensure!(
-                self.inner.vmm.host_boot_id().as_deref() == Some(current.host_boot_id.as_str()),
-                "run host boot changed; explicit new authority required"
-            );
-            let compatible = match current.mode {
-                Mode::Fresh { .. } => {
-                    self.inner
-                        .vmm
-                        .boot_identity(self.inner.cfg.balloon.enabled)
-                        .as_ref()
-                        == Some(&current.expected_boot_identity)
-                }
-                Mode::Checkpoint { .. } => self.resume_compatible(&current.prior),
-            };
-            anyhow::ensure!(
-                compatible,
-                "run boot artifacts changed; no implicit fallback"
-            );
-            let (root, data) = self.current_run_disks(&current.prior).await?;
-            anyhow::ensure!(
-                root == current.root && data == current.data,
-                "CURRENT run dataset GUID changed; backing retained"
-            );
-            if let Mode::Checkpoint {
-                state,
-                memory,
-                config,
-                ..
-            } = &current.mode
-            {
-                let paths = self.run_checkpoint_paths(&current.prior);
-                for (path, expected) in paths.iter().zip([state, memory, config]) {
-                    anyhow::ensure!(
-                        templates::fingerprint(path)? == *expected,
-                        "CURRENT checkpoint evidence changed"
-                    );
-                }
+            self.verify_run_backing(&current).await?;
+        }
+        Ok(())
+    }
+    pub(super) async fn verify_run_backing(&self, current: &Current) -> Result<()> {
+        current.check()?;
+        anyhow::ensure!(
+            self.inner.vmm.host_boot_id().as_deref() == Some(current.host_boot_id.as_str()),
+            "run host boot changed; explicit new authority required"
+        );
+        let compatible = match current.mode {
+            Mode::Fresh { .. } => {
+                self.inner
+                    .vmm
+                    .boot_identity(self.inner.cfg.balloon.enabled)
+                    .as_ref()
+                    == Some(&current.expected_boot_identity)
+            }
+            Mode::Checkpoint { .. } => self.resume_compatible(&current.prior),
+        };
+        anyhow::ensure!(
+            compatible,
+            "run boot artifacts changed; no implicit fallback"
+        );
+        let (root, data) = self.current_run_disks(&current.prior).await?;
+        anyhow::ensure!(
+            root == current.root && data == current.data,
+            "CURRENT run dataset GUID changed; backing retained"
+        );
+        if let Mode::Checkpoint {
+            state,
+            memory,
+            config,
+            ..
+        } = &current.mode
+        {
+            let paths = self.run_checkpoint_paths(&current.prior);
+            for (path, expected) in paths.iter().zip([state, memory, config]) {
+                anyhow::ensure!(
+                    templates::fingerprint(path)? == *expected,
+                    "CURRENT checkpoint evidence changed"
+                );
             }
         }
         Ok(())

@@ -1,6 +1,7 @@
-//! Private write-ahead authority for future continuation. No launcher consumes it.
+//! Private continuation authority. Observation never authorizes ordinary publication.
 use super::*;
 use rand::RngCore;
+mod launch;
 mod model;
 mod recovery;
 #[cfg(test)]
@@ -66,6 +67,12 @@ struct Current {
     mode: Mode,
     /// Expected host bundle is NOT observed guest/config proof. This slice grants no trust.
     observed_guest: Option<guest::AssignedRunProof>,
+    #[serde(default)]
+    launch_started: bool,
+    #[serde(default)]
+    observed_main_pid: i32,
+    #[serde(default)]
+    observed_checkpoint: Option<guest::Response>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +92,8 @@ struct Intent {
     schema: u8,
     current: Current,
     reader: Reader,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    predecessor: Option<Current>,
 }
 
 fn sha(value: &[u8]) -> String {
@@ -105,7 +114,7 @@ fn generation() -> Result<String> {
 }
 
 impl Manager {
-    /// Private first-continuation reservation only; no launch/config/disk mutation follows.
+    /// Private first-continuation reservation; this method performs no launch/config/disk mutation.
     #[allow(dead_code)]
     pub(in crate::machine) async fn reserve_assigned_run(
         &self,
@@ -172,3 +181,6 @@ impl Manager {
         Ok(intent.current.reference)
     }
 }
+
+#[cfg(test)]
+pub(in crate::machine) use model::parse_drive as parse_drive_for_test;

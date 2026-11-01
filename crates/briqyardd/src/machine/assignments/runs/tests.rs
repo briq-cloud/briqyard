@@ -1,4 +1,4 @@
-//! Private journal tests use synthetic records/backing; no continuation launcher exists.
+//! Private continuation tests use synthetic records, processes and backing; no native qualification.
 use super::*;
 
 #[test]
@@ -268,6 +268,7 @@ async fn unknown_exit_pending_update_and_invalid_bundle_never_gain_run_authority
     .await
     .unwrap();
     assert!(h.m.plan_assigned_run(&entry, false).await.is_err());
+    assert!(h.m.launch_assigned_run(&entry, false).await.is_err());
     let (h, entry) = stopped(false).await;
     entry.rec.lock().unwrap().pending = Some(api::SpecChange {
         cmd: Some(vec!["pending".into()]),
@@ -282,4 +283,169 @@ async fn unknown_exit_pending_update_and_invalid_bundle_never_gain_run_authority
     }
     assert!(intent.current.check().is_err());
     assert!(h.m.inner.store.list::<Intent>(INTENTS).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn private_fresh_and_current_checkpoint_observe_exact_process_without_publication() {
+    for checkpoint in [false, true] {
+        let (h, entry) = stopped(checkpoint).await;
+        let old = entry.snapshot();
+        h.host_calls();
+        let reference = h.m.launch_assigned_run(&entry, checkpoint).await.unwrap();
+        assert_eq!(reference.phase, Phase::Observed);
+        let current: Current = h.m.inner.store.get(RUNS, &old.id).unwrap().unwrap();
+        current.check().unwrap();
+        let live = entry.live.lock().unwrap().clone().unwrap();
+        h.m.verify_run_process(&current, &live).unwrap();
+        assert_ne!(live.incarnation, old.boot_incarnation);
+        assert_eq!(entry.snapshot().launch_identity, old.launch_identity);
+        assert_eq!(
+            serde_json::to_value(entry.snapshot().clone_origin).unwrap(),
+            serde_json::to_value(old.clone_origin).unwrap()
+        );
+        assert_eq!(entry.snapshot().state, state::STARTING);
+        assert!(!entry.identity_trusted.load(Relaxed));
+        assert!(!h.m.assignment_publication_allowed(&entry.snapshot(), true));
+        assert!(h.m.ordinary_operation(&entry.snapshot()).is_err());
+        assert!(h.m.namespace_dns_names("destination").is_empty());
+        assert_eq!(current.observed_guest.is_some(), !checkpoint);
+        assert_eq!(current.observed_checkpoint.is_some(), checkpoint);
+        assert!(h.m.launch_assigned_run(&entry, checkpoint).await.is_err());
+        let calls = h.host_calls();
+        assert_eq!(calls.iter().filter(|c| c.starts_with("boot ")).count(), 1);
+        assert!(!calls
+            .iter()
+            .any(|c| c.starts_with("activate_quarantined ") || c.starts_with("exec ")));
+        assert!(
+            calls
+                .iter()
+                .position(|c| c.starts_with("quarantine "))
+                .unwrap()
+                < calls.iter().position(|c| c.starts_with("boot ")).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_wrong_digest_marker_init_process_lost_response_and_launch_retain_without_retry() {
+    for (checkpoint, fault) in [
+        (false, 1),
+        (false, 2),
+        (false, 3),
+        (false, 4),
+        (false, 5),
+        (false, 6),
+        (true, 6),
+        (true, 7),
+    ] {
+        let (h, entry) = stopped(checkpoint).await;
+        let before = entry.snapshot();
+        h.assigned_run_fault(fault);
+        h.host_calls();
+        assert!(h.m.launch_assigned_run(&entry, checkpoint).await.is_err());
+        let current: Current = h.m.inner.store.get(RUNS, &before.id).unwrap().unwrap();
+        assert!(current.launch_started);
+        assert_eq!(current.reference.phase, Phase::Reserved);
+        assert!(current.observed_guest.is_none() && current.observed_checkpoint.is_none());
+        assert!(!entry.identity_trusted.load(Relaxed));
+        h.assigned_run_fault(0);
+        assert!(h.m.launch_assigned_run(&entry, checkpoint).await.is_err());
+        assert_eq!(
+            h.host_calls()
+                .iter()
+                .filter(|c| c.starts_with("boot "))
+                .count(),
+            1
+        );
+        assert!(h.pool.zfs.exists(&before.root_dataset()).await.unwrap());
+        assert_eq!(
+            h.m.quota("destination").unwrap().used.memory_mb,
+            before.size.memory_mb
+        );
+    }
+}
+
+#[tokio::test]
+async fn interrupted_observation_intent_repairs_exact_generation_without_launching_again() {
+    for boundary in 0..4 {
+        let (h, entry) = stopped(false).await;
+        h.m.launch_assigned_run(&entry, false).await.unwrap();
+        let observed: Current =
+            h.m.inner
+                .store
+                .get(RUNS, &entry.snapshot().id)
+                .unwrap()
+                .unwrap();
+        let mut attempted = observed.clone();
+        attempted.reference.phase = Phase::Reserved;
+        attempted.target = attempted.prior.clone();
+        attempted.target.assigned_run = Some(attempted.reference.clone());
+        attempted.target.state = state::STARTING.into();
+        attempted.target.suspended = false;
+        attempted.observed_guest = None;
+        attempted.observed_main_pid = 0;
+        attempted.check().unwrap();
+        let intent = Intent {
+            schema: 1,
+            reader: observed.reader().unwrap(),
+            current: observed.clone(),
+            predecessor: Some(attempted.clone()),
+        };
+        intent.check().unwrap();
+        let id = &observed.machine;
+        h.m.inner.store.put_durable(RUNS, id, &attempted).unwrap();
+        h.m.inner
+            .store
+            .put_durable("machines", id, &attempted.target)
+            .unwrap();
+        h.m.inner
+            .store
+            .put_durable(READERS, id, &attempted.reader().unwrap())
+            .unwrap();
+        h.m.inner.store.put_durable(INTENTS, id, &intent).unwrap();
+        if boundary >= 1 {
+            h.m.inner.store.put_durable(RUNS, id, &observed).unwrap();
+        }
+        if boundary >= 2 {
+            h.m.inner
+                .store
+                .put_durable("machines", id, &observed.target)
+                .unwrap();
+        }
+        if boundary >= 3 {
+            h.m.inner
+                .store
+                .put_durable(READERS, id, &intent.reader)
+                .unwrap();
+        }
+        h.host_calls();
+        restart(&h).unwrap();
+        let repaired: Current = h.m.inner.store.get(RUNS, id).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(repaired).unwrap(),
+            serde_json::to_value(&observed).unwrap()
+        );
+        assert!(h.m.inner.store.list::<Intent>(INTENTS).unwrap().is_empty());
+        let recovered = h.m.entry(id).unwrap();
+        assert!(!recovered.identity_trusted.load(Relaxed));
+        assert!(h.m.launch_assigned_run(&recovered, false).await.is_err());
+        assert!(h.host_calls().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn assigned_early_pong_waits_for_main_and_rejects_marker_change() {
+    for fault in [8, 9] {
+        let (h, entry) = stopped(false).await;
+        h.assigned_run_fault(fault);
+        h.host_calls();
+        assert_eq!(
+            h.m.launch_assigned_run(&entry, false).await.is_ok(),
+            fault == 8
+        );
+        let calls = h.host_calls();
+        assert_eq!(calls.iter().filter(|c| c.starts_with("boot ")).count(), 1);
+        assert_eq!(calls.iter().filter(|c| c.starts_with("ping ")).count(), 2);
+        assert!(!entry.identity_trusted.load(Relaxed));
+    }
 }

@@ -299,6 +299,9 @@ impl Harness {
         *self.host.host_boot_id.lock().unwrap() = value.map(str::to_string);
     }
 
+    pub(in crate::machine) fn assigned_run_fault(&self, fault: u32) {
+        self.host.run_fault.store(fault, Relaxed);
+    }
     pub(in crate::machine) fn assigned_guest_status(
         &self,
         vsock: &Path,

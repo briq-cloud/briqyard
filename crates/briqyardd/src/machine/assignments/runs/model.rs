@@ -163,12 +163,16 @@ impl Manager {
             expected_boot_identity,
             mode,
             observed_guest: None,
+            launch_started: false,
+            observed_main_pid: 0,
+            observed_checkpoint: None,
         };
         let reader = current.reader()?;
         let intent = Intent {
             schema: 1,
             current,
             reader,
+            predecessor: None,
         };
         intent.check()?;
         Ok(intent)
@@ -307,12 +311,17 @@ impl Current {
                     sha(&measured) == *expected_bundle_sha256,
                     "frozen drive/config evidence differs"
                 );
+                anyhow::ensure!(
+                    self.observed_checkpoint.is_none(),
+                    "fresh run claims checkpoint proof"
+                );
                 if let Some(proof) = &self.observed_guest {
                     proof.validate().map_err(|error| anyhow!(error))?;
                     anyhow::ensure!(
                         proof.generation == *guest_generation
                             && proof.boot_bundle_sha256 == *expected_bundle_sha256
-                            && proof.init_sha256 == origin.artifact.init_sha256,
+                            && proof.init_sha256 == origin.artifact.init_sha256
+                            && proof.boot_marker != origin.artifact.ram_marker,
                         "observed guest tuple differs from expected evidence"
                     );
                 }
@@ -338,6 +347,15 @@ impl Current {
                         && self.observed_guest.is_none(),
                     "checkpoint relabels or loses its saved creation lineage"
                 );
+                if let Some(pong) = &self.observed_checkpoint {
+                    templates::sandbox::check_ack(origin, pong, &["active"])?;
+                    anyhow::ensure!(
+                        pong.kind == "pong"
+                            && pong.main_pid == self.observed_main_pid
+                            && pong.init_sha256 == *saved_init_sha256,
+                        "checkpoint observation differs"
+                    );
+                }
                 for file in [state, memory, config] {
                     anyhow::ensure!(
                         file.bytes > 0 && file.inode > 0 && hex_id(&file.sha256, 64),
@@ -347,8 +365,19 @@ impl Current {
             }
         }
         anyhow::ensure!(
-            self.reference.phase == Phase::Observed || self.observed_guest.is_none(),
-            "reserved run cannot claim guest observation"
+            if self.reference.phase == Phase::Observed {
+                self.launch_started
+                    && self.observed_main_pid > 0
+                    && match self.mode {
+                        Mode::Fresh { .. } => self.observed_guest.is_some(),
+                        Mode::Checkpoint { .. } => self.observed_checkpoint.is_some(),
+                    }
+            } else {
+                self.observed_guest.is_none()
+                    && self.observed_checkpoint.is_none()
+                    && self.observed_main_pid == 0
+            },
+            "run phase lacks exact guest observation"
         );
         Ok(())
     }
@@ -373,6 +402,38 @@ impl Current {
 impl Intent {
     pub(super) fn check(&self) -> Result<()> {
         self.current.check()?;
+        if let Some(prior) = &self.predecessor {
+            prior.check()?;
+            anyhow::ensure!(
+                prior.reference.phase == Phase::Reserved,
+                "run already observed"
+            );
+            let mut projected = self.current.clone();
+            projected.launch_started = prior.launch_started;
+            projected.reference = prior.reference.clone();
+            projected.target = prior.target.clone();
+            projected.observed_guest = prior.observed_guest.clone();
+            projected.observed_checkpoint = prior.observed_checkpoint.clone();
+            projected.observed_main_pid = prior.observed_main_pid;
+            anyhow::ensure!(
+                serde_json::to_value(projected)? == serde_json::to_value(prior)?,
+                "run transition changes frozen authority"
+            );
+            anyhow::ensure!(
+                self.current.launch_started
+                    && if self.current.reference.phase == Phase::Observed {
+                        prior.launch_started
+                    } else {
+                        !prior.launch_started
+                    },
+                "invalid launch transition"
+            );
+        } else {
+            anyhow::ensure!(
+                !self.current.launch_started && self.current.reference.phase == Phase::Reserved,
+                "new run already launched"
+            );
+        }
         anyhow::ensure!(
             self.schema == 1
                 && serde_json::to_value(&self.reader)?
@@ -383,7 +444,7 @@ impl Intent {
     }
 }
 
-pub(super) fn parse_drive(
+pub(in crate::machine) fn parse_drive(
     bytes: &[u8],
 ) -> Result<(guest::Config, crate::machine::start::GuestBootFiles)> {
     use std::io::Read;

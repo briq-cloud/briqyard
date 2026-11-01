@@ -109,14 +109,20 @@ impl guestc::Guest for Mock {
             return Err(guestc::Unreachable("guest exited".into()).into());
         }
         let clone_status = self.clone_status.lock().unwrap().get(vsock).cloned();
-        Ok(guest::Response {
+        let assigned_run = self.run_proofs.lock().unwrap().get(vsock).cloned();
+        let mut response = guest::Response {
             kind: "pong".into(),
             version: self.init_version.lock().unwrap().clone(),
             file_stream_v1: self.file_stream_v1.load(Relaxed),
-            main_pid: clone_status
-                .as_ref()
-                .filter(|s| s.stage == "active")
-                .map_or(0, |_| 42),
+            assigned_run: assigned_run.clone(),
+            main_pid: if assigned_run.is_some() {
+                42
+            } else {
+                clone_status
+                    .as_ref()
+                    .filter(|s| s.stage == "active")
+                    .map_or(0, |_| 42)
+            },
             sha256: self.destination_hash(vsock)?,
             clone_status,
             init_sha256: self
@@ -127,7 +133,46 @@ impl guestc::Guest for Mock {
                 .cloned()
                 .unwrap_or_default(),
             ..Default::default()
-        })
+        };
+        match self.run_fault.load(Relaxed) {
+            1 => {
+                if let Some(proof) = &mut response.assigned_run {
+                    proof.boot_bundle_sha256 = "f".repeat(64);
+                }
+            }
+            2 => {
+                if let Some(proof) = &mut response.assigned_run {
+                    proof.boot_marker = "0123456789abcdef0123456789abcdef".into();
+                }
+            }
+            3 => response.init_sha256 = "f".repeat(64),
+            4 => {
+                self.procs
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|p| p.pid == pid)
+                    .unwrap()
+                    .uid += 1
+            }
+            5 => anyhow::bail!("injected lost run observation"),
+            7 => response.sha256 = "f".repeat(64),
+            8 => {
+                response.main_pid = 0;
+                self.run_fault.store(0, Relaxed);
+            }
+            9 => {
+                response.main_pid = 0;
+                self.run_fault.store(10, Relaxed);
+            }
+            10 => {
+                if let Some(proof) = &mut response.assigned_run {
+                    proof.boot_marker = "fedcba9876543210fedcba9876543210".into();
+                }
+            }
+            _ => {}
+        }
+        Ok(response)
     }
 
     /// Answers as the real wait does: only at the deadline when the init is silent.
