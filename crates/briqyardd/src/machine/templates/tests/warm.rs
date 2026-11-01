@@ -404,3 +404,145 @@ async fn queued_namespace_writer_cannot_deadlock_refill_and_claim_lock_order() {
         fill(&h).await;
     } // Settle the existing fill before fixture teardown.
 }
+
+#[tokio::test]
+async fn paused_resident_stats_report_physical_use_and_warm_state_without_resuming() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    let r = e.snapshot();
+    let reserved = h.m.usage().0.memory_mb;
+    let quota = h.m.quota("t1").unwrap().used.memory_mb;
+    h.set_cgroup(
+        &r.id,
+        Some(fc::CgroupUse {
+            cpu_usec: 1234,
+            memory_bytes: 5754880,
+            memory_anon_bytes: Some(4096),
+            memory_file_bytes: Some(8192),
+        }),
+    );
+    h.host_calls();
+    h.m.measure(Utc::now()).await;
+    let stats = h.m.stats(&r.id).await.unwrap();
+    assert_eq!(stats.state, state::WARM);
+    assert_eq!(stats.memory_status, "available");
+    assert_eq!((stats.cpu_usec, stats.memory_bytes), (1234, 5754880));
+    assert_eq!(
+        (stats.memory_anon_bytes, stats.memory_file_bytes),
+        (Some(4096), Some(8192))
+    );
+    assert!(stats.memory_read_at.is_some());
+    assert!(stats.balloon.is_none(), "legacy profile has no balloon");
+    let metrics = h.m.metrics();
+    for (name, value) in [
+        ("memory_bytes", 5754880),
+        ("memory_anon_bytes", 4096),
+        ("memory_file_bytes", 8192),
+    ] {
+        assert!(
+            metrics.lines().any(|line| line
+                .starts_with(&format!("briqyard_machine_{name}{{machine=\"{}\"", r.id))
+                && line.ends_with(&format!(" {value}"))),
+            "{metrics}"
+        );
+    }
+    assert!(metrics.lines().any(|line| line
+        .starts_with(&format!("briqyard_machine_state{{machine=\"{}\"", r.id))
+        && line.ends_with("state=\"warm\"} 1")));
+    assert!(metrics.contains("briqyard_machines{state=\"warm\"} 1"));
+    assert_eq!(h.m.usage().0.memory_mb, reserved);
+    assert_eq!(h.m.quota("t1").unwrap().used.memory_mb, quota);
+    assert_eq!(e.snapshot().pid, r.pid);
+    assert_eq!(e.snapshot().clone_origin.unwrap().stage, CloneStage::Paused);
+    assert!(!h
+        .host_calls()
+        .iter()
+        .any(|c| c.starts_with("resume") || c.starts_with("clone-activate")));
+    // A failed read is unavailable, never a successful zero or configured-RAM sample.
+    h.set_cgroup(&r.id, None);
+    h.m.measure(Utc::now()).await;
+    let stats = h.m.stats(&r.id).await.unwrap();
+    assert_eq!(stats.memory_status, "unavailable");
+    assert_eq!(stats.memory_bytes, 0);
+    assert!(stats.memory_read_at.is_none());
+    assert!(stats.memory_anon_bytes.is_none());
+    assert!(!h.m.metrics().lines().any(|line| line.starts_with(&format!(
+        "briqyard_machine_memory_bytes{{machine=\"{}\"",
+        r.id
+    ))));
+}
+
+#[tokio::test]
+async fn paused_resident_telemetry_requires_bound_live_incarnation_and_paused_stage() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    let original = e.snapshot();
+    h.set_cgroup(
+        &original.id,
+        Some(fc::CgroupUse {
+            memory_bytes: 99,
+            ..Default::default()
+        }),
+    );
+    for case in 0..5 {
+        *e.rec.lock().unwrap() = original.clone();
+        let saved_live = e.live.lock().unwrap().clone();
+        match case {
+            0 => e.rec.lock().unwrap().boot_incarnation = None,
+            1 => {
+                e.rec
+                    .lock()
+                    .unwrap()
+                    .boot_incarnation
+                    .as_mut()
+                    .unwrap()
+                    .start_ticks += 1
+            }
+            2 => *e.live.lock().unwrap() = None,
+            3 => {
+                e.rec.lock().unwrap().clone_origin.as_mut().unwrap().stage =
+                    CloneStage::IdentityDone
+            }
+            _ => {
+                e.live.lock().unwrap().as_mut().unwrap().exited =
+                    tokio::sync::watch::channel(true).1
+            }
+        }
+        h.m.measure(Utc::now()).await;
+        let stats = h.m.stats(&original.id).await.unwrap();
+        assert_ne!(stats.memory_status, "available", "case {case}");
+        assert_eq!(stats.memory_bytes, 0);
+        assert!(stats.memory_read_at.is_none());
+        assert!(!e.meter.lock().unwrap().memory_available);
+        assert!(!h.m.metrics().lines().any(|line| line.starts_with(&format!(
+            "briqyard_machine_memory_bytes{{machine=\"{}\"",
+            original.id
+        ))));
+        *e.live.lock().unwrap() = saved_live;
+    }
+}
+
+#[tokio::test]
+async fn paused_resident_balloon_read_preserves_unknown_guest_sample_time() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    // Exercise reporting-device telemetry using the same mock as the balloon tests.
+    e.rec
+        .lock()
+        .unwrap()
+        .boot_identity
+        .as_mut()
+        .unwrap()
+        .device_profile = fc::REPORTING_PROFILE.into();
+    h.m.measure(Utc::now()).await;
+    let stats = h.m.stats(&e.snapshot().id).await.unwrap();
+    let balloon = stats.balloon.unwrap();
+    assert_eq!(balloon.actual_bytes, Some(3 * 4096));
+    assert!(!balloon.guest_sample_time_known);
+    assert!(balloon.last_stats_update_observed_at.is_none());
+    assert!(h.host_calls().iter().any(|c| c == "balloon-statistics"));
+    assert!(h.m.metrics().lines().any(|line| line.starts_with(&format!(
+        "briqyard_machine_balloon_actual_bytes{{machine=\"{}\"",
+        e.snapshot().id
+    ))));
+}

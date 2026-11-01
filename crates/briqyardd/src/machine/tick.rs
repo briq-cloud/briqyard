@@ -304,7 +304,8 @@ impl Manager {
             let cgroup = self.inner.vmm.cgroup(&r.id).await;
             // No record/live lock crosses the socket await. A failed read is telemetry only.
             let live = e.live.lock().unwrap().clone();
-            let balloon = if r.state == state::RUNNING
+            let resident = observe::resident(&r, live.as_ref());
+            let balloon = if resident
                 && r.boot_identity
                     .as_ref()
                     .is_some_and(|i| i.device_profile == fc::REPORTING_PROFILE)
@@ -322,9 +323,13 @@ impl Manager {
             } else {
                 None
             };
+            let live = e.live.lock().unwrap().clone();
             let (who, used) = {
                 let current = e.rec.lock().unwrap();
-                let same_run = current.pid == r.pid && current.state == state::RUNNING;
+                let same_run = resident
+                    && current.pid == r.pid
+                    && current.boot_incarnation == r.boot_incarnation
+                    && observe::resident(&current, live.as_ref());
                 let r = current;
                 let mut m = e.meter.lock().unwrap();
                 if let Some(all) = &disks {
