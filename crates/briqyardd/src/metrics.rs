@@ -6,9 +6,13 @@ use briqyard_api as api;
 use briqyard_api::metrics::{family, label_value};
 use std::collections::BTreeMap;
 
+pub mod warm;
+
 /// The host's figures.
 #[derive(Default)]
 pub struct Host {
+    pub warm: warm::Snapshot,
+    pub warm_operations: warm::Operations,
     pub by_state: BTreeMap<String, usize>,
     /// Stopped machines by why they stopped (`idle`: asleep).
     pub stopped: BTreeMap<String, usize>,
@@ -309,6 +313,7 @@ const MACHINE_SERIES: [Series; 29] = [
 pub fn render(h: &Host, machines: &[Machine]) -> String {
     let mut out = String::new();
     let o = &mut out;
+    warm::render(o, &h.warm, &h.warm_operations);
     let states = h
         .by_state
         .iter()

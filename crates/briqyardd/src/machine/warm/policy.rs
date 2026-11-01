@@ -1,6 +1,6 @@
 use super::*;
 
-const MAX_SAMPLE_AGE: Duration = Duration::from_secs(5);
+pub(super) const MAX_SAMPLE_AGE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Default)]
 pub(in crate::machine) struct SampleBoundary {
@@ -35,7 +35,7 @@ pub(super) fn failure(error: &MError) -> api::WarmBlocked {
     blocked(reason, &error.to_string())
 }
 
-fn add(a: api::WarmResources, b: api::WarmResources) -> Option<api::WarmResources> {
+pub(super) fn add(a: api::WarmResources, b: api::WarmResources) -> Option<api::WarmResources> {
     Some(api::WarmResources {
         memory_mb: a.memory_mb.checked_add(b.memory_mb)?,
         cpu_millis: a.cpu_millis.checked_add(b.cpu_millis)?,
@@ -43,7 +43,7 @@ fn add(a: api::WarmResources, b: api::WarmResources) -> Option<api::WarmResource
     })
 }
 
-fn resources(r: &Record) -> api::WarmResources {
+pub(super) fn resources(r: &Record) -> api::WarmResources {
     api::WarmResources {
         memory_mb: r.size.memory_mb,
         cpu_millis: r.size.cpu_millis(),
@@ -58,10 +58,10 @@ fn exceeds(a: api::WarmResources, b: api::WarmResources) -> bool {
     a.memory_mb > b.memory_mb || a.cpu_millis > b.cpu_millis || a.root_disk_gb > b.root_disk_gb
 }
 
-struct Usage {
-    charged: api::WarmResources,
+pub(super) struct Usage {
+    pub(super) charged: api::WarmResources,
     filling_memory: u32,
-    fills: usize,
+    pub(super) fills: usize,
     draining: usize,
     counts: HashMap<String, usize>,
 }
@@ -95,6 +95,14 @@ impl Manager {
     // lock, so durable claim intent changes classification without releasing resources.
     fn warm_usage(&self, machines: &HashMap<String, Arc<Entry>>) -> Result<Usage, MError> {
         let pools = self.inner.store.list::<Pool>(POOLS)?;
+        self.warm_usage_from(machines, &pools)
+    }
+
+    pub(super) fn warm_usage_from(
+        &self,
+        machines: &HashMap<String, Arc<Entry>>,
+        pools: &[Pool],
+    ) -> Result<Usage, MError> {
         let claimed: std::collections::HashSet<_> = pools
             .iter()
             .flat_map(|p| p.claims.values().map(|c| c.machine.as_str()))

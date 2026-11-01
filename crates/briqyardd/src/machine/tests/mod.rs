@@ -217,6 +217,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             warm_names: Mutex::new(HashMap::new()),
             warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
             warm_sample: Mutex::new(None),
+            warm_pool_cache: Mutex::new(None),
             warm_probe_override: Mutex::new(None),
             verified_templates: Mutex::new(std::collections::HashSet::new()),
             range: Range::parse(&cfg.network.range).unwrap(),

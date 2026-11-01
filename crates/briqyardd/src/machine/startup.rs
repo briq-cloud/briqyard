@@ -54,6 +54,7 @@ impl Manager {
             warm_names: Mutex::new(HashMap::new()),
             warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
             warm_sample: Mutex::new(None),
+            warm_pool_cache: Mutex::new(None),
             #[cfg(test)]
             warm_probe_override: Mutex::new(None),
             verified_templates: Mutex::new(std::collections::HashSet::new()),

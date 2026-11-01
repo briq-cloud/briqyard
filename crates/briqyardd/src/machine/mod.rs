@@ -759,6 +759,7 @@ impl Drop for InUse {
 /// Counters since the daemon started, for /metrics.
 #[derive(Default)]
 pub struct Stats {
+    pub warm: Mutex<metrics::warm::Operations>,
     pub boots: std::sync::atomic::AtomicU64,
     pub resumes: std::sync::atomic::AtomicU64,
     pub suspends: std::sync::atomic::AtomicU64,
@@ -774,6 +775,7 @@ struct Inner {
     // Validated operator configuration; requests may change only pool desired counts.
     warm_policy: Mutex<crate::config::WarmPolicy>,
     warm_sample: Mutex<Option<warm::Sample>>,
+    warm_pool_cache: Mutex<Option<BTreeMap<String, warm::Pool>>>,
     #[cfg(test)]
     warm_probe_override: Mutex<Option<Option<warm::Sample>>>,
     verified_templates: Mutex<std::collections::HashSet<(String, String, String)>>,

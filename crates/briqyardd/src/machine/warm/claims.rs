@@ -9,10 +9,25 @@ impl Manager {
         name: &str,
         request: api::ClaimWarmPoolRequest,
     ) -> Result<api::Machine, MError> {
-        let scope = self.inner.zfs.io_scope()?;
-        scope
-            .run(self.claim_warm_pool_admitted(namespace, name, request))
-            .await
+        let began = std::time::Instant::now();
+        let result = async {
+            let scope = self.inner.zfs.io_scope()?;
+            scope
+                .run(self.claim_warm_pool_admitted(namespace, name, request))
+                .await
+        }
+        .await;
+        let outcome = match &result {
+            Ok(_) => metrics::warm::Outcome::Success,
+            Err(MError::PoolEmpty) => metrics::warm::Outcome::Miss,
+            Err(_) => metrics::warm::Outcome::Failure,
+        };
+        self.inner.stats.warm.lock().unwrap().observe(
+            metrics::warm::Operation::Claim,
+            outcome,
+            began.elapsed(),
+        );
+        result
     }
 
     async fn claim_warm_pool_admitted(

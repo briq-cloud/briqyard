@@ -151,7 +151,11 @@ impl Manager {
             .cloned()
             .collect();
         entries.sort_by_key(|e| e.snapshot().id);
-        let mut host = metrics::Host::default();
+        let mut host = metrics::Host {
+            warm: self.warm_metrics(),
+            warm_operations: self.inner.stats.warm.lock().unwrap().clone(),
+            ..Default::default()
+        };
         let machines: Vec<metrics::Machine> = entries
             .iter()
             .map(|e| {

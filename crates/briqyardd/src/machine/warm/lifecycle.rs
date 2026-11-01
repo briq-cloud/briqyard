@@ -108,6 +108,12 @@ impl Manager {
                 if let Err(error) = self.fill_warm_slot(&pool).await {
                     pool.error = error.to_string();
                     pool.blocked = Some(policy::failure(&error));
+                    self.inner
+                        .stats
+                        .warm
+                        .lock()
+                        .unwrap()
+                        .blocked(&policy::failure(&error).reason);
                 } else {
                     pool.error.clear();
                     pool.blocked = None;
@@ -175,6 +181,12 @@ impl Manager {
     /// Rebuild pending-name holds before admitting requests after a daemon restart.
     pub(in crate::machine) fn recover_warm_names(&self) -> Result<()> {
         let pools = self.inner.store.list::<Pool>(POOLS)?;
+        *self.inner.warm_pool_cache.lock().unwrap() = Some(
+            pools
+                .iter()
+                .map(|pool| Ok((key(&pool.namespace, &pool.name)?, pool.clone())))
+                .collect::<Result<_, MError>>()?,
+        );
         let machines = self.inner.machines.lock().unwrap();
         let mut names = self.inner.warm_names.lock().unwrap();
         for pool in pools {

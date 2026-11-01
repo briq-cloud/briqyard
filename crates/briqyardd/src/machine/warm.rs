@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 mod claims;
 mod lifecycle;
 mod policy;
+mod telemetry;
 pub(super) use policy::Sample;
 #[cfg(test)]
 mod tests;
@@ -25,7 +26,7 @@ struct Claim {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Pool {
+pub(super) struct Pool {
     namespace: String,
     name: String,
     source_machine: String,
@@ -94,10 +95,16 @@ impl Manager {
     }
 
     fn pool_save(&self, pool: &Pool) -> Result<(), MError> {
-        Ok(self
-            .inner
+        self.inner
             .store
-            .put_durable(POOLS, &key(&pool.namespace, &pool.name)?, pool)?)
+            .put_durable(POOLS, &key(&pool.namespace, &pool.name)?, pool)?;
+        self.inner
+            .warm_pool_cache
+            .lock()
+            .unwrap()
+            .get_or_insert_with(BTreeMap::new)
+            .insert(key(&pool.namespace, &pool.name)?, pool.clone());
+        Ok(())
     }
 
     fn pool_artifact(

@@ -34,3 +34,10 @@ existing YAML, and rejects invalid configuration before installing a replacement
 Catalog status exposes desired and actual counts, full resource charges, measurement age,
 draining count and structured blocked reasons. Namespace ownership, source-host binding,
 template qualification and secret restrictions continue to apply.
+
+Expose warm telemetry through the existing host metrics and dashboard. Cache durable pool
+metadata at recovery and successful writes; combine it with current machine records under
+the admission lock. Scrapes run no pool probe or artifact verification. Reuse full-charge
+accounting and bounded state/reason labels. Host prepare/claim counters and duration sums
+describe host readiness, excluding fleet and public API transport. Missing observations
+remain absent; reservations are distinct from physical usage.

@@ -73,6 +73,7 @@ async fn pool(desired: u16) -> (Harness, api::Machine) {
 }
 
 mod policy;
+mod telemetry;
 
 async fn fill(h: &Harness) -> Arc<Entry> {
     h.m.warm_step().await;

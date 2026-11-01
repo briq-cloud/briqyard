@@ -424,8 +424,17 @@ snapshot, or is whole.
   | `briqyard_machine_restarts_total` | same | restarts by its policy |
   | `briqyard_machine_state` | same, `state` | 1, one series per machine |
   | `briqyard_machine_boot_seconds` | same | its last start, `starting` to `running` |
+  | `briqyard_warm_pool_{desired,max_ready,shortfall,slots,blocked}`, `_reserved_{memory_bytes,cpu_millis,root_disk_bytes}` | namespace, pool, catalog, type, exact numeric size; bounded state/reason | actual warm counts, upper targets and full unclaimed reservations |
+  | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the absolute free-space floor |
+  | `briqyard_warm_{memory_available_bytes,disk_free_bytes,probe_age_seconds,probe_available,probe_valid,accounting_available}` | | cached physical availability, sample age/validity and accounting availability; a scrape runs no probe |
+  | `briqyard_warm_operations_total`, `_operation_seconds_total`, `_operation_last_seconds` | `operation="prepare\|claim"`, `outcome="success\|miss\|failure"` | host prepare-worker and claim-to-host-readiness observations; excludes fleet and public API transport |
+  | `briqyard_warm_fill_blocked_total` | bounded `reason` | actual refused refill attempts |
 
   Counters count from the daemon's start. Alert on `briqyard_host_condition == 1`.
+  Warm reservations include creating, paused, failed and unreleased slots; they are not
+  resident memory or physical disk use. Counts use current records and cached durable claim
+  receipts. Unknown accounting is omitted, with `accounting_available=0`. Probe values and
+  durations remain absent until observed. Host readiness does not measure a public API call.
 - `briqyard top [--namespace T]`: running machines by CPU, with memory, disk and network rates over
   the last 15 s (`GET /v1/top`; through the fleet, a namespace's host or every host).
 - Conditions (ADR 0021): `memory_pressure`, `disk_pressure`, `storage_stalled` (ADR 0046) in
@@ -601,6 +610,11 @@ namespaces (the busiest, each machine's series, crash loops, egress drops, use p
 anonymous access, no sign-up; the dashboards are the repository's (`hack/monitoring/dashboards`),
 read-only in Grafana. Point the reverse proxy at `GRAFANA_LISTEN` only after the first run: Grafana
 starts with its default `admin` password, which the script replaces seconds later, on loopback.
+
+The host dashboard's warm section follows the selected host. It shows pool counts by type
+and exact size, reservations against operator limits, cached availability and probe age,
+blocked reasons and host operation timings. Empty pools and unobserved timings can have no
+series. Dashboard history starts with real scrapes and operations after the feature is installed.
 
 **Alerts to Slack**: a webhook in `/etc/briqyard-monitoring/alerting.env` (root's, `0600`,
 written with an editor), then the script again:
