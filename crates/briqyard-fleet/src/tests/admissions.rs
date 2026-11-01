@@ -738,3 +738,87 @@ async fn admission_retains_registered_routing_for_intrinsic_seed_identity() {
         registered
     );
 }
+
+#[tokio::test]
+async fn sandbox_admission_matches_resources_but_keeps_exact_frozen_request_identity() {
+    for source_cpu in [None, Some(1000)] {
+        let (f, ds) = fleet_with_daemons(1).await;
+        source(&f, &ds[0], "m_seed");
+        ds[0].stub.snapshots.lock().unwrap()[0]
+            .clone_size
+            .as_mut()
+            .unwrap()
+            .cpu_millis = source_cpu;
+        let mut body = admission_body("m_seed");
+        if source_cpu.is_none() {
+            body["size"]["cpu_millis"] = 1000.into();
+        }
+        // Resource mismatch must leave neither an admission nor a namespace pin.
+        for size in [
+            serde_json::json!({"vcpus":1,"memory_mb":256,"cpu_millis":250}),
+            serde_json::json!({"vcpus":1,"memory_mb":256,"cpu_millis":500}),
+            serde_json::json!({"vcpus":1,"memory_mb":256,"cpu_millis":750}),
+            serde_json::json!({"vcpus":2,"memory_mb":256,"cpu_millis":1000}),
+            serde_json::json!({"vcpus":1,"memory_mb":512,"cpu_millis":1000}),
+        ] {
+            let mut changed = body.clone();
+            changed["size"] = size;
+            let (s, _, b) = call(
+                &f.st,
+                "PUT",
+                &admission_path("destination", "req_one"),
+                "api",
+                Some(changed),
+            )
+            .await;
+            assert_eq!(s, StatusCode::CONFLICT, "{b}");
+            let reg = f.st.reg.lock().unwrap();
+            assert!(!reg.namespaces.contains_key("destination"));
+            assert!(reg.sandbox_admissions.is_empty());
+        }
+        let (s, _, b) = call(
+            &f.st,
+            "PUT",
+            &admission_path("destination", "req_one"),
+            "api",
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(json(&b)["mode"], "sandbox-seed");
+        // Resource equivalence does not broaden admission replay or dispatch identity.
+        let mut changed = body.clone();
+        if source_cpu.is_none() {
+            changed["size"]
+                .as_object_mut()
+                .unwrap()
+                .remove("cpu_millis");
+        } else {
+            changed["size"]["cpu_millis"] = 1000.into();
+        }
+        let (s, _, b) = call(
+            &f.st,
+            "PUT",
+            &admission_path("destination", "req_one"),
+            "api",
+            Some(changed.clone()),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        let mut create = create_body("destination", "sandbox", 256);
+        create["region"] = "fsn".into();
+        create["sandbox_seed"] = serde_json::json!({"machine_id":"m_seed","snapshot":"s_one","generation":"g_one","request_id":"req_one"});
+        create["start"] = true.into();
+        create["volume"] = serde_json::json!({"size_gb":2,"mount":"/work"});
+        create["size"] = changed["size"].clone();
+        let (s, _, b) = call(&f.st, "POST", "/v1/machines", "api", Some(create.clone())).await;
+        assert_eq!(s, StatusCode::CONFLICT, "{b}");
+        assert!(ds[0].stub.creates.lock().unwrap().is_empty());
+        create["size"] = body["size"].clone();
+        let (s, _, b) = call(&f.st, "POST", "/v1/machines", "api", Some(create)).await;
+        assert_eq!(s, StatusCode::CREATED, "{b}");
+        let creates = ds[0].stub.creates.lock().unwrap();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(serde_json::to_value(creates[0].size).unwrap(), body["size"]);
+    }
+}

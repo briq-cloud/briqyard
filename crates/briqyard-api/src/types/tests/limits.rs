@@ -336,3 +336,42 @@ fn sibling_access_is_explicit_and_only_valid_through_a_gateway() {
         assert!(invalid.check().is_err(), "siblings cannot widen {mode}");
     }
 }
+
+#[test]
+fn sandbox_resource_matching_preserves_topology_cpu_limits_and_request_identity() {
+    for vcpus in [1, 2, 32] {
+        let implicit = Size {
+            vcpus,
+            memory_mb: 2048,
+            cpu_millis: None,
+        };
+        let explicit = Size {
+            cpu_millis: Some(vcpus * 1000),
+            ..implicit
+        };
+        assert_ne!(implicit, explicit);
+        assert!(implicit.matches_sandbox_resources(&explicit));
+        assert!(explicit.matches_sandbox_resources(&implicit));
+        for millis in [250, 500, 750] {
+            let fractional = Size {
+                cpu_millis: Some(millis),
+                ..implicit
+            };
+            assert!(!implicit.matches_sandbox_resources(&fractional));
+            assert!(!fractional.matches_sandbox_resources(&explicit));
+            assert!(fractional.matches_sandbox_resources(&fractional));
+        }
+        let other_topology = Size {
+            vcpus: vcpus + 1,
+            ..explicit
+        };
+        // Equal effective CPU does not make a different guest topology eligible.
+        assert_eq!(other_topology.cpu_millis(), explicit.cpu_millis());
+        assert!(!implicit.matches_sandbox_resources(&other_topology));
+        let other_memory = Size {
+            memory_mb: 4096,
+            ..explicit
+        };
+        assert!(!implicit.matches_sandbox_resources(&other_memory));
+    }
+}

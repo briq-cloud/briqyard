@@ -328,3 +328,69 @@ async fn lookup_http_returns_distinct_absence_and_requires_configured_authentica
         }
     }
 }
+
+#[tokio::test]
+async fn sandbox_recipe_artifact_and_create_match_full_cpu_representations_only() {
+    let (h, source, seed) = source().await;
+    let implicit = image_size();
+    let explicit = api::Size {
+        cpu_millis: Some(1000),
+        ..implicit
+    };
+    assert!(h.m.sandbox_recipe(ALPINE, explicit).is_ok());
+    let record = source.snapshot();
+    let artifact = record.snapshots[0].clone_artifact.as_ref().unwrap();
+    let mut represented = artifact.clone();
+    represented.recipe.size = explicit;
+    assert!(h.m.check_sandbox_artifact(&record, &represented).is_ok());
+    let mut explicit_record = record.clone();
+    explicit_record.size = explicit;
+    assert!(h
+        .m
+        .check_sandbox_artifact(&explicit_record, artifact)
+        .is_ok());
+    for size in [
+        api::Size {
+            cpu_millis: Some(250),
+            ..implicit
+        },
+        api::Size {
+            cpu_millis: Some(500),
+            ..implicit
+        },
+        api::Size {
+            cpu_millis: Some(750),
+            ..implicit
+        },
+        api::Size {
+            vcpus: 2,
+            ..explicit
+        },
+        api::Size {
+            memory_mb: 512,
+            ..explicit
+        },
+    ] {
+        assert!(h.m.sandbox_recipe(ALPINE, size).is_err());
+        let mut changed = artifact.clone();
+        changed.recipe.size = size;
+        assert!(h.m.check_sandbox_artifact(&record, &changed).is_err());
+        let mut request = destination(seed.clone());
+        request.size = size;
+        assert!(h.m.record(request, None).await.is_err());
+        assert_eq!(h.m.inner.machines.lock().unwrap().len(), 1);
+    }
+    let mut request = destination(seed);
+    request.size = explicit;
+    let (created, _) = h.m.record(request.clone(), None).await.unwrap();
+    assert_eq!(created.snapshot().size, explicit);
+    assert_eq!(created.snapshot().size.cpu_millis(), implicit.cpu_millis());
+    let (same, how) = h.m.record(request.clone(), None).await.unwrap();
+    assert_eq!(same.snapshot().id, created.snapshot().id);
+    assert!(matches!(how, Make::Existing));
+    request.size = implicit;
+    assert!(matches!(
+        h.m.record(request, None).await,
+        Err(MError::Conflict(_))
+    ));
+}

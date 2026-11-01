@@ -1,6 +1,16 @@
 //! Stable client-request identity for accepted sandbox creates and read-only replay lookup.
 use super::*;
 
+impl Size {
+    /// Sandbox recipe eligibility compares resources, without changing request identity.
+    /// An omitted CPU limit means the same full allocation as an explicit vCPU * 1000.
+    pub fn matches_sandbox_resources(&self, other: &Self) -> bool {
+        self.vcpus == other.vcpus
+            && self.memory_mb == other.memory_mb
+            && self.cpu_millis() == other.cpu_millis()
+    }
+}
+
 pub fn valid_sandbox_request_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
