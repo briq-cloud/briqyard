@@ -33,14 +33,22 @@ An uncertain write or failed cleanup retains the allocation. A retry can finish 
 hold, but cannot replace either its cached or durable identity. The machine record is
 durably deleted under write exclusion before its hold is durably deleted.
 
-Graceful handover fences namespace admission while checking `state-capabilities` on the
-installed replacement executable. The admission wait and target probe share a bounded
-deadline; stop signals and server completion can cancel the wait. A target lacking `launch-identity-v1` leaves the current
-daemon serving with its listeners and ownership intact. This guard covers graceful handover;
-it does not make arbitrary older installers or forced restarts compatible. Normal managed
-rollback must refuse incompatible installed targets and fallback/restart paths while holds
-exist before unbound pools can be enabled. Draining requires verified exit and completed
-cleanup, not merely desired zero. Preserving unknown JSON fields alone is insufficient.
+Graceful handover fences namespace admission while checking the installed replacement
+executable. State inspection fails closed on malformed or unknown evidence. Every candidate
+must pass the exact assignment, assigned-run and assigned-run-lifecycle capability probes,
+regardless of the sampled floor; launch holds additionally require `launch-identity-v1`.
+The admission wait and target probes share a bounded deadline; cancellation or a weaker
+target leaves the current daemon serving with its listeners and ownership intact.
+
+Managed installation and automatic rollback use the same unconditional assignment protocol
+requirements before copying any executable, including when the daemon is stopped. An
+admitted writer or a daemon restart can advance the floor between preflight and copying.
+Updated installers serialize with a root-owned lock held through preflight, rollback capture,
+installation, handover and failure cleanup. The staged candidate remains private and its
+bytes are checked again before activation. Automatic rollback refuses a weaker retained
+daemon and leaves the compatible replacement installed while reporting the failure. Weaker
+offline downgrades are unsupported. Draining requires verified exit and completed cleanup,
+not merely desired zero; preserving unknown JSON fields alone is insufficient.
 
 Resource accounting exposes full data-volume capacity separately from logical roots,
 checks each configured budget and subtracts their sum before the disk free-space floor.

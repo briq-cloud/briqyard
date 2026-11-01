@@ -1,5 +1,6 @@
 """Exercise the actual standalone install section in a temporary host filesystem."""
 import hashlib
+import select
 import io
 import json
 import os
@@ -23,6 +24,15 @@ INSTALL = SCRIPT.split('echo "== binaries', 1)[1].split('echo "== api certificat
 INSTALL = 'echo "== binaries' + INSTALL
 
 
+CAPABILITIES = {
+    "assignment-capabilities": "destination-assignment-v1",
+    "assigned-run-capabilities": "assigned-run-v1",
+    "assigned-run-lifecycle-capabilities": "assigned-run-lifecycle-v1",
+}
+FULL_DAEMON = "#!/bin/sh\ncase $1 in\n" + "".join(
+    command + ") printf '" + answer + "\\n';;\n" for command, answer in CAPABILITIES.items()
+) + "*) exit 2;;\nesac\n"
+
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -44,6 +54,17 @@ class BootstrapRelease(unittest.TestCase):
         daemon.write_text('''#!/usr/bin/env python3
 from pathlib import Path
 import os, sys, yaml
+protocols = {"assignment-capabilities": "destination-assignment-v1", "assigned-run-capabilities": "assigned-run-v1", "assigned-run-lifecycle-capabilities": "assigned-run-lifecycle-v1"}
+if sys.argv[1] in protocols:
+    print(protocols[sys.argv[1]])
+    sys.exit(0)
+if os.environ.get("ADVANCE_FLOOR"):
+    floor = Path(os.environ["ADVANCE_FLOOR"])
+    floor.parent.mkdir(parents=True, exist_ok=True)
+    floor.write_text('{"schema":3,"protocol":"assigned-run-lifecycle-v1"}')
+if os.environ.get("MUTATE_DAEMON"):
+    with Path(__file__).open("a") as changed:
+        changed.write("# changed after capability probe\\n")
 live = Path(os.environ["LIVE_CONFIG"])
 assert live.read_bytes() == Path(os.environ["OLD_CONFIG"]).read_bytes()
 candidate = yaml.safe_load(Path(sys.argv[2]).read_text())
@@ -53,10 +74,13 @@ Path(os.environ["VALIDATED_CONFIG"]).write_text(yaml.safe_dump(candidate))
 if os.environ.get("REJECT_CONFIG") == "1":
     sys.exit(1)
 ''')
+        self.old_binaries = {}
         for name in ("briqyardd", "briqyard", "briqyard-fleet"):
             old = self.root / "usr/local/bin" / name
             old.parent.mkdir(parents=True, exist_ok=True)
-            old.write_text(name + " old running binary\n")
+            self.old_binaries[name] = FULL_DAEMON if name == "briqyardd" else name + " old running binary\n"
+            old.write_text(self.old_binaries[name])
+            old.chmod(0o755)
         self.config = self.root / "etc/briqyard/config.yaml"
         self.config.parent.mkdir(parents=True)
         self.old_paths = {}
@@ -104,7 +128,7 @@ fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
         self.assertIn("upstream", self.old_paths["firecracker"].read_text())
         self.assertEqual(self.old_paths["init"].read_text(), "init old\n")
         for name in ("briqyard", "briqyard-fleet", "briqyardd"):
-            self.assertEqual((self.root / "usr/local/bin" / name).read_text(), name + " old running binary\n")
+            self.assertEqual((self.root / "usr/local/bin" / name).read_text(), self.old_binaries[name])
 
     def test_same_version_new_digest_atomic_paths_and_idempotence(self):
         result = self.run_install()
@@ -125,6 +149,33 @@ fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(yaml.safe_load(self.config.read_text()), current)
         self.assertEqual({key: Path(current[key]).stat().st_ino for key in before}, before)
+
+    def test_floor_can_advance_after_probes_before_copy_with_full_candidate(self):
+        floor = self.root / "data/state/meta/required-assignment-protocol.json"
+        self.config.write_text(yaml.safe_dump(yaml.safe_load(self.config.read_text()) | {"data_dir": str(self.root / "data")}))
+        self.original = self.config.read_bytes()
+        self.old_config.write_bytes(self.original)
+        for prior in (None, {"schema": 2, "protocol": "assigned-run-v1"}):
+            with self.subTest(prior=prior):
+                floor.unlink(missing_ok=True)
+                if prior:
+                    floor.parent.mkdir(parents=True, exist_ok=True)
+                    floor.write_text(json.dumps(prior))
+                result = self.run_install(ADVANCE_FLOOR=str(floor))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(floor.read_text())["schema"], 3)
+                self.old_config.write_bytes(self.config.read_bytes())
+
+    def test_weaker_candidate_refused_before_validation_even_without_daemon_state(self):
+        (self.release / "briqyardd-linux-x86_64").write_text(FULL_DAEMON.replace(
+            "assigned-run-lifecycle-capabilities) printf 'assigned-run-lifecycle-v1\\n';;\n", ""))
+        self.sums()
+        self.assert_untouched(self.run_install())
+        self.assertFalse((self.root / "validated").exists())
+        self.assertFalse(any(self.config.parent.glob("rollback.*")))
+
+    def test_staged_daemon_changes_after_probe_are_refused_before_copy(self):
+        self.assert_untouched(self.run_install(MUTATE_DAEMON="1"))
 
     def test_missing_corrupt_or_unchecksummed_release_assets_preserve_config(self):
         bundle = self.release / "firecracker-checked-linux-x86_64.tar.gz"
@@ -259,7 +310,7 @@ fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
         rollback, = self.config.parent.glob("rollback.*")
         self.assertEqual((rollback / "config.yaml").read_bytes(), self.original)
         for name in ("briqyard", "briqyard-fleet", "briqyardd"):
-            self.assertEqual((rollback / name).read_text(), name + " old running binary\n")
+            self.assertEqual((rollback / name).read_text(), self.old_binaries[name])
         check = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=rollback, capture_output=True)
         self.assertEqual(check.returncode, 0, check.stderr)
 
@@ -341,6 +392,63 @@ fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
         self.assertEqual(self.old_paths["kernel"].read_text(), "kernel old\n")
 
 
+class InstallerLock(unittest.TestCase):
+    def test_installers_serialize_through_handover_and_failure_cleanup(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            private = root / "private"
+            staging = root / "staging"
+            staging.mkdir()
+            first_script = HELPERS + r'''
+runtime_install_lock "$1"
+new="$2"; candidate=""; rollback=""; activation_pending=0; rollback_ready=0
+trap 'set +e; printf "cleanup\n"; read -r gate; false; cleanup_runtime_install' EXIT
+printf 'preflight\n'
+read -r gate
+false
+'''
+            second_script = HELPERS + r'''
+runtime_install_lock "$1"
+[ ! -e "$2" ] || exit 3
+printf 'second-installed\n'
+'''
+            first = subprocess.Popen(["bash", "-c", first_script, "first", str(private), str(staging)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            second = None
+            try:
+                self.assertEqual(first.stdout.readline(), "preflight\n")
+                second = subprocess.Popen(["bash", "-c", second_script, "second", str(private), str(staging)],
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                self.assertEqual(select.select([second.stdout], [], [], .15)[0], [])
+                first.stdin.write("handover done\n"); first.stdin.flush()
+                self.assertEqual(first.stdout.readline(), "cleanup\n")
+                self.assertEqual(select.select([second.stdout], [], [], .15)[0], [])
+                first.stdin.write("cleanup allowed\n"); first.stdin.flush()
+                _, error = first.communicate(timeout=10)
+                self.assertEqual(first.returncode, 1, error)
+                output, error = second.communicate(timeout=10)
+                self.assertEqual(second.returncode, 0, error)
+                self.assertEqual(output, "second-installed\n")
+                self.assertEqual(private.stat().st_mode & 0o777, 0o700)
+                self.assertEqual((private / "runtime-install.lock").stat().st_mode & 0o777, 0o600)
+            finally:
+                for child in (first, second):
+                    if child and child.poll() is None:
+                        child.kill()
+                        child.communicate(timeout=10)
+
+    def test_symlink_lock_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            target = root / "target"
+            target.write_text("unchanged")
+            (root / "runtime-install.lock").symlink_to(target)
+            result = subprocess.run(["bash", "-c", HELPERS + '\nruntime_install_lock "$1"', "lock", str(root)],
+                                    text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(target.read_text(), "unchanged")
+
+
 class AssignmentCompatibility(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -366,13 +474,15 @@ class AssignmentCompatibility(unittest.TestCase):
         path.write_text(json.dumps(value))
         return path
 
-    def test_unknown_command_accepted_only_for_empty_state_and_pure_reads(self):
-        self.assertEqual(self.check().returncode, 0)
+    def test_unknown_command_refused_even_for_empty_state_and_pure_reads(self):
+        self.assertNotEqual(self.check().returncode, 0)
         self.assertFalse(self.data.exists())
         receipt = self.evidence("unbound-requests/request.json", {"schema": 1})
         self.assertNotEqual(self.check().returncode, 0)
         self.assertFalse((self.data / "state/meta").exists())
         receipt.unlink()
+        self.assertNotEqual(self.check().returncode, 0)
+        self.binary.write_text(FULL_DAEMON)
         self.assertEqual(self.check().returncode, 0)
 
     def test_installed_custom_root_cannot_be_hidden_by_empty_candidate_root(self):
@@ -380,11 +490,13 @@ class AssignmentCompatibility(unittest.TestCase):
                       {"schema": 1, "protocol": "destination-assignment-v1"})
         self.assertNotEqual(self.check().returncode, 0)
         self.binary.write_text("#!/bin/sh\n[ \"$1\" = assignment-capabilities ] || exit 1\nprintf 'destination-assignment-v1\\n'\n")
+        self.assertNotEqual(self.check().returncode, 0)
+        self.binary.write_text(FULL_DAEMON)
         self.assertEqual(self.check().returncode, 0)
         self.binary.write_text("#!/bin/sh\nprintf 'destination-assignment-v1\\nextra'\n")
         self.assertNotEqual(self.check().returncode, 0)
 
-    def test_assigned_run_floor_and_missing_floor_evidence_require_both_commands(self):
+    def test_assigned_run_floor_and_missing_floor_evidence_require_all_commands(self):
         for collection in ("meta/required-assignment-protocol.json", "assigned-run-intents/run.json",
                            "assigned-runs/machine.json", "assigned-run-readers/machine.json",
                            "machines/machine.json"):
@@ -396,6 +508,8 @@ class AssignmentCompatibility(unittest.TestCase):
                 self.binary.write_text("#!/bin/sh\n[ \"$1\" = assignment-capabilities ] || exit 2\nprintf 'destination-assignment-v1\\n'\n")
                 self.assertNotEqual(self.check().returncode, 0)
                 self.binary.write_text("#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\n*) exit 2;;\nesac\n")
+                self.assertNotEqual(self.check().returncode, 0)
+                self.binary.write_text(FULL_DAEMON)
                 self.assertEqual(self.check().returncode, 0)
                 if not collection.startswith("meta/"):
                     self.assertFalse((self.data / "state/meta").exists(), "inspection must not migrate state")
@@ -419,22 +533,34 @@ class AssignmentCompatibility(unittest.TestCase):
                 if not collection.startswith("meta/"):
                     self.assertFalse((self.data / "state/meta").exists())
 
+    def test_empty_state_requires_exact_successful_bounded_protocol_answers(self):
+        for command, answer in CAPABILITIES.items():
+            branch = command + ") printf '" + answer + "\\n';;"
+            for body in ("exit 2", "printf wrong", "printf '" + answer + "\\n'; exit 1"):
+                with self.subTest(command=command, body=body):
+                    self.binary.write_text(FULL_DAEMON.replace(branch, command + ") " + body + ";;"))
+                    self.assertNotEqual(self.check().returncode, 0)
+        branch = "assigned-run-lifecycle-capabilities) printf 'assigned-run-lifecycle-v1\\n';;"
+        for body in ("while :; do printf 0123456789; done", "exec sleep 10"):
+            self.binary.write_text(FULL_DAEMON.replace(branch, "assigned-run-lifecycle-capabilities) " + body + ";;"))
+            self.assertNotEqual(self.check().returncode, 0)
+        self.assertFalse(self.data.exists())
+
     def test_unknown_assignment_floor_cannot_be_overridden_by_new_capability(self):
         self.evidence("meta/required-assignment-protocol.json", {"schema": 3, "protocol": "assigned-run-v1"})
-        self.binary.write_text("#!/bin/sh\nprintf 'assigned-run-v1\\n'\n")
+        self.binary.write_text(FULL_DAEMON)
         self.assertNotEqual(self.check().returncode, 0)
         shutil.rmtree(self.data)
         self.evidence("assigned-runs/machine.json", {"schema": 2})
         self.assertNotEqual(self.check().returncode, 0)
 
     def test_malformed_floor_or_assignment_evidence_fails_closed(self):
-        self.binary.write_text("#!/bin/sh\nprintf 'destination-assignment-v1\\n'\n")
+        self.binary.write_text(FULL_DAEMON)
         marker = self.evidence("meta/required-assignment-protocol.json", {"schema": 9})
         self.assertNotEqual(self.check().returncode, 0)
         marker.unlink()
         self.evidence("machines/assigned.json", {"launch_identity": {}, "warm_slot": {"claimed": "request"}})
-        self.binary.write_text("#!/bin/sh\nexit 2\n")
-        self.assertNotEqual(self.check().returncode, 0)
+        self.assertEqual(self.check().returncode, 0)
         self.evidence("unbound-assignments/intent.json", []).write_text("invalid JSON")
         self.assertNotEqual(self.check().returncode, 0)
 
@@ -472,24 +598,28 @@ class AssignmentCompatibility(unittest.TestCase):
         binary_dir.mkdir()
         replacement = binary_dir / "briqyardd"
         replacement.write_text("lifecycle replacement")
-        self.evidence("meta/required-assignment-protocol.json",
-                      {"schema": 3, "protocol": "assigned-run-lifecycle-v1"})
-        staging = self.root / "staging"
-        staging.mkdir()
-        script = HELPERS + '\nactivation_pending=1; rollback_ready=1; candidate=""; trap cleanup_runtime_install EXIT; false\n'
-        env = dict(os.environ, rollback=str(rollback), binary_dir=str(binary_dir),
-                   config_path=str(self.config), new=str(staging))
-        result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(replacement.read_text(), "lifecycle replacement")
-        self.assertIn("compatible replacement left installed", result.stderr)
+        for floor in (None, {"schema": 2, "protocol": "assigned-run-v1"},
+                      {"schema": 3, "protocol": "assigned-run-lifecycle-v1"}):
+            with self.subTest(floor=floor):
+                shutil.rmtree(self.data, ignore_errors=True)
+                if floor:
+                    self.evidence("meta/required-assignment-protocol.json", floor)
+                staging = self.root / "staging"
+                staging.mkdir()
+                script = HELPERS + '\nactivation_pending=1; rollback_ready=1; candidate=""; trap cleanup_runtime_install EXIT; false\n'
+                env = dict(os.environ, rollback=str(rollback), binary_dir=str(binary_dir),
+                           config_path=str(self.config), new=str(staging))
+                result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(replacement.read_text(), "lifecycle replacement")
+                self.assertIn("compatible replacement left installed", result.stderr)
 
     def test_compatible_retained_binary_is_restored_with_current_floor(self):
         rollback = self.root / "rollback"
         rollback.mkdir()
         shutil.copyfile(self.config, rollback / "config.yaml")
         retained = rollback / "briqyardd"
-        retained.write_text("#!/bin/sh\nprintf 'destination-assignment-v1\\n'\n")
+        retained.write_text(FULL_DAEMON)
         retained.chmod(0o700)
         binary_dir = self.root / "bin"
         binary_dir.mkdir()

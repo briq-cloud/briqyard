@@ -119,12 +119,12 @@ async fn handover_rejects_incompatible_target_with_holds_and_releases_admission_
     assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
     assert!(h.m.held_addresses(1).contains(&2));
     h.m.release_launch_hold("m_abc123").unwrap();
-    let admission =
-        h.m.handover_admission(Path::new("/usr/bin/true"))
-            .await
-            .unwrap();
-    assert!(h.m.inner.namespace_lifecycle.try_read().is_err());
-    drop(admission);
+    // Empty launch holds do not authorize a target without current run protocols.
+    assert!(h
+        .m
+        .handover_admission(Path::new("/usr/bin/true"))
+        .await
+        .is_err());
     assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
 }
 
@@ -171,7 +171,7 @@ async fn compatible_handover_fences_new_admission_through_target_check() {
     let executable = dir.path().join("replacement");
     std::fs::write(
         &executable,
-        b"#!/bin/sh\n[ \"$1\" = state-capabilities ] || exit 1\nprintf 'launch-identity-v1\\n'\n",
+        b"#!/bin/sh\ncase $1 in\nstate-capabilities) printf 'launch-identity-v1\\n';;\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) printf 'assigned-run-lifecycle-v1\\n';;\n*) exit 1;;\nesac\n",
     )
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -334,7 +334,7 @@ fn unjailed_launch_identity_is_refused_instead_of_assuming_root_credentials() {
 async fn assignment_state_appearing_after_preflight_is_checked_inside_admission_fence() {
     let h = harness("10.64.0.0/22", 4096).await;
     let reader = h.m.inner.namespace_lifecycle.read().await;
-    // A preflight with no assignment state accepts an old executable.
+    // Empty state does not authorize a weaker executable; later evidence remains fenced.
     assert!(!crate::assignment_compatibility::required(&h.m.inner.cfg.state_dir()).unwrap());
     let mut pending = Box::pin(h.m.handover_admission(Path::new("/usr/bin/true")));
     assert!(matches!(
@@ -401,13 +401,14 @@ async fn late_lifecycle_writer_rechecks_schema2_only_candidate_inside_handover_f
         .store
         .put("assigned-runs", "before", &serde_json::json!({"schema":1}))
         .unwrap();
-    crate::assignment_compatibility::check_required_candidate(
+    // A floor sampled before later lifecycle work no longer permits weaker preflight.
+    assert!(crate::assignment_compatibility::check_required_candidate(
         &h.m.inner.cfg.state_dir(),
         &executable,
         tokio::time::Instant::now() + Duration::from_secs(5),
     )
     .await
-    .unwrap();
+    .is_err());
     let admission = h.m.inner.namespace_lifecycle.read().await;
     let mut pending = Box::pin(h.m.handover_admission(&executable));
     assert!(matches!(

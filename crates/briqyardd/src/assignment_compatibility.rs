@@ -192,28 +192,24 @@ pub async fn check_required_candidate(
     executable: &Path,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
-    let required = requirement(root)?;
-    if required >= Requirement::Assignment {
-        check_candidate(executable, deadline).await?;
-    }
-    if required >= Requirement::AssignedRun {
-        probe(
-            executable,
-            "assigned-run-capabilities",
-            RUN_CAPABILITY,
-            deadline,
-        )
-        .await?;
-    }
-    if required >= Requirement::AssignedRunLifecycle {
-        probe(
-            executable,
-            "assigned-run-lifecycle-capabilities",
-            LIFECYCLE_CAPABILITY,
-            deadline,
-        )
-        .await?;
-    }
+    // Inspection still fails closed, but a sample cannot authorize a weaker binary:
+    // an admitted writer or a daemon restart may raise the floor before replacement.
+    requirement(root)?;
+    check_candidate(executable, deadline).await?;
+    probe(
+        executable,
+        "assigned-run-capabilities",
+        RUN_CAPABILITY,
+        deadline,
+    )
+    .await?;
+    probe(
+        executable,
+        "assigned-run-lifecycle-capabilities",
+        LIFECYCLE_CAPABILITY,
+        deadline,
+    )
+    .await?;
     Ok(())
 }
 async fn probe(
@@ -454,11 +450,9 @@ mod tests {
             .exists());
     }
     #[tokio::test]
-    async fn lifecycle_requires_all_three_exact_successful_bounded_probes() {
+    async fn empty_state_requires_all_three_exact_successful_bounded_probes() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::Store::open(dir.path()).unwrap();
-        store.ensure_assigned_run_lifecycle_floor().unwrap();
         let executable = dir.path().join("candidate");
         for (body, accepted) in [
             ("exit 2", false),

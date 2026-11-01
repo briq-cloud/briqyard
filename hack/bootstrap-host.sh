@@ -520,6 +520,33 @@ else:
     print("/var/lib/briqyard/vmlinux")
 PYKERNEL
 }
+# The parent shell keeps fd 9 open until EXIT cleanup finishes. flock is attached
+# to its shared open file description, so the Python child can acquire it for us.
+# This script requires root; its private directory and lock are therefore root-owned.
+runtime_install_lock() {
+  python3 - "$1" <<'PYLOCK' || return
+import os, pathlib, stat, sys
+root = pathlib.Path(sys.argv[1])
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
+info = root.lstat()
+if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+    raise ValueError("runtime install directory must be owned by installer")
+root.chmod(0o700)
+fd = os.open(root / "runtime-install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+        raise ValueError("invalid runtime install lock")
+    os.fchmod(fd, 0o600)
+finally:
+    os.close(fd)
+PYLOCK
+  exec 9<>"$1/runtime-install.lock" || return
+  python3 - <<'PYFLOCK'
+import fcntl
+fcntl.flock(9, fcntl.LOCK_EX)
+PYFLOCK
+}
 # Inspect both the installed and candidate roots without opening or changing host state.
 # Kept standalone: this gate must also protect stopped daemons and custom data_dir.
 runtime_assignment_compatible() {
@@ -630,13 +657,11 @@ def probe(binary, command, expected):
 try:
     # Evaluate every root even after one requires support: malformed roots fail closed.
     states = [required(config) for config in sys.argv[2:] if config]
-    needed = max(states, default=0)
-    if needed >= 1:
-        probe(sys.argv[1], "assignment-capabilities", b"destination-assignment-v1\n")
-    if needed >= 2:
-        probe(sys.argv[1], "assigned-run-capabilities", b"assigned-run-v1\n")
-    if needed >= 3:
-        probe(sys.argv[1], "assigned-run-lifecycle-capabilities", b"assigned-run-lifecycle-v1\n")
+    # Every managed replacement needs the complete current protocol. State can
+    # advance after this inspection, including while the daemon starts or restarts.
+    probe(sys.argv[1], "assignment-capabilities", b"destination-assignment-v1\n")
+    probe(sys.argv[1], "assigned-run-capabilities", b"assigned-run-v1\n")
+    probe(sys.argv[1], "assigned-run-lifecycle-capabilities", b"assigned-run-lifecycle-v1\n")
 except Exception:
     print("assignment compatibility inspection/probe refused replacement", file=sys.stderr)
     sys.exit(1)
@@ -645,10 +670,12 @@ PYASSIGNMENT
 # A failed activation restores installed executables before leaving the old daemon running.
 # The verified rollback directory also remains available for an explicit later rollback.
 cleanup_runtime_install() {
-  local result=$? b restored=1
+  local result=$? b restored=1 retained_sha
   trap - EXIT
   if [ "$result" != 0 ] && [ "$activation_pending" = 1 ] && [ "$rollback_ready" = 1 ]; then
-    if ! runtime_assignment_compatible "$rollback/briqyardd" "$config_path" "$rollback/config.yaml"; then
+    retained_sha=$(sha256sum "$rollback/briqyardd" | awk '{print $1}') || retained_sha=""
+    if [ -z "$retained_sha" ] || ! runtime_assignment_compatible "$rollback/briqyardd" "$config_path" "$rollback/config.yaml" ||
+       ! echo "$retained_sha  $rollback/briqyardd" | sha256sum -c --quiet -; then
       echo "   activation failed; retained daemon is incompatible with current state; compatible replacement left installed ($rollback)" >&2
       rm -rf "$new"
       [ -z "$candidate" ] || rm -f "$candidate"
@@ -690,7 +717,10 @@ release_file() {
 }
 
 echo "== binaries${RELEASE:+ from $RELEASE}"
+# Serialize preflight, rollback capture, replacement, handover and EXIT cleanup.
+runtime_install_lock /etc/briqyard
 new=$(mktemp -d)
+chmod 0700 "$new"
 candidate=""
 rollback=""
 rollback_ready=0
@@ -781,6 +811,7 @@ fi
 # One candidate contains all changed launch paths. Validate it with the staged daemon.
 runtime_config "$candidate" "$firecracker" "$jailer" "$kernel" "$init"
 chmod 0600 "$candidate"
+daemon_sha=$(sha256sum "$new/briqyardd" | awk '{print $1}')
 runtime_assignment_compatible "$new/briqyardd" "$config_path" "$candidate" || fail "assignment state requires a compatible daemon: nothing activated"
 fingerprint=$("$new/briqyardd" --config "$candidate" tls-fingerprint) || fail "the new briqyardd refuses the staged configuration: nothing activated"
 # Retain a complete rollback set before the first installed executable changes. Its
@@ -809,6 +840,7 @@ if [ -f "$config_path" ]; then
   echo "   previous executables and configuration retained at $rollback"
 fi
 # Init and runtime inputs stay immutable. The old daemon may still read them.
+echo "$daemon_sha  $new/briqyardd" | sha256sum -c --quiet - || fail "staged daemon changed after compatibility checks: nothing activated"
 activation_pending=1
 for b in briqyard briqyard-fleet briqyardd; do put "$new/$b" "$binary_dir/$b"; done
 # The rename is on the configuration filesystem, before the existing SIGUSR2 handover.

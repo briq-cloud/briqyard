@@ -333,9 +333,11 @@ configuration remains at `/etc/briqyard/config.yaml.before-<sha256>`. Before rep
 installed executable, the script also retains the previous configuration and installed
 `briqyard`, `briqyard-fleet` and `briqyardd` in the printed `/etc/briqyard/rollback.<suffix>`
 directory, with `SHA256SUMS`. A backup failure prevents activation. A failure during binary
-or configuration replacement restores that set automatically; if restoration cannot finish,
-the error names the retained set for recovery. The running daemon is not signalled on those
-failures. Old runtime files remain
+or configuration replacement restores that set automatically only when its daemon passes
+all current assignment protocol probes. A weaker retained daemon is refused before any
+restoration; the compatible replacement stays installed and the activation reports failure.
+If restoration cannot finish, the error names the retained set for recovery. The running
+daemon is not signalled on those failures. Old runtime files remain
 in place: an old daemon's launch or image pull may still read them after staging starts. Do
 not remove or overwrite those inputs during an upgrade. Runtime path edits preserve all
 other configuration text and scalar spellings, including credentials. Root merges, anchored
@@ -388,24 +390,21 @@ newer fleet every host one version behind. A caller uses a field new in a releas
 `host ls` shows every host on it: an older host ignores a field it does not know. A
 configuration field new in a release goes into the file after the upgrade (an older binary
 refuses it), and out of it before a rollback. For releases with checked runtime packages,
-a rollback can use the same bootstrap; for older releases, restore the retained configuration
-and prior binaries by rename before handover, keeping the runtime paths they reference.
-Use the rollback directory printed by that upgrade, after checking compatibility with the
-prior daemon and while coordinating the host's normal upgrade gate:
+a rollback uses the current bootstrap and a compatible release. Every managed replacement,
+including automatic rollback, must return the exact successful answers to
+`assignment-capabilities`, `assigned-run-capabilities` and
+`assigned-run-lifecycle-capabilities`. Empty state, a stopped daemon and draining do not
+permit a weaker candidate. State may advance after inspection or a daemon may restart
+before executable replacement, so sampled state never reduces these requirements.
+Downgrades to binaries without all three protocols are unsupported.
 
-```bash
-rollback=/etc/briqyard/rollback.REPLACE_WITH_PRINTED_SUFFIX
-(cd "$rollback" && sha256sum -c SHA256SUMS) || exit 1
-for b in briqyard briqyard-fleet briqyardd; do
-  [ ! -f "$rollback/$b" ] || {
-    cp -p "$rollback/$b" "/usr/local/bin/$b.rollback" &&
-      mv -f "/usr/local/bin/$b.rollback" "/usr/local/bin/$b" || exit 1
-  }
-done
-cp -p "$rollback/config.yaml" /etc/briqyard/config.yaml.rollback &&
-  mv -f /etc/briqyard/config.yaml.rollback /etc/briqyard/config.yaml || exit 1
-systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
-```
+Updated installers serialize on the root-owned
+`/etc/briqyard/runtime-install.lock`. The lock covers preflight, rollback capture, executable
+replacement, handover and failure cleanup. Keep the staged daemon private and unchanged
+between its capability checks and installation. Use the current bootstrap for recovery;
+do not copy retained executables directly over the installed files or use an older bootstrap
+to bypass its compatibility checks. The printed rollback directory and its checksums remain
+available for inspection and recovery with a compatible daemon.
 
 Do not delete that rollback directory or its referenced runtime inputs until the rollback
 window is closed.
