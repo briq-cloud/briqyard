@@ -6,6 +6,85 @@ async fn settle(h: &Harness) {
 }
 
 #[tokio::test]
+async fn a_sample_keeps_fill_liability_after_completion_or_claim_until_a_fresh_measurement() {
+    for began_before_fill in [false, true] {
+        let (h, _) = pool(0).await;
+        h.m.inner.warm_policy.lock().unwrap().max_fills = 1;
+        let initial_boundary = if began_before_fill {
+            Some(h.m.warm_probe_boundary().unwrap())
+        } else {
+            None
+        };
+        h.pause_warm_barrier("warm_parked");
+        desired(&h, 1).await;
+        h.wait_warm_barrier().await;
+        let boundary = initial_boundary.unwrap_or_else(|| h.m.warm_probe_boundary().unwrap());
+        let sample = crate::machine::warm::Sample {
+            at: std::time::Instant::now(),
+            memory_mb: 1024,
+            pool: crate::zfs::Pool {
+                used: 1 << 30,
+                free: 1024 << 30,
+            },
+            boundary,
+        };
+        // The asynchronous pool probe returns after this fill has completed. Its memory
+        // measurement still predates that completion, regardless of the current fill count.
+        h.release_warm_barriers();
+        let entry = fill(&h).await;
+        {
+            let _completed = tokio::time::timeout(Duration::from_secs(3), entry.lock.lock())
+                .await
+                .unwrap();
+        }
+        if began_before_fill {
+            h.m.claim_warm_pool("t1", "tools", claim("owned", "sample-claim"))
+                .await
+                .unwrap();
+        }
+        *h.m.inner.warm_probe_override.lock().unwrap() = Some(Some(sample));
+        desired(&h, 2).await;
+        settle(&h).await;
+        let status = h.m.warm_catalog("t1").await.unwrap();
+        assert_eq!(status.fills, 0);
+        assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
+        assert!(status.pools[0].error.contains("MemAvailable"));
+        assert!(status.blocked.iter().any(|b| b.reason == "pressure"));
+
+        // A replacement measurement includes the completed allocation. It may release
+        // the old conservative liability, but cannot admit more than one fill at a time.
+        *h.m.inner.warm_probe_override.lock().unwrap() = Some(Some(crate::machine::warm::Sample {
+            at: std::time::Instant::now(),
+            memory_mb: 1024,
+            pool: crate::zfs::Pool {
+                used: 1 << 30,
+                free: 1024 << 30,
+            },
+            boundary: h.m.warm_probe_boundary().unwrap(),
+        }));
+        h.m.warm_step().await;
+        assert_eq!(h.m.inner.machines.lock().unwrap().len(), 3);
+        h.wait_warm_barrier().await;
+        h.release_warm_barriers();
+        let entries =
+            h.m.inner
+                .machines
+                .lock()
+                .unwrap()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+        for entry in entries {
+            let _completed = tokio::time::timeout(Duration::from_secs(3), entry.lock.lock())
+                .await
+                .unwrap();
+        }
+        h.m.delete_warm_pool("t1", "tools").await.unwrap();
+        h.m.warm_step().await;
+    }
+}
+
+#[tokio::test]
 async fn durable_paused_claim_can_finish_after_catalog_removal_and_pool_drain() {
     use sha2::Digest;
     let (h, _) = pool(1).await;
@@ -215,6 +294,7 @@ async fn stale_failed_and_low_measurements_stop_refill_and_drain_only_unused_slo
                 .warm_probe_override
                 .lock()
                 .unwrap()
+                .clone()
                 .unwrap()
                 .unwrap();
         match pressure {

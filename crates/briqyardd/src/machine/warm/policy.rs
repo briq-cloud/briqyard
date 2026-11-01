@@ -2,11 +2,18 @@ use super::*;
 
 const MAX_SAMPLE_AGE: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Default)]
+pub(in crate::machine) struct SampleBoundary {
+    known_warm: std::collections::HashSet<String>,
+    pending_memory_mb: u32,
+}
+
+#[derive(Clone)]
 pub(in crate::machine) struct Sample {
     pub at: std::time::Instant,
     pub memory_mb: u32,
     pub pool: crate::zfs::Pool,
+    pub boundary: SampleBoundary,
 }
 
 fn blocked(reason: &str, message: &str) -> api::WarmBlocked {
@@ -141,8 +148,8 @@ impl Manager {
 
     pub(in crate::machine) async fn warm_probe(&self) -> Result<(), MError> {
         #[cfg(test)]
-        if let Some(sample) = *self.inner.warm_probe_override.lock().unwrap() {
-            *self.inner.warm_sample.lock().unwrap() = sample;
+        if let Some(sample) = self.inner.warm_probe_override.lock().unwrap().clone() {
+            *self.inner.warm_sample.lock().unwrap() = sample.clone();
             return sample
                 .map(|_| ())
                 .ok_or_else(|| MError::Capacity("pressure: measurement unavailable".into()));
@@ -150,6 +157,7 @@ impl Manager {
         // Invalidate before probing: a failed probe must never retain a usable old sample.
         *self.inner.warm_sample.lock().unwrap() = None;
         let began = std::time::Instant::now();
+        let boundary = self.warm_probe_boundary()?;
         let memory_mb = std::fs::read_to_string("/proc/meminfo")
             .ok()
             .and_then(|s| mem_available(&s))
@@ -161,8 +169,25 @@ impl Manager {
             at: began,
             memory_mb,
             pool,
+            boundary,
         });
         Ok(())
+    }
+
+    // Capture before reading MemAvailable. Completion or claim cannot erase these
+    // liabilities while the sample is usable; later fills are charged by their IDs.
+    pub(in crate::machine) fn warm_probe_boundary(&self) -> Result<SampleBoundary, MError> {
+        let machines = self.inner.machines.lock().unwrap();
+        Ok(SampleBoundary {
+            known_warm: machines
+                .values()
+                .filter_map(|entry| {
+                    let record = entry.snapshot();
+                    record.warm_slot.is_some().then_some(record.id)
+                })
+                .collect(),
+            pending_memory_mb: self.warm_usage(&machines)?.filling_memory,
+        })
     }
 
     pub(super) fn policy_blocked(
@@ -242,7 +267,7 @@ impl Manager {
                 )));
             }
         }
-        let Some(sample) = *self.inner.warm_sample.lock().unwrap() else {
+        let Some(sample) = self.inner.warm_sample.lock().unwrap().clone() else {
             return Ok(Some(blocked(
                 "pressure",
                 "availability measurement unavailable",
@@ -254,7 +279,22 @@ impl Manager {
         if self.inner.zfs.stalled(crate::zfs::STALL_AFTER).is_some() {
             return Ok(Some(blocked("pressure", "storage stalled")));
         }
-        let liability = u.filling_memory.saturating_add(need.memory_mb);
+        let mut liability = sample
+            .boundary
+            .pending_memory_mb
+            .checked_add(need.memory_mb);
+        for entry in machines.values() {
+            let record = entry.snapshot();
+            if record.warm_slot.is_some() && !sample.boundary.known_warm.contains(&record.id) {
+                liability = liability.and_then(|n| n.checked_add(record.size.memory_mb));
+            }
+        }
+        let Some(liability) = liability else {
+            return Ok(Some(blocked(
+                "capacity",
+                "sample memory liability overflow",
+            )));
+        };
         if sample
             .memory_mb
             .checked_sub(liability)
@@ -328,7 +368,7 @@ impl Manager {
                 .filter_map(|pool| pool.blocked),
         );
         drop(machines);
-        let sample = *self.inner.warm_sample.lock().unwrap();
+        let sample = self.inner.warm_sample.lock().unwrap().clone();
         Ok(api::WarmCatalogStatus {
             entries: p
                 .catalog
@@ -346,9 +386,10 @@ impl Manager {
             max_fills: p.max_fills,
             fills: usage.fills,
             draining: usage.draining,
-            memory_available_mb: sample.map(|s| s.memory_mb),
-            disk_free_bytes: sample.map(|s| s.pool.free),
+            memory_available_mb: sample.as_ref().map(|s| s.memory_mb),
+            disk_free_bytes: sample.as_ref().map(|s| s.pool.free),
             measurement_age_ms: sample
+                .as_ref()
                 .map(|s| s.at.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
             blocked: blocked_,
             pools: self.warm_pools(namespace)?,

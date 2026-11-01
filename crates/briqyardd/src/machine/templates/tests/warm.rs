@@ -50,6 +50,7 @@ async fn pool(desired: u16) -> (Harness, api::Machine) {
     *h.m.inner.warm_probe_override.lock().unwrap() = Some(Some(crate::machine::warm::Sample {
         at: std::time::Instant::now(),
         memory_mb: 32768,
+        boundary: Default::default(),
         pool: crate::zfs::Pool {
             used: 1 << 30,
             free: 1024 << 30,
