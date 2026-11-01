@@ -77,9 +77,13 @@ fn sandbox_body() -> serde_json::Value {
 #[tokio::test]
 async fn sandbox_selector_pins_source_host_generation_and_existing_namespace_placement() {
     let (f, ds) = fleet_with_daemons(2).await;
-    let id = ds[0].stub.id.clone();
+    let daemon_id = ds[0].stub.id.clone();
+    let id = "h_registered".to_string();
     {
         let mut reg = f.st.reg.lock().unwrap();
+        let mut host = reg.hosts.remove(&daemon_id).unwrap();
+        host.id = id.clone();
+        reg.hosts.insert(id.clone(), host);
         reg.machines.insert("m_operator".into(), id.clone());
         let host = reg.hosts.get_mut(&id).unwrap();
         host.named_memory_fork_v1 = true;
@@ -93,7 +97,7 @@ async fn sandbox_selector_pins_source_host_generation_and_existing_namespace_pla
         disks: vec!["root".into(), "data".into()],
         memory: true,
         clone_profile: Some("sandbox-ready-v1".into()),
-        source_host: Some(id.clone()),
+        source_host: Some(daemon_id.clone()),
         clone_size: Some(api::Size {
             vcpus: 1,
             memory_mb: 256,
@@ -102,6 +106,53 @@ async fn sandbox_selector_pins_source_host_generation_and_existing_namespace_pla
         clone_ram_marker: None,
         clone_generation: Some("g_one".into()),
     });
+    for provenance in [
+        None,
+        Some(String::new()),
+        Some(id.clone()),
+        Some("h_foreign".into()),
+    ] {
+        ds[0].stub.snapshots.lock().unwrap()[0].source_host = provenance;
+        let (status, _, _) = call(&f.st, "POST", "/v1/machines", "api", Some(sandbox_body())).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(ds[0].stub.creates.lock().unwrap().is_empty());
+        assert!(!f
+            .st
+            .reg
+            .lock()
+            .unwrap()
+            .namespaces
+            .contains_key("destination"));
+    }
+    ds[0].stub.snapshots.lock().unwrap()[0].source_host = Some(daemon_id);
+    let host = f.st.reg.lock().unwrap().hosts[&id].clone();
+    let status_body = serde_json::to_value(
+        crate::get_json::<api::Status>(&f.st, &host, "/v1/status")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let mut empty_identity = status_body.clone();
+    empty_identity["host_id"] = "".into();
+    for (status, body) in [
+        (StatusCode::OK, serde_json::json!({})),
+        (StatusCode::OK, empty_identity),
+        (StatusCode::SERVICE_UNAVAILABLE, status_body),
+    ] {
+        *ds[0].stub.status_reply.lock().unwrap() = Some((status, body));
+        let (status, _, _) = call(&f.st, "POST", "/v1/machines", "api", Some(sandbox_body())).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(ds[0].stub.creates.lock().unwrap().is_empty());
+    }
+    *ds[0].stub.status_reply.lock().unwrap() = None;
+    ds[0].stub.status_body_failure.store(true, Ordering::SeqCst);
+    let (status, _, _) = call(&f.st, "POST", "/v1/machines", "api", Some(sandbox_body())).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(ds[0].stub.creates.lock().unwrap().is_empty());
+    ds[0]
+        .stub
+        .status_body_failure
+        .store(false, Ordering::SeqCst);
     let mut stale = sandbox_body();
     stale["sandbox_seed"]["generation"] = "g_old".into();
     let (status, _, _) = call(&f.st, "POST", "/v1/machines", "api", Some(stale)).await;

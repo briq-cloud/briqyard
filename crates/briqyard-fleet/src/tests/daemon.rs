@@ -39,6 +39,8 @@ pub(super) struct Daemon {
     pub(super) sandbox_lookup: Mutex<Option<(StatusCode, serde_json::Value)>>,
     pub(super) sandbox_lookups: Mutex<Vec<api::SandboxRequestLookup>>,
     pub(super) snapshots: Mutex<Vec<api::Snapshot>>,
+    pub(super) status_body_failure: std::sync::atomic::AtomicBool,
+    pub(super) status_reply: Mutex<Option<(StatusCode, serde_json::Value)>>,
     pub(super) backup_records: Mutex<Vec<serde_json::Value>>,
 }
 
@@ -169,10 +171,20 @@ pub(super) async fn start_daemon_on(
         sandbox_lookup: Mutex::new(None),
         sandbox_lookups: Mutex::new(vec![]),
         snapshots: Mutex::new(vec![]),
+        status_reply: Mutex::new(None),
+        status_body_failure: std::sync::atomic::AtomicBool::new(false),
         backup_records: Mutex::new(vec![]),
     });
     type D = State<Arc<Daemon>>;
-    async fn status(State(d): D) -> Json<api::Status> {
+    async fn status(State(d): D) -> Response {
+        if d.status_body_failure.load(Ordering::SeqCst) {
+            return Response::new(Body::from_stream(futures::stream::once(async {
+                Err::<Bytes, _>(std::io::Error::other("status body interrupted"))
+            })));
+        }
+        if let Some((status, body)) = d.status_reply.lock().unwrap().clone() {
+            return (status, Json(body)).into_response();
+        }
         let ms = d.machines.lock().unwrap();
         Json(api::Status {
             egress_siblings_v1: d.egress_siblings.load(Ordering::SeqCst),
@@ -200,6 +212,7 @@ pub(super) async fn start_daemon_on(
             vmm_version: String::new(),
             regions: Vec::new(),
         })
+        .into_response()
     }
     async fn namespaces(State(d): D) -> Json<Vec<api::Namespace>> {
         let mut ids: Vec<String> = {

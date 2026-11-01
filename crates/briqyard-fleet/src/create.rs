@@ -714,13 +714,38 @@ pub(super) async fn check_sandbox_selector(
             "invalid sandbox snapshot listing",
         )
     })?;
+    // Snapshot provenance uses the daemon's intrinsic identity, while routing uses the
+    // operator-assigned fleet identity. Read it from the same authenticated, pinned host.
+    let response = forward(
+        st,
+        &host,
+        Method::GET,
+        "/v1/status",
+        &HeaderMap::new(),
+        Bytes::new(),
+    )
+    .await;
+    let (parts, bytes) = read(response).await;
+    let daemon = parts
+        .status
+        .is_success()
+        .then(|| serde_json::from_slice::<api::Status>(&bytes).ok())
+        .flatten()
+        .filter(|s| !s.host_id.is_empty())
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                "host_unreachable",
+                "sandbox source daemon identity unavailable",
+            )
+        })?;
     let valid = snapshots.iter().any(|s| {
         s.id == seed.snapshot
             && s.clone_generation.as_deref() == Some(&seed.generation)
             && s.clone_profile.as_deref() == Some("sandbox-ready-v1")
             && s.memory
             && s.clone_size == Some(size)
-            && s.source_host.as_deref() == Some(&host.id)
+            && s.source_host.as_deref() == Some(&daemon.host_id)
     });
     if !valid {
         return Err(err(
