@@ -362,7 +362,12 @@ impl Manager {
                 // it, so the lock is released before waiting, or the wait only ends when it
                 // times out.
                 let started = Instant::now();
-                e.rec.lock().unwrap().suspended = true;
+                let identity = self.memory_identity(e, &e.snapshot());
+                {
+                    let mut rec = e.rec.lock().unwrap();
+                    rec.suspended = true;
+                    rec.boot_identity = identity;
+                }
                 let saved = self.save(e);
                 stage(
                     operation,

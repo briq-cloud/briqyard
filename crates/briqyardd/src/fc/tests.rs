@@ -3,6 +3,8 @@
 use super::*;
 use tokio::net::UnixListener;
 
+mod balloon;
+
 #[test]
 fn the_vmm_version_is_firecrackers_and_the_kernels() {
     let out = "Firecracker v1.17.0\n\nSupported snapshot data format versions: v8.0.0\n";
@@ -713,6 +715,8 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
                 dir: dir.path().to_path_buf(),
                 chroot: None,
                 resumed: false,
+                boot_identity: None,
+                incarnation: None,
                 exited,
                 exit,
             };
@@ -724,6 +728,7 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
                 pci: false,
                 console_max: 0,
                 version: String::new(),
+                identity: BootIdentity::ambiguous(LEGACY_PROFILE),
             };
             assert_eq!(vmm.snapshot(&vm, durable).await.is_err(), failed);
             let seen = server.await.unwrap();

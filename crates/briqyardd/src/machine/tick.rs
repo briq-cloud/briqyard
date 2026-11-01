@@ -301,8 +301,30 @@ impl Manager {
             files.extend(self.memory_snapshot_files(&r));
             let memory_snapshot = usage::file_bytes(&files);
             let cgroup = self.inner.vmm.cgroup(&r.id).await;
+            // No record/live lock crosses the socket await. A failed read is telemetry only.
+            let live = e.live.lock().unwrap().clone();
+            let balloon = if r.state == state::RUNNING
+                && r.boot_identity
+                    .as_ref()
+                    .is_some_and(|i| i.device_profile == fc::REPORTING_PROFILE)
+            {
+                let result = match live.as_ref() {
+                    Some(vm) => tokio::time::timeout(
+                        Duration::from_secs(3),
+                        self.inner.vmm.balloon_statistics(vm),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow!("balloon statistics timed out"))),
+                    None => Ok(None),
+                };
+                Some(e.disk_io.balloon.sample(Utc::now(), result))
+            } else {
+                None
+            };
             let (who, used) = {
-                let r = e.rec.lock().unwrap();
+                let current = e.rec.lock().unwrap();
+                let same_run = current.pid == r.pid && current.state == state::RUNNING;
+                let r = current;
                 let mut m = e.meter.lock().unwrap();
                 if let Some(all) = &disks {
                     let mut d = all.get(&r.id).copied().unwrap_or_default();
@@ -313,7 +335,17 @@ impl Manager {
                 m.advance(now, held(&r));
                 let net = internet.as_ref().and_then(|c| c.get(&r.ip)).copied();
                 m.counters(now, cgroup.map(|c| c.cpu_usec), net, e.traffic.take());
-                m.memory_bytes = cgroup.map_or(0, |c| c.memory_bytes);
+                m.memory_available = same_run && cgroup.is_some();
+                if m.memory_available {
+                    m.memory_bytes = cgroup.unwrap().memory_bytes;
+                }
+                m.memory_anon_bytes = cgroup
+                    .filter(|_| same_run)
+                    .and_then(|c| c.memory_anon_bytes);
+                m.memory_file_bytes = cgroup
+                    .filter(|_| same_run)
+                    .and_then(|c| c.memory_file_bytes);
+                m.balloon = if same_run { balloon } else { None };
                 (usage_identity(&r), m.drain())
             };
             self.inner.usage.lock().unwrap().add(&who, used);

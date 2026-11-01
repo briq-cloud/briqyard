@@ -16,12 +16,18 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::sync::watch;
 
+mod balloon;
+mod balloon_metrics;
 mod client;
+mod incarnation;
 mod process;
 #[cfg(test)]
 mod tests;
 mod vmm;
 
+pub use balloon::*;
+pub use balloon_metrics::*;
 pub use client::*;
+pub use incarnation::*;
 pub use process::*;
 pub use vmm::*;

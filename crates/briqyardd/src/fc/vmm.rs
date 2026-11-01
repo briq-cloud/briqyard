@@ -20,6 +20,8 @@ pub struct Boot {
     pub mac: String,
     /// Resume from the snapshot next to the sockets when there is one.
     pub resume: bool,
+    /// Effective identity persisted by the manager before launch.
+    pub boot_identity: Option<BootIdentity>,
     /// The limits on the root disk and the volume.
     pub disk: DiskRate,
     /// Where its disks' metrics add up.
@@ -40,6 +42,8 @@ pub struct Vm {
     pub chroot: Option<PathBuf>,
     /// Resumed from a snapshot rather than booted.
     pub resumed: bool,
+    pub boot_identity: Option<BootIdentity>,
+    pub incarnation: Option<Incarnation>,
     /// `true` once the process is gone and its console fully written.
     pub exited: watch::Receiver<bool>,
     /// What the init reported when the main process ended; `None` until then, and the
@@ -61,7 +65,7 @@ impl Vm {
 #[async_trait]
 pub trait Vmm: Send + Sync {
     /// Starts a VMM for the machine and boots it, or resumes it when asked and a snapshot
-    /// is there (a resume that fails boots cold). Returns once the machine runs on the
+    /// is there (a failed resume returns `ResumeFailed`). Returns once the machine runs on the
     /// VMM's side; the guest answering is the caller's wait.
     async fn boot(&self, b: &Boot) -> Result<Vm>;
 
@@ -104,6 +108,16 @@ pub trait Vmm: Send + Sync {
     /// What a machine booted now runs under: the VMM's version and the host kernel's release
     /// (ADR 0027). A memory snapshot resumes only under the one it was taken under.
     fn version(&self) -> String;
+
+    /// Artifact provenance, read once at daemon startup. None for legacy implementations.
+    fn boot_identity(&self, _reporting: bool) -> Option<BootIdentity> {
+        None
+    }
+
+    /// Optional bounded telemetry, never used to decide lifecycle or capacity.
+    async fn balloon_statistics(&self, _vm: &Vm) -> Result<Option<BalloonStatistics>> {
+        Ok(None)
+    }
 }
 
 /// The Firecracker on this host.
@@ -115,6 +129,7 @@ pub struct Firecracker {
     pub console_max: u64,
     /// [`vmm_version`] of `binary`, read once at the daemon's start.
     pub version: String,
+    pub identity: BootIdentity,
 }
 
 /// `<Firecracker's version>/<the host kernel's release>`, `v1.17.0/6.8.0-45-generic`: what a
@@ -145,8 +160,15 @@ pub(super) fn version_of(firecracker: &str, kernel: &str) -> Option<String> {
 #[async_trait]
 impl Vmm for Firecracker {
     async fn boot(&self, b: &Boot) -> Result<Vm> {
-        let mut resume = b.resume;
-        let (proc, exit) = loop {
+        let resume = b.resume;
+        if resume
+            && !snapshot_files(&b.dir, b.jail.as_ref().map(|j| j.base.as_path()), &b.id)
+                .iter()
+                .all(|p| p.exists())
+        {
+            return Err(ResumeFailed("memory/state files are missing".into()).into());
+        }
+        let (proc, exit) = 'configured: {
             let mut proc = Process::start(
                 &self.binary,
                 &b.id,
@@ -165,13 +187,12 @@ impl Vmm for Firecracker {
                 }
             };
             let c = proc.client.clone();
+            b.disk_io.balloon.reset_observation();
             if let Err(err) = proc.metrics_to(b.disk_io.clone()).await {
                 proc.kill();
                 proc.wait().await;
                 return Err(err.context("firecracker metrics"));
             }
-            let (snap_state, snap_mem) = (proc.outside("snap.state"), proc.outside("snap.mem"));
-            resume = resume && snap_state.exists() && snap_mem.exists();
             if resume {
                 // Memory and state come back; the disks are where they were; the TAP has the
                 // same name. Nothing boots: the guest carries on where it was paused.
@@ -197,13 +218,11 @@ impl Vmm for Firecracker {
                     Ok::<(), anyhow::Error>(())
                 };
                 match load.await {
-                    Ok(()) => break (proc, exit),
+                    Ok(()) => break 'configured (proc, exit),
                     Err(err) => {
-                        tracing::warn!(machine = b.id, err = %err, "resume from snapshot failed, booting cold");
                         proc.kill();
                         proc.wait().await;
-                        resume = false;
-                        continue;
+                        return Err(ResumeFailed(format!("{err:#}")).into());
                     }
                 }
             }
@@ -224,6 +243,12 @@ impl Vmm for Firecracker {
                 }
                 c.network_interface("eth0", &b.tap, &b.mac).await?;
                 c.vsock(3, &proc.inside("vsock.sock")).await?;
+                if b.boot_identity
+                    .as_ref()
+                    .is_some_and(|i| i.device_profile == REPORTING_PROFILE)
+                {
+                    c.configure_balloon(&BalloonConfig::reporting()).await?;
+                }
                 c.start().await?;
                 Ok::<(), anyhow::Error>(())
             };
@@ -232,7 +257,7 @@ impl Vmm for Firecracker {
                 proc.wait().await;
                 return Err(anyhow!("configure firecracker: {err}"));
             }
-            break (proc, exit);
+            break 'configured (proc, exit);
         };
         // A snapshot is for one resume: stale files would be loaded into a different boot.
         let _ = tokio::fs::remove_file(proc.outside("snap.state")).await;
@@ -245,6 +270,8 @@ impl Vmm for Firecracker {
             dir: proc.dir.clone(),
             chroot: proc.chroot.clone(),
             resumed: resume,
+            boot_identity: b.boot_identity.clone(),
+            incarnation: Incarnation::read(proc.pid()),
             exited,
             exit,
         };
@@ -286,6 +313,7 @@ impl Vmm for Firecracker {
         // The pipe Firecracker was told at its boot; without one, no disk metrics this run.
         let chroot = jail.map(|j| jail_root(&j.base, id));
         let pipe = outside_path(chroot.as_deref(), dir, METRICS_FIFO);
+        disk_io.balloon.reset_observation();
         if let Err(err) = read_metrics(&pipe, disk_io, exited.clone()) {
             tracing::warn!(machine = id, err = %err, "disk metrics not read");
         }
@@ -296,6 +324,19 @@ impl Vmm for Firecracker {
             }
             let _ = exited_tx.send(true);
         });
+        let boot_identity = match client.balloon_config().await {
+            Ok(None) => None,
+            Ok(Some(config))
+                if config.deflate_on_oom
+                    && config.stats_polling_interval_s == 5
+                    && !config.free_page_hinting
+                    && config.free_page_reporting =>
+            {
+                Some(BootIdentity::ambiguous(REPORTING_PROFILE))
+            }
+            Ok(Some(_)) => Some(BootIdentity::ambiguous("unknown-device-profile")),
+            Err(_) => Some(BootIdentity::ambiguous(UNAVAILABLE_PROFILE)),
+        };
         Some(Vm {
             pid,
             api,
@@ -303,6 +344,8 @@ impl Vmm for Firecracker {
             dir: dir.to_path_buf(),
             chroot,
             resumed: false,
+            boot_identity,
+            incarnation: Incarnation::read(pid),
             exited,
             exit,
         })
@@ -382,6 +425,14 @@ impl Vmm for Firecracker {
         self.version.clone()
     }
 
+    fn boot_identity(&self, reporting: bool) -> Option<BootIdentity> {
+        Some(self.identity.with_reporting(reporting))
+    }
+
+    async fn balloon_statistics(&self, vm: &Vm) -> Result<Option<BalloonStatistics>> {
+        Client::new(&vm.api).balloon_statistics().await.map(Some)
+    }
+
     /// Read from `/proc`: what a sweep compares to the records.
     fn processes(&self) -> Vec<(u32, String)> {
         let mut out = Vec::new();
@@ -409,9 +460,16 @@ impl Vmm for Firecracker {
         let memory = tokio::fs::read_to_string(cg.join("memory.current"))
             .await
             .unwrap_or_default();
+        let memory_stat = tokio::fs::read_to_string(cg.join("memory.stat")).await.ok();
         Some(CgroupUse {
             cpu_usec: cpu_usec(&stat)?,
-            memory_bytes: memory.trim().parse().unwrap_or(0),
+            memory_bytes: memory.trim().parse().ok()?,
+            memory_anon_bytes: memory_stat
+                .as_deref()
+                .and_then(|s| memory_stat_bytes(s, "anon")),
+            memory_file_bytes: memory_stat
+                .as_deref()
+                .and_then(|s| memory_stat_bytes(s, "file")),
         })
     }
 }

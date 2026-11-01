@@ -28,6 +28,8 @@ pub struct SnapshotRec {
     /// the same Firecracker and host kernel (ADR 0027).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vmm_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_identity: Option<fc::BootIdentity>,
 }
 
 impl SnapshotRec {
@@ -231,6 +233,11 @@ impl Manager {
             name: req.name,
             created_at: Utc::now(),
             disks: disks.iter().map(|d| d.to_string()).collect(),
+            boot_identity: if memory.is_some() {
+                self.memory_identity(&e, &r)
+            } else {
+                None
+            },
             memory,
             vmm_version,
         };
@@ -499,6 +506,7 @@ impl Manager {
             if resume {
                 // What took the memory: the start resumes it only under the same (ADR 0027).
                 rec.vmm_version = s.vmm_version.clone();
+                rec.boot_identity = s.boot_identity.clone();
             }
             let named = s
                 .name

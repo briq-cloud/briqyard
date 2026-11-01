@@ -194,9 +194,21 @@ impl Manager {
                         r.pid = 0;
                         r.restarting_at = None;
                         applied = apply_pending(r, image);
-                        if r.suspended && r.vmm_version != vmm {
+                        let compatible =
+                            match (&r.boot_identity, self.inner.vmm.boot_identity(false)) {
+                                (Some(saved), Some(host)) => {
+                                    r.vmm_version == vmm && saved.compatible(&host)
+                                }
+                                (Some(_), None) => false,
+                                (None, _) => r.vmm_version == vmm,
+                            };
+                        if r.suspended && !compatible {
                             r.suspended = false;
-                            dropped = Some(r.vmm_version.clone());
+                            dropped = Some(if r.vmm_version != vmm {
+                                r.vmm_version.clone()
+                            } else {
+                                format!("{} (boot identity incompatible)", r.vmm_version)
+                            });
                         }
                         None
                     });

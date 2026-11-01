@@ -279,6 +279,11 @@ pub struct Record {
     /// What ran the last boot (`Vmm::version`): a memory snapshot resumes only under it.
     #[serde(default)]
     pub vmm_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_identity: Option<fc::BootIdentity>,
+    /// Strong provenance is bound to this actual running process after launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_incarnation: Option<fc::Incarnation>,
     /// What a newer daemon wrote and this one does not know: kept as it is, so a rollback that
     /// rewrites the record does not drop it (ADR 0027).
     #[serde(flatten)]
@@ -504,6 +509,8 @@ struct Entry {
     lock: Arc<tokio::sync::Mutex<()>>,
     rec: Mutex<Record>,
     live: Mutex<Option<fc::Vm>>,
+    /// Confirmed for this daemon's live handle; never inferred from an old record alone.
+    identity_trusted: AtomicBool,
     /// The reason set before asking the guest to stop; `None` when it ends on its own.
     stop_req: Mutex<Option<String>>,
     /// Signalled on every state change: what `wait` and a stop wait on.
@@ -540,6 +547,7 @@ impl Entry {
             lock: Default::default(),
             rec: Mutex::new(rec),
             live: Mutex::new(None),
+            identity_trusted: AtomicBool::new(false),
             stop_req: Mutex::new(None),
             changed: Notify::new(),
             unsaved_use: AtomicBool::new(false),

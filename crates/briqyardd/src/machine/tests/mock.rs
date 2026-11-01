@@ -26,6 +26,7 @@ pub(super) struct Proc {
     pub(super) vsock: PathBuf,
     pub(super) console: PathBuf,
     pub(super) boots: Boots,
+    pub(super) boot_identity: Option<fc::BootIdentity>,
     pub(super) exited: tokio::sync::watch::Sender<bool>,
     /// The init's report, sent by `exit`; dropped when the process is `gone`, so the
     /// manager's wait on it ends.
@@ -91,6 +92,7 @@ pub(super) struct Mock {
     pub(super) roots: Mutex<HashMap<String, (PathBuf, Option<PathBuf>)>>,
     /// A live change of disk limits fails, as a Firecracker that refuses the PATCH.
     pub(super) refuse_disk_rate: AtomicBool,
+    pub(super) refuse_balloon_stats: AtomicBool,
     pub(super) pause_bridge_delete: AtomicBool,
     pub(super) bridge_delete_started: tokio::sync::Notify,
     pub(super) bridge_delete_release: tokio::sync::Notify,
@@ -146,6 +148,7 @@ impl Mock {
             disks: Mutex::new(HashMap::new()),
             roots: Mutex::new(HashMap::new()),
             refuse_disk_rate: AtomicBool::new(false),
+            refuse_balloon_stats: AtomicBool::new(false),
             pause_bridge_delete: AtomicBool::new(false),
             bridge_delete_started: tokio::sync::Notify::new(),
             bridge_delete_release: tokio::sync::Notify::new(),
@@ -239,6 +242,7 @@ impl Mock {
             vsock,
             console,
             boots: Boots::Ready(Duration::ZERO),
+            boot_identity: None,
             exited: tokio::sync::watch::channel(false).0,
             exit: Some(tokio::sync::watch::channel(None).0),
         });
@@ -335,6 +339,20 @@ impl Mock {
 impl fc::Vmm for Mock {
     async fn boot(&self, b: &fc::Boot) -> Result<fc::Vm> {
         let boots = self.boots.lock().unwrap().clone();
+        // The manager must durably publish the selected identity before any VMM launches.
+        if !b.resume {
+            let path = b
+                .dir
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("state/machines")
+                .join(format!("{}.json", b.id));
+            let persisted: Record = serde_json::from_slice(&std::fs::read(path)?)?;
+            assert_eq!(persisted.boot_identity, b.boot_identity);
+            assert!(!persisted.suspended);
+        }
         self.record(format!("boot {} tap={} resume={}", b.id, b.tap, b.resume));
         let size = api::Size {
             vcpus: b.vcpus,
@@ -356,7 +374,10 @@ impl fc::Vmm for Mock {
         tokio::fs::create_dir_all(&b.dir).await?;
         let (api, vsock, console, _) = fc::paths(&b.dir);
         let snapshot = b.dir.join("snap.mem");
-        let resumed = b.resume && snapshot.exists();
+        if b.resume && !snapshot.exists() {
+            return Err(fc::ResumeFailed("memory file missing".into()).into());
+        }
+        let resumed = b.resume;
         let _ = std::fs::remove_file(&snapshot);
         let _ = std::fs::remove_file(b.dir.join("snap.state"));
         let pid = self
@@ -370,6 +391,7 @@ impl fc::Vmm for Mock {
             vsock: vsock.clone(),
             console,
             boots: boots.clone(),
+            boot_identity: b.boot_identity.clone(),
             exited,
             exit: Some(exit_tx),
         });
@@ -385,6 +407,8 @@ impl fc::Vmm for Mock {
             dir: b.dir.clone(),
             chroot: None,
             resumed,
+            boot_identity: b.boot_identity.clone(),
+            incarnation: Some(mock_incarnation(pid)),
             exited: rx,
             exit,
         })
@@ -411,6 +435,11 @@ impl fc::Vmm for Mock {
             dir: dir.to_path_buf(),
             chroot: None,
             resumed: false,
+            boot_identity: p
+                .boot_identity
+                .as_ref()
+                .map(|i| fc::BootIdentity::ambiguous(&i.device_profile)),
+            incarnation: Some(mock_incarnation(pid)),
             exited: p.exited.subscribe(),
             exit: Self::exit_of(p),
         })
@@ -470,6 +499,34 @@ impl fc::Vmm for Mock {
 
     fn version(&self) -> String {
         self.vmm_version.lock().unwrap().clone()
+    }
+
+    fn boot_identity(&self, reporting: bool) -> Option<fc::BootIdentity> {
+        Some(
+            fc::BootIdentity {
+                schema: 1,
+                device_profile: fc::LEGACY_PROFILE.into(),
+                kernel_sha256: "kernel-digest".into(),
+                vmm_sha256: self.version(),
+                host_kernel: "test".into(),
+                transport: "mmio".into(),
+            }
+            .with_reporting(reporting),
+        )
+    }
+
+    async fn balloon_statistics(&self, _vm: &fc::Vm) -> Result<Option<fc::BalloonStatistics>> {
+        self.record("balloon-statistics".into());
+        if self.refuse_balloon_stats.load(Relaxed) {
+            bail!("statistics unavailable");
+        }
+        Ok(Some(fc::BalloonStatistics {
+            target_pages: 0,
+            actual_pages: 3,
+            free_memory: Some(123),
+            available_memory: None,
+            disk_caches: Some(456),
+        }))
     }
 }
 
@@ -791,5 +848,13 @@ pub(super) fn policy_line(p: &nft::Policy) -> String {
             "open {ip} ports {:?} conn {} mbit {}",
             l.blocked_ports, l.new_connections_per_minute, l.bandwidth_mbit
         ),
+    }
+}
+
+fn mock_incarnation(pid: u32) -> fc::Incarnation {
+    fc::Incarnation {
+        pid,
+        start_ticks: u64::from(pid),
+        host_boot_id: "test-host-boot".into(),
     }
 }

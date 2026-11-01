@@ -4,6 +4,7 @@
 use super::*;
 use chrono::TimeZone;
 
+mod balloon;
 mod event_log;
 mod gateway;
 mod lifecycle;
@@ -107,6 +108,8 @@ pub(in crate::machine) fn record() -> Record {
         pending_since: None,
         init_version: String::new(),
         vmm_version: String::new(),
+        boot_identity: None,
+        boot_incarnation: None,
         rest: Default::default(),
         snapshots: Vec::new(),
         restoring: None,

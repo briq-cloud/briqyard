@@ -1,5 +1,12 @@
 use super::*;
 
+/// Cold-boot rollout; existing live and suspended devices retain their profile.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Balloon {
+    pub enabled: bool,
+}
+
 /// The thresholds of the host's conditions (ADR 0021), in percent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -327,6 +334,7 @@ impl Default for Ingress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::config::testutil::load;
 
     #[test]

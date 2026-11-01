@@ -106,6 +106,10 @@ pub struct Meter {
     readings: [Option<(DateTime<Utc>, Usage)>; 2],
     /// Memory its cgroup held at the last tick; 0 without one.
     pub memory_bytes: u64,
+    pub memory_available: bool,
+    pub memory_anon_bytes: Option<u64>,
+    pub memory_file_bytes: Option<u64>,
+    pub balloon: Option<briqyard_api::BalloonStats>,
     /// How long its last start took, `starting` to `running`.
     pub boot_seconds: Option<f64>,
     /// Restarts by its policy since the daemon started.
@@ -137,6 +141,10 @@ impl Meter {
             counted: Usage::default(),
             readings: [None, None],
             memory_bytes: 0,
+            memory_available: false,
+            memory_anon_bytes: None,
+            memory_file_bytes: None,
+            balloon: None,
             boot_seconds: None,
             restarts: 0,
         }
@@ -198,6 +206,10 @@ impl Meter {
     pub fn boot(&mut self, cpu_usec: u64) {
         self.cpu_usec = Some(cpu_usec);
         self.drops = EgressDrops::default();
+        self.memory_available = false;
+        self.memory_anon_bytes = None;
+        self.memory_file_bytes = None;
+        self.balloon = None;
     }
 
     /// Packets its egress limits dropped since it booted (or the daemon started), as of the

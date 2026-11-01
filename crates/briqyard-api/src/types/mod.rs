@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod balloon;
 mod events;
 mod host;
 mod join;
@@ -17,6 +18,7 @@ mod spec;
 #[cfg(test)]
 mod tests;
 
+pub use balloon::*;
 pub use events::*;
 pub use host::*;
 pub use join::*;
