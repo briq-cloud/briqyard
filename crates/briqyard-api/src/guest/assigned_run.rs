@@ -8,6 +8,8 @@ pub struct AssignedRunProof {
     pub generation: String,
     /// Measured by the running init, never copied from host configuration.
     pub init_sha256: String,
+    /// Digest of parsed config and successfully installed ordered boot files.
+    pub boot_bundle_sha256: String,
     /// Random boot-local RAM state: stable across checkpoint/resume, fresh on reboot.
     pub boot_marker: String,
 }
@@ -22,6 +24,7 @@ impl AssignedRunProof {
         if self.protocol != 1
             || !hex(&self.generation, 64)
             || !hex(&self.init_sha256, 64)
+            || !hex(&self.boot_bundle_sha256, 64)
             || !hex(&self.boot_marker, 32)
         {
             return Err("invalid assigned run guest proof");
@@ -33,11 +36,13 @@ impl AssignedRunProof {
         generation: &str,
         init_sha256: &str,
         boot_marker: &str,
+        boot_bundle_sha256: &str,
     ) -> Result<(), &'static str> {
         self.validate()?;
         if self.generation != generation
             || self.init_sha256 != init_sha256
             || self.boot_marker != boot_marker
+            || self.boot_bundle_sha256 != boot_bundle_sha256
         {
             return Err("assigned run guest continuity differs");
         }
@@ -55,18 +60,47 @@ mod tests {
             generation: "a".repeat(64),
             init_sha256: "b".repeat(64),
             boot_marker: "c".repeat(32),
+            boot_bundle_sha256: "d".repeat(64),
         };
         assert!(proof
-            .verify(&proof.generation, &proof.init_sha256, &proof.boot_marker)
+            .verify(
+                &proof.generation,
+                &proof.init_sha256,
+                &proof.boot_marker,
+                &proof.boot_bundle_sha256
+            )
             .is_ok());
         assert!(proof
-            .verify(&"d".repeat(64), &proof.init_sha256, &proof.boot_marker)
+            .verify(
+                &"d".repeat(64),
+                &proof.init_sha256,
+                &proof.boot_marker,
+                &proof.boot_bundle_sha256
+            )
             .is_err());
         assert!(proof
-            .verify(&proof.generation, &"e".repeat(64), &proof.boot_marker)
+            .verify(
+                &proof.generation,
+                &"e".repeat(64),
+                &proof.boot_marker,
+                &proof.boot_bundle_sha256
+            )
             .is_err());
         assert!(proof
-            .verify(&proof.generation, &proof.init_sha256, &"f".repeat(32))
+            .verify(
+                &proof.generation,
+                &proof.init_sha256,
+                &"f".repeat(32),
+                &proof.boot_bundle_sha256
+            )
+            .is_err());
+        assert!(proof
+            .verify(
+                &proof.generation,
+                &proof.init_sha256,
+                &proof.boot_marker,
+                &"e".repeat(64)
+            )
             .is_err());
         let mut unknown = proof;
         unknown.protocol = 2;

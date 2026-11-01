@@ -32,6 +32,22 @@ pub(super) fn halt() -> ! {
 // --- the host's side: vsock ---
 
 pub(super) async fn serve(st: Arc<State>) {
+    serve_ready(st, None).await;
+}
+
+/// Assigned evidence becomes reachable only after installation verification, before main.
+pub(super) async fn serve_assigned(st: Arc<State>) -> Result<()> {
+    let (ready, listener) = tokio::sync::oneshot::channel();
+    tokio::spawn(serve_ready(st, Some(ready)));
+    listener
+        .await
+        .context("assigned listener ended before binding")?
+        .map_err(anyhow::Error::msg)
+}
+async fn serve_ready(
+    st: Arc<State>,
+    ready: Option<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>,
+) {
     let mut listener = None;
     for _ in 0..50 {
         match VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, guest::PORT)) {
@@ -46,9 +62,15 @@ pub(super) async fn serve(st: Arc<State>) {
         Some(l) => l,
         None => {
             log!("vsock listen failed");
+            if let Some(ready) = ready {
+                let _ = ready.send(Err("vsock listen failed".into()));
+            }
             return;
         }
     };
+    if let Some(ready) = ready {
+        let _ = ready.send(Ok(()));
+    }
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {

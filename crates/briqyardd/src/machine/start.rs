@@ -626,7 +626,7 @@ pub(super) fn boot_args(pci: bool, extra: &str) -> String {
 /// The config drive: a tar archive the init reads raw, `config.json` first and the boot
 /// files under `files/`, padded to a multiple of 512 bytes since Firecracker wants a drive
 /// that size.
-type GuestBootFiles = Vec<(String, u32, Vec<u8>)>;
+pub(in crate::machine) type GuestBootFiles = Vec<(String, u32, Vec<u8>)>;
 
 pub(super) fn resolved_guest_config(
     r: &Record,
@@ -663,6 +663,7 @@ pub(super) fn resolved_guest_config(
         stop_timeout_sec: 10,
         template_profile: None,
         sandbox_device: None,
+        assigned_run_generation: None,
     };
     if let Some(v) = &r.volume {
         cfg.mounts.push(guest::Mount {
@@ -713,14 +714,41 @@ pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
     {
         cfg = origin.artifact.recipe.config.clone();
     }
+    encode_config_drive(&cfg, &files)
+}
+
+/// Exact supplied config/files, after the assigned fields have been set. Journal the
+/// returned drive and expected digest before launch; never rebuild from Record later.
+#[allow(dead_code)] // The run journal consumes this before lifecycle launch wiring.
+pub(in crate::machine) fn assigned_config_drive(
+    cfg: &guest::Config,
+    files: &GuestBootFiles,
+) -> Result<(Vec<u8>, String)> {
+    use sha2::{Digest, Sha256};
+    anyhow::ensure!(
+        cfg.assigned_run_generation.is_some() && cfg.template_profile.is_none(),
+        "assigned bundle requires ordinary assigned config"
+    );
+    let measured =
+        guest::boot_bundle_fingerprint_bytes(cfg, files).map_err(|error| anyhow!(error))?;
+    Ok((
+        encode_config_drive(cfg, files)?,
+        hex::encode(Sha256::digest(measured)),
+    ))
+}
+
+pub(in crate::machine) fn encode_config_drive(
+    cfg: &guest::Config,
+    files: &GuestBootFiles,
+) -> Result<Vec<u8>> {
     let mut b = tar::Builder::new(Vec::new());
-    let cfg_json = serde_json::to_vec(&cfg)?;
+    let cfg_json = serde_json::to_vec(cfg)?;
     let mut h = tar::Header::new_gnu();
     h.set_mode(0o600);
     h.set_size(cfg_json.len() as u64);
     h.set_mtime(Utc::now().timestamp() as u64);
     b.append_data(&mut h, guest::CONFIG_NAME, &cfg_json[..])?;
-    for (p, mode, data) in &files {
+    for (p, mode, data) in files {
         let mut h = tar::Header::new_gnu();
         h.set_mode(*mode);
         h.set_size(data.len() as u64);
@@ -741,4 +769,64 @@ pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
 /// temp file next to it, so a crash leaves the previous drive or none, never half of one.
 pub(super) fn write_drive(path: &Path, data: &[u8]) -> Result<()> {
     crate::store::write_private(path, data)
+}
+
+#[cfg(test)]
+mod boot_bundle_tests {
+    use super::*;
+    #[test]
+    fn assigned_config_drive_fingerprints_the_exact_encoded_bundle() {
+        use sha2::{Digest, Sha256};
+        let cfg = guest::Config {
+            assigned_run_generation: Some("a".repeat(64)),
+            cmd: vec!["application".into()],
+            files: vec![guest::FileMeta {
+                path: "/app".into(),
+                mode: 0o600,
+            }],
+            ..Default::default()
+        };
+        let files = vec![
+            ("/app".into(), 0o755, b"bytes".to_vec()),
+            ("/other".into(), 0, vec![2]),
+        ];
+        let (drive, expected) = assigned_config_drive(&cfg, &files).unwrap();
+        let mut archive = tar::Archive::new(&drive[..]);
+        let mut entries = archive.entries().unwrap();
+        let mut config_entry = entries.next().unwrap().unwrap();
+        let mut raw = Vec::new();
+        std::io::Read::read_to_end(&mut config_entry, &mut raw).unwrap();
+        let parsed: guest::Config = serde_json::from_slice(&raw).unwrap();
+        drop(config_entry);
+        let decoded = entries
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let path = format!(
+                    "/{}",
+                    entry
+                        .path()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .strip_prefix(guest::FILES_PREFIX)
+                        .unwrap()
+                );
+                let mode = entry.header().mode().unwrap();
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+                (path, mode, data)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected,
+            hex::encode(Sha256::digest(
+                guest::boot_bundle_fingerprint_bytes(&parsed, &decoded).unwrap()
+            ))
+        );
+        let mut changed = cfg;
+        changed.cmd.push("different".into());
+        assert_ne!(expected, assigned_config_drive(&changed, &files).unwrap().1);
+        changed.assigned_run_generation = None;
+        assert!(assigned_config_drive(&changed, &files).is_err());
+    }
 }

@@ -18,6 +18,8 @@
 //! unknown fields are ignored; an unknown `op` is answered `error` "unknown op <op>"; an
 //! unknown response `type` in a stream is skipped. The init says its version in `pong`.
 
+mod boot_bundle;
+pub use boot_bundle::{boot_bundle_fingerprint_bytes, boot_file_mode, effective_boot_file_mode};
 mod assigned_run;
 pub use assigned_run::AssignedRunProof;
 mod clone;
