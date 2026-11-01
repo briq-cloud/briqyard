@@ -1,6 +1,7 @@
 //! Private continuation authority. Observation never authorizes ordinary publication.
 use super::*;
 use rand::RngCore;
+mod adoption;
 mod launch;
 mod model;
 mod recovery;

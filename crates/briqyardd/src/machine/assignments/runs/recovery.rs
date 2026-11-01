@@ -1,4 +1,13 @@
 use super::*;
+
+/// Historical inputs never confer live ownership after an attempted launch.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RunRecovery {
+    Prelaunch,
+    DiscoveryNeeded,
+    ObservedNeedsProof,
+}
+
 impl Manager {
     pub(super) fn reconcile_assigned_run(&self, intent: &Intent) -> Result<()> {
         intent.check()?;
@@ -175,11 +184,17 @@ impl Manager {
 
     pub(in crate::machine) async fn verify_assigned_run_backing(&self) -> Result<()> {
         for current in self.inner.store.list::<Current>(RUNS)? {
-            self.verify_run_backing(&current).await?;
+            if self.classify_run_recovery(&current).await? == RunRecovery::DiscoveryNeeded {
+                tracing::warn!(machine = current.machine, "assigned run consumption unresolved; quarantine/discovery required, backing and charges retained");
+            }
+            // This startup fence precedes forwarding/rules. Historical observation and
+            // unresolved consumption both remain unpublished until actual live proof.
+            self.unplug(&current.machine, &current.target.ip).await?;
+            self.inner.net.quarantine(&current.machine).await?;
         }
         Ok(())
     }
-    pub(super) async fn verify_run_backing(&self, current: &Current) -> Result<()> {
+    async fn verify_run_current_backing(&self, current: &Current) -> Result<()> {
         current.check()?;
         anyhow::ensure!(
             self.inner.vmm.host_boot_id().as_deref() == Some(current.host_boot_id.as_str()),
@@ -204,6 +219,17 @@ impl Manager {
             root == current.root && data == current.data,
             "CURRENT run dataset GUID changed; backing retained"
         );
+        Ok(())
+    }
+
+    /// Called only before the launch attempt reaches the VMM. Snapshot inputs must still
+    /// exist exactly here, including during the durable attempted/pre-spawn window.
+    pub(super) async fn verify_run_prelaunch_backing(&self, current: &Current) -> Result<()> {
+        anyhow::ensure!(
+            current.reference.phase == Phase::Reserved,
+            "run already observed"
+        );
+        self.verify_run_current_backing(current).await?;
         if let Mode::Checkpoint {
             state,
             memory,
@@ -220,5 +246,44 @@ impl Manager {
             }
         }
         Ok(())
+    }
+    pub(super) fn verify_run_config(&self, current: &Current) -> Result<()> {
+        let path = self.run_checkpoint_paths(&current.prior)[2].clone();
+        match &current.mode {
+            Mode::Fresh { drive_sha256, .. } => {
+                anyhow::ensure!(
+                    sha(&std::fs::read(path)?) == *drive_sha256,
+                    "CURRENT fresh config changed"
+                );
+            }
+            Mode::Checkpoint { config, .. } => {
+                anyhow::ensure!(
+                    templates::fingerprint(&path)? == *config,
+                    "CURRENT checkpoint config changed"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn classify_run_recovery(&self, current: &Current) -> Result<RunRecovery> {
+        self.check_run_creation_authority(current)?;
+        self.verify_run_current_backing(current).await?;
+        if !current.launch_started {
+            self.verify_run_prelaunch_backing(current).await?;
+            return Ok(RunRecovery::Prelaunch);
+        }
+        if current.reference.phase != Phase::Observed {
+            if matches!(current.mode, Mode::Checkpoint { .. }) {
+                self.verify_run_config(current)?;
+            }
+            // Neither remaining nor missing snapshot inputs prove whether a VMM consumed
+            // them. No exact observed incarnation exists for read-only API adoption.
+            return Ok(RunRecovery::DiscoveryNeeded);
+        }
+        self.verify_run_config(current)?;
+        // Snapshot state/memory are historical inputs after durable observation. Native
+        // resume consumes them; a live handle still needs exact process/API/guest proof.
+        Ok(RunRecovery::ObservedNeedsProof)
     }
 }

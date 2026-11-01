@@ -1,5 +1,6 @@
 //! Private continuation tests use synthetic records, processes and backing; no native qualification.
 use super::*;
+mod recovery;
 
 #[test]
 fn run_reference_is_explicit_and_rejects_unknown_fields() {

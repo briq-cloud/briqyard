@@ -16,7 +16,7 @@ impl Manager {
         let id = entry.snapshot().id;
         let mut current: Current = self.inner.store.get(RUNS, &id)?.context("run missing")?;
         self.check_run_creation_authority(&current)?;
-        self.verify_run_backing(&current).await?;
+        self.verify_run_prelaunch_backing(&current).await?;
         anyhow::ensure!(
             !current.launch_started
                 && launch_identity::record_fingerprint(&entry.snapshot())?
@@ -30,7 +30,7 @@ impl Manager {
         self.persist_run_transition(entry, prior, &current)?;
         self.unplug(&id, &current.target.ip).await?;
         let tap = self.inner.net.quarantine(&id).await?;
-        self.verify_run_backing(&current).await?;
+        self.verify_run_prelaunch_backing(&current).await?;
         let rec = &current.target;
         let dir = self.inner.cfg.run_dir().join(&id);
         tokio::fs::create_dir_all(&dir).await?;
@@ -65,10 +65,14 @@ impl Manager {
         };
         let _turn = self.inner.boot_gate.acquire().await?;
         self.check_run_creation_authority(&current)?;
-        self.verify_run_backing(&current).await?;
+        self.verify_run_prelaunch_backing(&current).await?;
         // No ResumeFailed fallback: a different boot requires different explicit authority.
         let live = self.inner.vmm.boot(&boot).await?;
         *entry.live.lock().unwrap() = Some(live.clone());
+        anyhow::ensure!(
+            live.resumed == matches!(current.mode, Mode::Checkpoint { .. }),
+            "launch resume mode differs"
+        );
         self.verify_run_process(&current, &live)?;
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(self.inner.cfg.boot_timeout_sec.max(10));
@@ -169,7 +173,6 @@ impl Manager {
                 && incarnation.host_boot_id == current.host_boot_id
                 && self.inner.vmm.host_boot_id().as_deref() == Some(current.host_boot_id.as_str())
                 && live.boot_identity.as_ref() == Some(&current.expected_boot_identity)
-                && live.resumed == matches!(current.mode, Mode::Checkpoint { .. })
                 && self.inner.vmm.verify_process(
                     &current.machine,
                     incarnation,
