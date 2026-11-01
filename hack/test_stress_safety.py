@@ -58,6 +58,50 @@ class SafetyTest(unittest.TestCase):
         self.policy.request(self.send, 'DELETE', '/v1/machines/owned')
         self.assertEqual(self.calls[-1][0], 'DELETE')
 
+    def test_swapped_owned_response_cannot_authorize_requested_id(self):
+        self.create()
+        other = {'id': 'other', 'namespace': 'other-ns', 'name': 'other-name',
+                 'metadata': {'stress': self.policy.identity}}
+        self.policy.owned['other'] = ['other-ns', 'other-name']
+        self.machines = [other]
+        for method, path, body in [
+                ('DELETE', '/v1/machines/owned', None),
+                ('POST', '/v1/machines/owned/start', None),
+                ('POST', '/v1/machines', {'namespace': 'ns', 'name': 'fork',
+                                        'fork': {'machine_id': 'owned'}}),
+                ('POST', '/v1/machines', {'namespace': 'ns', 'name': 'restore',
+                                        'restore': {'machine_id': 'owned'}})]:
+            before = len(self.calls)
+            with self.assertRaisesRegex(RuntimeError, 'preserving'):
+                self.policy.request(self.send, method, path, body)
+            self.assertTrue(all(c[0] == 'GET' for c in self.calls[before:]))
+        self.assertIn('owned', self.policy.owned)
+
+    def test_deadline_transport_timeout_is_completion_except_create(self):
+        api = stress.Api('http://unused.invalid', '', self.policy)
+        self.policy.deadline = 12
+        def timed_out(*args, **kwargs):
+            self.assertEqual(kwargs['timeout'], 2)
+            raise stress.urllib.error.URLError(TimeoutError('timed out'))
+        with patch('stress.time.monotonic', side_effect=[10, 10, 10, 12]), \
+                patch('stress.urllib.request.urlopen', side_effect=timed_out):
+            with self.assertRaises(BudgetExpired):
+                api.call('GET', '/v1/machines')
+        self.assertEqual(api.failures, [])
+
+        def create_transport(method, path, body=None, op=None, timeout=300):
+            if method == 'GET':
+                return 200, '[]'
+            return api._request(method, path, body, op, timeout)
+        with patch('stress.time.monotonic', side_effect=[10, 10, 10, 10, 12, 12]), \
+                patch('stress.urllib.request.urlopen', side_effect=timed_out):
+            with self.assertRaisesRegex(RuntimeError, 'ambiguous'):
+                self.policy.request(create_transport, 'POST', '/v1/machines',
+                                    {'namespace': 'ns', 'name': 'm0'})
+        self.assertTrue(self.policy.unresolved)
+        self.assertEqual(self.policy.intents, [['ns', 'm0']])
+        self.assertEqual(self.policy.owned, {})
+
     def test_ambiguous_create_no_replay_or_mutation(self):
         self.answer = (0, 'timeout')
         with self.assertRaisesRegex(RuntimeError, "ambiguous"):

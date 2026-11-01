@@ -72,6 +72,12 @@ class Api:
         except urllib.error.HTTPError as e:
             status, text = e.code, e.read().decode(errors="replace")
         except Exception as e:  # connection refused, timeout
+            cause = e.reason if isinstance(e, urllib.error.URLError) else e
+            if (isinstance(cause, TimeoutError) and self.safety
+                    and self.safety.deadline is not None
+                    and time.monotonic() >= self.safety.deadline
+                    and not (method == 'POST' and path == '/v1/machines')):
+                raise BudgetExpired('stress time budget exhausted') from e
             status, text = 0, f"{type(e).__name__}: {e}"
         dt = time.monotonic() - t0
         with self.lock:

@@ -59,7 +59,9 @@ class Safety:
                 self.owned.pop(mid, None)
                 self.save()
             return False
-        if status != 200 or not self.matches(json.loads(text)):
+        machine = json.loads(text) if status == 200 else None
+        if (not isinstance(machine, dict) or machine.get('id') != mid
+                or not self.matches(machine)):
             raise RuntimeError('ownership unknown or changed; preserving machine')
         return True
 
