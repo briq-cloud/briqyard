@@ -82,6 +82,15 @@ pub trait Vmm: Send + Sync {
         disk_io: Arc<DiskIo>,
     ) -> Option<Vm>;
 
+    fn host_boot_id(&self) -> Option<String> {
+        None
+    }
+
+    /// Positive exit of an exact registered clone incarnation; no guest activation.
+    async fn settle_clone_process(&self, _id: &str, _saved: &Incarnation) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Gives a running machine's disks these limits now: the root disk, and the volume when
     /// it has one.
     async fn disk_rate(&self, vm: &Vm, rate: &DiskRate, volume: bool) -> Result<()>;
@@ -396,6 +405,14 @@ impl Vmm for Firecracker {
             exited,
             exit,
         })
+    }
+
+    fn host_boot_id(&self) -> Option<String> {
+        super::host_boot_id()
+    }
+
+    async fn settle_clone_process(&self, id: &str, saved: &Incarnation) -> Result<bool> {
+        super::incarnation::settle_clone_process(id, saved).await
     }
 
     async fn disk_rate(&self, vm: &Vm, rate: &DiskRate, volume: bool) -> Result<()> {

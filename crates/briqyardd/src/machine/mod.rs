@@ -400,7 +400,11 @@ fn holds_memory(state: &str) -> bool {
 fn commits_memory(r: &Record) -> bool {
     holds_memory(&r.state)
         || (r.state == state::CREATING && r.start)
-        || (r.state == state::DESTROYING && r.clone_origin.is_some() && r.pid > 0)
+        || r.clone_origin.as_ref().is_some_and(|origin| {
+            r.state == state::DESTROYING
+                || (origin.stage != templates::CloneStage::Reserved
+                    && (origin.stage != templates::CloneStage::Active || !origin.mapping_exited))
+        })
 }
 
 /// What a machine in this record's state holds, for its usage.

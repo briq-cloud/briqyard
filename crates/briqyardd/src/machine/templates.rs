@@ -11,6 +11,7 @@ pub(super) use policy::*;
 mod create;
 mod start;
 pub(super) use create::clone_mac;
+mod recovery;
 mod sealing;
 
 /// The resolved workload held by a named memory artifact, independent of later edits.

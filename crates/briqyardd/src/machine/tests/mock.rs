@@ -1,6 +1,7 @@
 //! The mock host: a stand-in VMM, guest and network, with its processes on record.
 
 use super::*;
+mod clone_recovery;
 
 /// How the next boots go: what the guest does once its process is up.
 #[derive(Clone, Debug)]
@@ -41,6 +42,8 @@ type Attachment = (String, String, Option<nft::Policy>);
 /// internet counters are values a test sets.
 pub(super) struct Mock {
     pub(super) boots: Mutex<Boots>,
+    pub(super) host_boot_id: Mutex<Option<String>>,
+    pub(super) refuse_clone_exit: AtomicBool,
     /// How long a guest takes to stop once asked.
     pub(super) stops: Mutex<Duration>,
     pub(super) next_pid: std::sync::atomic::AtomicU32,
@@ -117,6 +120,8 @@ impl Mock {
     pub(in crate::machine) fn new() -> Arc<Self> {
         Arc::new(Self {
             boots: Mutex::new(Boots::Ready(Duration::ZERO)),
+            host_boot_id: Mutex::new(Some("11111111-1111-4111-8111-111111111111".into())),
+            refuse_clone_exit: AtomicBool::new(false),
             stops: Mutex::new(Duration::ZERO),
             next_pid: std::sync::atomic::AtomicU32::new(1000),
             procs: Mutex::new(Vec::new()),
@@ -475,6 +480,13 @@ impl fc::Vmm for Mock {
             exited: p.exited.subscribe(),
             exit: Self::exit_of(p),
         })
+    }
+
+    fn host_boot_id(&self) -> Option<String> {
+        self.host_boot_id.lock().unwrap().clone()
+    }
+    async fn settle_clone_process(&self, id: &str, saved: &fc::Incarnation) -> Result<bool> {
+        self.settle_clone(id, saved)
     }
 
     async fn disk_rate(&self, vm: &fc::Vm, rate: &fc::DiskRate, volume: bool) -> Result<()> {
@@ -959,6 +971,6 @@ fn mock_incarnation(pid: u32) -> fc::Incarnation {
     fc::Incarnation {
         pid,
         start_ticks: u64::from(pid),
-        host_boot_id: "test-host-boot".into(),
+        host_boot_id: "11111111-1111-4111-8111-111111111111".into(),
     }
 }

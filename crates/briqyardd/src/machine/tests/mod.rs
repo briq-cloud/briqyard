@@ -270,6 +270,14 @@ pub(super) const IMAGE: &str =
     "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000001";
 
 impl Harness {
+    pub(super) fn set_host_boot_id(&self, value: Option<&str>) {
+        *self.host.host_boot_id.lock().unwrap() = value.map(str::to_string);
+    }
+
+    pub(super) fn refuse_clone_exit(&self, refused: bool) {
+        self.host.refuse_clone_exit.store(refused, Relaxed);
+    }
+
     /// Registers a machine in `state`, as if loaded, and returns its entry.
     pub(super) fn add(&self, id: &str, state: &str, memory_mb: u32) -> Arc<Entry> {
         let mut r = record();

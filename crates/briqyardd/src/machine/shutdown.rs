@@ -543,13 +543,10 @@ impl Manager {
                 return Err(MError::Conflict("clone VMM exit is unconfirmed".into()));
             }
         }
-        if e.snapshot()
-            .clone_origin
-            .as_ref()
-            .is_some_and(|o| !o.mapping_exited && o.stage != templates::CloneStage::Reserved)
-        {
+        if !self.reconcile_clone_exit(&e).await? {
             return Err(MError::Conflict(
-                "clone mapping exit proof is unavailable; all backing retained".into(),
+                "clone mapping exit proof is unavailable; full reservation and backing retained"
+                    .into(),
             ));
         }
         for ep in self.endpoints_of(id) {

@@ -415,3 +415,5 @@ async fn index_and_config_digest_levels_are_not_interchangeable_at_seal() {
         .is_err());
     assert!(!h.host_calls().iter().any(|s| s.starts_with("snapshot ")));
 }
+
+mod recovery;

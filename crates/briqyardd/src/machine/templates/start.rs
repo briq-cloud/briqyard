@@ -52,6 +52,17 @@ impl Manager {
                         | (CloneStage::Paused, CloneStage::Active)
                 );
             anyhow::ensure!(allowed, "invalid clone stage transition");
+            if next == CloneStage::Loading && origin.stage == CloneStage::Reserved {
+                let boot = self
+                    .inner
+                    .vmm
+                    .host_boot_id()
+                    .filter(|id| fc::valid_host_boot_id(id))
+                    .ok_or_else(|| {
+                        anyhow!("host boot identity is unavailable; clone launch refused")
+                    })?;
+                origin.launch_host_boot_id = Some(boot);
+            }
             origin.stage = next.clone();
         }
         self.save(e)?;

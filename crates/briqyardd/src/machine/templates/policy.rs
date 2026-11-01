@@ -34,6 +34,9 @@ pub struct CloneOrigin {
     pub stage: CloneStage,
     #[serde(default)]
     pub mapping_exited: bool,
+    /// Persisted before a VMM launch can begin, even before a PID is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_host_boot_id: Option<String>,
 }
 
 impl Manager {

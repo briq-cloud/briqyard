@@ -59,3 +59,15 @@ Incomplete clones after daemon restart remain quarantined with their backing and
 reservations retained; destroy them explicitly. Ambiguous exit or corrupt reader
 metadata blocks cleanup. Running completed clones use the existing incarnation
 adoption path. Templates and clone records cannot move to another namespace/host.
+
+An interrupted clone never resumes or activates automatically during recovery. Before
+launch, the daemon durably records the current host boot UUID with the loading intent.
+A verified change of that boot UUID proves that the previous launch cannot remain
+alive. For a registered process, cleanup can instead observe its exact incarnation
+through a pidfd, recheck ownership, and wait for exit of that same process. Unknown or
+unavailable evidence retains the immutable backing and full capacity reservation.
+In particular, a zero saved PID or an empty process scan on the same boot does not
+prove that a pending launch has ended. Such an intent can remain charged until positive
+process evidence or a verified host boot boundary is available; automatic cleanup is
+not promised. A timeout never proves exit. Explicit destruction retains the full
+reservation until its cleanup completes.

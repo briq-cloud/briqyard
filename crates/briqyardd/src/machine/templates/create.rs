@@ -97,6 +97,7 @@ impl Manager {
             identity: None,
             stage: CloneStage::Reserved,
             mapping_exited: false,
+            launch_host_boot_id: None,
         });
         Ok(())
     }

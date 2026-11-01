@@ -236,10 +236,7 @@ impl Manager {
                 .as_ref()
                 .is_some_and(|o| o.stage != templates::CloneStage::Active)
             {
-                tracing::warn!(
-                    machine = rec.id,
-                    "incomplete memory clone retained under quarantine; explicit destroy required"
-                );
+                self.recover_incomplete_clone(&e).await;
                 continue;
             }
             if rec.state == state::CREATING {
