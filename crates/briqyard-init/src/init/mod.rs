@@ -77,6 +77,7 @@ mod files;
 mod network;
 mod pty;
 mod reap;
+mod sandbox_device;
 mod serve;
 #[cfg(all(test, target_os = "linux"))]
 mod testutil;
@@ -193,6 +194,16 @@ async fn run() -> ExitReport {
         setup_names(&cfg);
         if let Err(e) = setup_network(&cfg).await {
             log!("network: {e:#}");
+        }
+    }
+    if cfg.template_profile.as_deref() == Some(guest::SANDBOX_READY_V1) {
+        let prepared = cfg
+            .sandbox_device
+            .as_ref()
+            .ok_or_else(|| anyhow!("sandbox data topology missing"))
+            .and_then(sandbox_device::prepare);
+        if let Err(e) = prepared {
+            return failed(125, format!("sandbox data quarantine: {e:#}"));
         }
     }
     let env = build_env(&cfg.env);

@@ -7,6 +7,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 pub(super) const READERS: &str = "clone-readers";
 
 mod policy;
+pub(super) mod sandbox;
 pub(super) use policy::*;
 mod create;
 mod start;
@@ -148,11 +149,7 @@ impl Manager {
         destination: &str,
         namespace: &str,
     ) -> Result<(CloneArtifact, [PathBuf; 2]), MError> {
-        if !self
-            .named_memory_profiles()
-            .iter()
-            .any(|p| p == guest::INIT_READY_V1)
-        {
+        if self.named_memory_profiles().is_empty() {
             return Err(invalid(
                 "reviewed named memory profile is disabled or unavailable",
             ));
@@ -163,7 +160,12 @@ impl Manager {
         let e = self.own_entry(source)?;
         let _source_lock = e.lock.lock().await;
         let r = e.snapshot();
-        if r.namespace != namespace {
+        if r.namespace != namespace
+            && !r
+                .template_birth
+                .as_ref()
+                .is_some_and(|b| b.profile == guest::SANDBOX_READY_V1)
+        {
             return Err(invalid("memory clone requires the same namespace owner"));
         }
         if r.state == state::DESTROYING {
@@ -213,7 +215,8 @@ impl Manager {
             .clone_artifact
             .as_ref()
             .ok_or_else(|| invalid("snapshot is not a sealed memory template"))?;
-        if r.namespace != namespace
+        let sandbox = a.profile == guest::SANDBOX_READY_V1;
+        if (r.namespace != namespace && !sandbox)
             || r.state == state::DESTROYING
             || !self.named_memory_profiles().iter().any(|p| p == &a.profile)
         {
@@ -223,15 +226,16 @@ impl Manager {
         }
         if s.memory.is_none()
             || a.schema != 1
-            || a.profile != guest::INIT_READY_V1
+            || (!sandbox && a.profile != guest::INIT_READY_V1)
             || a.init_protocol != 1
             || a.recipe.root_disk_gb == 0
             || a.recipe.root_disk_gb != self.inner.cfg.root_disk_gb
             || a.ram_marker.len() != 32
-            || a.recipe.image != ALPINE
-            || a.recipe.image_digest != ALPINE.split('@').nth(1).unwrap_or("")
-            || a.recipe.image_config_digest != ALPINE_CONFIG_DIGEST
-            || a.namespace != namespace
+            || (!sandbox
+                && (a.recipe.image != ALPINE
+                    || a.recipe.image_digest != ALPINE.split('@').nth(1).unwrap_or("")
+                    || a.recipe.image_config_digest != ALPINE_CONFIG_DIGEST))
+            || a.namespace != r.namespace
             || a.source_host != self.inner.host_id
             || a.init_sha256 != self.inner.images.init_sha256()
             || self.inner.vmm.cpu_fingerprint().as_deref() != Some(a.cpu_fingerprint.as_str())
@@ -239,6 +243,9 @@ impl Manager {
             return Err(invalid(
                 "memory template provenance/profile is incompatible",
             ));
+        }
+        if sandbox {
+            self.check_sandbox_artifact(r, a)?;
         }
         if !self.inner.verified_templates.lock().unwrap().contains(&(
             r.id.clone(),

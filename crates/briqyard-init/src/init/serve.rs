@@ -137,6 +137,7 @@ where
                     version: briqyard_api::VERSION.into(),
                     file_stream_v1: true,
                     clone_status: st.clone_gate.lock().await.status(),
+                    sha256: st.clone_gate.lock().await.destination_fingerprint(),
                     init_sha256: if st.cfg.template_profile.is_some() {
                         clone_identity::executable_sha256()
                     } else {

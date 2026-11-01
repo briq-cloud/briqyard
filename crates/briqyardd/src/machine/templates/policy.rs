@@ -37,6 +37,8 @@ pub struct CloneOrigin {
     /// Persisted before a VMM launch can begin, even before a PID is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_host_boot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<sandbox::Binding>,
 }
 
 impl Manager {
@@ -60,11 +62,15 @@ impl Manager {
                     "docker.io" | "index.docker.io" | "registry-1.docker.io"
                 )
             });
-        if available {
+        let mut profiles = if available {
             vec![guest::INIT_READY_V1.into()]
         } else {
             vec![]
+        };
+        if self.sandbox_available() {
+            profiles.push(guest::SANDBOX_READY_V1.into());
         }
+        profiles
     }
 
     pub(in crate::machine) fn template_birth(
@@ -75,6 +81,9 @@ impl Manager {
         let Some(profile) = &req.template_build else {
             return Ok(None);
         };
+        if profile == guest::SANDBOX_READY_V1 {
+            return self.sandbox_birth(req, role).map(Some);
+        }
         let bound = &self.inner.cfg.templates.init_ready_init_sha256;
         if !self
             .named_memory_profiles()
@@ -131,6 +140,9 @@ impl Manager {
         let Some(birth) = &r.template_birth else {
             return Ok(());
         };
+        if birth.profile == guest::SANDBOX_READY_V1 {
+            return self.check_sandbox_builder(r);
+        }
         let cfg = &r.image_config;
         anyhow::ensure!(
             birth.schema == 1

@@ -214,6 +214,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
         inner: Arc::new(Inner {
             stats: Stats::default(),
             warm_lock: tokio::sync::Mutex::new(()),
+            sandbox_create_lock: tokio::sync::Mutex::new(()),
             warm_names: Mutex::new(HashMap::new()),
             warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
             warm_sample: Mutex::new(None),
@@ -293,6 +294,10 @@ impl Harness {
         *self.host.host_boot_id.lock().unwrap() = value.map(str::to_string);
     }
 
+    pub(in crate::machine) fn refuse_destination(&self, response_loss: bool, bad_ack: bool) {
+        self.host.destination_refuse.store(response_loss, Relaxed);
+        self.host.destination_bad_ack.store(bad_ack, Relaxed);
+    }
     pub(super) fn refuse_clone_exit(&self, refused: bool) {
         self.host.refuse_clone_exit.store(refused, Relaxed);
     }

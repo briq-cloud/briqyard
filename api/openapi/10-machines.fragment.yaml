@@ -112,6 +112,24 @@
         blocked_port: { type: integer }
         rate: { type: integer }
         bandwidth: { type: integer }
+    SandboxRequestLookup:
+      type: object
+      additionalProperties: false
+      required: [namespace, request_id, create_sha256]
+      properties:
+        namespace: { type: string, maxLength: 64 }
+        request_id: { type: string, maxLength: 128 }
+        create_sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+    SandboxSeed:
+      type: object
+      additionalProperties: false
+      required: [machine_id, snapshot, generation, request_id]
+      description: "operator-produced pristine sandbox only; exclusive with fork, restore and template_build; exact approved image/size and fresh fixed-capacity /work volume, start:true required; no cold fallback after submission"
+      properties:
+        machine_id: { type: string }
+        snapshot: { type: string, description: "immutable sealed snapshot id" }
+        generation: { type: string }
+        request_id: { type: string, maxLength: 128, description: "namespace-scoped durable full-create identity; changed replay conflicts" }
     CreateMachineRequest:
       type: object
       required: [namespace, name, size]
@@ -136,7 +154,8 @@
         backup: { oneOf: [{ $ref: "#/components/schemas/BackupPolicy" }, { type: "null" }], description: "absent: the host's `backup.default_every` and `default_keep` (none unless configured); null: none. A restore or a fork takes this, not its source's" }
         probes: { allOf: [{ $ref: "#/components/schemas/Probes" }], description: "absent: none, or for a restore the backup's" }
         start: { type: boolean, default: true, description: "its create starts it once its disks are made; the answer comes at `creating`: `/wait` for `running` or `ready`" }
-        template_build: { type: string, enum: [init-ready-v1], description: "reviewed pinned public pre-main builder; requires matching init digest and jailer; already-running services are unsupported" }
+        template_build: { type: string, enum: [init-ready-v1, sandbox-ready-v1], description: "operator-reviewed pinned public pre-main builder; requires matching init digest and jailer; already-running services are unsupported" }
+        sandbox_seed: { $ref: "#/components/schemas/SandboxSeed" }
         fork: { $ref: "#/components/schemas/ForkSpec" }
         restore: { $ref: "#/components/schemas/RestoreSpec" }
     Exit:
@@ -357,6 +376,7 @@
         source_host: { type: string }
         clone_size: { $ref: "#/components/schemas/Size" }
         clone_ram_marker: { type: string, description: "init RAM marker inherited and checked on memory restore" }
+        clone_generation: { type: string, description: "immutable sealed artifact generation" }
     MachineStats:
       type: object
       properties:

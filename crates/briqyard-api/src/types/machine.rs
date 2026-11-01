@@ -72,9 +72,48 @@ pub struct CreateMachineRequest {
     /// Reviewed pre-main builder; never promotes an ordinary machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_build: Option<String>,
+    /// Operator-produced pristine sandbox seed; never a configured warm slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_seed: Option<SandboxSeed>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxSeed {
+    pub machine_id: String,
+    pub snapshot: String,
+    pub generation: String,
+    pub request_id: String,
 }
 
 impl CreateMachineRequest {
+    pub fn check_sandbox_seed(&self) -> Result<(), &'static str> {
+        let Some(seed) = &self.sandbox_seed else {
+            return Ok(());
+        };
+        if !super::valid_id(&seed.machine_id)
+            || !super::valid_id(&seed.snapshot)
+            || !super::valid_id(&seed.generation)
+            || !valid_sandbox_request_id(&seed.request_id)
+        {
+            return Err("invalid sandbox seed selector or request id");
+        }
+        if self.fork.is_some()
+            || self.restore.is_some()
+            || self.template_build.is_some()
+            || self.start != Some(true)
+            || self
+                .volume
+                .as_ref()
+                .is_none_or(|v| v.mount != "/work" || v.size_gb == 0)
+        {
+            return Err(
+                "sandbox seed requires exclusive selection, start:true and fresh /work volume",
+            );
+        }
+        Ok(())
+    }
+
     /// What it runs, as `SpecChange::check` reads it: the image when it names one.
     pub fn spec(&self) -> SpecChange {
         SpecChange {

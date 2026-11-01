@@ -38,6 +38,26 @@ pub(super) async fn create_machine(
 ) -> Result<Response, Refusal> {
     let mut req: api::CreateMachineRequest = serde_json::from_slice(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
+    req.check_sandbox_seed()
+        .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", e))?;
+    let sandbox_profile =
+        req.sandbox_seed.is_some() || req.template_build.as_deref() == Some("sandbox-ready-v1");
+    if sandbox_profile && st.cfg.token.is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "capability_unsupported",
+            "sandbox seeds require configured API authentication",
+        ));
+    }
+    if req.sandbox_seed.is_some() {
+        let route = crate::create_replay::existing_route(&st.reg.lock().unwrap(), &req)?;
+        if let Some(route) = route {
+            return crate::create_replay::sandbox_lookup(&st, &req, &headers, route).await;
+        }
+    }
+    if let Some(seed) = &req.sandbox_seed {
+        check_sandbox_selector(&st, seed, req.size).await?;
+    }
     if req.fork.is_some() && req.restore.is_some() {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -48,7 +68,7 @@ pub(super) async fn create_machine(
     if req
         .template_build
         .as_deref()
-        .is_some_and(|p| p != "init-ready-v1")
+        .is_some_and(|p| !matches!(p, "init-ready-v1" | "sandbox-ready-v1"))
     {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -56,8 +76,9 @@ pub(super) async fn create_machine(
             "requested template profile is unsupported",
         ));
     }
-    let needs_named_memory =
-        req.template_build.is_some() || req.fork.as_ref().is_some_and(|f| f.snapshot.is_some());
+    let needs_named_memory = req.template_build.is_some()
+        || req.sandbox_seed.is_some()
+        || req.fork.as_ref().is_some_and(|f| f.snapshot.is_some());
     if req.fork.as_ref().is_some_and(|f| f.snapshot.is_some()) {
         let (size, snapshot) = named_memory_size(&st, req.fork.as_ref().unwrap()).await?;
         if req.size != api::Size::default() && req.size != size {
@@ -103,6 +124,11 @@ pub(super) async fn create_machine(
     let placement = registry::Policy {
         require_egress_siblings: needs_siblings,
         require_named_memory: needs_named_memory,
+        named_memory_profile: if sandbox_profile {
+            "sandbox-ready-v1".into()
+        } else {
+            "init-ready-v1".into()
+        },
         ..st.policy.clone()
     };
     let ask = Ask {
@@ -113,18 +139,35 @@ pub(super) async fn create_machine(
         disk_mb: disk_need(req.volume.as_ref().map(|v| v.size_gb)),
         what: "machine",
     };
-    let (host, first, hold) = {
+    enum Placement {
+        Replay(crate::create_replay::SandboxRoute),
+        Admitted(Box<HostRec>, bool, u64),
+    }
+    let placement_result = {
         let mut reg = st.reg.lock().unwrap();
-        let first = !reg.namespaces.contains_key(&req.namespace);
-        let source = req
-            .fork
-            .as_ref()
-            .and_then(|f| reg.host_of_machine(&f.machine_id).map(|h| h.id.clone()));
-        // A fork is made on its source's host: into a namespace of another host it cannot be
-        // (ADR 0056).
-        if let (Some(src), Some(pinned)) = (&source, reg.namespaces.get(&req.namespace)) {
-            if src != pinned {
-                return Err(err(
+        let concurrent = if req.sandbox_seed.is_some() {
+            crate::create_replay::existing_route(&reg, &req)?
+        } else {
+            None
+        };
+        if let Some(route) = concurrent {
+            Placement::Replay(route)
+        } else {
+            let first = !reg.namespaces.contains_key(&req.namespace);
+            let source = req
+                .fork
+                .as_ref()
+                .and_then(|f| reg.host_of_machine(&f.machine_id).map(|h| h.id.clone()))
+                .or_else(|| {
+                    req.sandbox_seed
+                        .as_ref()
+                        .and_then(|s| reg.host_of_machine(&s.machine_id).map(|h| h.id.clone()))
+                });
+            // A fork is made on its source's host: into a namespace of another host it cannot be
+            // (ADR 0056).
+            if let (Some(src), Some(pinned)) = (&source, reg.namespaces.get(&req.namespace)) {
+                if src != pinned {
+                    return Err(err(
                     StatusCode::BAD_REQUEST,
                     "invalid",
                     format!(
@@ -132,70 +175,94 @@ pub(super) async fn create_machine(
                         req.namespace
                     ),
                 ));
+                }
             }
-        }
-        // The host the request is bound to: a fork's source's, else the namespace's.
-        let bound = source
-            .clone()
-            .or_else(|| reg.namespaces.get(&req.namespace).cloned());
-        if needs_named_memory {
-            if let Some(host) = bound.as_ref().and_then(|id| reg.hosts.get(id)) {
-                require_named_memory(host, st.policy.down_after)?;
-            } else if !reg.hosts.values().any(|h| {
-                h.named_memory_fork_v1
-                    && h.named_memory_profiles.iter().any(|p| p == "init-ready-v1")
-                    && h.state == "ready"
-                    && (req.region.is_empty() || h.region == req.region)
-            }) {
+            // The host the request is bound to: a fork's source's, else the namespace's.
+            let bound = source
+                .clone()
+                .or_else(|| reg.namespaces.get(&req.namespace).cloned());
+            if needs_named_memory {
+                if let Some(host) = bound.as_ref().and_then(|id| reg.hosts.get(id)) {
+                    require_memory_profile(
+                        host,
+                        st.policy.down_after,
+                        &placement.named_memory_profile,
+                    )?;
+                } else if !reg.hosts.values().any(|h| {
+                    h.named_memory_fork_v1
+                        && h.named_memory_profiles
+                            .iter()
+                            .any(|p| p == &placement.named_memory_profile)
+                        && h.state == "ready"
+                        && (req.region.is_empty() || h.region == req.region)
+                }) {
+                    return Err(err(
+                        StatusCode::CONFLICT,
+                        "capability_unsupported",
+                        "no host supports named memory templates in the requested region",
+                    ));
+                }
+            }
+            if needs_siblings {
+                if let Some(host) = bound.as_ref().and_then(|id| reg.hosts.get(id)) {
+                    require_siblings(host)?;
+                }
+            }
+            if needs_siblings
+                && bound.is_none()
+                && !reg.hosts.values().any(|host| {
+                    host.egress_siblings_v1 && (req.region.is_empty() || host.region == req.region)
+                })
+            {
                 return Err(err(
                     StatusCode::CONFLICT,
                     "capability_unsupported",
-                    "no host supports named memory templates in the requested region",
+                    "no host supports egress.siblings in the requested region",
                 ));
             }
-        }
-        if needs_siblings {
-            if let Some(host) = bound.as_ref().and_then(|id| reg.hosts.get(id)) {
-                require_siblings(host)?;
+            refuse_outside(&reg, bound.as_deref(), &req.namespace, &req.region)?;
+            refuse_under_pressure(&st, &reg, bound.as_deref(), &ask)?;
+            let chosen = source.or_else(|| {
+                reg.place(
+                    &req.namespace,
+                    &req.region,
+                    ask.memory_mb,
+                    ask.disk_mb,
+                    ask.cpu_millis,
+                    &placement,
+                )
+            });
+            let Some(host) = chosen.and_then(|id| reg.hosts.get(&id).cloned()) else {
+                return Err(no_room(&st, &reg, &ask));
+            };
+            if needs_siblings {
+                require_siblings(&host)?;
             }
+            if needs_named_memory {
+                require_memory_profile(
+                    &host,
+                    st.policy.down_after,
+                    &placement.named_memory_profile,
+                )?;
+            }
+            // A fork's new namespace lives where its source does, as a placement would pin it.
+            reg.pin(&req.namespace, &host.id);
+            if req.sandbox_seed.is_some() {
+                crate::create_replay::insert_route(
+                    &mut reg,
+                    crate::create_replay::request_route(&req, host.id.clone())?,
+                );
+            }
+            let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb, ask.cpu_millis);
+            reg.bind_hold_namespace(&host.id, id, &req.namespace);
+            Placement::Admitted(Box::new(host), first, id)
         }
-        if needs_siblings
-            && bound.is_none()
-            && !reg.hosts.values().any(|host| {
-                host.egress_siblings_v1 && (req.region.is_empty() || host.region == req.region)
-            })
-        {
-            return Err(err(
-                StatusCode::CONFLICT,
-                "capability_unsupported",
-                "no host supports egress.siblings in the requested region",
-            ));
+    };
+    let (host, first, hold) = match placement_result {
+        Placement::Replay(route) => {
+            return crate::create_replay::sandbox_lookup(&st, &req, &headers, route).await
         }
-        refuse_outside(&reg, bound.as_deref(), &req.namespace, &req.region)?;
-        refuse_under_pressure(&st, &reg, bound.as_deref(), &ask)?;
-        let chosen = source.or_else(|| {
-            reg.place(
-                &req.namespace,
-                &req.region,
-                ask.memory_mb,
-                ask.disk_mb,
-                ask.cpu_millis,
-                &placement,
-            )
-        });
-        let Some(host) = chosen.and_then(|id| reg.hosts.get(&id).cloned()) else {
-            return Err(no_room(&st, &reg, &ask));
-        };
-        if needs_siblings {
-            require_siblings(&host)?;
-        }
-        if needs_named_memory {
-            require_named_memory(&host, st.policy.down_after)?;
-        }
-        // A fork's new namespace lives where its source does, as a placement would pin it.
-        reg.pin(&req.namespace, &host.id);
-        let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb, ask.cpu_millis);
-        (host, first, id)
+        Placement::Admitted(host, first, hold) => (host, first, hold),
     };
     let hold = Held {
         st: &st,
@@ -456,11 +523,15 @@ pub(super) async fn first_refused(st: &AppState, namespace: &str, first: bool, a
 }
 
 fn require_named_memory(host: &HostRec, down_after: chrono::Duration) -> Result<(), Refusal> {
+    require_memory_profile(host, down_after, "init-ready-v1")
+}
+fn require_memory_profile(
+    host: &HostRec,
+    down_after: chrono::Duration,
+    profile: &str,
+) -> Result<(), Refusal> {
     if !host.named_memory_fork_v1
-        || !host
-            .named_memory_profiles
-            .iter()
-            .any(|p| p == "init-ready-v1")
+        || !host.named_memory_profiles.iter().any(|p| p == profile)
         || host.state != "ready"
         || Utc::now() - host.last_seen >= down_after
     {
@@ -551,4 +622,65 @@ async fn named_memory_size(
         )
     })?;
     Ok((size, snapshot.id))
+}
+
+async fn check_sandbox_selector(
+    st: &Arc<AppState>,
+    seed: &api::SandboxSeed,
+    size: api::Size,
+) -> Result<(), Refusal> {
+    let host = st
+        .reg
+        .lock()
+        .unwrap()
+        .host_of_machine(&seed.machine_id)
+        .cloned()
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "sandbox source host unavailable",
+            )
+        })?;
+    require_memory_profile(&host, st.policy.down_after, "sandbox-ready-v1")?;
+    let response = forward(
+        st,
+        &host,
+        Method::GET,
+        &format!("/v1/machines/{}/snapshots", seed.machine_id),
+        &HeaderMap::new(),
+        Bytes::new(),
+    )
+    .await;
+    let (parts, bytes) = read(response).await;
+    if !parts.status.is_success() {
+        return Err(err(
+            parts.status,
+            "invalid",
+            "sandbox snapshot listing failed",
+        ));
+    }
+    let snapshots: Vec<api::Snapshot> = serde_json::from_slice(&bytes).map_err(|_| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            "host_unreachable",
+            "invalid sandbox snapshot listing",
+        )
+    })?;
+    let valid = snapshots.iter().any(|s| {
+        s.id == seed.snapshot
+            && s.clone_generation.as_deref() == Some(&seed.generation)
+            && s.clone_profile.as_deref() == Some("sandbox-ready-v1")
+            && s.memory
+            && s.clone_size == Some(size)
+            && s.source_host.as_deref() == Some(&host.id)
+    });
+    if !valid {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "capability_unsupported",
+            "sandbox snapshot generation/profile/size/source-host mismatch",
+        ));
+    }
+    Ok(())
 }

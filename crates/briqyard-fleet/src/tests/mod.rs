@@ -32,6 +32,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         policy: Policy {
             require_egress_siblings: false,
             require_named_memory: false,
+            named_memory_profile: "init-ready-v1".into(),
             fill_ceiling: cfg.placement.fill_ceiling,
             down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
         },

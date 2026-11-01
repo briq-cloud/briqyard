@@ -24,6 +24,9 @@ impl Manager {
     /// The exact reservation crosses the accepted record boundary synchronously, before
     /// the worker can be queued or admission closed. The worker owns it through settlement.
     pub(super) fn spawn_make_admitted(&self, scope: crate::zfs::IoScope, e: Arc<Entry>, how: Make) {
+        if matches!(how, Make::Existing) {
+            return;
+        }
         let m = self.clone();
         tokio::spawn(async move {
             let warm = e.snapshot().warm_slot.is_some();
@@ -95,6 +98,15 @@ impl Manager {
         role: Option<Role>,
         warm_slot: Option<warm::Slot>,
     ) -> Result<(Arc<Entry>, Make), MError> {
+        let _sandbox_turn = if req.sandbox_seed.is_some() {
+            Some(self.inner.sandbox_create_lock.lock().await)
+        } else {
+            None
+        };
+        req.check_sandbox_seed().map_err(invalid)?;
+        if let Some(previous) = templates::sandbox::replay(self, &req)? {
+            return Ok((previous, Make::Existing));
+        }
         if warm_slot.is_some()
             && (req.fork.as_ref().is_none_or(|f| f.snapshot.is_none()) || role.is_some())
         {
@@ -178,7 +190,7 @@ impl Manager {
             error: String::new(),
             error_reason: String::new(),
             start: req.start.unwrap_or(true),
-            from_source: req.fork.is_some() || req.restore.is_some(),
+            from_source: req.fork.is_some() || req.restore.is_some() || req.sandbox_seed.is_some(),
             subnet_index: 0,
             host_num: 0,
             ip: String::new(),
@@ -220,7 +232,20 @@ impl Manager {
             rec.sleep = "never".into();
             rec.backup = Schedule::default();
             rec.entrypoint = Some(vec![]);
-            rec.cmd = Some(templates::builder_config().cmd);
+            if rec
+                .template_birth
+                .as_ref()
+                .is_some_and(|b| b.profile == guest::SANDBOX_READY_V1)
+            {
+                let recipe = self.sandbox_recipe(&req.image, req.size)?;
+                rec.cmd = Some(vec![]);
+                rec.volume = Some(api::VolumeSpec {
+                    size_gb: recipe.volume_gb,
+                    mount: "/work".into(),
+                });
+            } else {
+                rec.cmd = Some(templates::builder_config().cmd);
+            }
         }
         self.check_egress(&rec.egress, &rec.namespace, &rec.id)?;
         let mut src: Option<(Arc<Entry>, api::ForkSpec)> = None;
@@ -322,6 +347,10 @@ impl Manager {
                 }
             }
             src = Some((s, fork.clone()));
+        } else if let Some(seed) = &req.sandbox_seed {
+            let source = self.own_entry(&seed.machine_id)?;
+            let fork = self.sandbox_clone_spec(&req, &mut rec, &source.snapshot())?;
+            src = Some((source, fork));
         } else {
             rec.image = req.image.clone();
         }
@@ -333,6 +362,7 @@ impl Manager {
         }
         let t = self.ensure_namespace(&req.namespace).await?;
         let e = self.add_machine(rec, &t)?;
+        self.persist_sandbox_assignment(&e)?;
         if let Some(origin) = e.snapshot().clone_origin {
             let reserved = self
                 .reserve_named_clone(
@@ -355,17 +385,40 @@ impl Manager {
                     origin.configure.dns = vec![t.subnet.gateway().to_string()];
                     origin.configure.mac = templates::clone_mac(&ip)?;
                 }
+                Err(error) if req.sandbox_seed.is_some() => {
+                    e.set_state(state::ERROR, |r| {
+                        r.error = error.to_string();
+                        r.error_reason = reason::CREATE_FAILED.into();
+                        None
+                    });
+                    self.inner
+                        .store
+                        .put_durable("machines", &e.snapshot().id, &e.snapshot())?;
+                    return Ok((e, Make::Existing));
+                }
                 Err(error) => {
                     self.remove_machine(&e);
                     return Err(error);
                 }
             }
         }
+        self.freeze_sandbox_assignment(&e)?;
         let ip = e.snapshot().ip;
         let counted = self.inner.net.count(&ip).await.context("usage counters");
         // Written before the answer: a machine the caller was told of survives a restart, and
         // a restart finds it `creating` and fails it (`recover`).
         if let Err(err) = counted.and_then(|()| self.save(&e)) {
+            if req.sandbox_seed.is_some() {
+                e.set_state(state::ERROR, |r| {
+                    r.error = "sandbox assignment setup failed".into();
+                    r.error_reason = reason::CREATE_FAILED.into();
+                    None
+                });
+                self.inner
+                    .store
+                    .put_durable("machines", &e.snapshot().id, &e.snapshot())?;
+                return Ok((e, Make::Existing));
+            }
             self.remove_machine(&e);
             let _ = self.inner.net.uncount(&ip).await;
             let _ = self.inner.store.delete("machines", &e.snapshot().id);
@@ -400,6 +453,9 @@ impl Manager {
     }
 
     async fn make_owned(&self, e: &Arc<Entry>, how: Make) -> Result<(), MError> {
+        if matches!(how, Make::Existing) {
+            return Ok(());
+        }
         let reference = e.snapshot().image;
         let image = match how {
             Make::Image => {
@@ -445,6 +501,7 @@ impl Manager {
             Make::Restore(b, key) => self.receive_disks(e, b, key.as_deref()).await,
             Make::Fork(src, fork) => self.make_disks(e, Some(src.as_ref()), Some(fork)).await,
             Make::Image => self.make_disks(e, None, None).await,
+            Make::Existing => return Ok(()),
         };
         // A fork's or a restore's volume larger than its source's: its disk grows to it (ADR
         // 0040). A new volume is made at its size.
@@ -471,6 +528,7 @@ impl Manager {
                 Ev::normal(reason::FORKED, format!("forked from {from}"))
                     .data(json!({ "from": from }))
             }
+            Make::Existing => return Ok(()),
             Make::Image => Ev::normal(reason::CREATED, format!("created from {}", r.image))
                 .data(json!({ "image": r.image, "digest": r.image_digest })),
         };
@@ -711,17 +769,20 @@ impl Manager {
                 z.clone_snapshot(&s.root_dataset(), &origin.snapshot, &r.root_dataset())
                     .await?;
                 crate::profile::stage("named_memory_clone", "disk_clone", &r.id, 0, started, true);
-                return Ok(());
-            }
-            let snap = format!("fork-{}", r.id);
-            z.snapshot(&s.root_dataset(), &snap).await?;
-            z.clone_snapshot(&s.root_dataset(), &snap, &r.root_dataset())
-                .await?;
-            if r.volume.is_some() && z.exists(&s.data_dataset()).await? {
-                z.snapshot(&s.data_dataset(), &snap).await?;
-                z.clone_snapshot(&s.data_dataset(), &snap, &r.data_dataset())
+                if origin.sandbox.is_none() {
+                    return Ok(());
+                }
+            } else {
+                let snap = format!("fork-{}", r.id);
+                z.snapshot(&s.root_dataset(), &snap).await?;
+                z.clone_snapshot(&s.root_dataset(), &snap, &r.root_dataset())
                     .await?;
-                return Ok(());
+                if r.volume.is_some() && z.exists(&s.data_dataset()).await? {
+                    z.snapshot(&s.data_dataset(), &snap).await?;
+                    z.clone_snapshot(&s.data_dataset(), &snap, &r.data_dataset())
+                        .await?;
+                    return Ok(());
+                }
             }
         } else {
             z.clone_snapshot(
@@ -735,15 +796,26 @@ impl Manager {
             let dev = z
                 .create(&r.data_dataset(), (v.size_gb as u64) << 30)
                 .await?;
-            let out = tokio::process::Command::new("mkfs.ext4")
-                .args([
-                    "-q",
-                    "-F",
-                    "-L",
-                    "data",
-                    "-E",
-                    "lazy_itable_init=0,lazy_journal_init=0",
-                ])
+            if r.template_birth
+                .as_ref()
+                .is_some_and(|b| b.profile == guest::SANDBOX_READY_V1)
+            {
+                self.check_sandbox_disk(&r, &dev)?;
+                return Ok(());
+            }
+            let mut formatter = tokio::process::Command::new("mkfs.ext4");
+            formatter.args([
+                "-q",
+                "-F",
+                "-L",
+                "data",
+                "-E",
+                "lazy_itable_init=0,lazy_journal_init=0",
+            ]);
+            if r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some()) {
+                formatter.args(["-U", "random"]);
+            }
+            let out = formatter
                 .arg(&dev)
                 .output()
                 .await
@@ -754,6 +826,10 @@ impl Manager {
                     dev.display(),
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
+            }
+            if r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some()) {
+                std::fs::File::open(&dev)?.sync_all()?;
+                self.check_sandbox_disk(&r, &dev)?;
             }
         }
         Ok(())

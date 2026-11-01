@@ -137,6 +137,7 @@ pub struct HostRec {
 #[derive(Clone, Debug, Default)]
 pub struct Hold {
     id: u64,
+    namespace: String,
     memory_mb: u32,
     cpu_millis: u32,
     disk_mb: u64,
@@ -308,6 +309,7 @@ pub struct Policy {
     /// This placement requires the explicit namespace sibling capability.
     pub require_egress_siblings: bool,
     pub require_named_memory: bool,
+    pub named_memory_profile: String,
     /// A host above this share of its memory takes no new namespace.
     pub fill_ceiling: f64,
     /// A host silent for this long is down.
@@ -319,6 +321,7 @@ impl Default for Policy {
         Self {
             require_egress_siblings: false,
             require_named_memory: false,
+            named_memory_profile: "init-ready-v1".into(),
             fill_ceiling: 0.85,
             down_after: Duration::seconds(60),
         }
@@ -331,6 +334,11 @@ pub struct Registry {
     /// namespace → host id. A namespace's machines share a host, so its network needs no overlay.
     #[serde(alias = "tenants")]
     pub namespaces: HashMap<String, String>,
+    /// Dispatch intents survive network cleanup and host removal without holding resources.
+    #[serde(default)]
+    pub sandbox_requests: HashMap<String, crate::create_replay::SandboxRoute>,
+    #[serde(default)]
+    pub namespace_versions: HashMap<String, u64>,
     /// machine id → host id, learned from creates and listings.
     pub machines: HashMap<String, String>,
     /// endpoint id → host id, learned the same way.
@@ -524,7 +532,7 @@ impl Registry {
                                 || (h.named_memory_fork_v1
                                     && h.named_memory_profiles
                                         .iter()
-                                        .any(|p| p == "init-ready-v1")))
+                                        .any(|p| p == &policy.named_memory_profile)))
                             && (region.is_empty() || h.region == region)
                             && h.free_memory_mb() >= need_mb
                             && h.has_disk(need_disk_mb)
@@ -564,6 +572,23 @@ impl Registry {
         self.last_hold
     }
 
+    pub fn bind_hold_namespace(&mut self, host: &str, id: u64, namespace: &str) {
+        if let Some(hold) = self
+            .hosts
+            .get_mut(host)
+            .and_then(|h| h.holds.iter_mut().find(|hold| hold.id == id))
+        {
+            hold.namespace = namespace.into();
+            self.note_namespace_create(namespace);
+        }
+    }
+    pub fn namespace_inflight(&self, namespace: &str) -> bool {
+        self.hosts.values().any(|host| {
+            host.holds
+                .iter()
+                .any(|hold| hold.namespace == namespace && hold.made.is_none())
+        })
+    }
     /// The host made what hold `id` held, at `at`: the next report received after that counts
     /// it, and the hold goes then.
     pub fn made(&mut self, host: &str, id: u64, at: DateTime<Utc>) {
@@ -608,6 +633,14 @@ impl Registry {
         self.pinned_at.remove(namespace);
     }
 
+    /// Advance placement identity on every admitted create, including an existing network.
+    pub fn note_namespace_create(&mut self, namespace: &str) {
+        let version = self.namespace_versions.entry(namespace.into()).or_default();
+        *version = version.saturating_add(1);
+    }
+    pub fn namespace_version(&self, namespace: &str) -> u64 {
+        *self.namespace_versions.get(namespace).unwrap_or(&0)
+    }
     pub fn host_of_namespace(&self, namespace: &str) -> Option<&HostRec> {
         self.namespaces
             .get(namespace)

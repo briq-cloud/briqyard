@@ -14,6 +14,7 @@ mod machine;
 mod names;
 mod namespaces;
 mod probes;
+mod sandbox;
 mod spec;
 #[cfg(test)]
 mod tests;
@@ -29,5 +30,6 @@ pub use machine::*;
 pub use names::*;
 pub use namespaces::*;
 pub use probes::*;
+pub use sandbox::*;
 pub use spec::*;
 pub use warm::*;

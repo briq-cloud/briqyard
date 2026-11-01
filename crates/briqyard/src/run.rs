@@ -86,6 +86,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     fork: None,
                     restore: None,
                     template_build: a.template_build.clone(),
+                    sandbox_seed: None,
                 };
                 let m: api::Machine = c.call(POST, "/v1/machines", Some(&req)).await?;
                 let m = match a.detach || a.no_start {

@@ -2,6 +2,11 @@
 use super::*;
 
 pub(super) fn setup(cfg: &Config) -> Result<()> {
+    sandbox_device::prepare(
+        cfg.sandbox_device
+            .as_ref()
+            .context("sandbox data topology missing")?,
+    )?;
     for volume in &cfg.mounts {
         let path = Path::new(&volume.path);
         let seed = stage(path)?;

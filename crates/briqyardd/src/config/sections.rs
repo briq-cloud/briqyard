@@ -18,6 +18,8 @@ pub struct Templates {
     /// Paused pool rollout, requiring the same exact qualified template inputs.
     pub warm_pools: bool,
     pub warm_policy: WarmPolicy,
+    /// Operator-approved pristine public sandbox recipes; empty is disabled.
+    pub sandbox_recipes: Vec<SandboxRecipe>,
 }
 
 /// The thresholds of the host's conditions (ADR 0021), in percent.

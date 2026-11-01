@@ -108,6 +108,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/metrics", get(metrics))
         .route("/v1/status", get(status))
         .route("/v1/machines", get(list_machines).post(create_machine))
+        .route("/v1/sandbox-requests/lookup", post(sandbox_request_lookup))
         .route(
             "/v1/machines/:id",
             get(get_machine)

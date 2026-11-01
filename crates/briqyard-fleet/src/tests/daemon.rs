@@ -28,9 +28,13 @@ pub(super) struct Daemon {
     /// Namespaces' quotas (ADR 0025).
     pub(super) quotas: Mutex<Vec<(String, api::Quota)>>,
     /// Run by a create before it answers: a test's look at the fleet mid-forward.
+    pub(super) on_delete_namespace: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(super) on_create: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(super) creates: Mutex<Vec<api::CreateMachineRequest>>,
     pub(super) egress_siblings: std::sync::atomic::AtomicBool,
+    pub(super) sandbox_lookup: Mutex<Option<(StatusCode, serde_json::Value)>>,
+    pub(super) sandbox_lookups: Mutex<Vec<api::SandboxRequestLookup>>,
+    pub(super) snapshots: Mutex<Vec<api::Snapshot>>,
     pub(super) backup_records: Mutex<Vec<serde_json::Value>>,
 }
 
@@ -150,9 +154,13 @@ pub(super) async fn start_daemon_on(
             .unwrap_or_default(),
         conditions: Mutex::new(vec![]),
         quotas: Mutex::new(vec![]),
+        on_delete_namespace: Mutex::new(None),
         on_create: Mutex::new(None),
         creates: Mutex::new(vec![]),
         egress_siblings: std::sync::atomic::AtomicBool::new(true),
+        sandbox_lookup: Mutex::new(None),
+        sandbox_lookups: Mutex::new(vec![]),
+        snapshots: Mutex::new(vec![]),
         backup_records: Mutex::new(vec![]),
     });
     type D = State<Arc<Daemon>>;
@@ -250,6 +258,9 @@ pub(super) async fn start_daemon_on(
         StatusCode::NO_CONTENT.into_response()
     }
     async fn delete_namespace(State(d): D, Path(id): Path<String>) -> Response {
+        if let Some(callback) = d.on_delete_namespace.lock().unwrap().as_ref() {
+            callback();
+        }
         if id == d.keep_namespace {
             return err(StatusCode::CONFLICT, "busy", "namespace has machines").into_response();
         }
@@ -473,6 +484,17 @@ pub(super) async fn start_daemon_on(
         (StatusCode::CREATED, Json(b)).into_response()
     }
     /// The store is shared: every host answers for every machine id, with nothing here.
+    async fn sandbox_lookup(State(d): D, Json(query): Json<api::SandboxRequestLookup>) -> Response {
+        d.sandbox_lookups.lock().unwrap().push(query);
+        let (status, body) = d.sandbox_lookup.lock().unwrap().clone().unwrap_or((
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"code":"sandbox_request_unknown","error":"not accepted"}),
+        ));
+        (status, Json(body)).into_response()
+    }
+    async fn snapshots(State(d): D) -> Json<Vec<api::Snapshot>> {
+        Json(d.snapshots.lock().unwrap().clone())
+    }
     async fn backups(State(d): D) -> Json<Vec<serde_json::Value>> {
         Json(d.backup_records.lock().unwrap().clone())
     }
@@ -638,6 +660,7 @@ pub(super) async fn start_daemon_on(
             post(warm_claim),
         )
         .route("/v1/status", get(status))
+        .route("/v1/sandbox-requests/lookup", post(sandbox_lookup))
         .route("/v1/namespaces", get(namespaces))
         // What the fleet polls, as every daemon serves it (ADR 0055).
         .route("/v1/tenants", get(namespaces))
@@ -657,6 +680,7 @@ pub(super) async fn start_daemon_on(
         .route("/v1/machines/:id/logs", get(logs))
         .route("/v1/machines/:id/exec", get(exec_session))
         .route("/v1/namespaces/:id/quota", get(get_quota).put(put_quota))
+        .route("/v1/machines/:id/snapshots", get(snapshots))
         .route("/v1/machines/:id/backups", get(backups).post(make_backup))
         .route(
             "/v1/machines/:id/backups/:backup",

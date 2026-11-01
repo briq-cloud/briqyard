@@ -17,11 +17,8 @@ impl Manager {
                 "template seal requires a reviewed builder and a full memory snapshot",
             ));
         }
-        if !self
-            .named_memory_profiles()
-            .iter()
-            .any(|p| p == guest::INIT_READY_V1)
-        {
+        let profile = &r.template_birth.as_ref().unwrap().profile;
+        if !self.named_memory_profiles().iter().any(|p| p == profile) {
             return Err(invalid(
                 "reviewed named memory profile is disabled or unavailable",
             ));
@@ -54,7 +51,7 @@ impl Manager {
             .ok_or_else(|| invalid("template init lacks clone barrier protocol"))?;
         if report.main_pid != 0
             || status.protocol != 1
-            || status.profile != guest::INIT_READY_V1
+            || &status.profile != profile
             || status.stage != "builder"
         {
             return Err(invalid(
@@ -134,7 +131,11 @@ impl Manager {
                 image_key: r.image_key.clone(),
                 size: r.size,
                 root_disk_gb: self.inner.cfg.root_disk_gb,
-                config: builder_config(),
+                config: if birth.profile == guest::SANDBOX_READY_V1 {
+                    sandbox::builder_config(self.sandbox_recipe(&r.image, r.size)?.device())
+                } else {
+                    builder_config()
+                },
             },
             state: fingerprint(&files[0])?,
             memory: fingerprint(&files[1])?,

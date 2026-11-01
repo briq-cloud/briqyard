@@ -7,6 +7,7 @@ mod backup;
 mod bootstrap;
 mod config;
 mod create;
+mod create_replay;
 mod forward;
 mod hosts;
 mod join;
@@ -292,6 +293,7 @@ async fn run(args: Args) -> Result<()> {
     let policy = Policy {
         require_egress_siblings: false,
         require_named_memory: false,
+        named_memory_profile: "init-ready-v1".into(),
         fill_ceiling: cfg.placement.fill_ceiling,
         down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
     };

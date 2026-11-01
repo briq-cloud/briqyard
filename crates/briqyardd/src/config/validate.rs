@@ -2,6 +2,7 @@ use super::*;
 
 impl Config {
     pub(super) fn validate(&self) -> Result<()> {
+        self.check_sandbox_recipes()?;
         self.templates
             .warm_policy
             .check(self.templates.warm_pools)?;

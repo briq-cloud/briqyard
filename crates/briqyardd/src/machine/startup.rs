@@ -51,6 +51,7 @@ impl Manager {
         let inner = Arc::new(Inner {
             stats: Stats::default(),
             warm_lock: tokio::sync::Mutex::new(()),
+            sandbox_create_lock: tokio::sync::Mutex::new(()),
             warm_names: Mutex::new(HashMap::new()),
             warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
             warm_sample: Mutex::new(None),
@@ -201,6 +202,7 @@ impl Manager {
                 .unwrap()
                 .insert(id, Entry::new(r, self.inner.events.clone()));
         }
+        self.recover_sandbox_assignments()?;
         self.drop_renamed_leftovers()?;
         // An endpoint port outside the range would listen where the daemon's table does not
         // hold it for `allowed_clients`: refused, like a namespace outside `network.range`.

@@ -124,8 +124,7 @@ pub(super) fn pristine(c: &Config) -> bool {
 
 fn fingerprint(request: &DestinationBind) -> Result<String> {
     let mut hash = Sha256::new();
-    hash.update(b"briqyard:sandbox-ready-v1:destination\0");
-    hash.update(serde_json::to_vec(request)?);
+    hash.update(request.fingerprint_bytes()?);
     Ok(hex::encode(hash.finalize()))
 }
 
@@ -265,7 +264,7 @@ mod tests {
 #[cfg(test)]
 mod replay_tests {
     use super::*;
-    fn request() -> DestinationBind {
+    pub(super) fn request() -> DestinationBind {
         let identity = guest::CloneConfigure {
             generation: "sandbox-1".into(),
             hostname: "sandbox-1".into(),
@@ -288,6 +287,11 @@ mod replay_tests {
                     path: "/work".into(),
                     fstype: "ext4".into(),
                 }],
+                sandbox_device: Some(guest::SandboxDevice {
+                    bytes: 2 << 30,
+                    logical_sector_bytes: 512,
+                    drive_id: "data".into(),
+                }),
                 ..Default::default()
             },
             identity,
@@ -415,5 +419,37 @@ mod replay_tests {
         assert!(files::install(root.path(), "/dir/receipt", 0o600, b"bad")
             .await
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod device_failure_tests {
+    use super::*;
+    #[tokio::test]
+    async fn block_cache_invalidation_failure_cannot_ack_or_activate() {
+        // Use the same valid payload fixture as replay coverage.
+        let request = super::replay_tests::request();
+        let st = testutil::state_with(Config {
+            template_profile: Some(SANDBOX_READY_V1.into()),
+            ..Default::default()
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let receipt = directory.path().join("receipt");
+        let file = tempfile::tempfile().unwrap();
+        let response = bind_with(&st, Some(request), &receipt, |_| async {
+            sandbox_device::reset_cache(&file, || Ok("0 0".into()))?;
+            panic!("regular file cannot pass block invalidation")
+        })
+        .await;
+        assert_eq!(response.kind, "error");
+        assert!(response.sha256.is_empty());
+        assert!(receipt.exists());
+        assert!(!st.clone_gate.lock().await.allows("exec"));
+        assert_eq!(
+            clone::activate(&st, "sandbox-1", Some(1_793_404_800))
+                .await
+                .kind,
+            "error"
+        );
     }
 }

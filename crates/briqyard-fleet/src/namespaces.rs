@@ -106,7 +106,21 @@ pub(super) async fn delete_namespace(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Refusal> {
-    let host = st.reg.lock().unwrap().host_of_namespace(&id).cloned();
+    let (host, version) = {
+        let reg = st.reg.lock().unwrap();
+        if reg.namespace_inflight(&id) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "conflict",
+                "namespace create is in progress",
+            ));
+        }
+        (
+            reg.host_of_namespace(&id).cloned(),
+            reg.namespace_version(&id),
+        )
+    };
+
     let host = match host {
         Some(h) => h,
         None => return Ok(StatusCode::NO_CONTENT.into_response()),
@@ -121,7 +135,15 @@ pub(super) async fn delete_namespace(
     )
     .await;
     if resp.status().is_success() {
-        st.reg.lock().unwrap().unpin(&id);
+        {
+            let mut reg = st.reg.lock().unwrap();
+            if reg.namespaces.get(&id) == Some(&host.id)
+                && reg.namespace_version(&id) == version
+                && version != u64::MAX
+            {
+                reg.unpin(&id);
+            }
+        }
         st.save_after_host().await;
     }
     Ok(resp)
@@ -197,7 +219,9 @@ pub(super) async fn put_on_namespace(
         let Some(host) = chosen.and_then(|h| reg.hosts.get(&h).cloned()) else {
             return Err(no_room(st, &reg, &ask));
         };
-        let id = reg.hold(&host.id, need_mb, need_disk_mb, need_cpu_millis);
+        let hold = reg.hold(&host.id, need_mb, need_disk_mb, need_cpu_millis);
+        reg.bind_hold_namespace(&host.id, hold, id);
+        let id = hold;
         (host, first, id)
     };
     let hold = Held {
