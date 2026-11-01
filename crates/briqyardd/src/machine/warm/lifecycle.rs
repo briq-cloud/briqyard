@@ -33,6 +33,7 @@ impl Manager {
             return;
         };
         let enabled = self.require_warm_pools().is_ok();
+        let _ = self.warm_probe().await;
         let pools = match self.inner.store.list::<Pool>(POOLS) {
             Ok(pools) => pools,
             Err(error) => {
@@ -74,6 +75,10 @@ impl Manager {
                 }
                 if current.is_err()
                     || remaining >= usize::from(pool.desired)
+                    || self.catalog_over_limit(&pool).unwrap_or(true)
+                    || self
+                        .policy_blocked(&self.inner.machines.lock().unwrap(), None)
+                        .map_or(true, |reason| reason.is_some())
                     || !matches!(
                         r.state.as_str(),
                         state::CREATING | state::STARTING | state::WARM
@@ -81,6 +86,10 @@ impl Manager {
                 {
                     if let Err(error) = self.destroy_machine(&r.id, None).await {
                         pool.error = error.to_string();
+                        pool.blocked = Some(api::WarmBlocked {
+                            reason: "cleanup".into(),
+                            message: pool.error.clone(),
+                        });
                         blocked = true;
                     }
                 } else {
@@ -89,21 +98,36 @@ impl Manager {
             }
             if let Err(error) = current {
                 pool.error = error.to_string();
+                if !blocked {
+                    pool.blocked = Some(policy::failure(&error));
+                }
                 let _ = self.pool_save(&pool);
                 continue;
             }
             if !blocked && remaining < usize::from(pool.desired) {
                 if let Err(error) = self.fill_warm_slot(&pool).await {
                     pool.error = error.to_string();
+                    pool.blocked = Some(policy::failure(&error));
+                    self.inner
+                        .stats
+                        .warm
+                        .lock()
+                        .unwrap()
+                        .blocked(&policy::failure(&error).reason);
                 } else {
                     pool.error.clear();
+                    pool.blocked = None;
                 }
+            } else if !blocked {
+                pool.error.clear();
+                pool.blocked = None;
             }
             let _ = self.pool_save(&pool);
         }
     }
 
     async fn fill_warm_slot(&self, pool: &Pool) -> Result<(), MError> {
+        self.warm_probe().await?;
         let name = format!("warm-{}", new_id("s").replace('_', "-"));
         let (e, how) = self.allocate_warm_slot(pool, name, None).await?;
         self.spawn_make_admitted(self.inner.zfs.io_scope()?, e, how);
@@ -157,6 +181,12 @@ impl Manager {
     /// Rebuild pending-name holds before admitting requests after a daemon restart.
     pub(in crate::machine) fn recover_warm_names(&self) -> Result<()> {
         let pools = self.inner.store.list::<Pool>(POOLS)?;
+        *self.inner.warm_pool_cache.lock().unwrap() = Some(
+            pools
+                .iter()
+                .map(|pool| Ok((key(&pool.namespace, &pool.name)?, pool.clone())))
+                .collect::<Result<_, MError>>()?,
+        );
         let machines = self.inner.machines.lock().unwrap();
         let mut names = self.inner.warm_names.lock().unwrap();
         for pool in pools {

@@ -143,6 +143,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/backups", get(all_backups))
         .route("/v1/namespaces/:namespace/warm-pools", get(warm_pools))
+        .route("/v1/namespaces/:namespace/warm-catalog", get(warm_catalog))
+        .route(
+            "/v1/namespaces/:namespace/warm-catalog/:id",
+            put(put_warm_catalog),
+        )
         .route(
             "/v1/namespaces/:namespace/warm-pools/:name",
             put(put_warm_pool).delete(delete_warm_pool),

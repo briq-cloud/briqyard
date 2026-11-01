@@ -17,6 +17,7 @@ pub struct Templates {
     pub init_ready_init_sha256: String,
     /// Paused pool rollout, requiring the same exact qualified template inputs.
     pub warm_pools: bool,
+    pub warm_policy: WarmPolicy,
 }
 
 /// The thresholds of the host's conditions (ADR 0021), in percent.

@@ -2,6 +2,15 @@ use super::*;
 
 #[derive(Subcommand)]
 pub(super) enum WarmCmd {
+    /// Read the operator catalog, resource charges and blocked reasons.
+    Catalog { namespace: String },
+    /// Set desired slots using a configured catalog entry.
+    Desired {
+        namespace: String,
+        entry: String,
+        #[arg(long)]
+        desired: u16,
+    },
     /// List paused template pools and their actual slot counts.
     Ls { namespace: String },
     /// Set the desired ready count of one immutable qualified template.
@@ -41,6 +50,32 @@ pub(super) async fn run(c: &Client, cmd: WarmCmd) -> Result<()> {
         Ok(())
     };
     match cmd {
+        WarmCmd::Catalog { namespace } => {
+            validate(&namespace, None)?;
+            print_json(
+                &c.call::<api::WarmCatalogStatus>(
+                    Method::GET,
+                    &format!("/v1/namespaces/{namespace}/warm-catalog"),
+                    NONE,
+                )
+                .await?,
+            );
+        }
+        WarmCmd::Desired {
+            namespace,
+            entry,
+            desired,
+        } => {
+            validate(&namespace, Some(&entry))?;
+            print_json(
+                &c.call::<api::WarmPool>(
+                    Method::PUT,
+                    &format!("/v1/namespaces/{namespace}/warm-catalog/{entry}"),
+                    Some(&api::WarmDesiredRequest { desired }),
+                )
+                .await?,
+            );
+        }
         WarmCmd::Ls { namespace } => {
             validate(&namespace, None)?;
             print_json(

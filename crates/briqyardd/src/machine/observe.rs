@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// Resolve configured or automatic capacity identically for validation and admission.
+pub(crate) fn host_capacity(c: crate::config::Capacity) -> api::Capacity {
+    let mut cap = api::Capacity {
+        cpu_millis: None,
+        memory_mb: if c.memory_mb > 0 {
+            c.memory_mb
+        } else {
+            default_memory_mb(host_memory_mb(), c.reserved_memory_mb, arc_max_mb())
+        },
+        vcpus: if c.vcpus > 0 {
+            c.vcpus
+        } else {
+            let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+            default_vcpus(threads as u32, c.reserved_threads)
+        },
+    };
+    cap.cpu_millis = Some(cap.cpu_millis());
+    cap
+}
+
 /// A parked slot is resident only while its recorded VMM is still bound and live.
 /// Ordinary starts retain their existing reporting behavior until they reach running.
 pub(super) fn resident(r: &Record, live: Option<&fc::Vm>) -> bool {
@@ -131,7 +151,11 @@ impl Manager {
             .cloned()
             .collect();
         entries.sort_by_key(|e| e.snapshot().id);
-        let mut host = metrics::Host::default();
+        let mut host = metrics::Host {
+            warm: self.warm_metrics(),
+            warm_operations: self.inner.stats.warm.lock().unwrap().clone(),
+            ..Default::default()
+        };
         let machines: Vec<metrics::Machine> = entries
             .iter()
             .map(|e| {
@@ -275,23 +299,7 @@ impl Manager {
     }
 
     pub fn capacity(&self) -> api::Capacity {
-        let c = self.inner.cfg.capacity;
-        let mut cap = api::Capacity {
-            cpu_millis: None,
-            memory_mb: if c.memory_mb > 0 {
-                c.memory_mb
-            } else {
-                default_memory_mb(host_memory_mb(), c.reserved_memory_mb, arc_max_mb())
-            },
-            vcpus: if c.vcpus > 0 {
-                c.vcpus
-            } else {
-                let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
-                default_vcpus(threads as u32, c.reserved_threads)
-            },
-        };
-        cap.cpu_millis = Some(cap.cpu_millis());
-        cap
+        host_capacity(self.inner.cfg.capacity)
     }
 
     /// Where the ingress adds the bytes it passes to and from a machine's endpoints.

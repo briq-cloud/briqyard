@@ -3,6 +3,58 @@
 What an operator needs: how to install a host, what the configuration means, where things
 live, how to upgrade, what to watch, and what to do when something is off.
 
+## Warm catalog
+
+Warm pools are disabled by default. Configure qualified immutable templates and explicit
+host ceilings before requesting slots. The type is an operator label; the size must match
+the template recipe exactly. A different size needs its own compatible template.
+
+```yaml
+templates:
+  enabled: true
+  warm_pools: true
+  init_ready_init_sha256: "<qualified-init-sha256>"
+  warm_policy:
+    budget: {memory_mb: 8192, cpu_millis: 4000, root_disk_gb: 64}
+    headroom: {memory_mb: 4096, cpu_millis: 2000, disk_free_gb: 32}
+    min_mem_available_mb: 4096
+    max_fills: 1
+    catalog:
+      - id: shell-small
+        namespace: team
+        type: shell
+        source_machine: m_source
+        snapshot: s_qualified
+        generation: g_qualified
+        size: {memory_mb: 1024, vcpus: 1, cpu_millis: 1000}
+        max_ready: 4
+```
+
+Apply YAML through the usual validated daemon handover. Bootstrap preserves operator
+configuration. Invalid configuration prevents handover; an API request cannot raise
+budgets or catalog ceilings. Budget plus RAM/CPU headroom must fit resolved host capacity.
+
+```sh
+briqyard warm-pool catalog team
+briqyard warm-pool desired team shell-small --desired 2
+```
+
+The corresponding API is `GET /v1/namespaces/team/warm-catalog` and
+`PUT /v1/namespaces/team/warm-catalog/shell-small` with `{"desired":2}`. Read the catalog
+for configured ceilings, pool desired/creating/ready/claimed counts, aggregate full charges,
+measurement age, draining count and blocked reasons. Desired is an upper target.
+
+Creating, paused and failed-but-unreleased slots reserve full recipe RAM, CPU millis and
+logical root disk. Copy-on-write sharing does not reduce these charges. Refill requires a
+fresh `MemAvailable` and pool-space sample, preserves absolute and percentage disk floors,
+and respects namespace quotas and aggregate concurrent-fill/entry limits.
+
+Headroom applies when warm slots are admitted. Ordinary workloads may consume it later:
+refill then stops and unused slots drain, while claimed and ordinary guests continue.
+Continuous free headroom is not guaranteed when ordinary workloads alone consume it.
+Lowered limits and removed entries also drain unused slots through normal cleanup. Charges
+remain until cleanup completes. Catalog entries never enable cross-namespace reuse.
+
 ## Install
 
 A Linux server with KVM (`/dev/kvm`), Ubuntu 26.04 (every suite runs there; 24.04 is untested).
@@ -372,8 +424,17 @@ snapshot, or is whole.
   | `briqyard_machine_restarts_total` | same | restarts by its policy |
   | `briqyard_machine_state` | same, `state` | 1, one series per machine |
   | `briqyard_machine_boot_seconds` | same | its last start, `starting` to `running` |
+  | `briqyard_warm_pool_{desired,max_ready,shortfall,slots,blocked}`, `_reserved_{memory_bytes,cpu_millis,root_disk_bytes}` | namespace, pool, catalog, type, exact numeric size; bounded state/reason | actual warm counts, upper targets and full unclaimed reservations |
+  | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the absolute free-space floor |
+  | `briqyard_warm_{memory_available_bytes,disk_free_bytes,probe_age_seconds,probe_available,probe_valid,accounting_available}` | | cached physical availability, sample age/validity and accounting availability; a scrape runs no probe |
+  | `briqyard_warm_operations_total`, `_operation_seconds_total`, `_operation_last_seconds` | `operation="prepare\|claim"`, `outcome="success\|miss\|failure"` | host prepare-worker and claim-to-host-readiness observations; excludes fleet and public API transport |
+  | `briqyard_warm_fill_blocked_total` | bounded `reason` | actual refused refill attempts |
 
   Counters count from the daemon's start. Alert on `briqyard_host_condition == 1`.
+  Warm reservations include creating, paused, failed and unreleased slots; they are not
+  resident memory or physical disk use. Counts use current records and cached durable claim
+  receipts. Unknown accounting is omitted, with `accounting_available=0`. Probe values and
+  durations remain absent until observed. Host readiness does not measure a public API call.
 - `briqyard top [--namespace T]`: running machines by CPU, with memory, disk and network rates over
   the last 15 s (`GET /v1/top`; through the fleet, a namespace's host or every host).
 - Conditions (ADR 0021): `memory_pressure`, `disk_pressure`, `storage_stalled` (ADR 0046) in
@@ -549,6 +610,11 @@ namespaces (the busiest, each machine's series, crash loops, egress drops, use p
 anonymous access, no sign-up; the dashboards are the repository's (`hack/monitoring/dashboards`),
 read-only in Grafana. Point the reverse proxy at `GRAFANA_LISTEN` only after the first run: Grafana
 starts with its default `admin` password, which the script replaces seconds later, on loopback.
+
+The host dashboard's warm section follows the selected host. It shows pool counts by type
+and exact size, reservations against operator limits, cached availability and probe age,
+blocked reasons and host operation timings. Empty pools and unobserved timings can have no
+series. Dashboard history starts with real scrapes and operations after the feature is installed.
 
 **Alerts to Slack**: a webhook in `/etc/briqyard-monitoring/alerting.env` (root's, `0600`,
 written with an editor), then the script again:

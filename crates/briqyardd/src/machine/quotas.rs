@@ -70,7 +70,7 @@ pub(super) fn over_quota(
     .into_iter()
     .find_map(|(resource, limit, used, need)| {
         let limit = limit?;
-        (need > 0 && used.saturating_add(need) > limit).then(|| Exceeded {
+        (need > 0 && used.checked_add(need).is_none_or(|total| total > limit)).then(|| Exceeded {
             namespace: namespace.into(),
             resource,
             limit,
@@ -114,11 +114,11 @@ pub(super) fn namespace_use(
         let r = e.rec.lock().unwrap();
         if r.namespace == namespace {
             let n = quota_need(&r, false);
-            u.machines += n.machines;
-            u.memory_mb += n.memory_mb;
+            u.machines = u.machines.saturating_add(n.machines);
+            u.memory_mb = u.memory_mb.saturating_add(n.memory_mb);
             u.cpu_millis = Some(u.cpu_millis().saturating_add(n.cpu_millis()));
-            u.vcpus += n.vcpus;
-            u.disk_gb += n.disk_gb;
+            u.vcpus = u.vcpus.saturating_add(n.vcpus);
+            u.disk_gb = u.disk_gb.saturating_add(n.disk_gb);
         }
     }
     u
@@ -176,9 +176,9 @@ pub(super) fn committed(machines: &HashMap<String, Arc<Entry>>) -> (api::Capacit
         let r = e.rec.lock().unwrap();
         if commits_memory(&r) {
             up += usize::from(holds_memory(&r.state));
-            used.memory_mb += r.size.memory_mb;
+            used.memory_mb = used.memory_mb.saturating_add(r.size.memory_mb);
             used.cpu_millis = Some(used.cpu_millis().saturating_add(r.size.cpu_millis()));
-            used.vcpus += r.size.vcpus;
+            used.vcpus = used.vcpus.saturating_add(r.size.vcpus);
         }
     }
     (used, up)

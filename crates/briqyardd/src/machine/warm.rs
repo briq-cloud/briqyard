@@ -4,10 +4,12 @@ use sha2::{Digest, Sha256};
 
 mod claims;
 mod lifecycle;
+mod policy;
+mod telemetry;
+pub(super) use policy::Sample;
 #[cfg(test)]
 mod tests;
 const POOLS: &str = "warm-pools";
-const MAX_DESIRED: u16 = 32;
 const MAX_CLAIMS: usize = 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,7 +26,7 @@ struct Claim {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Pool {
+pub(super) struct Pool {
     namespace: String,
     name: String,
     source_machine: String,
@@ -38,6 +40,8 @@ struct Pool {
     claims: BTreeMap<String, Claim>,
     #[serde(default)]
     error: String,
+    #[serde(default)]
+    blocked: Option<api::WarmBlocked>,
 }
 
 fn key(namespace: &str, name: &str) -> Result<String, MError> {
@@ -91,10 +95,16 @@ impl Manager {
     }
 
     fn pool_save(&self, pool: &Pool) -> Result<(), MError> {
-        Ok(self
-            .inner
+        self.inner
             .store
-            .put_durable(POOLS, &key(&pool.namespace, &pool.name)?, pool)?)
+            .put_durable(POOLS, &key(&pool.namespace, &pool.name)?, pool)?;
+        self.inner
+            .warm_pool_cache
+            .lock()
+            .unwrap()
+            .get_or_insert_with(BTreeMap::new)
+            .insert(key(&pool.namespace, &pool.name)?, pool.clone());
+        Ok(())
     }
 
     fn pool_artifact(
@@ -115,6 +125,7 @@ impl Manager {
     }
 
     fn pool_current(&self, pool: &Pool) -> Result<(), MError> {
+        self.catalog_entry(pool)?;
         if pool.closed {
             return Err(MError::Conflict("warm pool is closed".into()));
         }
@@ -210,9 +221,6 @@ impl Manager {
         let _turn = self.inner.warm_lock.lock().await;
         self.require_warm_pools()?;
         let pool_key = key(namespace, name)?;
-        if request.desired > MAX_DESIRED {
-            return Err(invalid("warm pool desired count exceeds32"));
-        }
         let (snapshot, artifact) =
             self.pool_artifact(namespace, &request.source_machine, &request.snapshot)?;
         let fp = fingerprint(&artifact)?;
@@ -241,9 +249,14 @@ impl Manager {
                 closed: false,
                 claims: BTreeMap::new(),
                 error: String::new(),
+                blocked: None,
             },
         };
         let increased = request.desired > pool.desired;
+        let entry = self.catalog_entry(&pool)?;
+        if request.desired > entry.max_ready {
+            return Err(invalid("catalog: desired exceeds configured max_ready"));
+        }
         pool.desired = request.desired;
         self.pool_save(&pool)?;
         let view = self.pool_view(&pool);

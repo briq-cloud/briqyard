@@ -5,7 +5,8 @@
 # With $PROMETHEUS_URL, that Prometheus scrapes every target, up exactly when its host answers.
 # With $GRAFANA_URL and $GRAFANA_PASSWORD_FILE (the admin's) too, every query of every panel of
 # hack/monitoring/dashboards returns data over the last 30 minutes, the host dashboard's for
-# $CHECK_HOST (default: the first host up). Changes nothing.
+# $CHECK_HOST (default: the first host up). Unobserved warm data may be absent, checked
+# against the host's explicit accounting/pool/probe counters. Changes nothing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7430}
@@ -20,6 +21,27 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+
+# Only explicit host evidence permits absent warm observations. Missing support,
+# unavailable accounting and malformed queries must still fail the check.
+warm_optional() {
+  local successful_operations="sum(briqyard_warm_operations_total{host=\"$host\",outcome=\"success\"})"
+  [[ "$1" == *briqyard_warm_* ]] || return 1
+  [ "$(up "briqyard_warm_accounting_available{host=\"$host\"}")" = 1 ] || return 1
+  case "$1" in
+    *briqyard_warm_pool_*) [ "$(up "briqyard_warm_pools{host=\"$host\"}")" = 0 ] && return 0 ;;
+  esac
+  case "$1" in
+    *briqyard_warm_probe_age_seconds*|*briqyard_warm_memory_available_bytes*|*briqyard_warm_disk_free_bytes*)
+      [ "$(up "briqyard_warm_probe_available{host=\"$host\"}")" = 0 ] &&
+        [ "$(up "briqyard_warm_desired{host=\"$host\"}")" = 0 ] && return 0 ;;
+  esac
+  case "$1" in
+    *briqyard_warm_operation_seconds_total*)
+      [ "$(up "$successful_operations")" = 0 ] && return 0 ;;
+  esac
+  return 1
+}
 
 echo "== discovery"
 targets=$(get /v1/metrics/targets)
@@ -73,6 +95,7 @@ if [ -n "${PROMETHEUS_URL:-}" ] && [ -n "${GRAFANA_URL:-}" ] && [ -n "${GRAFANA_
     check "$uid: provisioned" '[ "$(curl -fsS "${gauth[@]}" "$GRAFANA_URL/api/dashboards/uid/$uid" | jq -r .meta.provisioned)" = true ]'
     empty=()
     total=0
+    optional=0
     while IFS=$'\t' read -r title ref instant expr; do
       total=$((total+1))
       expr=${expr//\$__rate_interval/1m}; expr=${expr//\$__range/30m}; expr=${expr//\$host/$host}
@@ -80,11 +103,19 @@ if [ -n "${PROMETHEUS_URL:-}" ] && [ -n "${GRAFANA_URL:-}" ] && [ -n "${GRAFANA_
       body=$(jq -n --arg e "$expr" --argjson i "$instant" '{from: "now-30m", to: "now", queries: [{refId: "A",
         datasource: {type: "prometheus", uid: "briqyard-prometheus"}, expr: $e, instant: $i, range: ($i | not),
         intervalMs: 60000, maxDataPoints: 100}]}')
-      n=$(curl -fsS "${gauth[@]}" -H 'Content-Type: application/json' -d "$body" "$GRAFANA_URL/api/ds/query" |
-        jq '[.results.A.frames[]?.data.values[1]? // [] | length] | add // 0')
-      [ "$n" -gt 0 ] || empty+=("$title ($ref)")
+      answer=$(curl -fsS "${gauth[@]}" -H 'Content-Type: application/json' -d "$body" "$GRAFANA_URL/api/ds/query")
+      if jq -e '.results.A.error // empty' <<<"$answer" >/dev/null; then
+        empty+=("$title ($ref): query error")
+        continue
+      fi
+      n=$(jq '[.results.A.frames[]?.data.values[1]? // [] | length] | add // 0' <<<"$answer")
+      if [ "$n" -eq 0 ] && warm_optional "$expr"; then
+        optional=$((optional+1))
+      elif [ "$n" -eq 0 ]; then
+        empty+=("$title ($ref)")
+      fi
     done < <(jq -r '.panels[] | select(.targets) | .title as $t | .targets[] | [$t, .refId, (.instant // false), .expr] | @tsv' "$f")
-    check "$uid: $total queries, all with data (host $host)" '[ ${#empty[@]} = 0 ] || { printf "       no data: %s\n" "${empty[@]}"; false; }'
+    check "$uid: $total valid queries, applicable data ($optional unobserved warm queries; host $host)" '[ ${#empty[@]} = 0 ] || { printf "       no data: %s\n" "${empty[@]}"; false; }'
   done
 fi
 

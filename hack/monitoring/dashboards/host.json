@@ -1,7 +1,7 @@
 {
   "uid": "briqyard-host",
   "title": "briqyard: host",
-  "description": "One host: its machines, memory and CPU against capacity, the pool, disks, network, boots and restarts.",
+  "description": "One host: machines, capacity, pool, disks, network, boots, warm reservations and host preparation/readiness.",
   "tags": [
     "briqyard"
   ],
@@ -14,7 +14,7 @@
   },
   "refresh": "30s",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "links": [
     {
       "title": "briqyard",
@@ -2772,6 +2772,942 @@
         "y": 54
       },
       "id": 29
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Warm pools: host preparation and reservations",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Warm slots on this host",
+      "description": "Actual pool records and upper targets. Ready means a paused host slot; it does not measure public API readiness.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 63
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_slots{host=\"$host\"}",
+          "legendFormat": "{{state}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_desired{host=\"$host\"}",
+          "legendFormat": "desired",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_shortfall{host=\"$host\"}",
+          "legendFormat": "ready shortfall",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Warm slots by pool, type and exact size",
+      "description": "Each configured pool, its desired target and paused-ready shortfall. Claim transfers ownership; it does not return a machine to the pool.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 63
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_pool_slots{host=\"$host\"}",
+          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m {{state}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_pool_desired{host=\"$host\"}",
+          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m desired",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_pool_shortfall{host=\"$host\"}",
+          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m shortfall",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_pool_max_ready{host=\"$host\"}",
+          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m shared entry ceiling",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Warm RAM reservations",
+      "description": "Full recipe RAM, including creating and unreleased slots. Reservations are distinct from resident use. Headroom applies at warm admission; ordinary workloads may consume it later.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 71
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_memory_bytes{host=\"$host\"}",
+          "legendFormat": "host {{kind}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_pool_reserved_memory_bytes{host=\"$host\"}",
+          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m reserved",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Warm CPU reservations (millis)",
+      "description": "Full CPU-time reservations against operator budget and ordinary-workload admission headroom.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 71
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_cpu_millis{host=\"$host\"}",
+          "legendFormat": "host {{kind}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_pool_reserved_cpu_millis{host=\"$host\"}",
+          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m reserved",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "Warm logical root reservations",
+      "description": "Full logical root sizes, including failed or unreleased slots. These are not physical disk usage; copy-on-write sharing does not reduce the reservation.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 71
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_root_disk_bytes{host=\"$host\",kind=~\"reserved|budget\"}",
+          "legendFormat": "host {{kind}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_pool_reserved_root_disk_bytes{host=\"$host\"}",
+          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m reserved",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Measured available RAM and floor",
+      "description": "Cached MemAvailable and configured physical floor. Admission additionally subtracts conservative fill liabilities. See probe age and validity before interpreting this measurement.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 79
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_memory_available_bytes{host=\"$host\"}",
+          "legendFormat": "measured available",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_memory_floor_bytes{host=\"$host\"}",
+          "legendFormat": "configured available floor",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Physical pool free space and floor",
+      "description": "Cached physical free space and the configured absolute floor. Admission also preserves the existing percentage floor and full logical root liabilities.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 79
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_disk_free_bytes{host=\"$host\"}",
+          "legendFormat": "measured free",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_root_disk_bytes{host=\"$host\",kind=\"headroom\"}",
+          "legendFormat": "absolute free-space floor",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Warm probe age",
+      "description": "Age of the cached availability sample. The admission age bound is five seconds. Scrapes do not run probes; no sample is displayed until one exists.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 79
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_probe_age_seconds{host=\"$host\"}",
+          "legendFormat": "cached sample age",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 39,
+      "type": "timeseries",
+      "title": "Warm admission observations",
+      "description": "Actual unfinished fills, configured maximum, cached-probe presence/age validity and accounting availability. Values of one indicate available or valid observations.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 87
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_fills{host=\"$host\"}",
+          "legendFormat": "fills {{kind}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_probe_available{host=\"$host\"}",
+          "legendFormat": "probe available",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_probe_valid{host=\"$host\"}",
+          "legendFormat": "probe valid",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_accounting_available{host=\"$host\"}",
+          "legendFormat": "accounting available",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Blocked warm pools",
+      "description": "Last persisted blockage by a bounded reason. Cleanup blockage remains visible for draining, unreleased slots; raw errors are not metric labels.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 87
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_pool_blocked{host=\"$host\"}",
+          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m {{reason}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Blocked refill attempts",
+      "description": "Actual refused refill attempts per interval. A target is an upper bound and may remain unfilled while resources or headroom are unavailable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 87
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "increase(briqyard_warm_fill_blocked_total{host=\"$host\"}[$__rate_interval])",
+          "legendFormat": "{{reason}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Warm host preparation and claim readiness (mean)",
+      "description": "Mean successful prepare-worker duration and claim-to-host-readiness duration. Excludes fleet and public API transport. No duration appears until routine operations have been observed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 95
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "rate(briqyard_warm_operation_seconds_total{host=\"$host\",outcome=\"success\"}[$__rate_interval]) / rate(briqyard_warm_operations_total{host=\"$host\",outcome=\"success\"}[$__rate_interval])",
+          "legendFormat": "{{operation}} success mean",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Warm misses and failures",
+      "description": "Host claim misses, including empty or busy pools, and host prepare/claim failures per interval. This does not measure public API end-to-end latency.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 95
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "increase(briqyard_warm_operations_total{host=\"$host\",outcome=~\"miss|failure\"}[$__rate_interval])",
+          "legendFormat": "{{operation}} {{outcome}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "list",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     }
   ]
 }

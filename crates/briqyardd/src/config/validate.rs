@@ -2,6 +2,14 @@ use super::*;
 
 impl Config {
     pub(super) fn validate(&self) -> Result<()> {
+        self.templates
+            .warm_policy
+            .check(self.templates.warm_pools)?;
+        if self.templates.warm_pools {
+            self.templates
+                .warm_policy
+                .check_capacity(crate::machine::host_capacity(self.capacity))?;
+        }
         if self.storage.backend != "zfs" {
             bail!(
                 "storage.backend: {:?} is not supported (zfs)",

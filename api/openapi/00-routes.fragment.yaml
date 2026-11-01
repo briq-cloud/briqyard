@@ -468,6 +468,26 @@ paths:
       summary: Host-local paused template pools and slot counts
       responses:
         "200": { description: pools, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/WarmPool" } } } } }
+  /v1/namespaces/{id}/warm-catalog:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Operator catalog, host resource charges, measurements and blocked reasons
+      responses:
+        "200": { description: catalog status, content: { application/json: { schema: { $ref: "#/components/schemas/WarmCatalogStatus" } } } }
+  /v1/namespaces/{id}/warm-catalog/{entry}:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: entry, in: path, required: true, schema: { type: string } }
+    put:
+      summary: Set desired slots for one configured entry without changing operator ceilings
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WarmDesiredRequest" } } }
+      responses:
+        "200": { description: desired pool state, content: { application/json: { schema: { $ref: "#/components/schemas/WarmPool" } } } }
+        "400": { description: desired exceeds operator ceiling or invalid request }
+        "404": { description: configured entry not found in namespace }
+        "409": { description: unsupported or incompatible qualified template }
   /v1/namespaces/{id}/warm-pools/{name}:
     parameters:
       - { $ref: "#/components/parameters/id" }

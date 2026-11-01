@@ -26,7 +26,22 @@ impl Manager {
     pub(super) fn spawn_make_admitted(&self, scope: crate::zfs::IoScope, e: Arc<Entry>, how: Make) {
         let m = self.clone();
         tokio::spawn(async move {
-            match scope.run(m.make_owned(&e, how)).await {
+            let warm = e.snapshot().warm_slot.is_some();
+            let began = std::time::Instant::now();
+            let result = scope.run(m.make_owned(&e, how)).await;
+            if warm {
+                let outcome = if result.is_ok() {
+                    metrics::warm::Outcome::Success
+                } else {
+                    metrics::warm::Outcome::Failure
+                };
+                m.inner.stats.warm.lock().unwrap().observe(
+                    metrics::warm::Operation::Prepare,
+                    outcome,
+                    began.elapsed(),
+                );
+            }
+            match result {
                 Ok(())
                 | Err(MError::NotFound | MError::PullFailed(_) | MError::CreateFailed(_)) => {}
                 Err(MError::BootFailed(v)) => {
@@ -600,6 +615,7 @@ impl Manager {
             return Err(MError::Quota(x.to_string()));
         }
         if rec.start {
+            self.admit_warm_policy(&machines, &rec)?;
             let (used, _) = committed(&machines);
             admit(
                 used.memory_mb,

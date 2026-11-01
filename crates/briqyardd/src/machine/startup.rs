@@ -52,6 +52,11 @@ impl Manager {
             stats: Stats::default(),
             warm_lock: tokio::sync::Mutex::new(()),
             warm_names: Mutex::new(HashMap::new()),
+            warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
+            warm_sample: Mutex::new(None),
+            warm_pool_cache: Mutex::new(None),
+            #[cfg(test)]
+            warm_probe_override: Mutex::new(None),
             verified_templates: Mutex::new(std::collections::HashSet::new()),
             vmm: Arc::new(fc::Firecracker {
                 binary: cfg.firecracker.clone(),
@@ -91,6 +96,13 @@ impl Manager {
             started: Mutex::new(api::DaemonStart::default()),
         });
         let m = Self { inner };
+        if m.inner.cfg.templates.warm_pools {
+            m.inner
+                .cfg
+                .templates
+                .warm_policy
+                .check_capacity(m.capacity())?;
+        }
         m.load()?;
         m.verify_clone_artifacts();
         host::enable_forwarding()?;

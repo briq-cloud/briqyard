@@ -8,6 +8,7 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 
 | ADR | Decision |
 |---|---|
+| [0074](0074-warm-catalog-admission.md) | Operator catalog ceilings, full warm resource charges, admission headroom and pressure-aware refill/draining |
 | [0001](0001-own-runtime-on-firecracker.md) | A runtime of our own: Firecracker, a daemon per host, Rust, AGPL |
 | [0002](0002-disks-on-zfs.md) | Disks: ZFS zvols on the host's NVMe, Writeback, an image to a root disk once |
 | [0003](0003-tenant-network.md) | Network: a bridge and a /24 per tenant, nftables, the host's DNS, the ingress as the only way in |
