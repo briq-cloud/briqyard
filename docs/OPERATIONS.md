@@ -55,6 +55,10 @@ Continuous free headroom is not guaranteed when ordinary workloads alone consume
 Lowered limits and removed entries also drain unused slots through normal cleanup. Charges
 remain until cleanup completes. Catalog entries never enable cross-namespace reuse.
 
+## Pristine sandbox seeds
+
+See [Sandbox seeds](SANDBOX-SEEDS.md) for the default-off operator profile and retry contract.
+
 ## Install
 
 A Linux server with KVM (`/dev/kvm`), Ubuntu 26.04 (every suite runs there; 24.04 is untested).

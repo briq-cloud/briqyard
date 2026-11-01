@@ -315,6 +315,8 @@ pub struct Snapshot {
     pub clone_size: Option<Size>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_ram_marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_generation: Option<String>,
 }
 
 /// A snapshot's name: an id's characters, and not the shape of a snapshot id (`s_…`), so a

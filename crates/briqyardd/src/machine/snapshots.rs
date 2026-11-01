@@ -48,6 +48,7 @@ impl SnapshotRec {
             source_host: self.clone_artifact.as_ref().map(|a| a.source_host.clone()),
             clone_size: self.clone_artifact.as_ref().map(|a| a.recipe.size),
             clone_ram_marker: self.clone_artifact.as_ref().map(|a| a.ram_marker.clone()),
+            clone_generation: self.clone_artifact.as_ref().map(|a| a.generation.clone()),
         }
     }
 

@@ -58,6 +58,22 @@ paths:
         "403": { description: "`quota`: past a limit of the namespace's quota, the limit and the use in `error`; nothing made" }
         "409": { description: "`conflict`: a machine with that name exists in the namespace, the body's `machine` is it: a create sent again after no answer finds the one it made" }
         "503": { description: "`capacity`: the host has no room (its memory, or for a volume its pool's free space); through the fleet, no host (of `region`, when given) has room" }
+  /v1/sandbox-requests/lookup:
+    post:
+      summary: "Daemon-only authenticated read of an accepted sandbox create; no reservation, source lookup or worker"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SandboxRequestLookup" }
+      responses:
+        "200":
+          description: accepted destination, including creating/error states
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Machine" }
+        "404": { description: "sandbox_request_unknown: authoritative absence only; an existing fleet dispatch intent still cannot be sent again" }
+        "409": { description: "conflict: changed digest, consumed destination unavailable or inconsistent durable index" }
   /v1/machines/{id}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     description: "A namespace's gateway answers GET, `/logs`, `/stats` and `/wait` here like any machine; every other route on its id answers 409 `gateway` (`/v1/namespaces/{id}/gateway` owns it)."

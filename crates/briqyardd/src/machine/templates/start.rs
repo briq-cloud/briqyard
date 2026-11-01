@@ -77,6 +77,7 @@ impl Manager {
         &self,
         live: &fc::Vm,
         expected_marker: Option<&str>,
+        profile: &str,
     ) -> Result<String> {
         let timeout = Duration::from_secs(self.inner.cfg.boot_timeout_sec.max(10));
         self.inner.guest.wait_ready(&live.vsock, timeout).await?;
@@ -91,7 +92,7 @@ impl Manager {
         anyhow::ensure!(
             pong.main_pid == 0
                 && status.protocol == 1
-                && status.profile == guest::INIT_READY_V1
+                && status.profile == profile
                 && status.stage == "builder"
                 && status.identity.is_none(),
             "template init is not at its pre-main barrier"
@@ -140,8 +141,16 @@ impl Manager {
             true,
         );
         let version = self
-            .template_builder_ready(live, Some(&origin.artifact.ram_marker))
+            .template_builder_ready(
+                live,
+                Some(&origin.artifact.ram_marker),
+                &origin.artifact.profile,
+            )
             .await?;
+        if origin.sandbox.is_some() {
+            self.configure_sandbox_destination(e, live, origin).await?;
+            return Ok(version);
+        }
         // Queueing/disk load can take time. Freeze current wall time durably immediately
         // before the first configure, so delayed admission cannot start with a stale clock.
         if origin.stage == CloneStage::Loading {
@@ -268,38 +277,48 @@ impl Manager {
             true,
         );
         let started = std::time::Instant::now();
-        let activated = self
-            .inner
-            .guest
-            .clone_control(
-                &live.vsock,
-                guest::Request {
-                    op: "clone_activate_v1".into(),
-                    clone_generation: c.generation.clone(),
-                    clone_activation_realtime_sec: Some(Utc::now().timestamp().try_into()?),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        anyhow::ensure!(
-            activated
-                .identity
-                .as_ref()
-                .is_some_and(|i| i.generation == c.generation)
-                && matches!(activated.stage.as_str(), "activating" | "active"),
-            "clone activation generation mismatch"
-        );
+        let activation = guest::Request {
+            op: "clone_activate_v1".into(),
+            clone_generation: c.generation.clone(),
+            clone_activation_realtime_sec: Some(Utc::now().timestamp().try_into()?),
+            ..Default::default()
+        };
+        if origin.sandbox.is_some() {
+            let response = self
+                .inner
+                .guest
+                .destination_control(&live.vsock, activation)
+                .await?;
+            sandbox::check_ack(&origin, &response, &["activating", "active"])?;
+        } else {
+            let activated = self
+                .inner
+                .guest
+                .clone_control(&live.vsock, activation)
+                .await?;
+            anyhow::ensure!(
+                activated
+                    .identity
+                    .as_ref()
+                    .is_some_and(|i| i.generation == c.generation)
+                    && matches!(activated.stage.as_str(), "activating" | "active"),
+                "clone activation generation mismatch"
+            );
+        }
         let wait = async {
             loop {
                 let pong = self.inner.guest.ping(&live.vsock).await?;
                 let ready = pong.clone_status.as_ref().is_some_and(|s| {
                     s.protocol == 1
-                        && s.profile == guest::INIT_READY_V1
+                        && s.profile == origin.artifact.profile
                         && s.stage == "active"
                         && s.identity
                             .as_ref()
                             .is_some_and(|i| i.generation == c.generation)
                 });
+                if ready && origin.sandbox.is_some() {
+                    sandbox::check_ack(&origin, &pong, &["active"])?;
+                }
                 if ready && pong.main_pid > 0 {
                     return Ok::<_, anyhow::Error>(pong.version);
                 }

@@ -53,3 +53,5 @@ briqyard-testing = { workspace = true }
 ctor = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
+
+tower = { version = "0.5", features = ["util"] }

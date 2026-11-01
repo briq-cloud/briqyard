@@ -161,3 +161,29 @@ pub(super) async fn touch_machine(
     st.mgr.touch(&id)?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// Read-only accepted-create lookup. Generic not-found is never an authoritative miss.
+pub(super) async fn sandbox_request_lookup(
+    State(st): S,
+    Json(query): Json<api::SandboxRequestLookup>,
+) -> Result<Response, AppError> {
+    if st.token.is_empty() {
+        return Err(
+            MError::Conflict("sandbox lookup requires configured authentication".into()).into(),
+        );
+    }
+    match st.mgr.sandbox_request_lookup(query).await? {
+        Some(machine) => Ok(Json(machine).into_response()),
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(api::ApiError {
+                error: "sandbox request was not accepted".into(),
+                code: "sandbox_request_unknown".into(),
+                request_id: String::new(),
+                machine: None,
+                oldest: None,
+            }),
+        )
+            .into_response()),
+    }
+}

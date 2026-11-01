@@ -319,7 +319,12 @@ impl Manager {
                     self.activate_memory_clone(e, &live).await
                 }
             } else if rec.template_birth.is_some() {
-                self.template_builder_ready(&live, None).await
+                self.template_builder_ready(
+                    &live,
+                    None,
+                    &rec.template_birth.as_ref().unwrap().profile,
+                )
+                .await
             } else {
                 self.inner
                     .guest
@@ -589,7 +594,12 @@ pub(super) fn boot_args(pci: bool, extra: &str) -> String {
 /// The config drive: a tar archive the init reads raw, `config.json` first and the boot
 /// files under `files/`, padded to a multiple of 512 bytes since Firecracker wants a drive
 /// that size.
-pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
+type GuestBootFiles = Vec<(String, u32, Vec<u8>)>;
+
+pub(super) fn resolved_guest_config(
+    r: &Record,
+    gateway: Ipv4Addr,
+) -> Result<(guest::Config, GuestBootFiles)> {
     let mut env = r.image_config.env.clone();
     env.extend(r.env.iter().map(|(k, v)| (k.clone(), v.clone())));
     // Docker semantics: an entrypoint given replaces the image's and drops its cmd.
@@ -620,6 +630,7 @@ pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
         files: vec![],
         stop_timeout_sec: 10,
         template_profile: None,
+        sandbox_device: None,
     };
     if let Some(v) = &r.volume {
         cfg.mounts.push(guest::Mount {
@@ -627,15 +638,6 @@ pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
             path: v.mount.clone(),
             fstype: "ext4".into(),
         });
-    }
-    if r.template_birth.is_some() {
-        cfg = templates::builder_config();
-    } else if let Some(origin) = r
-        .clone_origin
-        .as_ref()
-        .filter(|o| o.stage != templates::CloneStage::Active)
-    {
-        cfg = origin.artifact.recipe.config.clone();
     }
     let mut files: Vec<(String, u32, Vec<u8>)> = Vec::new();
     for f in &r.files {
@@ -651,6 +653,33 @@ pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
             mode,
         });
         files.push((f.path.clone(), mode, data));
+    }
+    Ok((cfg, files))
+}
+
+pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
+    let (mut cfg, files) = resolved_guest_config(r, gateway)?;
+    if let Some(birth) = &r.template_birth {
+        cfg = if birth.profile == guest::SANDBOX_READY_V1 {
+            templates::sandbox::builder_config(guest::SandboxDevice {
+                bytes: (r
+                    .volume
+                    .as_ref()
+                    .context("sandbox placeholder missing")?
+                    .size_gb as u64)
+                    << 30,
+                logical_sector_bytes: 512,
+                drive_id: "data".into(),
+            })
+        } else {
+            templates::builder_config()
+        };
+    } else if let Some(origin) = r
+        .clone_origin
+        .as_ref()
+        .filter(|o| o.stage != templates::CloneStage::Active)
+    {
+        cfg = origin.artifact.recipe.config.clone();
     }
     let mut b = tar::Builder::new(Vec::new());
     let cfg_json = serde_json::to_vec(&cfg)?;

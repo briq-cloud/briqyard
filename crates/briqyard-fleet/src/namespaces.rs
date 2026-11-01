@@ -106,7 +106,21 @@ pub(super) async fn delete_namespace(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Refusal> {
-    let host = st.reg.lock().unwrap().host_of_namespace(&id).cloned();
+    let (host, version) = {
+        let reg = st.reg.lock().unwrap();
+        if reg.namespace_inflight(&id) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "conflict",
+                "namespace create is in progress",
+            ));
+        }
+        (
+            reg.host_of_namespace(&id).cloned(),
+            reg.namespace_version(&id),
+        )
+    };
+
     let host = match host {
         Some(h) => h,
         None => return Ok(StatusCode::NO_CONTENT.into_response()),
@@ -121,7 +135,15 @@ pub(super) async fn delete_namespace(
     )
     .await;
     if resp.status().is_success() {
-        st.reg.lock().unwrap().unpin(&id);
+        {
+            let mut reg = st.reg.lock().unwrap();
+            if reg.namespaces.get(&id) == Some(&host.id)
+                && reg.namespace_version(&id) == version
+                && version != u64::MAX
+            {
+                reg.unpin(&id);
+            }
+        }
         st.save_after_host().await;
     }
     Ok(resp)
@@ -180,8 +202,19 @@ pub(super) async fn put_on_namespace(
         disk_mb: need_disk_mb,
         what,
     };
-    let (host, first, hold) = {
+    let (host, first, hold, version) = {
         let mut reg = st.reg.lock().unwrap();
+        if crate::create_replay::relocation_unresolved(
+            &reg,
+            id,
+            reg.namespaces.get(id).map(String::as_str),
+        ) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "conflict",
+                "namespace has an unresolved sandbox dispatch",
+            ));
+        }
         let first = !reg.namespaces.contains_key(id);
         let bound = reg.namespaces.get(id).cloned();
         refuse_outside(&reg, bound.as_deref(), id, region)?;
@@ -197,8 +230,10 @@ pub(super) async fn put_on_namespace(
         let Some(host) = chosen.and_then(|h| reg.hosts.get(&h).cloned()) else {
             return Err(no_room(st, &reg, &ask));
         };
-        let id = reg.hold(&host.id, need_mb, need_disk_mb, need_cpu_millis);
-        (host, first, id)
+        let hold = reg.hold(&host.id, need_mb, need_disk_mb, need_cpu_millis);
+        reg.bind_hold_namespace(&host.id, hold, id);
+        let id = hold;
+        (host, first, id, reg.namespace_version(ask.namespace))
     };
     let hold = Held {
         st,
@@ -217,7 +252,7 @@ pub(super) async fn put_on_namespace(
         ));
     }
     drop(hold);
-    first_refused(st, id, first, &data).await;
+    first_refused(st, id, first, &host.id, version, &data).await;
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
@@ -291,7 +326,17 @@ pub(super) async fn unpin_namespace(
     State(st): S,
     Path(id): Path<String>,
 ) -> Result<Response, Refusal> {
-    st.reg.lock().unwrap().unpin(&id);
+    {
+        let mut reg = st.reg.lock().unwrap();
+        if crate::create_replay::namespace_unresolved(&reg, &id) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "conflict",
+                "namespace has an unresolved sandbox dispatch",
+            ));
+        }
+        reg.unpin(&id);
+    }
     st.save().await.map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

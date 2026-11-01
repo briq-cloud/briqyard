@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
+mod sandbox;
+pub use sandbox::SandboxRecipe;
 mod warm;
 pub use warm::*;
 

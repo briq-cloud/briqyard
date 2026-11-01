@@ -625,7 +625,14 @@ pub(super) async fn retire_host(State(st): S, Path(id): Path<String>) -> Result<
 /// Forgets a retired host: `retired` in the answer.
 pub(super) async fn retired(st: &AppState, h: &HostRec) -> Result<api::Host> {
     tracing::warn!(host = h.id, "host retired");
-    st.reg.lock().unwrap().forget(&h.id);
+    {
+        let mut reg = st.reg.lock().unwrap();
+        anyhow::ensure!(
+            !crate::create_replay::host_unresolved(&reg, &h.id),
+            "host has an unresolved sandbox dispatch"
+        );
+        reg.forget(&h.id);
+    }
     st.save().await?;
     let mut out = h.to_api();
     out.state = "retired".into();
@@ -652,6 +659,13 @@ pub(super) async fn forget_host(
 ) -> Result<Response, Refusal> {
     {
         let mut reg = st.reg.lock().unwrap();
+        if crate::create_replay::host_unresolved(&reg, &id) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "conflict",
+                "host has an unresolved sandbox dispatch",
+            ));
+        }
         let keyed = reg.hosts.get(&id).is_some_and(|h| !h.pool_key.is_empty());
         if keyed && !q.force {
             return Err(err(

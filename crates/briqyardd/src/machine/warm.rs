@@ -75,6 +75,9 @@ impl Manager {
                 .is_some_and(|id| fc::valid_host_boot_id(&id))
         {
             self.named_memory_profiles()
+                .into_iter()
+                .filter(|profile| profile == guest::INIT_READY_V1)
+                .collect()
         } else {
             Vec::new()
         }
@@ -121,6 +124,11 @@ impl Manager {
             .find(|s| s.id == snapshot || s.name.as_deref() == Some(snapshot))
             .ok_or_else(|| MError::NoSnapshot(snapshot.into()))?;
         let (artifact, _) = self.checked_clone_artifact(&r, s, namespace)?;
+        if artifact.profile != guest::INIT_READY_V1 {
+            return Err(invalid(
+                "configured paused pools support only init-ready-v1",
+            ));
+        }
         Ok((s.id.clone(), artifact))
     }
 

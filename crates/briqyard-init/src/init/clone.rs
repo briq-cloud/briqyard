@@ -63,6 +63,12 @@ impl Gate {
             *active = true;
         }
     }
+    pub(super) fn destination_fingerprint(&self) -> String {
+        match self {
+            Self::Sandbox(destination::Barrier::Bound { fingerprint, .. }) => fingerprint.clone(),
+            _ => String::new(),
+        }
+    }
     pub(super) fn status(&self) -> Option<CloneStatus> {
         let (stage, identity) = match self {
             Self::Ordinary => return None,

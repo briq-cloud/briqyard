@@ -771,6 +771,7 @@ pub struct Stats {
 struct Inner {
     stats: Stats,
     warm_lock: tokio::sync::Mutex<()>,
+    sandbox_create_lock: tokio::sync::Mutex<()>,
     warm_names: Mutex<HashMap<(String, String), String>>,
     // Validated operator configuration; requests may change only pool desired counts.
     warm_policy: Mutex<crate::config::WarmPolicy>,
@@ -836,6 +837,8 @@ pub struct Manager {
 
 /// What a create makes the machine's disks from (ADR 0048).
 enum Make {
+    /// Identical accepted sandbox request; never launch a second worker.
+    Existing,
     /// Its image, pulled when the host has not seen it.
     Image,
     /// Snapshots of another machine's disks, taken now.

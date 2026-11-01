@@ -24,6 +24,9 @@ impl Manager {
             .clone_artifact
             .as_ref()
             .ok_or_else(|| invalid("snapshot is not a sealed memory template"))?;
+        if artifact.profile != guest::INIT_READY_V1 {
+            return Err(invalid("named clone requires init-ready-v1; use sandbox_seed for pristine sandbox configuration"));
+        }
         if !req.image.is_empty()
             || req.entrypoint.is_some()
             || req.cmd.is_some()
@@ -98,6 +101,7 @@ impl Manager {
             stage: CloneStage::Reserved,
             mapping_exited: false,
             launch_host_boot_id: None,
+            sandbox: None,
         });
         Ok(())
     }

@@ -29,9 +29,20 @@ pub struct DestinationFile {
     pub data: Vec<u8>,
 }
 impl DestinationBind {
+    /// Shared fingerprint material; preserves all destination bytes without logging them.
+    pub fn fingerprint_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let mut bytes = b"briqyard:sandbox-ready-v1:destination\0".to_vec();
+        bytes.extend(serde_json::to_vec(self)?);
+        Ok(bytes)
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         self.identity.validate()?;
         let c = &self.config;
+        c.sandbox_device
+            .as_ref()
+            .ok_or("sandbox destination requires fixed data topology")?
+            .check()?;
         if self.receipt.len() != 64
             || !self
                 .receipt
@@ -128,6 +139,11 @@ mod tests {
                     path: "/work".into(),
                     fstype: "ext4".into(),
                 }],
+                sandbox_device: Some(super::super::SandboxDevice {
+                    bytes: 2 << 30,
+                    logical_sector_bytes: 512,
+                    drive_id: "data".into(),
+                }),
                 ..Default::default()
             },
             identity,

@@ -72,7 +72,7 @@ pub(super) fn snapshot_table(ss: &[api::Snapshot]) -> String {
         "ID", "NAME", "CREATED", "DISKS"
     );
     if templates {
-        out.push_str(" PROFILE SOURCE_HOST");
+        out.push_str(" PROFILE SOURCE_HOST GENERATION");
     }
     out.push('\n');
     for s in ss {
@@ -86,9 +86,10 @@ pub(super) fn snapshot_table(ss: &[api::Snapshot]) -> String {
         ));
         if templates {
             out.push_str(&format!(
-                " {} {}",
+                " {} {} {}",
                 s.clone_profile.as_deref().unwrap_or("-"),
-                s.source_host.as_deref().unwrap_or("-")
+                s.source_host.as_deref().unwrap_or("-"),
+                s.clone_generation.as_deref().unwrap_or("-")
             ));
         }
         out.push('\n');

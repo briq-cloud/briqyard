@@ -68,6 +68,29 @@ pub struct Config {
     /// Internal, reviewed template recipe; absent retains ordinary boot behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_profile: Option<String>,
+    /// Internal fixed data-device topology for a pristine sandbox seed and its destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_device: Option<SandboxDevice>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxDevice {
+    pub bytes: u64,
+    pub logical_sector_bytes: u32,
+    pub drive_id: String,
+}
+impl SandboxDevice {
+    pub fn check(&self) -> Result<(), &'static str> {
+        if self.bytes < 1 << 30
+            || !self.bytes.is_multiple_of(1 << 30)
+            || self.drive_id != "data"
+            || self.logical_sector_bytes != 512
+        {
+            return Err("unsupported sandbox data-device geometry");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

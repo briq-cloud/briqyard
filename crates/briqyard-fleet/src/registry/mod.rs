@@ -137,6 +137,7 @@ pub struct HostRec {
 #[derive(Clone, Debug, Default)]
 pub struct Hold {
     id: u64,
+    namespace: String,
     memory_mb: u32,
     cpu_millis: u32,
     disk_mb: u64,
@@ -308,6 +309,7 @@ pub struct Policy {
     /// This placement requires the explicit namespace sibling capability.
     pub require_egress_siblings: bool,
     pub require_named_memory: bool,
+    pub named_memory_profile: String,
     /// A host above this share of its memory takes no new namespace.
     pub fill_ceiling: f64,
     /// A host silent for this long is down.
@@ -319,6 +321,7 @@ impl Default for Policy {
         Self {
             require_egress_siblings: false,
             require_named_memory: false,
+            named_memory_profile: "init-ready-v1".into(),
             fill_ceiling: 0.85,
             down_after: Duration::seconds(60),
         }
@@ -331,6 +334,11 @@ pub struct Registry {
     /// namespace → host id. A namespace's machines share a host, so its network needs no overlay.
     #[serde(alias = "tenants")]
     pub namespaces: HashMap<String, String>,
+    /// Dispatch intents survive network cleanup and host removal without holding resources.
+    #[serde(default)]
+    pub sandbox_requests: HashMap<String, crate::create_replay::SandboxRoute>,
+    #[serde(default)]
+    pub namespace_versions: HashMap<String, u64>,
     /// machine id → host id, learned from creates and listings.
     pub machines: HashMap<String, String>,
     /// endpoint id → host id, learned the same way.
@@ -422,17 +430,30 @@ impl Registry {
         // A pin made at placement is younger than the machine it placed: the host lists the
         // namespace only once the create has landed, so a fresh pin is kept whatever the host says.
         let id = entry.id.clone();
+        let previous_namespaces: Vec<_> = self.namespaces.keys().cloned().collect();
         let pinned_at = &self.pinned_at;
+        let routes = &self.sandbox_requests;
         self.namespaces.retain(|t, host| {
-            *host != id
+            routes
+                .values()
+                .any(|route| route.namespace == *t && !route.accepted)
+                || *host != id
                 || h.namespaces.contains(t)
                 || pinned_at
                     .get(t)
                     .map(|at| now - *at < Duration::minutes(10))
                     .unwrap_or(false)
         });
+        for t in previous_namespaces {
+            if !self.namespaces.contains_key(&t) {
+                self.note_namespace_create(&t);
+            }
+        }
         for t in h.namespaces {
-            self.namespaces.entry(t).or_insert_with(|| id.clone());
+            if !self.namespaces.contains_key(&t) {
+                self.namespaces.insert(t.clone(), id.clone());
+                self.note_namespace_create(&t);
+            }
         }
         self.pinned_at
             .retain(|t, _| self.namespaces.contains_key(t));
@@ -462,6 +483,9 @@ impl Registry {
     /// Drops a host and everything indexed to it but its pool key, kept as a retired key: its
     /// backups stay readable (ADR 0035).
     pub fn forget(&mut self, id: &str) {
+        if crate::create_replay::host_unresolved(self, id) {
+            return;
+        }
         if let Some(h) = self.hosts.remove(id).filter(|h| !h.pool_key.is_empty()) {
             self.retired_keys.push(RetiredKey {
                 host: h.id,
@@ -469,7 +493,16 @@ impl Registry {
                 retired_at: Utc::now(),
             });
         }
+        let removed: Vec<_> = self
+            .namespaces
+            .iter()
+            .filter(|(_, h)| *h == id)
+            .map(|(n, _)| n.clone())
+            .collect();
         self.namespaces.retain(|_, h| h != id);
+        for namespace in removed {
+            self.note_namespace_create(&namespace);
+        }
         self.machines.retain(|_, h| h != id);
         self.endpoints.retain(|_, h| h != id);
         self.pinned_at
@@ -524,7 +557,7 @@ impl Registry {
                                 || (h.named_memory_fork_v1
                                     && h.named_memory_profiles
                                         .iter()
-                                        .any(|p| p == "init-ready-v1")))
+                                        .any(|p| p == &policy.named_memory_profile)))
                             && (region.is_empty() || h.region == region)
                             && h.free_memory_mb() >= need_mb
                             && h.has_disk(need_disk_mb)
@@ -564,6 +597,24 @@ impl Registry {
         self.last_hold
     }
 
+    pub fn bind_hold_namespace(&mut self, host: &str, id: u64, namespace: &str) {
+        if let Some(hold) = self
+            .hosts
+            .get_mut(host)
+            .and_then(|h| h.holds.iter_mut().find(|hold| hold.id == id))
+        {
+            hold.namespace = namespace.into();
+            self.note_namespace_create(namespace);
+        }
+    }
+    pub fn namespace_inflight(&self, namespace: &str) -> bool {
+        crate::create_replay::namespace_unresolved(self, namespace)
+            || self.hosts.values().any(|host| {
+                host.holds
+                    .iter()
+                    .any(|hold| hold.namespace == namespace && hold.made.is_none())
+            })
+    }
     /// The host made what hold `id` held, at `at`: the next report received after that counts
     /// it, and the hold goes then.
     pub fn made(&mut self, host: &str, id: u64, at: DateTime<Utc>) {
@@ -597,6 +648,7 @@ impl Registry {
     pub fn pin(&mut self, namespace: &str, host: &str) {
         if !self.namespaces.contains_key(namespace) {
             self.namespaces.insert(namespace.into(), host.into());
+            self.note_namespace_create(namespace);
             self.pinned_at.insert(namespace.into(), Utc::now());
         }
     }
@@ -604,10 +656,23 @@ impl Registry {
     /// Releases a namespace from its host: its next machine is placed afresh. The host's next
     /// heartbeat pins it again if the namespace still has machines there.
     pub fn unpin(&mut self, namespace: &str) {
-        self.namespaces.remove(namespace);
+        if crate::create_replay::namespace_unresolved(self, namespace) {
+            return;
+        }
+        if self.namespaces.remove(namespace).is_some() {
+            self.note_namespace_create(namespace);
+        }
         self.pinned_at.remove(namespace);
     }
 
+    /// Advance placement identity on every admitted create, including an existing network.
+    pub fn note_namespace_create(&mut self, namespace: &str) {
+        let version = self.namespace_versions.entry(namespace.into()).or_default();
+        *version = version.saturating_add(1);
+    }
+    pub fn namespace_version(&self, namespace: &str) -> u64 {
+        *self.namespace_versions.get(namespace).unwrap_or(&0)
+    }
     pub fn host_of_namespace(&self, namespace: &str) -> Option<&HostRec> {
         self.namespaces
             .get(namespace)
