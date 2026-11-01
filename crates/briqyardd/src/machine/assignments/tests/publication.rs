@@ -167,4 +167,42 @@ async fn live_completed_assignment_publication_still_requires_exact_receipt_and_
         .m
         .namespace_dns_names("destination")
         .contains_key(&assigned.hostname()));
+    receipt.create_sha256 = digest;
+    h.m.inner
+        .store
+        .put_durable(REQUESTS, &receipt.key(), &receipt)
+        .unwrap();
+    assert!(h
+        .m
+        .namespace_dns_names("destination")
+        .contains_key(&assigned.hostname()));
+    // Simulate loss of the permanent file while its consumed receipt remains cached.
+    std::fs::remove_file(
+        h.m.inner
+            .store
+            .dir(REQUESTS)
+            .join(format!("{}.json", receipt.key())),
+    )
+    .unwrap();
+    assert!(!h
+        .m
+        .namespace_dns_names("destination")
+        .contains_key(&assigned.hostname()));
+    h.m.inner.policies.lock().unwrap().clear();
+    assert!(!h
+        .m
+        .rules()
+        .unwrap()
+        .pins
+        .iter()
+        .any(|(_, ip)| ip == &assigned.ip));
+    h.host_calls();
+    assert!(h
+        .m
+        .start_destination_assignment("destination", "assignment-one", &receipt.create_sha256)
+        .await
+        .is_err());
+    assert!(h.host_calls().is_empty());
+    assert!(h.m.destination_assignment_owns(&assigned.id).unwrap());
+    assert_eq!(h.m.quota("destination").unwrap().used.machines, 1);
 }

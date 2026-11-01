@@ -53,9 +53,25 @@ impl Manager {
             .sandbox
             .as_ref()
             .context("assignment binding missing")?;
+        // Cache-only consumption authority prevents fallback, but cannot authorize
+        // binding, adoption or publication when permanent evidence disappeared.
+        let durable = self
+            .inner
+            .store
+            .get::<Receipt>(REQUESTS, &key(&record.namespace, &binding.request_id))?
+            .context("durable permanent assignment receipt missing")?;
+        durable.check()?;
+        anyhow::ensure!(
+            durable.namespace == record.namespace && durable.request_id == binding.request_id,
+            "durable assignment receipt key differs"
+        );
         let receipt = self
             .destination_receipt(&record.namespace, &binding.request_id)?
             .context("permanent assignment receipt missing")?;
+        anyhow::ensure!(
+            receipt == durable,
+            "durable assignment receipt differs from consumed authority"
+        );
         anyhow::ensure!(
             receipt.machine == record.id
                 && receipt.create_sha256 == binding.create_sha256
