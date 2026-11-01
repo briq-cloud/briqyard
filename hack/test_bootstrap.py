@@ -341,5 +341,106 @@ fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
         self.assertEqual(self.old_paths["kernel"].read_text(), "kernel old\n")
 
 
+class AssignmentCompatibility(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.data = self.root / "custom-data"
+        self.config = self.root / "installed.yaml"
+        self.config.write_text(yaml.safe_dump({"data_dir": str(self.data)}))
+        self.candidate = self.root / "candidate.yaml"
+        self.candidate.write_text(yaml.safe_dump({"data_dir": str(self.root / "empty-new-root")}))
+        self.binary = self.root / "replacement"
+        self.binary.write_text("#!/bin/sh\nexit 2\n")
+        self.binary.chmod(0o700)
+
+    def check(self, binary=None):
+        return subprocess.run(["bash", "-c", HELPERS + '\nruntime_assignment_compatible "$@"',
+                               "check", str(binary or self.binary), str(self.config), str(self.candidate)],
+                              text=True, capture_output=True)
+
+    def evidence(self, kind, value):
+        path = self.data / "state" / kind
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+        return path
+
+    def test_unknown_command_accepted_only_for_empty_state_and_pure_reads(self):
+        self.assertEqual(self.check().returncode, 0)
+        self.assertFalse(self.data.exists())
+        receipt = self.evidence("unbound-requests/request.json", {"schema": 1})
+        self.assertNotEqual(self.check().returncode, 0)
+        self.assertFalse((self.data / "state/meta").exists())
+        receipt.unlink()
+        self.assertEqual(self.check().returncode, 0)
+
+    def test_installed_custom_root_cannot_be_hidden_by_empty_candidate_root(self):
+        self.evidence("meta/required-assignment-protocol.json",
+                      {"schema": 1, "protocol": "destination-assignment-v1"})
+        self.assertNotEqual(self.check().returncode, 0)
+        self.binary.write_text("#!/bin/sh\n[ \"$1\" = assignment-capabilities ] || exit 1\nprintf 'destination-assignment-v1\\n'\n")
+        self.assertEqual(self.check().returncode, 0)
+        self.binary.write_text("#!/bin/sh\nprintf 'destination-assignment-v1\\nextra'\n")
+        self.assertNotEqual(self.check().returncode, 0)
+
+    def test_malformed_floor_or_assignment_evidence_fails_closed(self):
+        self.binary.write_text("#!/bin/sh\nprintf 'destination-assignment-v1\\n'\n")
+        marker = self.evidence("meta/required-assignment-protocol.json", {"schema": 9})
+        self.assertNotEqual(self.check().returncode, 0)
+        marker.unlink()
+        self.evidence("machines/assigned.json", {"launch_identity": {}, "warm_slot": {"claimed": "request"}})
+        self.binary.write_text("#!/bin/sh\nexit 2\n")
+        self.assertNotEqual(self.check().returncode, 0)
+        self.evidence("unbound-assignments/intent.json", []).write_text("invalid JSON")
+        self.assertNotEqual(self.check().returncode, 0)
+
+    def test_rollback_refuses_old_binary_after_assignment_appears(self):
+        rollback = self.root / "rollback"
+        rollback.mkdir()
+        shutil.copyfile(self.config, rollback / "config.yaml")
+        shutil.copyfile(self.binary, rollback / "briqyardd")
+        (rollback / "briqyardd").chmod(0o700)
+        binary_dir = self.root / "bin"
+        binary_dir.mkdir()
+        replacement = binary_dir / "briqyardd"
+        replacement.write_text("compatible replacement")
+        self.evidence("meta/required-assignment-protocol.json",
+                      {"schema": 1, "protocol": "destination-assignment-v1"})
+        staging = self.root / "staging"
+        staging.mkdir()
+        script = HELPERS + '\nactivation_pending=1; rollback_ready=1; candidate=""; trap cleanup_runtime_install EXIT; false\n'
+        env = dict(os.environ, rollback=str(rollback), binary_dir=str(binary_dir),
+                   config_path=str(self.config), new=str(staging))
+        result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(replacement.read_text(), "compatible replacement")
+        self.assertIn("compatible replacement left installed", result.stderr)
+
+
+    def test_compatible_retained_binary_is_restored_with_current_floor(self):
+        rollback = self.root / "rollback"
+        rollback.mkdir()
+        shutil.copyfile(self.config, rollback / "config.yaml")
+        retained = rollback / "briqyardd"
+        retained.write_text("#!/bin/sh\nprintf 'destination-assignment-v1\\n'\n")
+        retained.chmod(0o700)
+        binary_dir = self.root / "bin"
+        binary_dir.mkdir()
+        replacement = binary_dir / "briqyardd"
+        replacement.write_text("replacement")
+        self.evidence("meta/required-assignment-protocol.json",
+                      {"schema": 1, "protocol": "destination-assignment-v1"})
+        staging = self.root / "staging"
+        staging.mkdir()
+        script = HELPERS + '\nactivation_pending=1; rollback_ready=1; candidate=""; trap cleanup_runtime_install EXIT; false\n'
+        env = dict(os.environ, rollback=str(rollback), binary_dir=str(binary_dir),
+                   config_path=str(self.config), new=str(staging))
+        result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(replacement.read_bytes(), retained.read_bytes())
+        self.assertIn("previous executables and configuration restored", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

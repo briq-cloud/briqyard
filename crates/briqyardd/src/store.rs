@@ -45,6 +45,7 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 
 impl Store {
     pub fn open(root: &Path) -> Result<Self> {
+        let assignment_required = crate::assignment_compatibility::required(root)?;
         private_dir(root)?;
         for d in [
             "machines",
@@ -65,6 +66,9 @@ impl Store {
             private_dir(&root.join(d))?;
         }
         std::fs::File::open(root)?.sync_all()?;
+        if assignment_required {
+            crate::assignment_compatibility::ensure_floor(root)?;
+        }
         Ok(Self {
             root: root.to_path_buf(),
         })
@@ -86,7 +90,19 @@ impl Store {
     }
 
     pub fn put<T: Serialize>(&self, kind: &str, key: &str, v: &T) -> Result<()> {
-        write_private(&self.path(kind, key)?, &serde_json::to_vec_pretty(v)?)
+        anyhow::ensure!(
+            kind != "meta" || key != "required-assignment-protocol",
+            "permanent assignment floor cannot be overwritten"
+        );
+        let path = self.path(kind, key)?;
+        let bytes = serde_json::to_vec_pretty(v)?;
+        if matches!(kind, "unbound-assignments" | "unbound-requests")
+            || (kind == "machines"
+                && crate::assignment_compatibility::assigned(&serde_json::from_slice(&bytes)?))
+        {
+            crate::assignment_compatibility::ensure_floor(&self.root)?;
+        }
+        write_private(&path, &bytes)
     }
 
     /// Crash-durable record boundary for immutable snapshot publication and read intents.
@@ -114,6 +130,11 @@ impl Store {
     }
 
     pub fn delete(&self, kind: &str, key: &str) -> Result<()> {
+        anyhow::ensure!(
+            kind != "unbound-requests"
+                && !(kind == "meta" && key == "required-assignment-protocol"),
+            "permanent assignment authority cannot be deleted"
+        );
         match std::fs::remove_file(self.path(kind, key)?) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -157,6 +178,10 @@ impl Store {
     }
 
     pub fn put_meta(&self, key: &str, value: &str) -> Result<()> {
+        anyhow::ensure!(
+            key != "required-assignment-protocol",
+            "permanent assignment floor cannot be overwritten"
+        );
         write_private(&self.path("meta", key)?, value.as_bytes())
     }
 }

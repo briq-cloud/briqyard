@@ -329,3 +329,62 @@ async fn failed_machine_directory_sync_does_not_release_hold_or_mark_record_remo
 fn unjailed_launch_identity_is_refused_instead_of_assuming_root_credentials() {
     assert!(LaunchIdentity::new(&Config::default(), "operator", 1, 2).is_err());
 }
+
+#[tokio::test]
+async fn assignment_state_appearing_after_preflight_is_checked_inside_admission_fence() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let reader = h.m.inner.namespace_lifecycle.read().await;
+    // A preflight with no assignment state accepts an old executable.
+    assert!(!crate::assignment_compatibility::required(&h.m.inner.cfg.state_dir()).unwrap());
+    let mut pending = Box::pin(h.m.handover_admission(Path::new("/usr/bin/true")));
+    assert!(matches!(
+        futures::poll!(&mut pending),
+        std::task::Poll::Pending
+    ));
+    h.m.inner
+        .store
+        .put(
+            "unbound-requests",
+            "consumed",
+            &serde_json::json!({"schema": 1}),
+        )
+        .unwrap();
+    drop(reader);
+    assert!(pending.await.is_err());
+    assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
+}
+
+#[tokio::test]
+async fn machine_destruction_keeps_assignment_consumption_and_compatibility_floor() {
+    let (h, r, _) = held().await;
+    let e = Entry::new(r.clone(), h.m.inner.events.clone());
+    h.m.inner.machines.lock().unwrap().insert(r.id.clone(), e);
+    h.m.inner
+        .store
+        .put_durable(
+            "unbound-requests",
+            "consumed",
+            &serde_json::json!({"schema": 1, "machine": r.id, "namespace": r.namespace, "request_id": "req1", "create_sha256": "a".repeat(64)}),
+        )
+        .unwrap();
+    let run = h.m.inner.cfg.run_dir().join(&r.id);
+    std::fs::create_dir_all(run.parent().unwrap()).unwrap();
+    std::fs::write(&run, b"incomplete cleanup").unwrap();
+    assert!(h.m.destroy_machine(&r.id, None).await.is_err());
+    std::fs::remove_file(&run).unwrap();
+    h.m.destroy_machine(&r.id, None).await.unwrap();
+    assert!(h
+        .m
+        .inner
+        .store
+        .get::<serde_json::Value>("unbound-requests", "consumed")
+        .unwrap()
+        .is_some());
+    assert!(crate::assignment_compatibility::required(&h.m.inner.cfg.state_dir()).unwrap());
+    assert!(h
+        .m
+        .inner
+        .store
+        .delete_durable("unbound-requests", "consumed")
+        .is_err());
+}

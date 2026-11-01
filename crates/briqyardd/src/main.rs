@@ -49,6 +49,8 @@ enum Cmd {
     TlsFingerprint,
     /// Print supported persistent launch-allocation protocols without opening host state.
     StateCapabilities,
+    /// Print destination assignment support without reading configuration or host state.
+    AssignmentCapabilities,
 }
 
 fn main() {
@@ -89,6 +91,10 @@ fn one_malloc_arena() {
 async fn run(args: Args) -> Result<()> {
     if matches!(args.cmd, Some(Cmd::StateCapabilities)) {
         println!("launch-identity-v1");
+        return Ok(());
+    }
+    if matches!(args.cmd, Some(Cmd::AssignmentCapabilities)) {
+        println!("destination-assignment-v1");
         return Ok(());
     }
     // Capture before an installer replaces this path; /proc/self/exe later names old bytes.

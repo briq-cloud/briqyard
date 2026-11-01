@@ -281,6 +281,9 @@ impl Manager {
                 "replacement daemon cannot preserve launch allocations; handover refused"
             );
         }
+        if crate::assignment_compatibility::required(&self.inner.cfg.state_dir())? {
+            crate::assignment_compatibility::check_candidate(executable, deadline).await?;
+        }
         Ok(admission)
     }
 
