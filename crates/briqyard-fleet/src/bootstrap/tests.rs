@@ -15,20 +15,78 @@ fn bootstrap_config_creation_preserves_existing_operator_warm_policy() {
         .next()
         .unwrap()
         .replace("/etc/briqyard", dir.path().to_str().unwrap());
-    assert!(std::process::Command::new("bash")
-        .args(["-c", &block])
-        .status()
-        .unwrap()
-        .success());
-    assert_eq!(std::fs::read_to_string(config).unwrap(), original);
-    assert!(
-        SCRIPT
-            .find("if [ -f /etc/briqyard/config.yaml ] && !")
+    let staged = dir.path().join("staged");
+    std::fs::create_dir(&staged).unwrap();
+    let daemon = staged.join("briqyardd");
+    std::fs::write(
+        &daemon,
+        "#!/bin/bash\nset -eu\ntest \"$1\" = --config\ncmp -s \"$EXPECTED\" \"$2\"\nprintf '%s' \"$2\" > \"$VALIDATED\"\ntest \"$REJECT\" = 0\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&daemon, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let expected = dir.path().join("expected.yaml");
+    std::fs::write(&expected, original).unwrap();
+    let installed = dir.path().join("installed");
+    std::fs::create_dir(&installed).unwrap();
+    for name in ["briqyard", "briqyard-fleet", "briqyardd"] {
+        std::fs::write(installed.join(name), "original executable").unwrap();
+    }
+    let validated = dir.path().join("validated");
+    let run = |script: &str, reject: &str| {
+        std::process::Command::new("bash")
+            .args([
+                "-c",
+                &format!(
+                    "set -eu\nruntime_config() {{ cmp -s \"$EXPECTED\" \"$1\"; }}\nfail() {{ exit 1; }}\n{script}"
+                ),
+            ])
+            .env("new", &staged)
+            .env("config_path", &config)
+            .env("binary_dir", &installed)
+            .env("EXPECTED", &expected)
+            .env("VALIDATED", &validated)
+            .env("REJECT", reject)
+            .env("firecracker", "/test/firecracker")
+            .env("jailer", "/test/jailer")
+            .env("kernel", "/test/kernel")
+            .env("init", "/test/init")
+            .status()
             .unwrap()
-            < SCRIPT
-                .find("for b in briqyardd briqyard-init briqyard briqyard-fleet; do put")
-                .unwrap()
+    };
+    // Exercise candidate creation and the staged daemon's validation. Runtime path
+    // rewriting itself is covered by hack/test_bootstrap.py's real installer fixture.
+    let preparation = block
+        .split("# Retain a complete rollback set")
+        .next()
+        .unwrap();
+    assert!(run(preparation, "0").success());
+    let candidate = std::fs::read_to_string(&validated).unwrap();
+    assert_ne!(std::path::Path::new(&candidate), config);
+    assert_eq!(std::fs::read_to_string(&candidate).unwrap(), original);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+    std::fs::remove_file(&validated).unwrap();
+    // Run the entire switch block with validation rejected: neither the live
+    // configuration nor any installed executable may be replaced or retained.
+    assert!(!run(&block, "1").success());
+    assert!(
+        validated.exists(),
+        "the staged daemon must reject the candidate"
     );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+    for name in ["briqyard", "briqyard-fleet", "briqyardd"] {
+        assert_eq!(
+            std::fs::read_to_string(installed.join(name)).unwrap(),
+            "original executable"
+        );
+    }
+    assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("rollback.")
+    }));
 }
 
 const ED25519: &str =
