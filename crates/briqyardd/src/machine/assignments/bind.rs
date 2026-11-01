@@ -29,6 +29,15 @@ impl Manager {
             "assignment handle differs from the original owned VMM"
         );
         self.verify_live_launch(entry, live)?;
+        self.settled_assigned_origin(&record)
+    }
+
+    fn settled_assigned_origin(&self, record: &Record) -> Result<templates::CloneOrigin> {
+        anyhow::ensure!(
+            record.launch_identity.is_some(),
+            "assigned launch identity missing"
+        );
+        self.validate_launch_record(record)?;
         anyhow::ensure!(
             self.inner
                 .store
@@ -148,7 +157,12 @@ impl Manager {
         entry: &Entry,
         live: &fc::Vm,
     ) -> Result<()> {
-        let origin = self.assigned_origin(entry, live)?;
+        self.assigned_origin(entry, live)?;
+        self.check_assigned_bound_record(&entry.snapshot())
+    }
+
+    fn check_assigned_bound_record(&self, record: &Record) -> Result<()> {
+        let origin = self.settled_assigned_origin(record)?;
         anyhow::ensure!(
             matches!(
                 origin.stage,
@@ -158,13 +172,30 @@ impl Manager {
         );
         let binding = origin.sandbox.as_ref().unwrap();
         let bind = binding.bind.as_ref().context("assigned payload missing")?;
-        let resolved = templates::sandbox::destination_bind(&entry.snapshot(), &origin)?;
+        let resolved = templates::sandbox::destination_bind(record, &origin)?;
         anyhow::ensure!(
             binding.ack_sha256.as_ref() == Some(&templates::sandbox::binding_hash(bind)?)
                 && bind.fingerprint_bytes()? == resolved.fingerprint_bytes()?,
             "assignment acknowledgment or complete payload differs"
         );
         Ok(())
+    }
+
+    /// Startup Entries begin untrusted. Metadata alone cannot publish an assigned VM.
+    pub(in crate::machine) fn assignment_publication_allowed(
+        &self,
+        record: &Record,
+        trusted: bool,
+    ) -> bool {
+        if record.launch_identity.is_none() {
+            return true;
+        }
+        trusted
+            && record
+                .clone_origin
+                .as_ref()
+                .is_some_and(|origin| origin.stage == templates::CloneStage::Active)
+            && self.check_assigned_bound_record(record).is_ok()
     }
 
     /// Private end-to-end caller. No ordinary create/selector reaches this function.

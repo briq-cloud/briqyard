@@ -84,11 +84,15 @@ impl Manager {
             .lock()
             .unwrap()
             .values()
-            .map(|e| e.snapshot())
+            .filter_map(|entry| {
+                let record = entry.snapshot();
+                self.assignment_publication_allowed(&record, entry.identity_trusted.load(Relaxed))
+                    .then_some(record)
+            })
             .collect();
         let mut counted: Vec<String> = all.iter().map(|r| r.ip.clone()).collect();
         counted.sort();
-        let running = all.into_iter().filter(|r| r.state == state::RUNNING);
+        let running = all.iter().filter(|r| r.state == state::RUNNING);
         let mut pins = Vec::new();
         let mut members = Vec::new();
         for r in running {
@@ -99,7 +103,9 @@ impl Manager {
             {
                 continue;
             }
-            let Ok(policy) = self.policy_for(&r) else {
+            // Dependencies must come from the same publication-approved snapshot: a
+            // legacy via policy cannot expose an assigned target before its adoption.
+            let Ok(policy) = self.policy_for_records(r, &all) else {
                 continue;
             };
             pins.push((netw::tap_name(&r.id), r.ip.clone()));
@@ -455,6 +461,7 @@ impl Manager {
         for e in self.inner.machines.lock().unwrap().values() {
             let r = e.rec.lock().unwrap();
             if r.namespace != namespace
+                || !self.assignment_publication_allowed(&r, e.identity_trusted.load(Relaxed))
                 || (r.launch_identity.is_some()
                     && r.clone_origin
                         .as_ref()

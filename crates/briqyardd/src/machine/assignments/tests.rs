@@ -1,6 +1,7 @@
 use super::*;
 mod bind;
 mod live;
+mod publication;
 use crate::machine::templates::tests::launch_identity::prepared;
 
 async fn fixture() -> (
