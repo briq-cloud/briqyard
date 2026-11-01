@@ -91,6 +91,9 @@ pub trait Vmm: Send + Sync {
         Ok(false)
     }
 
+    #[cfg(test)]
+    async fn warm_test_barrier(&self, _phase: &str, _id: &str) {}
+
     fn paused_slots_supported(&self) -> bool {
         false
     }

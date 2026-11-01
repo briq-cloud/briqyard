@@ -28,7 +28,11 @@ impl Manager {
                 "warm claim requires a DNS name and stable request_id",
             ));
         }
-        let _admission = self.inner.namespace_lifecycle.read().await;
+        #[cfg(test)]
+        self.inner
+            .vmm
+            .warm_test_barrier("warm_claim_lock", "*")
+            .await;
         let turn = if request.fail_fast {
             match self.inner.warm_lock.try_lock() {
                 Ok(turn) => turn,
@@ -54,18 +58,25 @@ impl Manager {
         } else {
             self.inner.warm_lock.lock().await
         };
+        // Refill uses warm -> namespace -> entry; claims follow the same order.
+        let _admission = if request.fail_fast {
+            self.inner
+                .namespace_lifecycle
+                .try_read()
+                .map_err(|_| MError::PoolEmpty)?
+        } else {
+            self.inner.namespace_lifecycle.read().await
+        };
         let mut pool = self.pool(namespace, name)?;
         let pool_key = key(namespace, name)?;
         let existing = self.existing_warm_claim(&pool, &request.request_id)?;
-        let e = if let Some(claim) = existing {
+        let is_new = existing.is_none();
+        let e = if let Some(claim) = &existing {
             if claim.name != request.name {
                 return Err(MError::Conflict(
                     "request_id already claims another name".into(),
                 ));
             }
-            pool.claims
-                .insert(request.request_id.clone(), claim.clone());
-            self.pool_save(&pool)?;
             self.entry(&claim.machine).map_err(|_| MError::Conflict("the previously claimed machine was destroyed; this request_id cannot consume another slot".into()))?
         } else {
             self.pool_current(&pool)?;
@@ -74,63 +85,32 @@ impl Manager {
                     "pool claim receipt limit reached; use a new pool name".into(),
                 ));
             }
-            let selected = self
-                .inner
+            self.inner
                 .machines
                 .lock()
                 .unwrap()
                 .values()
                 .find(|e| {
-                    let r = e.rec.lock().unwrap();
+                    let r = e.snapshot();
                     ready_slot(&r)
                         && r.namespace == namespace
-                        && r.warm_slot.as_ref().is_some_and(|s| {
-                            s.pool == pool_key
-                                && s.fingerprint == pool.fingerprint
-                                && s.claimed.is_none()
+                        && r.warm_slot.as_ref().is_some_and(|slot| {
+                            slot.pool == pool_key
+                                && slot.fingerprint == pool.fingerprint
+                                && slot.claimed.is_none()
                         })
-                        && !pool.claims.values().any(|c| c.machine == r.id)
+                        && !pool.claims.values().any(|claim| claim.machine == r.id)
                 })
-                .cloned();
-            let e = selected.ok_or(MError::PoolEmpty)?;
-            // The machines lock is also the ordinary-create name/admission boundary.
-            {
-                let machines = self.inner.machines.lock().unwrap();
-                let id = e.snapshot().id;
-                if machines.values().any(|other| {
-                    let r = other.snapshot();
-                    r.namespace == namespace
-                        && r.name == request.name
-                        && r.id != id
-                        && r.state != state::DESTROYING
-                }) {
-                    return Err(MError::Conflict("claim name is already taken".into()));
-                }
-                let mut names = self.inner.warm_names.lock().unwrap();
-                if names
-                    .get(&(namespace.into(), request.name.clone()))
-                    .is_some_and(|other| other != &id)
-                {
-                    return Err(MError::Conflict("claim name is already reserved".into()));
-                }
-                names.insert((namespace.into(), request.name.clone()), id.clone());
-                {
-                    let mut r = e.rec.lock().unwrap();
-                    r.name = request.name.clone();
-                    r.warm_slot.as_mut().unwrap().claimed = Some(request.request_id.clone());
-                }
-                pool.claims.insert(
-                    request.request_id.clone(),
-                    Claim {
-                        machine: id,
-                        name: request.name.clone(),
-                    },
-                );
-                self.pool_save(&pool)?;
-            }
-            e
+                .cloned()
+                .ok_or(MError::PoolEmpty)?
         };
-        let entry_turn = e.lock.lock().await;
+        // A fill can publish Paused while still owning its lifecycle lock. Never alter
+        // claimed/name/receipt until that fill has completed and readiness is rechecked.
+        let entry_turn = if request.fail_fast && is_new {
+            e.lock.try_lock().map_err(|_| MError::PoolEmpty)?
+        } else {
+            e.lock.lock().await
+        };
         if !self.holds(&e) {
             self.inner
                 .warm_names
@@ -153,6 +133,20 @@ impl Manager {
                 "claim destination differs from its immutable pool".into(),
             ));
         }
+        if is_new
+            && (!ready_slot(&before)
+                || before
+                    .warm_slot
+                    .as_ref()
+                    .is_none_or(|slot| slot.claimed.is_some())
+                || pool.claims.values().any(|claim| claim.machine == before.id))
+        {
+            return Err(MError::PoolEmpty);
+        }
+        if let Some(claim) = existing.filter(|_| !pool.claims.contains_key(&request.request_id)) {
+            pool.claims.insert(request.request_id.clone(), claim);
+            self.pool_save(&pool)?;
+        }
         if before
             .warm_slot
             .as_ref()
@@ -169,9 +163,41 @@ impl Manager {
                 )
                 .await;
         }
-        // Recovered pending intents must still match the current qualified template.
-        if ready_slot(&before) {
-            self.pool_current(&pool)?;
+        if !ready_slot(&before) {
+            return Err(MError::Conflict(
+                "claimed destination is not a completed paused slot".into(),
+            ));
+        }
+        self.pool_current(&pool)?;
+        // Namespace create uses this same machine/name boundary. The entry lock above
+        // stays held through both durable receipt publication and activation.
+        {
+            let machines = self.inner.machines.lock().unwrap();
+            if machines.values().any(|other| {
+                let r = other.snapshot();
+                r.namespace == namespace
+                    && r.name == request.name
+                    && r.id != before.id
+                    && r.state != state::DESTROYING
+            }) {
+                return Err(MError::Conflict("claim name is already taken".into()));
+            }
+            let mut names = self.inner.warm_names.lock().unwrap();
+            if names
+                .get(&(namespace.into(), request.name.clone()))
+                .is_some_and(|id| id != &before.id)
+            {
+                return Err(MError::Conflict("claim name is already reserved".into()));
+            }
+            names.insert((namespace.into(), request.name.clone()), before.id.clone());
+            pool.claims.insert(
+                request.request_id.clone(),
+                Claim {
+                    machine: before.id.clone(),
+                    name: request.name.clone(),
+                },
+            );
+            self.pool_save(&pool)?;
         }
         {
             let mut r = e.rec.lock().unwrap();

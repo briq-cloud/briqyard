@@ -1,6 +1,15 @@
 use super::*;
 
 impl Mock {
+    pub(super) fn write_snapshot(&self, vm: &fc::Vm, durable: bool) -> Result<()> {
+        let how = if durable { "synced" } else { "unsynced" };
+        self.record(format!("snapshot {} {how}", vm.pid));
+        let dir = vm.chroot.as_ref().unwrap_or(&vm.dir);
+        std::fs::write(dir.join("snap.state"), b"state")?;
+        std::fs::write(dir.join("snap.mem"), b"memory")?;
+        Ok(())
+    }
+
     pub(super) fn park_slot(&self, pid: u32) -> Result<()> {
         self.record(format!("pause {pid}"));
         self.paused.lock().unwrap().insert(pid);

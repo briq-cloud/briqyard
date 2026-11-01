@@ -65,6 +65,11 @@ impl Manager {
         req: api::CreateMachineRequest,
         slot: warm::Slot,
     ) -> Result<(Arc<Entry>, Make), MError> {
+        #[cfg(test)]
+        self.inner
+            .vmm
+            .warm_test_barrier("warm_admission", "*")
+            .await;
         let _admission = self.inner.namespace_lifecycle.read().await;
         self.record_with_warm_slot(req, None, Some(slot)).await
     }
@@ -76,7 +81,7 @@ impl Manager {
         warm_slot: Option<warm::Slot>,
     ) -> Result<(Arc<Entry>, Make), MError> {
         if warm_slot.is_some()
-            && (!req.fork.as_ref().is_some_and(|f| f.snapshot.is_some()) || role.is_some())
+            && (req.fork.as_ref().is_none_or(|f| f.snapshot.is_none()) || role.is_some())
         {
             return Err(invalid(
                 "internal warm slot requires a strict named memory source",

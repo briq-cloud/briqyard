@@ -112,7 +112,7 @@ impl Mock {
             .lock()
             .unwrap()
             .as_ref()
-            .is_some_and(|(op, address)| *op == operation && address == ip);
+            .is_some_and(|(op, address)| *op == operation && (address == "*" || address == ip));
         if paused {
             self.network_started.notify_one();
             self.network_release.notified().await;
@@ -349,6 +349,10 @@ impl Mock {
 
 #[async_trait::async_trait]
 impl fc::Vmm for Mock {
+    async fn warm_test_barrier(&self, phase: &str, id: &str) {
+        self.wait_network(phase, id).await;
+    }
+
     fn paused_slots_supported(&self) -> bool {
         true
     }
@@ -526,12 +530,7 @@ impl fc::Vmm for Mock {
     }
 
     async fn snapshot(&self, vm: &fc::Vm, durable: bool) -> Result<()> {
-        let how = if durable { "synced" } else { "unsynced" };
-        self.record(format!("snapshot {} {how}", vm.pid));
-        let dir = vm.chroot.as_ref().unwrap_or(&vm.dir);
-        std::fs::write(dir.join("snap.state"), b"state")?;
-        std::fs::write(dir.join("snap.mem"), b"memory")?;
-        Ok(())
+        self.write_snapshot(vm, durable)
     }
 
     async fn resume(&self, vm: &fc::Vm) -> Result<()> {

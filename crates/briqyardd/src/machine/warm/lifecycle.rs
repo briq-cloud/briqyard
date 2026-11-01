@@ -10,6 +10,11 @@ impl Manager {
         let version = self.configure_memory_clone(e, live).await?;
         self.inner.vmm.pause(live).await.context("park warm slot")?;
         self.clone_stage(e, templates::CloneStage::Paused)?;
+        #[cfg(test)]
+        self.inner
+            .vmm
+            .warm_test_barrier("warm_parked", &e.snapshot().id)
+            .await;
         crate::profile::stage(
             "warm_slot_fill",
             "park_durable",

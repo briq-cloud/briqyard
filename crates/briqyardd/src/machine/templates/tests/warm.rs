@@ -310,3 +310,97 @@ async fn handover_keeps_confirmed_paused_slot_and_closes_new_claim_admission() {
         .is_err());
     drop(held);
 }
+
+#[tokio::test]
+async fn claim_cannot_mutate_a_paused_slot_until_fill_releases_its_lifecycle_lock() {
+    let (h, _) = pool(1).await;
+    h.pause_warm_barrier("warm_parked");
+    h.m.warm_step().await;
+    h.wait_warm_barrier().await;
+    let e =
+        h.m.inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .find(|e| e.snapshot().warm_slot.is_some())
+            .cloned()
+            .unwrap();
+    assert!(crate::machine::warm::ready_slot(&e.snapshot()));
+    assert!(e.lock.try_lock().is_err());
+    let fast = tokio::time::timeout(
+        Duration::from_secs(1),
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "parked-key")),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(fast, Err(MError::PoolEmpty)));
+    assert!(e.snapshot().warm_slot.unwrap().claimed.is_none());
+    assert_eq!(h.m.warm_pools("t1").unwrap()[0].claim_receipts, 0);
+    let manager = h.m.clone();
+    let waiting = tokio::spawn(async move {
+        let mut request = claim("worker", "parked-key");
+        request.fail_fast = false;
+        manager.claim_warm_pool("t1", "tools", request).await
+    });
+    h.release_warm_barriers();
+    let made = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(made.ready);
+    assert_eq!(made.id, e.snapshot().id);
+    assert_eq!(e.snapshot().clone_origin.unwrap().stage, CloneStage::Active);
+}
+
+#[tokio::test]
+async fn queued_namespace_writer_cannot_deadlock_refill_and_claim_lock_order() {
+    let (h, _) = pool(1).await;
+    h.pause_warm_barrier("warm_admission");
+    let manager = h.m.clone();
+    let refill = tokio::spawn(async move { manager.warm_step().await });
+    h.wait_warm_barrier().await; // Refill owns warm_lock, before namespace admission.
+    h.pause_warm_barrier("warm_claim_lock");
+    let manager = h.m.clone();
+    let claiming = tokio::spawn(async move {
+        let mut request = claim("worker", "writer-key");
+        request.fail_fast = false;
+        manager.claim_warm_pool("t1", "tools", request).await
+    });
+    h.wait_warm_barrier().await; // Claim is just before warm_lock, without a namespace reader.
+    let began = Arc::new(Notify::new());
+    let acquired = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let manager = h.m.clone();
+    let (writer_began, writer_acquired, writer_release) =
+        (began.clone(), acquired.clone(), release.clone());
+    let writer = tokio::spawn(async move {
+        writer_began.notify_one();
+        let _namespace_delete = manager.inner.namespace_lifecycle.write().await;
+        writer_acquired.notify_one();
+        writer_release.notified().await;
+    });
+    began.notified().await;
+    h.release_warm_barriers();
+    tokio::time::timeout(Duration::from_secs(3), acquired.notified())
+        .await
+        .unwrap();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), refill)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), claiming)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_ok() || matches!(result, Err(MError::PoolEmpty)));
+    if result.is_err() {
+        fill(&h).await;
+    } // Settle the existing fill before fixture teardown.
+}

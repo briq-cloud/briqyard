@@ -273,6 +273,18 @@ pub(super) const IMAGE: &str =
     "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000001";
 
 impl Harness {
+    pub(super) fn pause_warm_barrier(&self, phase: &'static str) {
+        *self.host.pause_network.lock().unwrap() = Some((phase, "*".into()));
+    }
+    pub(super) async fn wait_warm_barrier(&self) {
+        tokio::time::timeout(Duration::from_secs(3), self.host.network_started.notified())
+            .await
+            .unwrap();
+    }
+    pub(super) fn release_warm_barriers(&self) {
+        self.host.network_release.notify_waiters();
+    }
+
     pub(super) fn set_host_boot_id(&self, value: Option<&str>) {
         *self.host.host_boot_id.lock().unwrap() = value.map(str::to_string);
     }
