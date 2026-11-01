@@ -4,7 +4,7 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-const READERS: &str = "clone-readers";
+pub(super) const READERS: &str = "clone-readers";
 
 mod policy;
 pub(super) use policy::*;
@@ -174,10 +174,53 @@ impl Manager {
             .iter()
             .find(|s| s.id == snapshot || s.name.as_deref() == Some(snapshot))
             .ok_or_else(|| MError::NoSnapshot(snapshot.into()))?;
+        let (artifact, files) = self.checked_clone_artifact(&r, s, namespace)?;
+        let a = &artifact;
+        let reader = CloneReader {
+            source_machine: source.into(),
+            snapshot: s.id.clone(),
+            generation: a.generation.clone(),
+            destination: destination.into(),
+            namespace: namespace.into(),
+            stage: CloneStage::Reserved,
+        };
+        if let Some(old) = self.inner.store.get::<CloneReader>(READERS, destination)? {
+            if old.source_machine != reader.source_machine
+                || old.snapshot != reader.snapshot
+                || old.generation != reader.generation
+                || old.namespace != reader.namespace
+            {
+                return Err(MError::Conflict(
+                    "clone destination already holds a different memory reference".into(),
+                ));
+            }
+        } else {
+            self.inner
+                .store
+                .put_durable(READERS, destination, &reader)?;
+        }
+        Ok((a.clone(), files))
+    }
+
+    /// The same provenance validator serves clone reservation and paused pool placement.
+    pub(super) fn checked_clone_artifact(
+        &self,
+        r: &Record,
+        s: &SnapshotRec,
+        namespace: &str,
+    ) -> Result<(CloneArtifact, [PathBuf; 2]), MError> {
         let a = s
             .clone_artifact
             .as_ref()
             .ok_or_else(|| invalid("snapshot is not a sealed memory template"))?;
+        if r.namespace != namespace
+            || r.state == state::DESTROYING
+            || !self.named_memory_profiles().iter().any(|p| p == &a.profile)
+        {
+            return Err(invalid(
+                "template owner or qualified profile is unavailable",
+            ));
+        }
         if s.memory.is_none()
             || a.schema != 1
             || a.profile != guest::INIT_READY_V1
@@ -213,32 +256,9 @@ impl Manager {
         if current.as_ref() != Some(&a.boot_identity) {
             return Err(invalid("memory template boot identity is incompatible"));
         }
-        let files = self.artifact_files(source, &s.id, &a.generation)?;
+        let files = self.artifact_files(&r.id, &s.id, &a.generation)?;
         check_inode(&files[0], &a.state)?;
         check_inode(&files[1], &a.memory)?;
-        let reader = CloneReader {
-            source_machine: source.into(),
-            snapshot: s.id.clone(),
-            generation: a.generation.clone(),
-            destination: destination.into(),
-            namespace: namespace.into(),
-            stage: CloneStage::Reserved,
-        };
-        if let Some(old) = self.inner.store.get::<CloneReader>(READERS, destination)? {
-            if old.source_machine != reader.source_machine
-                || old.snapshot != reader.snapshot
-                || old.generation != reader.generation
-                || old.namespace != reader.namespace
-            {
-                return Err(MError::Conflict(
-                    "clone destination already holds a different memory reference".into(),
-                ));
-            }
-        } else {
-            self.inner
-                .store
-                .put_durable(READERS, destination, &reader)?;
-        }
         Ok((a.clone(), files))
     }
 

@@ -121,14 +121,22 @@ pub(super) async fn configure(st: &State, request: Option<CloneConfigure>) -> Re
     }
 }
 
-pub(super) async fn activate(st: &State, generation: &str) -> Response {
+pub(super) async fn activate(st: &State, generation: &str, realtime_sec: Option<u64>) -> Response {
     let mut gate = st.clone_gate.lock().await;
     match &mut *gate {
         Gate::Configured {
             identity,
             activating,
+            active,
             ..
         } if identity.generation == generation => {
+            if !*active && !*activating {
+                if let Some(seconds) = realtime_sec {
+                    if let Err(err) = clone_identity::set_clock(seconds) {
+                        return Response::error(format!("clone activation clock: {err:#}"));
+                    }
+                }
+            }
             *activating = true;
             st.activate.notify_one();
             response(&gate)
@@ -200,10 +208,10 @@ mod tests {
         let mut conflicting = request.clone();
         conflicting.generation = "clone-2".into();
         assert_eq!(configure(&st, Some(conflicting)).await.kind, "error");
-        assert_eq!(activate(&st, "clone-2").await.kind, "error");
-        assert_eq!(activate(&st, "clone-1").await.kind, "ok");
+        assert_eq!(activate(&st, "clone-2", None).await.kind, "error");
+        assert_eq!(activate(&st, "clone-1", None).await.kind, "ok");
         assert!(!st.clone_gate.lock().await.allows("exec"));
-        assert_eq!(activate(&st, "clone-1").await.kind, "ok");
+        assert_eq!(activate(&st, "clone-1", None).await.kind, "ok");
         st.clone_gate.lock().await.mark_active();
         assert!(st.clone_gate.lock().await.allows("exec"));
         // Retried configure after activation must return the original identity unchanged.
@@ -222,7 +230,7 @@ mod tests {
         let st = testutil::state();
         let request = configured(&st);
         *st.clone_gate.lock().await = Gate::Builder;
-        assert_eq!(activate(&st, "clone-1").await.kind, "error");
+        assert_eq!(activate(&st, "clone-1", None).await.kind, "error");
         *st.clone_gate.lock().await = Gate::Failed;
         assert_eq!(configure(&st, Some(request)).await.kind, "error");
     }

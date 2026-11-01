@@ -49,6 +49,7 @@ mod tests;
 mod tick;
 mod update;
 mod views;
+mod warm;
 
 use backups::{Backups, Schedule, Turn};
 use create::*;
@@ -64,6 +65,8 @@ use update::*;
 /// What the API maps to statuses.
 #[derive(Debug, thiserror::Error)]
 pub enum MError {
+    #[error("no compatible ready slot is available")]
+    PoolEmpty,
     #[error("machine not found")]
     NotFound,
     #[error("backup {0} not found")]
@@ -291,6 +294,8 @@ pub struct Record {
     pub template_birth: Option<templates::TemplateBirth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_origin: Option<templates::CloneOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm_slot: Option<warm::Slot>,
     /// What a newer daemon wrote and this one does not know: kept as it is, so a rollback that
     /// rewrites the record does not drop it (ADR 0027).
     #[serde(flatten)]
@@ -392,13 +397,17 @@ fn not_running_if_unreachable(err: anyhow::Error) -> MError {
 }
 
 fn holds_memory(state: &str) -> bool {
-    matches!(state, state::STARTING | state::RUNNING | state::STOPPING)
+    matches!(
+        state,
+        state::STARTING | state::RUNNING | state::STOPPING | state::WARM
+    )
 }
 
 /// Whether the host counts this machine's memory as taken: it holds it, or its create will
 /// start it (ADR 0048: room is taken when the machine is recorded, not when it boots).
 fn commits_memory(r: &Record) -> bool {
     holds_memory(&r.state)
+        || (r.warm_slot.is_some() && !matches!(r.state.as_str(), state::STOPPED | state::CREATED))
         || (r.state == state::CREATING && r.start)
         || r.clone_origin.as_ref().is_some_and(|origin| {
             r.state == state::DESTROYING
@@ -757,6 +766,8 @@ pub struct Stats {
 
 struct Inner {
     stats: Stats,
+    warm_lock: tokio::sync::Mutex<()>,
+    warm_names: Mutex<HashMap<(String, String), String>>,
     verified_templates: Mutex<std::collections::HashSet<(String, String, String)>>,
     cfg: Config,
     store: Store,

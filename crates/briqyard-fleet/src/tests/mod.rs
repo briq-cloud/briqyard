@@ -243,6 +243,7 @@ mod sessions;
 mod siblings;
 mod templates;
 mod tls;
+mod warm;
 
 use daemon::*;
 

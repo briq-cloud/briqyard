@@ -2,6 +2,7 @@
 
 use super::*;
 mod clone_recovery;
+mod warm;
 
 /// How the next boots go: what the guest does once its process is up.
 #[derive(Clone, Debug)]
@@ -88,6 +89,7 @@ pub(super) struct Mock {
     /// The version the guests' inits answer with.
     pub(super) init_version: Mutex<String>,
     pub(super) file_stream_v1: AtomicBool,
+    pub(super) paused: Mutex<std::collections::HashSet<u32>>,
     clone_status: Mutex<HashMap<PathBuf, guest::CloneStatus>>,
     pub(super) init_digests: Mutex<HashMap<PathBuf, String>>,
     /// The limits each machine's disks have now: given at boot, changed live, and
@@ -152,6 +154,7 @@ impl Mock {
             vmm_version: Mutex::new("v1.17.0/test".into()),
             init_version: Mutex::new("0.1.0+init".into()),
             file_stream_v1: AtomicBool::new(false),
+            paused: Mutex::new(std::collections::HashSet::new()),
             clone_status: Mutex::new(HashMap::new()),
             init_digests: Mutex::new(HashMap::new()),
             disks: Mutex::new(HashMap::new()),
@@ -346,6 +349,9 @@ impl Mock {
 
 #[async_trait::async_trait]
 impl fc::Vmm for Mock {
+    fn paused_slots_supported(&self) -> bool {
+        true
+    }
     async fn boot(&self, b: &fc::Boot) -> Result<fc::Vm> {
         let boots = self.boots.lock().unwrap().clone();
         // The manager must durably publish the selected identity before any VMM launches.
@@ -487,6 +493,23 @@ impl fc::Vmm for Mock {
     }
     async fn settle_clone_process(&self, id: &str, saved: &fc::Incarnation) -> Result<bool> {
         self.settle_clone(id, saved)
+    }
+
+    async fn pause(&self, vm: &fc::Vm) -> Result<()> {
+        self.park_slot(vm.pid)
+    }
+    async fn resume_paused(&self, vm: &fc::Vm) -> Result<()> {
+        self.resume_slot(vm.pid)
+    }
+    async fn adopt_paused(
+        &self,
+        id: &str,
+        dir: &Path,
+        jail: Option<&fc::Jail>,
+        pid: u32,
+        disk_io: Arc<fc::DiskIo>,
+    ) -> Option<fc::Vm> {
+        self.adopt_pool_slot(id, dir, jail, pid, disk_io).await
     }
 
     async fn disk_rate(&self, vm: &fc::Vm, rate: &fc::DiskRate, volume: bool) -> Result<()> {

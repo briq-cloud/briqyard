@@ -642,3 +642,41 @@ fn template_commands_keep_seal_and_named_memory_selection_explicit() {
         _ => panic!("not a builder"),
     }
 }
+
+#[test]
+fn warm_pool_claim_requires_stable_id_and_defaults_to_fail_fast() {
+    let Cmd::WarmPool(warm::WarmCmd::Claim {
+        namespace,
+        pool,
+        name,
+        request_id,
+        fail_fast,
+    }) = parse(&[
+        "warm-pool",
+        "claim",
+        "team",
+        "tools",
+        "--name",
+        "worker",
+        "--request-id",
+        "retry1",
+    ])
+    .cmd
+    else {
+        panic!("not a pool claim");
+    };
+    assert_eq!(
+        (
+            namespace.as_str(),
+            pool.as_str(),
+            name.as_str(),
+            request_id.as_str()
+        ),
+        ("team", "tools", "worker", "retry1")
+    );
+    assert!(fail_fast);
+    assert_eq!(
+        fails(&["warm-pool", "claim", "team", "tools", "--name", "worker"]),
+        ErrorKind::MissingRequiredArgument
+    );
+}

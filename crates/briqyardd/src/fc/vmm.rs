@@ -91,6 +91,32 @@ pub trait Vmm: Send + Sync {
         Ok(false)
     }
 
+    fn paused_slots_supported(&self) -> bool {
+        false
+    }
+
+    /// An explicitly owned paused slot, never an ordinary running adoption.
+    async fn adopt_paused(
+        &self,
+        _id: &str,
+        _dir: &Path,
+        _jail: Option<&Jail>,
+        _pid: u32,
+        _disk_io: Arc<DiskIo>,
+    ) -> Option<Vm> {
+        None
+    }
+
+    /// Park without taking a new snapshot; require the API to confirm Paused.
+    async fn pause(&self, _vm: &Vm) -> Result<()> {
+        anyhow::bail!("paused slots unsupported")
+    }
+
+    /// Only a confirmed paused slot can cross this boundary.
+    async fn resume_paused(&self, _vm: &Vm) -> Result<()> {
+        anyhow::bail!("paused slots unsupported")
+    }
+
     /// Gives a running machine's disks these limits now: the root disk, and the volume when
     /// it has one.
     async fn disk_rate(&self, vm: &Vm, rate: &DiskRate, volume: bool) -> Result<()>;
@@ -174,6 +200,9 @@ pub(super) fn version_of(firecracker: &str, kernel: &str) -> Option<String> {
 
 #[async_trait]
 impl Vmm for Firecracker {
+    fn paused_slots_supported(&self) -> bool {
+        true
+    }
     fn cpu_fingerprint(&self) -> Option<String> {
         cpu_fingerprint().ok()
     }
@@ -349,62 +378,44 @@ impl Vmm for Firecracker {
         pid: u32,
         disk_io: Arc<DiskIo>,
     ) -> Option<Vm> {
-        if self.machine_of(pid).as_deref() != Some(id) {
-            return None;
-        }
-        let (api, vsock, _, _) = paths_for(dir, jail, id);
-        let client = Client::new(&api);
-        let running = match tokio::time::timeout(Duration::from_secs(3), client.info()).await {
-            Ok(Ok(info)) => api_running(&info),
-            _ => false,
-        };
-        if !running {
-            return None;
-        }
-        let (exited_tx, exited) = watch::channel(false);
-        // The previous daemon's listener died with it; the guest connects at its exit, so
-        // a new one on the same path takes the report.
-        let (uid, gid) = jail.map(|j| (j.uid, j.gid)).unwrap_or((0, 0));
-        let exit = listen_exit(&vsock, uid, gid, exited.clone()).ok()?;
-        // The pipe Firecracker was told at its boot; without one, no disk metrics this run.
-        let chroot = jail.map(|j| jail_root(&j.base, id));
-        let pipe = outside_path(chroot.as_deref(), dir, METRICS_FIFO);
-        disk_io.balloon.reset_observation();
-        if let Err(err) = read_metrics(&pipe, disk_io, exited.clone()) {
-            tracing::warn!(machine = id, err = %err, "disk metrics not read");
-        }
-        let machine = id.to_string();
-        tokio::spawn(async move {
-            while machine_of(pid).as_deref() == Some(machine.as_str()) {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            let _ = exited_tx.send(true);
-        });
-        let boot_identity = match client.balloon_config().await {
-            Ok(None) => None,
-            Ok(Some(config))
-                if config.deflate_on_oom
-                    && config.stats_polling_interval_s == 5
-                    && !config.free_page_hinting
-                    && config.free_page_reporting =>
-            {
-                Some(BootIdentity::ambiguous(REPORTING_PROFILE))
-            }
-            Ok(Some(_)) => Some(BootIdentity::ambiguous("unknown-device-profile")),
-            Err(_) => Some(BootIdentity::ambiguous(UNAVAILABLE_PROFILE)),
-        };
-        Some(Vm {
-            pid,
-            api,
-            vsock,
-            dir: dir.to_path_buf(),
-            chroot,
-            resumed: false,
-            boot_identity,
-            incarnation: Incarnation::read(pid),
-            exited,
-            exit,
-        })
+        self.adopt_state(id, dir, jail, pid, disk_io, "Running")
+            .await
+    }
+
+    async fn adopt_paused(
+        &self,
+        id: &str,
+        dir: &Path,
+        jail: Option<&Jail>,
+        pid: u32,
+        disk_io: Arc<DiskIo>,
+    ) -> Option<Vm> {
+        self.adopt_state(id, dir, jail, pid, disk_io, "Paused")
+            .await
+    }
+
+    async fn pause(&self, vm: &Vm) -> Result<()> {
+        let c = Client::new(&vm.api);
+        c.pause().await?;
+        anyhow::ensure!(
+            c.info().await?["state"] == "Paused",
+            "VMM did not confirm Paused"
+        );
+        Ok(())
+    }
+
+    async fn resume_paused(&self, vm: &Vm) -> Result<()> {
+        let c = Client::new(&vm.api);
+        anyhow::ensure!(
+            c.info().await?["state"] == "Paused",
+            "warm slot is not paused"
+        );
+        c.resume().await?;
+        anyhow::ensure!(
+            c.info().await?["state"] == "Running",
+            "VMM did not confirm Running"
+        );
+        Ok(())
     }
 
     fn host_boot_id(&self) -> Option<String> {
@@ -665,4 +676,74 @@ pub(super) async fn stamp<R: tokio::io::AsyncRead + Unpin>(
         let _ = out.lock().await.line(&ts, &line).await;
     }
     let _ = out.lock().await.flush().await;
+}
+
+impl Firecracker {
+    async fn adopt_state(
+        &self,
+        id: &str,
+        dir: &Path,
+        jail: Option<&Jail>,
+        pid: u32,
+        disk_io: Arc<DiskIo>,
+        expected: &str,
+    ) -> Option<Vm> {
+        if self.machine_of(pid).as_deref() != Some(id) {
+            return None;
+        }
+        let (api, vsock, _, _) = paths_for(dir, jail, id);
+        let client = Client::new(&api);
+        let running = match tokio::time::timeout(Duration::from_secs(3), client.info()).await {
+            Ok(Ok(info)) if expected == "Running" => api_running(&info),
+            Ok(Ok(info)) => info["state"] == expected,
+            _ => false,
+        };
+        if !running {
+            return None;
+        }
+        let (exited_tx, exited) = watch::channel(false);
+        // The previous daemon's listener died with it; the guest connects at its exit, so
+        // a new one on the same path takes the report.
+        let (uid, gid) = jail.map(|j| (j.uid, j.gid)).unwrap_or((0, 0));
+        let exit = listen_exit(&vsock, uid, gid, exited.clone()).ok()?;
+        // The pipe Firecracker was told at its boot; without one, no disk metrics this run.
+        let chroot = jail.map(|j| jail_root(&j.base, id));
+        let pipe = outside_path(chroot.as_deref(), dir, METRICS_FIFO);
+        disk_io.balloon.reset_observation();
+        if let Err(err) = read_metrics(&pipe, disk_io, exited.clone()) {
+            tracing::warn!(machine = id, err = %err, "disk metrics not read");
+        }
+        let machine = id.to_string();
+        tokio::spawn(async move {
+            while machine_of(pid).as_deref() == Some(machine.as_str()) {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            let _ = exited_tx.send(true);
+        });
+        let boot_identity = match client.balloon_config().await {
+            Ok(None) => None,
+            Ok(Some(config))
+                if config.deflate_on_oom
+                    && config.stats_polling_interval_s == 5
+                    && !config.free_page_hinting
+                    && config.free_page_reporting =>
+            {
+                Some(BootIdentity::ambiguous(REPORTING_PROFILE))
+            }
+            Ok(Some(_)) => Some(BootIdentity::ambiguous("unknown-device-profile")),
+            Err(_) => Some(BootIdentity::ambiguous(UNAVAILABLE_PROFILE)),
+        };
+        Some(Vm {
+            pid,
+            api,
+            vsock,
+            dir: dir.to_path_buf(),
+            chroot,
+            resumed: expected == "Paused",
+            boot_identity,
+            incarnation: Incarnation::read(pid),
+            exited,
+            exit,
+        })
+    }
 }

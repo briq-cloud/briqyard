@@ -23,6 +23,7 @@ pub(super) async fn status(State(st): S) -> Json<api::Status> {
         egress_siblings_v1: true,
         named_memory_fork_v1: !st.mgr.named_memory_profiles().is_empty(),
         named_memory_profiles: st.mgr.named_memory_profiles(),
+        warm_pool_profiles: st.mgr.warm_pool_profiles(),
         version: api::VERSION.into(),
         host_id: st.mgr.host_id().into(),
         capacity: st.mgr.capacity(),

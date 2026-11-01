@@ -15,6 +15,7 @@ mod host_token;
 mod run;
 mod session;
 mod tables;
+mod warm;
 
 use client::*;
 use doctor::*;
@@ -48,6 +49,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Paused slots of an immutable qualified template (host-local).
+    #[command(subcommand)]
+    WarmPool(warm::WarmCmd),
     /// The host's status
     Status,
     /// The API description

@@ -61,7 +61,13 @@ impl Manager {
             image: r.image.clone(),
             image_digest: r.image_digest.clone(),
             image_config_digest: r.image_config_digest.clone(),
-            state: r.state.clone(),
+            state: if warm::ready_slot(&r)
+                && r.warm_slot.as_ref().is_some_and(|s| s.claimed.is_none())
+            {
+                state::WARM.into()
+            } else {
+                r.state.clone()
+            },
             stopped_reason: r.stopped_reason.clone(),
             exit: r.exit.clone(),
             error: r.error.clone(),

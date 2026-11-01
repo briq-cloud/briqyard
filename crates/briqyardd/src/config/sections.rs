@@ -15,6 +15,8 @@ pub struct Templates {
     /// Default-off rollout for the implemented reviewed init-ready profile.
     pub enabled: bool,
     pub init_ready_init_sha256: String,
+    /// Paused pool rollout, requiring the same exact qualified template inputs.
+    pub warm_pools: bool,
 }
 
 /// The thresholds of the host's conditions (ADR 0021), in percent.

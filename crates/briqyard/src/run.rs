@@ -11,6 +11,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
     const PUT: Method = Method::PUT;
     const DELETE: Method = Method::DELETE;
     match cmd {
+        Cmd::WarmPool(command) => warm::run(c, command).await?,
         Cmd::Status => print_json(&c.call::<api::Status>(GET, "/v1/status", NONE).await?),
         Cmd::Openapi => print!("{}", c.raw(GET, "/v1/openapi.yaml", NONE).await?),
         Cmd::Machine(m) => match *m {

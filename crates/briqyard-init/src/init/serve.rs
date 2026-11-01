@@ -110,7 +110,12 @@ where
             send(&stream, &response).await;
         }
         "clone_activate_v1" => {
-            let response = clone::activate(&st, &req.clone_generation).await;
+            let response = clone::activate(
+                &st,
+                &req.clone_generation,
+                req.clone_activation_realtime_sec,
+            )
+            .await;
             send(&stream, &response).await;
         }
         "ping" => {

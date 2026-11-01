@@ -28,6 +28,7 @@ mod namespaces;
 mod observe;
 #[cfg(test)]
 mod tests;
+mod warm;
 
 use auth::*;
 use backups::*;
@@ -38,6 +39,7 @@ use images::*;
 use machines::*;
 use namespaces::*;
 use observe::*;
+use warm::*;
 
 pub struct AppState {
     pub mgr: Manager,
@@ -140,6 +142,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::delete(delete_backup),
         )
         .route("/v1/backups", get(all_backups))
+        .route("/v1/namespaces/:namespace/warm-pools", get(warm_pools))
+        .route(
+            "/v1/namespaces/:namespace/warm-pools/:name",
+            put(put_warm_pool).delete(delete_warm_pool),
+        )
+        .route(
+            "/v1/namespaces/:namespace/warm-pools/:name/claims",
+            post(claim_warm_pool),
+        )
         .route("/v1/machines/:id/snapshots", get(snapshots).post(snapshot))
         .route(
             "/v1/machines/:id/snapshots/:snap",

@@ -123,6 +123,8 @@ pub mod state {
     pub const CREATED: &str = "created";
     pub const STARTING: &str = "starting";
     pub const RUNNING: &str = "running";
+    /// Internal pool slot: identity configured, workload not started, VMM confirmed paused.
+    pub const WARM: &str = "warm";
     pub const STOPPING: &str = "stopping";
     pub const STOPPED: &str = "stopped";
     pub const DESTROYING: &str = "destroying";

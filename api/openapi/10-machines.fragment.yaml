@@ -154,7 +154,7 @@
         name: { type: string }
         image: { type: string }
         image_digest: { type: string }
-        state: { type: string, enum: [creating, created, starting, running, stopping, stopped, destroying, error], description: "`creating`: recorded, its image pulled and its disks made in the background, then started unless asked not to (ADR 0048); only `GET`, `/wait`, endpoints and `DELETE` act on it (a start or a wake asks its create to start it)" }
+        state: { type: string, enum: [creating, created, starting, running, warm, stopping, stopped, destroying, error], description: "`creating`: recorded, its image pulled and its disks made in the background, then started unless asked not to (ADR 0048); only `GET`, `/wait`, endpoints and `DELETE` act on it (a start or a wake asks its create to start it)" }
         stopped_reason: { type: string, enum: [user, idle, exit, host], description: "why it is stopped: asked, the sleep window ran out, its process ended, or the daemon stopped it (a shutdown, a leftover of a crashed daemon; wakeable like idle)" }
         exit: { $ref: "#/components/schemas/Exit" }
         error: { type: string }

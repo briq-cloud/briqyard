@@ -128,6 +128,9 @@ pub struct Request {
     /// Clone activation is bound to the acknowledged generation.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub clone_generation: String,
+    /// Fresh host wall time applied only before the first activation, never on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_activation_realtime_sec: Option<u64>,
 }
 
 /// Responses: stdout and stderr chunks then exit; or ok, file, pong, ready, error.

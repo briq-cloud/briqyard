@@ -176,6 +176,10 @@ async fn recovery_retains_recordless_destinations_and_corrupt_references_block_c
 }
 
 async fn reviewed_builder() -> (Harness, api::Machine) {
+    reviewed_builder_with_warm(false).await
+}
+
+async fn reviewed_builder_with_warm(warm: bool) -> (Harness, api::Machine) {
     use crate::machine::tests::harness_config;
     use sha2::Digest;
     let h = harness_config(|cfg| {
@@ -183,6 +187,7 @@ async fn reviewed_builder() -> (Harness, api::Machine) {
         cfg.capacity.memory_mb = 4096;
         cfg.jailer = "/mock/jailer".into();
         cfg.templates.enabled = true;
+        cfg.templates.warm_pools = warm;
         cfg.templates.init_ready_init_sha256 = hex::encode(sha2::Sha256::digest(b"init"));
     })
     .await;
@@ -417,3 +422,5 @@ async fn index_and_config_digest_levels_are_not_interchangeable_at_seal() {
 }
 
 mod recovery;
+
+mod warm;

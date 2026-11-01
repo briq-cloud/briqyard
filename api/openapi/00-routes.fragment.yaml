@@ -462,6 +462,40 @@ paths:
       responses:
         "204": { description: removed }
         "409": { description: "`gateway_in_use`: a machine of the namespace with `via: gateway` is running or starting" }
+  /v1/namespaces/{id}/warm-pools:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      summary: Host-local paused template pools and slot counts
+      responses:
+        "200": { description: pools, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/WarmPool" } } } } }
+  /v1/namespaces/{id}/warm-pools/{name}:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: name, in: path, required: true, schema: { type: string } }
+    put:
+      summary: Set desired ready slots for one immutable qualified template
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PutWarmPoolRequest" } } }
+      responses:
+        "200": { description: desired pool state, content: { application/json: { schema: { $ref: "#/components/schemas/WarmPool" } } } }
+        "409": { description: incompatible template, owner, profile or pool generation }
+    delete:
+      summary: Drain unused slots; claimed machines remain owned by their callers
+      responses:
+        "204": { description: drain recorded }
+  /v1/namespaces/{id}/warm-pools/{name}/claims:
+    parameters:
+      - { $ref: "#/components/parameters/id" }
+      - { name: name, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Transfer one existing paused reservation and return first-command readiness
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ClaimWarmPoolRequest" } } }
+      responses:
+        "200": { description: same machine on idempotent retries, content: { application/json: { schema: { $ref: "#/components/schemas/Machine" } } } }
+        "409": { description: "pool_empty, incompatible generation, or an existing claim with another name; no implicit refill or fresh allocation" }
   /v1/namespaces/{id}/quota:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get:

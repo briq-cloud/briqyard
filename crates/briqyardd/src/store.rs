@@ -55,6 +55,7 @@ impl Store {
             "events",
             "holders",
             "clone-readers",
+            "warm-pools",
         ] {
             private_dir(&root.join(d))?;
         }
@@ -192,6 +193,7 @@ mod tests {
             "events",
             "holders",
             "clone-readers",
+            "warm-pools",
         ] {
             assert!(dir.path().join("state").join(d).is_dir(), "{d}");
         }
@@ -303,6 +305,7 @@ mod tests {
             "events",
             "holders",
             "clone-readers",
+            "warm-pools",
         ] {
             assert_eq!(mode(&state.join(d)), 0o700, "{d}");
         }

@@ -212,7 +212,7 @@ fn random_id() -> Result<[u8; 16]> {
     Ok(bytes)
 }
 
-fn set_clock(seconds: u64) -> Result<()> {
+pub(super) fn set_clock(seconds: u64) -> Result<()> {
     let time = libc::timespec {
         tv_sec: seconds as _,
         tv_nsec: 0,

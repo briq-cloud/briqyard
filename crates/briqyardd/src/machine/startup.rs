@@ -50,6 +50,8 @@ impl Manager {
         );
         let inner = Arc::new(Inner {
             stats: Stats::default(),
+            warm_lock: tokio::sync::Mutex::new(()),
+            warm_names: Mutex::new(HashMap::new()),
             verified_templates: Mutex::new(std::collections::HashSet::new()),
             vmm: Arc::new(fc::Firecracker {
                 binary: cfg.firecracker.clone(),
@@ -105,6 +107,7 @@ impl Manager {
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
+        m.recover_warm_names()?;
         let (adopted, stopped, gone) = m.recover().await;
         let swept = m.sweep_orphans().await;
         let machines = m.inner.machines.lock().unwrap().len();
@@ -227,6 +230,14 @@ impl Manager {
         let ready = self.take_handed_ready();
         for e in entries {
             let rec = e.snapshot();
+            if warm::ready_slot(&rec) {
+                if self.recover_warm_slot(&e).await {
+                    adopted += 1;
+                } else {
+                    stopped += 1;
+                }
+                continue;
+            }
             // Its create's task went with the previous daemon. One from an image is taken up
             // again, its partial disks gone first: the record holds what it needs. What a fork
             // or a restore was made from is not on the record: failed, for the caller to create
@@ -254,6 +265,11 @@ impl Manager {
                 && self.adopt(&e, rec.pid, ready.contains(&rec.id)).await
             {
                 adopted += 1;
+                continue;
+            }
+            if rec.warm_slot.is_some() {
+                self.recover_incomplete_clone(&e).await;
+                stopped += 1;
                 continue;
             }
             // Its process still there but not answering for it (not handed over), or gone: it

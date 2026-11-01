@@ -57,6 +57,31 @@ impl Manager {
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
+        self.record_with_warm_slot(req, role, None).await
+    }
+
+    pub(super) async fn record_warm_slot(
+        &self,
+        req: api::CreateMachineRequest,
+        slot: warm::Slot,
+    ) -> Result<(Arc<Entry>, Make), MError> {
+        let _admission = self.inner.namespace_lifecycle.read().await;
+        self.record_with_warm_slot(req, None, Some(slot)).await
+    }
+
+    async fn record_with_warm_slot(
+        &self,
+        req: api::CreateMachineRequest,
+        role: Option<Role>,
+        warm_slot: Option<warm::Slot>,
+    ) -> Result<(Arc<Entry>, Make), MError> {
+        if warm_slot.is_some()
+            && (!req.fork.as_ref().is_some_and(|f| f.snapshot.is_some()) || role.is_some())
+        {
+            return Err(invalid(
+                "internal warm slot requires a strict named memory source",
+            ));
+        }
         check_namespace_id(&req.namespace)?;
         let template_birth = self.template_birth(&req, role)?;
         if let Some(rs) = &req.restore {
@@ -161,6 +186,7 @@ impl Manager {
             boot_incarnation: None,
             template_birth: None,
             clone_origin: None,
+            warm_slot,
             rest: Default::default(),
             snapshots: Vec::new(),
             restoring: None,
@@ -530,6 +556,17 @@ impl Manager {
                 t.rec.id
             )));
         }
+        if self
+            .inner
+            .warm_names
+            .lock()
+            .unwrap()
+            .contains_key(&(rec.namespace.clone(), rec.name.clone()))
+        {
+            return Err(MError::Conflict(
+                "name reserved by a durable warm claim".into(),
+            ));
+        }
         let taken = machines.values().find(|e| {
             let r = e.rec.lock().unwrap();
             r.namespace == rec.namespace && r.name == rec.name && r.state != state::DESTROYING
@@ -599,6 +636,11 @@ impl Manager {
         *e.removed.lock().unwrap() = true;
         let rec = e.snapshot();
         self.inner.machines.lock().unwrap().remove(&rec.id);
+        self.inner
+            .warm_names
+            .lock()
+            .unwrap()
+            .retain(|_, id| id != &rec.id);
         if let Some(t) = self.namespace_of(&rec.namespace) {
             self.refresh_dns(&t);
         }

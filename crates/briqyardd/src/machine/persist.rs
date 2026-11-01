@@ -110,7 +110,18 @@ impl Manager {
             .collect();
         let mut tasks = Vec::new();
         for e in entries {
-            let st = e.snapshot().state;
+            let record = e.snapshot();
+            // Already paused, durably owned slots survive a same-version restart. New
+            // claims/refills are closed and drained by the existing owned scope gate.
+            if warm::ready_slot(&record)
+                && record
+                    .warm_slot
+                    .as_ref()
+                    .is_some_and(|s| s.claimed.is_none())
+            {
+                continue;
+            }
+            let st = record.state;
             if st == state::RUNNING || st == state::STARTING {
                 let m = self.clone();
                 tasks.push(tokio::spawn(async move {

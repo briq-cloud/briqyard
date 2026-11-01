@@ -113,6 +113,7 @@ pub(in crate::machine) fn record() -> Record {
         boot_incarnation: None,
         template_birth: None,
         clone_origin: None,
+        warm_slot: None,
         rest: Default::default(),
         snapshots: Vec::new(),
         restoring: None,
@@ -212,6 +213,8 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
     let m = Manager {
         inner: Arc::new(Inner {
             stats: Stats::default(),
+            warm_lock: tokio::sync::Mutex::new(()),
+            warm_names: Mutex::new(HashMap::new()),
             verified_templates: Mutex::new(std::collections::HashSet::new()),
             range: Range::parse(&cfg.network.range).unwrap(),
             cfg,

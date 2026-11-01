@@ -309,7 +309,15 @@ impl Manager {
 
         let ready = async {
             if self.initial_memory_clone(&e.snapshot()) {
-                self.activate_memory_clone(e, &live).await
+                if e.snapshot()
+                    .warm_slot
+                    .as_ref()
+                    .is_some_and(|s| s.claimed.is_none())
+                {
+                    self.prepare_warm_slot(e, &live).await
+                } else {
+                    self.activate_memory_clone(e, &live).await
+                }
             } else if rec.template_birth.is_some() {
                 self.template_builder_ready(&live, None).await
             } else {
@@ -348,6 +356,20 @@ impl Manager {
                 false => format!("{why}: {}", self.last_console_lines(&rec, 5)),
             };
             return Err(self.boot_failed(e, why));
+        }
+        if e.snapshot()
+            .warm_slot
+            .as_ref()
+            .is_some_and(|s| s.claimed.is_none())
+        {
+            e.set_state(state::STARTING, |r| {
+                r.started_at = Some(Utc::now());
+                None
+            });
+            self.inner
+                .store
+                .put_durable("machines", &e.snapshot().id, &e.snapshot())?;
+            return Ok(());
         }
         let (_, _, generation) = self.reset_probes(e);
         e.set_state(state::RUNNING, |r| {

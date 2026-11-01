@@ -162,6 +162,7 @@ pub(super) async fn start_daemon_on(
             egress_siblings_v1: d.egress_siblings.load(Ordering::SeqCst),
             named_memory_fork_v1: false,
             named_memory_profiles: Vec::new(),
+            warm_pool_profiles: Vec::new(),
             version: "0.1-stub".into(),
             host_id: d.id.clone(),
             capacity: api::Capacity {
@@ -613,7 +614,29 @@ pub(super) async fn start_daemon_on(
         }
         next.run(req).await
     }
+    async fn warm_claim(
+        State(d): D,
+        Path((namespace, pool)): Path<(String, String)>,
+        Json(request): Json<api::ClaimWarmPoolRequest>,
+    ) -> Response {
+        d.calls.lock().unwrap().push(format!(
+            "POST /v1/namespaces/{namespace}/warm-pools/{pool}/claims"
+        ));
+        if let Some(hook) = d.on_create.lock().unwrap().as_ref() {
+            hook();
+        }
+        let mut machines = d.machines.lock().unwrap();
+        let Some(machine) = machines.iter_mut().find(|m| m.namespace == namespace) else {
+            return err(StatusCode::CONFLICT, "pool_empty", "pool empty").into_response();
+        };
+        machine.name = request.name;
+        Json(machine.clone()).into_response()
+    }
     let app = Router::new()
+        .route(
+            "/v1/namespaces/:id/warm-pools/:pool/claims",
+            post(warm_claim),
+        )
         .route("/v1/status", get(status))
         .route("/v1/namespaces", get(namespaces))
         // What the fleet polls, as every daemon serves it (ADR 0055).

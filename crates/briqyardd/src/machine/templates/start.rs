@@ -103,13 +103,17 @@ impl Manager {
         Ok(pong.version)
     }
 
-    pub(in crate::machine) async fn activate_memory_clone(
+    pub(in crate::machine) async fn configure_memory_clone(
         &self,
         e: &Entry,
         live: &fc::Vm,
     ) -> Result<String> {
-        let entire = std::time::Instant::now();
         let machine = e.snapshot().id;
+        let operation = if e.snapshot().warm_slot.is_some() {
+            "warm_slot_fill"
+        } else {
+            "named_memory_clone"
+        };
         let mut origin = e
             .snapshot()
             .clone_origin
@@ -128,14 +132,15 @@ impl Manager {
             .await
             .context("resume into clone barrier")?;
         crate::profile::stage(
-            "named_memory_clone",
+            operation,
             "resume_into_init",
             &machine,
             live.pid,
             started,
             true,
         );
-        self.template_builder_ready(live, Some(&origin.artifact.ram_marker))
+        let version = self
+            .template_builder_ready(live, Some(&origin.artifact.ram_marker))
             .await?;
         // Queueing/disk load can take time. Freeze current wall time durably immediately
         // before the first configure, so delayed admission cannot start with a stale clock.
@@ -198,17 +203,64 @@ impl Manager {
         // Durable identity before any unquarantine or activation request.
         self.clone_stage(e, CloneStage::IdentityDone)?;
         crate::profile::stage(
-            "named_memory_clone",
+            operation,
             "identity_durable",
             &machine,
             live.pid,
             started,
             true,
         );
+        Ok(version)
+    }
+
+    pub(in crate::machine) async fn activate_memory_clone(
+        &self,
+        e: &Entry,
+        live: &fc::Vm,
+    ) -> Result<String> {
+        let entire = std::time::Instant::now();
+        let operation = if e.snapshot().warm_slot.is_some() {
+            "warm_claim"
+        } else {
+            "named_memory_clone"
+        };
+        let initial = e.snapshot();
+        let paused = initial
+            .clone_origin
+            .as_ref()
+            .is_some_and(|o| o.stage == CloneStage::Paused);
+        if !paused {
+            self.configure_memory_clone(e, live).await?;
+        }
+        let r = e.snapshot();
+        let machine = r.id;
+        let origin = r
+            .clone_origin
+            .ok_or_else(|| anyhow!("clone origin missing"))?;
+        anyhow::ensure!(
+            e.identity_trusted.load(Relaxed)
+                && live.incarnation.as_ref() == r.boot_incarnation.as_ref()
+                && live.boot_identity.as_ref() == Some(&origin.artifact.boot_identity)
+                && origin.identity.is_some(),
+            "clone activation provenance or identity is unconfirmed"
+        );
+        let c = &origin.configure;
+        if paused {
+            let started = std::time::Instant::now();
+            self.inner.vmm.resume_paused(live).await?;
+            crate::profile::stage(
+                operation,
+                "resume_paused",
+                &machine,
+                live.pid,
+                started,
+                true,
+            );
+        }
         let started = std::time::Instant::now();
         self.activate_clone_network(&e.snapshot()).await?;
         crate::profile::stage(
-            "named_memory_clone",
+            operation,
             "network_activate",
             &machine,
             live.pid,
@@ -224,6 +276,7 @@ impl Manager {
                 guest::Request {
                     op: "clone_activate_v1".into(),
                     clone_generation: c.generation.clone(),
+                    clone_activation_realtime_sec: Some(Utc::now().timestamp().try_into()?),
                     ..Default::default()
                 },
             )
@@ -259,14 +312,7 @@ impl Manager {
         )
         .await
         .context("clone main-start barrier timeout")??;
-        crate::profile::stage(
-            "named_memory_clone",
-            "main_started",
-            &machine,
-            live.pid,
-            started,
-            true,
-        );
+        crate::profile::stage(operation, "main_started", &machine, live.pid, started, true);
         let started = std::time::Instant::now();
         let mut session = self
             .inner
@@ -290,7 +336,7 @@ impl Manager {
         );
         self.clone_stage(e, CloneStage::Active)?;
         crate::profile::stage(
-            "named_memory_clone",
+            operation,
             "first_exec_ready",
             &machine,
             live.pid,
@@ -298,7 +344,7 @@ impl Manager {
             true,
         );
         crate::profile::stage(
-            "named_memory_clone",
+            operation,
             "identity_activation_ready",
             &machine,
             live.pid,

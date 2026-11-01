@@ -1,0 +1,312 @@
+use super::*;
+
+async fn pool(desired: u16) -> (Harness, api::Machine) {
+    let (h, builder) = reviewed_builder_with_warm(true).await;
+    let snapshot =
+        h.m.snapshot(
+            &builder.id,
+            api::SnapshotRequest {
+                memory: true,
+                template: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let view =
+        h.m.put_warm_pool(
+            "t1",
+            "tools",
+            api::PutWarmPoolRequest {
+                source_machine: builder.id.clone(),
+                snapshot: snapshot.id,
+                desired,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(view.profile, guest::INIT_READY_V1);
+    (h, builder)
+}
+
+async fn fill(h: &Harness) -> Arc<Entry> {
+    h.m.warm_step().await;
+    let e =
+        h.m.inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .find(|e| {
+                e.snapshot()
+                    .warm_slot
+                    .as_ref()
+                    .is_some_and(|s| s.claimed.is_none())
+            })
+            .cloned()
+            .expect("slot recorded");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let changed = e.changed.notified();
+            let r = e.snapshot();
+            if crate::machine::warm::ready_slot(&r) {
+                break;
+            }
+            assert_ne!(r.state, state::ERROR, "{}", r.error);
+            changed.await;
+        }
+    })
+    .await
+    .unwrap();
+    e
+}
+
+fn claim(name: &str, request_id: &str) -> api::ClaimWarmPoolRequest {
+    api::ClaimWarmPoolRequest {
+        name: name.into(),
+        request_id: request_id.into(),
+        fail_fast: true,
+    }
+}
+
+#[tokio::test]
+async fn slot_is_identity_configured_paused_and_fully_reserved_before_claim() {
+    let (h, _) = pool(1).await;
+    h.host_calls();
+    let e = fill(&h).await;
+    let before = e.snapshot();
+    let identity = before
+        .clone_origin
+        .as_ref()
+        .unwrap()
+        .identity
+        .clone()
+        .unwrap();
+    assert_eq!(
+        before.clone_origin.as_ref().unwrap().stage,
+        CloneStage::Paused
+    );
+    assert!(!h.m.view(&e).ready);
+    assert!(commits_memory(&before));
+    assert_eq!(quota_need(&before, false).memory_mb, 256);
+    assert!(!h
+        .host_calls()
+        .iter()
+        .any(|c| c.starts_with("clone-activate")));
+    let made =
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "request1"))
+            .await
+            .unwrap();
+    assert_eq!(made.id, before.id);
+    assert!(made.ready);
+    let after = e.snapshot();
+    assert_eq!(after.ip, before.ip);
+    assert_eq!(after.clone_origin.unwrap().identity.unwrap(), identity);
+    assert_eq!(after.name, "worker");
+    assert_eq!(h.m.quota("t1").unwrap().used.memory_mb, 512);
+    h.host_calls();
+    let retry =
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "request1"))
+            .await
+            .unwrap();
+    assert_eq!(retry.id, made.id);
+    assert!(!h.host_calls().iter().any(|c| c.starts_with("boot ")
+        || c.starts_with("resume")
+        || c.starts_with("clone-activate")));
+}
+
+#[tokio::test]
+async fn one_slot_concurrent_claims_and_empty_fail_fast_never_start_another_vm() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    h.host_calls();
+    let (a, b) = tokio::join!(
+        h.m.claim_warm_pool("t1", "tools", claim("worker-a", "request-a")),
+        h.m.claim_warm_pool("t1", "tools", claim("worker-b", "request-b"))
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert!(matches!(a, Err(MError::PoolEmpty)) || matches!(b, Err(MError::PoolEmpty)));
+    assert_eq!(h.m.warm_pools("t1").unwrap()[0].claimed, 1);
+    assert!(!h.host_calls().iter().any(|c| c.starts_with("boot ")));
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
+    assert!(e.snapshot().warm_slot.unwrap().claimed.is_some());
+}
+
+#[tokio::test]
+async fn paused_adoption_keeps_identity_and_claim_retry_survives_restart_and_destroy() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    let before = e.snapshot();
+    *e.live.lock().unwrap() = None;
+    h.host_calls();
+    h.m.recover().await;
+    assert_eq!(e.snapshot().pid, before.pid);
+    assert_eq!(
+        e.snapshot().clone_origin.unwrap().identity,
+        before.clone_origin.unwrap().identity
+    );
+    assert!(e.live.lock().unwrap().is_some());
+    let made =
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "stable-id"))
+            .await
+            .unwrap();
+    h.m.recover_warm_names().unwrap();
+    h.m.recover().await;
+    assert_eq!(
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "stable-id"))
+            .await
+            .unwrap()
+            .id,
+        made.id
+    );
+    h.m.destroy(&made.id, None).await.unwrap();
+    assert!(matches!(
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "stable-id"))
+            .await,
+        Err(MError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn quota_refusal_and_drain_keep_full_reservations_without_cold_fallback() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    h.m.set_quota(
+        "t1",
+        api::Quota {
+            machines: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let made =
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "request"))
+            .await
+            .unwrap();
+    h.m.warm_step().await;
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
+    assert!(h.m.warm_pools("t1").unwrap()[0].error.contains("quota"));
+    assert!(commits_memory(&e.snapshot()));
+    h.m.delete_warm_pool("t1", "tools").await.unwrap();
+    h.m.warm_step().await;
+    assert!(h.m.get(&made.id).unwrap().ready); // Claimed guests are never recycled.
+}
+
+#[tokio::test]
+async fn concurrent_identical_claims_and_busy_turn_retry_reach_the_same_vm() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    let (first, retry) = tokio::join!(
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "same-key")),
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "same-key"))
+    );
+    assert_eq!(first.unwrap().id, retry.unwrap().id);
+    let busy = h.m.inner.warm_lock.lock().await;
+    assert_eq!(
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "same-key"))
+            .await
+            .unwrap()
+            .id,
+        e.snapshot().id
+    );
+    assert!(matches!(
+        h.m.claim_warm_pool("t1", "tools", claim("another", "new-key"))
+            .await,
+        Err(MError::PoolEmpty)
+    ));
+    drop(busy);
+}
+
+#[tokio::test]
+async fn unconfirmed_paused_ownership_retains_quota_and_blocks_refill() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    *e.live.lock().unwrap() = None;
+    e.rec.lock().unwrap().boot_incarnation = None;
+    h.m.recover().await;
+    assert_eq!(e.snapshot().state, state::ERROR);
+    assert!(!e.snapshot().clone_origin.unwrap().mapping_exited);
+    assert!(commits_memory(&e.snapshot()));
+    h.m.warm_step().await;
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
+    assert_eq!(h.m.quota("t1").unwrap().used.memory_mb, 512);
+    assert!(matches!(
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "key"))
+            .await,
+        Err(MError::PoolEmpty)
+    ));
+}
+
+#[tokio::test]
+async fn draining_unused_slots_releases_capacity_and_readers() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    let id = e.snapshot().id;
+    h.m.delete_warm_pool("t1", "tools").await.unwrap();
+    h.m.warm_step().await;
+    assert!(h.m.entry(&id).is_err());
+    assert!(h.m.clone_readers().unwrap().is_empty());
+    assert_eq!(h.m.quota("t1").unwrap().used.memory_mb, 256);
+}
+
+#[tokio::test]
+async fn warm_root_disk_charge_is_admitted_before_record_and_survives_claim_and_destroy() {
+    let (h, _) = pool(2).await;
+    let root = h.m.inner.cfg.root_disk_gb;
+    h.m.set_quota(
+        "t1",
+        api::Quota {
+            disk_gb: Some(root),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let e = fill(&h).await;
+    let before = quota_need(&e.snapshot(), false);
+    assert_eq!(
+        (before.memory_mb, before.cpu_millis(), before.disk_gb),
+        (256, 1000, root)
+    );
+    h.m.warm_step().await;
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
+    assert!(h.m.warm_pools("t1").unwrap()[0].error.contains("disk_gb"));
+    let made =
+        h.m.claim_warm_pool("t1", "tools", claim("worker", "disk-key"))
+            .await
+            .unwrap();
+    assert_eq!(quota_need(&e.snapshot(), false), before);
+    h.refuse_clone_exit(true);
+    // Lost live observer plus exact registered exit unavailable: destruction retains all charges.
+    *e.live.lock().unwrap() = None;
+    assert!(h.m.destroy(&made.id, None).await.is_err());
+    assert_eq!(quota_need(&e.snapshot(), false), before);
+    h.refuse_clone_exit(false);
+    h.m.destroy(&made.id, None).await.unwrap();
+    assert_eq!(h.m.quota("t1").unwrap().used.disk_gb, 0);
+}
+
+#[tokio::test]
+async fn handover_keeps_confirmed_paused_slot_and_closes_new_claim_admission() {
+    let (h, _) = pool(1).await;
+    let e = fill(&h).await;
+    assert_eq!(e.snapshot().state, state::STARTING);
+    assert_eq!(h.m.view(&e).state, state::WARM);
+    h.host_calls();
+    let held = tokio::time::timeout(Duration::from_secs(3), h.m.hand_over())
+        .await
+        .unwrap();
+    assert!(commits_memory(&e.snapshot()));
+    assert_eq!(e.snapshot().clone_origin.unwrap().stage, CloneStage::Paused);
+    assert!(!h
+        .host_calls()
+        .iter()
+        .any(|c| c.starts_with("resume") || c.starts_with("kill ")));
+    assert!(h
+        .m
+        .claim_warm_pool("t1", "tools", claim("worker", "closed-key"))
+        .await
+        .is_err());
+    drop(held);
+}
