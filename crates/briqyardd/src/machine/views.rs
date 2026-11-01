@@ -30,7 +30,8 @@ impl Manager {
 
     pub(super) fn view(&self, e: &Entry) -> api::Machine {
         let r = e.snapshot();
-        let running = r.state == state::RUNNING;
+        let published = self.assignment_publication_allowed(&r, e.identity_trusted.load(Relaxed));
+        let running = r.state == state::RUNNING && published;
         let sleeps_at = if running && e.in_flight.load(Relaxed) == 0 {
             sleeps_at(r.last_used_at, r.sleep_window())
         } else {
@@ -65,6 +66,8 @@ impl Manager {
                 && r.warm_slot.as_ref().is_some_and(|s| s.claimed.is_none())
             {
                 state::WARM.into()
+            } else if r.state == state::RUNNING && !published {
+                state::STARTING.into()
             } else {
                 r.state.clone()
             },

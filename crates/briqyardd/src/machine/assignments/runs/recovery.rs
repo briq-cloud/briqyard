@@ -201,20 +201,6 @@ impl Manager {
             self.inner.vmm.host_boot_id().as_deref() == Some(current.host_boot_id.as_str()),
             "run host boot changed; explicit new authority required"
         );
-        let compatible = match current.mode {
-            Mode::Fresh { .. } => {
-                self.inner
-                    .vmm
-                    .boot_identity(self.inner.cfg.balloon.enabled)
-                    .as_ref()
-                    == Some(&current.expected_boot_identity)
-            }
-            Mode::Checkpoint { .. } => self.resume_compatible(&current.prior),
-        };
-        anyhow::ensure!(
-            compatible,
-            "run boot artifacts changed; no implicit fallback"
-        );
         let (root, data) = self.current_run_disks(&current.prior).await?;
         anyhow::ensure!(
             root == current.root && data == current.data,
@@ -231,6 +217,20 @@ impl Manager {
             "run already observed"
         );
         self.verify_run_current_backing(current).await?;
+        let compatible = match current.mode {
+            Mode::Fresh { .. } => {
+                self.inner
+                    .vmm
+                    .boot_identity(self.inner.cfg.balloon.enabled)
+                    .as_ref()
+                    == Some(&current.expected_boot_identity)
+            }
+            Mode::Checkpoint { .. } => self.resume_compatible(&current.prior),
+        };
+        anyhow::ensure!(
+            compatible,
+            "run boot artifacts changed; no implicit fallback"
+        );
         if let Mode::Checkpoint {
             state,
             memory,
@@ -284,6 +284,22 @@ impl Manager {
                 checkpoint.verify_files(self, &current.target).await?;
             }
             return Ok(RunRecovery::Settled);
+        }
+        if current.reference.phase == Phase::Reserved
+            && current.launch_started
+            && self
+                .inner
+                .vmm
+                .host_boot_id()
+                .as_ref()
+                .is_some_and(|host| fc::valid_host_boot_id(host) && host != &current.host_boot_id)
+        {
+            let (root, data) = self.current_run_disks(&current.target).await?;
+            anyhow::ensure!(
+                root == current.root && data == current.data,
+                "unresolved CURRENT disks changed"
+            );
+            return Ok(RunRecovery::DiscoveryNeeded);
         }
         self.verify_run_current_backing(current).await?;
         if !current.launch_started {

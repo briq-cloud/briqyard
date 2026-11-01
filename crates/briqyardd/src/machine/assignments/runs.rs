@@ -3,11 +3,14 @@ use super::*;
 use rand::RngCore;
 mod adoption;
 mod launch;
+mod lifecycle;
 mod model;
 #[allow(dead_code)]
 // Pure projection; durable run transitions are wired with the terminal capability floor.
 mod projection;
+mod publication;
 mod recovery;
+mod startup;
 mod terminal;
 #[cfg(test)]
 mod tests;
@@ -133,10 +136,21 @@ impl Manager {
         entry: &Arc<Entry>,
         checkpoint: bool,
     ) -> Result<RunRef> {
+        self.reserve_assigned_run_version(entry, checkpoint, None)
+            .await
+    }
+
+    pub(super) async fn reserve_assigned_run_version(
+        &self,
+        entry: &Arc<Entry>,
+        checkpoint: bool,
+        at: Option<u64>,
+    ) -> Result<RunRef> {
         let _warm = self.inner.warm_lock.lock().await;
         let _namespace = self.inner.namespace_lifecycle.read().await;
         let _sandbox = self.inner.sandbox_create_lock.lock().await;
         let _entry = entry.lock.lock().await;
+        self.check_version(entry, at)?;
         let intent = self.plan_assigned_run(entry, checkpoint).await?;
         let machines = self.inner.machines.lock().unwrap();
         anyhow::ensure!(
@@ -162,10 +176,9 @@ impl Manager {
             cpu_millis: Some(intent.current.target.size.cpu_millis()),
             ..Default::default()
         };
-        anyhow::ensure!(
-            over_quota(&quota.rec.id, &quota.rec.quota, &held, &need).is_none(),
-            "run namespace quota exceeded"
-        );
+        if let Some(error) = over_quota(&quota.rec.id, &quota.rec.quota, &held, &need) {
+            return Err(anyhow!(MError::Quota(error.to_string())));
+        }
         let (physical, _) = committed(&machines);
         admit(
             physical.memory_mb.saturating_sub(prior_charge.memory_mb),

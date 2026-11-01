@@ -28,6 +28,9 @@ impl Manager {
         if record.launch_identity.is_none() {
             return Ok(());
         }
+        if record.assigned_run.is_some() {
+            return self.validate_current_run_record(record);
+        }
         let reader = self
             .inner
             .store

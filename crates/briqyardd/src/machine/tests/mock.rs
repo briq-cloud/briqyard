@@ -547,12 +547,15 @@ impl fc::Vmm for Mock {
         &self,
         id: &str,
         dir: &Path,
-        _jail: Option<&fc::Jail>,
+        jail: Option<&fc::Jail>,
         pid: u32,
         _disk_io: Arc<fc::DiskIo>,
     ) -> Option<fc::Vm> {
         self.record(format!("adopt {id} {pid}"));
-        self.adopt_process(id, dir, pid, false)
+        self.adopt_process(id, dir, pid, false).map(|mut vm| {
+            vm.chroot = jail.map(|j| fc::jail_root(&j.base, id));
+            vm
+        })
     }
 
     fn host_boot_id(&self) -> Option<String> {

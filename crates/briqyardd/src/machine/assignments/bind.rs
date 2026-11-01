@@ -193,7 +193,7 @@ impl Manager {
         self.check_assigned_bound_record(&entry.snapshot())
     }
 
-    pub(super) fn check_assigned_bound_record(&self, record: &Record) -> Result<()> {
+    pub(in crate::machine) fn check_assigned_bound_record(&self, record: &Record) -> Result<()> {
         let origin = self.settled_assigned_origin(record)?;
         anyhow::ensure!(
             matches!(
@@ -221,6 +221,9 @@ impl Manager {
     ) -> bool {
         if record.launch_identity.is_none() {
             return true;
+        }
+        if record.assigned_run.is_some() {
+            return trusted && self.verified_run_publication(record).is_ok();
         }
         trusted
             && record

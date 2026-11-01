@@ -5,6 +5,10 @@ use super::*;
 impl Manager {
     pub async fn start(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        if self.assigned_lifecycle(&e.snapshot()) {
+            self.start_assigned_public(&e, at, false, true).await?;
+            return Ok(self.view(&e));
+        }
         self.ordinary_operation(&e.snapshot())?;
         let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;
@@ -60,6 +64,10 @@ impl Manager {
     /// one stopped on purpose stays stopped.
     pub async fn wake(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        if self.assigned_lifecycle(&e.snapshot()) {
+            self.start_assigned_public(&e, at, true, true).await?;
+            return Ok(self.view(&e));
+        }
         self.ordinary_operation(&e.snapshot())?;
         let _turns = e.lock_once_stopped(false).await;
         self.check_version(&e, at)?;

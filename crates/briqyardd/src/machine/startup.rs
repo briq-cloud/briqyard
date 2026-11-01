@@ -107,6 +107,7 @@ impl Manager {
                 .check_capacity(m.capacity())?;
         }
         m.load()?;
+        m.prepare_assigned_reboot_exits().await?;
         m.verify_assigned_run_backing().await?;
         m.verify_clone_artifacts();
         host::enable_forwarding()?;
@@ -251,6 +252,14 @@ impl Manager {
         let ready = self.take_handed_ready();
         for e in entries {
             let rec = e.snapshot();
+            if rec.assigned_run.is_some() {
+                if self.recover_current_run(&e).await {
+                    adopted += 1;
+                } else {
+                    stopped += 1;
+                }
+                continue;
+            }
             if rec.launch_identity.is_some() {
                 if self.recover_assigned_launch(&e).await {
                     adopted += 1;
@@ -571,7 +580,11 @@ impl Manager {
             .values()
             .filter(|e| {
                 let r = e.rec.lock().unwrap();
-                r.launch_identity.is_none()
+                (r.launch_identity.is_none()
+                    || (self.assigned_lifecycle(&r)
+                        && r.assigned_run
+                            .as_ref()
+                            .is_none_or(|run| run.phase == assignments::runs::Phase::Settled)))
                     && stopped_by_host(&r)
                     && !idle_past(r.last_used_at, r.sleep_window(), now)
             })
@@ -580,6 +593,12 @@ impl Manager {
         for e in left {
             let m = self.clone();
             tokio::spawn(async move {
+                if m.assigned_lifecycle(&e.snapshot()) {
+                    if stopped_by_host(&e.snapshot()) {
+                        let _ = m.start_assigned_boxed(&e, false).await;
+                    }
+                    return;
+                }
                 let _turns = e.lock_for_start().await;
                 // A call may have moved it meanwhile (a wake, a stop, a destroy).
                 if !stopped_by_host(&e.snapshot()) {

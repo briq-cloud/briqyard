@@ -7,7 +7,9 @@ impl Manager {
 
     pub(super) async fn running_vsock(&self, id: &str, wake: bool) -> Result<PathBuf, MError> {
         let e = self.own_entry(id)?;
-        self.ordinary_operation(&e.snapshot())?;
+        if !(wake && self.assigned_lifecycle(&e.snapshot())) {
+            self.ordinary_operation(&e.snapshot())?;
+        }
         let (st, reason, live) = {
             let r = e.rec.lock().unwrap();
             (
@@ -16,7 +18,9 @@ impl Manager {
                 e.live.lock().unwrap().clone(),
             )
         };
-        if st == state::RUNNING {
+        if st == state::RUNNING
+            && self.assignment_publication_allowed(&e.snapshot(), e.identity_trusted.load(Relaxed))
+        {
             if let Some(l) = live {
                 return Ok(l.vsock);
             }
@@ -35,6 +39,7 @@ impl Manager {
         self.wake_detached(id).await?;
         let boot = Duration::from_secs(self.inner.cfg.boot_timeout_sec.max(10));
         self.wait(id, Until::Ready, boot).await?;
+        self.ordinary_operation(&e.snapshot())?;
         let live = e.live.lock().unwrap().clone();
         live.map(|l| l.vsock)
             .ok_or_else(|| MError::NotRunning("no process".into()))
@@ -158,10 +163,13 @@ impl Manager {
             .execs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let e = self.own_entry(id)?;
-        self.ordinary_operation(&e.snapshot())?;
+        if !(wake && self.assigned_lifecycle(&e.snapshot())) {
+            self.ordinary_operation(&e.snapshot())?;
+        }
         // In use from the call (ADR 0053): the sleeper leaves a machine it wakes for this.
         let in_use = InUse::new(e.clone());
         let sock = self.running_vsock(id, wake).await?;
+        self.ordinary_operation(&e.snapshot())?;
         // An init older than sessions takes the request as a plain exec, its input and terminal
         // ignored (ADR 0027): refused, the init named, before the guest is asked.
         let init = e.snapshot().init_version;
@@ -378,8 +386,11 @@ impl Manager {
 
     /// Whether the machine runs: a connection waiting for its port gives up once it does not.
     pub fn is_running(&self, id: &str) -> bool {
-        self.entry(id)
-            .is_ok_and(|e| e.rec.lock().unwrap().state == state::RUNNING)
+        self.entry(id).is_ok_and(|e| {
+            let record = e.snapshot();
+            record.state == state::RUNNING
+                && self.assignment_publication_allowed(&record, e.identity_trusted.load(Relaxed))
+        })
     }
 
     /// The address a proxy connects to, waking the machine when asked.
@@ -389,7 +400,9 @@ impl Manager {
             let r = e.rec.lock().unwrap();
             (r.state.clone(), r.ip.clone())
         };
-        if st == state::RUNNING {
+        if st == state::RUNNING
+            && self.assignment_publication_allowed(&e.snapshot(), e.identity_trusted.load(Relaxed))
+        {
             e.touch();
             return Ok(ip.parse().unwrap());
         }
@@ -397,6 +410,7 @@ impl Manager {
             return Err(MError::NotRunning(st));
         }
         self.wake_detached(id).await?;
+        self.ordinary_operation(&e.snapshot())?;
         Ok(ip.parse().unwrap())
     }
 }

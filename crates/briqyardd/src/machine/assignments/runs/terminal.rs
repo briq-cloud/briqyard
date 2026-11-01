@@ -196,6 +196,14 @@ impl Manager {
     ) -> Result<RunRef> {
         let _namespace = self.inner.namespace_lifecycle.read().await;
         let _entry = entry.lock.lock().await;
+        self.settle_assigned_run_locked(entry, disposition).await
+    }
+
+    pub(super) async fn settle_assigned_run_locked(
+        &self,
+        entry: &Arc<Entry>,
+        disposition: Disposition,
+    ) -> Result<RunRef> {
         let record = entry.snapshot();
         anyhow::ensure!(
             self.inner

@@ -11,6 +11,10 @@ impl Manager {
         checkpoint: bool,
     ) -> Result<RunRef> {
         self.reserve_assigned_run(entry, checkpoint).await?;
+        self.boot_reserved_assigned_run(entry).await
+    }
+
+    pub(super) async fn boot_reserved_assigned_run(&self, entry: &Arc<Entry>) -> Result<RunRef> {
         let _namespace = self.inner.namespace_lifecycle.read().await;
         let _entry = entry.lock.lock().await;
         let id = entry.snapshot().id;

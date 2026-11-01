@@ -142,7 +142,9 @@ impl Manager {
         for e in entries {
             let turn = e.settled_lock().await;
             let record = e.snapshot();
-            if self.preserve_assignment_on_close(&record) {
+            let verified_assigned = self.assigned_lifecycle(&record)
+                && self.assignment_publication_allowed(&record, e.identity_trusted.load(Relaxed));
+            if self.preserve_assignment_on_close(&record) && !verified_assigned {
                 // No stop, suspend, reconciliation or readiness interpretation. Keep
                 // transitions fenced until the last usage write has finished.
                 if e.unsaved_use.load(Relaxed) {
