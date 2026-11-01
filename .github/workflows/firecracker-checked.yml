@@ -12,9 +12,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       RUSTUP_TOOLCHAIN: 1.97.0
     steps:
@@ -30,14 +34,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
+          targets: ${{ matrix.arch }}-unknown-linux-musl
       - name: Install library build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev pkg-config cmake libssl-dev libseccomp-dev
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev pkg-config cmake libssl-dev libseccomp-dev musl-tools
       - name: Verify evidence acceptance checks
         run: python3 -m unittest discover -s hack/firecracker -p "test_*.py"
       - name: Verify complete patch series
         run: python3 hack/firecracker/prepare.py .validation/firecracker
       - name: Compile and validate exact regressions
         run: python3 hack/firecracker/validate.py .validation/firecracker "$RUNNER_TEMP/checked-firecracker"
+      - name: Build static CLI candidates from the validated tree
+        run: python3 hack/firecracker/build_cli.py .validation/firecracker "$RUNNER_TEMP/checked-firecracker" "$RUNNER_TEMP/checked-firecracker-cli" --arch "${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checked-firecracker-cli-evidence-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/checked-firecracker-cli/provenance.json
+            ${{ runner.temp }}/checked-firecracker-cli/*.log
+            ${{ runner.temp }}/checked-firecracker-cli/*.jsonl
+            ${{ runner.temp }}/checked-firecracker-cli/uapi-inputs.json
+          if-no-files-found: warn
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: checked-firecracker-cli-${{ matrix.arch }}
+          path: ${{ runner.temp }}/checked-firecracker-cli/
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:

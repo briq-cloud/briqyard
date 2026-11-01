@@ -32,3 +32,20 @@ required before activation. Initial capture eligibility remains Sync-only.
 Run `python3 hack/firecracker/prepare.py CHECKOUT` on a clean checkout at the pinned
 base, then use `validate.py CHECKOUT OUTPUT_DIRECTORY` with the pinned toolchain.
 The output directory must be outside the source checkout and initially absent.
+
+The same workflow also produces `checked-firecracker-cli-<architecture>` candidates
+for x86_64 and aarch64. After the portable validation succeeds, `build_cli.py`
+reuses its prepared source and Cargo target to build release Firecracker and
+jailer for the native musl target. The helper stages only Linux UAPI headers
+for the musl C compilation, records their hashes and package versions, and
+rejects empty seccomp-policy warnings or a dynamic ELF loader/dependency.
+Cargo's production build-script event identifies the compiled seccomp bytecode;
+the artifact records its hash alongside the pinned source policy, exact patched
+tree, workflow commit/run, lockfile, toolchain and binary hashes. The artifact
+also contains versions, ELF evidence, build logs and upstream license notices.
+
+These static CLI candidates are retained for seven days. Verify the successful
+workflow run and expected source commit before using its artifacts; the manifest
+alone does not establish provenance. This workflow neither publishes a normal
+release nor changes bootstrap/installed binaries. Runtime acceptance and exact
+per-architecture artifact pins are still required before release integration.
