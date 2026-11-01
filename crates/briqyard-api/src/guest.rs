@@ -19,7 +19,9 @@
 //! unknown response `type` in a stream is skipped. The init says its version in `pong`.
 
 mod clone;
+mod destination;
 pub use clone::{CloneConfigure, CloneIdentity, CloneStatus, INIT_READY_V1};
+pub use destination::{DestinationBind, DestinationFile, SANDBOX_READY_V1};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -125,6 +127,9 @@ pub struct Request {
     pub file_mode: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_configure: Option<CloneConfigure>,
+    /// Complete destination configuration, accepted only at the sandbox barrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_bind: Option<DestinationBind>,
     /// Clone activation is bound to the acknowledged generation.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub clone_generation: String,

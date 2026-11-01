@@ -49,6 +49,7 @@ macro_rules! log {
 
 struct State {
     cfg: Config,
+    destination: OnceLock<(Config, Vec<(String, String)>)>,
     env: Vec<(String, String)>,
     main_pid: Mutex<Option<i32>>,
     main_done: Notify,
@@ -57,9 +58,19 @@ struct State {
     activate: Notify,
 }
 
+impl State {
+    fn config(&self) -> &Config {
+        self.destination.get().map(|v| &v.0).unwrap_or(&self.cfg)
+    }
+    fn environment(&self) -> &Vec<(String, String)> {
+        self.destination.get().map(|v| &v.1).unwrap_or(&self.env)
+    }
+}
+
 mod boot;
 mod clone;
 mod clone_identity;
+mod destination;
 mod exec;
 mod files;
 mod network;
@@ -159,6 +170,11 @@ async fn run() -> ExitReport {
         Err(e) => return failed(125, format!("template: {e:#}")),
     };
     let template = cfg.template_profile.is_some();
+    if cfg.template_profile.as_deref() == Some(guest::SANDBOX_READY_V1)
+        && Path::new(destination::RECEIPT).try_exists().unwrap_or(true)
+    {
+        return failed(125, "sandbox destination was already consumed".into());
+    }
     if template && !files.is_empty() {
         return failed(125, "template config drive contains boot files".into());
     }
@@ -181,6 +197,7 @@ async fn run() -> ExitReport {
     let env = build_env(&cfg.env);
     let st = Arc::new(State {
         cfg,
+        destination: OnceLock::new(),
         env,
         main_pid: Mutex::new(None),
         main_done: Notify::new(),

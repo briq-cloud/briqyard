@@ -49,7 +49,7 @@ pub(super) async fn exec_op<R, W>(
         return;
     }
     let deadline = (req.timeout_ms > 0).then(|| Duration::from_millis(req.timeout_ms));
-    let mut env = st.env.clone();
+    let mut env = st.environment().clone();
     for (k, v) in &req.env {
         env.retain(|(ek, _)| ek != k);
         env.push((k.clone(), v.clone()));
@@ -75,8 +75,8 @@ pub(super) async fn exec_op<R, W>(
     cmd.envs(env.iter().map(|(k, v)| (k, v)));
     let cwd = if !req.cwd.is_empty() {
         req.cwd.clone()
-    } else if !st.cfg.workdir.is_empty() {
-        st.cfg.workdir.clone()
+    } else if !st.config().workdir.is_empty() {
+        st.config().workdir.clone()
     } else {
         "/".into()
     };

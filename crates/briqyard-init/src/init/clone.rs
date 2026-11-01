@@ -11,12 +11,16 @@ pub(super) enum Gate {
         active: bool,
         activating: bool,
     },
+    Sandbox(destination::Barrier),
     Failed,
 }
 impl Gate {
     pub(super) fn from_config(cfg: &Config) -> Result<Self> {
         match cfg.template_profile.as_deref() {
             None => Ok(Self::Ordinary),
+            Some(guest::SANDBOX_READY_V1) if destination::pristine(cfg) => {
+                Ok(Self::Sandbox(destination::Barrier::Builder))
+            }
             Some(INIT_READY_V1)
                 if cfg.files.is_empty()
                     && cfg.mounts.is_empty()
@@ -33,12 +37,16 @@ impl Gate {
     }
     pub(super) fn allows(&self, op: &str) -> bool {
         match self {
-            Self::Ordinary => !op.starts_with("clone_"),
+            Self::Ordinary => !op.starts_with("clone_") && op != "destination_bind_v1",
+            Self::Sandbox(barrier) => barrier.allows(op),
             Self::Configured { active: true, .. } => true,
             _ => matches!(op, "ping" | "clone_configure_v1" | "clone_activate_v1"),
         }
     }
     pub(super) fn activation_requested(&self) -> bool {
+        if let Self::Sandbox(b) = self {
+            return b.activating();
+        }
         matches!(
             self,
             Self::Configured {
@@ -48,6 +56,9 @@ impl Gate {
         )
     }
     pub(super) fn mark_active(&mut self) {
+        if let Self::Sandbox(b) = self {
+            b.mark_active();
+        }
         if let Self::Configured { active, .. } = self {
             *active = true;
         }
@@ -55,6 +66,7 @@ impl Gate {
     pub(super) fn status(&self) -> Option<CloneStatus> {
         let (stage, identity) = match self {
             Self::Ordinary => return None,
+            Self::Sandbox(b) => return Some(b.status()),
             Self::Builder => ("builder", None),
             Self::Failed => ("failed", None),
             Self::Configured {
@@ -123,6 +135,9 @@ pub(super) async fn configure(st: &State, request: Option<CloneConfigure>) -> Re
 
 pub(super) async fn activate(st: &State, generation: &str, realtime_sec: Option<u64>) -> Response {
     let mut gate = st.clone_gate.lock().await;
+    if let Gate::Sandbox(b) = &mut *gate {
+        return b.activate(st, generation, realtime_sec);
+    }
     match &mut *gate {
         Gate::Configured {
             identity,

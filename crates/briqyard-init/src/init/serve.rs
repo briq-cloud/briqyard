@@ -105,6 +105,10 @@ where
         return;
     }
     match req.op.as_str() {
+        "destination_bind_v1" => {
+            let response = destination::bind(&st, req.destination_bind).await;
+            send(&stream, &response).await;
+        }
         "clone_configure_v1" => {
             let response = clone::configure(&st, req.clone_configure).await;
             send(&stream, &response).await;
