@@ -11,24 +11,8 @@ impl Manager {
                 .timestamp()
                 .try_into()
                 .context("host clock predates epoch")?;
-            let r = e.snapshot();
-            let (mut config, files) = crate::machine::start::resolved_guest_config(
-                &r,
-                origin.configure.gateway.parse()?,
-            )?;
+            let bind = destination_bind(&e.snapshot(), &origin)?;
             let binding = origin.sandbox.as_mut().context("sandbox binding missing")?;
-            config.files.clear();
-            config.sandbox_device = Some(binding.device.clone());
-            let bind = guest::DestinationBind {
-                identity: origin.configure.clone(),
-                config,
-                receipt: binding.receipt.clone(),
-                files: files
-                    .into_iter()
-                    .map(|(path, mode, data)| guest::DestinationFile { path, mode, data })
-                    .collect(),
-            };
-            bind.validate().map_err(|e| anyhow!(e))?;
             binding.bind = Some(bind);
             e.rec.lock().unwrap().clone_origin = Some(origin.clone());
             // clone_stage fsyncs record and reader before the first bind can be sent.
@@ -99,6 +83,7 @@ pub(in crate::machine) fn check_ack(
             && status.protocol == 1
             && status.profile == guest::SANDBOX_READY_V1
             && stages.contains(&status.stage.as_str())
+            && (status.stage != "destination_done" || response.main_pid == 0)
             && status.ram_marker == origin.artifact.ram_marker
             && identity.generation == c.generation
             && identity.hostname == c.hostname
@@ -110,4 +95,34 @@ pub(in crate::machine) fn check_ack(
         "sandbox destination acknowledgment mismatch"
     );
     Ok(())
+}
+
+/// Resolve and validate the complete payload before claim, and freeze these exact bytes
+/// before the first guest send. The source artifact/device and request receipt stay fixed.
+pub(in crate::machine) fn destination_bind(
+    record: &Record,
+    origin: &CloneOrigin,
+) -> Result<guest::DestinationBind> {
+    let (mut config, files) =
+        crate::machine::start::resolved_guest_config(record, origin.configure.gateway.parse()?)?;
+    let binding = origin.sandbox.as_ref().context("sandbox binding missing")?;
+    config.files.clear();
+    config.sandbox_device = Some(binding.device.clone());
+    let bind = guest::DestinationBind {
+        identity: origin.configure.clone(),
+        config,
+        receipt: binding.receipt.clone(),
+        files: files
+            .into_iter()
+            .map(|(path, mode, data)| guest::DestinationFile { path, mode, data })
+            .collect(),
+    };
+    bind.validate().map_err(|e| anyhow!(e))?;
+    guest::encode_frame(&guest::Request {
+        op: "destination_bind_v1".into(),
+        destination_bind: Some(bind.clone()),
+        ..Default::default()
+    })
+    .context("sandbox destination exceeds the guest frame contract")?;
+    Ok(bind)
 }

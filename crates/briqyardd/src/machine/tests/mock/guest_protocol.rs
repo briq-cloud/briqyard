@@ -16,16 +16,28 @@ impl guestc::Guest for Mock {
                 .destination_bind
                 .context("missing destination bind")?;
             bind.validate().map_err(|e| anyhow!(e))?;
-            self.destination_requests
-                .lock()
-                .unwrap()
-                .insert(vsock.into(), bind.clone());
+            let mut requests = self.destination_requests.lock().unwrap();
             let mut statuses = self.clone_status.lock().unwrap();
             let status = statuses.get_mut(vsock).context("sandbox barrier missing")?;
+            if let Some(previous) = requests.get(vsock) {
+                anyhow::ensure!(
+                    previous.fingerprint_bytes()? == bind.fingerprint_bytes()?,
+                    "sandbox destination replay differs"
+                );
+                let status = status.clone();
+                drop(statuses);
+                drop(requests);
+                return Ok(guest::Response {
+                    clone_status: Some(status),
+                    sha256: self.destination_hash(vsock)?,
+                    ..guest::Response::new("ok")
+                });
+            }
             anyhow::ensure!(
                 status.profile == guest::SANDBOX_READY_V1 && status.stage == "builder",
                 "sandbox barrier unavailable"
             );
+            requests.insert(vsock.into(), bind.clone());
             status.identity = Some(guest::CloneIdentity {
                 generation: bind.identity.generation,
                 hostname: bind.identity.hostname,
@@ -38,6 +50,10 @@ impl guestc::Guest for Mock {
         } else {
             self.clone_control(vsock, request).await?
         };
+        anyhow::ensure!(
+            !self.destination_ack_loss.swap(false, Relaxed),
+            "injected completed bind ACK loss"
+        );
         let sha256 = self.destination_hash(vsock)?;
         Ok(guest::Response {
             clone_status: Some(status),

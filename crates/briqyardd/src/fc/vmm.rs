@@ -125,6 +125,12 @@ pub trait Vmm: Send + Sync {
         anyhow::bail!("paused slots unsupported")
     }
 
+    /// Assignment-only retry on the original owned handle, after fresh process proof.
+    /// Confirm Paused -> Running or already Running; this never proves guest readiness.
+    async fn resume_assigned(&self, _vm: &Vm) -> Result<()> {
+        anyhow::bail!("assigned resume unsupported")
+    }
+
     /// Gives a running machine's disks these limits now: the root disk, and the volume when
     /// it has one.
     async fn disk_rate(&self, vm: &Vm, rate: &DiskRate, volume: bool) -> Result<()>;
@@ -422,6 +428,22 @@ impl Vmm for Firecracker {
         anyhow::ensure!(
             c.info().await?["state"] == "Running",
             "VMM did not confirm Running"
+        );
+        Ok(())
+    }
+
+    async fn resume_assigned(&self, vm: &Vm) -> Result<()> {
+        anyhow::ensure!(!*vm.exited.borrow(), "assigned process exited");
+        let client = Client::new(&vm.api);
+        let info = client.info().await?;
+        match info["state"].as_str() {
+            Some("Paused") => client.resume().await?,
+            Some("Running") => {}
+            _ => anyhow::bail!("assigned VMM state is unconfirmed"),
+        }
+        anyhow::ensure!(
+            !*vm.exited.borrow() && client.info().await?["state"] == "Running",
+            "assigned VMM did not confirm Running"
         );
         Ok(())
     }

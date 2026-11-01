@@ -97,6 +97,9 @@ pub(super) struct Mock {
     pub(in crate::machine) destination_requests: Mutex<HashMap<PathBuf, guest::DestinationBind>>,
     pub(in crate::machine) destination_bad_ack: AtomicBool,
     pub(in crate::machine) destination_refuse: AtomicBool,
+    pub(in crate::machine) assigned_resume_loss: AtomicBool,
+    pub(in crate::machine) assigned_resume_credentials: AtomicBool,
+    pub(in crate::machine) destination_ack_loss: AtomicBool,
     pub(super) init_digests: Mutex<HashMap<PathBuf, String>>,
     /// The limits each machine's disks have now: given at boot, changed live, and
     /// whether the volume was given them too.
@@ -165,6 +168,9 @@ impl Mock {
             destination_requests: Mutex::new(HashMap::new()),
             destination_bad_ack: AtomicBool::new(false),
             destination_refuse: AtomicBool::new(false),
+            assigned_resume_loss: AtomicBool::new(false),
+            assigned_resume_credentials: AtomicBool::new(false),
+            destination_ack_loss: AtomicBool::new(false),
             init_digests: Mutex::new(HashMap::new()),
             disks: Mutex::new(HashMap::new()),
             roots: Mutex::new(HashMap::new()),
@@ -529,6 +535,32 @@ impl fc::Vmm for Mock {
     async fn resume_paused(&self, vm: &fc::Vm) -> Result<()> {
         self.resume_slot(vm.pid)
     }
+    async fn resume_assigned(&self, vm: &fc::Vm) -> Result<()> {
+        let (_, _, exited) = self.proc_at(&vm.vsock)?;
+        anyhow::ensure!(!*exited.borrow(), "assigned process exited");
+        if self.paused.lock().unwrap().remove(&vm.pid) {
+            self.record(format!("assigned_resume paused {}", vm.pid));
+        } else {
+            self.record(format!("assigned_resume running {}", vm.pid));
+        }
+        if self.assigned_resume_credentials.swap(false, Relaxed) {
+            if let Some(process) = self
+                .procs
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|process| process.pid == vm.pid)
+            {
+                process.gid += 1;
+            }
+        }
+        anyhow::ensure!(
+            !self.assigned_resume_loss.swap(false, Relaxed),
+            "injected assigned resume response loss"
+        );
+        Ok(())
+    }
+
     async fn adopt_paused(
         &self,
         id: &str,

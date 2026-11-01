@@ -48,12 +48,22 @@ impl Manager {
                     (CloneStage::Reserved, CloneStage::Loading)
                         | (CloneStage::Loading, CloneStage::Configuring)
                         | (CloneStage::Loading, CloneStage::UnboundPaused)
+                        | (CloneStage::UnboundPaused, CloneStage::Configuring)
                         | (CloneStage::Configuring, CloneStage::IdentityDone)
                         | (CloneStage::IdentityDone, CloneStage::Active)
                         | (CloneStage::IdentityDone, CloneStage::Paused)
                         | (CloneStage::Paused, CloneStage::Active)
                 );
             anyhow::ensure!(allowed, "invalid clone stage transition");
+            if origin.stage == CloneStage::UnboundPaused && next == CloneStage::Configuring {
+                anyhow::ensure!(
+                    unbound_launch
+                        && origin.sandbox.as_ref().is_some_and(
+                            |binding| binding.bind.is_some() && binding.ack_sha256.is_none()
+                        ),
+                    "unbound configuration requires a frozen destination binding"
+                );
+            }
             if next == CloneStage::UnboundPaused {
                 anyhow::ensure!(
                     unbound_launch
@@ -263,6 +273,22 @@ impl Manager {
             .is_some_and(|o| o.stage == CloneStage::Paused);
         if !paused {
             self.configure_memory_clone(e, live).await?;
+        }
+        self.activate_configured_clone(e, live, paused, operation, entire)
+            .await
+    }
+
+    pub(in crate::machine) async fn activate_configured_clone(
+        &self,
+        e: &Entry,
+        live: &fc::Vm,
+        paused: bool,
+        operation: &str,
+        entire: std::time::Instant,
+    ) -> Result<String> {
+        self.verify_live_launch(e, live)?;
+        if e.snapshot().launch_identity.is_some() {
+            self.check_assigned_activation(e, live)?;
         }
         let r = e.snapshot();
         let machine = r.id;

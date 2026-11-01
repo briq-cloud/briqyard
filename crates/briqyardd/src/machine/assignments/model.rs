@@ -146,6 +146,12 @@ impl Intent {
             target_reader,
         };
         intent.check()?;
+        // Complete workload/files/identity framing must fit before any reservation or
+        // durable request authority consumes this pristine source slot.
+        templates::sandbox::destination_bind(
+            &intent.target,
+            intent.target.clone_origin.as_ref().unwrap(),
+        )?;
         manager.check_assignment_destination(&intent.target)?;
         Ok(intent)
     }

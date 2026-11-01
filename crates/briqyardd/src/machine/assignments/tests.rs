@@ -1,4 +1,5 @@
 use super::*;
+mod bind;
 mod live;
 use crate::machine::templates::tests::launch_identity::prepared;
 
@@ -25,6 +26,7 @@ async fn fixture() -> (
         volume: record.volume,
         sleep: "never".into(),
         start: Some(true),
+        cmd: Some(vec!["/bin/sh".into(), "-c".into(), "sleep infinity".into()]),
         env: BTreeMap::from([("DESTINATION_ONLY".into(), "value".into())]),
         metadata: BTreeMap::from([("owner".into(), "destination".into())]),
         sandbox_seed: Some(api::SandboxSeed {

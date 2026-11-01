@@ -297,6 +297,22 @@ impl Harness {
         *self.host.host_boot_id.lock().unwrap() = value.map(str::to_string);
     }
 
+    pub(in crate::machine) fn change_assigned_credentials_on_resume(&self) {
+        self.host.assigned_resume_credentials.store(true, Relaxed);
+    }
+    pub(in crate::machine) fn assigned_first_exec_code(&self, code: i32) {
+        self.host
+            .exec_codes
+            .lock()
+            .unwrap()
+            .insert("/bin/true".into(), code);
+    }
+    pub(in crate::machine) fn lose_assigned_resume(&self) {
+        self.host.assigned_resume_loss.store(true, Relaxed);
+    }
+    pub(in crate::machine) fn lose_destination_ack(&self) {
+        self.host.destination_ack_loss.store(true, Relaxed);
+    }
     pub(in crate::machine) fn refuse_destination(&self, response_loss: bool, bad_ack: bool) {
         self.host.destination_refuse.store(response_loss, Relaxed);
         self.host.destination_bad_ack.store(bad_ack, Relaxed);

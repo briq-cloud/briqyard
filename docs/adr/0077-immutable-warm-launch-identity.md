@@ -102,9 +102,26 @@ the new owner's baselines. Unbound destination names stay out of DNS before acti
 Failed or uncertain writes retain request authority and reservations; a missing durable
 intent in an uncertain process remains blocked until startup reconciliation.
 
-These writers have no public call path and do not bind, resume or activate the guest.
-Catalog/drain race checks, assignment-aware live adoption, linked later-stage evidence,
-full bind/ACK/network/main/exec integration and complete managed rollback protection remain
-required before reachability. A stored request index or a fresh physical sample is not proof
-that guest activation is safe. The live transfer tests use stand-in VMMs and synthetic disks;
-Linux/native process, TAP, disk and recovery qualification remains required.
+Staging and ownership writers remain separate from guest binding. A private assigned
+caller now validates the complete destination frame before consuming a pristine slot,
+then journals the exact full payload in Configuring before resume or vsock transmission.
+It requires settled permanent assignment authority and the original trusted owned handle.
+The assignment-only VMM resume operation queries actual Paused/Running state; fresh
+immutable process proof brackets that API operation. Legacy paused resume remains strict.
+Running alone cannot authorize main: Configuring accepts only the exact guest builder or
+matching destination-done pre-main barrier. A lost resume/ACK retries the same frozen
+payload, entropy and clock; unknown state, missing handle or unsettled journal is refusal.
+
+The existing complete bind ACK becomes durable IdentityDone before target traffic counting,
+bridge activation, main activation and first exec. Active follows successful first exec;
+RUNNING, probes and namespace DNS follow that barrier. The activation core is shared with
+legacy clones, while their existing unbound guards remain. Interrupted stage writes use
+existing launch-transition recovery; restarted records cannot bind without a fresh owned
+handle from future assignment-aware adoption.
+
+No public selector calls these private primitives. Current/desired-zero/catalog generation
+race checks, assignment-aware startup/adoption/stopped restart, compatible managed
+rollback/fallback and native qualification remain required before reachability. A stored
+request index or a fresh physical sample is not proof that guest activation is safe. Tests
+use stand-in VMMs, synthetic disks and a local API socket; Linux/native process, TAP, disk
+and recovery qualification remains required.
