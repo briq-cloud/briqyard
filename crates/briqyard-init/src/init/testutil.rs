@@ -19,6 +19,7 @@ pub(super) fn state_with(cfg: Config) -> Arc<State> {
     let gate = clone::Gate::from_config(&cfg).unwrap();
     Arc::new(State {
         cfg,
+        destination: OnceLock::new(),
         env,
         main_pid: Mutex::new(None),
         main_done: Notify::new(),

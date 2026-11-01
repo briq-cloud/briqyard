@@ -15,17 +15,17 @@ pub(super) fn build_env(env: &BTreeMap<String, String>) -> Vec<(String, String)>
 }
 
 pub(super) fn main_command(st: &State) -> Result<Command> {
-    let cfg = &st.cfg;
+    let cfg = st.config();
     let mut argv: Vec<String> = cfg.entrypoint.clone();
     argv.extend(cfg.cmd.iter().cloned());
     if argv.is_empty() {
         return Err(anyhow!("the image has no entrypoint or command"));
     }
-    let path = look_path(&argv[0], &st.env)?;
+    let path = look_path(&argv[0], st.environment())?;
     let mut cmd = Command::new(path);
     cmd.args(&argv[1..]);
     cmd.env_clear();
-    cmd.envs(st.env.iter().map(|(k, v)| (k, v)));
+    cmd.envs(st.environment().iter().map(|(k, v)| (k, v)));
     cmd.current_dir(if cfg.workdir.is_empty() {
         "/"
     } else {

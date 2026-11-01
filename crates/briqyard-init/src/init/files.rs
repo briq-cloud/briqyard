@@ -11,6 +11,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 static TRANSFERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
+/// Install a boot file with the same descriptor-relative, no-symlink semantics as uploads.
+pub(super) async fn install(root: &Path, path: &str, mode: u32, data: &[u8]) -> Result<()> {
+    wire::check_path(path).map_err(|e| anyhow!(e))?;
+    let mut upload = Upload::new(root, path)?;
+    upload.file.write_all(data).await?;
+    upload.file.flush().await?;
+    upload.file.sync_all().await?;
+    upload.commit(Some(file_mode(mode)))?;
+    at::fsync(&upload.dir)?;
+    Ok(())
+}
+
 pub(super) async fn serve<R, W>(mut input: R, output: Arc<tokio::sync::Mutex<W>>, req: Request)
 where
     R: AsyncRead + Unpin,
