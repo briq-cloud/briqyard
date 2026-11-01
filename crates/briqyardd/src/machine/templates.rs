@@ -70,6 +70,7 @@ pub enum CloneStage {
     Configuring,
     IdentityDone,
     Paused,
+    UnboundPaused,
     Active,
 }
 
@@ -81,13 +82,14 @@ impl CloneStage {
             Self::Configuring => "configuring",
             Self::IdentityDone => "identity_done",
             Self::Paused => "paused",
+            Self::UnboundPaused => "unbound_paused",
             Self::Active => "active",
         }
     }
 }
 
 /// Reserved before disk/jail/load work, retained for every possible live mapping.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct CloneReader {
     pub source_machine: String,
     pub snapshot: String,
@@ -369,4 +371,4 @@ fn fingerprint(path: &Path) -> Result<ArtifactFile> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::machine) mod tests;

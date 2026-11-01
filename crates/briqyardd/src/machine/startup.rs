@@ -172,6 +172,7 @@ impl Manager {
                 .unwrap()
                 .insert(rec.id.clone(), Namespace::new(rec, subnet));
         }
+        self.recover_launch_transitions()?;
         let records = st.list::<Record>("machines")?;
         self.recover_launch_holds(&records)?;
         // An address is one record's at a time: a `destroying` record whose address another
@@ -489,6 +490,9 @@ impl Manager {
         else {
             return false;
         };
+        if self.verify_live_launch(e, &vm).is_err() {
+            return false;
+        }
         let bound = rec
             .boot_incarnation
             .as_ref()

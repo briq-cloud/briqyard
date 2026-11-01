@@ -86,6 +86,11 @@ pub trait Vmm: Send + Sync {
         None
     }
 
+    /// Positive live kernel proof, including jailed credentials; unavailable is refusal.
+    fn verify_process(&self, _id: &str, _saved: &Incarnation, _uid: u32, _gid: u32) -> bool {
+        false
+    }
+
     /// Positive exit of an exact registered clone incarnation; no guest activation.
     async fn settle_clone_process(&self, _id: &str, _saved: &Incarnation) -> Result<bool> {
         Ok(false)
@@ -486,6 +491,10 @@ impl Vmm for Firecracker {
 
     async fn resume(&self, vm: &Vm) -> Result<()> {
         Client::new(&vm.api).resume().await.context("resume")
+    }
+
+    fn verify_process(&self, id: &str, saved: &Incarnation, uid: u32, gid: u32) -> bool {
+        super::process_proof::verify_process(id, saved, uid, gid)
     }
 
     fn kill(&self, pid: u32) {

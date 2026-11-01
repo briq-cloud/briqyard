@@ -58,6 +58,7 @@ impl Store {
             "warm-pools",
             "sandbox-requests",
             "launch-holds",
+            "launch-transitions",
         ] {
             private_dir(&root.join(d))?;
         }
@@ -198,6 +199,7 @@ mod tests {
             "warm-pools",
             "sandbox-requests",
             "launch-holds",
+            "launch-transitions",
         ] {
             assert!(dir.path().join("state").join(d).is_dir(), "{d}");
         }
@@ -312,6 +314,7 @@ mod tests {
             "warm-pools",
             "sandbox-requests",
             "launch-holds",
+            "launch-transitions",
         ] {
             assert_eq!(mode(&state.join(d)), 0o700, "{d}");
         }

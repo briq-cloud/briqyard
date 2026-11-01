@@ -6,6 +6,9 @@ impl Manager {
         e: &Entry,
         live: &fc::Vm,
     ) -> Result<String> {
+        if e.snapshot().launch_identity.is_some() {
+            return self.prepare_unbound_warm_slot(e, live).await;
+        }
         let started = std::time::Instant::now();
         let version = self.configure_memory_clone(e, live).await?;
         self.inner.vmm.pause(live).await.context("park warm slot")?;
@@ -230,6 +233,7 @@ impl Manager {
                 bound,
             );
             if bound
+                && self.verify_live_launch(e, &vm).is_ok()
                 && identity.as_ref() == Some(&origin.artifact.boot_identity)
                 && origin.stage == templates::CloneStage::Paused
                 && origin.identity.is_some()

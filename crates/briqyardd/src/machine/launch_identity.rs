@@ -3,6 +3,7 @@
 use super::*;
 
 mod provenance;
+mod transitions;
 use provenance::TemplateLaunch;
 
 const HOLDS: &str = "launch-holds";

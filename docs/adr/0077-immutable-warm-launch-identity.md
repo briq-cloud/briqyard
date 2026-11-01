@@ -1,6 +1,6 @@
 # 0077: Immutable host identity for unbound warm slots
 
-Status: prerequisite implementation; unbound sandbox pool consumption is not enabled.
+Status: internal preparation and recovery evidence; public unbound pool creation/consumption is not enabled.
 
 A jailed VMM's UID and GID currently derive from its namespace subnet and host number.
 Changing those coordinates while its process survives would change adoption's exit-socket
@@ -19,7 +19,10 @@ Reader destination, namespace, source, snapshot, generation and lifecycle stage 
 with the owning record. A recorded live PID requires the exact boot incarnation, start ticks,
 host boot ID and sealed boot identity. The owned launch path durably records that evidence
 before guest configuration or readiness; its existing failure path settles an unconfirmed
-launch. This validates stored evidence and does not substitute for native same-PID/UID proof.
+launch. Live adoption/preparation/activation additionally requires a fresh backend proof:
+matching host PID incarnation and machine ID, all real/effective/saved/filesystem UID/GID
+values and no foreign supplementary groups. Missing kernel evidence is refusal. Native
+same-PID/UID proof remains required.
 
 Startup reconciles holds before stale-record removal, network publication or orphan sweep.
 Missing or disagreeing identities, changed jail configuration, conflicting allocations and
@@ -48,3 +51,18 @@ Remaining integration includes unbound preparation, durable destination assignme
 full create identity, assignment/reader ownership transfer, quota transfer,
 recovery/drain races and native qualification. These prerequisites are not a working warm
 sandbox feature.
+
+An internal `UnboundPaused` transition parks at the verified pristine builder barrier without
+sending destination configuration or activation. It requires an owned resumed process and
+sealed `/work` geometry. The existing disk path creates and formats a new private data
+volume with a fresh UUID for these records. The public profile selector still rejects this
+mode, configured-slot recovery does not select it, and binding/activation explicitly refuses
+it until durable assignment integration is complete.
+
+`launch-transitions` journals each launch-identity record/reader stage change before either
+write. Startup reconciles only exact journal-evidenced record-first/reader-second states
+before strict provenance checks. Workload, ownership, boot evidence and the complete origin
+remain fingerprinted; terminal exit/error/accounting observations survive reconciliation.
+Contradictory reader-first states, changed controls, missing records/holds/readers or unknown
+journal schemas stop reconciliation with reservations retained. This is stage-write evidence,
+not a destination assignment journal or permission to infer a missing tenant assignment.

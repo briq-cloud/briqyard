@@ -26,6 +26,8 @@ pub(super) enum Boots {
 pub(super) struct Proc {
     pub(super) pid: u32,
     pub(super) id: String,
+    pub(super) uid: u32,
+    pub(super) gid: u32,
     pub(super) vsock: PathBuf,
     pub(super) console: PathBuf,
     pub(super) boots: Boots,
@@ -258,6 +260,8 @@ impl Mock {
         self.procs.lock().unwrap().push(Proc {
             pid,
             id: id.into(),
+            uid: 0,
+            gid: 0,
             vsock,
             console,
             boots: Boots::Ready(Duration::ZERO),
@@ -356,6 +360,17 @@ impl Mock {
 
 #[async_trait::async_trait]
 impl fc::Vmm for Mock {
+    fn verify_process(&self, id: &str, saved: &fc::Incarnation, uid: u32, gid: u32) -> bool {
+        saved == &mock_incarnation(saved.pid)
+            && self.procs.lock().unwrap().iter().any(|process| {
+                process.id == id
+                    && process.pid == saved.pid
+                    && process.uid == uid
+                    && process.gid == gid
+                    && !*process.exited.borrow()
+            })
+    }
+
     async fn warm_test_barrier(&self, phase: &str, id: &str) {
         self.wait_network(phase, id).await;
     }
@@ -438,6 +453,8 @@ impl fc::Vmm for Mock {
         self.procs.lock().unwrap().push(Proc {
             pid,
             id: b.id.clone(),
+            uid: b.jail.as_ref().map_or(0, |jail| jail.uid),
+            gid: b.jail.as_ref().map_or(0, |jail| jail.gid),
             vsock: vsock.clone(),
             console,
             boots: boots.clone(),

@@ -426,4 +426,4 @@ mod recovery;
 
 mod warm;
 
-mod launch_identity;
+pub(in crate::machine) mod launch_identity;

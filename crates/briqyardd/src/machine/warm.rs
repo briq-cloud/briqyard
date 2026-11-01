@@ -6,6 +6,7 @@ mod claims;
 mod lifecycle;
 mod policy;
 mod telemetry;
+mod unbound;
 pub(super) use policy::Sample;
 #[cfg(test)]
 mod tests;

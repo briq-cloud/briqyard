@@ -778,7 +778,7 @@ impl Manager {
                 z.clone_snapshot(&s.root_dataset(), &origin.snapshot, &r.root_dataset())
                     .await?;
                 crate::profile::stage("named_memory_clone", "disk_clone", &r.id, 0, started, true);
-                if origin.sandbox.is_none() {
+                if origin.sandbox.is_none() && r.launch_identity.is_none() {
                     return Ok(());
                 }
             } else {
@@ -821,7 +821,9 @@ impl Manager {
                 "-E",
                 "lazy_itable_init=0,lazy_journal_init=0",
             ]);
-            if r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some()) {
+            if r.launch_identity.is_some()
+                || r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some())
+            {
                 formatter.args(["-U", "random"]);
             }
             let out = formatter
@@ -836,7 +838,9 @@ impl Manager {
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             }
-            if r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some()) {
+            if r.launch_identity.is_some()
+                || r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some())
+            {
                 std::fs::File::open(&dev)?.sync_all()?;
                 self.check_sandbox_disk(&r, &dev)?;
             }
