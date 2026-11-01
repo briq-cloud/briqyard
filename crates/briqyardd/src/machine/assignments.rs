@@ -8,6 +8,7 @@ mod live;
 mod model;
 mod recovery;
 mod reservations;
+pub(super) mod runs;
 #[cfg(test)]
 pub(in crate::machine) mod tests;
 const REQUESTS: &str = "unbound-requests";

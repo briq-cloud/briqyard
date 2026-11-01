@@ -137,6 +137,21 @@ that preserves mutable root/data/configuration across user stop/start and host r
 still a pre-enable requirement. Loading or stopped records without an adoption contract,
 and unassigned pristine sources, remain conservatively retained.
 
+A separate private assigned-run journal now reserves the first continuation only after
+positive old-process exit. Its host generation is separate from the saved checkpoint guest
+lineage or a fresh ordinary-boot generation. It freezes actual current dataset GUIDs and
+either current checkpoint fingerprints or the exact encoded ordinary config drive and
+expected measured-bundle digest. Expected host evidence is never observed guest proof.
+Intent, current-run record, machine link and distinct run reader are repaired before
+creation-stage validation; actual backing is checked before startup side effects. Creation
+receipt, launch identity, clone origin and creation reader remain unchanged. Reserved and
+observed links never confer trust and remain excluded from the initial-assignment lifecycle.
+
+This is metadata authority only: no continuation launcher consumes it. Pending updates are
+retained and refused until explicit integration; subsequent run sequences, new-process
+observation/guest proof, checkpoint-to-fresh fallback and stop/start/reboot completion remain
+separate required work. Uncertain authority retains full reservations without a second run.
+
 No public selector calls these private primitives. Current/desired-zero/catalog generation
 race checks, complete assignment-aware stop/start/reboot behavior, compatible managed
 rollback/fallback qualification and native qualification remain required before reachability. A stored

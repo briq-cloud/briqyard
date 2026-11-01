@@ -230,6 +230,7 @@ impl Manager {
             clone_origin: None,
             warm_slot,
             launch_identity: None,
+            assigned_run: None,
             rest: Default::default(),
             snapshots: Vec::new(),
             restoring: None,

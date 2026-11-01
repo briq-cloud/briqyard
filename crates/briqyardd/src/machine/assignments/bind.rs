@@ -37,6 +37,10 @@ impl Manager {
         record: &Record,
     ) -> Result<templates::CloneOrigin> {
         anyhow::ensure!(
+            record.assigned_run.is_none(),
+            "run continuation requires separate lifecycle/guest proof"
+        );
+        anyhow::ensure!(
             record.launch_identity.is_some(),
             "assigned launch identity missing"
         );

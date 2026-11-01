@@ -116,6 +116,7 @@ pub(in crate::machine) fn record() -> Record {
         clone_origin: None,
         warm_slot: None,
         launch_identity: None,
+        assigned_run: None,
         rest: Default::default(),
         snapshots: Vec::new(),
         restoring: None,

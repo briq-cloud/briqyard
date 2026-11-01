@@ -348,7 +348,7 @@ fn check_inode(path: &Path, expected: &ArtifactFile) -> Result<()> {
     );
     Ok(())
 }
-fn fingerprint(path: &Path) -> Result<ArtifactFile> {
+pub(in crate::machine) fn fingerprint(path: &Path) -> Result<ArtifactFile> {
     use std::io::Read;
     let meta = std::fs::symlink_metadata(path)?;
     anyhow::ensure!(meta.is_file(), "memory artifact is not a regular file");

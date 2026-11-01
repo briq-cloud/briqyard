@@ -107,6 +107,7 @@ impl Manager {
                 .check_capacity(m.capacity())?;
         }
         m.load()?;
+        m.verify_assigned_run_backing().await?;
         m.verify_clone_artifacts();
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
@@ -173,6 +174,7 @@ impl Manager {
                 .unwrap()
                 .insert(rec.id.clone(), Namespace::new(rec, subnet));
         }
+        self.recover_assigned_runs()?;
         self.recover_destination_assignments()?;
         self.recover_launch_transitions()?;
         let records = st.list::<Record>("machines")?;

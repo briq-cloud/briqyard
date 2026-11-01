@@ -302,6 +302,9 @@ pub struct Record {
     /// Host identity stays fixed when an unbound slot changes tenant ownership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_identity: Option<launch_identity::LaunchIdentity>,
+    /// Current assigned-run authority; creation provenance remains on clone_origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_run: Option<assignments::runs::RunRef>,
     /// What a newer daemon wrote and this one does not know: kept as it is, so a rollback that
     /// rewrites the record does not drop it (ADR 0027).
     #[serde(flatten)]
@@ -412,7 +415,8 @@ fn holds_memory(state: &str) -> bool {
 /// Whether the host counts this machine's memory as taken: it holds it, or its create will
 /// start it (ADR 0048: room is taken when the machine is recorded, not when it boots).
 fn commits_memory(r: &Record) -> bool {
-    holds_memory(&r.state)
+    r.assigned_run.is_some()
+        || holds_memory(&r.state)
         || r.warm_slot
             .as_ref()
             .is_some_and(|slot| slot.claimed.is_none())
