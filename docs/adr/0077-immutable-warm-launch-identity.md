@@ -18,10 +18,13 @@ Missing or disagreeing identities, changed jail configuration, conflicting alloc
 journal-only holds stop startup while retaining the allocation and backing. Address and
 subnet selection, namespace deletion and namespace rename respect source holds. Destruction
 releases a hold last, after verified process exit and successful backing/run/jail cleanup.
-An uncertain write or failed cleanup retains the allocation.
+An uncertain write or failed cleanup retains the allocation. A retry can finish an identical
+hold, but cannot replace either its cached or durable identity. The machine record is
+durably deleted under write exclusion before its hold is durably deleted.
 
 Graceful handover fences namespace admission while checking `state-capabilities` on the
-installed replacement executable. A target lacking `launch-identity-v1` leaves the current
+installed replacement executable. The admission wait and target probe share a bounded
+deadline; stop signals and server completion can cancel the wait. A target lacking `launch-identity-v1` leaves the current
 daemon serving with its listeners and ownership intact. This guard covers graceful handover;
 it does not make arbitrary older installers or forced restarts compatible. Normal managed
 rollback must refuse incompatible installed targets and fallback/restart paths while holds

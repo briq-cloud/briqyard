@@ -196,3 +196,124 @@ async fn destruction_releases_source_allocation_only_after_cleanup_succeeds() {
     assert!(h.m.inner.store.get::<Hold>(HOLDS, &r.id).unwrap().is_none());
     assert!(h.m.entry(&r.id).is_err());
 }
+
+#[tokio::test]
+async fn handover_admission_deadline_and_cancellation_release_queued_writer() {
+    // No launch holds: even an ordinary host can have an admission reader stuck.
+    let h = harness("10.64.0.0/22", 4096).await;
+    let reader = h.m.inner.namespace_lifecycle.read().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+    let result =
+        h.m.handover_admission_until(Path::new("/usr/bin/true"), deadline)
+            .await;
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("handover deadline"));
+    assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
+
+    let mut pending = Box::pin(h.m.handover_admission(Path::new("/usr/bin/true")));
+    assert!(matches!(
+        futures::poll!(&mut pending),
+        std::task::Poll::Pending
+    ));
+    // A stop signal/server completion drops the pending acquisition in main's select.
+    drop(pending);
+    assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
+    drop(reader);
+    assert!(h.m.inner.namespace_lifecycle.try_write().is_ok());
+}
+
+#[tokio::test]
+async fn launch_hold_retry_is_idempotent_and_conflicting_retry_cannot_replace_it() {
+    let (h, r, identity) = held().await;
+    h.m.persist_launch_hold(&r.id, &identity).unwrap();
+    let mut changed = identity.clone();
+    changed.host_num += 1;
+    assert!(h.m.persist_launch_hold(&r.id, &changed).is_err());
+    assert_eq!(
+        h.m.inner.launch_holds.lock().unwrap().get(&r.id),
+        Some(&identity)
+    );
+    assert_eq!(
+        h.m.inner
+            .store
+            .get::<Hold>(HOLDS, &r.id)
+            .unwrap()
+            .unwrap()
+            .identity,
+        identity
+    );
+    // A restart/cache loss must still consult the existing durable identity.
+    h.m.inner.launch_holds.lock().unwrap().clear();
+    assert!(h.m.persist_launch_hold(&r.id, &changed).is_err());
+    h.m.persist_launch_hold(&r.id, &identity).unwrap();
+}
+
+#[tokio::test]
+async fn uncertain_first_launch_hold_write_keeps_immutable_cached_identity() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let identity = LaunchIdentity::new(&h.m.inner.cfg, "t1", 1, 2).unwrap();
+    let directory = h.m.inner.store.dir(HOLDS);
+    std::fs::remove_dir(&directory).unwrap();
+    assert!(h.m.persist_launch_hold("m_retry", &identity).is_err());
+    let mut changed = identity.clone();
+    changed.host_num = 3;
+    assert!(h.m.persist_launch_hold("m_retry", &changed).is_err());
+    assert_eq!(
+        h.m.inner.launch_holds.lock().unwrap().get("m_retry"),
+        Some(&identity)
+    );
+    std::fs::create_dir(&directory).unwrap();
+    h.m.persist_launch_hold("m_retry", &identity).unwrap();
+    assert_eq!(
+        h.m.inner
+            .store
+            .get::<Hold>(HOLDS, "m_retry")
+            .unwrap()
+            .unwrap()
+            .identity,
+        identity
+    );
+}
+
+#[tokio::test]
+async fn durable_machine_forget_precedes_hold_release_and_excludes_late_writes() {
+    let (h, r, _) = held().await;
+    let e = Entry::new(r.clone(), h.m.inner.events.clone());
+    h.m.inner.store.put_durable("machines", &r.id, &r).unwrap();
+    h.m.forget(&e).unwrap();
+    assert!(*e.removed.lock().unwrap());
+    h.m.save(&e).unwrap();
+    assert!(h
+        .m
+        .inner
+        .store
+        .get::<Record>("machines", &r.id)
+        .unwrap()
+        .is_none());
+    // Crash after the durable record unlink, before the durable hold unlink:
+    // the source remains held and startup conservatively refuses the orphaned hold.
+    assert!(h.m.recover_launch_holds(&[]).is_err());
+    assert!(h.m.held_addresses(1).contains(&2));
+    h.m.release_launch_hold(&r.id).unwrap();
+    h.m.recover_launch_holds(&[]).unwrap();
+    assert!(!h.m.held_addresses(1).contains(&2));
+}
+
+#[tokio::test]
+async fn failed_machine_directory_sync_does_not_release_hold_or_mark_record_removed() {
+    let (h, r, _) = held().await;
+    let e = Entry::new(r.clone(), h.m.inner.events.clone());
+    h.m.inner.store.put_durable("machines", &r.id, &r).unwrap();
+    let directory = h.m.inner.store.dir("machines");
+    let retained = directory.with_extension("retained");
+    std::fs::rename(&directory, &retained).unwrap();
+    // delete sees absence, but the mandatory directory fsync cannot complete.
+    assert!(h.m.forget(&e).is_err());
+    assert!(!*e.removed.lock().unwrap());
+    assert!(h.m.held_addresses(1).contains(&2));
+    assert!(h.m.inner.store.get::<Hold>(HOLDS, &r.id).unwrap().is_some());
+    std::fs::rename(&retained, &directory).unwrap();
+    h.m.recover_launch_holds(&[r]).unwrap();
+}

@@ -100,24 +100,43 @@ impl Manager {
         if let Some(previous) = &record.launch_identity {
             anyhow::ensure!(previous == &identity, "launch identity is immutable");
         }
-        let hold = Hold {
-            machine: record.id.clone(),
-            identity: identity.clone(),
-        };
-        let mut holds = self.inner.launch_holds.lock().unwrap();
-        anyhow::ensure!(
-            holds.iter().all(|(machine, other)| machine == &record.id
-                || (other.subnet_index, other.host_num)
-                    != (identity.subnet_index, identity.host_num)),
-            "source launch allocation is already held"
-        );
-        // Cache before the uncertain persistence boundary. Failure retains the allocation.
-        holds.insert(record.id.clone(), identity.clone());
-        self.inner.store.put_durable(HOLDS, &record.id, &hold)?;
+        self.persist_launch_hold(&record.id, &identity)?;
         record.launch_identity = Some(identity);
         self.inner
             .store
             .put_durable("machines", &record.id, &*record)
+    }
+
+    fn persist_launch_hold(&self, machine: &str, identity: &LaunchIdentity) -> Result<()> {
+        let mut holds = self.inner.launch_holds.lock().unwrap();
+        if let Some(previous) = holds.get(machine) {
+            anyhow::ensure!(previous == identity, "launch hold identity is immutable");
+        }
+        if let Some(previous) = self.inner.store.get::<Hold>(HOLDS, machine)? {
+            anyhow::ensure!(
+                previous.machine == machine && &previous.identity == identity,
+                "durable launch hold identity is immutable"
+            );
+        }
+        anyhow::ensure!(
+            holds
+                .iter()
+                .all(|(other_machine, other)| other_machine == machine
+                    || (other.subnet_index, other.host_num)
+                        != (identity.subnet_index, identity.host_num)),
+            "source launch allocation is already held"
+        );
+        // Cache before the uncertain persistence boundary. An identical retry may
+        // finish persistence; a conflicting retry cannot replace this reservation.
+        holds.insert(machine.into(), identity.clone());
+        self.inner.store.put_durable(
+            HOLDS,
+            machine,
+            &Hold {
+                machine: machine.into(),
+                identity: identity.clone(),
+            },
+        )
     }
 
     /// Reconcile before stale-record deletion, plumbing, orphan sweep or admission.
@@ -211,7 +230,21 @@ impl Manager {
         &self,
         executable: &Path,
     ) -> Result<tokio::sync::RwLockWriteGuard<'_, ()>> {
-        let admission = self.inner.namespace_lifecycle.write().await;
+        self.handover_admission_until(
+            executable,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+    }
+
+    async fn handover_admission_until(
+        &self,
+        executable: &Path,
+        deadline: tokio::time::Instant,
+    ) -> Result<tokio::sync::RwLockWriteGuard<'_, ()>> {
+        let admission = tokio::time::timeout_at(deadline, self.inner.namespace_lifecycle.write())
+            .await
+            .context("namespace admission did not settle before handover deadline")?;
         if !self.inner.launch_holds.lock().unwrap().is_empty() {
             let probe = tokio::process::Command::new(executable)
                 .arg("state-capabilities")
@@ -219,7 +252,7 @@ impl Manager {
                 .stderr(std::process::Stdio::null())
                 .kill_on_drop(true)
                 .output();
-            let output = tokio::time::timeout(Duration::from_secs(5), probe)
+            let output = tokio::time::timeout_at(deadline, probe)
                 .await
                 .context("replacement daemon compatibility probe timed out")??;
             anyhow::ensure!(

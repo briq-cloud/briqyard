@@ -281,12 +281,25 @@ async fn run(args: Args) -> Result<()> {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => break false,
                 _ = term.recv() => break false,
-                _ = usr2.recv() => match mgr.handover_admission(&executable).await {
+                _ = usr2.recv() => {
+                    // Admission may still be held by an in-flight request. Keep stop
+                    // signals and server termination live while its bounded fence waits.
+                    let admission = tokio::select! {
+                        _ = tokio::signal::ctrl_c() => break false,
+                        _ = term.recv() => break false,
+                        served = &mut server => {
+                            served??;
+                            return Err(anyhow!("the API stopped serving"));
+                        }
+                        admission = mgr.handover_admission(&executable) => admission,
+                    };
+                    match admission {
                     Ok(admission) => {
                         handover_admission = Some(admission);
                         break true;
                     }
                     Err(error) => tracing::error!(err = %error, "handover refused; daemon remains serving"),
+                    }
                 },
                 served = &mut server => {
                     served??;

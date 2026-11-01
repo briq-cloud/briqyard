@@ -57,7 +57,13 @@ impl Manager {
     /// Deletes the record for good, under the lock every write of it checks.
     pub(super) fn forget(&self, e: &Entry) -> Result<()> {
         let mut removed = e.removed.lock().unwrap();
-        self.inner.store.delete("machines", &e.snapshot().id)?;
+        let record = e.snapshot();
+        if record.launch_identity.is_some() {
+            // The record unlink must survive a crash before its source hold is released.
+            self.inner.store.delete_durable("machines", &record.id)?;
+        } else {
+            self.inner.store.delete("machines", &record.id)?;
+        }
         *removed = true;
         Ok(())
     }
