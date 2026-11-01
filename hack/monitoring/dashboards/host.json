@@ -14,7 +14,7 @@
   },
   "refresh": "30s",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "links": [
     {
       "title": "briqyard",
@@ -3712,7 +3712,7 @@
     {
       "type": "stat",
       "title": "Unique machines observed running",
-      "description": "Distinct machine identities observed running in the selected period, gateways included. Requires a running scrape: starts and stops entirely between scrapes may be missed. Not a count of machines first created in this period.",
+      "description": "Distinct machine identities observed running in the selected period, gateways included. Requires a running scrape: starts and stops entirely between scrapes may be missed. Not a count of machines first created in this period. Zero is shown only when at least one successful scrape of this host was observed in the selected period; otherwise the panel has no data.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -3724,7 +3724,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "count(max by (machine) (max_over_time(briqyard_machine_state{state=\"running\", host=\"$host\"}[$__range])) == 1) or vector(0)",
+          "expr": "count(max by (machine) (max_over_time(briqyard_machine_state{state=\"running\", host=\"$host\"}[$__range])) == 1) or (vector(0) and on() (max(max_over_time(up{job=\"briqyard\", host=\"$host\"}[$__range])) == 1))",
           "legendFormat": "__auto",
           "range": false,
           "instant": true
@@ -3775,7 +3775,7 @@
     {
       "type": "stat",
       "title": "Successful starts and resumes",
-      "description": "Successful start and resume events in the selected period, including restarts and wakes. Event count, not unique machines; counter increases are estimated between scrapes.",
+      "description": "Successful start and resume events in the selected period, including restarts and wakes. Event count, not unique machines; counter increases are estimated between scrapes. Zero is shown only when at least one successful scrape of this host was observed in the selected period; otherwise the panel has no data.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -3787,7 +3787,7 @@
             "type": "prometheus",
             "uid": "briqyard-prometheus"
           },
-          "expr": "sum(increase(briqyard_events_total{type=\"normal\", reason=~\"started|resumed\", host=\"$host\"}[$__range])) or vector(0)",
+          "expr": "sum(increase(briqyard_events_total{type=\"normal\", reason=~\"started|resumed\", host=\"$host\"}[$__range])) or (vector(0) and on() (max(max_over_time(up{job=\"briqyard\", host=\"$host\"}[$__range])) == 1))",
           "legendFormat": "__auto",
           "range": false,
           "instant": true
