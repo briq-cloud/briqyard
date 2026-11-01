@@ -243,9 +243,18 @@ impl Manager {
                 error: String::new(),
             },
         };
+        let increased = request.desired > pool.desired;
         pool.desired = request.desired;
         self.pool_save(&pool)?;
-        Ok(self.pool_view(&pool))
+        let view = self.pool_view(&pool);
+        drop(_turn);
+        if increased {
+            // Reuse the bounded, serialized refill pass; it reads current demand, so
+            // a later decrease or drain wins even if this task has not run yet.
+            let manager = self.clone();
+            tokio::spawn(async move { manager.warm_step().await });
+        }
+        Ok(view)
     }
 
     pub async fn delete_warm_pool(&self, namespace: &str, name: &str) -> Result<(), MError> {

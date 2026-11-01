@@ -61,6 +61,90 @@ async fn fill(h: &Harness) -> Arc<Entry> {
     e
 }
 
+async fn desired(h: &Harness, desired: u16) -> api::WarmPool {
+    let view = h.m.warm_pools("t1").unwrap().remove(0);
+    h.m.put_warm_pool(
+        "t1",
+        "tools",
+        api::PutWarmPoolRequest {
+            source_machine: view.source_machine,
+            snapshot: view.snapshot,
+            desired,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn increased_demand_refills_without_tick_and_put_does_not_wait_for_ready() {
+    let (h, _) = pool(0).await;
+    h.pause_warm_barrier("warm_parked");
+    let view = desired(&h, 1).await;
+    assert_eq!((view.desired, view.ready, view.creating), (1, 0, 0));
+    // The PUT has returned before its worker reaches the existing park barrier.
+    h.wait_warm_barrier().await;
+    let view = h.m.warm_pools("t1").unwrap().remove(0);
+    assert_eq!(view.slots.len(), 1);
+    assert_eq!(view.ready, 1);
+    h.release_warm_barriers();
+    fill(&h).await;
+}
+
+#[tokio::test]
+async fn queued_demand_increase_observes_later_decrease_and_drain() {
+    for drain in [false, true] {
+        let (h, _) = pool(0).await;
+        desired(&h, 1).await;
+        // No await has yielded to the queued refill: it must read the newer pool.
+        if drain {
+            h.m.delete_warm_pool("t1", "tools").await.unwrap();
+        } else {
+            desired(&h, 0).await;
+        }
+        tokio::task::yield_now().await;
+        let _settled = h.m.inner.warm_lock.lock().await;
+        assert!(h.m.warm_pools("t1").unwrap()[0].slots.is_empty());
+        assert_eq!(h.m.inner.machines.lock().unwrap().len(), 1);
+        assert!(h.m.clone_readers().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn queued_increases_serialize_at_latest_demand_without_extra_slots() {
+    let (h, _) = pool(0).await;
+    h.pause_warm_barrier("warm_parked");
+    desired(&h, 1).await;
+    desired(&h, 2).await;
+    desired(&h, 1).await;
+    h.wait_warm_barrier().await;
+    // Both queued passes see the final desired count and the same reservation.
+    let _settled = h.m.inner.warm_lock.lock().await;
+    let view = h.m.warm_pools("t1").unwrap().remove(0);
+    assert_eq!((view.desired, view.slots.len()), (1, 1));
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
+    drop(_settled);
+    h.release_warm_barriers();
+    fill(&h).await;
+}
+
+#[tokio::test]
+async fn unchanged_demand_does_not_refill_after_claim() {
+    let (h, _) = pool(1).await;
+    fill(&h).await;
+    // Let the initial demand task finish before consuming its slot.
+    tokio::task::yield_now().await;
+    h.m.claim_warm_pool("t1", "tools", claim("worker", "unchanged"))
+        .await
+        .unwrap();
+    let view = desired(&h, 1).await;
+    assert_eq!((view.ready, view.claimed), (0, 1));
+    tokio::task::yield_now().await;
+    let _settled = h.m.inner.warm_lock.lock().await;
+    assert_eq!(h.m.warm_pools("t1").unwrap()[0].slots.len(), 1);
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), 2);
+}
+
 fn claim(name: &str, request_id: &str) -> api::ClaimWarmPoolRequest {
     api::ClaimWarmPoolRequest {
         name: name.into(),
