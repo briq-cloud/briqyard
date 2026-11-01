@@ -2,6 +2,9 @@
 //! The hold is independent of the tenant record and is released after destruction, last.
 use super::*;
 
+mod provenance;
+use provenance::TemplateLaunch;
+
 const HOLDS: &str = "launch-holds";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +19,8 @@ pub struct LaunchIdentity {
     pub(super) jailer: PathBuf,
     pub(super) jail_base: PathBuf,
     uid_base: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    template: Option<TemplateLaunch>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -27,6 +32,10 @@ struct Hold {
 impl LaunchIdentity {
     fn new(cfg: &Config, namespace: &str, subnet_index: u32, host_num: u8) -> Result<Self> {
         let jailed = !cfg.jailer.as_os_str().is_empty();
+        anyhow::ensure!(
+            jailed,
+            "unbound slot launch requires the jailer; unjailed credentials are not qualified"
+        );
         let uid = if jailed {
             cfg.jail_uid_base
                 .checked_add(
@@ -50,6 +59,7 @@ impl LaunchIdentity {
             jailer: cfg.jailer.clone(),
             jail_base: cfg.jail_base(),
             uid_base: cfg.jail_uid_base,
+            template: None,
         })
     }
 
@@ -61,7 +71,8 @@ impl LaunchIdentity {
             "invalid source launch address"
         );
         // Recompute only from immutable source coordinates, never tenant ownership.
-        let expected = Self::new(cfg, &self.namespace, self.subnet_index, self.host_num)?;
+        let mut expected = Self::new(cfg, &self.namespace, self.subnet_index, self.host_num)?;
+        expected.template.clone_from(&self.template);
         anyhow::ensure!(
             self == &expected,
             "launch identity conflicts with jail configuration"
@@ -90,12 +101,15 @@ impl Manager {
                         && origin.artifact.profile == guest::SANDBOX_READY_V1),
             "launch identity requires a newly reserved pristine sandbox slot"
         );
-        let identity = LaunchIdentity::new(
+        let mut identity = LaunchIdentity::new(
             &self.inner.cfg,
             &record.namespace,
             record.subnet_index,
             record.host_num,
         )?;
+        identity.template = Some(TemplateLaunch::from_origin(
+            record.clone_origin.as_ref().unwrap(),
+        )?);
         identity.check(&self.inner.cfg)?;
         if let Some(previous) = &record.launch_identity {
             anyhow::ensure!(previous == &identity, "launch identity is immutable");
@@ -170,6 +184,9 @@ impl Manager {
                 );
             }
         }
+        for record in records {
+            self.validate_launch_provenance(record)?;
+        }
         let mut sources = std::collections::HashSet::new();
         let namespaces = self.inner.namespaces.lock().unwrap();
         for (id, identity) in &holds {
@@ -221,6 +238,7 @@ impl Manager {
                 "launch allocation is not durably held"
             );
         }
+        self.validate_launch_provenance(record)?;
         Ok(())
     }
 

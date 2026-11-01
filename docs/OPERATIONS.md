@@ -33,6 +33,12 @@ templates:
 Apply YAML through the usual validated daemon handover. Bootstrap preserves operator
 configuration. Invalid configuration prevents handover; an API request cannot raise
 budgets or catalog ceilings. Budget plus RAM/CPU headroom must fit resolved host capacity.
+The optional `budget.data_disk_gb` defaults to zero and limits full data-volume capacity
+separately from roots. Admission subtracts both logical root and data reservations from
+sampled pool free space before enforcing the disk floor; neither receives a sharing discount.
+A usable sample retains each slot's disk liability through a claim until a fresh measurement,
+so claiming cannot erase allocation that the sample predates.
+Configured `init-ready-v1` slots have no data volumes and retain zero data charges.
 
 ```sh
 briqyard warm-pool catalog team
@@ -503,8 +509,8 @@ snapshot, or is whole.
   | `briqyard_machine_restarts_total` | same | restarts by its policy |
   | `briqyard_machine_state` | same, `state` | 1, one series per machine |
   | `briqyard_machine_boot_seconds` | same | its last start, `starting` to `running` |
-  | `briqyard_warm_pool_{desired,max_ready,shortfall,slots,blocked}`, `_reserved_{memory_bytes,cpu_millis,root_disk_bytes}` | namespace, pool, catalog, type, exact numeric size; bounded state/reason | actual warm counts, upper targets and full unclaimed reservations |
-  | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the absolute free-space floor |
+  | `briqyard_warm_pool_{desired,max_ready,shortfall,slots,blocked}`, `_reserved_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | namespace, pool, catalog, type, exact numeric size; bounded state/reason | actual warm counts, upper targets and full unclaimed reservations |
+  | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the absolute free-space floor |
   | `briqyard_warm_{memory_available_bytes,disk_free_bytes,probe_age_seconds,probe_available,probe_valid,accounting_available}` | | cached physical availability, sample age/validity and accounting availability; a scrape runs no probe |
   | `briqyard_warm_operations_total`, `_operation_seconds_total`, `_operation_last_seconds` | `operation="prepare\|claim"`, `outcome="success\|miss\|failure"` | host prepare-worker and claim-to-host-readiness observations; excludes fleet and public API transport |
   | `briqyard_warm_fill_blocked_total` | bounded `reason` | actual refused refill attempts |

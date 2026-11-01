@@ -130,7 +130,10 @@ async fn handover_rejects_incompatible_target_with_holds_and_releases_admission_
 
 #[test]
 fn launch_identity_checks_source_range_version_and_uid_overflow() {
-    let cfg = Config::default();
+    let cfg = Config {
+        jailer: "/mock/jailer".into(),
+        ..Default::default()
+    };
     assert!(LaunchIdentity::new(
         &Config {
             jailer: "/jailer".into(),
@@ -252,7 +255,11 @@ async fn launch_hold_retry_is_idempotent_and_conflicting_retry_cannot_replace_it
 
 #[tokio::test]
 async fn uncertain_first_launch_hold_write_keeps_immutable_cached_identity() {
-    let h = harness("10.64.0.0/22", 4096).await;
+    let h = harness_config(|cfg| {
+        cfg.network.range = "10.64.0.0/22".into();
+        cfg.jailer = "/mock/jailer".into();
+    })
+    .await;
     let identity = LaunchIdentity::new(&h.m.inner.cfg, "t1", 1, 2).unwrap();
     let directory = h.m.inner.store.dir(HOLDS);
     std::fs::remove_dir(&directory).unwrap();
@@ -316,4 +323,9 @@ async fn failed_machine_directory_sync_does_not_release_hold_or_mark_record_remo
     assert!(h.m.inner.store.get::<Hold>(HOLDS, &r.id).unwrap().is_some());
     std::fs::rename(&retained, &directory).unwrap();
     h.m.recover_launch_holds(&[r]).unwrap();
+}
+
+#[test]
+fn unjailed_launch_identity_is_refused_instead_of_assuming_root_credentials() {
+    assert!(LaunchIdentity::new(&Config::default(), "operator", 1, 2).is_err());
 }

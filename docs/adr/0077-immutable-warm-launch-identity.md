@@ -12,6 +12,14 @@ namespace, subnet and host number, UID/GID, jail mode, jailer path, jail base an
 An independent durable `launch-holds` record reserves that source allocation before launch.
 Destination assignment must preserve both records, the machine ID and the live incarnation.
 Legacy configured pools keep their existing identity derivation and namespace restrictions.
+Unjailed launch identities are rejected until their process credentials are qualified.
+
+The identity also freezes the source machine, snapshot and complete immutable artifact hash.
+Reader destination, namespace, source, snapshot, generation and lifecycle stage must agree
+with the owning record. A recorded live PID requires the exact boot incarnation, start ticks,
+host boot ID and sealed boot identity. The owned launch path durably records that evidence
+before guest configuration or readiness; its existing failure path settles an unconfirmed
+launch. This validates stored evidence and does not substitute for native same-PID/UID proof.
 
 Startup reconciles holds before stale-record removal, network publication or orphan sweep.
 Missing or disagreeing identities, changed jail configuration, conflicting allocations and
@@ -31,7 +39,12 @@ rollback must refuse incompatible installed targets and fallback/restart paths w
 exist before unbound pools can be enabled. Draining requires verified exit and completed
 cleanup, not merely desired zero. Preserving unknown JSON fields alone is insufficient.
 
+Resource accounting exposes full data-volume capacity separately from logical roots,
+checks each configured budget and subtracts their sum before the disk free-space floor.
+Zero data charge retains the legacy resource wire shape. Record-level tests cover these
+logical liabilities; native disk creation and durable assignment consumption remain unqualified.
+
 Remaining integration includes unbound preparation, durable destination assignment with
-full create identity, incarnation/reader binding, quota transfer, data-volume accounting,
+full create identity, assignment/reader ownership transfer, quota transfer,
 recovery/drain races and native qualification. These prerequisites are not a working warm
 sandbox feature.

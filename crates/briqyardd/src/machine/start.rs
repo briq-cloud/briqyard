@@ -310,6 +310,7 @@ impl Manager {
         self.watch(e, &live);
 
         let ready = async {
+            self.persist_launch_provenance(e, &live)?;
             if self.initial_memory_clone(&e.snapshot()) {
                 if e.snapshot()
                     .warm_slot

@@ -6,6 +6,7 @@ pub(super) const MAX_SAMPLE_AGE: Duration = Duration::from_secs(5);
 pub(in crate::machine) struct SampleBoundary {
     known_warm: std::collections::HashSet<String>,
     pending_memory_mb: u32,
+    disk_liabilities_gb: BTreeMap<String, u64>,
 }
 
 #[derive(Clone)]
@@ -39,6 +40,7 @@ pub(super) fn add(a: api::WarmResources, b: api::WarmResources) -> Option<api::W
     Some(api::WarmResources {
         memory_mb: a.memory_mb.checked_add(b.memory_mb)?,
         cpu_millis: a.cpu_millis.checked_add(b.cpu_millis)?,
+        data_disk_gb: a.data_disk_gb.checked_add(b.data_disk_gb)?,
         root_disk_gb: a.root_disk_gb.checked_add(b.root_disk_gb)?,
     })
 }
@@ -47,6 +49,7 @@ pub(super) fn resources(r: &Record) -> api::WarmResources {
     api::WarmResources {
         memory_mb: r.size.memory_mb,
         cpu_millis: r.size.cpu_millis(),
+        data_disk_gb: r.volume.as_ref().map_or(0, |volume| volume.size_gb),
         root_disk_gb: r
             .clone_origin
             .as_ref()
@@ -55,7 +58,10 @@ pub(super) fn resources(r: &Record) -> api::WarmResources {
 }
 
 fn exceeds(a: api::WarmResources, b: api::WarmResources) -> bool {
-    a.memory_mb > b.memory_mb || a.cpu_millis > b.cpu_millis || a.root_disk_gb > b.root_disk_gb
+    a.memory_mb > b.memory_mb
+        || a.cpu_millis > b.cpu_millis
+        || a.root_disk_gb > b.root_disk_gb
+        || a.data_disk_gb > b.data_disk_gb
 }
 
 pub(super) struct Usage {
@@ -195,6 +201,21 @@ impl Manager {
                 })
                 .collect(),
             pending_memory_mb: self.warm_usage(&machines)?.filling_memory,
+            disk_liabilities_gb: machines
+                .values()
+                .filter_map(|entry| {
+                    let record = entry.snapshot();
+                    record
+                        .warm_slot
+                        .as_ref()
+                        .filter(|slot| slot.claimed.is_none())?;
+                    let charge = resources(&record);
+                    Some((
+                        record.id,
+                        u64::from(charge.root_disk_gb) + u64::from(charge.data_disk_gb),
+                    ))
+                })
+                .collect(),
         })
     }
 
@@ -223,6 +244,7 @@ impl Manager {
             let r = e.snapshot();
             if commits_memory(&r) {
                 let n = api::WarmResources {
+                    data_disk_gb: 0,
                     root_disk_gb: 0,
                     ..resources(&r)
                 };
@@ -234,11 +256,13 @@ impl Manager {
         let available = api::WarmResources {
             memory_mb: cap.memory_mb.saturating_sub(p.headroom.memory_mb),
             cpu_millis: cap.cpu_millis().saturating_sub(p.headroom.cpu_millis),
+            data_disk_gb: u32::MAX,
             root_disk_gb: u32::MAX,
         };
         let Some(committed) = add(
             used,
             api::WarmResources {
+                data_disk_gb: 0,
                 root_disk_gb: 0,
                 ..need
             },
@@ -310,7 +334,34 @@ impl Manager {
         {
             return Ok(Some(blocked("pressure", "MemAvailable floor reached")));
         }
-        let logical = u64::from(total.root_disk_gb) << 30;
+        // A claim cannot erase disk allocation that a usable sample predates.
+        // Merge by slot ID so current reservations and sample liabilities count once.
+        let mut disk = sample.boundary.disk_liabilities_gb.clone();
+        for entry in machines.values() {
+            let record = entry.snapshot();
+            if record.warm_slot.as_ref().is_some_and(|slot| {
+                slot.claimed.is_none() || !sample.boundary.known_warm.contains(&record.id)
+            }) {
+                let charge = resources(&record);
+                let gb = u64::from(charge.root_disk_gb) + u64::from(charge.data_disk_gb);
+                disk.entry(record.id)
+                    .and_modify(|held| *held = (*held).max(gb))
+                    .or_insert(gb);
+            }
+        }
+        if let Some(candidate) = candidate {
+            let gb = u64::from(need.root_disk_gb) + u64::from(need.data_disk_gb);
+            disk.entry(candidate.id.clone())
+                .and_modify(|held| *held = (*held).max(gb))
+                .or_insert(gb);
+        }
+        let logical = disk
+            .values()
+            .try_fold(0u64, |sum, gb| sum.checked_add(*gb))
+            .and_then(|gb| gb.checked_mul(1 << 30));
+        let Some(logical) = logical else {
+            return Ok(Some(blocked("capacity", "sample disk liability overflow")));
+        };
         let Some(pool_size) = sample.pool.used.checked_add(sample.pool.free) else {
             return Ok(Some(blocked("capacity", "pool capacity overflow")));
         };
@@ -388,6 +439,7 @@ impl Manager {
             headroom: api::WarmResources {
                 memory_mb: p.headroom.memory_mb,
                 cpu_millis: p.headroom.cpu_millis,
+                data_disk_gb: 0,
                 root_disk_gb: p.headroom.disk_free_gb,
             },
             min_mem_available_mb: p.min_mem_available_mb,
@@ -466,18 +518,25 @@ mod tests {
     fn full_resource_addition_fails_closed_on_each_overflow() {
         for value in [
             api::WarmResources {
+                data_disk_gb: u32::MAX,
+                ..Default::default()
+            },
+            api::WarmResources {
                 memory_mb: u32::MAX,
                 cpu_millis: 0,
+                data_disk_gb: 0,
                 root_disk_gb: 0,
             },
             api::WarmResources {
                 memory_mb: 0,
                 cpu_millis: u32::MAX,
+                data_disk_gb: 0,
                 root_disk_gb: 0,
             },
             api::WarmResources {
                 memory_mb: 0,
                 cpu_millis: 0,
+                data_disk_gb: 0,
                 root_disk_gb: u32::MAX,
             },
         ] {
@@ -486,6 +545,7 @@ mod tests {
                 api::WarmResources {
                     memory_mb: 1,
                     cpu_millis: 1,
+                    data_disk_gb: 1,
                     root_disk_gb: 1
                 }
             )
