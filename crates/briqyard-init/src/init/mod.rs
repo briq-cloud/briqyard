@@ -71,6 +71,7 @@ mod boot;
 mod clone;
 mod clone_identity;
 mod destination;
+mod destination_mounts;
 mod exec;
 mod files;
 mod network;

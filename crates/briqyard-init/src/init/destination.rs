@@ -152,6 +152,22 @@ fn reserve(path: &Path, fingerprint: &str) -> Result<()> {
 }
 
 pub(super) async fn bind(st: &State, request: Option<DestinationBind>) -> Response {
+    bind_with(st, request, Path::new(RECEIPT), |request| {
+        install(st, request)
+    })
+    .await
+}
+
+async fn bind_with<F, Fut>(
+    st: &State,
+    request: Option<DestinationBind>,
+    receipt: &Path,
+    install: F,
+) -> Response
+where
+    F: FnOnce(DestinationBind) -> Fut,
+    Fut: std::future::Future<Output = Result<CloneIdentity>>,
+{
     let Some(request) = request else {
         return Response::error("missing sandbox destination");
     };
@@ -177,26 +193,8 @@ pub(super) async fn bind(st: &State, request: Option<DestinationBind>) -> Respon
     }
     *gate = clone::Gate::Sandbox(Barrier::Failed);
     let result = async {
-        reserve(Path::new(RECEIPT), &fingerprint)?;
-        let identity = clone_identity::configure(&request.identity).await?;
-        // Reuse ordinary mount seeding and file installation, after identity reset.
-        setup_mounts(&request.config)?;
-        for file in &request.files {
-            files::install(Path::new("/"), &file.path, file.mode, &file.data).await?;
-        }
-        fs::write("/etc/hosts", hosts_text(&request.config))?;
-        let env = build_env(&request.config.env);
-        st.destination
-            .set((request.config, env))
-            .map_err(|_| anyhow!("destination already installed"))?;
-        // Flush destination files and mounted volume before acknowledging the bind.
-        if unsafe { libc::syncfs(fs::File::open("/")?.as_raw_fd()) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("sync destination root");
-        }
-        if unsafe { libc::syncfs(fs::File::open("/work")?.as_raw_fd()) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("sync destination volume");
-        }
-        Ok::<_, anyhow::Error>(identity)
+        reserve(receipt, &fingerprint)?;
+        install(request).await
     }
     .await;
     match result {
@@ -215,6 +213,27 @@ pub(super) async fn bind(st: &State, request: Option<DestinationBind>) -> Respon
             Response::error("sandbox destination installation failed; guest remains quarantined")
         }
     }
+}
+
+async fn install(st: &State, request: DestinationBind) -> Result<CloneIdentity> {
+    let identity = clone_identity::configure(&request.identity).await?;
+    destination_mounts::setup(&request.config)?;
+    for file in &request.files {
+        files::install(Path::new("/"), &file.path, file.mode, &file.data).await?;
+    }
+    fs::write("/etc/hosts", hosts_text(&request.config))?;
+    let env = build_env(&request.config.env);
+    st.destination
+        .set((request.config, env))
+        .map_err(|_| anyhow!("destination already installed"))?;
+    // Flush destination files and mounted volume before acknowledging the bind.
+    if unsafe { libc::syncfs(fs::File::open("/")?.as_raw_fd()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("sync destination root");
+    }
+    if unsafe { libc::syncfs(fs::File::open("/work")?.as_raw_fd()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("sync destination volume");
+    }
+    Ok::<_, anyhow::Error>(identity)
 }
 
 #[cfg(test)]
@@ -317,6 +336,58 @@ mod replay_tests {
         assert_eq!(clone::activate(&st, "sandbox-1", None).await.kind, "error");
         assert_eq!(bind(&st, Some(r)).await.kind, "ok");
     }
+    #[tokio::test]
+    async fn seed_failure_consumes_destination_without_ack_or_activation() {
+        let root = tempfile::tempdir().unwrap();
+        let receipt = root.path().join("receipt");
+        let source = root.path().join("work");
+        let destination = root.path().join("disk");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("original"), b"retained source").unwrap();
+        let st = testutil::state_with(Config {
+            template_profile: Some(SANDBOX_READY_V1.into()),
+            ..Default::default()
+        });
+        let r = request();
+        let digest = fingerprint(&r).unwrap();
+        let response = bind_with(&st, Some(r.clone()), &receipt, |_| async {
+            destination_mounts::injected_seed_failure(&source, &destination)?;
+            panic!("seed failure must abort installation")
+        })
+        .await;
+        assert_eq!(response.kind, "error");
+        assert!(response.sha256.is_empty());
+        assert!(response.clone_status.is_none());
+        assert!(fs::read_to_string(&receipt).unwrap().contains(&digest));
+        assert_eq!(
+            fs::read(root.path().join("work.briqyard-seed/content/original")).unwrap(),
+            b"retained source"
+        );
+        assert_eq!(
+            fs::read(destination.join("partial")).unwrap(),
+            b"partial copy"
+        );
+        assert!(st.destination.get().is_none());
+        assert!(!st.clone_gate.lock().await.allows("exec"));
+        assert!(!st.clone_gate.lock().await.activation_requested());
+        assert_eq!(
+            clone::activate(&st, "sandbox-1", Some(1_793_404_800))
+                .await
+                .kind,
+            "error"
+        );
+        assert_eq!(
+            bind_with(&st, Some(r), &receipt, |_| async {
+                panic!("failed bind must not retry")
+            })
+            .await
+            .kind,
+            "error"
+        );
+        assert!(reserve(&receipt, "another").is_err());
+    }
+
     #[test]
     fn installed_config_replaces_seed_environment_for_main_and_exec() {
         let st = testutil::state();

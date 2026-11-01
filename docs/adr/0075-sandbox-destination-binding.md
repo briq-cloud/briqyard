@@ -28,7 +28,9 @@ Before side effects, init creates an exclusive root-disk consumed receipt and
 fsyncs both it and the root directory. Its SHA-256 covers the protocol domain and
 the complete serialized bind, including identity, resolved config, files and host
 receipt. Identity reset reuses the existing entropy, clock and network helpers.
-Mount seeding precedes boot-file installation. Main and subsequent exec read the
+Destination mount staging, growth, source copying and ownership/permission changes
+propagate errors. A failed seed retains its staging source and cannot be acknowledged;
+ordinary boot retains its existing behavior. Mount seeding precedes boot-file installation. Main and subsequent exec read the
 installed config/environment, never the seed values. Filesystems are flushed
 before the acknowledgment returns its fingerprint and effective identity.
 
