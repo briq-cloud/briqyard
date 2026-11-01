@@ -1,6 +1,7 @@
 //! Private continuation tests use synthetic records, processes and backing; no native qualification.
 use super::*;
 mod legacy545;
+mod public_lifecycle;
 mod recovery;
 mod terminal;
 
