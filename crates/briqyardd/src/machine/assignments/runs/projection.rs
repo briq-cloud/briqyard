@@ -74,6 +74,11 @@ impl Current {
         }
     }
     pub(super) fn authority_sha256(&self) -> Result<String> {
+        // Schema1 persisted struct field-order bytes at 545db521, not Value's sorted map.
+        // Box wrappers are serde-transparent; later optional fields omit absent values.
+        if self.schema == 1 {
+            return Ok(sha(&serde_json::to_vec(self)?));
+        }
         let mut value = serde_json::to_value(self)?;
         if self.schema == 3 {
             value["prior"] = authority(&self.prior)?;
