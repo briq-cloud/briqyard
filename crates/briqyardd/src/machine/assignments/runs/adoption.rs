@@ -27,8 +27,7 @@ impl Manager {
             .get(RUNS, &record.id)?
             .context("current run missing")?;
         anyhow::ensure!(
-            launch_identity::record_fingerprint(&record)?
-                == launch_identity::record_fingerprint(&current.target)?
+            current.record_fingerprint(&record)? == current.record_fingerprint(&current.target)?
                 && record.assigned_run.as_ref() == Some(&current.reference),
             "run machine differs from observation"
         );

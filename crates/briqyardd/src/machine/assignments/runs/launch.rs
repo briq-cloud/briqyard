@@ -19,8 +19,8 @@ impl Manager {
         self.verify_run_prelaunch_backing(&current).await?;
         anyhow::ensure!(
             !current.launch_started
-                && launch_identity::record_fingerprint(&entry.snapshot())?
-                    == launch_identity::record_fingerprint(&current.target)?,
+                && current.record_fingerprint(&entry.snapshot())?
+                    == current.record_fingerprint(&current.target)?,
             "run already attempted or controls changed"
         );
         // Persist an irreversible attempt before network/config effects or spawn. Even a
@@ -121,7 +121,16 @@ impl Manager {
         current.observed_main_pid = pong.main_pid;
         match current.mode {
             Mode::Fresh { .. } => current.observed_guest = pong.assigned_run,
-            Mode::Checkpoint { .. } => current.observed_checkpoint = Some(pong),
+            Mode::Checkpoint {
+                ref assigned_lineage,
+                ..
+            } => {
+                if assigned_lineage.is_some() {
+                    current.observed_guest = pong.assigned_run
+                } else {
+                    current.observed_checkpoint = Some(pong)
+                }
+            }
         }
         self.verify_run_process(&current, &live)?;
         self.persist_run_transition(entry, prior, &current)?;
@@ -137,7 +146,7 @@ impl Manager {
         current: &Current,
     ) -> Result<()> {
         let intent = Intent {
-            schema: 1,
+            schema: current.schema,
             current: current.clone(),
             reader: current.reader()?,
             predecessor: Some(prior),
@@ -146,11 +155,18 @@ impl Manager {
         entry.identity_trusted.store(false, Relaxed);
         // Cache exact target before uncertain writes; launch_assigned_run never retries an
         // already reserved machine, even if the first transition write is uncertain.
-        *entry.rec.lock().unwrap() = current.target.clone();
+        self.inner.store.ensure_assigned_run_lifecycle_floor()?;
+        if current.reference.phase != Phase::Settled {
+            let merged = projection::preserve_advisory(&current.target, &entry.snapshot())?;
+            *entry.rec.lock().unwrap() = merged;
+        }
         self.inner
             .store
             .put_durable(INTENTS, &current.machine, &intent)?;
-        self.reconcile_assigned_run(&intent)
+        self.reconcile_assigned_run(&intent)?;
+        let merged = projection::preserve_advisory(&current.target, &entry.snapshot())?;
+        *entry.rec.lock().unwrap() = merged;
+        Ok(())
     }
 
     pub(super) fn verify_run_process(&self, current: &Current, live: &fc::Vm) -> Result<()> {
@@ -222,7 +238,20 @@ impl Current {
                     "fresh run reused creation RAM lineage"
                 );
             }
-            Mode::Checkpoint { .. } => {
+            Mode::Checkpoint {
+                assigned_lineage: Some(proof),
+                ..
+            } => {
+                anyhow::ensure!(
+                    pong.assigned_run.as_ref() == Some(proof.as_ref())
+                        && pong.clone_status.is_none(),
+                    "assigned checkpoint guest lineage differs"
+                );
+            }
+            Mode::Checkpoint {
+                assigned_lineage: None,
+                ..
+            } => {
                 anyhow::ensure!(
                     pong.assigned_run.is_none(),
                     "checkpoint changed guest lineage"

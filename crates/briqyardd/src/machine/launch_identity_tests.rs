@@ -388,3 +388,47 @@ async fn machine_destruction_keeps_assignment_consumption_and_compatibility_floo
         .delete_durable("unbound-requests", "consumed")
         .is_err());
 }
+
+#[tokio::test]
+async fn late_lifecycle_writer_rechecks_schema2_only_candidate_inside_handover_fence() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = harness("10.64.0.0/22", 4096).await;
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("schema2-only");
+    std::fs::write(&executable, b"#!/bin/sh\ncase \"$1\" in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\n*) exit 1;;\nesac\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    h.m.inner
+        .store
+        .put("assigned-runs", "before", &serde_json::json!({"schema":1}))
+        .unwrap();
+    crate::assignment_compatibility::check_required_candidate(
+        &h.m.inner.cfg.state_dir(),
+        &executable,
+        tokio::time::Instant::now() + Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let admission = h.m.inner.namespace_lifecycle.read().await;
+    let mut pending = Box::pin(h.m.handover_admission(&executable));
+    assert!(matches!(
+        futures::poll!(&mut pending),
+        std::task::Poll::Pending
+    ));
+    // Models the terminal writer already admitted under this read fence: floor first,
+    // then incompatible intent. The queued handover must observe it after admission.
+    h.m.inner
+        .store
+        .ensure_assigned_run_lifecycle_floor()
+        .unwrap();
+    h.m.inner
+        .store
+        .put_durable(
+            "assigned-run-intents",
+            "late",
+            &serde_json::json!({"schema":3}),
+        )
+        .unwrap();
+    drop(admission);
+    assert!(pending.await.is_err());
+    assert!(h.m.inner.namespace_lifecycle.try_read().is_ok());
+}

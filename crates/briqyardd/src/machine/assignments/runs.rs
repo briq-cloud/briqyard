@@ -4,7 +4,11 @@ use rand::RngCore;
 mod adoption;
 mod launch;
 mod model;
+#[allow(dead_code)]
+// Pure projection; durable run transitions are wired with the terminal capability floor.
+mod projection;
 mod recovery;
+mod terminal;
 #[cfg(test)]
 mod tests;
 const INTENTS: &str = "assigned-run-intents";
@@ -23,6 +27,7 @@ pub struct RunRef {
 pub enum Phase {
     Reserved,
     Observed,
+    Settled,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +52,8 @@ enum Mode {
         saved_init_sha256: String,
         saved_marker: String,
         saved_bind_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assigned_lineage: Option<Box<guest::AssignedRunProof>>,
     },
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -58,8 +65,8 @@ struct Current {
     reference: RunRef,
     receipt: Receipt,
     prior_control_sha256: String,
-    prior: Record,
-    target: Record,
+    prior: Box<Record>,
+    target: Box<Record>,
     creation_reader: templates::CloneReader,
     root: Disk,
     data: Disk,
@@ -74,6 +81,10 @@ struct Current {
     observed_main_pid: i32,
     #[serde(default)]
     observed_checkpoint: Option<guest::Response>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_run_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settlement: Option<Box<terminal::Settlement>>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,7 +146,7 @@ impl Manager {
             "run source left admission"
         );
         anyhow::ensure!(
-            launch_identity::record_fingerprint(&entry.snapshot())?
+            intent.current.record_fingerprint(&entry.snapshot())?
                 == intent.current.prior_control_sha256,
             "run source controls changed before admission"
         );
@@ -168,13 +179,14 @@ impl Manager {
             self.capacity().cpu_millis(),
             need.cpu_millis(),
         )?;
+        self.inner.store.ensure_assigned_run_lifecycle_floor()?;
         // Cache reservation before uncertain persistence: even the first failed write
         // cannot turn this process into a second run or a second physical allocation.
         let _writes = entry.removed.lock().unwrap();
         anyhow::ensure!(!*_writes, "run source removed");
         entry.identity_trusted.store(false, Relaxed);
         *entry.live.lock().unwrap() = None;
-        *entry.rec.lock().unwrap() = intent.current.target.clone();
+        *entry.rec.lock().unwrap() = intent.current.target.as_ref().clone();
         self.inner
             .store
             .put_durable(INTENTS, &intent.current.machine, &intent)?;

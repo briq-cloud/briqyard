@@ -415,8 +415,10 @@ fn holds_memory(state: &str) -> bool {
 /// Whether the host counts this machine's memory as taken: it holds it, or its create will
 /// start it (ADR 0048: room is taken when the machine is recorded, not when it boots).
 fn commits_memory(r: &Record) -> bool {
-    r.assigned_run.is_some()
-        || holds_memory(&r.state)
+    if let Some(run) = &r.assigned_run {
+        return run.schema != 3 || run.phase != assignments::runs::Phase::Settled;
+    }
+    holds_memory(&r.state)
         || r.warm_slot
             .as_ref()
             .is_some_and(|slot| slot.claimed.is_none())

@@ -6,6 +6,7 @@ pub(super) enum RunRecovery {
     Prelaunch,
     DiscoveryNeeded,
     ObservedNeedsProof,
+    Settled,
 }
 
 impl Manager {
@@ -22,22 +23,20 @@ impl Manager {
             .predecessor
             .as_ref()
             .map_or(&run.prior, |old| &old.target);
-        let prior = launch_identity::record_fingerprint(&machine)?
-            == launch_identity::record_fingerprint(old_machine)?;
-        let target = launch_identity::record_fingerprint(&machine)?
-            == launch_identity::record_fingerprint(&run.target)?;
+        let prior = run.record_fingerprint(&machine)? == run.record_fingerprint(old_machine)?;
+        let target = run.record_fingerprint(&machine)? == run.record_fingerprint(&run.target)?;
         anyhow::ensure!(
             prior || target,
             "run machine controls differ from exact journal evidence"
         );
         let current = self.inner.store.get::<Current>(RUNS, &run.machine)?;
         let reader = self.inner.store.get::<Reader>(READERS, &run.machine)?;
-        let new_current = current.as_ref().is_some_and(|value| {
-            serde_json::to_value(value).ok() == serde_json::to_value(run).ok()
-        });
+        let new_current = current
+            .as_ref()
+            .is_some_and(|value| value.authority_sha256().ok() == run.authority_sha256().ok());
         let old_current = match (&current, &intent.predecessor) {
             (None, None) => true,
-            (Some(value), Some(old)) => serde_json::to_value(value)? == serde_json::to_value(old)?,
+            (Some(value), Some(old)) => value.authority_sha256()? == old.authority_sha256()?,
             _ => false,
         };
         let new_reader = reader.as_ref().is_some_and(|value| {
@@ -68,9 +67,11 @@ impl Manager {
         );
         self.inner.store.put_durable(RUNS, &run.machine, run)?;
         if prior {
-            self.inner
-                .store
-                .put_durable("machines", &run.machine, &run.target)?;
+            self.inner.store.put_durable(
+                "machines",
+                &run.machine,
+                &projection::preserve_advisory(&run.target, &machine)?,
+            )?;
         }
         self.inner
             .store
@@ -142,8 +143,8 @@ impl Manager {
                 .context("current run machine missing")?;
             anyhow::ensure!(
                 machine.assigned_run.as_ref() == Some(&current.reference)
-                    && launch_identity::record_fingerprint(machine)?
-                        == launch_identity::record_fingerprint(&current.target)?,
+                    && current.record_fingerprint(machine)?
+                        == current.record_fingerprint(&current.target)?,
                 "machine/current-run link differs"
             );
             let reader = self
@@ -170,7 +171,7 @@ impl Manager {
         }
         for reader in self.inner.store.list::<Reader>(READERS)? {
             anyhow::ensure!(
-                reader.schema == 1
+                matches!(reader.schema, 1 | 3)
                     && self
                         .inner
                         .store
@@ -268,6 +269,22 @@ impl Manager {
 
     pub(super) async fn classify_run_recovery(&self, current: &Current) -> Result<RunRecovery> {
         self.check_run_creation_authority(current)?;
+        current.check()?;
+        if current.reference.phase == Phase::Settled {
+            let (root, data) = self.current_run_disks(&current.target).await?;
+            anyhow::ensure!(
+                root == current.root && data == current.data,
+                "settled CURRENT disks changed"
+            );
+            if let Some(checkpoint) = current
+                .settlement
+                .as_ref()
+                .and_then(|s| s.checkpoint.as_ref())
+            {
+                checkpoint.verify_files(self, &current.target).await?;
+            }
+            return Ok(RunRecovery::Settled);
+        }
         self.verify_run_current_backing(current).await?;
         if !current.launch_started {
             self.verify_run_prelaunch_backing(current).await?;
