@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-api"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "chrono",
  "hex",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-objstore"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "briqyardd"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
