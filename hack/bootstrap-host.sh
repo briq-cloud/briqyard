@@ -54,9 +54,9 @@ ARC_GB=${BRIQYARD_ARC_GB:-}
 KEY_FILE=${BRIQYARD_KEY_FILE:-/etc/briqyard/pool.key}
 ARCH=$(uname -m)
 
-# Every host runs the same Firecracker and guest kernel: a memory snapshot only resumes under
-# the Firecracker that wrote it, and the CI kernel's config is not ours. Bump the three
-# together, with their digests. The kernel comes from Firecracker's CI bucket until we host it.
+# Release installs use their checked Firecracker bundle. Local ./bin installs use the pinned
+# upstream archive below. Boot identity includes binary and kernel digests: version equality
+# alone cannot establish snapshot compatibility. The kernel comes from Firecracker's CI bucket.
 FIRECRACKER_VERSION=${FIRECRACKER_VERSION:-v1.17.0}
 KERNEL_URL=${KERNEL_URL:-https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261016-5732b8331e1e-0/$ARCH/vmlinux-6.18.54}
 case "$ARCH" in
@@ -144,7 +144,7 @@ EOF
 echo "   needrestart leaves briqyardd and briqyard-fleet running"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq zfsutils-linux nftables conntrack e2fsprogs gdisk curl jq ca-certificates >/dev/null
+apt-get install -y -qq zfsutils-linux nftables conntrack e2fsprogs gdisk curl jq ca-certificates python3 python3-yaml >/dev/null
 modprobe zfs
 
 # The ARC is a cache the kernel must shrink when a machine touches its memory: capped, it
@@ -365,21 +365,187 @@ elif [ "$(zfs get -H -o value keystatus "$POOL")" = unavailable ]; then
   echo "   key loaded"
 fi
 
-echo "== firecracker $FIRECRACKER_VERSION and a guest kernel"
-mkdir -p /var/lib/briqyard
-if [ "$(/usr/local/bin/firecracker --version 2>/dev/null | head -1)" != "Firecracker $FIRECRACKER_VERSION" ]; then
-  fetch "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${ARCH}.tgz" "$FIRECRACKER_SHA256" /tmp/firecracker.tgz
-  tar -xz -C /tmp -f /tmp/firecracker.tgz
-  rm -f /tmp/firecracker.tgz
-  put "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}/firecracker-${FIRECRACKER_VERSION}-${ARCH}" /usr/local/bin/firecracker
-  put "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}/jailer-${FIRECRACKER_VERSION}-${ARCH}" /usr/local/bin/jailer
-  rm -rf "/tmp/release-${FIRECRACKER_VERSION}-${ARCH}"
-fi
-if ! echo "$KERNEL_SHA256  /var/lib/briqyard/vmlinux" | sha256sum -c --quiet - 2>/dev/null; then
-  fetch "$KERNEL_URL" "$KERNEL_SHA256" /var/lib/briqyard/vmlinux
-  chmod 0644 /var/lib/briqyard/vmlinux
-  echo "   kernel ${KERNEL_URL##*/}"
-fi
+# Runtime installation helpers. Kept here because the fleet embeds this standalone script.
+checked_bundle() {
+  python3 - "$@" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+import tarfile
+
+bundle, arch, destination = sys.argv[1:]
+with tarfile.open(bundle, "r:gz") as archive:
+    members = archive.getmembers()
+    files = {}
+    for member in members:
+        if not member.isfile() or member.name in files or not re.fullmatch(r"[A-Za-z0-9_.-]+", member.name):
+            raise ValueError("unsafe or duplicate runtime package member")
+        files[member.name] = archive.extractfile(member).read()
+    pin = json.loads(files["pin.json"])
+    provenance = json.loads(files["provenance.json"])
+    receipt = json.loads(files["receipt.json"])
+    required = {"firecracker", "jailer", "seccomp_filter.bpf", "seccomp-source.json",
+                "provenance.json", "receipt.json", "pin.json", "series", "uapi-inputs.json",
+                "LICENSE", "NOTICE", "THIRD-PARTY"} | {p["path"] for p in pin["series"]}
+    if set(files) != required or any(not data for data in files.values()):
+        raise ValueError("incomplete runtime package")
+    if (provenance["status"] != "static-cli-candidate-built"
+            or provenance["architecture"] != arch
+            or provenance["target"] != arch + "-unknown-linux-musl"
+            or provenance["base"] != pin["base"] or provenance["tree"] != pin["tree"]
+            or provenance["series_sha256"] != pin["series_concatenated_sha256"]
+            or receipt["status"] != "portable-validation-passed"
+            or receipt["architecture"] != arch or receipt["base"] != pin["base"]
+            or receipt["tree"] != pin["tree"] or receipt["toolchain"] != pin["toolchain"]):
+        raise ValueError("runtime provenance or validation mismatch")
+    expected = {name: provenance["binaries"][name] for name in ("firecracker", "jailer")}
+    expected.update({"seccomp_filter.bpf": provenance["seccomp"]["compiled"],
+                     "seccomp-source.json": provenance["seccomp"]["source"],
+                     "uapi-inputs.json": provenance["uapi_inputs"],
+                     "series": {"sha256": pin["series_file_sha256"]}})
+    expected.update({p["path"]: p for p in pin["series"]})
+    for name, record in expected.items():
+        data = files[name]
+        if hashlib.sha256(data).hexdigest() != record["sha256"] or len(data) != record.get("bytes", len(data)):
+            raise ValueError("runtime digest mismatch: " + name)
+    patches = pin["series"]
+    if (files["series"].decode("ascii").splitlines() != [p["path"] for p in patches]
+            or hashlib.sha256(b"".join(files[p["path"]] for p in patches)).hexdigest() != pin["series_concatenated_sha256"]):
+        raise ValueError("runtime patch series mismatch")
+    # No archive paths, links or modes are used. All checks precede the first write.
+    root = Path(destination)
+    root.mkdir(mode=0o700)
+    for name, data in files.items():
+        (root / name).write_bytes(data)
+PY
+}
+
+# Each cached hash keeps referring to these bytes while an old daemon or builder finishes.
+# Never overwrite an existing digest path, even on a same-version reinstall.
+immutable_runtime() {
+  local source=$1 name=$2 digest target temporary
+  digest=$(sha256sum "$source" | awk '{print $1}') || fail "cannot hash runtime input"
+  target="$runtime_root/$digest/$name"
+  mkdir -p "$runtime_root/$digest" || fail "cannot create runtime directory"
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    [ ! -L "$target" ] && echo "$digest  $target" | sha256sum -c --quiet - || fail "immutable runtime input differs: $target"
+  else
+    temporary=$(mktemp "$runtime_root/$digest/.stage.XXXXXX") || fail "cannot stage runtime input"
+    install -m 0555 "$source" "$temporary" || { rm -f "$temporary"; fail "cannot install runtime input"; }
+    echo "$digest  $temporary" | sha256sum -c --quiet - || { rm -f "$temporary"; fail "staged runtime digest differs"; }
+    # A concurrent staging attempt may have installed the same bytes. Never replace them.
+    if ! ln "$temporary" "$target" 2>/dev/null; then
+      [ ! -L "$target" ] && echo "$digest  $target" | sha256sum -c --quiet - || { rm -f "$temporary"; fail "immutable runtime input differs"; }
+    fi
+    rm -f "$temporary"
+  fi
+  echo "$target"
+}
+
+runtime_config() {
+  python3 - "$@" <<'PYCONFIG'
+import json
+from pathlib import Path
+import sys
+import yaml
+
+path = Path(sys.argv[1])
+text = path.read_bytes().decode("utf-8")
+try:
+    config = yaml.compose(text)
+    tokens = list(yaml.scan(text))
+except yaml.YAMLError:
+    raise SystemExit("cannot parse runtime configuration") from None
+if not isinstance(config, yaml.MappingNode) or config.flow_style:
+    raise SystemExit("runtime paths require a block configuration mapping")
+paths = dict(zip(("firecracker", "jailer", "kernel", "init"), sys.argv[2:]))
+edits = []
+seen = set()
+for key, value in config.value:
+    if not isinstance(key, yaml.ScalarNode):
+        raise SystemExit("runtime configuration has a complex mapping key")
+    if key.value == "<<":
+        raise SystemExit("runtime paths cannot be updated through a root merge")
+    if key.value not in paths:
+        continue
+    if key.value in seen:
+        raise SystemExit("duplicate runtime path in configuration")
+    seen.add(key.value)
+    start, end = value.start_mark.index, value.end_mark.index
+    # Aliases point to a different source span; anchors can be referenced by unrelated
+    # fields. Refuse those cases rather than silently changing their meaning.
+    if (not isinstance(value, yaml.ScalarNode) or start <= key.end_mark.index
+            or "\n" in text[start:end] or "\r" in text[start:end]
+            or any(isinstance(t, (yaml.AnchorToken, yaml.AliasToken))
+                   and key.start_mark.index <= t.start_mark.index < end for t in tokens)):
+        raise SystemExit("runtime paths must be unanchored single-line scalars")
+    edits.append((start, end, json.dumps(paths[key.value])))
+# Insert absent fields before an explicit document end, preserving every other byte.
+missing = "".join(name + ": " + json.dumps(value) + "\n"
+                  for name, value in paths.items() if name not in seen)
+if missing:
+    end = next((t.start_mark.index for t in tokens if isinstance(t, yaml.DocumentEndToken)), len(text))
+    edits.append((end, end, ("" if end == 0 or text[end - 1] == "\n" else "\n") + missing))
+for start, end, replacement in sorted(edits, reverse=True):
+    text = text[:start] + replacement + text[end:]
+try:
+    yaml.compose(text)
+except yaml.YAMLError:
+    raise SystemExit("cannot preserve runtime configuration syntax") from None
+path.write_bytes(text.encode("utf-8"))
+PYCONFIG
+}
+
+runtime_kernel() {
+  python3 - "$1" <<'PYKERNEL'
+from pathlib import Path
+import sys
+import yaml
+
+try:
+    config = yaml.compose(Path(sys.argv[1]).read_text())
+except yaml.YAMLError:
+    raise SystemExit("cannot parse runtime configuration") from None
+if not isinstance(config, yaml.MappingNode):
+    raise SystemExit("configuration must be a mapping")
+for key, value in config.value:
+    if isinstance(key, yaml.ScalarNode) and key.value == "kernel":
+        if not isinstance(value, yaml.ScalarNode):
+            raise SystemExit("kernel path must be a scalar")
+        print(value.value)
+        break
+else:
+    print("/var/lib/briqyard/vmlinux")
+PYKERNEL
+}
+# A failed activation restores installed executables before leaving the old daemon running.
+# The verified rollback directory also remains available for an explicit later rollback.
+cleanup_runtime_install() {
+  local result=$? b restored=1
+  trap - EXIT
+  if [ "$result" != 0 ] && [ "$activation_pending" = 1 ] && [ "$rollback_ready" = 1 ]; then
+    for b in briqyard briqyard-fleet briqyardd; do
+      if [ -f "$rollback/$b" ]; then
+        cp -p "$rollback/$b" "$binary_dir/$b.rollback" && mv -f "$binary_dir/$b.rollback" "$binary_dir/$b" || restored=0
+      fi
+    done
+    if ! cmp -s "$rollback/config.yaml" "$config_path"; then
+      cp -p "$rollback/config.yaml" "$config_path.rollback" && mv -f "$config_path.rollback" "$config_path" || restored=0
+    fi
+    if [ "$restored" = 0 ]; then
+      echo "   activation failed; automatic restoration incomplete: retained rollback at $rollback" >&2
+    else
+      echo "   activation failed; previous executables and configuration restored ($rollback)" >&2
+    fi
+  fi
+  rm -rf "$new"
+  [ -z "$candidate" ] || rm -f "$candidate"
+  if [ -n "$rollback" ] && [ "$rollback_ready" = 0 ]; then rm -rf "$rollback"; fi
+  exit "$result"
+}
+# End runtime installation helpers.
 
 # A request to GitHub's API with BRIQYARD_RELEASE_TOKEN, the token on stdin, off the command line.
 github() { printf 'Authorization: Bearer %s\n' "$RELEASE_TOKEN" | curl -fsSL -H @- "$@"; }
@@ -397,45 +563,71 @@ release_file() {
 
 echo "== binaries${RELEASE:+ from $RELEASE}"
 new=$(mktemp -d)
+candidate=""
+rollback=""
+rollback_ready=0
+activation_pending=0
+config_path=/etc/briqyard/config.yaml
+binary_dir=/usr/local/bin
+trap cleanup_runtime_install EXIT
 if [ -n "$RELEASE" ]; then
   if [ -n "$RELEASE_TOKEN" ]; then
     repo=${RELEASE#https://github.com/}; tag=${repo##*/releases/download/}; repo=${repo%%/releases/download/*}
     [ "$repo" != "$tag" ] || fail "BRIQYARD_RELEASE=$RELEASE: with a token, a GitHub release (https://github.com/<owner>/<repo>/releases/download/<tag>)"
     assets=$(github "https://api.github.com/repos/$repo/releases/tags/$tag")
   fi
-  # Every file checked against the release's digests before any is installed.
   release_file "SHA256SUMS-$ARCH" "$new/SHA256SUMS"
-  for b in briqyardd briqyard-init briqyard briqyard-fleet; do
-    release_file "$b-linux-$ARCH" "$new/$b"
-    sha=$(awk -v f="$b-linux-$ARCH" '$2 == f {print $1}' "$new/SHA256SUMS")
-    echo "$sha  $new/$b" | sha256sum -c --quiet - 2>/dev/null || { rm -rf "$new"; fail "$b-linux-$ARCH: digest differs from the release's SHA256SUMS-$ARCH"; }
+  # Check the complete release before staging any executable or changing configuration.
+  for b in briqyardd briqyard-init briqyard briqyard-fleet firecracker-checked; do
+    asset="$b-linux-$ARCH"
+    [ "$b" != firecracker-checked ] || asset="$asset.tar.gz"
+    release_file "$asset" "$new/$b"
+    sha=$(awk -v f="$asset" '$2 == f {print $1}' "$new/SHA256SUMS")
+    [[ "$sha" =~ ^[a-f0-9]{64}$ ]] && echo "$sha  $new/$b" | sha256sum -c --quiet - 2>/dev/null || fail "$asset: digest differs from the release's SHA256SUMS-$ARCH"
   done
+  checked_bundle "$new/firecracker-checked" "$ARCH" "$new/checked"
+  cp "$new/checked/firecracker" "$new/firecracker"
+  cp "$new/checked/jailer" "$new/jailer"
 else
   for b in briqyardd briqyard-init briqyard briqyard-fleet; do cp "bin/$b" "$new/$b"; done
+  # Local development keeps the pinned upstream runtime; release installs require checked assets.
+  fetch "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${ARCH}.tgz" "$FIRECRACKER_SHA256" "$new/firecracker.tgz"
+  tar -xz -C "$new" -f "$new/firecracker.tgz"
+  cp "$new/release-${FIRECRACKER_VERSION}-${ARCH}/firecracker-${FIRECRACKER_VERSION}-${ARCH}" "$new/firecracker"
+  cp "$new/release-${FIRECRACKER_VERSION}-${ARCH}/jailer-${FIRECRACKER_VERSION}-${ARCH}" "$new/jailer"
 fi
 chmod 0755 "$new"/briq*
-# The new daemon reads the configuration before any binary lands: one it refuses leaves the
-# host as it was, its daemon running (ADR 0027).
-if [ -f /etc/briqyard/config.yaml ] && ! "$new/briqyardd" --config /etc/briqyard/config.yaml tls-fingerprint >/dev/null; then
-  rm -rf "$new"; fail "the new briqyardd refuses /etc/briqyard/config.yaml: nothing installed"
+runtime_root=/usr/local/lib/briqyard/runtime
+firecracker=$(immutable_runtime "$new/firecracker" firecracker)
+jailer=$(immutable_runtime "$new/jailer" jailer)
+init=$(immutable_runtime "$new/briqyard-init" briqyard-init)
+# Keep the configured kernel path when its digest is unchanged. Never replace its bytes.
+kernel=/var/lib/briqyard/vmlinux
+if [ -f /etc/briqyard/config.yaml ]; then
+  kernel=$(runtime_kernel /etc/briqyard/config.yaml)
 fi
-for b in briqyardd briqyard-init briqyard briqyard-fleet; do put "$new/$b" "/usr/local/bin/$b"; done
-rm -rf "$new"
+if ! echo "$KERNEL_SHA256  $kernel" | sha256sum -c --quiet - 2>/dev/null; then
+  fetch "$KERNEL_URL" "$KERNEL_SHA256" "$new/vmlinux"
+  kernel=$(immutable_runtime "$new/vmlinux" vmlinux)
+fi
 
 echo "== config"
 mkdir -p /etc/briqyard
 chmod 0700 /etc/briqyard
-if [ ! -f /etc/briqyard/config.yaml ]; then
+candidate=$(mktemp /etc/briqyard/.config.XXXXXX)
+if [ -f /etc/briqyard/config.yaml ]; then
+  cp /etc/briqyard/config.yaml "$candidate"
+else
   key_source=fleet
   [ -n "$FLEET_URL" ] || key_source="file:$KEY_FILE"
-  cat > /etc/briqyard/config.yaml <<EOF
+  cat > "$candidate" <<EOF
 listen: $bind:${LISTEN##*:}
 token: "$API_TOKEN"
 data_dir: /var/lib/briqyard
-firecracker: /usr/local/bin/firecracker
-jailer: /usr/local/bin/jailer
-kernel: /var/lib/briqyard/vmlinux
-init: /usr/local/bin/briqyard-init
+firecracker: $firecracker
+jailer: $jailer
+kernel: $kernel
+init: $init
 root_disk_gb: 8
 storage:
   backend: zfs
@@ -449,24 +641,56 @@ ingress:
   http: $bind:8080
   domain: byard.localhost
 EOF
-  [ -z "$clients" ] || echo "$clients" >> /etc/briqyard/config.yaml
+  [ -z "$clients" ] || echo "$clients" >> "$candidate"
   if [ -n "$FLEET_URL" ]; then
-    cat >> /etc/briqyard/config.yaml <<EOF
+    cat >> "$candidate" <<EOF
 fleet:
   url: $FLEET_URL
   advertise: $advertise
 EOF
   fi
 fi
-# The host's token is in it.
-chmod 0600 /etc/briqyard/config.yaml
+# One candidate contains all changed launch paths. Validate it with the staged daemon.
+runtime_config "$candidate" "$firecracker" "$jailer" "$kernel" "$init"
+chmod 0600 "$candidate"
+fingerprint=$("$new/briqyardd" --config "$candidate" tls-fingerprint) || fail "the new briqyardd refuses the staged configuration: nothing activated"
+# Retain a complete rollback set before the first installed executable changes. Its
+# checksums cover the exact prior configuration and executables, including the daemon.
+if [ -f "$config_path" ]; then
+  rollback=$(mktemp -d /etc/briqyard/rollback.XXXXXX)
+  retained=(config.yaml)
+  cp -p "$config_path" "$rollback/config.yaml"
+  cmp -s "$config_path" "$rollback/config.yaml" || fail "configuration changed while retaining rollback"
+  for b in briqyard briqyard-fleet briqyardd; do
+    if [ -f "$binary_dir/$b" ]; then
+      cp -p "$binary_dir/$b" "$rollback/$b"
+      cmp -s "$binary_dir/$b" "$rollback/$b" || fail "installed executable changed while retaining rollback"
+      retained+=("$b")
+    fi
+  done
+  (cd "$rollback" && sha256sum "${retained[@]}" > SHA256SUMS && sha256sum -c --quiet SHA256SUMS)
+  config_sha=$(sha256sum "$rollback/config.yaml" | awk '{print $1}')
+  backup="/etc/briqyard/config.yaml.before-$config_sha"
+  if [ -e "$backup" ]; then
+    cmp -s "$rollback/config.yaml" "$backup" || fail "retained configuration backup differs"
+  else
+    cp -p "$rollback/config.yaml" "$backup"
+  fi
+  rollback_ready=1
+  echo "   previous executables and configuration retained at $rollback"
+fi
+# Init and runtime inputs stay immutable. The old daemon may still read them.
+activation_pending=1
+for b in briqyard briqyard-fleet briqyardd; do put "$new/$b" "$binary_dir/$b"; done
+# The rename is on the configuration filesystem, before the existing SIGUSR2 handover.
+mv -f "$candidate" "$config_path"
+candidate=""
 
 echo "== api certificate"
 # Made here, before the daemon starts, so it is there to read; kept across runs. It is also the
 # new binary reading the configuration: one it refuses stops here, before any hand-over, and the
 # running daemon goes on (ADR 0027).
-fingerprint=$(/usr/local/bin/briqyardd --config /etc/briqyard/config.yaml tls-fingerprint) || {
-  echo "   the new briqyardd refuses /etc/briqyard/config.yaml: nothing handed over"; exit 1; }
+
 if [ -n "$fingerprint" ]; then
   echo "   sha256 $fingerprint: the fleet pins it (tls_fingerprint)"
 else
@@ -517,7 +741,9 @@ systemctl enable briqyardd >/dev/null
 # starts the new one at once, the listeners kept (ADR 0051); the new one adopts the machines. The
 # start below covers a daemon from before ADR 0051, which exits 0. `systemctl restart` would
 # suspend every machine instead.
+# Once handover can begin, recovery uses the retained rollback set explicitly.
 pid=$(systemctl show -p MainPID --value briqyardd)
+activation_pending=0
 if [ "${pid:-0}" != 0 ]; then
   echo "== handing the machines over to the new daemon"
   systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd

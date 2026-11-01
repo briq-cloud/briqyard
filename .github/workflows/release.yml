@@ -14,19 +14,40 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
         with:
+          repository: firecracker-microvm/firecracker
+          ref: 95f868c8e345b1cc8faccd1a3c910b4989dc3f58
+          path: .validation/firecracker
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: rustfmt, clippy
           targets: ${{ matrix.arch }}-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --workspace --exclude briqyard-init
-      - run: cargo build --release -p briqyard-init --target ${{ matrix.arch }}-unknown-linux-musl
+      - name: Install native checked Firecracker prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev pkg-config cmake libssl-dev libseccomp-dev musl-tools python3-yaml
+      - name: Verify release and evidence acceptance checks
+        run: |
+          python3 -m unittest discover -s hack/firecracker -p "test_*.py"
+          python3 -m unittest discover -s hack -p "test_bootstrap.py"
+      - name: Prepare exact checked Firecracker sources
+        run: python3 hack/firecracker/prepare.py .validation/firecracker
+      - name: Validate checked Firecracker regressions once on this architecture
+        run: python3 hack/firecracker/validate.py .validation/firecracker "$RUNNER_TEMP/checked-firecracker"
+      - name: Build static Firecracker and jailer with production seccomp
+        run: python3 hack/firecracker/build_cli.py .validation/firecracker "$RUNNER_TEMP/checked-firecracker" "$RUNNER_TEMP/checked-firecracker-cli" --arch "${{ matrix.arch }}"
+      - run: cargo build --release --locked --workspace --exclude briqyard-init
+      - run: cargo build --release --locked -p briqyard-init --target ${{ matrix.arch }}-unknown-linux-musl
       - name: Name the binaries as bootstrap-host.sh expects them
         run: |
           mkdir -p dist
           for b in briqyardd briqyard briqyard-fleet; do cp target/release/$b dist/$b-linux-${{ matrix.arch }}; done
           cp target/${{ matrix.arch }}-unknown-linux-musl/release/briqyard-init dist/briqyard-init-linux-${{ matrix.arch }}
+          python3 hack/firecracker/package.py .validation/firecracker "$RUNNER_TEMP/checked-firecracker" "$RUNNER_TEMP/checked-firecracker-cli" "dist/firecracker-checked-linux-${{ matrix.arch }}.tar.gz" --arch "${{ matrix.arch }}"
           (cd dist && sha256sum * > SHA256SUMS-${{ matrix.arch }})
       - uses: actions/upload-artifact@v4
         with:
@@ -40,7 +61,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "briqyard $GITHUB_REF_NAME. Install with hack/bootstrap-host.sh (BRIQYARD_RELEASE=https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME)."
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --latest=false --title "$GITHUB_REF_NAME" --notes "briqyard $GITHUB_REF_NAME candidate; runtime qualification required before publication. Install with hack/bootstrap-host.sh (BRIQYARD_RELEASE=https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME)."
         env:
           GH_TOKEN: ${{ github.token }}
   # The fleet as an image (ADR 0060), from the binaries the build job made: one manifest for
@@ -70,8 +91,7 @@ jobs:
         run: |
           image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/briqyard-fleet
           tags="$image:${GITHUB_REF_NAME#v}"
-          # A pre-release (v0.2.0-rc1) is never "latest".
-          case "$GITHUB_REF_NAME" in *-*) ;; *) tags="$tags,$image:latest" ;; esac
+          # Candidates get a version tag only. Promote this manifest after qualification.
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
