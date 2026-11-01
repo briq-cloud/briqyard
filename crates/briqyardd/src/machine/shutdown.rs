@@ -532,6 +532,7 @@ impl Manager {
     ) -> Result<Vec<String>, MError> {
         let e = e.clone();
         self.check_version(&e, at)?;
+        self.validate_launch_record(&e.snapshot())?;
         self.check_clone_readers(id, None)?;
         // No event: the destroy is one step, and `destroyed` ends it.
         e.set_state(state::DESTROYING, |_| None);
@@ -591,11 +592,19 @@ impl Manager {
             }
             z.destroy(&rec.dataset()).await.context("disks")?;
         }
-        let _ = tokio::fs::remove_dir_all(self.inner.cfg.run_dir().join(id)).await;
+        if rec.launch_identity.is_some() {
+            launch_identity::remove_dir(&self.inner.cfg.run_dir().join(id)).await?;
+        } else {
+            let _ = tokio::fs::remove_dir_all(self.inner.cfg.run_dir().join(id)).await;
+        }
         if let Some(j) = self.jail_for(&rec) {
-            let _ =
-                tokio::fs::remove_dir_all(fc::jail_root(&j.base, id).parent().unwrap_or(&j.base))
-                    .await;
+            let path = fc::jail_root(&j.base, id);
+            let path = path.parent().unwrap_or(&j.base);
+            if rec.launch_identity.is_some() {
+                launch_identity::remove_dir(path).await?;
+            } else {
+                let _ = tokio::fs::remove_dir_all(path).await;
+            }
         }
         for snapshot in &rec.snapshots {
             if snapshot.clone_artifact.is_some() {
@@ -616,6 +625,10 @@ impl Manager {
         self.hold_at_destroy(&rec, had_disks, e.backup_turn.clone())
             .await?;
         self.forget(&e)?;
+        // The source allocation is released only after verified exit and all cleanup.
+        if rec.launch_identity.is_some() {
+            self.release_launch_hold(id)?;
+        }
         self.remove_machine(&e);
         self.inner
             .events

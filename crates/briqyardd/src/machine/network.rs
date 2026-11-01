@@ -11,6 +11,23 @@ impl Manager {
         Ok(())
     }
 
+    pub(super) fn free_namespace_subnet(
+        &self,
+        namespaces: &HashMap<String, Namespace>,
+    ) -> Result<u32> {
+        let mut used: Vec<u32> = namespaces.values().map(|t| t.rec.subnet_index).collect();
+        used.extend(
+            self.inner
+                .launch_holds
+                .lock()
+                .unwrap()
+                .values()
+                .map(|i| i.subnet_index),
+        );
+        netw::first_free(used, 0, self.inner.range.count() - 1)
+            .ok_or_else(|| anyhow!("no namespace subnet left"))
+    }
+
     pub(super) async fn ensure_namespace(&self, id: &str) -> Result<Namespace> {
         if let Some(t) = self.inner.namespaces.lock().unwrap().get(id) {
             return Ok(t.clone());
@@ -23,9 +40,7 @@ impl Manager {
         }
         let t = {
             let namespaces = self.inner.namespaces.lock().unwrap();
-            let used: Vec<u32> = namespaces.values().map(|t| t.rec.subnet_index).collect();
-            let idx = netw::first_free(used, 0, self.inner.range.count() - 1)
-                .ok_or_else(|| anyhow!("no namespace subnet left"))?;
+            let idx = self.free_namespace_subnet(&namespaces)?;
             Namespace::new(
                 NamespaceRec {
                     id: id.to_string(),

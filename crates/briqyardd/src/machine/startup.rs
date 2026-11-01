@@ -79,6 +79,7 @@ impl Manager {
             advertise,
             machines: Mutex::new(HashMap::new()),
             address_holds: Mutex::new(std::collections::HashSet::new()),
+            launch_holds: Mutex::new(BTreeMap::new()),
             namespaces: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
             endpoint_events,
@@ -172,6 +173,7 @@ impl Manager {
                 .insert(rec.id.clone(), Namespace::new(rec, subnet));
         }
         let records = st.list::<Record>("machines")?;
+        self.recover_launch_holds(&records)?;
         // An address is one record's at a time: a `destroying` record whose address another
         // holds is a destroyed machine's, written back after its destroy by an older daemon.
         // Its destroy ran; another would take the address's counters, and its limits, from
@@ -181,9 +183,9 @@ impl Manager {
             .filter(|r| r.state != state::DESTROYING && !r.ip.is_empty())
             .map(|r| r.ip.clone())
             .collect();
-        let (records, stale): (Vec<Record>, Vec<Record>) = records
-            .into_iter()
-            .partition(|r| r.state != state::DESTROYING || !held.contains(&r.ip));
+        let (records, stale): (Vec<Record>, Vec<Record>) = records.into_iter().partition(|r| {
+            r.launch_identity.is_some() || r.state != state::DESTROYING || !held.contains(&r.ip)
+        });
         for r in stale {
             st.delete("machines", &r.id)?;
             tracing::warn!(

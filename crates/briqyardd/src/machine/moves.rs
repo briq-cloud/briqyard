@@ -191,13 +191,25 @@ impl Manager {
     }
 
     pub(super) fn held_addresses(&self, subnet: u32) -> Vec<u32> {
-        self.inner
+        let mut held: Vec<_> = self
+            .inner
             .address_holds
             .lock()
             .unwrap()
             .iter()
             .filter_map(|(index, host)| (*index == subnet).then_some(*host as u32))
-            .collect()
+            .collect();
+        held.extend(
+            self.inner
+                .launch_holds
+                .lock()
+                .unwrap()
+                .values()
+                .filter_map(|identity| {
+                    (identity.subnet_index == subnet).then_some(u32::from(identity.host_num))
+                }),
+        );
+        held
     }
 
     /// The address, name and quota the machine would have in `t`; the host number it takes.
@@ -268,6 +280,16 @@ impl Manager {
         let r = e.snapshot();
         self.check_movable(&r, namespace)?;
         let from = r.namespace.clone();
+        if self
+            .inner
+            .launch_holds
+            .lock()
+            .unwrap()
+            .values()
+            .any(|i| i.namespace == from)
+        {
+            return Ok(false);
+        }
         // Usage up to now belongs to the name it leaves.
         self.meter(std::slice::from_ref(e), Utc::now()).await;
         let renamed = {

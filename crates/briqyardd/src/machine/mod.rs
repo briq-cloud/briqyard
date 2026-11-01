@@ -32,6 +32,7 @@ mod create;
 mod endpoints;
 mod exec;
 mod gateway;
+mod launch_identity;
 mod moves;
 mod namespaces;
 mod network;
@@ -297,6 +298,9 @@ pub struct Record {
     pub clone_origin: Option<templates::CloneOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warm_slot: Option<warm::Slot>,
+    /// Host identity stays fixed when an unbound slot changes tenant ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_identity: Option<launch_identity::LaunchIdentity>,
     /// What a newer daemon wrote and this one does not know: kept as it is, so a rollback that
     /// rewrites the record does not drop it (ADR 0027).
     #[serde(flatten)]
@@ -797,6 +801,7 @@ struct Inner {
     machines: Mutex<HashMap<String, Arc<Entry>>>,
     /// Destination slots reserved by moves before their record commits. Allocated under machines.
     address_holds: Mutex<std::collections::HashSet<(u32, u8)>>,
+    launch_holds: Mutex<BTreeMap<String, launch_identity::LaunchIdentity>>,
     namespaces: Mutex<HashMap<String, Namespace>>,
     endpoints: Mutex<HashMap<String, EndpointRec>>,
     endpoint_events: broadcast::Sender<(EndpointRec, bool)>,

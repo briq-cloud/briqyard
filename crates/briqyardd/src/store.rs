@@ -57,6 +57,7 @@ impl Store {
             "clone-readers",
             "warm-pools",
             "sandbox-requests",
+            "launch-holds",
         ] {
             private_dir(&root.join(d))?;
         }
@@ -196,6 +197,7 @@ mod tests {
             "clone-readers",
             "warm-pools",
             "sandbox-requests",
+            "launch-holds",
         ] {
             assert!(dir.path().join("state").join(d).is_dir(), "{d}");
         }
@@ -309,6 +311,7 @@ mod tests {
             "clone-readers",
             "warm-pools",
             "sandbox-requests",
+            "launch-holds",
         ] {
             assert_eq!(mode(&state.join(d)), 0o700, "{d}");
         }

@@ -219,6 +219,7 @@ impl Manager {
             template_birth: None,
             clone_origin: None,
             warm_slot,
+            launch_identity: None,
             rest: Default::default(),
             snapshots: Vec::new(),
             restoring: None,
@@ -401,6 +402,14 @@ impl Manager {
                     return Err(error);
                 }
             }
+        }
+        if e.snapshot().warm_slot.is_some()
+            && e.snapshot()
+                .clone_origin
+                .as_ref()
+                .is_some_and(|origin| origin.artifact.profile == guest::SANDBOX_READY_V1)
+        {
+            self.pin_launch_identity(&e)?;
         }
         self.freeze_sandbox_assignment(&e)?;
         let ip = e.snapshot().ip;

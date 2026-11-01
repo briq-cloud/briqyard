@@ -97,6 +97,7 @@ impl Manager {
     pub(super) async fn start_entry(&self, e: &Arc<Entry>, asked: bool) -> Result<(), MError> {
         let cfg = &self.inner.cfg;
         let rec = e.snapshot();
+        self.validate_launch_record(&rec)?;
         match rec.state.as_str() {
             // `creating`: the create's own start (`make`), its lock held throughout.
             state::CREATING | state::CREATED | state::STOPPED | state::ERROR => {}
@@ -189,6 +190,7 @@ impl Manager {
             Some(t) => t,
             None => return Err(fail(anyhow!("namespace network is gone"))),
         };
+        self.validate_launch_record(&rec).map_err(fail)?;
         let quarantined = rec.template_birth.is_some() || self.initial_memory_clone(&rec);
         let tap = if quarantined {
             self.inner.net.quarantine(&rec.id).await
@@ -534,15 +536,28 @@ impl Manager {
     /// machine, from its place in the namespace's network.
     pub(super) fn jail_for(&self, rec: &Record) -> Option<fc::Jail> {
         let cfg = &self.inner.cfg;
-        if cfg.jailer.as_os_str().is_empty() {
-            return None;
-        }
-        let uid = jail_uid(cfg.jail_uid_base, rec.subnet_index, rec.host_num);
+        let (jailer, base, uid, gid) = if let Some(identity) = &rec.launch_identity {
+            if !identity.jailed {
+                return None;
+            }
+            (
+                identity.jailer.clone(),
+                identity.jail_base.clone(),
+                identity.uid,
+                identity.gid,
+            )
+        } else {
+            if cfg.jailer.as_os_str().is_empty() {
+                return None;
+            }
+            let uid = jail_uid(cfg.jail_uid_base, rec.subnet_index, rec.host_num);
+            (cfg.jailer.clone(), cfg.jail_base(), uid, uid)
+        };
         Some(fc::Jail {
-            jailer: cfg.jailer.clone(),
-            base: cfg.jail_base(),
+            jailer,
+            base,
             uid,
-            gid: uid,
+            gid,
             cpu_millis: rec.size.cpu_millis(),
             // Guest memory, plus what Firecracker itself needs around it.
             memory_mb: rec.size.memory_mb + 256,
