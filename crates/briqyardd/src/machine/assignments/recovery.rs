@@ -91,8 +91,7 @@ impl Manager {
         ) {
             return Err(MError::Quota(exceeded.to_string()).into());
         }
-        self.check_egress(&target.egress, &target.namespace, &target.id)?;
-        let _ = self.policy_for(target)?;
+        let _ = self.policy_for_records(target, records)?;
         Ok(())
     }
 

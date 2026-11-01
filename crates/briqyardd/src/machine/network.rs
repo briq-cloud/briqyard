@@ -159,6 +159,7 @@ impl Manager {
         } else {
             e.via.clone().unwrap_or_default()
         };
+        // Keep self-refusal before the live-map lookup, as in ordinary admission.
         if id == me {
             return Err(invalid("egress.via names the machine itself"));
         }
@@ -168,21 +169,58 @@ impl Manager {
             .lock()
             .unwrap()
             .get(&id)
-            .map(|e| e.snapshot())
-            .filter(|r| r.state != state::DESTROYING)
-            .ok_or_else(|| invalid(format!("egress.via {id}: no such machine")))?;
-        if target.namespace != namespace {
-            return Err(invalid(format!(
-                "egress.via {id}: a machine of another namespace"
-            )));
-        }
-        Ok(target)
+            .map(|entry| entry.snapshot());
+        checked_via_target(&id, target, namespace, me)
+    }
+
+    /// Resolve against one supplied snapshot during startup, before machines are loaded.
+    fn via_target_records(
+        e: &api::Egress,
+        namespace: &str,
+        me: &str,
+        records: &[Record],
+    ) -> Result<Record, MError> {
+        let id = if e.via_gateway() {
+            records
+                .iter()
+                .find(|record| {
+                    record.namespace == namespace
+                        && record.is_gateway()
+                        && record.state != state::DESTROYING
+                })
+                .map(|record| record.id.clone())
+                .ok_or_else(|| no_gateway(namespace))?
+        } else {
+            e.via.clone().unwrap_or_default()
+        };
+        let target = records.iter().find(|record| record.id == id).cloned();
+        checked_via_target(&id, target, namespace, me)
     }
 
     /// The policy a record asks for, resolved against its namespace, with the namespace's gateway:
     /// `None` for open with nothing to limit. An open machine's limits are its own over the
     /// host's (ADR 0018); `via` and `none` never reach the NAT, so they carry none.
     pub(super) fn policy_for(&self, r: &Record) -> Result<Option<(Ipv4Addr, nft::Policy)>, MError> {
+        self.policy_for_resolved(r, |egress, namespace, me| {
+            self.via_target(egress, namespace, me)
+        })
+    }
+
+    pub(super) fn policy_for_records(
+        &self,
+        r: &Record,
+        records: &[Record],
+    ) -> Result<Option<(Ipv4Addr, nft::Policy)>, MError> {
+        self.policy_for_resolved(r, |egress, namespace, me| {
+            Self::via_target_records(egress, namespace, me, records)
+        })
+    }
+
+    fn policy_for_resolved(
+        &self,
+        r: &Record,
+        resolve: impl FnOnce(&api::Egress, &str, &str) -> Result<Record, MError>,
+    ) -> Result<Option<(Ipv4Addr, nft::Policy)>, MError> {
         r.egress.check().map_err(invalid)?;
         let limits = self.inner.cfg.egress_limits.with(&r.limits);
         if r.egress.mode == api::egress::OPEN && limits.is_none() {
@@ -196,7 +234,7 @@ impl Manager {
         let p = match r.egress.mode.as_str() {
             api::egress::OPEN => nft::Policy::Open { ip, limits },
             api::egress::VIA => {
-                let target = self.via_target(&r.egress, &r.namespace, &r.id)?;
+                let target = resolve(&r.egress, &r.namespace, &r.id)?;
                 nft::Policy::Via {
                     ip,
                     to_tap: netw::tap_name(&target.id),
@@ -415,4 +453,24 @@ impl Manager {
         }
         self.inner.dns.set(t.subnet.gateway(), names);
     }
+}
+
+fn checked_via_target(
+    id: &str,
+    target: Option<Record>,
+    namespace: &str,
+    me: &str,
+) -> Result<Record, MError> {
+    if id == me {
+        return Err(invalid("egress.via names the machine itself"));
+    }
+    let target = target
+        .filter(|record| record.state != state::DESTROYING)
+        .ok_or_else(|| invalid(format!("egress.via {id}: no such machine")))?;
+    if target.namespace != namespace {
+        return Err(invalid(format!(
+            "egress.via {id}: a machine of another namespace"
+        )));
+    }
+    Ok(target)
 }

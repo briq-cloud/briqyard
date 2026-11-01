@@ -354,3 +354,137 @@ async fn confirmed_exit_during_assignment_is_not_rewritten_as_a_live_destination
     assert_eq!(target.state, state::STOPPED);
     assert!(target.clone_origin.unwrap().mapping_exited);
 }
+
+fn routing_dependency(h: &crate::machine::tests::Harness, gateway: bool) -> Record {
+    let mut route = crate::machine::tests::record();
+    route.id = "m_route".into();
+    route.name = "route".into();
+    route.namespace = "destination".into();
+    route.subnet_index = 2;
+    route.host_num = 3;
+    route.ip = "10.64.2.3".into();
+    route.state = state::CREATED.into();
+    route.volume = None;
+    route.role = gateway.then_some(Role::Gateway);
+    h.m.inner
+        .store
+        .put_durable("machines", &route.id, &route)
+        .unwrap();
+    h.m.inner.machines.lock().unwrap().insert(
+        route.id.clone(),
+        Entry::new(route.clone(), h.m.inner.events.clone()),
+    );
+    route
+}
+
+async fn interrupted_routing_assignment(gateway: bool) {
+    for boundary in 0..3 {
+        let (h, entry, mut request) = fixture().await;
+        let route = routing_dependency(&h, gateway);
+        request.egress = Some(api::Egress {
+            mode: api::egress::VIA.into(),
+            via: Some(if gateway {
+                api::egress::GATEWAY.into()
+            } else {
+                route.id.clone()
+            }),
+            ..Default::default()
+        });
+        h.m.stage_destination_assignment(request.clone(), &entry, 2)
+            .unwrap();
+        let intent: model::Intent =
+            h.m.inner
+                .store
+                .get(INTENTS, &key("destination", "assignment-one"))
+                .unwrap()
+                .unwrap();
+        if boundary >= 1 {
+            h.m.inner
+                .store
+                .put_durable("machines", &intent.target.id, &intent.target)
+                .unwrap();
+        }
+        if boundary >= 2 {
+            h.m.inner
+                .store
+                .put_durable(templates::READERS, &intent.target.id, &intent.target_reader)
+                .unwrap();
+        }
+        h.host_calls();
+        restart_load(&h.m).unwrap();
+        assert!(
+            h.host_calls().is_empty(),
+            "metadata recovery must not publish a network or start a gateway"
+        );
+        let assigned = h.m.entry(&intent.target.id).unwrap().snapshot();
+        let (_, policy) = h.m.policy_for(&assigned).unwrap().unwrap();
+        assert!(matches!(policy, nft::Policy::Via { to, to_tap, .. }
+            if to == route.ip && to_tap == netw::tap_name(&route.id)));
+        assert!(h
+            .m
+            .resolve_destination_assignment(
+                &request.namespace,
+                "assignment-one",
+                &templates::sandbox::request_digest(&request).unwrap()
+            )
+            .unwrap()
+            .is_some());
+    }
+}
+
+#[tokio::test]
+async fn named_machine_egress_recovers_from_durable_dependency_at_each_assignment_interruption() {
+    interrupted_routing_assignment(false).await;
+}
+
+#[tokio::test]
+async fn namespace_gateway_egress_recovers_from_durable_dependency_at_each_assignment_interruption()
+{
+    interrupted_routing_assignment(true).await;
+}
+
+#[tokio::test]
+async fn durable_policy_resolution_preserves_self_namespace_and_destroying_rejections() {
+    for gateway in [false, true] {
+        for invalid_namespace in [false, true] {
+            let (h, entry, mut request) = fixture().await;
+            let mut route = routing_dependency(&h, gateway);
+            request.egress = Some(api::Egress {
+                mode: api::egress::VIA.into(),
+                via: Some(if gateway {
+                    api::egress::GATEWAY.into()
+                } else {
+                    route.id.clone()
+                }),
+                ..Default::default()
+            });
+            h.m.stage_destination_assignment(request, &entry, 2)
+                .unwrap();
+            if invalid_namespace {
+                route.namespace = "another".into();
+            } else {
+                route.state = state::DESTROYING.into();
+            }
+            h.m.inner
+                .store
+                .put_durable("machines", &route.id, &route)
+                .unwrap();
+            assert!(restart_load(&h.m).is_err());
+            assert!(h
+                .m
+                .inner
+                .store
+                .get::<model::Intent>(INTENTS, &key("destination", "assignment-one"))
+                .unwrap()
+                .is_some());
+        }
+    }
+    let (h, entry, _) = fixture().await;
+    let mut record = entry.snapshot();
+    record.egress = api::Egress {
+        mode: api::egress::VIA.into(),
+        via: Some(record.id.clone()),
+        ..Default::default()
+    };
+    assert!(h.m.policy_for_records(&record, &[record.clone()]).is_err());
+}
