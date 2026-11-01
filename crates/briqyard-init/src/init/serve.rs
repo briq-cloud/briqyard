@@ -128,6 +128,10 @@ where
                 .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse().ok()))
                 .unwrap_or(0.0);
             let main_pid = st.main_pid.lock().unwrap().unwrap_or(0);
+            let (clone_status, sha256) = {
+                let gate = st.clone_gate.lock().await;
+                (gate.status(), gate.destination_fingerprint())
+            };
             send(
                 &stream,
                 &Response {
@@ -136,8 +140,8 @@ where
                     main_pid,
                     version: briqyard_api::VERSION.into(),
                     file_stream_v1: true,
-                    clone_status: st.clone_gate.lock().await.status(),
-                    sha256: st.clone_gate.lock().await.destination_fingerprint(),
+                    clone_status,
+                    sha256,
                     init_sha256: if st.cfg.template_profile.is_some() {
                         clone_identity::executable_sha256()
                     } else {
@@ -215,6 +219,50 @@ mod tests {
         frames(&out)
     }
 
+    async fn ping(st: &Arc<State>) -> Vec<Response> {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            roundtrip(
+                st,
+                Request {
+                    op: "ping".into(),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .expect("ping must finish without retaining the clone gate lock")
+    }
+
+    #[tokio::test]
+    async fn sandbox_ping_returns_status_and_binding_hash_without_locking_twice() {
+        let st = state();
+        let identity = guest::CloneIdentity {
+            generation: "g_test".into(),
+            hostname: "test".into(),
+            ip: "10.1.0.2/24".into(),
+            mac: [2, 1, 2, 3, 4, 5],
+            machine_id: "test-machine".into(),
+        };
+        let digest = "a".repeat(64);
+        *st.clone_gate.lock().await = clone::Gate::Sandbox(destination::Barrier::Bound {
+            fingerprint: digest.clone(),
+            identity: identity.clone(),
+            active: true,
+            activating: false,
+        });
+        let frames = ping(&st).await;
+        assert_eq!(frames[0].sha256, digest);
+        let status = frames[0].clone_status.as_ref().unwrap();
+        assert_eq!(status.profile, guest::SANDBOX_READY_V1);
+        assert_eq!(status.stage, "active");
+        assert_eq!(status.identity.as_ref(), Some(&identity));
+        assert!(
+            st.clone_gate.try_lock().is_ok(),
+            "ping releases the gate before returning"
+        );
+    }
+
     #[tokio::test]
     async fn template_barrier_denies_files_and_exec_before_activation() {
         let st = state_with(Config {
@@ -241,14 +289,7 @@ mod tests {
         }
         assert!(!path.exists());
         assert!(!*st.requested.lock().unwrap());
-        let pong = roundtrip(
-            &st,
-            Request {
-                op: "ping".into(),
-                ..Default::default()
-            },
-        )
-        .await;
+        let pong = ping(&st).await;
         assert_eq!(pong[0].main_pid, 0);
         assert_eq!(pong[0].clone_status.as_ref().unwrap().stage, "builder");
     }
@@ -257,20 +298,15 @@ mod tests {
     async fn handle_ping() {
         let st = state();
         *st.main_pid.lock().unwrap() = Some(42);
-        let f = roundtrip(
-            &st,
-            Request {
-                op: "ping".into(),
-                ..Default::default()
-            },
-        )
-        .await;
+        let f = ping(&st).await;
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].kind, "pong");
         assert_eq!(f[0].main_pid, 42);
         assert!(f[0].uptime > 0.0, "read from /proc/uptime");
         assert_eq!(f[0].version, briqyard_api::VERSION);
         assert!(f[0].file_stream_v1);
+        assert!(f[0].clone_status.is_none());
+        assert!(f[0].sha256.is_empty());
     }
 
     #[tokio::test]
