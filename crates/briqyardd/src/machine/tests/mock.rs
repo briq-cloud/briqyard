@@ -93,7 +93,8 @@ pub(super) struct Mock {
     pub(super) init_version: Mutex<String>,
     pub(super) file_stream_v1: AtomicBool,
     pub(super) paused: Mutex<std::collections::HashSet<u32>>,
-    clone_status: Mutex<HashMap<PathBuf, guest::CloneStatus>>,
+    pub(super) clone_status: Mutex<HashMap<PathBuf, guest::CloneStatus>>,
+    pub(super) adoption_profile: Mutex<Option<String>>,
     pub(in crate::machine) destination_requests: Mutex<HashMap<PathBuf, guest::DestinationBind>>,
     pub(in crate::machine) destination_bad_ack: AtomicBool,
     pub(in crate::machine) destination_refuse: AtomicBool,
@@ -165,6 +166,7 @@ impl Mock {
             file_stream_v1: AtomicBool::new(false),
             paused: Mutex::new(std::collections::HashSet::new()),
             clone_status: Mutex::new(HashMap::new()),
+            adoption_profile: Mutex::new(None),
             destination_requests: Mutex::new(HashMap::new()),
             destination_bad_ack: AtomicBool::new(false),
             destination_refuse: AtomicBool::new(false),
@@ -500,26 +502,7 @@ impl fc::Vmm for Mock {
         _disk_io: Arc<fc::DiskIo>,
     ) -> Option<fc::Vm> {
         self.record(format!("adopt {id} {pid}"));
-        let procs = self.procs.lock().unwrap();
-        let p = procs
-            .iter()
-            .find(|p| p.pid == pid && p.id == id && !*p.exited.borrow())?;
-        let (api, _, _, _) = fc::paths(dir);
-        Some(fc::Vm {
-            pid,
-            api,
-            vsock: p.vsock.clone(),
-            dir: dir.to_path_buf(),
-            chroot: None,
-            resumed: false,
-            boot_identity: p
-                .boot_identity
-                .as_ref()
-                .map(|i| fc::BootIdentity::ambiguous(&i.device_profile)),
-            incarnation: Some(mock_incarnation(pid)),
-            exited: p.exited.subscribe(),
-            exit: Self::exit_of(p),
-        })
+        self.adopt_process(id, dir, pid, false)
     }
 
     fn host_boot_id(&self) -> Option<String> {

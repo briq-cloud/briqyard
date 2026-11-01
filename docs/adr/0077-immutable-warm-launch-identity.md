@@ -117,11 +117,29 @@ bridge activation, main activation and first exec. Active follows successful fir
 RUNNING, probes and namespace DNS follow that barrier. The activation core is shared with
 legacy clones, while their existing unbound guards remain. Interrupted stage writes use
 existing launch-transition recovery; restarted records cannot bind without a fresh owned
-handle from future assignment-aware adoption.
+handle from assignment-aware adoption.
+
+Assigned startup recovery now dispatches before configured warm recovery or incomplete
+clone settlement. It quarantines first and requires settled durable receipt, exact reader,
+launch hold and schema-1 artifact evidence. Actual API Paused/Running adoption is bracketed
+by exact immutable host-process proof. Saved boot identity populates only a local provisional
+handle: a known matching observed device profile is required, while unavailable or
+contradictory observations refuse adoption. Fresh guest init/protocol/profile/RAM-marker
+continuity and stage-specific full bind ACK/main-PID evidence precede installing trusted
+ownership. Configuring and IdentityDone remain quarantined for exact private bind replay;
+Active network, probes and DNS return only after continuity, with via dependencies also
+restricted to verified targets. Unknown exit never enters legacy kill/cleanup or fallback.
+
+Ordinary operations remain fenced for unverified assigned ownership. Ordinary cold start
+and automatic stopped-by-host restart refuse previously launched assignment records; this
+is a safety fence, not complete stop/start or reboot behavior. An assignment-aware path
+that preserves mutable root/data/configuration across user stop/start and host reboot is
+still a pre-enable requirement. Loading or stopped records without an adoption contract,
+and unassigned pristine sources, remain conservatively retained.
 
 No public selector calls these private primitives. Current/desired-zero/catalog generation
-race checks, assignment-aware startup/adoption/stopped restart, compatible managed
-rollback/fallback and native qualification remain required before reachability. A stored
+race checks, complete assignment-aware stop/start/reboot behavior, compatible managed
+rollback/fallback qualification and native qualification remain required before reachability. A stored
 request index or a fresh physical sample is not proof that guest activation is safe. Tests
 use stand-in VMMs, synthetic disks and a local API socket; Linux/native process, TAP, disk
 and recovery qualification remains required.

@@ -4,6 +4,7 @@
 use super::*;
 use chrono::TimeZone;
 
+mod assignment_close;
 mod balloon;
 mod event_log;
 mod gateway;
@@ -297,6 +298,27 @@ impl Harness {
         *self.host.host_boot_id.lock().unwrap() = value.map(str::to_string);
     }
 
+    pub(in crate::machine) fn assigned_guest_status(
+        &self,
+        vsock: &Path,
+        status: guest::CloneStatus,
+    ) {
+        self.host
+            .clone_status
+            .lock()
+            .unwrap()
+            .insert(vsock.into(), status);
+    }
+    pub(in crate::machine) fn assigned_guest_init(&self, vsock: &Path, digest: &str) {
+        self.host
+            .init_digests
+            .lock()
+            .unwrap()
+            .insert(vsock.into(), digest.into());
+    }
+    pub(in crate::machine) fn assigned_adoption_profile(&self, profile: &str) {
+        *self.host.adoption_profile.lock().unwrap() = Some(profile.into());
+    }
     pub(in crate::machine) fn change_assigned_credentials_on_resume(&self) {
         self.host.assigned_resume_credentials.store(true, Relaxed);
     }

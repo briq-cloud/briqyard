@@ -249,6 +249,14 @@ impl Manager {
         let ready = self.take_handed_ready();
         for e in entries {
             let rec = e.snapshot();
+            if rec.launch_identity.is_some() {
+                if self.recover_assigned_launch(&e).await {
+                    adopted += 1;
+                } else {
+                    stopped += 1;
+                }
+                continue;
+            }
             if warm::ready_slot(&rec) {
                 if self.recover_warm_slot(&e).await {
                     adopted += 1;
@@ -561,7 +569,9 @@ impl Manager {
             .values()
             .filter(|e| {
                 let r = e.rec.lock().unwrap();
-                stopped_by_host(&r) && !idle_past(r.last_used_at, r.sleep_window(), now)
+                r.launch_identity.is_none()
+                    && stopped_by_host(&r)
+                    && !idle_past(r.last_used_at, r.sleep_window(), now)
             })
             .cloned()
             .collect();

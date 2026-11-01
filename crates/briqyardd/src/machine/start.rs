@@ -97,6 +97,22 @@ impl Manager {
     pub(super) async fn start_entry(&self, e: &Arc<Entry>, asked: bool) -> Result<(), MError> {
         let cfg = &self.inner.cfg;
         let rec = e.snapshot();
+        if rec.launch_identity.is_some()
+            && !(rec.state == state::CREATING
+                && rec.pid == 0
+                && rec.boot_incarnation.is_none()
+                && rec
+                    .warm_slot
+                    .as_ref()
+                    .is_some_and(|slot| slot.claimed.is_none())
+                && rec.clone_origin.as_ref().is_some_and(|origin| {
+                    origin.stage == templates::CloneStage::Reserved && origin.sandbox.is_none()
+                }))
+        {
+            return Err(MError::Conflict(
+                "assigned or previously launched VMM cannot enter ordinary cold start".into(),
+            ));
+        }
         self.validate_launch_record(&rec)?;
         match rec.state.as_str() {
             // `creating`: the create's own start (`make`), its lock held throughout.

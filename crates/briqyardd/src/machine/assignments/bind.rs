@@ -32,7 +32,10 @@ impl Manager {
         self.settled_assigned_origin(&record)
     }
 
-    fn settled_assigned_origin(&self, record: &Record) -> Result<templates::CloneOrigin> {
+    pub(super) fn settled_assigned_origin(
+        &self,
+        record: &Record,
+    ) -> Result<templates::CloneOrigin> {
         anyhow::ensure!(
             record.launch_identity.is_some(),
             "assigned launch identity missing"
@@ -96,14 +99,11 @@ impl Manager {
         Ok(origin.clone())
     }
 
-    async fn configure_assigned_destination(&self, entry: &Entry, live: &fc::Vm) -> Result<()> {
-        let mut origin = self.assigned_origin(entry, live)?;
-        if matches!(
-            origin.stage,
-            templates::CloneStage::IdentityDone | templates::CloneStage::Active
-        ) {
-            return self.check_assigned_activation(entry, live);
-        }
+    pub(super) fn freeze_assigned_configuration(
+        &self,
+        entry: &Entry,
+        mut origin: templates::CloneOrigin,
+    ) -> Result<()> {
         if origin.stage == templates::CloneStage::UnboundPaused {
             anyhow::ensure!(
                 origin.identity.is_none()
@@ -119,6 +119,18 @@ impl Manager {
             // Full payload/entropy/clock and Configuring are durable before resume or send.
             self.clone_stage(entry, templates::CloneStage::Configuring)?;
         }
+        Ok(())
+    }
+
+    async fn configure_assigned_destination(&self, entry: &Entry, live: &fc::Vm) -> Result<()> {
+        let origin = self.assigned_origin(entry, live)?;
+        if matches!(
+            origin.stage,
+            templates::CloneStage::IdentityDone | templates::CloneStage::Active
+        ) {
+            return self.check_assigned_activation(entry, live);
+        }
+        self.freeze_assigned_configuration(entry, origin)?;
         let frozen = self.assigned_origin(entry, live)?;
         anyhow::ensure!(
             frozen.stage == templates::CloneStage::Configuring,
@@ -177,7 +189,7 @@ impl Manager {
         self.check_assigned_bound_record(&entry.snapshot())
     }
 
-    fn check_assigned_bound_record(&self, record: &Record) -> Result<()> {
+    pub(super) fn check_assigned_bound_record(&self, record: &Record) -> Result<()> {
         let origin = self.settled_assigned_origin(record)?;
         anyhow::ensure!(
             matches!(

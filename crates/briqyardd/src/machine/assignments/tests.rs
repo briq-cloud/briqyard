@@ -1,10 +1,11 @@
 use super::*;
+mod adoption;
 mod bind;
 mod live;
 mod publication;
 use crate::machine::templates::tests::launch_identity::prepared;
 
-async fn fixture() -> (
+pub(in crate::machine) async fn fixture() -> (
     crate::machine::tests::Harness,
     Arc<Entry>,
     api::CreateMachineRequest,

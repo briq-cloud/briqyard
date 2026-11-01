@@ -2,13 +2,14 @@
 //! Publication is intentionally not connected to any public claim path yet.
 use super::*;
 use sha2::{Digest, Sha256};
+mod adoption;
 mod bind;
 mod live;
 mod model;
 mod recovery;
 mod reservations;
 #[cfg(test)]
-mod tests;
+pub(in crate::machine) mod tests;
 const REQUESTS: &str = "unbound-requests";
 const INTENTS: &str = "unbound-assignments";
 
