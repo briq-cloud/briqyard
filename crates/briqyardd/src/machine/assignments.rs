@@ -2,8 +2,10 @@
 //! Publication is intentionally not connected to any public claim path yet.
 use super::*;
 use sha2::{Digest, Sha256};
+mod live;
 mod model;
 mod recovery;
+mod reservations;
 #[cfg(test)]
 mod tests;
 const REQUESTS: &str = "unbound-requests";
@@ -46,6 +48,7 @@ pub(super) struct State {
     receipts: BTreeMap<String, Receipt>,
     slots: BTreeMap<String, String>,
     pending: std::collections::HashSet<String>,
+    targets: BTreeMap<String, Record>,
 }
 impl State {
     fn remember(&mut self, receipt: &Receipt, pending: bool) -> Result<()> {
@@ -85,7 +88,7 @@ impl Manager {
                 "destination intent stored under another request key"
             );
             intent.check()?;
-            state.remember(&intent.receipt, true)?;
+            state.reserve(&intent)?;
         }
         Ok(state.receipts.get(&key).cloned())
     }
@@ -168,11 +171,7 @@ impl Manager {
         }
         for intent in self.inner.store.list::<model::Intent>(INTENTS)? {
             intent.check()?;
-            self.inner
-                .assignments
-                .lock()
-                .unwrap()
-                .remember(&intent.receipt, true)?;
+            self.inner.assignments.lock().unwrap().reserve(&intent)?;
         }
         Ok(self
             .inner

@@ -296,34 +296,6 @@ pub(super) fn eligible(record: &Record) -> bool {
 }
 
 impl Manager {
-    /// Private model writer. Public admission/reservation and activation integration is not enabled.
-    #[allow(dead_code)]
-    pub(in crate::machine) fn stage_destination_assignment(
-        &self,
-        request: api::CreateMachineRequest,
-        entry: &Entry,
-        host: u8,
-    ) -> Result<()> {
-        let intent = Intent::plan(self, request, entry, host)?;
-        // Cache before uncertain I/O. No caller may interpret failure as a warm miss.
-        self.inner
-            .assignments
-            .lock()
-            .unwrap()
-            .remember(&intent.receipt, true)?;
-        anyhow::ensure!(
-            self.inner
-                .store
-                .get::<Intent>(INTENTS, &intent.receipt.key())?
-                .is_none(),
-            "destination assignment intent already exists"
-        );
-        self.inner
-            .store
-            .put_durable(INTENTS, &intent.receipt.key(), &intent)?;
-        self.persist_destination_receipt(&intent.receipt)
-    }
-
     pub(super) fn persist_destination_receipt(&self, receipt: &Receipt) -> Result<()> {
         self.check_sandbox_request_index(
             &receipt.namespace,

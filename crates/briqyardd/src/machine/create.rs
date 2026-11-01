@@ -65,8 +65,13 @@ impl Manager {
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
+        let _warm = if req.sandbox_seed.is_some() {
+            Some(self.inner.warm_lock.lock().await)
+        } else {
+            None
+        };
         let _admission = self.inner.namespace_lifecycle.read().await;
-        self.record_admitted(req, role).await
+        self.record_with_warm_slot(req, role, None).await
     }
 
     /// The caller already holds namespace admission (a gateway put keeps it through boot).
@@ -75,6 +80,11 @@ impl Manager {
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
+        if req.sandbox_seed.is_some() {
+            return Err(invalid(
+                "sandbox create requires warm admission before namespace admission",
+            ));
+        }
         self.record_with_warm_slot(req, role, None).await
     }
 
@@ -654,6 +664,11 @@ impl Manager {
                 "name reserved by a durable warm claim".into(),
             ));
         }
+        if self.assignment_name_held(&rec.namespace, &rec.name, &rec.id) {
+            return Err(MError::Conflict(
+                "name reserved by a pending destination assignment".into(),
+            ));
+        }
         let taken = machines.values().find(|e| {
             let r = e.rec.lock().unwrap();
             r.namespace == rec.namespace && r.name == rec.name && r.state != state::DESTROYING
@@ -669,7 +684,7 @@ impl Manager {
                 used.push(r.host_num as u32);
             }
         }
-        let held = namespace_use(&machines, &rec.namespace);
+        let held = self.namespace_use(&machines, &rec.namespace);
         if let Some(x) = over_quota(
             &rec.namespace,
             &t.rec.quota,

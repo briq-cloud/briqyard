@@ -77,6 +77,7 @@ impl Manager {
             r.namespace == id && r.is_namespaces()
         });
         if in_use
+            || self.assignment_namespace_held(id)
             || self
                 .inner
                 .launch_holds

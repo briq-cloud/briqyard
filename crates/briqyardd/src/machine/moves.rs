@@ -191,6 +191,10 @@ impl Manager {
     }
 
     pub(super) fn held_addresses(&self, subnet: u32) -> Vec<u32> {
+        self.held_addresses_except_assignment(subnet, "")
+    }
+
+    pub(super) fn held_addresses_except_assignment(&self, subnet: u32, except: &str) -> Vec<u32> {
         let mut held: Vec<_> = self
             .inner
             .address_holds
@@ -209,6 +213,10 @@ impl Manager {
                     (identity.subnet_index == subnet).then_some(u32::from(identity.host_num))
                 }),
         );
+        held.extend(self.assignment_targets().iter().filter_map(|target| {
+            (target.id != except && target.subnet_index == subnet)
+                .then_some(u32::from(target.host_num))
+        }));
         held
     }
 
@@ -246,6 +254,11 @@ impl Manager {
         t: &Namespace,
         starting: bool,
     ) -> Result<Vec<u32>, MError> {
+        if self.assignment_name_held(&t.rec.id, &r.name, &r.id) {
+            return Err(MError::Conflict(
+                "name reserved by a pending destination assignment".into(),
+            ));
+        }
         let mut used = Vec::new();
         for o in machines.values() {
             let o = o.rec.lock().unwrap();
@@ -261,7 +274,7 @@ impl Manager {
             }
             used.push(o.host_num as u32);
         }
-        let held = namespace_use(machines, &t.rec.id);
+        let held = self.namespace_use(machines, &t.rec.id);
         if let Some(x) = over_quota(&t.rec.id, &t.rec.quota, &held, &quota_need(r, starting)) {
             let ev = x.event(format!("move of {} refused: {x}", r.name));
             self.inner.events.emit(ev.namespace(&t.rec.id));
@@ -280,13 +293,14 @@ impl Manager {
         let r = e.snapshot();
         self.check_movable(&r, namespace)?;
         let from = r.namespace.clone();
-        if self
-            .inner
-            .launch_holds
-            .lock()
-            .unwrap()
-            .values()
-            .any(|i| i.namespace == from)
+        if self.assignment_namespace_held(&from)
+            || self
+                .inner
+                .launch_holds
+                .lock()
+                .unwrap()
+                .values()
+                .any(|i| i.namespace == from)
         {
             return Ok(false);
         }
@@ -294,10 +308,11 @@ impl Manager {
         self.meter(std::slice::from_ref(e), Utc::now()).await;
         let renamed = {
             let machines = self.inner.machines.lock().unwrap();
-            let alone = machines.values().all(|o| {
-                let o = o.rec.lock().unwrap();
-                o.namespace != from || o.id == r.id
-            });
+            let alone = !self.assignment_namespace_held(&from)
+                && machines.values().all(|o| {
+                    let o = o.rec.lock().unwrap();
+                    o.namespace != from || o.id == r.id
+                });
             let mut namespaces = self.inner.namespaces.lock().unwrap();
             match namespaces.get(&from).cloned() {
                 Some(t) if alone && !namespaces.contains_key(namespace) => {

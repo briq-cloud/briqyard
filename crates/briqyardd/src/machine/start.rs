@@ -37,7 +37,7 @@ impl Manager {
         };
         {
             let machines = self.inner.machines.lock().unwrap();
-            let held = namespace_use(&machines, &r.namespace);
+            let held = self.namespace_use(&machines, &r.namespace);
             if let Some(x) = over_quota(&r.namespace, &quota, &held, &need) {
                 drop(machines);
                 e.note(x.event(format!("start refused: {x}")));

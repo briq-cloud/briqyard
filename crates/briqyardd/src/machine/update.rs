@@ -200,7 +200,7 @@ impl Manager {
             let over = over_quota(
                 &namespace,
                 &quota,
-                &namespace_use(&machines, &namespace),
+                &self.namespace_use(&machines, &namespace),
                 &need,
             );
             if over.is_none() {

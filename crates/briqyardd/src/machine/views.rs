@@ -192,7 +192,7 @@ impl Manager {
                 cpu_millis: Some(size.cpu_millis()),
                 ..Default::default()
             };
-            let mut held = namespace_use(&machines, &namespace);
+            let mut held = self.namespace_use(&machines, &namespace);
             held.memory_mb = held.memory_mb.saturating_sub(own.memory_mb);
             held.cpu_millis = Some(held.cpu_millis().saturating_sub(own.cpu_millis()));
             held.vcpus = held.vcpus.saturating_sub(own.vcpus);

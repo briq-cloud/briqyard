@@ -3,6 +3,14 @@ use model::Intent;
 
 impl Manager {
     pub(super) fn check_assignment_destination(&self, target: &Record) -> Result<()> {
+        let machines = self.inner.machines.lock().unwrap();
+        self.check_assignment_destination_records(target, &self.assignment_records(&machines)?)
+    }
+
+    pub(super) fn assignment_records(
+        &self,
+        machines: &HashMap<String, Arc<Entry>>,
+    ) -> Result<Vec<Record>> {
         let mut records: BTreeMap<_, _> = self
             .inner
             .store
@@ -10,17 +18,17 @@ impl Manager {
             .into_iter()
             .map(|record| (record.id.clone(), record))
             .collect();
-        for entry in self.inner.machines.lock().unwrap().values() {
+        for entry in machines.values() {
             let record = entry.snapshot();
             records.insert(record.id.clone(), record);
         }
-        self.check_assignment_destination_records(
-            target,
-            &records.into_values().collect::<Vec<_>>(),
-        )
+        for target in self.assignment_targets() {
+            records.insert(target.id.clone(), target);
+        }
+        Ok(records.into_values().collect())
     }
 
-    fn check_assignment_destination_records(
+    pub(super) fn check_assignment_destination_records(
         &self,
         target: &Record,
         records: &[Record],
@@ -37,7 +45,7 @@ impl Manager {
         );
         anyhow::ensure!(
             !self
-                .held_addresses(target.subnet_index)
+                .held_addresses_except_assignment(target.subnet_index, &target.id)
                 .contains(&u32::from(target.host_num)),
             "assignment destination address is held"
         );
@@ -46,6 +54,17 @@ impl Manager {
                 .durable_launch_addresses()?
                 .contains(&(target.subnet_index, target.host_num)),
             "assignment destination overlaps a durable launch allocation"
+        );
+        anyhow::ensure!(
+            !self.assignment_name_held(&target.namespace, &target.name, &target.id)
+                && self
+                    .inner
+                    .warm_names
+                    .lock()
+                    .unwrap()
+                    .get(&(target.namespace.clone(), target.name.clone()))
+                    .is_none_or(|id| id == &target.id),
+            "assignment destination name is reserved"
         );
         for record in records
             .iter()
@@ -130,7 +149,7 @@ impl Manager {
                     "destination intent key or duplicate conflict"
                 );
                 intent.check()?;
-                state.remember(&intent.receipt, true)?;
+                state.reserve(intent)?;
             }
         }
         if !intents.is_empty() {
@@ -140,12 +159,19 @@ impl Manager {
             );
         }
         for intent in intents {
-            self.reconcile_destination_intent(&intent)?;
+            let records = self.assignment_records(&HashMap::new())?;
+            self.write_destination_intent(&intent, &records, |_| {})?;
+            self.finish_destination_intent(&intent)?;
         }
         Ok(())
     }
 
-    fn reconcile_destination_intent(&self, intent: &Intent) -> Result<()> {
+    pub(super) fn write_destination_intent(
+        &self,
+        intent: &Intent,
+        records: &[Record],
+        publish_record: impl FnOnce(&Record),
+    ) -> Result<()> {
         intent.check()?;
         anyhow::ensure!(
             intent
@@ -190,8 +216,7 @@ impl Manager {
         } else {
             launch_identity::check_launch_pair(&current, Some(&intent.target_reader))?;
         }
-        let records = self.inner.store.list::<Record>("machines")?;
-        self.check_assignment_destination_records(&intent.target, &records)?;
+        self.check_assignment_destination_records(&intent.target, records)?;
         self.persist_destination_receipt(&intent.receipt)?;
         if current_hash == source_hash {
             let previous = current;
@@ -215,13 +240,22 @@ impl Manager {
             launch_identity::check_launch_pair(&current, Some(&intent.target_reader))?;
             self.inner.store.put_durable("machines", id, &current)?;
         }
+        // Publish the same Entry before any uncertain reader write. A later generic
+        // save must preserve target ownership, never recreate source + target-reader.
+        publish_record(&current);
         self.inner
             .store
             .put_durable(templates::READERS, id, &intent.target_reader)?;
+        Ok(())
+    }
+
+    pub(super) fn finish_destination_intent(&self, intent: &Intent) -> Result<()> {
         self.inner
             .store
             .delete_durable(INTENTS, &intent.receipt.key())?;
-        self.inner.assignments.lock().unwrap().pending.remove(id);
+        let mut state = self.inner.assignments.lock().unwrap();
+        state.pending.remove(&intent.receipt.machine);
+        state.targets.remove(&intent.receipt.machine);
         Ok(())
     }
 }

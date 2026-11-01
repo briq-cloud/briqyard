@@ -81,8 +81,30 @@ Startup repairs ownership and reader metadata before stage journals and exact pr
 checks. Interrupted index, record and reader writes retain the same consumed request/slot.
 Missing records/readers and PID absence without exit proof retain reservations and backing.
 
-This writer has no public call path. Live pending destination name/address/quota reservation,
-ordinary-create lock ordering, catalog/drain race checks, assignment-aware live adoption,
+Private staging takes warm, namespace, sandbox-create and entry locks in that order, then
+rechecks under the ordinary machines admission lock. Before uncertain intent publication,
+the exact target reserves its name, address, subnet and full namespace quota. Ordinary
+create, start, growth, move and configured-pool claim admission respect these reservations;
+namespace deletion/rename cannot discard them. Quota uses replace the source by stable
+machine ID while physical host accounting retains its one source record. Startup reconstructs
+all pending targets before reconciling any one intent, so coexisting liabilities cannot pass
+quota independently.
+
+A private live commit shares the recovery writer's exact source/target record and reader
+checks. It requires fresh actual process proof from the immutable launch identity, then
+updates the same Entry under the admission lock after the durable record write, before
+the reader write. An uncertain reader write therefore leaves target ownership in memory. The
+record-write exclusion stays held through publication and the Entry update, preventing a
+concurrent save from restoring source ownership afterward. Usage
+through the ownership boundary is drained to its old owner; CPU/address baselines start
+over without discarding host counter totals. A tick begun under old ownership cannot seed
+the new owner's baselines. Unbound destination names stay out of DNS before activation.
+Failed or uncertain writes retain request authority and reservations; a missing durable
+intent in an uncertain process remains blocked until startup reconciliation.
+
+These writers have no public call path and do not bind, resume or activate the guest.
+Catalog/drain race checks, assignment-aware live adoption, linked later-stage evidence,
 full bind/ACK/network/main/exec integration and complete managed rollback protection remain
 required before reachability. A stored request index or a fresh physical sample is not proof
-that concurrent tenant admission or guest activation is safe.
+that guest activation is safe. The live transfer tests use stand-in VMMs and synthetic disks;
+Linux/native process, TAP, disk and recovery qualification remains required.

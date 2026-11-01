@@ -24,6 +24,11 @@ impl Manager {
                 .values()
                 .map(|i| i.subnet_index),
         );
+        used.extend(
+            self.assignment_targets()
+                .iter()
+                .map(|target| target.subnet_index),
+        );
         netw::first_free(used, 0, self.inner.range.count() - 1)
             .ok_or_else(|| anyhow!("no namespace subnet left"))
     }
@@ -440,10 +445,21 @@ impl Manager {
 
     /// Republishes a namespace's names on its gateway.
     pub(super) fn refresh_dns(&self, t: &Namespace) {
+        self.inner
+            .dns
+            .set(t.subnet.gateway(), self.namespace_dns_names(&t.rec.id));
+    }
+
+    pub(super) fn namespace_dns_names(&self, namespace: &str) -> HashMap<String, Ipv4Addr> {
         let mut names: HashMap<String, Ipv4Addr> = HashMap::new();
         for e in self.inner.machines.lock().unwrap().values() {
             let r = e.rec.lock().unwrap();
-            if r.namespace != t.rec.id {
+            if r.namespace != namespace
+                || (r.launch_identity.is_some()
+                    && r.clone_origin
+                        .as_ref()
+                        .is_some_and(|origin| origin.stage != templates::CloneStage::Active))
+            {
                 continue;
             }
             if let Ok(ip) = r.ip.parse::<Ipv4Addr>() {
@@ -451,7 +467,7 @@ impl Manager {
                 names.insert(r.machine_host(), ip);
             }
         }
-        self.inner.dns.set(t.subnet.gateway(), names);
+        names
     }
 }
 

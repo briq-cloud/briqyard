@@ -1,4 +1,5 @@
 use super::*;
+mod live;
 use crate::machine::templates::tests::launch_identity::prepared;
 
 async fn fixture() -> (
@@ -50,6 +51,7 @@ async fn assignment_intent_is_not_a_miss_and_transfers_full_quota_once_on_recove
     let before = entry.snapshot();
     let before_host = committed(&h.m.inner.machines.lock().unwrap()).0;
     h.m.stage_destination_assignment(request.clone(), &entry, 2)
+        .await
         .unwrap();
     let digest = templates::sandbox::request_digest(&request).unwrap();
     assert!(h
@@ -192,6 +194,7 @@ async fn destination_name_address_and_logical_storage_quota_conflicts_prevent_au
         assert!(h
             .m
             .stage_destination_assignment(request, &entry, 2)
+            .await
             .is_err());
         assert!(h
             .m
@@ -215,6 +218,7 @@ async fn missing_record_or_reader_never_becomes_a_definitive_miss_or_releases_so
     for missing_record in [false, true] {
         let (h, entry, request) = fixture().await;
         h.m.stage_destination_assignment(request.clone(), &entry, 2)
+            .await
             .unwrap();
         let id = entry.snapshot().id;
         h.m.inner
@@ -255,6 +259,7 @@ async fn missing_record_or_reader_never_becomes_a_definitive_miss_or_releases_so
 async fn pid_absence_without_exit_proof_retains_consumed_request_and_full_backing() {
     let (h, entry, request) = fixture().await;
     h.m.stage_destination_assignment(request.clone(), &entry, 2)
+        .await
         .unwrap();
     let mut record = entry.snapshot();
     record.pid = 0;
@@ -297,6 +302,7 @@ async fn wrong_request_key_and_uncertain_first_intent_write_are_not_misses() {
     assert!(h
         .m
         .stage_destination_assignment(request.clone(), &entry, 2)
+        .await
         .is_err());
     let digest = templates::sandbox::request_digest(&request).unwrap();
     assert!(h
@@ -312,6 +318,7 @@ async fn wrong_request_key_and_uncertain_first_intent_write_are_not_misses() {
     assert!(h
         .m
         .stage_destination_assignment(request.clone(), &entry, 2)
+        .await
         .is_err());
     let receipt =
         h.m.inner
@@ -337,6 +344,7 @@ async fn wrong_request_key_and_uncertain_first_intent_write_are_not_misses() {
 async fn confirmed_exit_during_assignment_is_not_rewritten_as_a_live_destination() {
     let (h, entry, request) = fixture().await;
     h.m.stage_destination_assignment(request, &entry, 2)
+        .await
         .unwrap();
     let mut source = entry.snapshot();
     h.m.inner.vmm.kill(source.pid);
@@ -391,6 +399,7 @@ async fn interrupted_routing_assignment(gateway: bool) {
             ..Default::default()
         });
         h.m.stage_destination_assignment(request.clone(), &entry, 2)
+            .await
             .unwrap();
         let intent: model::Intent =
             h.m.inner
@@ -459,6 +468,7 @@ async fn durable_policy_resolution_preserves_self_namespace_and_destroying_rejec
                 ..Default::default()
             });
             h.m.stage_destination_assignment(request, &entry, 2)
+                .await
                 .unwrap();
             if invalid_namespace {
                 route.namespace = "another".into();
