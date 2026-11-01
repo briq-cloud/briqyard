@@ -34,7 +34,7 @@ impl Manager {
             .iter()
             .find(|r| {
                 r.image == image
-                    && r.size == size
+                    && r.size.matches_sandbox_resources(&size)
                     && r.init_sha256 == self.inner.images.init_sha256()
             })
             .ok_or_else(|| invalid("sandbox image/size/init is not operator approved"))
@@ -123,7 +123,7 @@ impl Manager {
         anyhow::ensure!(
             a.profile == guest::SANDBOX_READY_V1
                 && a.recipe.image == r.image
-                && a.recipe.size == r.size
+                && a.recipe.size.matches_sandbox_resources(&r.size)
                 && a.recipe.image_digest == r.image_digest
                 && a.recipe.image_config_digest == recipe.image_config_digest
                 && a.recipe.image_key == r.image_key

@@ -29,7 +29,7 @@ impl Manager {
         let (artifact, _) = self.checked_clone_artifact(source, snapshot, &req.namespace)?;
         self.check_sandbox_artifact(source, &artifact)?;
         if artifact.generation != seed.generation
-            || artifact.recipe.size != req.size
+            || !artifact.recipe.size.matches_sandbox_resources(&req.size)
             || artifact.recipe.image != req.image
         {
             return Err(invalid("sandbox seed generation/image/size mismatch"));

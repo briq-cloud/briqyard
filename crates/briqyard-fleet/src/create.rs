@@ -744,7 +744,8 @@ pub(super) async fn check_sandbox_selector(
             && s.clone_generation.as_deref() == Some(&seed.generation)
             && s.clone_profile.as_deref() == Some("sandbox-ready-v1")
             && s.memory
-            && s.clone_size == Some(size)
+            && s.clone_size
+                .is_some_and(|source| source.matches_sandbox_resources(&size))
             && s.source_host.as_deref() == Some(&daemon.host_id)
     });
     if !valid {
