@@ -705,3 +705,36 @@ async fn overlapping_move_completion_settles_only_its_own_monotonic_generation()
     assert!(reg.namespace_moves.is_empty());
     assert_eq!(reg.namespace_version("destination"), generations[1]);
 }
+
+#[tokio::test]
+async fn admission_retains_registered_routing_for_intrinsic_seed_identity() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    source(&f, &ds[0], "m_seed");
+    let registered = "h_registered";
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        let mut host = reg.hosts.remove(&ds[0].stub.id).unwrap();
+        host.id = registered.into();
+        reg.hosts.insert(registered.into(), host);
+        reg.machines.insert("m_seed".into(), registered.into());
+    }
+    let (status, body) = admit(&f, "destination", "req_one", "m_seed").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json(&body)["mode"], "sandbox-seed");
+    assert_eq!(
+        f.st.reg
+            .lock()
+            .unwrap()
+            .sandbox_admissions
+            .values()
+            .next()
+            .unwrap()
+            .host
+            .as_deref(),
+        Some(registered)
+    );
+    assert_eq!(
+        f.st.reg.lock().unwrap().namespaces["destination"],
+        registered
+    );
+}
