@@ -400,6 +400,25 @@ class AssignmentCompatibility(unittest.TestCase):
                 if not collection.startswith("meta/"):
                     self.assertFalse((self.data / "state/meta").exists(), "inspection must not migrate state")
 
+    def test_lifecycle_floor_and_missing_marker_evidence_require_new_probe(self):
+        old = "#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\n*) exit 2;;\nesac\n"
+        for collection in ("meta/required-assignment-protocol.json", "assigned-run-intents/run.json",
+                           "assigned-runs/machine.json", "assigned-run-readers/machine.json", "machines/machine.json"):
+            with self.subTest(collection=collection):
+                shutil.rmtree(self.data, ignore_errors=True)
+                value = ({"schema": 3, "protocol": "assigned-run-lifecycle-v1"} if collection.startswith("meta/") else
+                         {"assigned_run": {"schema": 3, "sequence": 1, "phase": "settled"}} if collection.startswith("machines/") else {"schema": 3})
+                self.evidence(collection, value)
+                self.binary.write_text(old)
+                self.assertNotEqual(self.check().returncode, 0)
+                for answer, accepted in (("printf 'assigned-run-lifecycle-v1\\n'", True),
+                                         ("printf 'assigned-run-lifecycle-v1\\nextra'", False),
+                                         ("printf 'assigned-run-lifecycle-v1\\n'; exit 1", False)):
+                    self.binary.write_text(old.replace("*) exit 2;;", "assigned-run-lifecycle-capabilities) " + answer + ";;\n*) exit 2;;"))
+                    self.assertEqual(self.check().returncode == 0, accepted)
+                if not collection.startswith("meta/"):
+                    self.assertFalse((self.data / "state/meta").exists())
+
     def test_unknown_assignment_floor_cannot_be_overridden_by_new_capability(self):
         self.evidence("meta/required-assignment-protocol.json", {"schema": 3, "protocol": "assigned-run-v1"})
         self.binary.write_text("#!/bin/sh\nprintf 'assigned-run-v1\\n'\n")
@@ -441,6 +460,29 @@ class AssignmentCompatibility(unittest.TestCase):
         self.assertEqual(replacement.read_text(), "compatible replacement")
         self.assertIn("compatible replacement left installed", result.stderr)
 
+
+    def test_rollback_refuses_schema2_binary_after_lifecycle_floor_appears(self):
+        rollback = self.root / "rollback"
+        rollback.mkdir()
+        shutil.copyfile(self.config, rollback / "config.yaml")
+        retained = rollback / "briqyardd"
+        retained.write_text("#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\n*) exit 2;;\nesac\n")
+        retained.chmod(0o700)
+        binary_dir = self.root / "bin"
+        binary_dir.mkdir()
+        replacement = binary_dir / "briqyardd"
+        replacement.write_text("lifecycle replacement")
+        self.evidence("meta/required-assignment-protocol.json",
+                      {"schema": 3, "protocol": "assigned-run-lifecycle-v1"})
+        staging = self.root / "staging"
+        staging.mkdir()
+        script = HELPERS + '\nactivation_pending=1; rollback_ready=1; candidate=""; trap cleanup_runtime_install EXIT; false\n'
+        env = dict(os.environ, rollback=str(rollback), binary_dir=str(binary_dir),
+                   config_path=str(self.config), new=str(staging))
+        result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(replacement.read_text(), "lifecycle replacement")
+        self.assertIn("compatible replacement left installed", result.stderr)
 
     def test_compatible_retained_binary_is_restored_with_current_floor(self):
         rollback = self.root / "rollback"

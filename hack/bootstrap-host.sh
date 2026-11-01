@@ -558,6 +558,8 @@ def required(config):
             needed = 1
         elif marker == {"schema": 2, "protocol": "assigned-run-v1"} and type(marker["schema"]) is int:
             needed = 2
+        elif marker == {"schema": 3, "protocol": "assigned-run-lifecycle-v1"} and type(marker["schema"]) is int:
+            needed = 3
         else:
             raise ValueError("invalid assignment protocol floor")
     runs = ("assigned-run-intents", "assigned-runs", "assigned-run-readers")
@@ -575,9 +577,9 @@ def required(config):
             if not isinstance(record, dict):
                 raise ValueError("invalid assignment state record")
             if kind in runs:
-                if type(record.get("schema")) is not int or record["schema"] != 1:
+                if type(record.get("schema")) is not int or record["schema"] not in (1, 3):
                     raise ValueError("unsupported assigned run evidence schema")
-                needed = 2
+                needed = max(needed, 3 if record["schema"] == 3 else 2)
             elif kind != "machines":
                 receipt = record.get("receipt") if kind == "unbound-assignments" else record
                 if not isinstance(receipt, dict) or type(receipt.get("schema")) is not int or receipt["schema"] != 1:
@@ -586,11 +588,11 @@ def required(config):
             elif record.get("assigned_run") is not None:
                 run = record["assigned_run"]
                 if (not isinstance(run, dict) or set(run) != {"schema", "sequence", "phase"}
-                        or type(run.get("schema")) is not int or run["schema"] != 1
+                        or type(run.get("schema")) is not int or run["schema"] not in (1, 3)
                         or type(run.get("sequence")) is not int or run["sequence"] <= 0
-                        or run.get("phase") not in ("reserved", "observed")):
+                        or run.get("phase") not in (("reserved", "observed", "settled") if run["schema"] == 3 else ("reserved", "observed"))):
                     raise ValueError("unsupported assigned run record link")
-                needed = 2
+                needed = max(needed, 3 if run["schema"] == 3 else 2)
             elif record.get("launch_identity") is not None:
                 warm = record.get("warm_slot")
                 if warm is not None and not isinstance(warm, dict):
@@ -633,6 +635,8 @@ try:
         probe(sys.argv[1], "assignment-capabilities", b"destination-assignment-v1\n")
     if needed >= 2:
         probe(sys.argv[1], "assigned-run-capabilities", b"assigned-run-v1\n")
+    if needed >= 3:
+        probe(sys.argv[1], "assigned-run-lifecycle-capabilities", b"assigned-run-lifecycle-v1\n")
 except Exception:
     print("assignment compatibility inspection/probe refused replacement", file=sys.stderr)
     sys.exit(1)

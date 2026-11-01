@@ -99,20 +99,28 @@ impl Store {
         );
         let path = self.path(kind, key)?;
         let bytes = serde_json::to_vec_pretty(v)?;
-        if crate::assignment_compatibility::RUN_COLLECTIONS.contains(&kind)
-            || (kind == "machines"
-                && serde_json::from_slice::<serde_json::Value>(&bytes)?
-                    .get("assigned_run")
-                    .is_some_and(|value| !value.is_null()))
-        {
-            crate::assignment_compatibility::ensure_run_floor(&self.root)?;
-        } else if matches!(kind, "unbound-assignments" | "unbound-requests")
-            || (kind == "machines"
-                && crate::assignment_compatibility::assigned(&serde_json::from_slice(&bytes)?))
-        {
-            crate::assignment_compatibility::ensure_floor(&self.root)?;
+        let mut minimum = crate::assignment_compatibility::record_requirement(
+            kind,
+            &serde_json::from_slice(&bytes)?,
+        )?;
+        // Replacing the last machine link must not erase evidence after marker loss.
+        if kind == "machines" || crate::assignment_compatibility::RUN_COLLECTIONS.contains(&kind) {
+            if let Some(previous) = self.get::<serde_json::Value>(kind, key)? {
+                minimum = minimum.max(crate::assignment_compatibility::record_requirement(
+                    kind, &previous,
+                )?);
+            }
+        }
+        if minimum != crate::assignment_compatibility::Requirement::None {
+            crate::assignment_compatibility::ensure_floor_at(&self.root, minimum)?;
         }
         write_private(&path, &bytes)
+    }
+
+    /// Raise the durable downgrade fence before reserving incompatible lifecycle work.
+    /// An error is uncertain durability and must retain all existing reservations.
+    pub fn ensure_assigned_run_lifecycle_floor(&self) -> Result<()> {
+        crate::assignment_compatibility::ensure_assigned_run_lifecycle_floor(&self.root)
     }
 
     /// Crash-durable record boundary for immutable snapshot publication and read intents.
@@ -145,6 +153,17 @@ impl Store {
                 && !(kind == "meta" && key == "required-assignment-protocol"),
             "permanent assignment authority cannot be deleted"
         );
+        // Preserve evidence before deleting its last surviving copy after marker loss.
+        if matches!(kind, "machines" | "unbound-assignments")
+            || crate::assignment_compatibility::RUN_COLLECTIONS.contains(&kind)
+        {
+            if let Some(value) = self.get::<serde_json::Value>(kind, key)? {
+                let required = crate::assignment_compatibility::record_requirement(kind, &value)?;
+                if required != crate::assignment_compatibility::Requirement::None {
+                    crate::assignment_compatibility::ensure_floor_at(&self.root, required)?;
+                }
+            }
+        }
         match std::fs::remove_file(self.path(kind, key)?) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

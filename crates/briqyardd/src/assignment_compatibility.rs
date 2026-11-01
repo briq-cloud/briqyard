@@ -6,11 +6,13 @@ use std::path::Path;
 
 pub const CAPABILITY: &[u8] = b"destination-assignment-v1\n";
 pub const RUN_CAPABILITY: &[u8] = b"assigned-run-v1\n";
+pub const LIFECYCLE_CAPABILITY: &[u8] = b"assigned-run-lifecycle-v1\n";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Requirement {
     None,
     Assignment,
     AssignedRun,
+    AssignedRunLifecycle,
 }
 pub const RUN_COLLECTIONS: [&str; 3] = [
     "assigned-run-intents",
@@ -46,6 +48,7 @@ fn floor(root: &Path) -> Result<Requirement> {
     match (value.schema, value.protocol.as_str()) {
         (1, "destination-assignment-v1") => Ok(Requirement::Assignment),
         (2, "assigned-run-v1") => Ok(Requirement::AssignedRun),
+        (3, "assigned-run-lifecycle-v1") => Ok(Requirement::AssignedRunLifecycle),
         _ => anyhow::bail!("unsupported assignment compatibility floor"),
     }
 }
@@ -87,33 +90,49 @@ pub fn requirement(root: &Path) -> Result<Requirement> {
             let value: Value =
                 serde_json::from_slice(&bytes).context("invalid assignment state JSON")?;
             anyhow::ensure!(value.is_object(), "invalid assignment state record");
-            if kind == "machines" {
-                if let Some(run) = value.get("assigned_run").filter(|v| !v.is_null()) {
-                    anyhow::ensure!(
-                        run.as_object().is_some_and(|fields| fields.len() == 3)
-                            && run["schema"].as_u64() == Some(1)
-                            && run["sequence"].as_u64().is_some_and(|value| value > 0)
-                            && matches!(run["phase"].as_str(), Some("reserved" | "observed")),
-                        "unsupported assigned run record link"
-                    );
-                    required = Requirement::AssignedRun;
-                } else if assigned(&value) {
-                    required = required.max(Requirement::Assignment);
-                }
-            } else {
-                required = required.max(if RUN_COLLECTIONS.contains(&kind) {
-                    anyhow::ensure!(
-                        value["schema"].as_u64() == Some(1),
-                        "unsupported assigned run evidence schema"
-                    );
-                    Requirement::AssignedRun
-                } else {
-                    Requirement::Assignment
-                });
-            }
+            required = required.max(record_requirement(kind, &value)?);
         }
     }
     Ok(required)
+}
+/// Inspect both committed evidence and a pending write using the same exact schemas.
+pub fn record_requirement(kind: &str, value: &Value) -> Result<Requirement> {
+    if kind == "machines" {
+        if let Some(run) = value.get("assigned_run").filter(|v| !v.is_null()) {
+            let requirement = run_schema(run)?;
+            anyhow::ensure!(
+                run.as_object().is_some_and(|fields| fields.len() == 3)
+                    && run["sequence"].as_u64().is_some_and(|value| value > 0)
+                    && (matches!(run["phase"].as_str(), Some("reserved" | "observed"))
+                        || (requirement == Requirement::AssignedRunLifecycle
+                            && run["phase"].as_str() == Some("settled"))),
+                "unsupported assigned run record link"
+            );
+            return Ok(requirement);
+        }
+        return Ok(if assigned(value) {
+            Requirement::Assignment
+        } else {
+            Requirement::None
+        });
+    }
+    if RUN_COLLECTIONS.contains(&kind) {
+        return run_schema(value);
+    }
+    Ok(
+        if matches!(kind, "unbound-assignments" | "unbound-requests") {
+            Requirement::Assignment
+        } else {
+            Requirement::None
+        },
+    )
+}
+fn run_schema(value: &Value) -> Result<Requirement> {
+    match value["schema"].as_u64() {
+        Some(1) => Ok(Requirement::AssignedRun),
+        Some(3) => Ok(Requirement::AssignedRunLifecycle),
+        _ => anyhow::bail!("unsupported assigned run evidence schema"),
+    }
 }
 /// Must complete before any intent, receipt or assigned machine becomes visible.
 /// The lock also prevents concurrent writers sharing the store's temporary path.
@@ -122,6 +141,9 @@ pub fn ensure_floor(root: &Path) -> Result<()> {
 }
 pub fn ensure_run_floor(root: &Path) -> Result<()> {
     ensure_floor_at(root, Requirement::AssignedRun)
+}
+pub fn ensure_assigned_run_lifecycle_floor(root: &Path) -> Result<()> {
+    ensure_floor_at(root, Requirement::AssignedRunLifecycle)
 }
 pub fn ensure_floor_at(root: &Path, minimum: Requirement) -> Result<()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -139,15 +161,15 @@ pub fn ensure_floor_at(root: &Path, minimum: Requirement) -> Result<()> {
         crate::store::write_private(
             &meta.join(FLOOR),
             &serde_json::to_vec(&Floor {
-                schema: if minimum == Requirement::AssignedRun {
-                    2
-                } else {
-                    1
+                schema: match minimum {
+                    Requirement::AssignedRunLifecycle => 3,
+                    Requirement::AssignedRun => 2,
+                    _ => 1,
                 },
-                protocol: if minimum == Requirement::AssignedRun {
-                    "assigned-run-v1"
-                } else {
-                    "destination-assignment-v1"
+                protocol: match minimum {
+                    Requirement::AssignedRunLifecycle => "assigned-run-lifecycle-v1",
+                    Requirement::AssignedRun => "assigned-run-v1",
+                    _ => "destination-assignment-v1",
                 }
                 .into(),
             })?,
@@ -179,6 +201,15 @@ pub async fn check_required_candidate(
             executable,
             "assigned-run-capabilities",
             RUN_CAPABILITY,
+            deadline,
+        )
+        .await?;
+    }
+    if required >= Requirement::AssignedRunLifecycle {
+        probe(
+            executable,
+            "assigned-run-lifecycle-capabilities",
+            LIFECYCLE_CAPABILITY,
             deadline,
         )
         .await?;
@@ -304,6 +335,161 @@ mod tests {
         assert_eq!(floor(dir.path()).unwrap(), Requirement::AssignedRun);
         crate::store::Store::open(dir.path()).unwrap();
         assert_eq!(floor(dir.path()).unwrap(), Requirement::AssignedRun);
+    }
+    #[test]
+    fn lifecycle_floor_survives_marker_loss_deletion_and_ordinary_writes() {
+        for kind in RUN_COLLECTIONS.into_iter().chain(["machines"]) {
+            let dir = tempfile::tempdir().unwrap();
+            let store = crate::store::Store::open(dir.path()).unwrap();
+            let value = if kind == "machines" {
+                serde_json::json!({"assigned_run":{"schema":3,"sequence":1,"phase":"settled"}})
+            } else {
+                serde_json::json!({"schema":3})
+            };
+            store.put_durable(kind, "terminal", &value).unwrap();
+            assert_eq!(
+                floor(dir.path()).unwrap(),
+                Requirement::AssignedRunLifecycle
+            );
+            store
+                .put(
+                    "unbound-requests",
+                    "ordinary",
+                    &serde_json::json!({"schema":1}),
+                )
+                .unwrap();
+            assert_eq!(
+                floor(dir.path()).unwrap(),
+                Requirement::AssignedRunLifecycle
+            );
+            std::fs::remove_file(dir.path().join("meta").join(FLOOR)).unwrap();
+            assert_eq!(
+                requirement(dir.path()).unwrap(),
+                Requirement::AssignedRunLifecycle
+            );
+            store.delete_durable(kind, "terminal").unwrap();
+            assert_eq!(
+                requirement(dir.path()).unwrap(),
+                Requirement::AssignedRunLifecycle
+            );
+            crate::store::Store::open(dir.path()).unwrap();
+            assert_eq!(
+                floor(dir.path()).unwrap(),
+                Requirement::AssignedRunLifecycle
+            );
+        }
+    }
+    #[test]
+    fn replacing_last_lifecycle_machine_link_restores_lost_floor_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        store
+            .put(
+                "machines",
+                "terminal",
+                &serde_json::json!({
+                    "assigned_run":{"schema":3,"sequence":1,"phase":"settled"}
+                }),
+            )
+            .unwrap();
+        std::fs::remove_file(dir.path().join("meta").join(FLOOR)).unwrap();
+        store
+            .put(
+                "machines",
+                "terminal",
+                &serde_json::json!({"assigned_run":null}),
+            )
+            .unwrap();
+        assert_eq!(
+            requirement(dir.path()).unwrap(),
+            Requirement::AssignedRunLifecycle
+        );
+    }
+    #[test]
+    fn lifecycle_inspection_never_downgrades_and_unknown_evidence_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        store.ensure_assigned_run_lifecycle_floor().unwrap();
+        store
+            .put(
+                "machines",
+                "old",
+                &serde_json::json!({
+                    "assigned_run":{"schema":1,"sequence":1,"phase":"observed"}
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            requirement(dir.path()).unwrap(),
+            Requirement::AssignedRunLifecycle
+        );
+        for kind in RUN_COLLECTIONS.into_iter().chain(["machines"]) {
+            let path = store.dir(kind).join("unknown.json");
+            let value = if kind == "machines" {
+                serde_json::json!({"assigned_run":{"schema":9,"sequence":1,"phase":"settled"}})
+            } else {
+                serde_json::json!({"schema":9})
+            };
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(requirement(dir.path()).is_err());
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    #[test]
+    fn lifecycle_floor_failure_forbids_first_incompatible_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("meta").join(FLOOR)).unwrap();
+        assert!(store.ensure_assigned_run_lifecycle_floor().is_err());
+        assert!(store
+            .put_durable(
+                "assigned-run-intents",
+                "first",
+                &serde_json::json!({"schema":3})
+            )
+            .is_err());
+        assert!(!store
+            .dir("assigned-run-intents")
+            .join("first.json")
+            .exists());
+    }
+    #[tokio::test]
+    async fn lifecycle_requires_all_three_exact_successful_bounded_probes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        store.ensure_assigned_run_lifecycle_floor().unwrap();
+        let executable = dir.path().join("candidate");
+        for (body, accepted) in [
+            ("exit 2", false),
+            ("printf 'assigned-run-lifecycle-v1\\nextra'", false),
+            ("printf 'assigned-run-lifecycle-v1\\n'; exit 1", false),
+            ("sleep 2", false),
+            ("printf 'assigned-run-lifecycle-v1\\n'", true),
+        ] {
+            std::fs::write(&executable, format!("#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\nassigned-run-lifecycle-capabilities) {body};;\n*) exit 2;;\nesac\n")).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = check_required_candidate(
+                dir.path(),
+                &executable,
+                tokio::time::Instant::now() + std::time::Duration::from_millis(150),
+            )
+            .await;
+            assert_eq!(result.is_ok(), accepted, "{body}: {result:?}");
+        }
+        // A lifecycle-only answer also cannot bypass either prior protocol.
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'assigned-run-lifecycle-v1\\n'\n",
+        )
+        .unwrap();
+        assert!(check_required_candidate(
+            dir.path(),
+            &executable,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1)
+        )
+        .await
+        .is_err());
     }
     #[test]
     fn corrupt_floor_prevents_any_run_publication() {
