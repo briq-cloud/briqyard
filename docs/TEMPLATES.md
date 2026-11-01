@@ -2,8 +2,9 @@
 
 The current candidate supports `init-ready-v1`: a booted kernel and init parked
 before the workload's first exec. It does not clone an already-running service or
-application-prepared process. Service-ready recipes and paused warm pools remain
-unavailable. No startup or memory-sharing performance result is qualified yet.
+application-prepared process. Paused pools are described in
+[WARM_POOLS.md](WARM_POOLS.md); service-ready recipes remain unavailable.
+No startup or memory-sharing performance result is qualified yet.
 
 The reviewed public recipe is recorded in
 [recipes/alpine-init-ready-v1.json](recipes/alpine-init-ready-v1.json), including
