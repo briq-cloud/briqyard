@@ -338,6 +338,8 @@ pub struct Registry {
     #[serde(default)]
     pub sandbox_requests: HashMap<String, crate::create_replay::SandboxRoute>,
     #[serde(default)]
+    pub sandbox_admissions: HashMap<String, crate::sandbox_admissions::Admission>,
+    #[serde(default)]
     pub namespace_versions: HashMap<String, u64>,
     /// machine id → host id, learned from creates and listings.
     pub machines: HashMap<String, String>,
@@ -433,10 +435,14 @@ impl Registry {
         let previous_namespaces: Vec<_> = self.namespaces.keys().cloned().collect();
         let pinned_at = &self.pinned_at;
         let routes = &self.sandbox_requests;
+        let admissions = &self.sandbox_admissions;
         self.namespaces.retain(|t, host| {
-            routes
+            admissions
                 .values()
-                .any(|route| route.namespace == *t && !route.accepted)
+                .any(|a| a.namespace == *t && a.pending_seed())
+                || routes
+                    .values()
+                    .any(|route| route.namespace == *t && !route.accepted)
                 || *host != id
                 || h.namespaces.contains(t)
                 || pinned_at

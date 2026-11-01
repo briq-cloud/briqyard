@@ -17,6 +17,7 @@ mod moves;
 mod namespaces;
 mod registry;
 mod restores;
+mod sandbox_admissions;
 mod scrape;
 mod signals;
 mod upgrade;
@@ -460,6 +461,10 @@ fn restored(reg: &Registry, from: &str, path: &std::path::Path) -> String {
 fn namespace_routes(prefix: &str) -> Router<Arc<AppState>> {
     Router::new()
         .route(prefix, get(list_namespaces))
+        .route(
+            &format!("{prefix}/:namespace/sandbox-admissions/:request_id"),
+            put(sandbox_admissions::admit).delete(sandbox_admissions::cancel),
+        )
         .route(
             &format!("{prefix}/:id"),
             get(get_namespace).delete(delete_namespace),

@@ -173,6 +173,8 @@ pub(super) async fn get_namespace(
 pub(super) struct PlaceQuery {
     #[serde(default)]
     pub(super) region: String,
+    #[serde(default)]
+    pub(super) placement_request_id: Option<String>,
 }
 
 /// A PUT on a namespace that the namespace's host answers: one with no host yet is placed as its
@@ -182,7 +184,7 @@ pub(super) async fn put_on_namespace(
     st: &AppState,
     id: &str,
     what: &str,
-    region: &str,
+    placement: &PlaceQuery,
     (need_mb, need_disk_mb, need_cpu_millis): (u32, u64, u32),
     headers: &HeaderMap,
     body: Bytes,
@@ -194,6 +196,7 @@ pub(super) async fn put_on_namespace(
             "namespace must be a-z, 0-9, _ or -, at most 64 characters",
         ));
     }
+    let region = placement.region.as_str();
     let ask = Ask {
         namespace: id,
         region,
@@ -215,6 +218,12 @@ pub(super) async fn put_on_namespace(
                 "namespace has an unresolved sandbox dispatch",
             ));
         }
+        crate::sandbox_admissions::check_gateway(
+            &reg,
+            id,
+            region,
+            placement.placement_request_id.as_deref(),
+        )?;
         let first = !reg.namespaces.contains_key(id);
         let bound = reg.namespaces.get(id).cloned();
         refuse_outside(&reg, bound.as_deref(), id, region)?;
@@ -275,7 +284,7 @@ pub(super) async fn set_gateway(
         disk_need(spec.volume_gb),
         spec.size().cpu_millis(),
     );
-    put_on_namespace(&st, &id, "gateway", &q.region, need, &headers, body).await
+    put_on_namespace(&st, &id, "gateway", &q, need, &headers, body).await
 }
 
 /// Puts a namespace's quota on the namespace's host (ADR 0025); a namespace with none yet is placed,
@@ -289,7 +298,7 @@ pub(super) async fn set_quota(
 ) -> Result<Response, Refusal> {
     serde_json::from_slice::<api::Quota>(&body)
         .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-    put_on_namespace(&st, &id, "quota", &q.region, (0, 0, 0), &headers, body).await
+    put_on_namespace(&st, &id, "quota", &q, (0, 0, 0), &headers, body).await
 }
 
 /// A namespace's quota and use, from its host.
