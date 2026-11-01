@@ -139,12 +139,16 @@ pub(super) async fn create_machine(
         disk_mb: disk_need(req.volume.as_ref().map(|v| v.size_gb)),
         what: "machine",
     };
+    let admission_id = crate::sandbox_admissions::header_id(&headers)?;
     enum Placement {
         Replay(crate::create_replay::SandboxRoute),
         Admitted(Box<HostRec>, bool, u64, u64),
     }
     let placement_result = {
         let mut reg = st.reg.lock().unwrap();
+        let admission_id =
+            crate::sandbox_admissions::effective_id(&reg, &req, admission_id.as_deref());
+        crate::sandbox_admissions::check_dispatch(&reg, &req, admission_id.as_deref())?;
         let concurrent = if req.sandbox_seed.is_some() {
             crate::create_replay::existing_route(&reg, &req)?
         } else {
@@ -264,6 +268,11 @@ pub(super) async fn create_machine(
                     crate::create_replay::request_route(&req, host.id.clone())?,
                 );
             }
+            crate::sandbox_admissions::dispatched(
+                &mut reg,
+                &req.namespace,
+                admission_id.as_deref(),
+            );
             let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb, ask.cpu_millis);
             reg.bind_hold_namespace(&host.id, id, &req.namespace);
             Placement::Admitted(
@@ -563,7 +572,7 @@ pub(super) async fn first_refused(
 fn require_named_memory(host: &HostRec, down_after: chrono::Duration) -> Result<(), Refusal> {
     require_memory_profile(host, down_after, "init-ready-v1")
 }
-fn require_memory_profile(
+pub(super) fn require_memory_profile(
     host: &HostRec,
     down_after: chrono::Duration,
     profile: &str,
@@ -662,11 +671,11 @@ async fn named_memory_size(
     Ok((size, snapshot.id))
 }
 
-async fn check_sandbox_selector(
+pub(super) async fn check_sandbox_selector(
     st: &Arc<AppState>,
     seed: &api::SandboxSeed,
     size: api::Size,
-) -> Result<(), Refusal> {
+) -> Result<String, Refusal> {
     let host = st
         .reg
         .lock()
@@ -720,5 +729,5 @@ async fn check_sandbox_selector(
             "sandbox snapshot generation/profile/size/source-host mismatch",
         ));
     }
-    Ok(())
+    Ok(host.id)
 }
