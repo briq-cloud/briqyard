@@ -430,17 +430,30 @@ impl Registry {
         // A pin made at placement is younger than the machine it placed: the host lists the
         // namespace only once the create has landed, so a fresh pin is kept whatever the host says.
         let id = entry.id.clone();
+        let previous_namespaces: Vec<_> = self.namespaces.keys().cloned().collect();
         let pinned_at = &self.pinned_at;
+        let routes = &self.sandbox_requests;
         self.namespaces.retain(|t, host| {
-            *host != id
+            routes
+                .values()
+                .any(|route| route.namespace == *t && !route.accepted)
+                || *host != id
                 || h.namespaces.contains(t)
                 || pinned_at
                     .get(t)
                     .map(|at| now - *at < Duration::minutes(10))
                     .unwrap_or(false)
         });
+        for t in previous_namespaces {
+            if !self.namespaces.contains_key(&t) {
+                self.note_namespace_create(&t);
+            }
+        }
         for t in h.namespaces {
-            self.namespaces.entry(t).or_insert_with(|| id.clone());
+            if !self.namespaces.contains_key(&t) {
+                self.namespaces.insert(t.clone(), id.clone());
+                self.note_namespace_create(&t);
+            }
         }
         self.pinned_at
             .retain(|t, _| self.namespaces.contains_key(t));
@@ -470,6 +483,9 @@ impl Registry {
     /// Drops a host and everything indexed to it but its pool key, kept as a retired key: its
     /// backups stay readable (ADR 0035).
     pub fn forget(&mut self, id: &str) {
+        if crate::create_replay::host_unresolved(self, id) {
+            return;
+        }
         if let Some(h) = self.hosts.remove(id).filter(|h| !h.pool_key.is_empty()) {
             self.retired_keys.push(RetiredKey {
                 host: h.id,
@@ -477,7 +493,16 @@ impl Registry {
                 retired_at: Utc::now(),
             });
         }
+        let removed: Vec<_> = self
+            .namespaces
+            .iter()
+            .filter(|(_, h)| *h == id)
+            .map(|(n, _)| n.clone())
+            .collect();
         self.namespaces.retain(|_, h| h != id);
+        for namespace in removed {
+            self.note_namespace_create(&namespace);
+        }
         self.machines.retain(|_, h| h != id);
         self.endpoints.retain(|_, h| h != id);
         self.pinned_at
@@ -583,11 +608,12 @@ impl Registry {
         }
     }
     pub fn namespace_inflight(&self, namespace: &str) -> bool {
-        self.hosts.values().any(|host| {
-            host.holds
-                .iter()
-                .any(|hold| hold.namespace == namespace && hold.made.is_none())
-        })
+        crate::create_replay::namespace_unresolved(self, namespace)
+            || self.hosts.values().any(|host| {
+                host.holds
+                    .iter()
+                    .any(|hold| hold.namespace == namespace && hold.made.is_none())
+            })
     }
     /// The host made what hold `id` held, at `at`: the next report received after that counts
     /// it, and the hold goes then.
@@ -622,6 +648,7 @@ impl Registry {
     pub fn pin(&mut self, namespace: &str, host: &str) {
         if !self.namespaces.contains_key(namespace) {
             self.namespaces.insert(namespace.into(), host.into());
+            self.note_namespace_create(namespace);
             self.pinned_at.insert(namespace.into(), Utc::now());
         }
     }
@@ -629,7 +656,12 @@ impl Registry {
     /// Releases a namespace from its host: its next machine is placed afresh. The host's next
     /// heartbeat pins it again if the namespace still has machines there.
     pub fn unpin(&mut self, namespace: &str) {
-        self.namespaces.remove(namespace);
+        if crate::create_replay::namespace_unresolved(self, namespace) {
+            return;
+        }
+        if self.namespaces.remove(namespace).is_some() {
+            self.note_namespace_create(namespace);
+        }
         self.pinned_at.remove(namespace);
     }
 

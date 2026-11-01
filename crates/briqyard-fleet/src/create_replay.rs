@@ -8,6 +8,9 @@ pub(super) struct SandboxRoute {
     pub request_id: String,
     pub host: String,
     pub create_sha256: String,
+    /// Missing state is conservatively unresolved, including after upgrade/restart.
+    #[serde(default)]
+    pub accepted: bool,
 }
 fn key(namespace: &str, request_id: &str) -> String {
     serde_json::to_string(&(namespace, request_id)).expect("tuple serializes")
@@ -25,6 +28,7 @@ pub(super) fn request_route(
             .request_id
             .clone(),
         host,
+        accepted: false,
         create_sha256: format!(
             "{:x}",
             Sha256::digest(req.sandbox_create_bytes().map_err(|_| err(
@@ -74,6 +78,32 @@ pub(super) fn existing_route(
 pub(super) fn insert_route(reg: &mut Registry, route: SandboxRoute) {
     reg.sandbox_requests
         .insert(key(&route.namespace, &route.request_id), route);
+}
+/// Only validated acceptance settles dispatch. Absence cannot exclude a delayed POST.
+pub(super) fn accept_route(reg: &mut Registry, route: &SandboxRoute) {
+    if let Some(stored) = reg
+        .sandbox_requests
+        .get_mut(&key(&route.namespace, &route.request_id))
+    {
+        if stored.host == route.host && stored.create_sha256 == route.create_sha256 {
+            stored.accepted = true;
+        }
+    }
+}
+pub(super) fn namespace_unresolved(reg: &Registry, namespace: &str) -> bool {
+    reg.sandbox_requests
+        .values()
+        .any(|route| route.namespace == namespace && !route.accepted)
+}
+pub(super) fn host_unresolved(reg: &Registry, host: &str) -> bool {
+    reg.sandbox_requests
+        .values()
+        .any(|route| route.host == host && !route.accepted)
+}
+pub(super) fn relocation_unresolved(reg: &Registry, namespace: &str, host: Option<&str>) -> bool {
+    reg.sandbox_requests.values().any(|route| {
+        route.namespace == namespace && !route.accepted && Some(route.host.as_str()) != host
+    })
 }
 pub(super) async fn sandbox_lookup(
     st: &Arc<AppState>,
@@ -125,6 +155,8 @@ pub(super) async fn sandbox_lookup(
                 "sandbox receipt returned a different destination",
             ));
         }
+        accept_route(&mut st.reg.lock().unwrap(), &route);
+        st.save().await.map_err(registry_error)?;
         // Returning an old receipt never changes a current namespace placement.
         return Ok(Response::from_parts(
             parts,

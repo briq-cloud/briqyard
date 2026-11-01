@@ -43,9 +43,17 @@ lookup before source/capability/capacity/sibling gates; a changed digest conflic
 Lost responses, removed hosts, malformed replies and even an authoritative daemon miss
 never authorize dispatching that key again. This also fences crash-before-send intents.
 
-Routing intents and daemon request-index tombstones contain metadata, not network or
+Unresolved dispatch intents durably fence namespace deletion, unpinning, host removal
+and relocation, even after cancellation or transient hold release. Matching validated
+machine acceptance from POST or authenticated lookup settles that fence; timeout,
+transport failure or lookup absence does not. New creates on the existing pinned host
+remain available. No authoritative termination reconciliation API exists yet: an
+unresolved request without recoverable acceptance requires explicit operator
+reconciliation, never expiry or inferred termination.
+
+Settled routing intents and daemon request-index tombstones contain metadata, not network or
 resource holds. Normal empty-namespace/gateway/network deletion, unpin and host removal
-remain available. New request IDs can place elsewhere after cleanup; old lookup results
+remain available after settlement. New request IDs can place elsewhere after cleanup; old lookup results
 do not repin that namespace. Existing temporary holds fence deletion during create, and
 a namespace placement version prevents stale deletion responses from unpinning a later
 create. Earlier-format namespace-wide fences, if encountered, require reconciliation

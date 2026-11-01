@@ -296,6 +296,13 @@ async fn new_request_after_namespace_cleanup_may_use_another_host_without_replay
         crate::create_replay::request_route(&old_req, old_id.clone())
             .unwrap_or_else(|_| panic!("valid routing fixture")),
     );
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        let route = crate::create_replay::existing_route(&reg, &old_req)
+            .unwrap_or_else(|_| panic!("valid route"))
+            .unwrap();
+        crate::create_replay::accept_route(&mut reg, &route);
+    }
     f.st.reg.lock().unwrap().pin("destination", &old_id);
     let (status, _, _) = call(&f.st, "DELETE", "/v1/namespaces/destination", "api", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -362,6 +369,13 @@ async fn namespace_delete_waits_for_an_admitted_create_but_tombstones_hold_no_ne
         crate::create_replay::request_route(&request, host)
             .unwrap_or_else(|_| panic!("valid routing fixture")),
     );
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        let route = crate::create_replay::existing_route(&reg, &request)
+            .unwrap_or_else(|_| panic!("valid route"))
+            .unwrap();
+        crate::create_replay::accept_route(&mut reg, &route);
+    }
     let (status, _, _) = call(&f.st, "DELETE", "/v1/namespaces/destination", "api", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(!f
@@ -376,4 +390,206 @@ async fn namespace_delete_waits_for_an_admitted_create_but_tombstones_hold_no_ne
             .unwrap_or_else(|_| panic!("valid routing fixture"))
             .is_some()
     );
+}
+
+fn approve_sandbox_host(st: &Arc<AppState>, daemon: &Arc<daemon::Daemon>) {
+    let id = daemon.id.clone();
+    {
+        let mut reg = st.reg.lock().unwrap();
+        reg.machines.insert("m_operator".into(), id.clone());
+        let host = reg.hosts.get_mut(&id).unwrap();
+        host.named_memory_fork_v1 = true;
+        host.named_memory_profiles = vec!["sandbox-ready-v1".into()];
+    }
+    daemon.snapshots.lock().unwrap().push(api::Snapshot {
+        id: "s_one".into(),
+        machine_id: "m_operator".into(),
+        name: None,
+        created_at: Utc::now(),
+        disks: vec!["root".into(), "data".into()],
+        memory: true,
+        clone_profile: Some("sandbox-ready-v1".into()),
+        source_host: Some(id),
+        clone_size: Some(api::Size {
+            vcpus: 1,
+            memory_mb: 256,
+            cpu_millis: None,
+        }),
+        clone_ram_marker: None,
+        clone_generation: Some("g_one".into()),
+    });
+}
+
+#[tokio::test]
+async fn delayed_sandbox_dispatch_survives_cancellation_and_blocks_cleanup_until_acceptance() {
+    for cancel in [false, true] {
+        let (f, ds) = fleet_with_daemons(1).await;
+        approve_sandbox_host(&f.st, &ds[0].stub);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *ds[0].stub.create_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let state = f.st.clone();
+        let request = tokio::spawn(async move {
+            call(&state, "POST", "/v1/machines", "api", Some(sandbox_body())).await
+        });
+        entered.notified().await;
+        if cancel {
+            request.abort();
+        }
+        // Existing pinned same-host creates remain available while A is unresolved.
+        *ds[0].stub.create_gate.lock().unwrap() = None;
+        assert_eq!(
+            call(
+                &f.st,
+                "POST",
+                "/v1/machines",
+                "api",
+                Some(create_body("destination", "sibling", 256))
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        // The durable fence remains even if the handler/temporary hold disappeared.
+        let saved: Registry =
+            serde_json::from_slice(&std::fs::read(&f.st.state_path).unwrap()).unwrap();
+        assert!(crate::create_replay::namespace_unresolved(
+            &saved,
+            "destination"
+        ));
+        assert_eq!(
+            call(&f.st, "DELETE", "/v1/namespaces/destination", "api", None)
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        {
+            let mut reg = f.st.reg.lock().unwrap();
+            reg.unpin("destination");
+            reg.forget(&ds[0].stub.id);
+            assert_eq!(reg.namespaces["destination"], ds[0].stub.id);
+            assert!(reg.hosts.contains_key(&ds[0].stub.id));
+        }
+        // An authoritative miss while the POST is still delayed is not settlement.
+        *ds[0].stub.sandbox_lookup.lock().unwrap() = Some((
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"code":"sandbox_request_unknown","error":"unknown"}),
+        ));
+        assert_eq!(
+            call(&f.st, "POST", "/v1/machines", "api", Some(sandbox_body()))
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            call(&f.st, "DELETE", "/v1/namespaces/destination", "api", None)
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        let finished = Arc::new(tokio::sync::Notify::new());
+        *ds[0].stub.create_finished.lock().unwrap() = Some(finished.clone());
+        release.notify_one();
+        finished.notified().await;
+        if !cancel {
+            assert_eq!(request.await.unwrap().0, StatusCode::CREATED);
+        } else {
+            assert!(request.await.unwrap_err().is_cancelled());
+            // Matching authenticated acceptance reconciles the durable dispatch fence.
+            let machine = ds[0]
+                .stub
+                .machines
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|m| m.name == "sandbox")
+                .unwrap()
+                .clone();
+            *ds[0].stub.sandbox_lookup.lock().unwrap() =
+                Some((StatusCode::OK, serde_json::to_value(machine).unwrap()));
+            assert_eq!(
+                call(&f.st, "POST", "/v1/machines", "api", Some(sandbox_body()))
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        }
+        assert!(!crate::create_replay::namespace_unresolved(
+            &f.st.reg.lock().unwrap(),
+            "destination"
+        ));
+        assert_eq!(
+            call(&f.st, "DELETE", "/v1/namespaces/destination", "api", None)
+                .await
+                .0,
+            StatusCode::NO_CONTENT
+        );
+    }
+}
+
+#[tokio::test]
+async fn delayed_capacity_refusal_cannot_unpin_another_accepted_placement() {
+    for same_host in [false, true] {
+        let (f, ds) = fleet_with_daemons(2).await;
+        let old = ds[0].stub.id.clone();
+        let next = if same_host {
+            old.clone()
+        } else {
+            ds[1].stub.id.clone()
+        };
+        // Force A's first admission to old without treating it as an existing namespace.
+        f.st.reg
+            .lock()
+            .unwrap()
+            .hosts
+            .get_mut(&ds[1].stub.id)
+            .unwrap()
+            .state = "draining".into();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *ds[0].stub.create_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+        ds[0].stub.add("other", "full", daemon::DAEMON_MEMORY_MB);
+        let state = f.st.clone();
+        let a = tokio::spawn(async move {
+            call(
+                &state,
+                "POST",
+                "/v1/machines",
+                "api",
+                Some(create_body("destination", "a", 256)),
+            )
+            .await
+        });
+        entered.notified().await;
+        {
+            let mut reg = f.st.reg.lock().unwrap();
+            reg.unpin("destination");
+            reg.pin("destination", &next);
+        }
+        if same_host {
+            *ds[0].stub.create_gate.lock().unwrap() = None;
+            ds[0].stub.machines.lock().unwrap().clear();
+        } else {
+            f.st.reg.lock().unwrap().hosts.get_mut(&next).unwrap().state = "ready".into();
+        }
+        assert_eq!(
+            call(
+                &f.st,
+                "POST",
+                "/v1/machines",
+                "api",
+                Some(create_body("destination", "b", 256))
+            )
+            .await
+            .0,
+            StatusCode::CREATED
+        );
+        if same_host {
+            ds[0].stub.add("other", "full", daemon::DAEMON_MEMORY_MB);
+        }
+        release.notify_one();
+        let result = a.await.unwrap();
+        assert_eq!(json(&result.2)["code"], "capacity");
+        assert_eq!(f.st.reg.lock().unwrap().namespaces["destination"], next);
+    }
 }

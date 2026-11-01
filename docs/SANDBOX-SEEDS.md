@@ -20,8 +20,12 @@ preserve the entire create body. A different body conflicts, and destroy does no
 consumption. A lost response or interrupted bind never authorizes a second slot or
 cold fallback. The fleet stores routing intent before dispatch and never sends that
 request ID again, including when lookup cannot confirm acceptance. Keep the same
-machine/reservation for reconciliation. Empty namespace/network cleanup and host
-removal remain available; durable request routing/index tombstones hold no live
+machine/reservation for reconciliation. An unresolved dispatch fences namespace
+cleanup, unpin, host removal and relocation durably. Matching validated acceptance
+settles it; absence or timeout cannot. Without recoverable acceptance, explicit
+operator reconciliation is required (no termination reconciliation API is provided).
+Same-host creates on the existing pin remain available. After settlement, empty
+namespace/network cleanup and host removal remain available; durable request routing/index tombstones hold no live
 resources. A new request ID can place elsewhere after cleanup, while old IDs remain
 fenced. Startup/readiness
 probes retain normal semantics. Existing configured warm pools are not rebound.

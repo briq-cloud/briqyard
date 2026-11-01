@@ -141,7 +141,7 @@ pub(super) async fn create_machine(
     };
     enum Placement {
         Replay(crate::create_replay::SandboxRoute),
-        Admitted(Box<HostRec>, bool, u64),
+        Admitted(Box<HostRec>, bool, u64, u64),
     }
     let placement_result = {
         let mut reg = st.reg.lock().unwrap();
@@ -153,6 +153,17 @@ pub(super) async fn create_machine(
         if let Some(route) = concurrent {
             Placement::Replay(route)
         } else {
+            if crate::create_replay::relocation_unresolved(
+                &reg,
+                &req.namespace,
+                reg.namespaces.get(&req.namespace).map(String::as_str),
+            ) {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "conflict",
+                    "namespace has an unresolved sandbox dispatch",
+                ));
+            }
             let first = !reg.namespaces.contains_key(&req.namespace);
             let source = req
                 .fork
@@ -255,14 +266,19 @@ pub(super) async fn create_machine(
             }
             let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb, ask.cpu_millis);
             reg.bind_hold_namespace(&host.id, id, &req.namespace);
-            Placement::Admitted(Box::new(host), first, id)
+            Placement::Admitted(
+                Box::new(host),
+                first,
+                id,
+                reg.namespace_version(&req.namespace),
+            )
         }
     };
-    let (host, first, hold) = match placement_result {
+    let (host, first, hold, version) = match placement_result {
         Placement::Replay(route) => {
             return crate::create_replay::sandbox_lookup(&st, &req, &headers, route).await
         }
-        Placement::Admitted(host, first, hold) => (host, first, hold),
+        Placement::Admitted(host, first, hold, version) => (host, first, hold, version),
     };
     let hold = Held {
         st: &st,
@@ -285,6 +301,12 @@ pub(super) async fn create_machine(
     if parts.status.is_success() {
         hold.made();
         if let Ok(m) = serde_json::from_slice::<api::Machine>(&data) {
+            if m.namespace == req.namespace && api::valid_id(&m.id) && req.sandbox_seed.is_some() {
+                crate::create_replay::accept_route(
+                    &mut st.reg.lock().unwrap(),
+                    &crate::create_replay::request_route(&req, host.id.clone())?,
+                );
+            }
             st.reg
                 .lock()
                 .unwrap()
@@ -299,7 +321,7 @@ pub(super) async fn create_machine(
         ));
     }
     drop(hold);
-    first_refused(&st, &req.namespace, first, &data).await;
+    first_refused(&st, &req.namespace, first, &host.id, version, &data).await;
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
@@ -515,9 +537,25 @@ pub(super) fn disk_need(volume_gb: Option<u32>) -> u64 {
 
 /// A host with no room for a namespace's first machine (or gateway): the pin the request made
 /// goes, so a retry is placed afresh. A later one keeps it: the namespace's network is there.
-pub(super) async fn first_refused(st: &AppState, namespace: &str, first: bool, answer: &[u8]) {
+pub(super) async fn first_refused(
+    st: &AppState,
+    namespace: &str,
+    first: bool,
+    host: &str,
+    version: u64,
+    answer: &[u8],
+) {
     if first && error_code(answer) == "capacity" {
-        st.reg.lock().unwrap().unpin(namespace);
+        {
+            let mut reg = st.reg.lock().unwrap();
+            if reg.namespaces.get(namespace).is_some_and(|id| id == host)
+                && reg.namespace_version(namespace) == version
+                && version != u64::MAX
+                && !reg.namespace_inflight(namespace)
+            {
+                reg.unpin(namespace);
+            }
+        }
         st.save_after_host().await;
     }
 }

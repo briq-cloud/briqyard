@@ -29,6 +29,8 @@ pub(super) struct Daemon {
     pub(super) quotas: Mutex<Vec<(String, api::Quota)>>,
     /// Run by a create before it answers: a test's look at the fleet mid-forward.
     pub(super) on_delete_namespace: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    pub(super) create_finished: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    pub(super) create_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     pub(super) on_create: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(super) creates: Mutex<Vec<api::CreateMachineRequest>>,
     pub(super) egress_siblings: std::sync::atomic::AtomicBool,
@@ -155,6 +157,8 @@ pub(super) async fn start_daemon_on(
         conditions: Mutex::new(vec![]),
         quotas: Mutex::new(vec![]),
         on_delete_namespace: Mutex::new(None),
+        create_finished: Mutex::new(None),
+        create_gate: Mutex::new(None),
         on_create: Mutex::new(None),
         creates: Mutex::new(vec![]),
         egress_siblings: std::sync::atomic::AtomicBool::new(true),
@@ -372,6 +376,15 @@ pub(super) async fn start_daemon_on(
     /// Like the daemon: a bad name is refused, and a machine that does not fit in what the
     /// host has left.
     async fn create(State(d): D, Json(req): Json<api::CreateMachineRequest>) -> Response {
+        // Model a dispatched daemon operation that can outlive the fleet HTTP handler.
+        tokio::spawn(perform_create(d, req)).await.unwrap()
+    }
+    async fn perform_create(d: Arc<Daemon>, req: api::CreateMachineRequest) -> Response {
+        let gate = d.create_gate.lock().unwrap().clone();
+        if let Some((entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
         d.creates.lock().unwrap().push(req.clone());
         if !api::valid_name(&req.name) {
             return err(StatusCode::BAD_REQUEST, "invalid", "name").into_response();
@@ -388,6 +401,9 @@ pub(super) async fn start_daemon_on(
             f();
         }
         let m = d.add(&req.namespace, &req.name, req.size.memory_mb);
+        if let Some(done) = d.create_finished.lock().unwrap().as_ref() {
+            done.notify_one();
+        }
         (StatusCode::CREATED, Json(m)).into_response()
     }
     async fn get_machine(State(d): D, Path(id): Path<String>) -> Response {

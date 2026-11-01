@@ -202,8 +202,19 @@ pub(super) async fn put_on_namespace(
         disk_mb: need_disk_mb,
         what,
     };
-    let (host, first, hold) = {
+    let (host, first, hold, version) = {
         let mut reg = st.reg.lock().unwrap();
+        if crate::create_replay::relocation_unresolved(
+            &reg,
+            id,
+            reg.namespaces.get(id).map(String::as_str),
+        ) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "conflict",
+                "namespace has an unresolved sandbox dispatch",
+            ));
+        }
         let first = !reg.namespaces.contains_key(id);
         let bound = reg.namespaces.get(id).cloned();
         refuse_outside(&reg, bound.as_deref(), id, region)?;
@@ -222,7 +233,7 @@ pub(super) async fn put_on_namespace(
         let hold = reg.hold(&host.id, need_mb, need_disk_mb, need_cpu_millis);
         reg.bind_hold_namespace(&host.id, hold, id);
         let id = hold;
-        (host, first, id)
+        (host, first, id, reg.namespace_version(ask.namespace))
     };
     let hold = Held {
         st,
@@ -241,7 +252,7 @@ pub(super) async fn put_on_namespace(
         ));
     }
     drop(hold);
-    first_refused(st, id, first, &data).await;
+    first_refused(st, id, first, &host.id, version, &data).await;
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
@@ -315,7 +326,17 @@ pub(super) async fn unpin_namespace(
     State(st): S,
     Path(id): Path<String>,
 ) -> Result<Response, Refusal> {
-    st.reg.lock().unwrap().unpin(&id);
+    {
+        let mut reg = st.reg.lock().unwrap();
+        if crate::create_replay::namespace_unresolved(&reg, &id) {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "conflict",
+                "namespace has an unresolved sandbox dispatch",
+            ));
+        }
+        reg.unpin(&id);
+    }
     st.save().await.map_err(registry_error)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
