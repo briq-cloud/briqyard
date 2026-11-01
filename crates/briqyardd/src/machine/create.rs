@@ -600,6 +600,7 @@ impl Manager {
             return Err(MError::Quota(x.to_string()));
         }
         if rec.start {
+            self.admit_warm_policy(&machines, &rec)?;
             let (used, _) = committed(&machines);
             admit(
                 used.memory_mb,

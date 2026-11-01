@@ -321,8 +321,56 @@
       required: [source_machine, snapshot, desired]
       properties:
         source_machine: { type: string }
-        snapshot: { type: string, description: "Resolved once to an immutable snapshot ID and generation" }
-        desired: { type: integer, minimum: 0, maximum: 32 }
+        snapshot: { type: string, description: "Resolved once to an immutable configured snapshot and generation" }
+        desired: { type: integer, minimum: 0, maximum: 65535 }
+    WarmDesiredRequest:
+      type: object
+      additionalProperties: false
+      required: [desired]
+      properties:
+        desired: { type: integer, minimum: 0, maximum: 65535, description: "Upper target, also bounded by the configured entry ceiling" }
+    WarmResources:
+      type: object
+      required: [memory_mb, cpu_millis, root_disk_gb]
+      properties:
+        memory_mb: { type: integer, minimum: 0 }
+        cpu_millis: { type: integer, minimum: 0 }
+        root_disk_gb: { type: integer, minimum: 0, description: "Full logical roots, without a copy-on-write discount" }
+    WarmCatalogEntry:
+      type: object
+      required: [id, namespace, type, source_machine, snapshot, generation, size, max_ready]
+      properties:
+        id: { type: string }
+        namespace: { type: string }
+        type: { type: string, description: "Operator label; does not override the exact template recipe" }
+        source_machine: { type: string }
+        snapshot: { type: string }
+        generation: { type: string }
+        size: { $ref: "#/components/schemas/Size" }
+        max_ready: { type: integer, minimum: 1, maximum: 65535, description: "Aggregate creating and unclaimed slots across pools for this entry" }
+    WarmBlocked:
+      type: object
+      required: [reason, message]
+      properties:
+        reason: { type: string, enum: [catalog, quota, budget, headroom, pressure, capacity, cleanup] }
+        message: { type: string }
+    WarmCatalogStatus:
+      type: object
+      required: [entries, budget, charged, headroom, min_mem_available_mb, max_fills, fills, draining, blocked, pools]
+      properties:
+        entries: { type: array, items: { $ref: "#/components/schemas/WarmCatalogEntry" } }
+        budget: { $ref: "#/components/schemas/WarmResources" }
+        charged: { $ref: "#/components/schemas/WarmResources" }
+        headroom: { allOf: [{ $ref: "#/components/schemas/WarmResources" }], description: "Admission headroom; root_disk_gb is the pool free-space floor" }
+        min_mem_available_mb: { type: integer }
+        max_fills: { type: integer }
+        fills: { type: integer }
+        draining: { type: integer }
+        memory_available_mb: { type: integer, nullable: true }
+        disk_free_bytes: { type: integer, nullable: true }
+        measurement_age_ms: { type: integer, nullable: true }
+        blocked: { type: array, items: { $ref: "#/components/schemas/WarmBlocked" } }
+        pools: { type: array, items: { $ref: "#/components/schemas/WarmPool" } }
     ClaimWarmPoolRequest:
       type: object
       additionalProperties: false

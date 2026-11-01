@@ -3,6 +3,58 @@
 What an operator needs: how to install a host, what the configuration means, where things
 live, how to upgrade, what to watch, and what to do when something is off.
 
+## Warm catalog
+
+Warm pools are disabled by default. Configure qualified immutable templates and explicit
+host ceilings before requesting slots. The type is an operator label; the size must match
+the template recipe exactly. A different size needs its own compatible template.
+
+```yaml
+templates:
+  enabled: true
+  warm_pools: true
+  init_ready_init_sha256: "<qualified-init-sha256>"
+  warm_policy:
+    budget: {memory_mb: 8192, cpu_millis: 4000, root_disk_gb: 64}
+    headroom: {memory_mb: 4096, cpu_millis: 2000, disk_free_gb: 32}
+    min_mem_available_mb: 4096
+    max_fills: 1
+    catalog:
+      - id: shell-small
+        namespace: team
+        type: shell
+        source_machine: m_source
+        snapshot: s_qualified
+        generation: g_qualified
+        size: {memory_mb: 1024, vcpus: 1, cpu_millis: 1000}
+        max_ready: 4
+```
+
+Apply YAML through the usual validated daemon handover. Bootstrap preserves operator
+configuration. Invalid configuration prevents handover; an API request cannot raise
+budgets or catalog ceilings. Budget plus RAM/CPU headroom must fit resolved host capacity.
+
+```sh
+briqyard warm-pool catalog team
+briqyard warm-pool desired team shell-small --desired 2
+```
+
+The corresponding API is `GET /v1/namespaces/team/warm-catalog` and
+`PUT /v1/namespaces/team/warm-catalog/shell-small` with `{"desired":2}`. Read the catalog
+for configured ceilings, pool desired/creating/ready/claimed counts, aggregate full charges,
+measurement age, draining count and blocked reasons. Desired is an upper target.
+
+Creating, paused and failed-but-unreleased slots reserve full recipe RAM, CPU millis and
+logical root disk. Copy-on-write sharing does not reduce these charges. Refill requires a
+fresh `MemAvailable` and pool-space sample, preserves absolute and percentage disk floors,
+and respects namespace quotas and aggregate concurrent-fill/entry limits.
+
+Headroom applies when warm slots are admitted. Ordinary workloads may consume it later:
+refill then stops and unused slots drain, while claimed and ordinary guests continue.
+Continuous free headroom is not guaranteed when ordinary workloads alone consume it.
+Lowered limits and removed entries also drain unused slots through normal cleanup. Charges
+remain until cleanup completes. Catalog entries never enable cross-namespace reuse.
+
 ## Install
 
 A Linux server with KVM (`/dev/kvm`), Ubuntu 26.04 (every suite runs there; 24.04 is untested).

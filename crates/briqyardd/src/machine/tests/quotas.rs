@@ -3,6 +3,25 @@
 use super::*;
 
 #[test]
+fn quota_addition_overflow_refuses_even_at_the_largest_limit() {
+    let quota = api::Quota {
+        memory_mb: Some(u32::MAX),
+        ..Default::default()
+    };
+    let used = api::QuotaUse {
+        memory_mb: u32::MAX,
+        ..Default::default()
+    };
+    let need = api::QuotaUse {
+        memory_mb: 1,
+        ..Default::default()
+    };
+    assert!(over_quota("t1", &quota, &used, &need).is_some());
+    assert!(admit(u32::MAX, u32::MAX, 1).is_err());
+    assert!(admit_cpu(u32::MAX, u32::MAX, 1).is_err());
+}
+
+#[test]
 fn a_quota_refuses_the_first_limit_a_request_passes() {
     let q = api::Quota {
         machines: Some(2),

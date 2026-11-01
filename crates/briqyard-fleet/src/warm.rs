@@ -2,6 +2,57 @@
 //! reservations, so they must not create a second fleet hold.
 use super::*;
 
+pub(super) async fn warm_catalog(
+    State(st): S,
+    Path(namespace): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Refusal> {
+    let host = host(&st, &namespace, false)?;
+    Ok(forward(
+        &st,
+        &host,
+        Method::GET,
+        &format!("/v1/namespaces/{namespace}/warm-catalog"),
+        &headers,
+        Bytes::new(),
+    )
+    .await)
+}
+
+pub(super) async fn put_warm_catalog(
+    State(st): S,
+    Path((namespace, entry)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Refusal> {
+    let _: api::WarmDesiredRequest = serde_json::from_slice(&body)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", e.to_string()))?;
+    if !api::valid_name(&entry) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            "invalid catalog entry",
+        ));
+    }
+    let host = host(&st, &namespace, true)?;
+    if host.state != "ready" {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "host_unavailable",
+            "host is not accepting pool changes",
+        ));
+    }
+    Ok(forward(
+        &st,
+        &host,
+        Method::PUT,
+        &format!("/v1/namespaces/{namespace}/warm-catalog/{entry}"),
+        &headers,
+        body,
+    )
+    .await)
+}
+
 fn host(st: &AppState, namespace: &str, require: bool) -> Result<HostRec, Refusal> {
     if !api::valid_id(namespace) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid", "invalid namespace"));

@@ -471,6 +471,11 @@ fn namespace_routes(prefix: &str) -> Router<Arc<AppState>> {
             get(get_quota).put(set_quota),
         )
         .route(&format!("{prefix}/:id/warm-pools"), get(warm_pools))
+        .route(&format!("{prefix}/:id/warm-catalog"), get(warm_catalog))
+        .route(
+            &format!("{prefix}/:id/warm-catalog/:entry"),
+            put(put_warm_catalog),
+        )
         .route(
             &format!("{prefix}/:id/warm-pools/:name"),
             put(put_warm_pool).delete(delete_warm_pool),

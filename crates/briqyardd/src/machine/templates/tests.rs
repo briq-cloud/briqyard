@@ -188,6 +188,7 @@ async fn reviewed_builder_with_warm(warm: bool) -> (Harness, api::Machine) {
         cfg.jailer = "/mock/jailer".into();
         cfg.templates.enabled = true;
         cfg.templates.warm_pools = warm;
+        cfg.capacity.vcpus = 8;
         cfg.templates.init_ready_init_sha256 = hex::encode(sha2::Sha256::digest(b"init"));
     })
     .await;

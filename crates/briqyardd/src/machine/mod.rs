@@ -54,6 +54,7 @@ mod warm;
 use backups::{Backups, Schedule, Turn};
 use create::*;
 use endpoints::*;
+pub(crate) use observe::host_capacity;
 pub use observe::Until;
 use observe::*;
 use quotas::*;
@@ -407,7 +408,9 @@ fn holds_memory(state: &str) -> bool {
 /// start it (ADR 0048: room is taken when the machine is recorded, not when it boots).
 fn commits_memory(r: &Record) -> bool {
     holds_memory(&r.state)
-        || (r.warm_slot.is_some() && !matches!(r.state.as_str(), state::STOPPED | state::CREATED))
+        || r.warm_slot
+            .as_ref()
+            .is_some_and(|slot| slot.claimed.is_none())
         || (r.state == state::CREATING && r.start)
         || r.clone_origin.as_ref().is_some_and(|origin| {
             r.state == state::DESTROYING
@@ -768,6 +771,11 @@ struct Inner {
     stats: Stats,
     warm_lock: tokio::sync::Mutex<()>,
     warm_names: Mutex<HashMap<(String, String), String>>,
+    // Validated operator configuration; requests may change only pool desired counts.
+    warm_policy: Mutex<crate::config::WarmPolicy>,
+    warm_sample: Mutex<Option<warm::Sample>>,
+    #[cfg(test)]
+    warm_probe_override: Mutex<Option<Option<warm::Sample>>>,
     verified_templates: Mutex<std::collections::HashSet<(String, String, String)>>,
     cfg: Config,
     store: Store,

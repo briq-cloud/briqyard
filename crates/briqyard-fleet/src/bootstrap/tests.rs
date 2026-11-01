@@ -1,5 +1,36 @@
 use super::*;
 
+#[test]
+fn bootstrap_config_creation_preserves_existing_operator_warm_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.yaml");
+    let original =
+        "templates:\n  warm_pools: true\n  warm_policy:\n    max_fills: 1\n    catalog: []\n";
+    std::fs::write(&config, original).unwrap();
+    let block = SCRIPT
+        .split("echo \"== config\"")
+        .nth(1)
+        .unwrap()
+        .split("echo \"== api certificate\"")
+        .next()
+        .unwrap()
+        .replace("/etc/briqyard", dir.path().to_str().unwrap());
+    assert!(std::process::Command::new("bash")
+        .args(["-c", &block])
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+    assert!(
+        SCRIPT
+            .find("if [ -f /etc/briqyard/config.yaml ] && !")
+            .unwrap()
+            < SCRIPT
+                .find("for b in briqyardd briqyard-init briqyard briqyard-fleet; do put")
+                .unwrap()
+    );
+}
+
 const ED25519: &str =
     "10.0.0.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF+69ms8S2QZ+nIzDuFQDaK1FztcJQuI5HGeuZIneF4y\n";
 

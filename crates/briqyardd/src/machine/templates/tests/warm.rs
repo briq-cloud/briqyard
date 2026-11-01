@@ -13,6 +13,48 @@ async fn pool(desired: u16) -> (Harness, api::Machine) {
         )
         .await
         .unwrap();
+    let artifact =
+        h.m.entry(&builder.id)
+            .unwrap()
+            .snapshot()
+            .snapshots
+            .into_iter()
+            .find(|s| s.id == snapshot.id)
+            .unwrap()
+            .clone_artifact
+            .unwrap();
+    *h.m.inner.warm_policy.lock().unwrap() = crate::config::WarmPolicy {
+        budget: api::WarmResources {
+            memory_mb: 2048,
+            cpu_millis: 6000,
+            root_disk_gb: 64,
+        },
+        headroom: crate::config::WarmHeadroom {
+            memory_mb: 512,
+            cpu_millis: 1000,
+            disk_free_gb: 16,
+        },
+        min_mem_available_mb: 512,
+        max_fills: 2,
+        catalog: vec![api::WarmCatalogEntry {
+            id: "shell-small".into(),
+            namespace: "t1".into(),
+            kind: "shell".into(),
+            source_machine: builder.id.clone(),
+            snapshot: snapshot.id.clone(),
+            generation: artifact.generation,
+            size: artifact.recipe.size,
+            max_ready: 32,
+        }],
+    };
+    *h.m.inner.warm_probe_override.lock().unwrap() = Some(Some(crate::machine::warm::Sample {
+        at: std::time::Instant::now(),
+        memory_mb: 32768,
+        pool: crate::zfs::Pool {
+            used: 1 << 30,
+            free: 1024 << 30,
+        },
+    }));
     let view =
         h.m.put_warm_pool(
             "t1",
@@ -28,6 +70,8 @@ async fn pool(desired: u16) -> (Harness, api::Machine) {
     assert_eq!(view.profile, guest::INIT_READY_V1);
     (h, builder)
 }
+
+mod policy;
 
 async fn fill(h: &Harness) -> Arc<Entry> {
     h.m.warm_step().await;

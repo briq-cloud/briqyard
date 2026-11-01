@@ -1,6 +1,46 @@
 use super::*;
 
 #[tokio::test]
+async fn catalog_routes_keep_namespace_host_and_refuse_extra_request_fields_before_forwarding() {
+    let (f, ds) = fleet_with_daemons(2).await;
+    {
+        let mut reg = f.st.reg.lock().unwrap();
+        reg.pin("team", "d1");
+        reg.hosts.get_mut("d1").unwrap().warm_pool_profiles = vec!["init-ready-v1".into()];
+    }
+    for daemon in &ds {
+        daemon.stub.calls.lock().unwrap().clear();
+    }
+    let path = "/v1/namespaces/team/warm-catalog";
+    let _ = call(&f.st, "GET", path, "api", None).await;
+    assert_eq!(ds[0].stub.calls(), [format!("GET {path}")]);
+    assert!(ds[1].stub.calls().is_empty());
+    let (status, _, _) = call(
+        &f.st,
+        "PUT",
+        &format!("{path}/shell-small"),
+        "api",
+        Some(serde_json::json!({"desired":1,"source_machine":"m_injected"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(ds[0].stub.calls().len(), 1);
+    let _ = call(
+        &f.st,
+        "PUT",
+        &format!("{path}/shell-small"),
+        "api",
+        Some(serde_json::json!({"desired":1})),
+    )
+    .await;
+    assert_eq!(
+        ds[0].stub.calls().last().unwrap(),
+        &format!("PUT {path}/shell-small")
+    );
+    assert!(ds[1].stub.calls().is_empty());
+}
+
+#[tokio::test]
 async fn warm_claim_capability_is_required_and_legacy_poll_revokes_it() {
     let (f, ds) = fleet_with_daemons(1).await;
     f.st.reg.lock().unwrap().pin("team", "d1");
