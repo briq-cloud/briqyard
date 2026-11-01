@@ -59,6 +59,8 @@ impl Store {
             "sandbox-requests",
             "launch-holds",
             "launch-transitions",
+            "unbound-requests",
+            "unbound-assignments",
         ] {
             private_dir(&root.join(d))?;
         }
@@ -200,6 +202,8 @@ mod tests {
             "sandbox-requests",
             "launch-holds",
             "launch-transitions",
+            "unbound-requests",
+            "unbound-assignments",
         ] {
             assert!(dir.path().join("state").join(d).is_dir(), "{d}");
         }
@@ -315,6 +319,8 @@ mod tests {
             "sandbox-requests",
             "launch-holds",
             "launch-transitions",
+            "unbound-requests",
+            "unbound-assignments",
         ] {
             assert_eq!(mode(&state.join(d)), 0o700, "{d}");
         }

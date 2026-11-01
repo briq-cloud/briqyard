@@ -47,6 +47,9 @@ fn resolve(
     request_id: &str,
     digest: &str,
 ) -> Result<Option<Arc<Entry>>, MError> {
+    if let Some(entry) = manager.resolve_destination_assignment(namespace, request_id, digest)? {
+        return Ok(Some(entry));
+    }
     let saved = manager
         .inner
         .store
@@ -109,6 +112,29 @@ impl Manager {
         )?
         .map(|entry| self.view(&entry)))
     }
+    pub(in crate::machine) fn check_sandbox_request_index(
+        &self,
+        namespace: &str,
+        request_id: &str,
+        digest: &str,
+        machine: &str,
+    ) -> Result<()> {
+        if let Some(index) = self
+            .inner
+            .store
+            .get::<Index>("sandbox-requests", &key(namespace, request_id))?
+        {
+            anyhow::ensure!(
+                index.namespace == namespace
+                    && index.request_id == request_id
+                    && index.create_sha256 == digest
+                    && index.machine == machine,
+                "sandbox request index conflicts with destination assignment"
+            );
+        }
+        Ok(())
+    }
+
     pub(in crate::machine) fn freeze_sandbox_assignment(&self, e: &Entry) -> Result<()> {
         let r = e.snapshot();
         if r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some()) {

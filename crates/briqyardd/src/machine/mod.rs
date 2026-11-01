@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
 
+mod assignments;
 mod backups;
 mod create;
 mod endpoints;
@@ -777,6 +778,7 @@ struct Inner {
     warm_lock: tokio::sync::Mutex<()>,
     sandbox_create_lock: tokio::sync::Mutex<()>,
     warm_names: Mutex<HashMap<(String, String), String>>,
+    assignments: Mutex<assignments::State>,
     // Validated operator configuration; requests may change only pool desired counts.
     warm_policy: Mutex<crate::config::WarmPolicy>,
     warm_sample: Mutex<Option<warm::Sample>>,

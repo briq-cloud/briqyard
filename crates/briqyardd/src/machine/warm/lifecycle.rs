@@ -73,7 +73,10 @@ impl Manager {
             for e in entries {
                 let r = e.snapshot();
                 // A durable claim intent owns its slot even before the record rename.
-                if pool.claims.values().any(|c| c.machine == r.id) {
+                if pool.claims.values().any(|c| c.machine == r.id)
+                    || (r.launch_identity.is_some()
+                        && self.destination_assignment_owns(&r.id).unwrap_or(true))
+                {
                     continue;
                 }
                 if current.is_err()

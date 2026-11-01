@@ -19,7 +19,7 @@ struct Transition {
 
 // Error/exit/accounting observations may complete after a failed persistence step.
 // Ownership, workload, boot evidence and complete binding remain in the fingerprint.
-fn record_fingerprint(record: &Record) -> Result<String> {
+pub(in crate::machine) fn record_fingerprint(record: &Record) -> Result<String> {
     let mut value = serde_json::to_value(record)?;
     let object = value
         .as_object_mut()

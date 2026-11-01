@@ -4,7 +4,9 @@ use super::*;
 
 mod provenance;
 mod transitions;
+pub(in crate::machine) use provenance::check_pair as check_launch_pair;
 use provenance::TemplateLaunch;
+pub(in crate::machine) use transitions::record_fingerprint;
 
 const HOLDS: &str = "launch-holds";
 
@@ -280,6 +282,36 @@ impl Manager {
             );
         }
         Ok(admission)
+    }
+
+    pub(in crate::machine) fn check_durable_launch_hold(
+        &self,
+        machine: &str,
+        identity: &LaunchIdentity,
+    ) -> Result<()> {
+        let hold = self
+            .inner
+            .store
+            .get::<Hold>(HOLDS, machine)?
+            .context("source launch hold missing")?;
+        anyhow::ensure!(
+            hold.machine == machine && &hold.identity == identity,
+            "source launch hold identity conflict"
+        );
+        identity.check(&self.inner.cfg)
+    }
+
+    pub(in crate::machine) fn durable_launch_addresses(&self) -> Result<Vec<(u32, u8)>> {
+        let mut addresses = std::collections::HashSet::new();
+        for hold in self.inner.store.list::<Hold>(HOLDS)? {
+            hold.identity.check(&self.inner.cfg)?;
+            anyhow::ensure!(
+                api::valid_id(&hold.machine)
+                    && addresses.insert((hold.identity.subnet_index, hold.identity.host_num)),
+                "duplicate or invalid durable source allocation"
+            );
+        }
+        Ok(addresses.into_iter().collect())
     }
 
     pub(super) fn release_launch_hold(&self, id: &str) -> Result<()> {

@@ -66,3 +66,23 @@ remain fingerprinted; terminal exit/error/accounting observations survive reconc
 Contradictory reader-first states, changed controls, missing records/holds/readers or unknown
 journal schemas stop reconciliation with reservations retained. This is stage-write evidence,
 not a destination assignment journal or permission to infer a missing tenant assignment.
+
+A separate private `unbound-assignments` journal records the complete destination request,
+source and target records/readers. `unbound-requests` retains only the permanent request
+namespace, request ID, normalized create digest and slot identity after completion or
+destruction. Preparation journals grant no such authority. Existing sandbox replay checks
+this authority first: pending, missing, conflicting or uncertain assignment state is never
+a warm miss. Pending source slots are protected from drain and destruction.
+
+The model plans only an owned `UnboundPaused` process, preserves its machine/backing and
+launch identity, freezes fresh destination identity/configuration, and validates destination
+name, address and complete root/data/CPU/RAM quota independently of physical availability.
+Startup repairs ownership and reader metadata before stage journals and exact provenance
+checks. Interrupted index, record and reader writes retain the same consumed request/slot.
+Missing records/readers and PID absence without exit proof retain reservations and backing.
+
+This writer has no public call path. Live pending destination name/address/quota reservation,
+ordinary-create lock ordering, catalog/drain race checks, assignment-aware live adoption,
+full bind/ACK/network/main/exec integration and complete managed rollback protection remain
+required before reachability. A stored request index or a fresh physical sample is not proof
+that concurrent tenant admission or guest activation is safe.

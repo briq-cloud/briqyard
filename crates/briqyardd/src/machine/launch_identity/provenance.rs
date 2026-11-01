@@ -90,7 +90,10 @@ impl Manager {
     }
 }
 
-pub(super) fn check_pair(record: &Record, reader: Option<&templates::CloneReader>) -> Result<()> {
+pub(in crate::machine) fn check_pair(
+    record: &Record,
+    reader: Option<&templates::CloneReader>,
+) -> Result<()> {
     let Some(identity) = &record.launch_identity else {
         return Ok(());
     };

@@ -532,6 +532,11 @@ impl Manager {
     ) -> Result<Vec<String>, MError> {
         let e = e.clone();
         self.check_version(&e, at)?;
+        if e.snapshot().launch_identity.is_some() && self.destination_assignment_pending(id)? {
+            return Err(MError::Conflict(
+                "destination assignment must settle before destruction".into(),
+            ));
+        }
         self.validate_launch_record(&e.snapshot())?;
         self.check_clone_readers(id, None)?;
         // No event: the destroy is one step, and `destroyed` ends it.

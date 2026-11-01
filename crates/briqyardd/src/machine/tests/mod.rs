@@ -217,6 +217,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             warm_lock: tokio::sync::Mutex::new(()),
             sandbox_create_lock: tokio::sync::Mutex::new(()),
             warm_names: Mutex::new(HashMap::new()),
+            assignments: Mutex::new(assignments::State::default()),
             warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
             warm_sample: Mutex::new(None),
             warm_pool_cache: Mutex::new(None),

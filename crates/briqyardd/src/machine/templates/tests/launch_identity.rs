@@ -157,6 +157,21 @@ async fn settled_paused_exit_can_finish_cleanup_but_unknown_exit_cannot() {
     h.m.validate_launch_record(&saved).unwrap();
 }
 
+pub(in crate::machine) async fn prepared() -> (Harness, Arc<Entry>) {
+    let (h, entry) = reserved().await;
+    h.m.inner
+        .machines
+        .lock()
+        .unwrap()
+        .insert(entry.snapshot().id, entry.clone());
+    h.disks(&entry).await;
+    {
+        let _turn = entry.lock.lock().await;
+        h.m.start_entry(&entry, true).await.unwrap();
+    }
+    (h, entry)
+}
+
 #[tokio::test]
 async fn internal_unbound_preparation_stays_at_builder_without_bind_network_or_activation() {
     let (h, entry) = reserved().await;
