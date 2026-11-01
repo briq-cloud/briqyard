@@ -45,7 +45,7 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 
 impl Store {
     pub fn open(root: &Path) -> Result<Self> {
-        let assignment_required = crate::assignment_compatibility::required(root)?;
+        let assignment_required = crate::assignment_compatibility::requirement(root)?;
         private_dir(root)?;
         for d in [
             "machines",
@@ -62,12 +62,15 @@ impl Store {
             "launch-transitions",
             "unbound-requests",
             "unbound-assignments",
+            "assigned-run-intents",
+            "assigned-runs",
+            "assigned-run-readers",
         ] {
             private_dir(&root.join(d))?;
         }
         std::fs::File::open(root)?.sync_all()?;
-        if assignment_required {
-            crate::assignment_compatibility::ensure_floor(root)?;
+        if assignment_required != crate::assignment_compatibility::Requirement::None {
+            crate::assignment_compatibility::ensure_floor_at(root, assignment_required)?;
         }
         Ok(Self {
             root: root.to_path_buf(),
@@ -96,7 +99,14 @@ impl Store {
         );
         let path = self.path(kind, key)?;
         let bytes = serde_json::to_vec_pretty(v)?;
-        if matches!(kind, "unbound-assignments" | "unbound-requests")
+        if crate::assignment_compatibility::RUN_COLLECTIONS.contains(&kind)
+            || (kind == "machines"
+                && serde_json::from_slice::<serde_json::Value>(&bytes)?
+                    .get("assigned_run")
+                    .is_some_and(|value| !value.is_null()))
+        {
+            crate::assignment_compatibility::ensure_run_floor(&self.root)?;
+        } else if matches!(kind, "unbound-assignments" | "unbound-requests")
             || (kind == "machines"
                 && crate::assignment_compatibility::assigned(&serde_json::from_slice(&bytes)?))
         {
@@ -229,6 +239,9 @@ mod tests {
             "launch-transitions",
             "unbound-requests",
             "unbound-assignments",
+            "assigned-run-intents",
+            "assigned-runs",
+            "assigned-run-readers",
         ] {
             assert!(dir.path().join("state").join(d).is_dir(), "{d}");
         }
@@ -346,6 +359,9 @@ mod tests {
             "launch-transitions",
             "unbound-requests",
             "unbound-assignments",
+            "assigned-run-intents",
+            "assigned-runs",
+            "assigned-run-readers",
         ] {
             assert_eq!(mode(&state.join(d)), 0o700, "{d}");
         }

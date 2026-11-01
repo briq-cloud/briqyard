@@ -51,6 +51,8 @@ enum Cmd {
     StateCapabilities,
     /// Print destination assignment support without reading configuration or host state.
     AssignmentCapabilities,
+    /// Print assigned-run support without reading configuration or host state.
+    AssignedRunCapabilities,
 }
 
 fn main() {
@@ -95,6 +97,10 @@ async fn run(args: Args) -> Result<()> {
     }
     if matches!(args.cmd, Some(Cmd::AssignmentCapabilities)) {
         println!("destination-assignment-v1");
+        return Ok(());
+    }
+    if matches!(args.cmd, Some(Cmd::AssignedRunCapabilities)) {
+        println!("assigned-run-v1");
         return Ok(());
     }
     // Capture before an installer replaces this path; /proc/self/exe later names old bytes.

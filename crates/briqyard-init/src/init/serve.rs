@@ -140,9 +140,10 @@ where
                     main_pid,
                     version: briqyard_api::VERSION.into(),
                     file_stream_v1: true,
+                    assigned_run: st.assigned_run.clone(),
                     clone_status,
                     sha256,
-                    init_sha256: if st.cfg.template_profile.is_some() {
+                    init_sha256: if st.cfg.template_profile.is_some() || st.assigned_run.is_some() {
                         clone_identity::executable_sha256()
                     } else {
                         String::new()
@@ -479,6 +480,26 @@ mod tests {
             start.elapsed() >= Duration::from_secs(1),
             "the grace was given"
         );
+    }
+
+    #[tokio::test]
+    async fn assigned_run_ping_is_boot_local_measured_and_stable() {
+        let cfg = Config {
+            assigned_run_generation: Some("a".repeat(64)),
+            ..Default::default()
+        };
+        let first = state_with(cfg.clone());
+        let pong1 = ping(&first).await.remove(0);
+        let pong2 = ping(&first).await.remove(0);
+        let proof = pong1.assigned_run.unwrap();
+        assert_eq!(proof, pong2.assigned_run.unwrap());
+        assert_eq!(proof.init_sha256, clone_identity::executable_sha256());
+        assert_eq!(pong1.init_sha256, proof.init_sha256);
+        let fresh = state_with(cfg);
+        let next = ping(&fresh).await.remove(0).assigned_run.unwrap();
+        assert_eq!(proof.generation, next.generation);
+        assert_ne!(proof.boot_marker, next.boot_marker);
+        assert!(ping(&state()).await.remove(0).assigned_run.is_none());
     }
 
     #[tokio::test]

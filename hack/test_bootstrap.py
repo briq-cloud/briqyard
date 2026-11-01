@@ -384,6 +384,30 @@ class AssignmentCompatibility(unittest.TestCase):
         self.binary.write_text("#!/bin/sh\nprintf 'destination-assignment-v1\\nextra'\n")
         self.assertNotEqual(self.check().returncode, 0)
 
+    def test_assigned_run_floor_and_missing_floor_evidence_require_both_commands(self):
+        for collection in ("meta/required-assignment-protocol.json", "assigned-run-intents/run.json",
+                           "assigned-runs/machine.json", "assigned-run-readers/machine.json",
+                           "machines/machine.json"):
+            with self.subTest(collection=collection):
+                shutil.rmtree(self.data, ignore_errors=True)
+                value = ({"schema": 2, "protocol": "assigned-run-v1"} if collection.startswith("meta/") else
+                         {"assigned_run": {"schema": 1, "sequence": 1, "phase": "reserved"}} if collection.startswith("machines/") else {"schema": 1})
+                self.evidence(collection, value)
+                self.binary.write_text("#!/bin/sh\n[ \"$1\" = assignment-capabilities ] || exit 2\nprintf 'destination-assignment-v1\\n'\n")
+                self.assertNotEqual(self.check().returncode, 0)
+                self.binary.write_text("#!/bin/sh\ncase $1 in\nassignment-capabilities) printf 'destination-assignment-v1\\n';;\nassigned-run-capabilities) printf 'assigned-run-v1\\n';;\n*) exit 2;;\nesac\n")
+                self.assertEqual(self.check().returncode, 0)
+                if not collection.startswith("meta/"):
+                    self.assertFalse((self.data / "state/meta").exists(), "inspection must not migrate state")
+
+    def test_unknown_assignment_floor_cannot_be_overridden_by_new_capability(self):
+        self.evidence("meta/required-assignment-protocol.json", {"schema": 3, "protocol": "assigned-run-v1"})
+        self.binary.write_text("#!/bin/sh\nprintf 'assigned-run-v1\\n'\n")
+        self.assertNotEqual(self.check().returncode, 0)
+        shutil.rmtree(self.data)
+        self.evidence("assigned-runs/machine.json", {"schema": 2})
+        self.assertNotEqual(self.check().returncode, 0)
+
     def test_malformed_floor_or_assignment_evidence_fails_closed(self):
         self.binary.write_text("#!/bin/sh\nprintf 'destination-assignment-v1\\n'\n")
         marker = self.evidence("meta/required-assignment-protocol.json", {"schema": 9})

@@ -6,6 +6,7 @@ fn capability_commands_preserve_legacy_stdout_without_opening_state() {
     std::fs::write(&config, b"data_dir: [invalid\n").unwrap();
     for path in [&config, &temp.path().join("missing.yaml")] {
         for (command, expected) in [
+            ("assigned-run-capabilities", b"assigned-run-v1\n".as_slice()),
             ("state-capabilities", b"launch-identity-v1\n".as_slice()),
             (
                 "assignment-capabilities",

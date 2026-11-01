@@ -547,17 +547,21 @@ def required(config):
         raise ValueError("invalid data_dir")
     root = pathlib.Path(data) / "state"
     floor = root / "meta/required-assignment-protocol.json"
-    needed = False
+    needed = 0
     try:
         marker = json.loads(floor.read_bytes())
     except FileNotFoundError:
         if floor.is_symlink():
             raise ValueError("dangling assignment floor")
     else:
-        if marker != {"schema": 1, "protocol": "destination-assignment-v1"} or type(marker["schema"]) is not int:
+        if marker == {"schema": 1, "protocol": "destination-assignment-v1"} and type(marker["schema"]) is int:
+            needed = 1
+        elif marker == {"schema": 2, "protocol": "assigned-run-v1"} and type(marker["schema"]) is int:
+            needed = 2
+        else:
             raise ValueError("invalid assignment protocol floor")
-        needed = True
-    for kind in ("unbound-assignments", "unbound-requests", "machines"):
+    runs = ("assigned-run-intents", "assigned-runs", "assigned-run-readers")
+    for kind in ("unbound-assignments", "unbound-requests", "machines") + runs:
         try:
             entries = list((root / kind).iterdir())
         except FileNotFoundError:
@@ -570,20 +574,33 @@ def required(config):
             record = json.loads(entry.read_bytes())
             if not isinstance(record, dict):
                 raise ValueError("invalid assignment state record")
-            if kind != "machines":
+            if kind in runs:
+                if type(record.get("schema")) is not int or record["schema"] != 1:
+                    raise ValueError("unsupported assigned run evidence schema")
+                needed = 2
+            elif kind != "machines":
                 receipt = record.get("receipt") if kind == "unbound-assignments" else record
                 if not isinstance(receipt, dict) or type(receipt.get("schema")) is not int or receipt["schema"] != 1:
                     raise ValueError("invalid assignment receipt schema")
-                needed = True
+                needed = max(needed, 1)
+            elif record.get("assigned_run") is not None:
+                run = record["assigned_run"]
+                if (not isinstance(run, dict) or set(run) != {"schema", "sequence", "phase"}
+                        or type(run.get("schema")) is not int or run["schema"] != 1
+                        or type(run.get("sequence")) is not int or run["sequence"] <= 0
+                        or run.get("phase") not in ("reserved", "observed")):
+                    raise ValueError("unsupported assigned run record link")
+                needed = 2
             elif record.get("launch_identity") is not None:
                 warm = record.get("warm_slot")
                 if warm is not None and not isinstance(warm, dict):
                     raise ValueError("invalid warm slot")
-                needed |= isinstance(warm, dict) and warm.get("claimed") is not None
+                if isinstance(warm, dict) and warm.get("claimed") is not None:
+                    needed = max(needed, 1)
     return needed
 
-def probe(binary):
-    child = subprocess.Popen([binary, "assignment-capabilities"], stdin=subprocess.DEVNULL,
+def probe(binary, command, expected):
+    child = subprocess.Popen([binary, command], stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         selector = selectors.DefaultSelector()
@@ -600,7 +617,7 @@ def probe(binary):
             output += chunk
             if len(output) >= 128:
                 raise ValueError("assignment capability output too long")
-        if output != b"destination-assignment-v1\n" or child.wait(timeout=max(.001, deadline - time.monotonic())) != 0:
+        if output != expected or child.wait(timeout=max(.001, deadline - time.monotonic())) != 0:
             raise ValueError("candidate lacks destination assignment support")
     finally:
         if child.poll() is None:
@@ -611,8 +628,11 @@ def probe(binary):
 try:
     # Evaluate every root even after one requires support: malformed roots fail closed.
     states = [required(config) for config in sys.argv[2:] if config]
-    if any(states):
-        probe(sys.argv[1])
+    needed = max(states, default=0)
+    if needed >= 1:
+        probe(sys.argv[1], "assignment-capabilities", b"destination-assignment-v1\n")
+    if needed >= 2:
+        probe(sys.argv[1], "assigned-run-capabilities", b"assigned-run-v1\n")
 except Exception:
     print("assignment compatibility inspection/probe refused replacement", file=sys.stderr)
     sys.exit(1)

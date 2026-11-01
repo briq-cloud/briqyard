@@ -49,6 +49,7 @@ macro_rules! log {
 
 struct State {
     cfg: Config,
+    assigned_run: Option<guest::AssignedRunProof>,
     destination: OnceLock<(Config, Vec<(String, String)>)>,
     env: Vec<(String, String)>,
     main_pid: Mutex<Option<i32>>,
@@ -67,6 +68,7 @@ impl State {
     }
 }
 
+mod assigned_run;
 mod boot;
 mod clone;
 mod clone_identity;
@@ -207,8 +209,13 @@ async fn run() -> ExitReport {
         }
     }
     let env = build_env(&cfg.env);
+    let assigned_run = match assigned_run::boot_proof(&cfg) {
+        Ok(proof) => proof,
+        Err(error) => return failed(125, format!("assigned boot proof: {error:#}")),
+    };
     let st = Arc::new(State {
         cfg,
+        assigned_run,
         destination: OnceLock::new(),
         env,
         main_pid: Mutex::new(None),
