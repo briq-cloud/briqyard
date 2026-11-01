@@ -51,9 +51,11 @@ async fn observed_fresh_and_consumed_checkpoint_adopt_exact_running_process_stil
         assert!(!*live.exited.borrow());
         assert!(!recovered.identity_trusted.load(Relaxed));
         assert!(recovered.live.lock().unwrap().is_none());
-        assert!(!h
-            .m
-            .assignment_publication_allowed(&recovered.snapshot(), true));
+        assert!(h.m.verified_run_publication(&recovered.snapshot()).is_ok());
+        assert!(!h.m.assignment_publication_allowed(
+            &recovered.snapshot(),
+            recovered.identity_trusted.load(Relaxed)
+        ));
         assert!(h.m.namespace_dns_names("destination").is_empty());
         assert!(h.m.ordinary_operation(&recovered.snapshot()).is_err());
         assert_eq!(
@@ -186,6 +188,20 @@ async fn observed_adoption_refuses_changed_current_backing_process_api_and_guest
             _ => h.assigned_run_fault(fault),
         }
         h.host_calls();
+        assert!(
+            h.m.publish_observed_run(&recovered, false, None)
+                .await
+                .is_err(),
+            "publisher fault {fault}"
+        );
+        assert!(!recovered.identity_trusted.load(Relaxed));
+        assert!(recovered.live.lock().unwrap().is_none());
+        assert!(h.m.namespace_dns_names("destination").is_empty());
+        assert_no_launch_or_publication(&h.host_calls());
+        // Fault 8 is one-shot; independently fault the adopter after the publisher consumed it.
+        if fault == 8 {
+            h.assigned_run_fault(8);
+        }
         assert!(
             h.m.adopt_observed_assigned_run(&recovered).await.is_err(),
             "fault {fault}"

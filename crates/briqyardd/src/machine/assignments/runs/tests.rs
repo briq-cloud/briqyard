@@ -308,7 +308,11 @@ async fn private_fresh_and_current_checkpoint_observe_exact_process_without_publ
         );
         assert_eq!(entry.snapshot().state, state::STARTING);
         assert!(!entry.identity_trusted.load(Relaxed));
-        assert!(!h.m.assignment_publication_allowed(&entry.snapshot(), true));
+        assert!(h.m.verified_run_publication(&entry.snapshot()).is_ok());
+        assert!(!h.m.assignment_publication_allowed(
+            &entry.snapshot(),
+            entry.identity_trusted.load(Relaxed)
+        ));
         assert!(h.m.ordinary_operation(&entry.snapshot()).is_err());
         assert!(h.m.namespace_dns_names("destination").is_empty());
         assert_eq!(current.observed_guest.is_some(), !checkpoint);
