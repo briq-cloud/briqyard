@@ -14,7 +14,7 @@
   },
   "refresh": "30s",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 4,
   "links": [
     {
       "title": "briqyard",
@@ -697,7 +697,7 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 9
       },
       "id": 8
     },
@@ -710,7 +710,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 9
+        "y": 13
       },
       "id": 9
     },
@@ -894,7 +894,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 10
+        "y": 14
       },
       "id": 10
     },
@@ -1033,7 +1033,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 10
+        "y": 14
       },
       "id": 11
     },
@@ -1046,7 +1046,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 22
       },
       "id": 12
     },
@@ -1212,7 +1212,7 @@
         "h": 8,
         "w": 9,
         "x": 0,
-        "y": 19
+        "y": 23
       },
       "id": 13
     },
@@ -1378,7 +1378,7 @@
         "h": 8,
         "w": 9,
         "x": 9,
-        "y": 19
+        "y": 23
       },
       "id": 14
     },
@@ -1448,7 +1448,7 @@
         "h": 8,
         "w": 3,
         "x": 18,
-        "y": 19
+        "y": 23
       },
       "id": 15
     },
@@ -1518,7 +1518,7 @@
         "h": 8,
         "w": 3,
         "x": 21,
-        "y": 19
+        "y": 23
       },
       "id": 16
     },
@@ -1531,7 +1531,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 31
       },
       "id": 17
     },
@@ -1650,7 +1650,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 32
       },
       "id": 18
     },
@@ -1727,7 +1727,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 32
       },
       "id": 19
     },
@@ -1740,7 +1740,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 40
       },
       "id": 20
     },
@@ -1870,7 +1870,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 37
+        "y": 41
       },
       "id": 21
     },
@@ -2022,7 +2022,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 37
+        "y": 41
       },
       "id": 22
     },
@@ -2141,7 +2141,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 37
+        "y": 41
       },
       "id": 23
     },
@@ -2154,7 +2154,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 45
+        "y": 49
       },
       "id": 24
     },
@@ -2273,7 +2273,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 46
+        "y": 50
       },
       "id": 25
     },
@@ -2445,7 +2445,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 46
+        "y": 50
       },
       "id": 26
     },
@@ -2565,7 +2565,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 46
+        "y": 50
       },
       "id": 27
     },
@@ -2649,7 +2649,7 @@
         "h": 8,
         "w": 16,
         "x": 0,
-        "y": 54
+        "y": 58
       },
       "id": 28
     },
@@ -2769,7 +2769,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 54
+        "y": 58
       },
       "id": 29
     },
@@ -2783,7 +2783,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 62
+        "y": 66
       }
     },
     {
@@ -2799,7 +2799,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 63
+        "y": 67
       },
       "targets": [
         {
@@ -2881,7 +2881,7 @@
         "h": 8,
         "w": 16,
         "x": 8,
-        "y": 63
+        "y": 67
       },
       "targets": [
         {
@@ -2974,7 +2974,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 71
+        "y": 75
       },
       "targets": [
         {
@@ -3045,7 +3045,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 71
+        "y": 75
       },
       "targets": [
         {
@@ -3116,7 +3116,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 71
+        "y": 75
       },
       "targets": [
         {
@@ -3187,7 +3187,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 79
+        "y": 83
       },
       "targets": [
         {
@@ -3258,7 +3258,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 79
+        "y": 83
       },
       "targets": [
         {
@@ -3329,7 +3329,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 79
+        "y": 83
       },
       "targets": [
         {
@@ -3389,7 +3389,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 87
+        "y": 91
       },
       "targets": [
         {
@@ -3482,7 +3482,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 87
+        "y": 91
       },
       "targets": [
         {
@@ -3542,7 +3542,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 87
+        "y": 91
       },
       "targets": [
         {
@@ -3602,7 +3602,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 95
+        "y": 99
       },
       "targets": [
         {
@@ -3662,7 +3662,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 95
+        "y": 99
       },
       "targets": [
         {
@@ -3708,6 +3708,132 @@
           "sort": "desc"
         }
       }
+    },
+    {
+      "type": "stat",
+      "title": "Unique machines observed running",
+      "description": "Distinct machine identities observed running in the selected period, gateways included. Requires a running scrape: starts and stops entirely between scrapes may be missed. Not a count of machines first created in this period. Zero is shown only when at least one successful scrape of this host was observed in the selected period; otherwise the panel has no data.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "count(max by (machine) (max_over_time(briqyard_machine_state{state=\"running\", host=\"$host\"}[$__range])) == 1) or (vector(0) and on() (max(max_over_time(up{job=\"briqyard\", host=\"$host\"}[$__range])) == 1))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "blue"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "id": 44
+    },
+    {
+      "type": "stat",
+      "title": "Successful starts and resumes",
+      "description": "Successful start and resume events in the selected period, including restarts and wakes. Event count, not unique machines; counter increases are estimated between scrapes. Zero is shown only when at least one successful scrape of this host was observed in the selected period; otherwise the panel has no data.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "briqyard-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "sum(increase(briqyard_events_total{type=\"normal\", reason=~\"started|resumed\", host=\"$host\"}[$__range])) or (vector(0) and on() (max(max_over_time(up{job=\"briqyard\", host=\"$host\"}[$__range])) == 1))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "blue"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 45
     }
   ]
 }
