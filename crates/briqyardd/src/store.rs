@@ -10,9 +10,12 @@ use std::path::{Path, PathBuf};
 /// called tenants (ADR 0055): hosts already hold records there.
 pub const NAMESPACES: &str = "tenants";
 
+mod durable;
+
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    publisher: durable::Publisher,
 }
 
 /// Makes a directory the daemon's user alone can enter (0700), existing or not.
@@ -45,7 +48,13 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 
 impl Store {
     pub fn open(root: &Path) -> Result<Self> {
-        private_dir(root)?;
+        Self::open_using(root, durable::Publisher::default())
+    }
+
+    fn open_using(root: &Path, publisher: durable::Publisher) -> Result<Self> {
+        publisher
+            .private_directory(root)
+            .context("publish Store directory ancestry")?;
         for d in [
             "machines",
             NAMESPACES,
@@ -57,12 +66,23 @@ impl Store {
             "clone-readers",
             "warm-pools",
         ] {
-            private_dir(&root.join(d))?;
+            publisher
+                .private_child(&root.join(d))
+                .with_context(|| format!("publish Store directory {d}"))?;
         }
         std::fs::File::open(root)?.sync_all()?;
         Ok(Self {
             root: root.to_path_buf(),
+            publisher,
         })
+    }
+
+    /// Confirm the host identity durably before manager recovery or serving. Existing raw
+    /// identities are preserved and repaired under the same cross-process initialization lock.
+    pub fn establish_host_id(&self, make: impl FnOnce() -> String) -> Result<String> {
+        self.publisher
+            .host_id(&self.path("meta", "host_id")?, make)
+            .context("establish durable host identity")
     }
 
     /// The directory of a kind, for a log that is not one record per file (events).
