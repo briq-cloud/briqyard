@@ -9,7 +9,31 @@ monitoring_auth_cleanup() {
   curl_auth_dir=
 }
 
+monitoring_auth_on_exit() {
+  local status=$1
+  trap - EXIT HUP INT TERM
+  monitoring_auth_cleanup || true
+  exit "$status"
+}
+
+monitoring_auth_on_signal() {
+  local signal_name=$1 status
+  case "$signal_name" in
+    HUP) status=129 ;;
+    INT) status=130 ;;
+    TERM) status=143 ;;
+    *) status=1 ;;
+  esac
+  trap - EXIT HUP INT TERM
+  monitoring_auth_cleanup || true
+  exit "$status"
+}
+
 monitoring_auth_init() {
+  trap 'monitoring_auth_on_exit "$?"' EXIT
+  trap 'monitoring_auth_on_signal HUP' HUP
+  trap 'monitoring_auth_on_signal INT' INT
+  trap 'monitoring_auth_on_signal TERM' TERM
   set +x
   local metrics_token=${BRIQYARD_METRICS_TOKEN:-${BRIQYARD_TOKEN:-}}
   local api_token=${BRIQYARD_TOKEN:-}
@@ -27,7 +51,6 @@ monitoring_auth_init() {
     monitoring_auth_cleanup || true
     return 1
   fi
-  trap monitoring_auth_cleanup EXIT
 }
 
 curl_with_auth_config() {
