@@ -73,3 +73,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0075](0075-sandbox-destination-binding.md) | One-way complete sandbox guest configuration before main, with durable consumption and replay fencing |
 | [0076](0076-operator-sandbox-seeds.md) | Operator-produced pristine sandbox topology, ordinary-create receipts and exact destination acknowledgment; native qualification gates enablement |
 | [0077](0077-warm-data-volume-liability.md) | Full logical warm data-volume budgets, shared pool-space liability and reservation telemetry |
+| [0078](0078-dev-checked-release-bundle.md) | Local upgrade releases verify and include the checked runtime bundle |
