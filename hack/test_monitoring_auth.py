@@ -8,10 +8,12 @@ import http.server
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
-import threading
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -19,6 +21,49 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 AUTH = ROOT / "hack" / "monitoring-auth.sh"
 CHECK = ROOT / "hack" / "monitoring-check.sh"
+
+
+def _signal_process_group(process: subprocess.Popen[str], sig: int) -> None:
+    if os.name != "posix":
+        process.send_signal(sig)
+        return
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> tuple[str | None, str | None]:
+    _signal_process_group(process, signal.SIGTERM)
+    try:
+        return process.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        _signal_process_group(process, signal.SIGKILL)
+    try:
+        return process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            return process.communicate(timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("timed-out test process did not reap after group kill") from exc
+
+
+def _run_bounded(args: list[str], *, env: dict[str, str], timeout: float) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        args,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        stdout, stderr = _terminate_process_group(process)
+        raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr) from None
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 class MonitoringAuthTests(unittest.TestCase):
@@ -65,6 +110,7 @@ class MonitoringAuthTests(unittest.TestCase):
             bindir.mkdir()
             audit = temp / "child-audit"
             grafana_auth_fixture = temp / "grafana-auth-fixture"
+            # Fixed dummy values exercise curl-config quoting; they are not credentials.
             auth_fixtures = {
                 "metrics": 'm-"quote\\tail',
                 "api": 'a-"quote\\tail',
@@ -129,7 +175,7 @@ curl_plain -fsS {base_url}/plain
                     "BASE_URL": base_url,
                 }
             )
-            result = subprocess.run(["bash", "-x", "-c", script], env=env, capture_output=True, text=True, timeout=15)
+            result = _run_bounded(["bash", "-x", "-c", script], env=env, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
             for fixture_value in auth_fixtures.values():
                 self.assertNotIn(fixture_value, result.stdout)
@@ -156,7 +202,7 @@ curl_api -fsS {base_url}/fallback-api
             fallback_env.pop("BRIQYARD_METRICS_TOKEN")
             fallback_env["BRIQYARD_TOKEN"] = auth_fixtures["fallback"]
             fallback_env.pop("GRAFANA_PASSWORD_FILE")
-            fallback = subprocess.run(["bash", "-c", fallback_script], env=fallback_env, capture_output=True, text=True, timeout=15)
+            fallback = _run_bounded(["bash", "-c", fallback_script], env=fallback_env, timeout=15)
             self.assertEqual(fallback.returncode, 0, fallback.stderr)
             self.assertNotIn(auth_fixtures["fallback"], fallback.stdout + fallback.stderr)
             expected.update(
@@ -182,7 +228,7 @@ curl_api -fsS {base_url}/fallback-api
                     "BRIQYARD_TOKEN": "",
                 }
             )
-            result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=15)
+            result = _run_bounded(["bash", "-c", script], env=env, timeout=15)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("header-secret", result.stdout + result.stderr)
             self.assertFalse(any(path.name.startswith("briqyard-monitoring-auth.") for path in temp.iterdir()))
@@ -196,7 +242,7 @@ curl_api -fsS {base_url}/fallback-api
             script = f"source {shlex.quote(str(AUTH))}; monitoring_auth_init"
             env = os.environ.copy()
             env.update({"TMPDIR": tmp, "GRAFANA_PASSWORD_FILE": str(grafana_auth_fixture)})
-            result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=15)
+            result = _run_bounded(["bash", "-c", script], env=env, timeout=15)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("first-line", result.stdout + result.stderr)
             self.assertNotIn("second-line", result.stdout + result.stderr)
@@ -207,6 +253,85 @@ curl_api -fsS {base_url}/fallback-api
         server.server_close()
         thread.join(timeout=5)
         self.assertFalse(thread.is_alive(), "loopback HTTP server did not stop")
+
+    def test_auth_files_are_removed_on_termination_signals(self) -> None:
+        for sig, expected_status in ((signal.SIGHUP, 129), (signal.SIGINT, 130), (signal.SIGTERM, 143)):
+            with self.subTest(signal=sig), tempfile.TemporaryDirectory() as tmp:
+                env = os.environ.copy()
+                env.update({"TMPDIR": tmp, "BRIQYARD_METRICS_TOKEN": "fixture-auth-value"})
+                script = f"""source {shlex.quote(str(AUTH))}
+monitoring_auth_init
+while :; do read -r -t 0.05 _ || :; done
+"""
+                process = subprocess.Popen(
+                    ["bash", "-c", script],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                self.addCleanup(self._cleanup_test_process, process)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    candidates = list(Path(tmp).glob("briqyard-monitoring-auth.*"))
+                    if candidates and (candidates[0] / "metrics.curl").exists():
+                        break
+                    if process.poll() is not None:
+                        self.fail("auth test process exited before creating its config")
+                    time.sleep(0.02)
+                else:
+                    self.fail("auth test process did not create its config before the deadline")
+
+                _signal_process_group(process, sig)
+                stdout, stderr = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, expected_status, (stdout, stderr))
+                self.assertFalse(list(Path(tmp).glob("briqyard-monitoring-auth.*")))
+
+    def test_timeout_terminates_and_reaps_child_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ready = Path(tmp) / "child-ready"
+            terminated = Path(tmp) / "child-terminated"
+            survived = Path(tmp) / "child-survived"
+            parent_pid = Path(tmp) / "parent-pid"
+            child_code = "\n".join(
+                (
+                    "import pathlib, signal, sys, time",
+                    "ready, terminated, survived = map(pathlib.Path, sys.argv[1:])",
+                    "def on_term(_signal, _frame):",
+                    "    terminated.write_text('terminated', encoding='utf-8')",
+                    "    raise SystemExit(0)",
+                    "signal.signal(signal.SIGTERM, on_term)",
+                    "ready.write_text('ready', encoding='utf-8')",
+                    "time.sleep(30)",
+                    "survived.write_text('survived', encoding='utf-8')",
+                )
+            )
+            parent_code = "\n".join(
+                (
+                    "import pathlib, subprocess, sys, time",
+                    "ready, terminated, survived, parent_pid = map(pathlib.Path, sys.argv[1:5])",
+                    "parent_pid.write_text(str(__import__('os').getpid()), encoding='utf-8')",
+                    "child = subprocess.Popen([sys.executable, '-c', sys.argv[5], str(ready), str(terminated), str(survived)])",
+                    "deadline = time.monotonic() + 2",
+                    "while not ready.exists() and time.monotonic() < deadline: time.sleep(0.01)",
+                    "if not ready.exists(): raise SystemExit(7)",
+                    "time.sleep(30)",
+                )
+            )
+            args = [sys.executable, "-c", parent_code, str(ready), str(terminated), str(survived), str(parent_pid), child_code]
+            with self.assertRaises(subprocess.TimeoutExpired):
+                _run_bounded(args, env=os.environ.copy(), timeout=0.2)
+            self.assertEqual(terminated.read_text(encoding="utf-8"), "terminated")
+            self.assertFalse(survived.exists())
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(int(parent_pid.read_text(encoding="utf-8")), 0)
+
+    def _cleanup_test_process(self, process: subprocess.Popen[str]) -> None:
+        if process.poll() is None:
+            _terminate_process_group(process)
+        else:
+            process.communicate(timeout=5)
 
 
 if __name__ == "__main__":
