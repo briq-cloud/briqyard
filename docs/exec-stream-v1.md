@@ -20,7 +20,10 @@ NUL is forbidden in command, cwd, and environment. Timeout must be 1 through 360
 
 The daemon holds the machine in use while probing the actual running guest's pong for
 `exec_stream_v1:true` and throughout execution. A missing capability is unsupported regardless
-of version number. Commands use the distinct guest operation `exec_stream_v1`, so a guest
+of version number. This pre-spawn refusal has terminal `code: "unsupported"`; invalid initial
+requests use `invalid`, unavailable machines use `not_running`, and other start refusals use
+`exec_stream_refused`. Clients must use these codes rather than error prose. Commands use the
+distinct guest operation `exec_stream_v1`, so a guest
 replaced by an older init between probe and execution rejects the operation before spawning.
 
 After the initial request the only application message is text `{"action":"cancel"}`.

@@ -68,6 +68,8 @@ use update::*;
 pub enum MError {
     #[error("no compatible ready slot is available")]
     PoolEmpty,
+    #[error("running guest does not support exec_stream_v1")]
+    ExecStreamUnsupported,
     #[error("machine not found")]
     NotFound,
     #[error("backup {0} not found")]

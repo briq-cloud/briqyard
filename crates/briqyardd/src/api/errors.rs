@@ -20,6 +20,7 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::NotFound | MError::NoBackup(_) | MError::NoSnapshot(_) => {
             (StatusCode::NOT_FOUND, "not_found")
         }
+        MError::ExecStreamUnsupported => (StatusCode::CONFLICT, "unsupported"),
         MError::PoolEmpty => (StatusCode::CONFLICT, "pool_empty"),
         MError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
         MError::Conflict(_) | MError::NameTaken(_) => (StatusCode::CONFLICT, "conflict"),

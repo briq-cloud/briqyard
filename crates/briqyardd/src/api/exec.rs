@@ -112,8 +112,7 @@ pub(super) async fn exec_stream_v1(
                     drop(session.in_use);
                 }
                 Err(error) => {
-                    let end =
-                        api::session::SessionEnd::failed("exec_stream_refused", error.to_string());
+                    let end = exec_stream_refusal(error);
                     let payload = serde_json::to_vec(&end).unwrap_or_default();
                     let _ = socket
                         .send(Message::Binary(api::session::message(
@@ -189,4 +188,51 @@ pub(super) fn ndjson(rx: tokio::sync::mpsc::Receiver<String>) -> Response {
         Body::from_stream(lines),
     )
         .into_response()
+}
+
+/// Capability refusal has a typed cause; ordinary conflicts are never unsupported.
+fn exec_stream_refusal(error: MError) -> api::session::SessionEnd {
+    let code = match &error {
+        MError::ExecStreamUnsupported => "unsupported",
+        MError::Invalid(_) => "invalid",
+        MError::NotRunning(_) => "not_running",
+        _ => "exec_stream_refused",
+    };
+    api::session::SessionEnd::failed(code, error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_stream_refusal_preserves_typed_capability_and_ordinary_errors() {
+        let cases = [
+            (MError::ExecStreamUnsupported, "unsupported"),
+            (MError::Invalid("bad timeout".into()), "invalid"),
+            (MError::NotRunning("stopped".into()), "not_running"),
+            // Even identical prose cannot turn an ordinary conflict into unsupported.
+            (
+                MError::Conflict("running guest does not support exec_stream_v1".into()),
+                "exec_stream_refused",
+            ),
+            (
+                MError::Other(anyhow::anyhow!("transport failure")),
+                "exec_stream_refused",
+            ),
+        ];
+        for (error, code) in cases {
+            let expected_message = error.to_string();
+            let terminal = exec_stream_refusal(error);
+            assert_eq!(terminal.code, code);
+            assert_eq!(terminal.error, expected_message);
+            assert!(terminal.exit_code.is_none());
+            assert!(!terminal.cancelled);
+            let value = serde_json::to_value(terminal).unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({"code":code, "error":expected_message})
+            );
+        }
+    }
 }
