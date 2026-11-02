@@ -64,16 +64,16 @@ class MonitoringAuthTests(unittest.TestCase):
             bindir = temp / "bin"
             bindir.mkdir()
             audit = temp / "child-audit"
-            password_file = temp / "grafana-password"
-            secrets = {
-                "metrics": 'metrics-"quote\\tail',
-                "api": 'api-"quote\\tail',
-                "grafana": 'grafana-"quote\\tail:more',
-                "fallback": 'fallback-"quote\\tail',
+            grafana_auth_fixture = temp / "grafana-auth-fixture"
+            auth_fixtures = {
+                "metrics": 'm-"quote\\tail',
+                "api": 'a-"quote\\tail',
+                "grafana": 'g-"quote\\tail:more',
+                "fallback": 'f-"quote\\tail',
             }
-            password_file.write_text(secrets["grafana"] + "\n", encoding="utf-8")
-            password_file.chmod(0o600)
-            needles = tuple(secrets.values())
+            grafana_auth_fixture.write_text(auth_fixtures["grafana"] + "\n", encoding="utf-8")
+            grafana_auth_fixture.chmod(0o600)
+            needles = tuple(auth_fixtures.values())
             encoded_needles = repr(needles)
             real_python = sys.executable
             base_url = f"http://127.0.0.1:{server.server_port}"
@@ -118,9 +118,9 @@ curl_plain -fsS {base_url}/plain
                     "TMPDIR": tmp,
                     "HOME": tmp,
                     "CURL_HOME": tmp,
-                    "BRIQYARD_METRICS_TOKEN": secrets["metrics"],
-                    "BRIQYARD_TOKEN": secrets["api"],
-                    "GRAFANA_PASSWORD_FILE": str(password_file),
+                    "BRIQYARD_METRICS_TOKEN": auth_fixtures["metrics"],
+                    "BRIQYARD_TOKEN": auth_fixtures["api"],
+                    "GRAFANA_PASSWORD_FILE": str(grafana_auth_fixture),
                     "CHILD_AUDIT": str(audit),
                     "REAL_CURL": real_curl,
                     "REAL_PYTHON3": real_python,
@@ -131,18 +131,18 @@ curl_plain -fsS {base_url}/plain
             )
             result = subprocess.run(["bash", "-x", "-c", script], env=env, capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
-            for secret in secrets.values():
-                self.assertNotIn(secret, result.stdout)
-                self.assertNotIn(secret, result.stderr)
+            for fixture_value in auth_fixtures.values():
+                self.assertNotIn(fixture_value, result.stdout)
+                self.assertNotIn(fixture_value, result.stderr)
             self.assertNotIn("Authorization:", result.stderr)
             self.assertTrue(audit.read_text(encoding="utf-8").splitlines())
             self.assertTrue(all(line.endswith(":clean") for line in audit.read_text(encoding="utf-8").splitlines()))
             self.assertFalse(any(path.name.startswith("briqyard-monitoring-auth.") for path in temp.iterdir()))
 
             expected = {
-                "/metrics": "Bearer " + secrets["metrics"],
-                "/api": "Bearer " + secrets["api"],
-                "/grafana": "Basic " + base64.b64encode(("admin:" + secrets["grafana"]).encode()).decode(),
+                "/metrics": "Bearer " + auth_fixtures["metrics"],
+                "/api": "Bearer " + auth_fixtures["api"],
+                "/grafana": "Basic " + base64.b64encode(("admin:" + auth_fixtures["grafana"]).encode()).decode(),
                 "/plain": None,
             }
             self.assertEqual(dict(server.RequestHandlerClass.seen), expected)
@@ -154,15 +154,15 @@ curl_api -fsS {base_url}/fallback-api
 """
             fallback_env = env.copy()
             fallback_env.pop("BRIQYARD_METRICS_TOKEN")
-            fallback_env["BRIQYARD_TOKEN"] = secrets["fallback"]
+            fallback_env["BRIQYARD_TOKEN"] = auth_fixtures["fallback"]
             fallback_env.pop("GRAFANA_PASSWORD_FILE")
             fallback = subprocess.run(["bash", "-c", fallback_script], env=fallback_env, capture_output=True, text=True, timeout=15)
             self.assertEqual(fallback.returncode, 0, fallback.stderr)
-            self.assertNotIn(secrets["fallback"], fallback.stdout + fallback.stderr)
+            self.assertNotIn(auth_fixtures["fallback"], fallback.stdout + fallback.stderr)
             expected.update(
                 {
-                    "/fallback-metrics": "Bearer " + secrets["fallback"],
-                    "/fallback-api": "Bearer " + secrets["fallback"],
+                    "/fallback-metrics": "Bearer " + auth_fixtures["fallback"],
+                    "/fallback-api": "Bearer " + auth_fixtures["fallback"],
                 }
             )
             self.assertEqual(dict(server.RequestHandlerClass.seen), expected)
@@ -190,12 +190,12 @@ curl_api -fsS {base_url}/fallback-api
     def test_malformed_grafana_password_is_rejected_independently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             temp = Path(tmp)
-            password_file = temp / "grafana-password"
-            password_file.write_text("first-line\nsecond-line\n", encoding="utf-8")
-            password_file.chmod(0o600)
+            grafana_auth_fixture = temp / "grafana-auth-fixture"
+            grafana_auth_fixture.write_text("first-line\nsecond-line\n", encoding="utf-8")
+            grafana_auth_fixture.chmod(0o600)
             script = f"source {shlex.quote(str(AUTH))}; monitoring_auth_init"
             env = os.environ.copy()
-            env.update({"TMPDIR": tmp, "GRAFANA_PASSWORD_FILE": str(password_file)})
+            env.update({"TMPDIR": tmp, "GRAFANA_PASSWORD_FILE": str(grafana_auth_fixture)})
             result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=15)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("first-line", result.stdout + result.stderr)
