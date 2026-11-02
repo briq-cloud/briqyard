@@ -33,20 +33,56 @@ def _signal_process_group(process: subprocess.Popen[str], sig: int) -> None:
         pass
 
 
+def _process_group_exists(process: subprocess.Popen[str]) -> bool:
+    if os.name != "posix":
+        return process.poll() is None
+    try:
+        os.killpg(process.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _wait_for_process_group_exit(
+    process: subprocess.Popen[str], timeout: float
+) -> tuple[str | None, str | None, bool]:
+    deadline = time.monotonic() + timeout
+    stdout: str | None = None
+    stderr: str | None = None
+    while True:
+        if not _process_group_exists(process):
+            stdout, stderr = process.communicate()
+            return stdout, stderr, True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return stdout, stderr, False
+        if process.poll() is None:
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.05, remaining))
+            except subprocess.TimeoutExpired as exc:
+                stdout, stderr = exc.output, exc.stderr
+        else:
+            time.sleep(min(0.05, remaining))
+
+
 def _terminate_process_group(process: subprocess.Popen[str]) -> tuple[str | None, str | None]:
     _signal_process_group(process, signal.SIGTERM)
-    try:
-        return process.communicate(timeout=1)
-    except subprocess.TimeoutExpired:
-        _signal_process_group(process, signal.SIGKILL)
-    try:
-        return process.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        try:
-            return process.communicate(timeout=5)
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("timed-out test process did not reap after group kill") from exc
+    stdout, stderr, exited = _wait_for_process_group_exit(process, 1)
+    if exited:
+        return stdout, stderr
+
+    _signal_process_group(process, signal.SIGKILL)
+    stdout, stderr, exited = _wait_for_process_group_exit(process, 5)
+    if exited:
+        return stdout, stderr
+
+    process.kill()
+    stdout, stderr, exited = _wait_for_process_group_exit(process, 5)
+    if not exited:
+        raise RuntimeError("timed-out test process group did not exit after kill")
+    return stdout, stderr
 
 
 def _run_bounded(args: list[str], *, env: dict[str, str], timeout: float) -> subprocess.CompletedProcess[str]:
@@ -309,20 +345,69 @@ while :; do read -r -t 0.05 _ || :; done
             )
             parent_code = "\n".join(
                 (
-                    "import pathlib, subprocess, sys, time",
+                    "import os, pathlib, subprocess, sys, time",
                     "ready, terminated, survived, parent_pid = map(pathlib.Path, sys.argv[1:5])",
-                    "parent_pid.write_text(str(__import__('os').getpid()), encoding='utf-8')",
-                    "child = subprocess.Popen([sys.executable, '-c', sys.argv[5], str(ready), str(terminated), str(survived)])",
+                    "parent_pid.write_text(str(os.getpid()), encoding='utf-8')",
+                    "child = subprocess.Popen(",
+                    "    [sys.executable, '-c', sys.argv[5], str(ready), str(terminated), str(survived)]",
+                    ")",
                     "deadline = time.monotonic() + 2",
                     "while not ready.exists() and time.monotonic() < deadline: time.sleep(0.01)",
                     "if not ready.exists(): raise SystemExit(7)",
                     "time.sleep(30)",
                 )
             )
-            args = [sys.executable, "-c", parent_code, str(ready), str(terminated), str(survived), str(parent_pid), child_code]
+            args = [
+                sys.executable,
+                "-c",
+                parent_code,
+                str(ready),
+                str(terminated),
+                str(survived),
+                str(parent_pid),
+                child_code,
+            ]
             with self.assertRaises(subprocess.TimeoutExpired):
                 _run_bounded(args, env=os.environ.copy(), timeout=0.2)
             self.assertEqual(terminated.read_text(encoding="utf-8"), "terminated")
+            self.assertFalse(survived.exists())
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(int(parent_pid.read_text(encoding="utf-8")), 0)
+
+    def test_timeout_kills_term_ignoring_descendant_with_redirected_streams(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ready = Path(tmp) / "child-ready"
+            survived = Path(tmp) / "child-survived"
+            parent_pid = Path(tmp) / "parent-pid"
+            child_code = "\n".join(
+                (
+                    "import pathlib, signal, sys, time",
+                    "ready, survived = map(pathlib.Path, sys.argv[1:])",
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                    "ready.write_text('ready', encoding='utf-8')",
+                    "time.sleep(30)",
+                    "survived.write_text('survived', encoding='utf-8')",
+                )
+            )
+            parent_code = "\n".join(
+                (
+                    "import os, pathlib, subprocess, sys, time",
+                    "ready, survived, parent_pid = map(pathlib.Path, sys.argv[1:4])",
+                    "parent_pid.write_text(str(os.getpid()), encoding='utf-8')",
+                    "child = subprocess.Popen(",
+                    "    [sys.executable, '-c', sys.argv[4], str(ready), str(survived)],",
+                    "    stdout=subprocess.DEVNULL,",
+                    "    stderr=subprocess.DEVNULL,",
+                    ")",
+                    "deadline = time.monotonic() + 2",
+                    "while not ready.exists() and time.monotonic() < deadline: time.sleep(0.01)",
+                    "if not ready.exists(): raise SystemExit(7)",
+                    "time.sleep(30)",
+                )
+            )
+            args = [sys.executable, "-c", parent_code, str(ready), str(survived), str(parent_pid), child_code]
+            with self.assertRaises(subprocess.TimeoutExpired):
+                _run_bounded(args, env=os.environ.copy(), timeout=0.2)
             self.assertFalse(survived.exists())
             with self.assertRaises(ProcessLookupError):
                 os.killpg(int(parent_pid.read_text(encoding="utf-8")), 0)
