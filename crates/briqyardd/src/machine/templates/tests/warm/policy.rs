@@ -416,8 +416,11 @@ async fn ordinary_admission_racing_fill_can_consume_headroom_and_refill_rechecks
     h.wait_warm_barrier().await;
     let mut request = h.request("ordinary");
     request.image = ALPINE.into();
-    request.size.memory_mb = 3456;
+    // Source: 512 MiB physical; ordinary: 3072 + 256 MiB. Both fit the host,
+    // but the remaining 256 MiB cannot cover a fill plus its reserved headroom.
+    request.size.memory_mb = 3072;
     let ordinary = h.m.create_made(request).await.unwrap();
+    assert_eq!(h.m.usage().0.memory_mb, 3840);
     h.release_warm_barriers();
     settle(&h).await;
     let view = h.m.warm_pools("t1").unwrap().remove(0);
