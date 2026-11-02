@@ -15,7 +15,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y python3-yaml
           python3 -m unittest discover -s hack/firecracker -p "test_*.py"
-          python3 -m unittest discover -s hack -p "test_bootstrap.py"
+          python3 -m unittest discover -s hack -p "test_bootstrap*.py"
           python3 -m unittest discover -s hack -p "test_release.py"
           python3 -m unittest discover -s hack -p "test_suite_key_transport.py"
           python3 hack/release.py check > /dev/null

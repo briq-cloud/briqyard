@@ -88,6 +88,10 @@ prerequisites block protected admission. Explicit bootstrap verifies cgroup cont
 persistent no-swap/no-oomd/no-KSM settings; occupied-host maintenance must be drained when swap
 or merged pages exist. Stopping KSM merging does not unmerge existing pages.
 
+Before packages or memory-policy maintenance, bootstrap requires positive `auto` observations
+for both ManagedOOM properties on the root and system slices. Failed, incomplete or unknown
+observations refuse maintenance without printing their values.
+
 ## Scope and validation
 
 This supplies physical overhead admission, fixed OOM preferences and per-leaf containment.

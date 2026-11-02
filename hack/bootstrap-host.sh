@@ -130,6 +130,18 @@ fetch() {
 }
 
 # Read-only safety checks before maintenance which could reclaim host memory.
+# Memory ancestor policy preflight.
+for property in ManagedOOMSwap ManagedOOMMemoryPressure; do
+  ancestor_values=$(systemctl show --value --property="$property" -- -.slice system.slice) || fail "ancestor $property: observation unavailable"
+  ancestor_count=0
+  while IFS= read -r ancestor_mode; do
+    [ -n "$ancestor_mode" ] || continue
+    [ "$ancestor_mode" = auto ] || fail "ancestor $property: policy unsafe or unknown; resolve in drained maintenance"
+    ancestor_count=$((ancestor_count + 1))
+  done <<< "$ancestor_values"
+  [ "$ancestor_count" = 2 ] || fail "ancestor $property: incomplete observation"
+done
+# End memory ancestor policy preflight.
 [ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ] || fail "cgroup v2 is required"
 grep -qw memory /sys/fs/cgroup/cgroup.controllers || fail "cgroup memory controller is required"
 awk 'NR > 1 && $4 > 0 { bad = 1 } END { exit bad }' /proc/swaps || fail "swap holds pages: drain the host before disabling it"
@@ -214,9 +226,6 @@ if [ -e /sys/kernel/mm/ksm/run ]; then
   mkdir -p /etc/tmpfiles.d
   echo 'w /sys/kernel/mm/ksm/run - - - - 0' > /etc/tmpfiles.d/briqyard-memory.conf
 fi
-for property in ManagedOOMSwap ManagedOOMMemoryPressure; do
-  ! systemctl show --value --property="$property" -- -.slice system.slice | grep -qx kill || fail "ancestor $property=kill: resolve in drained maintenance"
-done
 
 echo "== no crash dumps"
 # A kernel crash dump is the whole memory, guests' included, written to /var/crash in clear.
