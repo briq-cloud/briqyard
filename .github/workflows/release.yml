@@ -5,7 +5,16 @@ on:
 permissions:
   contents: write
 jobs:
+  notes:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release metadata before building candidates
+        run: |
+          python3 -m unittest discover -s hack -p "test_release.py"
+          python3 hack/release.py notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
   build:
+    needs: notes
     strategy:
       matrix:
         include:
@@ -57,11 +66,14 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+      - name: Extract reviewed changelog entry
+        run: python3 hack/release.py notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --latest=false --title "$GITHUB_REF_NAME" --notes "briqyard $GITHUB_REF_NAME candidate; runtime qualification required before publication. Install with hack/bootstrap-host.sh (BRIQYARD_RELEASE=https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME)."
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --latest=false --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
         env:
           GH_TOKEN: ${{ github.token }}
   # The fleet as an image (ADR 0060), from the binaries the build job made: one manifest for
