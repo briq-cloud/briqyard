@@ -140,6 +140,7 @@ where
                     main_pid,
                     version: briqyard_api::VERSION.into(),
                     file_stream_v1: true,
+                    exec_stream_v1: true,
                     clone_status,
                     sha256,
                     init_sha256: if st.cfg.template_profile.is_some() {
@@ -152,7 +153,7 @@ where
             )
             .await;
         }
-        "exec" => exec_op(&st, input, stream, req).await,
+        "exec" | "exec_stream_v1" => exec_op(&st, input, stream, req).await,
         "put_stream" | "get_stream" => files::serve(input, stream, req).await,
         "put" => {
             let res = (|| -> std::io::Result<()> {

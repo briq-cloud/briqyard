@@ -145,6 +145,40 @@ impl Manager {
         })
     }
 
+    /// Finite-input streaming requires a capability from the running guest under use.
+    pub async fn open_exec_stream_v1(
+        &self,
+        id: &str,
+        req: api::session::stream::Start,
+    ) -> Result<Session, MError> {
+        req.validate().map_err(invalid)?;
+        let e = self.own_entry(id)?;
+        self.ordinary_operation(&e.snapshot())?;
+        let in_use = InUse::new(e);
+        let sock = self.running_vsock(id, req.wake).await?;
+        let pong = tokio::time::timeout(Duration::from_secs(10), self.inner.guest.ping(&sock))
+            .await
+            .map_err(|_| MError::NotRunning("exec stream capability timeout".into()))?
+            .map_err(not_running_if_unreachable)?;
+        if pong.kind != "pong" || !pong.exec_stream_v1 {
+            return Err(MError::Conflict(
+                "running guest does not support exec_stream_v1".into(),
+            ));
+        }
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.inner.guest.exec_stream_v1(&sock, req.into_guest()),
+        )
+        .await
+        .map_err(|_| MError::NotRunning("exec stream start timeout".into()))?
+        .map_err(not_running_if_unreachable)?;
+        Ok(Session {
+            conn,
+            machine: id.into(),
+            in_use,
+        })
+    }
+
     /// The one way a command starts in a machine for a caller: woken when asked, the guest's
     /// connection once it took the command, and the machine in use while `InUse` lives.
     async fn start_command(

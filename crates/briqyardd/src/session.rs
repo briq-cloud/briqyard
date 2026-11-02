@@ -1,6 +1,8 @@
 //! An exec session's WebSocket (ADR 0029): the client's messages become the guest's input
 //! frames, the guest's output frames become messages, and the command's exit is the last one.
 
+mod stream;
+
 use crate::events;
 use crate::guestc;
 use crate::machine::Session;
@@ -60,10 +62,37 @@ pub async fn serve(socket: WebSocket, session: Session) {
 /// is gone, and so is one that takes no message for as long (it stopped reading: a laptop
 /// asleep). Dropping `conn` at the end is what ends a command whose client went.
 pub async fn pump<Rx, Tx>(
+    from_client: Rx,
+    to_client: Tx,
+    conn: Box<dyn guestc::Conn>,
+    heartbeat: Duration,
+) -> Ended
+where
+    Rx: Stream<Item = Result<Message, axum::Error>> + Unpin,
+    Tx: Sink<Message> + Unpin,
+{
+    pump_mode(from_client, to_client, conn, heartbeat, false).await
+}
+
+pub async fn pump_stream<Rx, Tx>(
+    from_client: Rx,
+    to_client: Tx,
+    conn: Box<dyn guestc::Conn>,
+    heartbeat: Duration,
+) -> Ended
+where
+    Rx: Stream<Item = Result<Message, axum::Error>> + Unpin,
+    Tx: Sink<Message> + Unpin + Send + 'static,
+{
+    stream::pump(from_client, to_client, conn, heartbeat).await
+}
+
+async fn pump_mode<Rx, Tx>(
     mut from_client: Rx,
     mut to_client: Tx,
     conn: Box<dyn guestc::Conn>,
     heartbeat: Duration,
+    versioned: bool,
 ) -> Ended
 where
     Rx: Stream<Item = Result<Message, axum::Error>> + Unpin,
@@ -97,6 +126,8 @@ where
                     "exit" => break Some(SessionEnd {
                         exit_code: Some(r.code),
                         timed_out: r.timed_out,
+                        cancelled: versioned && r.cancelled,
+                        error: r.message,
                         ..Default::default()
                     }),
                     "error" => break Some(SessionEnd::failed("internal", r.message)),
@@ -109,6 +140,13 @@ where
             m = from_client.next() => {
                 heard = Instant::now();
                 let frame = match m {
+                    Some(Ok(Message::Text(text))) if versioned => {
+                        match serde_json::from_str::<wire::stream::Control>(&text) {
+                            Ok(wire::stream::Control::Cancel) => Ok(Some(Request { op: "cancel".into(), ..Default::default() })),
+                            Err(_) => Err("only cancel is accepted after the initial request".into()),
+                        }
+                    }
+                    Some(Ok(Message::Binary(_))) if versioned => Err("data and resize are not supported".into()),
                     Some(Ok(Message::Binary(b))) => input(&b),
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break None,
                     Some(Ok(_)) => Ok(None),
@@ -132,6 +170,7 @@ where
         }
     };
     reader.abort();
+    let _ = reader.await;
     let Some(end) = end else {
         return Ended::ClientGone;
     };
@@ -422,5 +461,158 @@ mod tests {
         // Silent past three beats since the pong: gone, with nothing more sent.
         assert_eq!(b.ended.await.unwrap(), Ended::ClientGone);
         assert!(b.client_rx.next().await.is_none());
+    }
+    #[tokio::test]
+    async fn stream_cancel_is_not_acknowledged_by_transport_loss() {
+        let (client_tx, rx) = mpsc::unbounded();
+        let (tx, mut client_rx) = mpsc::unbounded();
+        let (ours, mut guest) = tokio::io::duplex(4096);
+        let task = tokio::spawn(pump_stream(rx, tx, Box::new(ours), Duration::from_secs(30)));
+        client_tx
+            .unbounded_send(Ok(Message::Text(r#"{"action":"cancel"}"#.into())))
+            .unwrap();
+        let req: Request = guestc::read_frame(&mut guest).await.unwrap();
+        assert_eq!(req.op, "cancel");
+        drop(guest);
+        let (ch, payload) = binary(client_rx.next().await.unwrap());
+        assert_eq!(ch, channel::EXIT);
+        let end: SessionEnd = serde_json::from_slice(&payload).unwrap();
+        assert!(!end.cancelled);
+        assert_eq!(end.code, "not_running");
+        client_tx.unbounded_send(Ok(Message::Close(None))).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_preserves_guest_cancellation_acknowledgment() {
+        let (client_tx, rx) = mpsc::unbounded();
+        let (tx, mut client_rx) = mpsc::unbounded();
+        let (ours, mut guest) = tokio::io::duplex(4096);
+        let task = tokio::spawn(pump_stream(rx, tx, Box::new(ours), Duration::from_secs(30)));
+        let mut end = Response::exit(137, false);
+        end.cancelled = true;
+        guest
+            .write_all(&guest::encode_frame(&end).unwrap())
+            .await
+            .unwrap();
+        let (_, payload) = binary(client_rx.next().await.unwrap());
+        let end: SessionEnd = serde_json::from_slice(&payload).unwrap();
+        assert!(end.cancelled);
+        client_tx.unbounded_send(Ok(Message::Close(None))).unwrap();
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn stream_cancel_reaches_guest_while_downstream_send_is_blocked() {
+        let (client_tx, rx) = mpsc::unbounded();
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (entered_sink, resume_sink) = (entered.clone(), resume.clone());
+        let sink = Box::pin(futures::sink::unfold(false, move |blocked, _: Message| {
+            let (entered, resume) = (entered_sink.clone(), resume_sink.clone());
+            async move {
+                if !blocked {
+                    entered.notify_one();
+                    resume.notified().await;
+                }
+                Ok::<_, std::convert::Infallible>(true)
+            }
+        }));
+        let (ours, mut guest) = tokio::io::duplex(4096);
+        let task = tokio::spawn(pump_stream(
+            rx,
+            sink,
+            Box::new(ours),
+            Duration::from_secs(30),
+        ));
+        guest
+            .write_all(
+                &guest::encode_frame(&Response::chunk("stdout", b"blocked".to_vec())).unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        client_tx
+            .unbounded_send(Ok(Message::Text(r#"{"action":"cancel"}"#.into())))
+            .unwrap();
+        let cancel: Request =
+            tokio::time::timeout(Duration::from_secs(1), guestc::read_frame(&mut guest))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(cancel.op, "cancel");
+        let mut end = Response::exit(137, false);
+        end.cancelled = true;
+        guest
+            .write_all(&guest::encode_frame(&end).unwrap())
+            .await
+            .unwrap();
+        resume.notify_one();
+        let mut remaining = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::io::AsyncReadExt::read_to_end(&mut guest, &mut remaining),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        client_tx.unbounded_send(Ok(Message::Close(None))).unwrap();
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap(), Ended::Command(end) if end.cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_invalid_input_drops_guest_before_client_closes() {
+        let (client_tx, rx) = mpsc::unbounded();
+        let (tx, mut client_rx) = mpsc::unbounded();
+        let (ours, mut guest) = tokio::io::duplex(4096);
+        let task = tokio::spawn(pump_stream(rx, tx, Box::new(ours), Duration::from_secs(30)));
+        client_tx
+            .unbounded_send(Ok(Message::Binary(vec![0, 1])))
+            .unwrap();
+        let (_, payload) = binary(client_rx.next().await.unwrap());
+        let end: SessionEnd = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(end.code, "invalid");
+        assert!(!end.cancelled && end.exit_code.is_none());
+        let mut remaining = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::io::AsyncReadExt::read_to_end(&mut guest, &mut remaining),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(remaining.is_empty());
+        // Client has not closed, but its command's guest connection is already gone.
+        assert!(!task.is_finished());
+        client_tx.unbounded_send(Ok(Message::Close(None))).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_cleanup_error_has_no_completion_exit_code() {
+        let (client_tx, rx) = mpsc::unbounded();
+        let (tx, mut client_rx) = mpsc::unbounded();
+        let (ours, mut guest) = tokio::io::duplex(4096);
+        let task = tokio::spawn(pump_stream(rx, tx, Box::new(ours), Duration::from_secs(30)));
+        let response = Response {
+            error_code: "exec_cleanup_failed".into(),
+            ..Response::error("cleanup unconfirmed")
+        };
+        guest
+            .write_all(&guest::encode_frame(&response).unwrap())
+            .await
+            .unwrap();
+        let (_, payload) = binary(client_rx.next().await.unwrap());
+        let end: SessionEnd = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(end.code, "exec_cleanup_failed");
+        assert!(end.exit_code.is_none() && !end.cancelled);
+        client_tx.unbounded_send(Ok(Message::Close(None))).unwrap();
+        task.await.unwrap();
     }
 }

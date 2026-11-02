@@ -3,6 +3,8 @@
 //! upgrade headers and [`ExecSession`] in the query; then every message is binary, its first
 //! byte a [`channel`], the rest the payload, as Kubernetes' `v5.channel.k8s.io`.
 
+pub mod stream;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -146,6 +148,9 @@ pub struct Resize {
 /// `error` as an `ApiError`'s, and no `exit_code`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEnd {
+    /// True only after the guest confirmed cancellation and process-group cleanup.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -305,5 +310,14 @@ mod tests {
             }
         );
         assert!(serde_json::from_value::<Resize>(json!({"cols": 100})).is_err());
+    }
+    #[test]
+    fn exec_stream_capability_defaults_to_false() {
+        let old: crate::guest::Response =
+            serde_json::from_str(r#"{"type":"pong","version":"99.0.0"}"#).unwrap();
+        assert!(!old.exec_stream_v1);
+        let current: crate::guest::Response =
+            serde_json::from_str(r#"{"type":"pong","exec_stream_v1":true}"#).unwrap();
+        assert!(current.exec_stream_v1);
     }
 }

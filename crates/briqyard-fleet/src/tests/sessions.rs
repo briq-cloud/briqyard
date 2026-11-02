@@ -296,3 +296,33 @@ async fn a_fork_may_name_a_namespace_of_its_hosts_and_not_one_of_another() {
     let after: usize = ds.iter().map(|d| d.stub.calls().len()).sum();
     assert_eq!(before, after);
 }
+
+#[tokio::test]
+async fn versioned_stream_route_forwards_initial_and_cancel_frames() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+    let (f, ds) = fleet_with_daemons(1).await;
+    let m = ds[0].stub.add("t1", "sbx", 512);
+    let addr = serve_fleet(&f).await;
+    let mut req = format!("ws://{addr}/v1/machines/{}/exec/stream/v1", m.id)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer api".parse().unwrap());
+    let tcp = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let (mut ws, _) = tokio_tungstenite::client_async(req, tcp).await.unwrap();
+    for text in [
+        r#"{"cmd":["cat"],"timeout_ms":1000}"#,
+        r#"{"action":"cancel"}"#,
+    ] {
+        ws.send(Message::Text(text.into())).await.unwrap();
+        assert_eq!(
+            ws.next().await.unwrap().unwrap(),
+            Message::Text(text.into())
+        );
+    }
+    assert_eq!(
+        ds[0].stub.calls().last().unwrap(),
+        &format!("GET /v1/machines/{}/exec/stream/v1", m.id)
+    );
+}

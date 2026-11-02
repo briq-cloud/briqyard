@@ -24,6 +24,9 @@ pub trait Guest: Send + Sync {
     async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()>;
     /// Starts a command and hands its connection over: [`collect`] reads it to the exit.
     async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>>;
+    async fn exec_stream_v1(&self, _vsock: &Path, _req: Request) -> Result<Box<dyn Conn>> {
+        Err(anyhow!("exec stream v1 unavailable"))
+    }
     async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()>;
     async fn get(&self, vsock: &Path, path: &str) -> Result<Vec<u8>>;
     async fn ping(&self, _vsock: &Path) -> Result<Response> {
@@ -98,6 +101,12 @@ impl Guest for Vsock {
     }
     async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>> {
         Ok(Box::new(session(vsock, req).await?))
+    }
+    async fn exec_stream_v1(&self, vsock: &Path, mut req: Request) -> Result<Box<dyn Conn>> {
+        req.op = "exec_stream_v1".into();
+        let mut conn = dial(vsock).await?;
+        write_request(&mut conn, &req).await?;
+        Ok(Box::new(conn))
     }
     async fn put(&self, vsock: &Path, path: &str, mode: u32, data: Vec<u8>) -> Result<()> {
         put(vsock, path, mode, data).await

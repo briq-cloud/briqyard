@@ -1,4 +1,5 @@
 use super::*;
+mod cleanup;
 
 /// How long a command on a terminal has after its hangup before it is killed.
 pub(super) const HANGUP_GRACE: Duration = Duration::from_secs(5);
@@ -27,6 +28,8 @@ pub(super) enum Stdin {
 pub(super) enum End {
     Exited(std::io::Result<std::process::ExitStatus>),
     TimedOut,
+    Cancelled,
+    InvalidControl,
     /// The host closed the connection: nobody reads the answer any more.
     HostGone,
 }
@@ -44,6 +47,27 @@ pub(super) async fn exec_op<R, W>(
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let versioned = req.op == "exec_stream_v1";
+    if versioned {
+        let start = briqyard_api::session::stream::Start {
+            cmd: req.cmd.clone(),
+            env: req.env.clone(),
+            cwd: req.cwd.clone(),
+            stdin: String::from_utf8(req.stdin.clone()).unwrap_or_default(),
+            timeout_ms: req.timeout_ms,
+            interactive: req.interactive,
+            wake: false,
+        };
+        if req.tty
+            || req.cols != 0
+            || req.rows != 0
+            || std::str::from_utf8(&req.stdin).is_err()
+            || start.validate().is_err()
+        {
+            send(&stream, &Response::error("invalid exec stream request")).await;
+            return;
+        }
+    }
     if req.cmd.is_empty() {
         send(&stream, &Response::error("empty command")).await;
         return;
@@ -140,10 +164,18 @@ pub(super) async fn exec_op<R, W>(
     if !req.interactive {
         let _ = to_stdin.send(Input::Close);
     }
-    tokio::spawn(write_stdin(sink, stdin_rx));
+    let writer = tokio::spawn(write_stdin(sink, stdin_rx));
     let (gone_tx, mut gone) = tokio::sync::oneshot::channel();
     let budget = Arc::new(tokio::sync::Semaphore::new(STDIN_QUEUE_BYTES));
-    let host = tokio::spawn(read_input(input, to_stdin, pty.clone(), gone_tx, budget));
+    let (cancel_tx, mut cancel_rx) = tokio::sync::mpsc::channel(1);
+    let terminal = pty.clone();
+    let host = tokio::spawn(async move {
+        if versioned {
+            read_stream_control(input, gone_tx, cancel_tx).await;
+        } else {
+            read_input(input, to_stdin, terminal, gone_tx, budget).await;
+        }
+    });
     let mut readers = Vec::new();
     if let Some(p) = &pty {
         let (p, s) = (p.clone(), stream.clone());
@@ -176,35 +208,129 @@ pub(super) async fn exec_op<R, W>(
                 None => End::TimedOut,
             },
             _ = &mut gone => End::HostGone,
+            Some(cancel) = cancel_rx.recv(), if versioned => {
+                if cancel { End::Cancelled } else { End::InvalidControl }
+            },
         }
     };
-    let (status, timed_out) = match end {
-        End::Exited(s) => (s, false),
-        End::TimedOut => {
-            let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
-            (child.wait().await, true)
-        }
-        End::HostGone => {
+    let timed_out = matches!(end, End::TimedOut);
+    let cancellation = matches!(end, End::Cancelled);
+    let invalid_control = matches!(end, End::InvalidControl);
+    let host_gone = matches!(end, End::HostGone);
+    let mut cleanup_error = None;
+    let status = match end {
+        End::Exited(s) => s,
+        End::HostGone if !versioned => {
             hang_up(pid, pty.is_some(), &mut child).await;
-            TRACKED.lock().unwrap().remove(pid);
-            return;
+            Err(std::io::Error::other("host disconnected"))
+        }
+        _ => {
+            let killed = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+            if versioned {
+                let status = match tokio::time::timeout(Duration::from_secs(2), child.wait()).await
+                {
+                    Ok(status) => status,
+                    Err(_) => Err(std::io::Error::other("wait for command timed out")),
+                };
+                cleanup_error =
+                    cleanup::cleanup_failures(killed, &status, confirm_group_gone(pid).await);
+                status
+            } else {
+                // Preserve the original exec wait and wire behavior.
+                child.wait().await
+            }
         }
     };
     TRACKED.lock().unwrap().remove(pid);
-    // Grandchildren may keep the pipes (or the terminal) open; give them a moment, then let go.
-    let drain = async {
-        for r in readers {
-            let _ = r.await;
-        }
-    };
-    let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
-    let code = match status {
-        Ok(s) => exit_code(s),
-        Err(_) => 126,
-    };
-    send(&stream, &Response::exit(code, timed_out)).await;
-    // The exit is the last frame: the connection closes with both its halves.
+    // Keep every task owned until it has finished or been aborted and joined.
     host.abort();
+    let _ = host.await;
+    writer.abort();
+    let _ = writer.await;
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    for mut reader in readers {
+        if tokio::time::timeout_at(drain_deadline, &mut reader)
+            .await
+            .is_err()
+        {
+            reader.abort();
+            let _ = reader.await;
+        }
+    }
+    if host_gone {
+        return;
+    }
+    let response = if versioned {
+        cleanup::terminal(
+            status,
+            timed_out,
+            cancellation,
+            invalid_control,
+            cleanup_error,
+        )
+    } else {
+        Response::exit(status.map(exit_code).unwrap_or(126), timed_out)
+    };
+    send(&stream, &response).await;
+}
+
+/// This reader never waits on the stdin writer or output channel.
+async fn read_stream_control<R: AsyncRead + Unpin>(
+    mut input: R,
+    gone: tokio::sync::oneshot::Sender<()>,
+    cancel: tokio::sync::mpsc::Sender<bool>,
+) {
+    while let Ok(request) = read_request(&mut input).await {
+        let valid = request.op == "cancel"
+            && request.data.is_empty()
+            && request.stdin.is_empty()
+            && request.cmd.is_empty();
+        let _ = cancel.try_send(valid);
+        if !valid {
+            std::future::pending::<()>().await;
+        }
+    }
+    let _ = gone.send(());
+}
+
+/// Zombies cannot run or retain file descriptors; PID 1 reaps them separately.
+async fn confirm_group_gone(pid: i32) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let mut live = false;
+        for entry in
+            std::fs::read_dir("/proc").map_err(|e| format!("inspect command group: {e}"))?
+        {
+            let entry = entry.map_err(|e| format!("inspect command group: {e}"))?;
+            if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+                continue;
+            }
+            let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+                Ok(stat) => stat,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("inspect command group: {e}")),
+            };
+            let fields: Vec<_> = stat
+                .rsplit_once(')')
+                .ok_or("invalid process status")?
+                .1
+                .split_whitespace()
+                .collect();
+            if fields.len() < 3 {
+                return Err("invalid process status".into());
+            }
+            if fields[2].parse::<i32>().ok() == Some(pid) && !matches!(fields[0], "Z" | "X") {
+                live = true;
+            }
+        }
+        if !live {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("command group cleanup unconfirmed".into());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Sends what a pipe gives as `kind` frames until it closes.
@@ -498,7 +624,7 @@ mod tests {
         async fn exit(&mut self) -> Response {
             loop {
                 let f = self.frame().await;
-                if f.kind == "exit" {
+                if matches!(f.kind.as_str(), "exit" | "error") {
                     return f;
                 }
                 self.out.push_str(&String::from_utf8_lossy(&f.data));
@@ -672,5 +798,75 @@ mod tests {
         let mut s = open(&state(), req).await;
         let exit = s.exit().await;
         assert_eq!((exit.code, exit.timed_out), (137, true));
+    }
+    fn stream_req(cmd: &[&str]) -> Request {
+        Request {
+            op: "exec_stream_v1".into(),
+            timeout_ms: 10_000,
+            ..exec_req(cmd)
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_cancel_bypasses_blocked_stdin_and_drains_heavy_output() {
+        let mut req = stream_req(&["sh", "-c", "echo ready; while :; do echo output; done"]);
+        req.stdin = vec![b'x'; 512 << 10];
+        let mut s = open(&state(), req).await;
+        s.until("ready").await;
+        s.send(input("cancel")).await;
+        s.send(input("cancel")).await;
+        let end = s.exit().await;
+        assert!(end.cancelled, "{}", end.message);
+        assert!(!end.timed_out);
+        assert_eq!(end.code, 137);
+        let mut rest = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), s.rd.read_to_end(&mut rest))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rest.is_empty());
+        s.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_timeout_kills_child_and_grandchild() {
+        let mut req = stream_req(&["sh", "-c", "sleep 60 & echo $!; wait"]);
+        req.timeout_ms = 100;
+        let frames = exec(&state(), req).await;
+        let end = exit_of(&frames);
+        assert!(end.timed_out && !end.cancelled);
+        assert!(end.message.is_empty(), "{}", end.message);
+        let pid = text(&frames, "stdout").trim().parse().unwrap();
+        assert!(gone(pid));
+    }
+
+    #[tokio::test]
+    async fn stream_normal_exit_can_win_cancel_race() {
+        let mut s = open(&state(), stream_req(&["true"])).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ =
+            s.wr.write_all(&guest::encode_frame(&input("cancel")).unwrap())
+                .await;
+        let end = s.exit().await;
+        assert_eq!(end.code, 0);
+        assert!(!end.cancelled);
+        s.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_rejects_later_stdin_and_interactive_requests() {
+        let mut s = open(&state(), stream_req(&["sleep", "60"])).await;
+        s.send(stdin("late")).await;
+        let end = s.exit().await;
+        assert!(!end.cancelled);
+        assert_eq!(end.kind, "error");
+        assert_eq!(end.error_code, "invalid");
+        assert!(!end.message.is_empty());
+        s.task.await.unwrap();
+        let mut req = stream_req(&["true"]);
+        req.interactive = true;
+        let frames = exec(&state(), req).await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].kind, "error");
     }
 }
