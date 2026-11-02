@@ -34,8 +34,6 @@ artifacts and versioned fleet image. The GitHub release remains a draft with
 publication/promotion remain separate steps. Merging the changelog tooling itself does
 not build or publish a new runtime version.
 
-Qualify the exact candidate before explicitly publishing that version. Consumers pin the
-published version and artifact identity with their matching application revision; a draft
-build or a floating `latest` reference is not a qualification record. Host installation and
-handover use the existing [Upgrade procedure](OPERATIONS.md#upgrade), with an explicit
-`--release <version or URL>`.
+Qualify the exact candidate before explicitly publishing that version. Host installation
+and handover use the existing [Upgrade procedure](OPERATIONS.md#upgrade), with an
+explicit `--release <version or URL>`.
