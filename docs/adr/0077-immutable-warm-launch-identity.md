@@ -166,3 +166,21 @@ rollback/fallback qualification and native qualification remain required before 
 request index or a fresh physical sample is not proof that guest activation is safe. Tests
 use stand-in VMMs, synthetic disks and a local API socket; Linux/native process, TAP, disk
 and recovery qualification remains required.
+
+The source candidate now connects the catalog factory and ordinary `sandbox_seed`
+create through `templates.unbound_warm_pools`, a separate default-off gate. It gates
+profile advertisement, pristine internal factory allocation and selection together;
+legacy configured claims and public named clones keep their existing restrictions.
+Warm hits retain the source machine ID, backing, process and immutable launch identity.
+Existing assignment intent/receipt and reader transfer settle before the accepted
+STARTING response. The existing create worker then binds and publishes that exact
+assignment. Request replay never queues another worker. The worker's I/O admission
+exists before ownership commitment; binding errors never enter generic disk cleanup.
+
+Selection validates the full explicit seed request and recipe, current catalog,
+positive demand, exact artifact fingerprint, effective CPU/RAM/topology/device, and
+fresh process/reader/launch authority under the existing admission order. Gate-off
+or an unused-slot miss retains the same selected-seed restore and request digest;
+uncertain or consumed assignment authority is never a miss or ordinary-image fallback.
+This is source integration only. The gate remains off until native process, disk,
+network, recovery and failure-path qualification and ordinary review/CI are complete.

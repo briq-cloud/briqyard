@@ -14,6 +14,16 @@ impl Manager {
         let _namespace = self.inner.namespace_lifecycle.read().await;
         let _sandbox = self.inner.sandbox_create_lock.lock().await;
         let _entry = entry.lock.lock().await;
+        self.stage_destination_assignment_locked(request, entry, host)
+    }
+
+    // Caller holds warm -> namespace -> sandbox -> entry through reservation.
+    pub(in crate::machine) fn stage_destination_assignment_locked(
+        &self,
+        request: api::CreateMachineRequest,
+        entry: &Arc<Entry>,
+        host: u8,
+    ) -> Result<()> {
         let intent = Intent::plan(self, request, entry, host)?;
         let machines = self.inner.machines.lock().unwrap();
         anyhow::ensure!(
@@ -96,6 +106,17 @@ impl Manager {
         let _warm = self.inner.warm_lock.lock().await;
         let _namespace = self.inner.namespace_lifecycle.read().await;
         let _sandbox = self.inner.sandbox_create_lock.lock().await;
+        self.commit_destination_assignment_admitted(namespace, request, digest)
+            .await
+    }
+
+    // Caller holds warm -> namespace -> sandbox; this method acquires entry last.
+    pub(in crate::machine) async fn commit_destination_assignment_admitted(
+        &self,
+        namespace: &str,
+        request: &str,
+        digest: &str,
+    ) -> Result<Arc<Entry>> {
         let receipt = self
             .destination_receipt(namespace, request)?
             .context("assignment absent")?;

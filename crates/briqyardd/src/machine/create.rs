@@ -12,9 +12,10 @@ impl Manager {
         let scope = self.inner.zfs.io_scope()?;
         scope
             .run(async {
+                // Acquire worker admission before any uncertain warm ownership transfer.
+                let child_scope = self.inner.zfs.io_scope()?;
                 let (e, how) = self.record(req, None).await?;
                 let made = self.view(&e);
-                let child_scope = self.inner.zfs.io_scope()?;
                 self.spawn_make_admitted(child_scope, e, how);
                 Ok(made)
             })
@@ -30,6 +31,11 @@ impl Manager {
         let m = self.clone();
         tokio::spawn(async move {
             let warm = e.snapshot().warm_slot.is_some();
+            let operation = if matches!(how, Make::Assigned) {
+                metrics::warm::Operation::Claim
+            } else {
+                metrics::warm::Operation::Prepare
+            };
             let began = std::time::Instant::now();
             let result = scope.run(m.make_owned(&e, how)).await;
             if warm {
@@ -38,11 +44,12 @@ impl Manager {
                 } else {
                     metrics::warm::Outcome::Failure
                 };
-                m.inner.stats.warm.lock().unwrap().observe(
-                    metrics::warm::Operation::Prepare,
-                    outcome,
-                    began.elapsed(),
-                );
+                m.inner
+                    .stats
+                    .warm
+                    .lock()
+                    .unwrap()
+                    .observe(operation, outcome, began.elapsed());
             }
             match result {
                 Ok(())
@@ -71,7 +78,7 @@ impl Manager {
             None
         };
         let _admission = self.inner.namespace_lifecycle.read().await;
-        self.record_with_warm_slot(req, role, None).await
+        self.record_with_warm_slot(req, role, None, false).await
     }
 
     /// The caller already holds namespace admission (a gateway put keeps it through boot).
@@ -85,7 +92,7 @@ impl Manager {
                 "sandbox create requires warm admission before namespace admission",
             ));
         }
-        self.record_with_warm_slot(req, role, None).await
+        self.record_with_warm_slot(req, role, None, false).await
     }
 
     pub(super) async fn record_warm_slot(
@@ -99,14 +106,16 @@ impl Manager {
             .warm_test_barrier("warm_admission", "*")
             .await;
         let _admission = self.inner.namespace_lifecycle.read().await;
-        self.record_with_warm_slot(req, None, Some(slot)).await
+        self.record_with_warm_slot(req, None, Some(slot), false)
+            .await
     }
 
-    async fn record_with_warm_slot(
+    pub(in crate::machine) async fn record_with_warm_slot(
         &self,
         req: api::CreateMachineRequest,
         role: Option<Role>,
         warm_slot: Option<warm::Slot>,
+        unbound_factory: bool,
     ) -> Result<(Arc<Entry>, Make), MError> {
         let _sandbox_turn = if req.sandbox_seed.is_some() {
             Some(self.inner.sandbox_create_lock.lock().await)
@@ -330,7 +339,11 @@ impl Manager {
             })?;
             let sr = s.snapshot();
             if fork.snapshot.is_some() {
-                self.named_clone_spec(&req, &mut rec, &sr, fork)?;
+                if unbound_factory {
+                    self.unbound_warm_clone_spec(&req, &mut rec, &sr, fork)?;
+                } else {
+                    self.named_clone_spec(&req, &mut rec, &sr, fork)?;
+                }
             } else {
                 self.ordinary_operation(&sr)?;
                 if !sr.has_disks() {
@@ -365,6 +378,13 @@ impl Manager {
             src = Some((source, fork));
         } else {
             rec.image = req.image.clone();
+        }
+        if req.sandbox_seed.is_some() {
+            self.ensure_namespace(&req.namespace).await?;
+            // Keep the optional assignment journal future off every create/fill caller's stack.
+            if let Some(entry) = Box::pin(self.select_unbound_assignment(&req)).await? {
+                return Ok((entry, Make::Assigned));
+            }
         }
         if rec.root_key.is_empty() {
             rec.root_key = rec.image_key.clone();
@@ -476,6 +496,23 @@ impl Manager {
         if matches!(how, Make::Existing) {
             return Ok(());
         }
+        if matches!(how, Make::Assigned) {
+            let record = e.snapshot();
+            let binding = record
+                .clone_origin
+                .as_ref()
+                .and_then(|o| o.sandbox.as_ref())
+                .ok_or_else(|| invalid("accepted assignment binding missing"))?;
+            return self
+                .start_destination_assignment(
+                    &record.namespace,
+                    &binding.request_id,
+                    &binding.create_sha256,
+                )
+                .await
+                .map(|_| ())
+                .map_err(MError::Other);
+        }
         let reference = e.snapshot().image;
         let image = match how {
             Make::Image => {
@@ -521,7 +558,7 @@ impl Manager {
             Make::Restore(b, key) => self.receive_disks(e, b, key.as_deref()).await,
             Make::Fork(src, fork) => self.make_disks(e, Some(src.as_ref()), Some(fork)).await,
             Make::Image => self.make_disks(e, None, None).await,
-            Make::Existing => return Ok(()),
+            Make::Existing | Make::Assigned => return Ok(()),
         };
         // A fork's or a restore's volume larger than its source's: its disk grows to it (ADR
         // 0040). A new volume is made at its size.
@@ -548,7 +585,7 @@ impl Manager {
                 Ev::normal(reason::FORKED, format!("forked from {from}"))
                     .data(json!({ "from": from }))
             }
-            Make::Existing => return Ok(()),
+            Make::Existing | Make::Assigned => return Ok(()),
             Make::Image => Ev::normal(reason::CREATED, format!("created from {}", r.image))
                 .data(json!({ "image": r.image, "digest": r.image_digest })),
         };

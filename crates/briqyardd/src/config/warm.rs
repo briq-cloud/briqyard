@@ -12,6 +12,7 @@ mod tests {
     fn defaults_are_disabled_and_catalog_updates_are_strictly_validated() {
         let default = load("").unwrap();
         assert!(!default.templates.warm_pools);
+        assert!(!default.templates.unbound_warm_pools);
         assert!(default.templates.warm_policy.catalog.is_empty());
         load(POLICY).unwrap();
         for (from, to) in [

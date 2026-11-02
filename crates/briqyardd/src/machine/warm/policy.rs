@@ -149,7 +149,7 @@ impl Manager {
             if let Some(entry) = entries.get(&slot.pool) {
                 *use_.counts.entry(entry.clone()).or_default() += 1;
             }
-            if !ready_slot(&r) || e.lock.try_lock().is_err() {
+            if !(ready_slot(&r) || unbound_ready_slot(&r)) || e.lock.try_lock().is_err() {
                 use_.fills += 1;
                 use_.filling_memory = use_
                     .filling_memory

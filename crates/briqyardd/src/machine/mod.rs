@@ -850,6 +850,8 @@ pub struct Manager {
 
 /// What a create makes the machine's disks from (ADR 0048).
 enum Make {
+    /// Ownership is durable; the existing assigned binder owns all remaining publication.
+    Assigned,
     /// Identical accepted sandbox request; never launch a second worker.
     Existing,
     /// Its image, pulled when the host has not seen it.

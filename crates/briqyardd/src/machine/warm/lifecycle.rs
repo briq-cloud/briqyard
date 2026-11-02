@@ -140,7 +140,7 @@ impl Manager {
         Ok(())
     }
 
-    pub(super) async fn allocate_warm_slot(
+    pub(in crate::machine) async fn allocate_warm_slot(
         &self,
         pool: &Pool,
         name: String,
@@ -166,7 +166,12 @@ impl Manager {
                     fingerprint: pool.fingerprint.clone(),
                     claimed,
                 };
-                let (e, how) = self.record_warm_slot(request, slot).await?;
+                let (e, how) = if pool.artifact.profile == guest::SANDBOX_READY_V1 {
+                    self.record_unbound_warm_slot(pool, request.name.clone(), slot)
+                        .await?
+                } else {
+                    self.record_warm_slot(request, slot).await?
+                };
                 let origin = e
                     .snapshot()
                     .clone_origin
