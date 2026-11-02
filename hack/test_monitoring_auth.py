@@ -58,6 +58,7 @@ class MonitoringAuthTests(unittest.TestCase):
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
+        self.addCleanup(self._stop_server, server, server_thread)
         with tempfile.TemporaryDirectory() as tmp:
             temp = Path(tmp)
             bindir = temp / "bin"
@@ -128,7 +129,7 @@ curl_plain -fsS {base_url}/plain
                     "BASE_URL": base_url,
                 }
             )
-            result = subprocess.run(["bash", "-x", "-c", script], env=env, capture_output=True, text=True)
+            result = subprocess.run(["bash", "-x", "-c", script], env=env, capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
             for secret in secrets.values():
                 self.assertNotIn(secret, result.stdout)
@@ -155,7 +156,7 @@ curl_api -fsS {base_url}/fallback-api
             fallback_env.pop("BRIQYARD_METRICS_TOKEN")
             fallback_env["BRIQYARD_TOKEN"] = secrets["fallback"]
             fallback_env.pop("GRAFANA_PASSWORD_FILE")
-            fallback = subprocess.run(["bash", "-c", fallback_script], env=fallback_env, capture_output=True, text=True)
+            fallback = subprocess.run(["bash", "-c", fallback_script], env=fallback_env, capture_output=True, text=True, timeout=15)
             self.assertEqual(fallback.returncode, 0, fallback.stderr)
             self.assertNotIn(secrets["fallback"], fallback.stdout + fallback.stderr)
             expected.update(
@@ -181,7 +182,7 @@ curl_api -fsS {base_url}/fallback-api
                     "BRIQYARD_TOKEN": "",
                 }
             )
-            result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+            result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=15)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("header-secret", result.stdout + result.stderr)
             self.assertFalse(any(path.name.startswith("briqyard-monitoring-auth.") for path in temp.iterdir()))
@@ -195,11 +196,17 @@ curl_api -fsS {base_url}/fallback-api
             script = f"source {shlex.quote(str(AUTH))}; monitoring_auth_init"
             env = os.environ.copy()
             env.update({"TMPDIR": tmp, "GRAFANA_PASSWORD_FILE": str(password_file)})
-            result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+            result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=15)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("first-line", result.stdout + result.stderr)
             self.assertNotIn("second-line", result.stdout + result.stderr)
             self.assertFalse(any(path.name.startswith("briqyard-monitoring-auth.") for path in temp.iterdir()))
+
+    def _stop_server(self, server: http.server.ThreadingHTTPServer, thread: threading.Thread) -> None:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive(), "loopback HTTP server did not stop")
 
 
 if __name__ == "__main__":
