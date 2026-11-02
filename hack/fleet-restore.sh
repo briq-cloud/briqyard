@@ -15,17 +15,21 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
-. "$(dirname "${BASH_SOURCE[0]}")/suite-end.sh"
+script_dir=${BASH_SOURCE[0]%/*}
+. "$script_dir/suite-end.sh"
+. "$script_dir/monitoring-auth.sh"
+monitoring_auth_init
 on_fleet()  { $FLEET_SH sh -c "$1"; }
 on_second() { $SECOND_HOST_SH sh -c "$1"; }
 # The fleet restarts during the run; the dev VMs reach it through a port forward that comes
 # back a moment after its listener does: a refused connection is tried again.
-CURL="curl -fsS --retry 10 --retry-connrefused --retry-delay 1"
+CURL="curl_api -fsS --retry 10 --retry-connrefused --retry-delay 1"
 hosts() { $CURL "$BRIQYARD_URL/v1/hosts"; }
 CFG=/etc/briqyard/fleet.yaml
 ID=/etc/briqyard/fleet-backup.key
 STORE=/var/lib/briqyard-fleet-backup
-STATE=$(on_fleet "sed -n 's/^state_dir: //p' $CFG"); STATE=${STATE:-/var/lib/briqyard-fleet}
+STATE=
+RESTORE_STARTED=
 
 # Run on any exit, a failed check, Ctrl-C or a kill included: the fleet's config and registry
 # put back, then the second host started again if the run left it stopped.
@@ -34,29 +38,41 @@ cleanup() {
   echo "cleanup"
   # Every step best-effort: one that fails leaves the others to run and the exit status as it was.
   set +e
-  on_fleet "systemctl stop briqyard-fleet
+  if [ -n "$RESTORE_STARTED" ]; then
+    on_fleet "systemctl stop briqyard-fleet
     if [ -f $STATE/registry.json.lost ]; then mv $STATE/registry.json.lost $STATE/registry.json; fi
     if [ -f $CFG.restore-check ]; then mv $CFG.restore-check $CFG; fi
     systemctl start briqyard-fleet" || true
-  on_second "systemctl start briqyardd" || true
+    on_second "systemctl start briqyardd" || true
+  fi
+  monitoring_auth_cleanup || true
   suite_early_end "$rc"
+  return "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
+STATE=$(on_fleet "sed -n 's/^state_dir: //p' $CFG"); STATE=${STATE:-/var/lib/briqyard-fleet}
 echo "== the registry backed up"
+RESTORE_STARTED=1
 on_fleet "cp $CFG $CFG.restore-check; [ -f $ID ] || briqyard-fleet --config $CFG keygen --out $ID >/dev/null"
 recipient=$(on_fleet "sed -n 's/^# public key: //p' $ID")
 on_fleet "printf 'backup:\n  store: file://%s\n  recipient: %s\n' $STORE $recipient >> $CFG && systemctl restart briqyard-fleet"
 for i in $(seq 1 30); do hosts >/dev/null 2>&1 && break; sleep 1; done
 # The second host's key, asked as the host asks it: its token and address from its config.
+export -n token conf
 conf=$(on_second "cat /etc/briqyard/config.yaml")
 token=$(echo "$conf" | sed -n 's/^token: "\(.*\)"$/\1/p')
 advertise=$(echo "$conf" | sed -n 's/^  advertise: //p')
-host_key() {
-  $CURL -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+# A subshell owns the host auth context; its traps cannot replace the fleet cleanup.
+host_key() (
+  BRIQYARD_TOKEN=$token
+  unset BRIQYARD_METRICS_TOKEN GRAFANA_PASSWORD_FILE
+  curl_auth_dir=
+  monitoring_auth_init
+  $CURL -X POST -H 'Content-Type: application/json' \
     -d "{\"url\": \"$advertise\"}" "$BRIQYARD_URL/v1/hosts/key" | jq -r .key
-}
+)
 HOST=$(hosts | jq -r ".[] | select(.url == \"$advertise\") | .id")
 key=$(host_key)
 check "the second host's key served" '[ "${#key}" = 64 ] && [ -n "$HOST" ]'

@@ -82,10 +82,17 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--dir", required=True)
+    subparsers.add_parser("bearer-config")
     cleanup_parser = subparsers.add_parser("cleanup")
     cleanup_parser.add_argument("--dir", required=True)
     args = parser.parse_args()
     try:
+        if args.command == "bearer-config":
+            token = sys.stdin.buffer.read().decode("utf-8", errors="strict")
+            header = quote_config("Authorization: Bearer " + token)
+            if token:
+                print("header = " + header)
+            return 0
         directory = Path(args.dir)
         if args.command == "init":
             initialize(directory)

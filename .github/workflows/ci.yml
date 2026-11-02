@@ -18,6 +18,7 @@ jobs:
           python3 -m unittest discover -s hack -p "test_bootstrap*.py"
           python3 -m unittest discover -s hack -p "test_release.py"
           python3 -m unittest discover -s hack -p "test_suite_key_transport.py"
+          python3 -m unittest discover -s hack -p "test_*auth.py"
           python3 hack/release.py check > /dev/null
           bash -n hack/bootstrap-host.sh
           bash -n hack/fleet-two-hosts.sh
