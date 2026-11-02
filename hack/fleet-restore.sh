@@ -9,6 +9,7 @@
 # /etc/briqyard/fleet-backup.key on the fleet's host: in production the identity is kept off
 # it) and puts the config and the registry back as they were at the end.
 set -euo pipefail
+set +x
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7430}
 pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
@@ -59,7 +60,17 @@ host_key() {
 HOST=$(hosts | jq -r ".[] | select(.url == \"$advertise\") | .id")
 key=$(host_key)
 check "the second host's key served" '[ "${#key}" = 64 ] && [ -n "$HOST" ]'
-sealed() { echo "$key" | $FLEET_SH sh -c "k=\$(cat); f=$STORE/fleet/registry.json.age; head -c 21 \$f | grep -qx age-encryption.org/v1 && ! grep -qF \"\$k\" \$f && ! grep -qF '\"token\"' \$f"; }
+sealed() {
+  printf '%s\n' "$key" | $FLEET_SH sh -c '
+    set +x
+    k=$(cat); f=$1/fleet/registry.json.age
+    head -c 21 "$f" | grep -qx age-encryption.org/v1 || exit 1
+    if printf "%s\n" "$k" | grep -qF -f - "$f"; then exit 1
+    else [ "$?" -eq 1 ] || exit 1; fi
+    if grep -qF '\''"token"'\'' "$f"; then exit 1
+    else [ "$?" -eq 1 ]; fi
+  ' _ "$STORE"
+}
 check "backed up, encrypted: no key, no token" 'sealed'
 
 echo "== the registry lost, restored"

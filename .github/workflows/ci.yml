@@ -17,8 +17,10 @@ jobs:
           python3 -m unittest discover -s hack/firecracker -p "test_*.py"
           python3 -m unittest discover -s hack -p "test_bootstrap.py"
           python3 -m unittest discover -s hack -p "test_release.py"
+          python3 -m unittest discover -s hack -p "test_suite_key_transport.py"
           python3 hack/release.py check > /dev/null
           bash -n hack/bootstrap-host.sh
+          bash -n hack/fleet-two-hosts.sh hack/fleet-restore.sh
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings

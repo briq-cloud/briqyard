@@ -12,6 +12,7 @@
 # A section whose variable is not set is left out and named in the summary; the run then ends with
 # a non-zero status (ALLOW_SKIPPED=1 accepts it).
 set -euo pipefail
+set +x
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7430}
 T=two-hosts
 pass=0; fail=0
@@ -26,7 +27,7 @@ CONF2=/etc/briqyard/config.yaml
 # fleet in its config, with its token) and `$adv` (its advertised URL); stdin and arguments
 # passed on.
 as_second() {
-  $SECOND_HOST_SH bash -c 'c='"$CONF2"'
+  $SECOND_HOST_SH bash -c 'set +x; c='"$CONF2"'
     tok=$(sed -n "s/^token: *\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" $c); adv=$(sed -n "s/^  advertise: //p" $c)
     fleet=$(sed -n "/^fleet:/,/^[^ ]/s/^  url: //p" $c)
     ask_key() { curl -fsS -X POST -H "Authorization: Bearer $tok" -H "Content-Type: application/json" -d "$1" "$fleet/v1/hosts/key"; }
@@ -115,8 +116,13 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
     # The key, asked of the fleet as the host does, from the host (the fleet checks a host's
     # calls by its address): nowhere on its disk or in its log, in none of the fleet's answers
     # but this one. Only counts leave the host.
-    seen=$(hosts | as_second 'list=$(cat); key=$(ask_key "{\"url\": \"$adv\"}" | jq -r .key)
-      echo "${#key} $(grep -rlsF -D skip "$key" /etc/briqyard /var/lib/briqyard --exclude=pool.img | wc -l) $(journalctl -u briqyardd -b -o cat | grep -cF "$key") $(echo "$list" | grep -cF "$key")"')
+    seen=$(hosts | as_second 'set -o pipefail
+      list=$(cat); key=$(ask_key "{\"url\": \"$adv\"}" | jq -r .key) || exit 1
+      keygrep() { if grep "$@"; then return 0; else [ "$?" -eq 1 ]; fi; }
+      files=$(keygrep -rlsF -D skip -f <(printf "%s\n" "$key") /etc/briqyard /var/lib/briqyard --exclude=pool.img | wc -l) || exit 1
+      logs=$(journalctl -u briqyardd -b -o cat | keygrep -cF -f <(printf "%s\n" "$key")) || exit 1
+      listed=$(printf "%s\n" "$list" | keygrep -cF -f <(printf "%s\n" "$key")) || exit 1
+      printf "%s %s %s %s\n" "${#key}" "$files" "$logs" "$listed"')
     check "its key on none of its files nor in its log" '[ "$(echo "$seen" | cut -d" " -f1-3)" = "64 0 0" ]'
     check "nor in the fleet host list" '[ "$(echo "$seen" | cut -d" " -f4)" = 0 ]'
   fi
