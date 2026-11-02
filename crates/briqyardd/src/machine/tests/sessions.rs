@@ -446,7 +446,10 @@ async fn exec_stream_requires_live_capability_before_spawn() {
         stdin: String::new(),
         interactive: false,
     };
-    assert!(h.m.open_exec_stream_v1(&m.id, request()).await.is_err());
+    assert!(matches!(
+        h.m.open_exec_stream_v1(&m.id, request()).await,
+        Err(MError::ExecStreamUnsupported)
+    ));
     assert!(!h
         .host
         .calls

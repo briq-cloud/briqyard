@@ -161,9 +161,7 @@ impl Manager {
             .map_err(|_| MError::NotRunning("exec stream capability timeout".into()))?
             .map_err(not_running_if_unreachable)?;
         if pong.kind != "pong" || !pong.exec_stream_v1 {
-            return Err(MError::Conflict(
-                "running guest does not support exec_stream_v1".into(),
-            ));
+            return Err(MError::ExecStreamUnsupported);
         }
         let conn = tokio::time::timeout(
             Duration::from_secs(10),
