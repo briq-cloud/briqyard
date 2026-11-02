@@ -3,7 +3,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -33,6 +35,49 @@ def rewrite(bundle, member, transform):
 
 
 class DevRelease(unittest.TestCase):
+    def test_guest_bundle_refusal_precedes_build_and_installed_file_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, _, _, bundle = fixture(root)
+            installed = root / "installed"
+            installed.write_text("previous installed files\n")
+            trace = root / "commands.jsonl"
+            commands = root / "commands"
+            commands.mkdir()
+            lima = commands / "limactl"
+            lima.write_text("#!" + sys.executable + "\n" + '''import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open(os.environ["TEST_TRACE"], "a") as stream:
+    stream.write(json.dumps(args) + "\\n")
+if args == ["shell", "fc", "sh", "-c", "echo $HOME"]:
+    print(os.environ["TEST_VMHOME"])
+elif args == ["shell", "fc", "uname", "-m"]:
+    print("x86_64")
+elif args[:3] == ["shell", "fc", "python3"] and "verify" in args:
+    sys.exit(41)
+else:
+    Path(os.environ["TEST_INSTALLED_FILE"]).write_text("changed")
+    sys.exit(42)
+''')
+            lima.chmod(0o755)
+            cargo = commands / "cargo"
+            cargo.write_text('#!/bin/sh\nprintf changed > "$TEST_INSTALLED_FILE"\nexit 91\n')
+            cargo.chmod(0o755)
+            env = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ["PATH"],
+                       VM="fc", BRIQYARD_VM_LOCK="offline-test", TEST_VMHOME=str(root),
+                       TEST_TRACE=str(trace), TEST_INSTALLED_FILE=str(installed),
+                       BRIQYARD_CHECKED_BUNDLE=str(bundle),
+                       BRIQYARD_CHECKED_BUNDLE_SHA256=digest(bundle))
+            result = subprocess.run(["bash", str(Path(__file__).with_name("vm.sh")), "install"],
+                                    env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 41)
+            self.assertEqual(installed.read_text(), "previous installed files\n")
+            calls = [json.loads(line) for line in trace.read_text().splitlines()]
+            self.assertTrue(any(c[:3] == ["shell", "fc", "python3"] and "verify" in c
+                                for c in calls))
+            self.assertFalse(any("sudo" in c or "bash" in c for c in calls))
+
     def test_stages_complete_release_and_manifest_without_changing_bundle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
