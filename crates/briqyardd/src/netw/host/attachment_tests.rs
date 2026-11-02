@@ -1,6 +1,7 @@
 //! Exercise the real command path in a child with private fake tools, never the host network.
 use super::*;
 use std::os::unix::fs::PermissionsExt;
+use tokio::process::Command;
 
 const CHILD: &str = "netw::host::attachment_tests::retry_after_link_up_child";
 const FIXTURE: &str = "BRIQYARD_TEST_ATTACHMENT_DIR";
