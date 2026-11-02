@@ -431,3 +431,31 @@ async fn file_capabilities_are_live_even_when_versions_are_identical() {
         .unwrap();
     assert!(h.m.file_capabilities(&machine.id).await.is_err());
 }
+
+#[tokio::test]
+async fn exec_stream_requires_live_capability_before_spawn() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    let m = h.m.create_made(h.request("sbx")).await.unwrap();
+    let request = || api::session::stream::Start {
+        cmd: vec!["true".into()],
+        env: Default::default(),
+        cwd: String::new(),
+        timeout_ms: 1000,
+        wake: false,
+        stdin: String::new(),
+        interactive: false,
+    };
+    assert!(h.m.open_exec_stream_v1(&m.id, request()).await.is_err());
+    assert!(!h
+        .host
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c.starts_with("exec ")));
+    h.host.exec_stream_v1.store(true, Relaxed);
+    let mut session = h.m.open_exec_stream_v1(&m.id, request()).await.unwrap();
+    let output = guestc::collect(&mut session.conn).await.unwrap();
+    assert_eq!(output.code, 0);
+}

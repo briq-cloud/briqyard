@@ -90,6 +90,7 @@ pub(super) struct Mock {
     /// The version the guests' inits answer with.
     pub(super) init_version: Mutex<String>,
     pub(super) file_stream_v1: AtomicBool,
+    pub(super) exec_stream_v1: AtomicBool,
     pub(super) paused: Mutex<std::collections::HashSet<u32>>,
     clone_status: Mutex<HashMap<PathBuf, guest::CloneStatus>>,
     pub(in crate::machine) destination_requests: Mutex<HashMap<PathBuf, guest::DestinationBind>>,
@@ -158,6 +159,7 @@ impl Mock {
             vmm_version: Mutex::new("v1.17.0/test".into()),
             init_version: Mutex::new("0.1.0+init".into()),
             file_stream_v1: AtomicBool::new(false),
+            exec_stream_v1: AtomicBool::new(false),
             paused: Mutex::new(std::collections::HashSet::new()),
             clone_status: Mutex::new(HashMap::new()),
             destination_requests: Mutex::new(HashMap::new()),

@@ -97,6 +97,7 @@ impl guestc::Guest for Mock {
             kind: "pong".into(),
             version: self.init_version.lock().unwrap().clone(),
             file_stream_v1: self.file_stream_v1.load(Relaxed),
+            exec_stream_v1: self.exec_stream_v1.load(Relaxed),
             main_pid: clone_status
                 .as_ref()
                 .filter(|s| s.stage == "active")
@@ -146,6 +147,14 @@ impl guestc::Guest for Mock {
     /// when it fails) after `exec_takes`, its code from `exec_codes`. A session: each
     /// `stdin` frame back as stdout, a `resize` as a `COLSxROWS` line, its code at
     /// `close_stdin`.
+    async fn exec_stream_v1(
+        &self,
+        vsock: &Path,
+        req: guest::Request,
+    ) -> Result<Box<dyn guestc::Conn>> {
+        anyhow::ensure!(req.op == "exec_stream_v1", "distinct operation required");
+        self.session(vsock, req).await
+    }
     async fn session(&self, vsock: &Path, req: guest::Request) -> Result<Box<dyn guestc::Conn>> {
         use std::sync::atomic::Ordering::SeqCst;
         use tokio::io::AsyncWriteExt;

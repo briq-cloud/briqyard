@@ -71,6 +71,62 @@ pub(super) async fn exec_session(
         .on_upgrade(move |socket| crate::session::serve(socket, session)))
 }
 
+/// Versioned sessions carry command fields in the first frame, never in the URL.
+pub(super) async fn exec_stream_v1(
+    State(st): S,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<Response, AppError> {
+    if query.is_some() {
+        return Err(MError::Invalid("exec stream does not accept query parameters".into()).into());
+    }
+    // Authenticate and establish ownership before upgrading, without starting a command.
+    let _ = st.mgr.in_use(&id)?;
+    let ws = ws.map_err(|_| MError::Invalid("exec stream requires a WebSocket upgrade".into()))?;
+    Ok(ws
+        .max_message_size(api::session::stream::MAX_MESSAGE)
+        .max_frame_size(api::session::stream::MAX_MESSAGE)
+        .on_upgrade(move |mut socket| async move {
+            use axum::extract::ws::Message;
+            use futures::StreamExt;
+            let start = tokio::time::timeout(Duration::from_secs(10), socket.next()).await;
+            let request = match start {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    serde_json::from_str::<api::session::stream::Start>(&text).ok()
+                }
+                _ => None,
+            };
+            let result = match request {
+                Some(req) => st.mgr.open_exec_stream_v1(&id, req).await,
+                None => Err(MError::Invalid(
+                    "expected initial exec stream request".into(),
+                )),
+            };
+            match result {
+                Ok(session) => {
+                    let (tx, rx) = socket.split();
+                    let _ =
+                        crate::session::pump_stream(rx, tx, session.conn, crate::events::HEARTBEAT)
+                            .await;
+                    drop(session.in_use);
+                }
+                Err(error) => {
+                    let end =
+                        api::session::SessionEnd::failed("exec_stream_refused", error.to_string());
+                    let payload = serde_json::to_vec(&end).unwrap_or_default();
+                    let _ = socket
+                        .send(Message::Binary(api::session::message(
+                            api::session::channel::EXIT,
+                            &payload,
+                        )))
+                        .await;
+                    let _ = socket.send(Message::Close(None)).await;
+                }
+            }
+        }))
+}
+
 pub(super) async fn put_file(
     State(st): S,
     Path(id): Path<String>,

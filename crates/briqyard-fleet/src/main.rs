@@ -532,6 +532,7 @@ fn app(state: Arc<AppState>) -> Router {
         )
         // A session (ADR 0029) is a WebSocket: relayed as bytes once both sides upgraded.
         .route("/v1/machines/:id/exec", get(exec_session).post(by_machine))
+        .route("/v1/machines/:id/exec/stream/v1", get(exec_session))
         .route(
             "/v1/machines/:id/files/content",
             get(forward::file_stream).put(forward::file_stream),

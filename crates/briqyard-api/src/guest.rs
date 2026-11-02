@@ -190,6 +190,13 @@ pub struct Response {
     /// Explicit live capability: version numbers alone do not distinguish development builds.
     #[serde(default, skip_serializing_if = "is_false")]
     pub file_stream_v1: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exec_stream_v1: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cancelled: bool,
+    /// Stable failure category for a versioned streaming terminal error.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error_code: String,
     /// Present only for guests born at the reviewed pre-main template barrier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_status: Option<CloneStatus>,

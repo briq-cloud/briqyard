@@ -390,6 +390,15 @@ pub(super) async fn start_daemon_on(
             }
         })
     }
+    async fn exec_stream_v1(ws: axum::extract::ws::WebSocketUpgrade) -> Response {
+        ws.on_upgrade(|mut socket| async move {
+            while let Some(Ok(message)) = socket.recv().await {
+                if socket.send(message).await.is_err() {
+                    break;
+                }
+            }
+        })
+    }
     /// Like the daemon: a bad name is refused, and a machine that does not fit in what the
     /// host has left.
     async fn create(State(d): D, Json(req): Json<api::CreateMachineRequest>) -> Response {
@@ -724,6 +733,7 @@ pub(super) async fn start_daemon_on(
         .route("/v1/machines/:id/move", post(move_machine))
         .route("/v1/machines/:id/logs", get(logs))
         .route("/v1/machines/:id/exec", get(exec_session))
+        .route("/v1/machines/:id/exec/stream/v1", get(exec_stream_v1))
         .route("/v1/namespaces/:id/quota", get(get_quota).put(put_quota))
         .route("/v1/machines/:id/snapshots", get(snapshots))
         .route("/v1/machines/:id/backups", get(backups).post(make_backup))

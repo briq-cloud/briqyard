@@ -123,6 +123,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/machines/:id/touch", post(touch_machine))
         .route("/v1/machines/:id/wait", post(wait_machine))
         .route("/v1/machines/:id/exec", get(exec_session).post(exec))
+        .route("/v1/machines/:id/exec/stream/v1", get(exec_stream_v1))
         .route("/v1/machines/:id/files", get(get_file).put(put_file))
         .route(
             "/v1/machines/:id/files/capabilities",
