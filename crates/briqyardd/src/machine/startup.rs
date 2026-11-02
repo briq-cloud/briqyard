@@ -13,14 +13,7 @@ impl Manager {
         dns: Resolver,
     ) -> Result<Self> {
         let range = Range::parse(&cfg.network.range).context("network.range")?;
-        let host_id = match store.get_meta("host_id")? {
-            Some(id) => id,
-            None => {
-                let id = new_id("h");
-                store.put_meta("host_id", &id)?;
-                id
-            }
-        };
+        let host_id = store.establish_host_id(|| new_id("h"))?;
         let egress = if cfg.network.egress.is_empty() {
             host::default_egress_interface()
                 .await
