@@ -425,3 +425,142 @@ async fn ordinary_admission_racing_fill_can_consume_headroom_and_refill_rechecks
     assert!(view.error.contains("headroom"));
     assert!(h.m.get(&ordinary.id).unwrap().ready);
 }
+
+// These tests exercise accounting records, not a qualified volume-bearing clone.
+// The public init-ready pool lifecycle continues to reject data-volume recipes.
+#[tokio::test]
+async fn data_volume_budget_is_independent_and_retained_through_uncertain_cleanup() {
+    let (h, _) = pool(1).await;
+    let entry = fill(&h).await;
+    {
+        let _completed = entry.lock.lock().await;
+    }
+    entry.rec.lock().unwrap().volume = Some(api::VolumeSpec {
+        size_gb: 12,
+        mount: "/work".into(),
+    });
+    let before = h.m.quota("t1").unwrap().used;
+    let status = h.m.warm_catalog("t1").await.unwrap();
+    assert_eq!(status.budget.data_disk_gb, 0);
+    assert_eq!(status.charged.data_disk_gb, 12);
+    assert!(status.blocked.iter().any(|b| b.reason == "budget"));
+    {
+        let mut policy = h.m.inner.warm_policy.lock().unwrap();
+        policy.budget.data_disk_gb = 12;
+    }
+    let status = h.m.warm_catalog("t1").await.unwrap();
+    assert!(status.blocked.is_empty());
+    // An additional fill must fit the independent data budget, even with ample roots,
+    // memory, CPU and physical free space. No admission state moves on refusal.
+    let candidate = entry.snapshot();
+    {
+        let machines = h.m.inner.machines.lock().unwrap();
+        assert!(matches!(
+            h.m.admit_warm_policy(&machines, &candidate),
+            Err(MError::Capacity(message)) if message.starts_with("budget:")
+        ));
+    }
+    assert_eq!(h.m.quota("t1").unwrap().used, before);
+
+    // Lowering the budget or demand cannot release a data liability before exit proof.
+    h.m.inner.warm_policy.lock().unwrap().budget.data_disk_gb = 11;
+    h.refuse_clone_exit(true);
+    *entry.live.lock().unwrap() = None;
+    h.m.delete_warm_pool("t1", "tools").await.unwrap();
+    h.m.warm_step().await;
+    let status = h.m.warm_catalog("t1").await.unwrap();
+    assert_eq!(status.draining, 1);
+    assert_eq!(status.charged.data_disk_gb, 12);
+    assert_eq!(h.m.quota("t1").unwrap().used, before);
+    assert!(h
+        .m
+        .metrics()
+        .contains("briqyard_warm_data_disk_bytes{kind=\"reserved\"} 12884901888\n"));
+    h.refuse_clone_exit(false);
+    h.m.warm_step().await;
+    assert_eq!(
+        h.m.warm_catalog("t1").await.unwrap().charged.data_disk_gb,
+        0
+    );
+    assert!(h.m.entry(&entry.snapshot().id).is_err());
+}
+
+#[tokio::test]
+async fn pool_space_floor_subtracts_both_full_root_and_data_liabilities() {
+    let (h, _) = pool(1).await;
+    let entry = fill(&h).await;
+    {
+        let _completed = entry.lock.lock().await;
+    }
+    entry.rec.lock().unwrap().volume = Some(api::VolumeSpec {
+        size_gb: 12,
+        mount: "/work".into(),
+    });
+    h.m.inner.warm_policy.lock().unwrap().budget.data_disk_gb = 12;
+    let root = h.m.inner.cfg.root_disk_gb;
+    let floor = h.m.inner.warm_policy.lock().unwrap().headroom.disk_free_gb;
+    let free = u64::from(root + 12 + floor) << 30;
+    for (extra, pressure) in [(0, true), (1, false)] {
+        *h.m.inner.warm_probe_override.lock().unwrap() = Some(Some(crate::machine::warm::Sample {
+            at: std::time::Instant::now(),
+            memory_mb: 32768,
+            boundary: h.m.warm_probe_boundary().unwrap(),
+            pool: crate::zfs::Pool {
+                used: 0,
+                free: free + extra,
+            },
+        }));
+        let status = h.m.warm_catalog("t1").await.unwrap();
+        assert_eq!(status.charged.root_disk_gb, root);
+        assert_eq!(status.charged.data_disk_gb, 12);
+        assert_eq!(
+            status
+                .blocked
+                .iter()
+                .any(|b| b.reason == "pressure" && b.message.contains("pool free-space")),
+            pressure
+        );
+    }
+}
+
+#[tokio::test]
+async fn durable_claim_transfers_data_charge_to_ordinary_without_releasing_namespace_charge() {
+    let (h, _) = pool(1).await;
+    let entry = fill(&h).await;
+    {
+        let _completed = entry.lock.lock().await;
+    }
+    entry.rec.lock().unwrap().volume = Some(api::VolumeSpec {
+        size_gb: 12,
+        mount: "/work".into(),
+    });
+    let before = h.m.quota("t1").unwrap().used;
+    // Existing durable claim receipt boundary, before the in-memory claimed marker.
+    // This exercises accounting transfer only; no volume-bearing guest is resumed.
+    let key = hex::encode(sha2::Sha256::digest(b"t1\0tools"));
+    let mut pool =
+        h.m.inner
+            .store
+            .get::<serde_json::Value>("warm-pools", &key)
+            .unwrap()
+            .unwrap();
+    pool["claims"] = json!({"data-transfer": {"machine": entry.snapshot().id, "name": "owned"}});
+    h.m.inner
+        .store
+        .put_durable("warm-pools", &key, &pool)
+        .unwrap();
+    h.m.recover_warm_names().unwrap();
+    assert_eq!(
+        h.m.warm_catalog("t1").await.unwrap().charged.data_disk_gb,
+        0
+    );
+    assert_eq!(h.m.quota("t1").unwrap().used, before);
+    assert!(h
+        .m
+        .metrics()
+        .contains("briqyard_warm_data_disk_bytes{kind=\"reserved\"} 0\n"));
+    h.m.delete_warm_pool("t1", "tools").await.unwrap();
+    h.m.warm_step().await;
+    assert!(h.m.entry(&entry.snapshot().id).is_ok());
+    assert_eq!(h.m.quota("t1").unwrap().used, before);
+}

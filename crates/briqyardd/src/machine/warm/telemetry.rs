@@ -25,6 +25,7 @@ impl Manager {
                 memory_mb: policy.headroom.memory_mb,
                 cpu_millis: policy.headroom.cpu_millis,
                 root_disk_gb: policy.headroom.disk_free_gb,
+                data_disk_gb: 0,
             },
             memory_floor_mb: policy.min_mem_available_mb,
             max_fills: policy.max_fills,

@@ -15,7 +15,7 @@ templates:
   warm_pools: true
   init_ready_init_sha256: "<qualified-init-sha256>"
   warm_policy:
-    budget: {memory_mb: 8192, cpu_millis: 4000, root_disk_gb: 64}
+    budget: {memory_mb: 8192, cpu_millis: 4000, root_disk_gb: 64, data_disk_gb: 0}
     headroom: {memory_mb: 4096, cpu_millis: 2000, disk_free_gb: 32}
     min_mem_available_mb: 4096
     max_fills: 1
@@ -45,9 +45,12 @@ for configured ceilings, pool desired/creating/ready/claimed counts, aggregate f
 measurement age, draining count and blocked reasons. Desired is an upper target.
 
 Creating, paused and failed-but-unreleased slots reserve full recipe RAM, CPU millis and
-logical root disk. Copy-on-write sharing does not reduce these charges. Refill requires a
-fresh `MemAvailable` and pool-space sample, preserves absolute and percentage disk floors,
-and respects namespace quotas and aggregate concurrent-fill/entry limits.
+logical root and data disks. `budget.data_disk_gb` defaults to zero: warm data-volume
+liabilities require an explicit budget. The shared pool-space check subtracts both full
+logical charges before applying one disk floor. Copy-on-write sharing does not reduce
+these charges. Refill requires a fresh `MemAvailable` and pool-space sample, preserves
+absolute and percentage disk floors, and respects namespace quotas and aggregate
+concurrent-fill/entry limits.
 
 Headroom applies when warm slots are admitted. Ordinary workloads may consume it later:
 refill then stops and unused slots drain, while claimed and ordinary guests continue.
@@ -503,8 +506,8 @@ snapshot, or is whole.
   | `briqyard_machine_restarts_total` | same | restarts by its policy |
   | `briqyard_machine_state` | same, `state` | 1, one series per machine |
   | `briqyard_machine_boot_seconds` | same | its last start, `starting` to `running` |
-  | `briqyard_warm_pool_{desired,max_ready,shortfall,slots,blocked}`, `_reserved_{memory_bytes,cpu_millis,root_disk_bytes}` | namespace, pool, catalog, type, exact numeric size; bounded state/reason | actual warm counts, upper targets and full unclaimed reservations |
-  | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the absolute free-space floor |
+  | `briqyard_warm_pool_{desired,max_ready,shortfall,slots,blocked}`, `_reserved_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | namespace, pool, catalog, type, exact numeric size; bounded state/reason | actual warm counts, upper targets and full unclaimed reservations |
+  | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the shared absolute free-space floor; data headroom is zero |
   | `briqyard_warm_{memory_available_bytes,disk_free_bytes,probe_age_seconds,probe_available,probe_valid,accounting_available}` | | cached physical availability, sample age/validity and accounting availability; a scrape runs no probe |
   | `briqyard_warm_operations_total`, `_operation_seconds_total`, `_operation_last_seconds` | `operation="prepare\|claim"`, `outcome="success\|miss\|failure"` | host prepare-worker and claim-to-host-readiness observations; excludes fleet and public API transport |
   | `briqyard_warm_fill_blocked_total` | bounded `reason` | actual refused refill attempts |

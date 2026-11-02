@@ -28,6 +28,7 @@ async fn pool(desired: u16) -> (Harness, api::Machine) {
             memory_mb: 2048,
             cpu_millis: 6000,
             root_disk_gb: 64,
+            data_disk_gb: 0,
         },
         headroom: crate::config::WarmHeadroom {
             memory_mb: 512,

@@ -40,6 +40,7 @@ pub(super) fn add(a: api::WarmResources, b: api::WarmResources) -> Option<api::W
         memory_mb: a.memory_mb.checked_add(b.memory_mb)?,
         cpu_millis: a.cpu_millis.checked_add(b.cpu_millis)?,
         root_disk_gb: a.root_disk_gb.checked_add(b.root_disk_gb)?,
+        data_disk_gb: a.data_disk_gb.checked_add(b.data_disk_gb)?,
     })
 }
 
@@ -47,6 +48,7 @@ pub(super) fn resources(r: &Record) -> api::WarmResources {
     api::WarmResources {
         memory_mb: r.size.memory_mb,
         cpu_millis: r.size.cpu_millis(),
+        data_disk_gb: r.volume.as_ref().map_or(0, |volume| volume.size_gb),
         root_disk_gb: r
             .clone_origin
             .as_ref()
@@ -55,7 +57,10 @@ pub(super) fn resources(r: &Record) -> api::WarmResources {
 }
 
 fn exceeds(a: api::WarmResources, b: api::WarmResources) -> bool {
-    a.memory_mb > b.memory_mb || a.cpu_millis > b.cpu_millis || a.root_disk_gb > b.root_disk_gb
+    a.memory_mb > b.memory_mb
+        || a.cpu_millis > b.cpu_millis
+        || a.root_disk_gb > b.root_disk_gb
+        || a.data_disk_gb > b.data_disk_gb
 }
 
 pub(super) struct Usage {
@@ -224,6 +229,7 @@ impl Manager {
             if commits_memory(&r) {
                 let n = api::WarmResources {
                     root_disk_gb: 0,
+                    data_disk_gb: 0,
                     ..resources(&r)
                 };
                 used = add(used, n)
@@ -235,11 +241,13 @@ impl Manager {
             memory_mb: cap.memory_mb.saturating_sub(p.headroom.memory_mb),
             cpu_millis: cap.cpu_millis().saturating_sub(p.headroom.cpu_millis),
             root_disk_gb: u32::MAX,
+            data_disk_gb: u32::MAX,
         };
         let Some(committed) = add(
             used,
             api::WarmResources {
                 root_disk_gb: 0,
+                data_disk_gb: 0,
                 ..need
             },
         ) else {
@@ -310,7 +318,9 @@ impl Manager {
         {
             return Ok(Some(blocked("pressure", "MemAvailable floor reached")));
         }
-        let logical = u64::from(total.root_disk_gb) << 30;
+        // Both thin roots and fully writable data devices can consume the pool.
+        // Widen before adding so independently bounded budgets cannot wrap.
+        let logical = (u64::from(total.root_disk_gb) + u64::from(total.data_disk_gb)) << 30;
         let Some(pool_size) = sample.pool.used.checked_add(sample.pool.free) else {
             return Ok(Some(blocked("capacity", "pool capacity overflow")));
         };
@@ -389,6 +399,7 @@ impl Manager {
                 memory_mb: p.headroom.memory_mb,
                 cpu_millis: p.headroom.cpu_millis,
                 root_disk_gb: p.headroom.disk_free_gb,
+                data_disk_gb: 0,
             },
             min_mem_available_mb: p.min_mem_available_mb,
             max_fills: p.max_fills,
@@ -469,16 +480,23 @@ mod tests {
                 memory_mb: u32::MAX,
                 cpu_millis: 0,
                 root_disk_gb: 0,
+                data_disk_gb: 0,
             },
             api::WarmResources {
                 memory_mb: 0,
                 cpu_millis: u32::MAX,
                 root_disk_gb: 0,
+                data_disk_gb: 0,
             },
             api::WarmResources {
                 memory_mb: 0,
                 cpu_millis: 0,
                 root_disk_gb: u32::MAX,
+                data_disk_gb: 0,
+            },
+            api::WarmResources {
+                data_disk_gb: u32::MAX,
+                ..Default::default()
             },
         ] {
             assert!(add(
@@ -486,7 +504,8 @@ mod tests {
                 api::WarmResources {
                     memory_mb: 1,
                     cpu_millis: 1,
-                    root_disk_gb: 1
+                    root_disk_gb: 1,
+                    data_disk_gb: 1
                 }
             )
             .is_none());
