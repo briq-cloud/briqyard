@@ -32,10 +32,13 @@ mod create;
 mod endpoints;
 mod exec;
 mod gateway;
+mod memory;
+mod memory_host;
 mod moves;
 mod namespaces;
 mod network;
 mod observe;
+use memory::host_memory;
 mod persist;
 mod probes;
 mod quotas;
@@ -536,6 +539,9 @@ struct Entry {
     lock: Arc<tokio::sync::Mutex<()>>,
     rec: Mutex<Record>,
     live: Mutex<Option<fc::Vm>>,
+    memory_protection: Mutex<Option<fc::MemoryProtection>>,
+    launch_pending: AtomicBool,
+    pending_adoption: Mutex<Option<(fc::Vm, bool)>>,
     /// Confirmed for this daemon's live handle; never inferred from an old record alone.
     identity_trusted: AtomicBool,
     /// The reason set before asking the guest to stop; `None` when it ends on its own.
@@ -574,6 +580,9 @@ impl Entry {
             lock: Default::default(),
             rec: Mutex::new(rec),
             live: Mutex::new(None),
+            memory_protection: Mutex::new(None),
+            launch_pending: AtomicBool::new(false),
+            pending_adoption: Mutex::new(None),
             identity_trusted: AtomicBool::new(false),
             stop_req: Mutex::new(None),
             changed: Notify::new(),
@@ -828,6 +837,8 @@ struct Inner {
     /// The pool's space as the tick last read it, and the conditions it decided (ADR 0021).
     pool: Mutex<Option<crate::zfs::Pool>>,
     conditions: Mutex<Conditions>,
+    memory_host: Mutex<Option<&'static str>>,
+    memory_condition: Mutex<Option<api::Condition>>,
     /// This daemon's start and what it did with what the previous one left (ADR 0027).
     started: Mutex<api::DaemonStart>,
 }

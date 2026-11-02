@@ -175,7 +175,7 @@ impl Manager {
             let machines = self.inner.machines.lock().unwrap();
             // A create's start: its memory is counted since it was recorded, and taken again
             // here, the count without it (ADR 0048).
-            let (size, own) = {
+            let (size, own, own_host) = {
                 let r = e.rec.lock().unwrap();
                 let own = match commits_memory(&r) {
                     true => r.size,
@@ -184,6 +184,11 @@ impl Manager {
                 (
                     r.pending.as_ref().and_then(|p| p.size).unwrap_or(r.size),
                     own,
+                    if e.commits_memory(&r) {
+                        e.memory_charge(&r)
+                    } else {
+                        0
+                    },
                 )
             };
             let need = api::QuotaUse {
@@ -199,14 +204,20 @@ impl Manager {
             match over_quota(&namespace, &quota, &held, &need) {
                 Some(x) => Some(x),
                 None => {
+                    self.memory_admission(&machines)?;
                     let (used, _) = committed(&machines);
                     admit_cpu(
                         used.cpu_millis().saturating_sub(own.cpu_millis()),
                         self.capacity().cpu_millis(),
                         size.cpu_millis(),
                     )?;
-                    let used = used.memory_mb.saturating_sub(own.memory_mb);
-                    admit(used, self.capacity().memory_mb, size.memory_mb)?;
+                    let used = used.memory_mb.saturating_sub(own_host);
+                    admit(
+                        used,
+                        self.capacity().memory_mb,
+                        host_memory(size.memory_mb)?,
+                    )?;
+                    *e.memory_protection.lock().unwrap() = None;
                     e.set_state(state::STARTING, |r| {
                         r.error.clear();
                         r.error_reason.clear();

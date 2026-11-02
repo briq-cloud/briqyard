@@ -150,6 +150,7 @@ pub(super) async fn refresh(st: &AppState, host: &HostRec) {
             h.named_memory_fork_v1 = s.named_memory_fork_v1;
             h.named_memory_profiles = s.named_memory_profiles;
             h.report(s.used, s.disk_free_mb, asked);
+            h.memory_policy = s.memory_policy;
         }
     }
 }

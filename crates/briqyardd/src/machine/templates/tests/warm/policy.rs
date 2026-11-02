@@ -21,7 +21,7 @@ async fn a_sample_keeps_fill_liability_after_completion_or_claim_until_a_fresh_m
         let boundary = initial_boundary.unwrap_or_else(|| h.m.warm_probe_boundary().unwrap());
         let sample = crate::machine::warm::Sample {
             at: std::time::Instant::now(),
-            memory_mb: 1024,
+            memory_mb: 1280,
             pool: crate::zfs::Pool {
                 used: 1 << 30,
                 free: 1024 << 30,
@@ -55,7 +55,7 @@ async fn a_sample_keeps_fill_liability_after_completion_or_claim_until_a_fresh_m
         // the old conservative liability, but cannot admit more than one fill at a time.
         *h.m.inner.warm_probe_override.lock().unwrap() = Some(Some(crate::machine::warm::Sample {
             at: std::time::Instant::now(),
-            memory_mb: 1024,
+            memory_mb: 1280,
             pool: crate::zfs::Pool {
                 used: 1 << 30,
                 free: 1024 << 30,

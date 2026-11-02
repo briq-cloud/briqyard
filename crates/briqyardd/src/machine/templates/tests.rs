@@ -164,7 +164,7 @@ async fn recovery_retains_recordless_destinations_and_corrupt_references_block_c
     let run = h.m.inner.cfg.run_dir().join("m_missing");
     std::fs::create_dir_all(&run).unwrap();
     std::fs::write(run.join("backing"), b"retain").unwrap();
-    h.m.sweep_orphans().await;
+    h.m.sweep_orphans().await.unwrap();
     assert!(run.join("backing").exists());
     std::fs::write(
         h.m.inner.store.dir(READERS).join("m_bad.json"),
@@ -172,7 +172,7 @@ async fn recovery_retains_recordless_destinations_and_corrupt_references_block_c
     )
     .unwrap();
     assert!(h.m.check_clone_readers("m_other", None).is_err());
-    assert_eq!(h.m.sweep_orphans().await, 0);
+    assert!(h.m.sweep_orphans().await.is_err());
 }
 
 async fn reviewed_builder() -> (Harness, api::Machine) {
@@ -280,7 +280,7 @@ async fn reviewed_builder_seals_and_named_clone_crosses_identity_before_network_
     assert_eq!(origin.stage, "active");
     assert_eq!(origin.snapshot, snapshot.id);
     assert_eq!(origin.identity.unwrap().ip, format!("{}/24", clone.ip));
-    assert_eq!(h.m.usage().0.memory_mb, 512);
+    assert_eq!(h.m.usage().0.memory_mb, 1024);
     let calls = h.host_calls();
     let configured = calls
         .iter()

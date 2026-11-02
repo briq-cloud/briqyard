@@ -248,14 +248,16 @@ impl Manager {
                 vm.boot_identity = identity;
                 e.identity_trusted.store(true, Relaxed);
                 *e.live.lock().unwrap() = Some(vm.clone());
-                self.watch(e, &vm);
+                self.retain_memory_policy(e, &vm);
+                *e.pending_adoption.lock().unwrap() = Some((vm, false));
                 return true;
             }
         }
         // Share the non-activating, pidfd/boot-boundary settlement used by strict
         // clone recovery. An unknown pending launch never becomes an absence proof.
         let _ = self.unplug(&r.id, &r.ip).await;
-        let gone = self.reconcile_clone_exit(e).await.unwrap_or(false);
+        let settled = self.inner.vmm.recover_stopped(&r.id).await;
+        let gone = settled.is_ok() && self.reconcile_clone_exit(e).await.unwrap_or(false);
         {
             let mut record = e.rec.lock().unwrap();
             record.state = state::ERROR.into();

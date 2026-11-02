@@ -21,7 +21,12 @@ mod balloon_metrics;
 mod client;
 mod clone;
 mod incarnation;
+mod memory;
 mod process;
+mod recovery;
+#[cfg(any(target_os = "linux", test))]
+mod retirement;
+mod settlement;
 #[cfg(test)]
 mod tests;
 mod vmm;
@@ -31,5 +36,9 @@ pub use balloon_metrics::*;
 pub use client::*;
 pub use clone::*;
 pub use incarnation::*;
+pub use memory::{enforce as enforce_memory, MemoryProtection};
 pub use process::*;
+#[doc(hidden)]
+pub use recovery::RecoveryMachine;
+pub use recovery::Startup;
 pub use vmm::*;

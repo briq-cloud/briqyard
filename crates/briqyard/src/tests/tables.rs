@@ -211,6 +211,7 @@ fn the_region_table() {
 #[test]
 fn the_host_table() {
     let ready = api::Host {
+        memory_policy: Some(api::MemoryPolicy::CURRENT),
         egress_siblings_v1: false,
         named_memory_fork_v1: false,
         named_memory_profiles: Vec::new(),
@@ -256,6 +257,7 @@ fn the_host_table() {
         started: Default::default(),
     };
     let pending = api::Host {
+        memory_policy: None,
         id: "h_srv-9".into(),
         url: String::new(),
         state: "provisioning".into(),
@@ -272,6 +274,7 @@ fn the_host_table() {
         ..ready.clone()
     };
     let added = api::Host {
+        memory_policy: None,
         id: "h_10-42-0-11".into(),
         url: "https://10.42.0.11:7420".into(),
         ssh: "51.68.1.2".into(),
@@ -290,11 +293,11 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[0],
-        "ID               URL                          STATE        REGION   MEMORY MB      CPU m      MACHINES  NAMESPACES VERSION              LAST SEEN"
+        "ID               URL                          STATE        REGION   MEMORY MB      CPU m      MACHINES  NAMESPACES VERSION              MEM POLICY         LAST SEEN"
     );
     assert_eq!(
         lines[1],
-        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6000/32000 3         2          0.1.0                2026-10-19T08:30:00+00:00"
+        "h_byard-1        https://10.0.0.9:7420        ready        par      8192/64000     6000/32000 3         2          0.1.0                v1:+256MB          2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[2],
@@ -307,7 +310,7 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[4],
-        "h_srv-9          -                            provisioning -        0/0            0/0        0         0          -                    2026-10-19T08:30:00+00:00",
+        "h_srv-9          -                            provisioning -        0/0            0/0        0         0          -                    legacy             2026-10-19T08:30:00+00:00",
         "no address, region nor version yet shows as -"
     );
     assert_eq!(
@@ -316,7 +319,7 @@ fn the_host_table() {
     );
     assert_eq!(
         lines[6],
-        "h_10-42-0-11     https://10.42.0.11:7420      provisioning gra      0/0            0/0        0         0          -                    2026-10-19T08:30:00+00:00"
+        "h_10-42-0-11     https://10.42.0.11:7420      provisioning gra      0/0            0/0        0         0          -                    legacy             2026-10-19T08:30:00+00:00"
     );
     assert_eq!(
         lines[7], "                 ssh: 51.68.1.2",
@@ -386,6 +389,7 @@ fn host_upgrade_takes_a_host_or_all() {
 #[test]
 fn a_rolling_upgrade_goes_host_by_host_over_those_in_service() {
     let host = |id: &str, state: &str| api::Host {
+        memory_policy: None,
         egress_siblings_v1: false,
         named_memory_fork_v1: false,
         named_memory_profiles: Vec::new(),

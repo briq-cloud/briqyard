@@ -260,6 +260,9 @@ pub(super) async fn create_machine(
                     &placement.named_memory_profile,
                 )?;
             }
+            let physical = host
+                .reservation_mb(ask.memory_mb)
+                .ok_or_else(|| no_room(&st, &reg, &ask))?;
             // A fork's new namespace lives where its source does, as a placement would pin it.
             reg.pin(&req.namespace, &host.id);
             if req.sandbox_seed.is_some() {
@@ -273,7 +276,7 @@ pub(super) async fn create_machine(
                 &req.namespace,
                 admission_id.as_deref(),
             );
-            let id = reg.hold(&host.id, ask.memory_mb, ask.disk_mb, ask.cpu_millis);
+            let id = reg.hold(&host.id, physical, ask.disk_mb, ask.cpu_millis);
             reg.bind_hold_namespace(&host.id, id, &req.namespace);
             Placement::Admitted(
                 Box::new(host),

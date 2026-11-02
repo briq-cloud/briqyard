@@ -8,6 +8,8 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 
 | ADR | Decision |
 |---|---|
+| [0065](0065-oom-protection-and-physical-memory.md) | Fixed OOM preferences, per-VMM containment and physical memory admission |
+| [0068](0068-cgroup-retirement.md) | Positive process settlement and checked nonrecursive cgroup retirement under lifecycle ownership |
 | [0074](0074-warm-catalog-admission.md) | Operator catalog ceilings, full warm resource charges, admission headroom and pressure-aware refill/draining |
 | [0001](0001-own-runtime-on-firecracker.md) | A runtime of our own: Firecracker, a daemon per host, Rust, AGPL |
 | [0002](0002-disks-on-zfs.md) | Disks: ZFS zvols on the host's NVMe, Writeback, an image to a root disk once |

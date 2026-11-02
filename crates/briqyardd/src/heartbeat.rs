@@ -25,6 +25,7 @@ pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, m
     loop {
         let (used, _, total) = mgr.usage();
         let req = api::RegisterHostRequest {
+            memory_policy: Some(api::MemoryPolicy::CURRENT),
             egress_siblings_v1: true,
             named_memory_fork_v1: !mgr.named_memory_profiles().is_empty(),
             named_memory_profiles: mgr.named_memory_profiles(),

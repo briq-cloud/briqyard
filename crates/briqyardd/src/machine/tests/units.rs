@@ -162,7 +162,11 @@ fn host_facts() {
         56320,
         "an edge beside it"
     );
-    assert_eq!(default_memory_mb(3072, 2048, 1024), 1024, "at least 1 GB");
+    assert_eq!(
+        default_memory_mb(3072, 2048, 1024),
+        0,
+        "no invented capacity when reserves consume RAM"
+    );
     assert_eq!(default_vcpus(16, 0), 64);
     assert_eq!(default_vcpus(16, 2), 56);
     assert_eq!(default_vcpus(2, 4), 4, "at least one thread's");

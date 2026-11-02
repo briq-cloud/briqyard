@@ -44,7 +44,12 @@ impl Manager {
                 return Err(MError::Quota(x.to_string()));
             }
             let (used, _) = committed(&machines);
-            admit(used.memory_mb, self.capacity().memory_mb, r.size.memory_mb)?;
+            self.memory_admission(&machines)?;
+            admit(
+                used.memory_mb,
+                self.capacity().memory_mb,
+                host_memory(r.size.memory_mb)?,
+            )?;
             admit_cpu(
                 used.cpu_millis(),
                 self.capacity().cpu_millis(),
@@ -95,6 +100,7 @@ impl Manager {
     /// `asked`: a caller asked for this run (a create, a start, a wake), not the restart
     /// policy; its startup probe failing is a failed boot (ADR 0022).
     pub(super) async fn start_entry(&self, e: &Arc<Entry>, asked: bool) -> Result<(), MError> {
+        self.refresh_launch_reservation(e);
         let cfg = &self.inner.cfg;
         let rec = e.snapshot();
         match rec.state.as_str() {
@@ -229,6 +235,7 @@ impl Manager {
             id: rec.id.clone(),
             dir,
             jail: self.jail_for(&rec),
+            oom_class: rec.oom_class(),
             vcpus: rec.size.vcpus,
             memory_mb: rec.size.memory_mb,
             kernel: cfg.kernel.clone(),
@@ -267,7 +274,7 @@ impl Manager {
         if !boot.resume && boot.memory_clone.is_none() {
             boot.boot_identity = self.persist_cold_identity(e).map_err(fail)?;
         }
-        let live = match self.inner.vmm.boot(&boot).await {
+        let live = match self.boot_reserved(e, &boot).await {
             Ok(live) => live,
             Err(err)
                 if boot.memory_clone.is_none()
@@ -279,12 +286,13 @@ impl Manager {
                 );
                 boot.resume = false;
                 boot.boot_identity = self.persist_cold_identity(e).map_err(fail)?;
-                self.inner.vmm.boot(&boot).await.map_err(fail)?
+                self.boot_reserved(e, &boot).await.map_err(fail)?
             }
             Err(err) => {
                 if let Some(origin) = e.rec.lock().unwrap().clone_origin.as_mut() {
-                    // Vmm::boot errors settle their owned process before returning.
-                    origin.mapping_exited = true;
+                    // An error alone never proves that a spawned clone mapping exited.
+                    origin.mapping_exited =
+                        self.inner.vmm.launch_settlement(&rec.id) == fc::LaunchSettlement::Settled;
                 }
                 return Err(fail(err));
             }
@@ -293,6 +301,9 @@ impl Manager {
             e.identity_trusted
                 .store(live.incarnation.is_some(), Relaxed);
             *e.live.lock().unwrap() = Some(live.clone());
+            self.retain_memory_policy(e, &live);
+            e.launch_pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             *e.stop_req.lock().unwrap() = None;
             let mut r = e.rec.lock().unwrap();
             r.pid = live.pid;
@@ -349,7 +360,7 @@ impl Manager {
             // finds nothing to settle and no restart policy applies. The machine stays in
             // `error`, with the init's reason or else the console's last lines, for the
             // caller to read and destroy.
-            self.end_process(e, &live, Duration::ZERO).await;
+            self.end_process(e, &live, Duration::ZERO).await?;
             if e.snapshot().clone_origin.is_some() && !*live.exited.borrow() {
                 return Err(MError::Conflict(
                     "clone VMM exit is unconfirmed; reservation retained".into(),
@@ -545,7 +556,7 @@ impl Manager {
             gid: uid,
             cpu_millis: rec.size.cpu_millis(),
             // Guest memory, plus what Firecracker itself needs around it.
-            memory_mb: rec.size.memory_mb + 256,
+            memory_mb: api::vmm_memory_mb(rec.size.memory_mb).unwrap_or(u32::MAX),
         })
     }
 

@@ -381,6 +381,7 @@ pub(super) async fn register_host(
                 state: String::new(),
                 capacity: req.capacity,
                 used: req.used,
+                memory_policy: req.memory_policy,
                 machines: req.machines,
                 namespaces: req.namespaces,
                 last_seen: now,
@@ -550,6 +551,7 @@ pub(super) fn new_added_host(
         return Err(invalid("public_tcp_ports: 0 is not a port".into()));
     }
     Ok(HostRec {
+        memory_policy: None,
         egress_siblings_v1: false,
         named_memory_fork_v1: false,
         named_memory_profiles: Vec::new(),
@@ -742,6 +744,7 @@ pub(super) async fn poll_static_hosts_once(st: &AppState) -> bool {
             rec.warm_pool_profiles = s.warm_pool_profiles;
             rec.capacity = s.capacity;
             rec.used = s.used;
+            rec.memory_policy = s.memory_policy;
             rec.machines = s.machines;
             rec.namespaces = namespaces;
             rec.version = s.version;

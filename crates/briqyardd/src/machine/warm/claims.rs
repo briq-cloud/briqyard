@@ -248,7 +248,7 @@ impl Manager {
                 })?;
             let result = self.activate_memory_clone(&e, &live).await;
             if let Err(error) = result {
-                self.end_process(&e, &live, Duration::ZERO).await;
+                self.end_process(&e, &live, Duration::ZERO).await?;
                 if !*live.exited.borrow() {
                     return Err(MError::Conflict(
                         "claim exit unconfirmed; reservation retained".into(),

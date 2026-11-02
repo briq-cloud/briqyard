@@ -276,7 +276,7 @@ async fn a_root_disk_is_made_again_only_once_no_backup_runs() {
 
 #[tokio::test]
 async fn a_new_size_is_reserved_at_the_start_and_refused_past_the_host() {
-    let h = harness("10.64.0.0/22", 1024).await;
+    let h = harness("10.64.0.0/22", 1536).await;
     h.ready().await;
     let a = h.m.create_made(h.request("a")).await.unwrap();
     let mut big = h.request("b");
@@ -291,13 +291,13 @@ async fn a_new_size_is_reserved_at_the_start_and_refused_past_the_host() {
         h.m.update(&a.id, spec(|s| s.size = Some(grown)), None)
             .await
             .unwrap();
-    // It runs on at its size: the host holds 256 for it.
+    // It runs on at its size: the host holds 512 MiB for its 256-MiB guest.
     assert_eq!(patched.size.memory_mb, 256);
-    assert_eq!(h.m.usage().0.memory_mb, 768);
+    assert_eq!(h.m.usage().0.memory_mb, 1280);
     h.m.stop(&a.id, Duration::from_secs(1), false, None)
         .await
         .unwrap();
-    // b holds 512: 768 more do not fit, and the change waits for a start that fits.
+    // b holds 768: the next 1024-MiB physical reservation does not fit, and the change waits for a start that fits.
     let full = h.m.start(&a.id, None).await;
     assert!(matches!(full, Err(MError::Capacity(_))), "{full:?}");
     let still = h.m.get(&a.id).unwrap();
@@ -315,7 +315,7 @@ async fn a_new_size_is_reserved_at_the_start_and_refused_past_the_host() {
     assert_eq!(
         h.m.usage().0,
         api::Capacity {
-            memory_mb: 768,
+            memory_mb: 1024,
             vcpus: 2,
             cpu_millis: Some(2000),
         }

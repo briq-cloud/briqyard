@@ -53,6 +53,12 @@ state, a setting), never with a use: `last_used_at` is kept in memory and reache
 with the next change or the sleeper's tick, so a busy machine does not rewrite its record on
 every connection. The record on disk says what the machine is, not when it was last touched.
 
+Host memory admission reserves the VMM hard ceiling (guest memory plus 256 MiB), while
+namespace quotas and usage retain guest memory. Unresolved launches, clone mappings and
+retirement keep their reservation; live policy failures retain adoption and block new
+admission ([ADR 0065](adr/0065-oom-protection-and-physical-memory.md),
+[ADR 0068](adr/0068-cgroup-retirement.md)).
+
 A create that fails leaves the machine in `error`, `error_reason` saying why: `pull_failed`
 (the image), `create_failed` (its disks, its start refused, a restart of the daemon during a fork's or a restore's: one from an image is taken up again),
 both with no disks. A boot the guest does not survive (the image's fault: no init to run, a

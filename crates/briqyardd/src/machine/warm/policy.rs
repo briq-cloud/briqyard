@@ -152,7 +152,7 @@ impl Manager {
                 use_.fills += 1;
                 use_.filling_memory = use_
                     .filling_memory
-                    .checked_add(r.size.memory_mb)
+                    .checked_add(e.memory_charge(&r))
                     .ok_or_else(|| MError::Capacity("warm fill accounting overflow".into()))?;
             }
         }
@@ -226,8 +226,9 @@ impl Manager {
         let mut used = api::WarmResources::default();
         for e in machines.values() {
             let r = e.snapshot();
-            if commits_memory(&r) {
+            if e.commits_memory(&r) {
                 let n = api::WarmResources {
+                    memory_mb: e.memory_charge(&r),
                     root_disk_gb: 0,
                     data_disk_gb: 0,
                     ..resources(&r)
@@ -243,9 +244,16 @@ impl Manager {
             root_disk_gb: u32::MAX,
             data_disk_gb: u32::MAX,
         };
+        self.memory_admission(machines)?;
+        let physical_need = if candidate.is_some() {
+            host_memory(need.memory_mb)?
+        } else {
+            0
+        };
         let Some(committed) = add(
             used,
             api::WarmResources {
+                memory_mb: physical_need,
                 root_disk_gb: 0,
                 data_disk_gb: 0,
                 ..need
@@ -295,14 +303,11 @@ impl Manager {
         if self.inner.zfs.stalled(crate::zfs::STALL_AFTER).is_some() {
             return Ok(Some(blocked("pressure", "storage stalled")));
         }
-        let mut liability = sample
-            .boundary
-            .pending_memory_mb
-            .checked_add(need.memory_mb);
+        let mut liability = sample.boundary.pending_memory_mb.checked_add(physical_need);
         for entry in machines.values() {
             let record = entry.snapshot();
             if record.warm_slot.is_some() && !sample.boundary.known_warm.contains(&record.id) {
-                liability = liability.and_then(|n| n.checked_add(record.size.memory_mb));
+                liability = liability.and_then(|n| n.checked_add(entry.memory_charge(&record)));
             }
         }
         let Some(liability) = liability else {
