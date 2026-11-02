@@ -8,7 +8,8 @@ Most work here is done by agents. Everything an agent needs is in the repo: this
 
 - `docs/ARCHITECTURE.md`: how a host, a guest and the fleet work.
 - `docs/adr/`: every technical decision, with the research and numbers behind it. A new decision is a new ADR in the same change.
-- `docs/OPERATIONS.md`: install, config fields, upgrades, what to watch.
+- [docs/OPERATIONS.md](docs/OPERATIONS.md): install, config fields, [upgrades](docs/OPERATIONS.md#upgrade), what to watch.
+- [docs/RELEASING.md](docs/RELEASING.md): reviewed version/changelog preparation, candidate artifacts and publication boundary.
 - `docs/DEVELOPMENT.md`: the dev loop on a Mac (Lima VMs `fc` and `fc2`) and on Linux.
 - `docs/KUBERNETES-MAP.md`: briqyard as the Kubernetes of Firecracker: every Kubernetes feature, its briqyard equivalent, the gap, and whose scope (would kube provide it?).
 
@@ -61,7 +62,7 @@ docs/                    architecture, operations, development, mesh design, adr
 
 - **Every change goes through a PR.** Never commit or push to `main`. One branch per task (`feat/…`, `fix/…`, `docs/…`) in its own worktree: `git worktree add ../briqyard-<task> -b <branch> origin/main`. This checkout stays on `main`.
 - A PR body says what was built, the checks with their numbers (unit, clippy, e2e, fleet suites), the choices to review, and its merge order when it depends on another PR. A draft while still pushing.
-- A reviewer approves every PR before a merge. Its findings are fixed on the branch and checked again. Merge with a merge commit once CI is green; a PR that conflicts with one merged before it is updated on its own branch, its checks run again.
+- A reviewer approves every PR before a merge. Its findings are fixed on the branch and checked again. Use a Conventional Commit PR title and squash merge once CI and CodeQL pass; a PR that conflicts with one merged before it is updated on its own branch, its checks run again.
 - Delete the worktree and the branch once merged.
 - The control plane's adapter for briqyard (`BriqyardProvider`) lives in briq's own repository and follows that repo's rules.
 - Never commit `target/`, `bin/`, `.env`, a token or a key.
