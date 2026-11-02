@@ -9,14 +9,15 @@
 # against the host's explicit accounting/pool/probe counters. Changes nothing.
 set -euo pipefail
 set +x
-cd "$(dirname "$0")/.."
+script_dir=${BASH_SOURCE[0]%/*}
+cd "$script_dir/.."
 BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7430}
 has_metrics_token=false; [ -n "${BRIQYARD_METRICS_TOKEN:-${BRIQYARD_TOKEN:-}}" ] && has_metrics_token=true
 source hack/monitoring-auth.sh
 monitoring_auth_init
 get() { curl_metrics -fsS "$BRIQYARD_URL$1"; }
 api_get() { curl_api -fsS "$BRIQYARD_URL$1"; }
-code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+code() { curl_plain -s -o /dev/null -w '%{http_code}' "$@"; }
 metrics_code() { curl_metrics -s -o /dev/null -w '%{http_code}' "$@"; }
 # A host in these states runs its daemon: its metrics come through and it is up.
 serving='select(.state | test("^(ready|draining|retiring|upgrading)$"))'
@@ -76,10 +77,10 @@ check "each host's state on the fleet's /metrics" '[ "$(grep -c "^briqyard_fleet
 if [ -n "${PROMETHEUS_URL:-}" ]; then
   echo "== prometheus"
   n=$(jq length <<<"$targets")
-  scraped() { curl -fsS "$PROMETHEUS_URL/api/v1/targets?state=active" | jq '[.data.activeTargets[] | select(.health != "unknown")] | length'; }
+  scraped() { curl_plain -fsS "$PROMETHEUS_URL/api/v1/targets?state=active" | jq '[.data.activeTargets[] | select(.health != "unknown")] | length'; }
   for _ in $(seq 1 60); do [ "$(scraped)" = "$n" ] && break; sleep 1; done
   check "every target scraped ($n)" '[ "$(scraped)" = "$n" ]'
-  up() { curl -fsS "$PROMETHEUS_URL/api/v1/query" --data-urlencode "query=$1" | jq -r '[.data.result[].value[1]] | join(",")'; }
+  up() { curl_plain -fsS "$PROMETHEUS_URL/api/v1/query" --data-urlencode "query=$1" | jq -r '[.data.result[].value[1]] | join(",")'; }
   check "the fleet: up" '[ "$(up "up{instance=\"fleet\"}")" = 1 ]'
   for id in $(jq -r ".[] | $serving | .id" <<<"$hosts"); do
     check "$id: up" '[ "$(up "up{host=\"$id\"}")" = 1 ]'
@@ -91,7 +92,7 @@ fi
 
 if [ -n "${PROMETHEUS_URL:-}" ] && [ -n "${GRAFANA_URL:-}" ] && [ -n "${GRAFANA_PASSWORD_FILE:-}" ]; then
   echo "== dashboards: every query returns data"
-  host=${CHECK_HOST:-$(curl -fsS "$PROMETHEUS_URL/api/v1/query" --data-urlencode 'query=up{host!=""} == 1' | jq -r '[.data.result[].metric.host] | sort | .[0]')}
+  host=${CHECK_HOST:-$(curl_plain -fsS "$PROMETHEUS_URL/api/v1/query" --data-urlencode 'query=up{host!=""} == 1' | jq -r '[.data.result[].metric.host] | sort | .[0]')}
   for f in hack/monitoring/dashboards/*.json; do
     uid=$(jq -r .uid "$f")
     check "$uid: provisioned" '[ "$(curl_grafana -fsS "$GRAFANA_URL/api/dashboards/uid/$uid" | jq -r .meta.provisioned)" = true ]'

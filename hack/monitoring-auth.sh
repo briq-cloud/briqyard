@@ -34,12 +34,13 @@ curl_with_auth_config() {
   local config=$1
   shift
   if [ -s "$config" ]; then
-    command curl --config "$config" "$@"
+    command curl --disable --config "$config" "$@"
   else
-    command curl "$@"
+    command curl --disable "$@"
   fi
 }
 
+curl_plain() { command curl --disable "$@"; }
 curl_metrics() { curl_with_auth_config "$curl_auth_dir/metrics.curl" "$@"; }
 curl_api() { curl_with_auth_config "$curl_auth_dir/api.curl" "$@"; }
 curl_grafana() { curl_with_auth_config "$curl_auth_dir/grafana.curl" "$@"; }
