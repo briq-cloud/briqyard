@@ -217,6 +217,7 @@ where
 async fn install(st: &State, request: DestinationBind) -> Result<CloneIdentity> {
     let identity = clone_identity::configure(&request.identity).await?;
     destination_mounts::setup(&request.config)?;
+    let mounted = !request.config.mounts.is_empty();
     for file in &request.files {
         files::install(Path::new("/"), &file.path, file.mode, &file.data).await?;
     }
@@ -229,7 +230,7 @@ async fn install(st: &State, request: DestinationBind) -> Result<CloneIdentity> 
     if unsafe { libc::syncfs(fs::File::open("/")?.as_raw_fd()) } != 0 {
         return Err(std::io::Error::last_os_error()).context("sync destination root");
     }
-    if unsafe { libc::syncfs(fs::File::open("/work")?.as_raw_fd()) } != 0 {
+    if mounted && unsafe { libc::syncfs(fs::File::open("/work")?.as_raw_fd()) } != 0 {
         return Err(std::io::Error::last_os_error()).context("sync destination volume");
     }
     Ok::<_, anyhow::Error>(identity)

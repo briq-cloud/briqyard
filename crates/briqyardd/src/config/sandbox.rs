@@ -8,15 +8,16 @@ pub struct SandboxRecipe {
     pub image_config_digest: String,
     pub init_sha256: String,
     pub size: api::Size,
+    /// Capacity of the `/work` data volume; `0` is a recipe without one (two-drive topology).
     pub volume_gb: u32,
 }
 impl SandboxRecipe {
-    pub fn device(&self) -> api::guest::SandboxDevice {
-        api::guest::SandboxDevice {
-            bytes: (self.volume_gb as u64) << 30,
-            logical_sector_bytes: 512,
-            drive_id: "data".into(),
-        }
+    pub fn volume(&self) -> Option<u32> {
+        (self.volume_gb > 0).then_some(self.volume_gb)
+    }
+    /// The sealed data-device identity; none for a volume-free recipe.
+    pub fn device(&self) -> Option<api::guest::SandboxDevice> {
+        self.volume().map(api::guest::SandboxDevice::of_gb)
     }
 }
 fn digest(value: &str) -> bool {
@@ -49,7 +50,6 @@ impl Config {
                     .image_config_digest
                     .strip_prefix("sha256:")
                     .is_some_and(digest)
-                || recipe.volume_gb == 0
                 || recipe.size.check().is_err()
                 || self
                     .registries
@@ -60,9 +60,10 @@ impl Config {
                     recipe.size.vcpus,
                     recipe.size.memory_mb,
                     recipe.size.cpu_millis(),
+                    recipe.volume_gb,
                 ))
             {
-                bail!("sandbox recipes require configured API authentication and unique pinned public image/config/init/size/device inputs without registry credentials");
+                bail!("sandbox recipes require configured API authentication and unique pinned public image/config/init/size/volume inputs without registry credentials");
             }
         }
         Ok(())
@@ -82,6 +83,7 @@ mod tests {
         assert_eq!(
             load(&yaml("admin")).unwrap().templates.sandbox_recipes[0]
                 .device()
+                .unwrap()
                 .bytes,
             2 << 30
         );
@@ -94,5 +96,29 @@ mod tests {
             yaml("admin")
         ))
         .is_err());
+    }
+    #[test]
+    fn volume_gb_zero_declares_a_volume_free_recipe_and_the_field_stays_required() {
+        let free = yaml("admin").replace("volume_gb: 2", "volume_gb: 0");
+        let recipe = &load(&free).unwrap().templates.sandbox_recipes[0];
+        assert_eq!(recipe.volume(), None);
+        assert!(recipe.device().is_none());
+        let recipe = &load(&yaml("admin")).unwrap().templates.sandbox_recipes[0];
+        assert_eq!(recipe.volume(), Some(2));
+        assert_eq!(recipe.device().unwrap().gb(), 2);
+        // A recipe that forgets the field is refused, never read as volume-free.
+        assert!(load(&yaml("admin").replace("      volume_gb: 2\n", "")).is_err());
+        // Both shapes of one image and size may coexist; the same shape twice may not.
+        let entry = yaml("admin")
+            .split_once("    - image")
+            .map(|(_, rest)| format!("    - image{rest}"))
+            .unwrap();
+        let both = format!(
+            "{}{}",
+            yaml("admin"),
+            entry.replace("volume_gb: 2", "volume_gb: 0")
+        );
+        assert_eq!(load(&both).unwrap().templates.sandbox_recipes.len(), 2);
+        assert!(load(&format!("{}{entry}", yaml("admin"))).is_err());
     }
 }

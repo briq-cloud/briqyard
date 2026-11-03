@@ -73,6 +73,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_profile: Option<String>,
     /// Internal fixed data-device topology for a pristine sandbox seed and its destination.
+    /// Absent in the sandbox profile means no third drive at all (a volume-free seed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_device: Option<SandboxDevice>,
     /// Ordinary assigned boot generation; not a continuity nonce or expected init digest.
@@ -88,6 +89,18 @@ pub struct SandboxDevice {
     pub drive_id: String,
 }
 impl SandboxDevice {
+    /// The data drive of a sandbox recipe with a `/work` volume of this many GiB.
+    pub fn of_gb(gb: u32) -> Self {
+        Self {
+            bytes: u64::from(gb) << 30,
+            logical_sector_bytes: 512,
+            drive_id: "data".into(),
+        }
+    }
+    /// Whole GiB of the drive: the volume size a create names for it.
+    pub fn gb(&self) -> u32 {
+        (self.bytes >> 30) as u32
+    }
     pub fn check(&self) -> Result<(), &'static str> {
         if self.bytes < 1 << 30
             || !self.bytes.is_multiple_of(1 << 30)

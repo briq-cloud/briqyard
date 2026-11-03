@@ -132,7 +132,14 @@ impl Manager {
                 size: r.size,
                 root_disk_gb: self.inner.cfg.root_disk_gb,
                 config: if birth.profile == guest::SANDBOX_READY_V1 {
-                    sandbox::builder_config(self.sandbox_recipe(&r.image, r.size)?.device())
+                    sandbox::builder_config(
+                        self.sandbox_recipe(
+                            &r.image,
+                            r.size,
+                            r.volume.as_ref().map(|v| v.size_gb),
+                        )?
+                        .device(),
+                    )
                 } else {
                     builder_config()
                 },
