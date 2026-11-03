@@ -107,7 +107,7 @@ pub(in crate::machine) fn destination_bind(
         crate::machine::start::resolved_guest_config(record, origin.configure.gateway.parse()?)?;
     let binding = origin.sandbox.as_ref().context("sandbox binding missing")?;
     config.files.clear();
-    config.sandbox_device = Some(binding.device.clone());
+    config.sandbox_device = binding.device.clone();
     let bind = guest::DestinationBind {
         identity: origin.configure.clone(),
         config,

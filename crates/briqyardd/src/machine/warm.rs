@@ -64,7 +64,7 @@ pub(super) fn ready_slot(r: &Record) -> bool {
             .is_some_and(|o| o.stage == templates::CloneStage::Paused)
 }
 
-fn fingerprint(artifact: &templates::CloneArtifact) -> Result<String> {
+pub(in crate::machine) fn fingerprint(artifact: &templates::CloneArtifact) -> Result<String> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(artifact)?)))
 }
 

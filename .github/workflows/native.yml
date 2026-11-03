@@ -1,0 +1,182 @@
+name: native
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Source ref to build and test (empty uses workflow ref)
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.*'
+      - 'rust-toolchain*'
+      - 'hack/**'
+      - 'api/**'
+      - '.github/workflows/native.yml'
+permissions:
+  contents: read
+concurrency:
+  group: native-${{ github.event.pull_request.number || inputs.ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  suites:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      # Keep the harness from the workflow revision when dispatch tests an older source ref.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: .native-harness
+          persist-credentials: false
+      - name: Record tested identity and host
+        run: |
+          git -C "$GITHUB_WORKSPACE" rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          uname -a | tee -a "$GITHUB_STEP_SUMMARY"
+          ls -l /dev/kvm
+          free -m
+          df -h /
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Build the head
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools pkg-config libssl-dev bc jq openssl postgresql-client openssh-server python3-yaml
+          cargo build --release --locked --workspace --exclude briqyard-init
+          cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl
+      - name: Install isolated native host and fleet
+        run: bash .native-harness/hack/native-ci.sh "$GITHUB_WORKSPACE"
+      - name: e2e
+        id: e2e
+        run: |
+          mkdir -p native-logs
+          set -o pipefail
+          start=$SECONDS
+          set +e
+          bash hack/e2e.sh 2>&1 | tee native-logs/e2e.log
+          statuses=("${PIPESTATUS[@]}")
+          rc=${statuses[0]}
+          if [ "${statuses[1]}" != 0 ]; then rc=${statuses[1]}; fi
+          echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      - name: fleet-smoke
+        if: ${{ !cancelled() && steps.e2e.outcome != 'skipped' }}
+        id: fleet
+        run: |
+          mkdir -p native-logs
+          set -o pipefail
+          start=$SECONDS
+          set +e
+          bash hack/fleet-smoke.sh 2>&1 | tee native-logs/fleet-smoke.log
+          statuses=("${PIPESTATUS[@]}")
+          rc=${statuses[0]}
+          if [ "${statuses[1]}" != 0 ]; then rc=${statuses[1]}; fi
+          echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      - name: Suite counts
+        if: always()
+        env:
+          E2E_SECONDS: ${{ steps.e2e.outputs.duration }}
+          FLEET_SECONDS: ${{ steps.fleet.outputs.duration }}
+        run: |
+          for suite in e2e fleet-smoke; do
+            echo "### $suite" >> "$GITHUB_STEP_SUMMARY"
+            if [ -f "native-logs/$suite.log" ]; then
+              grep -E '^passed |^ENDED EARLY|^NOT A FULL RUN' "native-logs/$suite.log" >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo 'Did not start' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          echo "Durations: e2e ${E2E_SECONDS:-incomplete}s; fleet-smoke ${FLEET_SECONDS:-incomplete}s" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-e2e-log
+          path: native-logs/e2e.log
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-fleet-smoke-log
+          path: native-logs/fleet-smoke.log
+          if-no-files-found: ignore
+  more-suites:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [stress, monitoring]
+    name: ${{ matrix.suite }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      # Keep the harness from the workflow revision when dispatch tests an older source ref.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: .native-harness
+          persist-credentials: false
+      - name: Record tested identity and host
+        run: |
+          git -C "$GITHUB_WORKSPACE" rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          uname -a | tee -a "$GITHUB_STEP_SUMMARY"
+          ls -l /dev/kvm
+          free -m
+          df -h /
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Build the head
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools pkg-config libssl-dev bc jq openssl postgresql-client openssh-server python3-yaml
+          cargo build --release --locked --workspace --exclude briqyard-init
+          cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl
+      - name: Install isolated native host and fleet
+        run: bash .native-harness/hack/native-ci.sh "$GITHUB_WORKSPACE"
+      - name: Run ${{ matrix.suite }}
+        id: suite
+        env:
+          NATIVE_SUITE: ${{ matrix.suite }}
+        run: |
+          mkdir -p native-logs
+          start=$SECONDS
+          set +e
+          bash .native-harness/hack/native-ci-more.sh "$NATIVE_SUITE" 2>&1 | tee "native-logs/$NATIVE_SUITE.log"
+          statuses=("${PIPESTATUS[@]}")
+          rc=${statuses[0]}
+          if [ "${statuses[1]}" != 0 ]; then rc=${statuses[1]}; fi
+          echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      - name: Suite counts and environment gate
+        if: always()
+        env:
+          NATIVE_SUITE: ${{ matrix.suite }}
+          SUITE_SECONDS: ${{ steps.suite.outputs.duration }}
+        run: |
+          echo "### $NATIVE_SUITE" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "native-logs/$NATIVE_SUITE.log" ]; then
+            grep -E '^passed |^api failures:|^invariant breaks:|^native stress checks:|^ENVIRONMENT GATE:' "native-logs/$NATIVE_SUITE.log" >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Did not start' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "Duration: ${SUITE_SECONDS:-incomplete}s" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-${{ matrix.suite }}-log
+          path: native-logs/${{ matrix.suite }}.log
+          if-no-files-found: ignore

@@ -490,6 +490,27 @@ backup until sent elsewhere. A restore to one (`briqyard machine snapshot restor
 keeps the backup chain correct: the next backup continues from the newest backup made before the
 snapshot, or is whole.
 
+### Backup-object census (ADR 0083)
+
+With a backup store configured, a daemon attempts one bounded read-only census daily, first
+one day after startup. A busy backup gate skips the attempt; shutdown closes admission and
+drains already admitted work. Active work is limited to 30 seconds, 4,096 listed objects,
+64 KiB per metadata record and 8 MiB total reserved metadata reads, one request at a time.
+SDK listing pages and transport buffers are additional overhead.
+
+`briqyard_backup_census_*` gauges expose the last attempt's scalar observations, without
+object keys, machine/namespace labels, names, sealed metadata or key IDs. Check
+`finished_timestamp_seconds`, `failed`, `enumeration_complete` and `metadata_complete` before
+interpreting counts. Before an attempt or while unsettled, coverage is unknown; after two
+days or a backwards clock step it is incomplete. A timeout/failure clears coverage.
+Missing streams, size mismatches and unresolved chains warrant investigation; this is no
+content-hash, encryption or restore test. `local_activity` flags some local backup races,
+not all races. Unreferenced streams may still be publishing. Unresolved owners may be on
+another host or retained by authorities unavailable here. Exhaustion is not atomic coverage.
+`global_ownership_qualified` and `deletion_qualified` always remain zero, including on quiet,
+repeated scans. No count authorizes deletion. Other prefixes, versions, multipart uploads,
+registry backups, operator archives and local backing/reference scopes are excluded.
+
 ## Watch
 
 - `GET /healthz`: the daemon is up. `GET /v1/status`: capacity, use, free disk, `conditions`.
@@ -515,7 +536,7 @@ snapshot, or is whole.
   | `briqyard_machine_state` | same, `state` | 1, one series per machine |
   | `briqyard_machine_boot_seconds` | same | its last start, `starting` to `running` |
   | `briqyard_warm_pool_{desired,max_ready,shortfall,slots,blocked}`, `_reserved_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | namespace, pool, catalog, type, exact numeric size; bounded state/reason | actual warm counts, upper targets and full unclaimed reservations |
-  | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the absolute free-space floor |
+  | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the shared absolute free-space floor; data headroom is zero |
   | `briqyard_warm_{memory_available_bytes,disk_free_bytes,probe_age_seconds,probe_available,probe_valid,accounting_available}` | | cached physical availability, sample age/validity and accounting availability; a scrape runs no probe |
   | `briqyard_warm_operations_total`, `_operation_seconds_total`, `_operation_last_seconds` | `operation="prepare\|claim"`, `outcome="success\|miss\|failure"` | host prepare-worker and claim-to-host-readiness observations; excludes fleet and public API transport |
   | `briqyard_warm_fill_blocked_total` | bounded `reason` | actual refused refill attempts |
@@ -748,9 +769,32 @@ GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitor
 | Host condition | a host condition true for a minute (`memory_pressure`, `disk_pressure`…) |
 | Pool over 80 % | for 5 minutes |
 | Machine in a crash loop | restarted 3 times in 10 minutes by its policy |
-| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|disk"}` grew: add a host in the region |
+| Backup failure observed | a host's `backup_failed` counter grew in 10 minutes, or is positive without a ten-minute baseline; one observed failure is enough |
+| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|cpu\|disk"}` grew: check regional capacity and host compatibility |
 | Creates refused: host under pressure | `{resource="pressure"}` grew: free the namespace's host |
 | Largest slot too small | a region's largest memory slot under `LARGEST_SLOT_MB` for 10 minutes |
+
+**Creates refused: no room** covers memory, CPU time and disk placement refusals.
+CPU refusals also include hosts that do not report CPU-time capacity. Upgrade such a
+host before retrying; adding a different host does not fix a namespace or fork bound
+to it. For an unbound placement with exhausted capacity, add capacity in its region.
+It needs counter samples before and after the refusal; a first positive sample alone
+does not establish an increase. A firing or resolved rule is not proof that its
+notification reached the operator; check delivery separately.
+
+For **Backup failure observed**, inspect the host's backup events and store availability.
+Coverage is daemon machine-backup failure events; registry publication and generation
+coverage need separate signals.
+The alert carries only the host, never backup IDs, object keys or event errors. A first
+positive observation can reflect an older failure after a scrape gap. Counter decreases
+observed within the window are handled by `increase()`; failures between scrapes or across
+an unobserved reset can be missed. Event series are absent before their first event, so
+an empty query leaves this failure-only alert Normal. That does not establish backup
+health or schedule coverage. Query errors remain Error; a missing host among other
+results follows Grafana's missing-series handling. Neither missing data, a reset nor a
+cleared alert proves success. The separate **Not answering** rule covers failed scrapes.
+This ten-minute event signal establishes no backup freshness, recovery or RPO; verify a
+successful backup and restore independently.
 
 **The proxy**, beside the fleet's site (step 6 of First OVH host), with a DNS record for the
 name:

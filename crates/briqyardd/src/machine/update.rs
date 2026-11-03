@@ -19,6 +19,12 @@ impl Manager {
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
         if e.snapshot().assigned_run.is_some() {
+            if self.assigned_lifecycle(&e.snapshot()) {
+                if req.spec.volume.is_some() && e.snapshot().state == state::RUNNING {
+                    return self.update_assigned_volume(&e, req, at).await;
+                }
+                return self.update_assigned_stopped_size(&e, req, at).await;
+            }
             return Err(MError::Conflict(
                 "assigned-run updates require journal integration; pending intent retained".into(),
             ));
@@ -306,7 +312,7 @@ fn change_event(was: &Record, now: &Record) -> Option<Ev> {
 
 /// What the next start applies after a PATCH of `change` (ADR 0024): the pending change with
 /// `change` over it, less what the record already has; None when nothing is left.
-fn pending_after(r: &Record, change: api::SpecChange) -> Option<api::SpecChange> {
+pub(super) fn pending_after(r: &Record, change: api::SpecChange) -> Option<api::SpecChange> {
     let p = r.pending.clone().unwrap_or_default();
     let next = api::SpecChange {
         image: change.image.or(p.image).filter(|v| *v != r.image),
@@ -328,7 +334,7 @@ fn pending_after(r: &Record, change: api::SpecChange) -> Option<api::SpecChange>
 /// What a PATCH of the volume to `gb` grows (ADR 0040): from and to, in GB; None for the
 /// size it has. A machine without a volume, a smaller size, a restore cut short or a destroy
 /// refuse it.
-fn volume_growth(r: &Record, gb: u32) -> Result<Option<(u32, u32)>, MError> {
+pub(super) fn volume_growth(r: &Record, gb: u32) -> Result<Option<(u32, u32)>, MError> {
     let held = r
         .volume
         .as_ref()

@@ -115,10 +115,7 @@ impl Manager {
                 .warm_policy
                 .check_capacity(m.capacity())?;
         }
-        m.load()?;
-        m.prepare_assigned_reboot_exits().await?;
-        m.verify_assigned_run_backing().await?;
-        m.verify_clone_artifacts();
+        m.load_backing_at_start().await?;
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
             .inner
@@ -133,9 +130,7 @@ impl Manager {
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
-        m.recover_warm_names()?;
-        let (adopted, stopped, gone) = m.recover().await;
-        let swept = m.sweep_orphans().await;
+        let (adopted, stopped, gone, swept) = m.recover_and_sweep_at_start().await?;
         let machines = m.inner.machines.lock().unwrap().len();
         *m.inner.started.lock().unwrap() = api::DaemonStart {
             at: Utc::now(),
@@ -160,6 +155,23 @@ impl Manager {
         let watch = m.clone();
         tokio::spawn(async move { watch.storage_watch().await });
         Ok(m)
+    }
+
+    // Shared by new and the fake-host startup tests; keep all durable backing recovery here.
+    pub(super) async fn load_backing_at_start(&self) -> Result<()> {
+        self.load()?;
+        self.recover_assigned_update_backing().await?;
+        self.prepare_assigned_reboot_exits().await?;
+        self.verify_assigned_run_backing().await?;
+        self.verify_clone_artifacts();
+        Ok(())
+    }
+
+    pub(super) async fn recover_and_sweep_at_start(&self) -> Result<(usize, usize, usize, usize)> {
+        self.recover_warm_names()?;
+        let (adopted, stopped, gone) = self.recover().await;
+        let swept = self.sweep_orphans().await;
+        Ok((adopted, stopped, gone, swept))
     }
 
     pub fn host_id(&self) -> &str {
@@ -435,6 +447,12 @@ impl Manager {
                 tracing::error!(err = %error, "clone references unreadable: orphan cleanup deferred");
                 return 0;
             }
+        }
+        // Every update names a machine that load kept (it refuses a journal without its record),
+        // so only an unreadable journal matters here.
+        if let Err(error) = self.assigned_update_machines() {
+            tracing::error!(err = %error, "assigned updates unreadable: orphan cleanup deferred");
+            return 0;
         }
         let mut swept = 0;
         for (pid, id) in self.inner.vmm.processes() {

@@ -30,7 +30,16 @@ Three things stand between a Prometheus and the hosts:
 
 **Retention 90 days by default** (`RETENTION`), Prometheus's local storage: a quarter to compare against, about 1 to 2 bytes a sample. A fleet of 10 hosts with 200 machines each (12 series a machine, ADR 0021) is about 25,000 series, 1,700 samples a second at 15 s: about 20 GB for 90 days.
 
-**Dashboards and alerts are files in the repository** (`hack/monitoring/`), provisioned read-only into a `briqyard` folder: a fleet overview, a host, machines and tenants. Every query uses series the daemon and the fleet export; `hack/monitoring-check.sh` runs each against a live Grafana. Alerts, with a Slack webhook in `/etc/briqyard-monitoring/alerting.env` (root's, `0600`, the env file shape of ADR 0041): a target not answering for 2 minutes, a host condition, a pool over 80 %, a machine restarted three times in ten minutes (the daemon's crash loop, named by machine), and the three capacity rules `OPERATIONS.md` gave as Prometheus rules (creates refused for memory or disk, for pressure, a largest slot under `LARGEST_SLOT_MB`).
+**Dashboards and alerts are files in the repository** (`hack/monitoring/`), provisioned read-only into a `briqyard` folder: a fleet overview, a host, machines and tenants. Every query uses series the daemon and the fleet export; `hack/monitoring-check.sh` runs each against a live Grafana. Alerts, with a Slack webhook in `/etc/briqyard-monitoring/alerting.env` (root's, `0600`, the env file shape of ADR 0041): a target not answering for 2 minutes, a host condition, a pool over 80 %, a machine restarted three times in ten minutes (the daemon's crash loop, named by machine), and the three capacity rules `OPERATIONS.md` gave as Prometheus rules (creates refused for memory, CPU or disk, for pressure, a largest slot under `LARGEST_SLOT_MB`).
+
+**Backup failures use the existing event counter, grouped only by host, over ten minutes.** Any positive `increase()` alerts without a pending period. Because an event series is absent until its first event, a current positive counter without a sample ten minutes ago also alerts; this can include an older failure first seen after a scrape gap. This branch precedes `increase()` so a single first failure stays visible once a second unchanged sample arrives. Empty results leave this failure-only alert Normal: series absence before the first event is expected, whereas Grafana's `NoData` policy would [create a separate alert](https://grafana.com/docs/grafana/latest/alerting/fundamentals/alert-rule-evaluation/nodata-and-error-states/). Query errors use `Error`, and scrape outages remain the separate target alert. Normal or cleared failure alerts do not establish backup health, schedule coverage, recovery or an RPO. Only the host label reaches the alert; event data and messages do not.
+
+**Capacity and backup expressions have synthetic promtool fixtures, bound to the
+Grafana source and threshold.** `hack/monitoring-alert-check.py` uses the existing
+pinned Prometheus tool, supplied explicitly; it installs nothing. Source binding runs
+in CI, expression evaluation in the native monitoring qualification (DEVELOPMENT.md).
+These checks establish query behavior, not Grafana state transitions, notification
+delivery or physical saturation.
 
 ## Rejected
 

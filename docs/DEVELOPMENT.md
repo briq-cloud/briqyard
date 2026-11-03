@@ -6,6 +6,15 @@ run on Linux only. The init's test that changes users needs root, so it is `#[ig
 runs its test binary as root (`--ignored run_as`, `.github/workflows/ci.yml`); in the VM, the
 same step.
 
+Native PR evidence comes from the `native` GitHub Actions workflow on `ubuntu-24.04`
+with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head;
+manual dispatch accepts a ref. The job summaries contain e2e, fleet-smoke, stress and monitoring counts
+and durations; the `native-*-log` artifacts contain their complete output. These checks are
+not required checks yet. Stress and monitoring run on separate runners in parallel. Monitoring covers a
+ready daemon and an explicitly unreachable registered host (18 checks). Two-host
+suites still need independent Linux hosts
+([ADR 0089](adr/0089-native-suites-in-ci.md)).
+
 ## On a Linux host with KVM
 
 ```bash
@@ -60,6 +69,23 @@ cat /tmp/briqyard-vm.lock             # who holds it while it is held: pid, tree
 ```
 
 Build and edit outside the lock; hold it only while the VMs run your build, and leave both hosts `ready` with no machines of yours behind.
+
+`hack/vm.sh install` requires `BRIQYARD_CHECKED_BUNDLE` (a local path also visible in the VM)
+and `BRIQYARD_CHECKED_BUNDLE_SHA256` (the digest from a trusted release manifest). Use an
+official release whose tag resolves to the successful release workflow's source commit;
+check the asset digest and architecture-specific `SHA256SUMS` before supplying it. The
+helper checks the bundle against the current source pin and reuses bootstrap's complete
+provenance, validation and member checks. It stages the bundle beside the four local
+binaries and includes all five assets in the local release manifest. It downloads nothing.
+A missing or incompatible bundle fails before build or installation.
+
+Fleet smoke requires every registered host to answer: global listings deliberately fail
+when a host is down. Starting a provisioned second VM may suffice; first verify its daemon,
+registration and empty dedicated fixture state. The suite can place a test machine there,
+and temporarily drains other ready hosts during the local host upgrade. Its upgrade
+activates the checked Firecracker and jailer plus immutable init paths; repeat lifecycle
+validation against those resulting bindings when they differ from the previous run.
+
 
 fc's pool is on a Lima disk of its own, so a full root disk can no longer suspend it:
 
@@ -373,7 +399,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   into another namespace and a fork into one (ADR 0056: a rename with the address, the
   uptime marker and the disk kept; into a namespace that exists a new address, a boot and the
   neighbour reached by name; a `moved` event in each namespace; the fork on a network of its own
-  with its source's disk). 264 checks, 260 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  with its source's disk). 280 checks, 276 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
@@ -402,6 +428,9 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   resume, destroy, and reads the daemon's `process_resident_memory_bytes` 12 s after each:
   growth over the second half past `--rss-growth-mb` (32) is a break (ADR 0052). Through a
   fleet it needs `--invariants-url` (the daemon's), else the check is skipped and says so.
+  The capacity race fails on missing start responses, worker or sampler errors, no valid
+  sample, or interruption after the phase begins. Its maximum is sampled guest quota
+  across the host, not continuous physical RAM usage.
   Against a daemon on TLS, the invariants' curl trusts the daemon's certificate with
   `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
 - `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
@@ -435,6 +464,28 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   `GRAFANA_URL` and `GRAFANA_PASSWORD_FILE`, every query of the three dashboards returning data
   (`CHECK_HOST=local`). 18 checks with fc and fc2 and the stack installed. Changes
   nothing: start a few machines on `local` first so the per-machine panels have data.
+
+Before the live monitoring checks, qualify the capacity and backup-failure expressions
+with the already installed, checksum-verified Prometheus 3.15.1 tool (ADR 0054):
+
+```bash
+python3 hack/monitoring-alert-check.py --promtool /opt/briqyard-monitoring/prometheus/promtool
+```
+
+Requires Python 3 and PyYAML (`python3-yaml` on the native host). This runs
+`promtool test rules hack/monitoring/alert-tests.yaml` after binding every fixture
+expression and threshold to the Grafana source. The tool has a 30-second execution
+timeout; a timeout is a failed check. No download or running service is needed.
+The 12 synthetic scenarios have 26 expectations: CPU, memory and disk refusals,
+pressure excluded, zero/first-sample baselines, window expiration, the first backup
+failure and second unchanged sample, reset, stale/absent series and other event reasons.
+Only fixed synthetic labels are used. The CPU case must fail with the old
+`memory|disk` selector; the second backup observation must fail if `increase()` takes
+precedence over the no-baseline branch. `--check-source` checks binding alone (also in
+CI); it does not execute PromQL. On a Mac without PyYAML or the pinned promtool, run the
+expression checks on the native monitoring host. These query tests do not qualify
+Grafana firing/resolution, operator notification delivery or physical saturation;
+those remain separate live checks.
 
 ### Fuzzing
 
