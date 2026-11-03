@@ -26,14 +26,25 @@ build() {
 }
 
 install() {
+  : "${BRIQYARD_CHECKED_BUNDLE:?set a checked release bundle path visible in the VM}"
+  : "${BRIQYARD_CHECKED_BUNDLE_SHA256:?set its trusted release manifest SHA256}"
+  local arch
+  arch=$(limactl shell "$VM" uname -m | tr -d '\r')
+  python3 hack/dev-release.py verify "$BRIQYARD_CHECKED_BUNDLE" "$BRIQYARD_CHECKED_BUNDLE_SHA256" \
+    --arch "$arch"
+  # The source mount may expose different paths or bytes in the guest. Refuse before build
+  # or replacing installed files; staging checks the copied bundle again before publication.
+  limactl shell "$VM" python3 "$SRC/hack/dev-release.py" verify \
+    "$BRIQYARD_CHECKED_BUNDLE" "$BRIQYARD_CHECKED_BUNDLE_SHA256" --arch "$arch"
   build
-  limactl shell "$VM" sudo bash -s -- "$VMHOME" "$SRC" "$TARGET" <<'EOF'
+  limactl shell "$VM" sudo bash -s -- "$VMHOME" "$SRC" "$TARGET" \
+    "$BRIQYARD_CHECKED_BUNDLE" "$BRIQYARD_CHECKED_BUNDLE_SHA256" <<'EOF'
 set -e
-H=$1 SRC=$2 TARGET=$3
+H=$1 SRC=$2 TARGET=$3 BUNDLE=$4 SHA=$5
 mkdir -p /var/lib/briqyard
 [ -f /usr/local/bin/firecracker ] || install -m 0755 "$H/fc/firecracker" /usr/local/bin/firecracker
 [ -f /var/lib/briqyard/vmlinux ] || cp "$H/fc/vmlinux" /var/lib/briqyard/vmlinux
-exec bash "$SRC/hack/install-dev.sh" "$TARGET"
+exec bash "$SRC/hack/install-dev.sh" "$TARGET" "$BUNDLE" "$SHA" "$SRC"
 EOF
 }
 

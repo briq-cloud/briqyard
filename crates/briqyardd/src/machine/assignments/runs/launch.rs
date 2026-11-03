@@ -58,7 +58,10 @@ impl Manager {
             boot_args: self.boot_args(),
             config_drive,
             root: self.inner.zfs.device(&rec.root_dataset()).await?,
-            data: Some(self.inner.zfs.device(&rec.data_dataset()).await?),
+            data: match &rec.volume {
+                Some(_) => Some(self.inner.zfs.device(&rec.data_dataset()).await?),
+                None => None,
+            },
             tap,
             mac: netw::mac_for(rec.ip.parse()?),
             resume: matches!(current.mode, Mode::Checkpoint { .. }),
@@ -160,6 +163,9 @@ impl Manager {
         // Cache exact target before uncertain writes; launch_assigned_run never retries an
         // already reserved machine, even if the first transition write is uncertain.
         self.inner.store.ensure_assigned_run_lifecycle_floor()?;
+        // The intent is checked against the machine file at once (a guest exit settles with
+        // the memory record): repair a file a failed update write left at its predecessor.
+        self.repair_outstanding_update_record(&current.machine)?;
         if current.reference.phase != Phase::Settled {
             let merged = projection::preserve_advisory(&current.target, &entry.snapshot())?;
             *entry.rec.lock().unwrap() = merged;

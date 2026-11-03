@@ -79,7 +79,11 @@ impl Manager {
             },
             Some(Phase::Settled) => {
                 let record = entry.snapshot();
-                if self.validate_current_run_record(&record).is_ok() {
+                // A durable stopped record is already settled. Re-stopping it changes the
+                // timestamp behind a pending update's exact source/predecessor binding.
+                if (record.state != state::STOPPED || record.pid != 0)
+                    && self.validate_current_run_record(&record).is_ok()
+                {
                     let why = if record.stopped_reason.is_empty() {
                         stop::HOST
                     } else {

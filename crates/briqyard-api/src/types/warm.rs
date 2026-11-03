@@ -7,7 +7,7 @@ pub struct WarmResources {
     pub memory_mb: u32,
     pub cpu_millis: u32,
     pub root_disk_gb: u32,
-    /// Full newly allocated data volumes, without a sharing discount.
+    /// Full logical data-volume liability; a zero budget permits no warm data volumes.
     #[serde(skip_serializing_if = "zero_data_disk")]
     pub data_disk_gb: u32,
 }
@@ -121,5 +121,9 @@ mod resource_tests {
         assert_eq!(serde_json::to_value(resources).unwrap(), legacy);
         resources.data_disk_gb = 2;
         assert_eq!(serde_json::to_value(resources).unwrap()["data_disk_gb"], 2);
+        for invalid in [serde_json::json!(-1), serde_json::json!(4294967296_u64)] {
+            let value = serde_json::json!({"data_disk_gb": invalid});
+            assert!(serde_json::from_value::<WarmResources>(value).is_err());
+        }
     }
 }
