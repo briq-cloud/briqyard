@@ -48,8 +48,30 @@ the measurements, leaving manual dispatch.
 
 ## Qualification
 
-Pending the first native suite completion. Record boot timing, suite counts and wall
-clock durations here before marking the PR ready.
+The [first full run](https://github.com/briq-cloud/briqyard/actions/runs/41697866494)
+used this branch's unchanged runtime code from main `2ae2ddbc880663a6045d3f381b4b2fe91d4883d5`.
+Release build: 283 s. Host installation: 18 s. Alpine's first create, including
+image pull, disk preparation and boot: 2.778 s (not a boot-only benchmark).
+
+| Suite | Passed/total | Duration | Result |
+|---|---:|---:|---|
+| e2e | 270/279 | 732 s | 8 internet/traffic-accounting failures; 1 supplementary-group assertion |
+| fleet-smoke | 33/33 | 58 s | full run, including SSH host upgrade and machine handover |
+
+An [explicit main-ref dispatch](https://github.com/briq-cloud/briqyard/actions/runs/41698748711)
+confirmed the tested commit `2ae2ddbc880663a6045d3f381b4b2fe91d4883d5`:
+e2e 270/279 in 657 s, fleet-smoke 33/33 in 65 s. Build 282 s; installation
+19 s; initial Alpine create 2.753 s. It reproduced the same nine failures.
+
+The internet failures motivate the Docker forwarding-policy correction above.
+The supplementary-group assertion remains enabled. Both suites reached their final summaries against exact main. This records current
+failures; it does not qualify the runtime. The [corrected runner run](https://github.com/briq-cloud/briqyard/actions/runs/41701131348)
+is still in progress at review handoff. It uses the same main runtime code (the
+branch changes only CI, installation scripts and documentation). Its results must
+be checked before treating the Docker correction as validated. The
+supplementary-group assertion at `hack/e2e-machines.sh:71` remains an open problem;
+no assertion or suite mode is disabled to turn the baseline green.
+The older documentation's 263-check count predates the current suite additions.
 
 ## Two-host follow-up
 
