@@ -322,7 +322,7 @@ mod tests {
 
     /// An app that is not root re-opens its stderr by path (nginx-unprivileged's error.log is
     /// a symlink to /dev/stderr) and got EACCES on a root-owned console. Needs root:
-    /// `sudo <test binary> --ignored console` (CI runs it).
+    /// `sudo <test binary> --ignored run_as` (CI runs it).
     #[test]
     #[ignore = "needs root"]
     fn run_as_app_user_reopens_its_console() {
