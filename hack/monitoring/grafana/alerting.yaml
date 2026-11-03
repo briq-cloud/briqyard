@@ -148,7 +148,7 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: gt, params: [0] }
-        noDataState: NoData
+        noDataState: OK
         execErrState: Error
         for: 0s
         labels:

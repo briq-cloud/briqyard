@@ -721,11 +721,14 @@ GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitor
 | Largest slot too small | a region's largest memory slot under `LARGEST_SLOT_MB` for 10 minutes |
 
 For **Backup failure observed**, inspect the host's backup events and store availability.
+Coverage is daemon machine-backup failure events; registry publication and generation
+coverage need separate signals.
 The alert carries only the host, never backup IDs, object keys or event errors. A first
 positive observation can reflect an older failure after a scrape gap. Counter decreases
 observed within the window are handled by `increase()`; failures between scrapes or across
-an unobserved reset can be missed. Missing event series produce `NoData` when the whole
-query is empty (also normal before any failure has occurred); a missing host among other
+an unobserved reset can be missed. Event series are absent before their first event, so
+an empty query leaves this failure-only alert Normal. That does not establish backup
+health or schedule coverage. Query errors remain Error; a missing host among other
 results follows Grafana's missing-series handling. Neither missing data, a reset nor a
 cleared alert proves success. The separate **Not answering** rule covers failed scrapes.
 This ten-minute event signal establishes no backup freshness, recovery or RPO; verify a
