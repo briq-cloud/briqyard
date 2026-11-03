@@ -16,4 +16,9 @@ Decision:
   started, so it is never sent again: an exec runs at most once. This covers exec, put, get,
   file streams and control calls.
 
-Other io errors stay internal errors.
+A 409 `not_running` after a write means the write may have run (docs/DEVELOPMENT.md). A client
+must not blindly repeat a non-idempotent put or exec; it reads the machine's state first.
+
+An end of stream is `Closed` in the same places (`read_frame`, `write_request`), so a reset and
+an end of stream answer alike. File uploads (`api/files.rs`) route their body writes and the
+final answer through the same mapping. Other io errors stay internal errors.

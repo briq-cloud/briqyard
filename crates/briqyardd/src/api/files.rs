@@ -79,6 +79,12 @@ pub(super) async fn put(
     Ok(Json(result?))
 }
 
+/// A write to the guest that failed: a connection that went away is not running (409), as a
+/// read of its answer is (ADR 0091).
+fn guest_io(e: std::io::Error) -> MError {
+    crate::machine::not_running_if_unreachable(crate::guestc::after_write(e))
+}
+
 /// No terminal chunk is sent until the HTTP body reports a successful end.
 async fn upload(
     conn: &mut impl crate::guestc::Conn,
@@ -93,10 +99,8 @@ async fn upload(
         for piece in chunk.chunks(wire::CHUNK_SIZE) {
             idle(conn.write_u32(piece.len() as u32))
                 .await?
-                .map_err(|e| MError::Other(e.into()))?;
-            idle(conn.write_all(piece))
-                .await?
-                .map_err(|e| MError::Other(e.into()))?;
+                .map_err(guest_io)?;
+            idle(conn.write_all(piece)).await?.map_err(guest_io)?;
         }
         total = next;
     }
@@ -105,12 +109,10 @@ async fn upload(
             "file body shorter than Content-Length".into(),
         ));
     }
-    idle(conn.write_u32(0))
-        .await?
-        .map_err(|e| MError::Other(e.into()))?;
+    idle(conn.write_u32(0)).await?.map_err(guest_io)?;
     let response: guest::Response = idle(crate::guestc::read_frame(conn))
         .await?
-        .map_err(MError::Other)?;
+        .map_err(crate::machine::not_running_if_unreachable)?;
     if response.kind != "ok" {
         return Err(MError::Other(anyhow::anyhow!(
             "upload: {}",
@@ -185,9 +187,7 @@ fn download(
             let mut left = size;
             while left > 0 {
                 let mut buf = vec![0; (left as usize).min(wire::CHUNK_SIZE)];
-                let n = idle(conn.read(&mut buf))
-                    .await?
-                    .map_err(|e| MError::Other(e.into()))?;
+                let n = idle(conn.read(&mut buf)).await?.map_err(guest_io)?;
                 if n == 0 {
                     return Err(MError::Other(anyhow::anyhow!("file stream ended early")));
                 }

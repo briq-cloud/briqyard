@@ -225,11 +225,11 @@ where
     Ok(guest::decode_frame(&body)?)
 }
 
-/// An io error on a connection whose request was already sent: a reset is the guest going
-/// away, [`Closed`], as an end of stream is. The command may have started, so nothing sends
+/// An io error on a connection whose request was already sent: a reset or an end of stream
+/// is the guest going away, [`Closed`]. The command may have started, so nothing sends
 /// it again; the caller reports it (ADR 0091).
-fn after_write(e: std::io::Error) -> anyhow::Error {
-    if is_reset(&e) {
+pub(crate) fn after_write(e: std::io::Error) -> anyhow::Error {
+    if is_reset(&e) || e.kind() == std::io::ErrorKind::UnexpectedEof {
         Closed.into()
     } else {
         e.into()
@@ -303,18 +303,7 @@ pub async fn collect<R: AsyncRead + Unpin>(s: &mut R) -> Result<ExecOutput> {
         timed_out: false,
     };
     loop {
-        let r: Response = match read_frame(s).await {
-            Ok(r) => r,
-            Err(e) => {
-                if e.downcast_ref::<std::io::Error>()
-                    .map(|e| e.kind() == std::io::ErrorKind::UnexpectedEof)
-                    .unwrap_or(false)
-                {
-                    return Err(Closed.into());
-                }
-                return Err(e);
-            }
-        };
+        let r: Response = read_frame(s).await?;
         match r.kind.as_str() {
             "stdout" => append(&mut out.stdout, &r.data),
             "stderr" => append(&mut out.stderr, &r.data),
@@ -597,6 +586,9 @@ mod tests {
 
     #[test]
     fn a_reset_after_the_write_is_closed() {
+        assert!(
+            after_write(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)).is::<Closed>()
+        );
         use std::io::{Error, ErrorKind::*};
         for k in [ConnectionReset, ConnectionAborted, BrokenPipe] {
             assert!(after_write(Error::from(k)).is::<Closed>());
