@@ -270,7 +270,9 @@ pub(super) fn root_cgroup() -> io::Result<Dir> {
 }
 
 pub(super) fn jailer_version(jailer: &str, vmm: &str) -> io::Result<()> {
-    if jailer.trim() != "Jailer v1.17.0" || !vmm.starts_with("v1.17.0/") {
+    // The approved digest names the build; this only ties the two binaries to one release.
+    let release = vmm.split_once('/').map_or(vmm, |(release, _)| release);
+    if release.is_empty() || jailer.trim() != format!("Jailer {release}") {
         return Err(invalid());
     }
     Ok(())

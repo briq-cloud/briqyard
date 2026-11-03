@@ -136,6 +136,16 @@ only open/write/close, with no fork or cgroup migration.
 | x86_64 | `65ef226e96f0ceda55ba643f445801ef2cc0ea667ef67cad8ac4f406c9c8434f` | 2243000 |
 | aarch64 | `4d8d2dd4dfc1d47932b2bd261479181dd0c54f0a2f32714421a7e7f9f07ddec8` | 2012584 |
 
+A release installs the jailer of the checked bundle (`firecracker-checked-linux-<arch>.tar.gz`),
+built static from the same commit; the patch series changes no jailer file, so the ordering above
+holds. Its digest, from the bundle's `provenance.json`, is approved as well (v0.1.17); a new
+bundle whose jailer differs is added here and in `build.rs` with its release.
+
+| Architecture | Checked bundle jailer SHA-256 | Bytes |
+|---|---|---:|
+| x86_64 | `d248986ec344a4a7d5a71cb38f0de4bb9dba73da530b106b1279bfd303a860fb` | 3073496 |
+| aarch64 | `3b9ab9768513ed67a31cc6b51aac5318480c57e464b3f59818ff4a5e4a57ce85` | 3134976 |
+
 Each exact `release-v1.17.0-<arch>/jailer-v1.17.0-<arch>` member was hashed only after its
 complete official archive matched the bootstrap pin:
 
@@ -143,7 +153,7 @@ complete official archive matched the bootstrap pin:
 - [aarch64 archive](https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-aarch64.tgz): `e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256`.
 - [Pinned jailer source](https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/jailer/src/env.rs#L659).
 
-The configured VMM and jailer must also report the matching supported version. Approving
+The configured VMM and jailer must also report the same release. Approving
 another build requires its exact bytes and source ordering, not an inherited version label.
 
 ## Validation boundary

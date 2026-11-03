@@ -314,9 +314,6 @@ impl Vmm for Firecracker {
     }
 
     async fn initialize_recovery(&self, machines: &[RecoveryMachine]) -> Result<()> {
-        if !self.version.starts_with("v1.17.0/") {
-            return Err(anyhow!("unsupported jailer lifecycle contract"));
-        }
         let startup = self
             .startup
             .lock()
