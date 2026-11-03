@@ -198,10 +198,9 @@ async fn assigned_combined_provider_resize_is_durable_and_consumed_on_cold_start
         .await
         .expect("the image root swap must finish from its durable intent");
     // Restart after the external root swap but before the next assigned run is reserved.
-    restart(&h).unwrap();
-    h.m.recover_assigned_update_backing()
+    full_startup(&h)
         .await
-        .expect("startup must accept the exact completed root swap");
+        .expect("startup including tidy must retain the exact completed root swap");
     let next = bounded(h.m.start(&id, None)).await.unwrap();
     assert_eq!(next.state, state::RUNNING);
     assert_eq!(next.size, requested_size);
@@ -568,7 +567,7 @@ async fn running_volume_update_settles_and_recovers_before_next_resize() {
 
 #[tokio::test]
 async fn assigned_image_root_swap_recovers_each_zfs_rename_boundary() {
-    for boundary in 0..4 {
+    for boundary in 0..5 {
         let (h, entry) = stopped(false).await;
         let id = entry.snapshot().id;
         bounded(h.m.start(&id, None)).await.unwrap();
@@ -624,25 +623,83 @@ async fn assigned_image_root_swap_recovers_each_zfs_rename_boundary() {
         update.check(&current).unwrap();
         h.m.inner.store.put_durable(UPDATES, &id, &update).unwrap();
         let base = resolved_image.dataset();
-        h.pool
-            .zfs
-            .clone_snapshot(&base, crate::image::SNAP, &next)
-            .await
-            .unwrap();
-        let target_guid = h.pool.zfs.guid(&next).await.unwrap();
-        if boundary >= 1 {
-            update.root_swap.as_mut().unwrap().target_guid = Some(target_guid);
+        let target_guid = if boundary >= 1 {
+            h.pool
+                .zfs
+                .clone_snapshot(&base, crate::image::SNAP, &next)
+                .await
+                .unwrap();
+            Some(h.pool.zfs.guid(&next).await.unwrap())
+        } else {
+            None
+        };
+        if boundary >= 2 {
+            update.root_swap.as_mut().unwrap().target_guid = target_guid;
             h.m.inner.store.put_durable(UPDATES, &id, &update).unwrap();
         }
-        if boundary >= 2 {
+        if boundary >= 3 {
             h.pool.zfs.rename(&root, &retired).await.unwrap();
         }
-        if boundary >= 3 {
+        if boundary >= 4 {
             h.pool.zfs.rename(&next, &root).await.unwrap();
         }
-
-        restart(&h).unwrap();
-        h.m.recover_assigned_update_backing().await.unwrap();
+        if boundary >= 3 {
+            h.pool.zfs.snapshot(&retired, "s_pending").await.unwrap();
+        }
+        if boundary == 0 {
+            assert!(
+                h.m.delete_image(&resolved_image.key).await.is_err(),
+                "the journal retains the resolved image before it has a clone"
+            );
+            h.m.gc_images(chrono::Duration::zero()).await;
+            assert!(h.pool.zfs.exists(&base).await.unwrap());
+            let gb = 1u64 << 30;
+            h.pool
+                .answer("used,available", &format!("{}\n{}\n", 92 * gb, 8 * gb));
+            h.pool.answer("used", &format!("{gb}\n"));
+            h.m.assess(Utc::now()).await;
+            assert!(h.pool.zfs.exists(&base).await.unwrap());
+            h.pool
+                .answer("used,available", &format!("0\n{}\n", 1u64 << 40));
+        }
+        let image_calls = h.m.inner.images.ensure_calls.load(Relaxed);
+        h.pool.calls();
+        full_startup(&h).await.unwrap();
+        assert_eq!(h.m.inner.images.ensure_calls.load(Relaxed), image_calls);
+        assert!(!h
+            .pool
+            .calls()
+            .iter()
+            .any(|call| call.starts_with(&format!("rollback byard/{retired}@"))));
+        if boundary >= 3 {
+            assert!(h
+                .pool
+                .zfs
+                .snapshots(&retired)
+                .await
+                .unwrap()
+                .iter()
+                .any(|snap| snap == "s_pending"));
+        }
+        if boundary <= 1 {
+            assert!(h
+                .m
+                .finish_swap(&h.m.entry(&id).unwrap().snapshot(), "root")
+                .await
+                .is_err());
+            assert_eq!(h.pool.zfs.guid(&root).await.unwrap(), source_guid);
+            assert_eq!(h.pool.zfs.exists(&next).await.unwrap(), boundary == 1);
+            let pending: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+            assert!(pending.root_swap.as_ref().unwrap().target_guid.is_none());
+            bounded(h.m.start(&id, None)).await.unwrap();
+            let installed_guid = h.pool.zfs.guid(&root).await.unwrap();
+            assert_ne!(installed_guid, source_guid);
+            if let Some(target_guid) = target_guid {
+                assert_eq!(installed_guid, target_guid);
+            }
+            continue;
+        }
+        let target_guid = target_guid.unwrap();
         let recovered: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
         let recovered_swap = recovered.root_swap.as_ref().unwrap();
         assert_eq!(recovered_swap.source_guid, source_guid);
@@ -655,6 +712,8 @@ async fn assigned_image_root_swap_recovers_each_zfs_rename_boundary() {
             h.m.classify_run_recovery(&current).await.unwrap(),
             RunRecovery::Settled
         );
+        full_startup(&h).await.unwrap();
+        bounded(h.m.start(&id, None)).await.unwrap();
     }
 }
 
@@ -1184,4 +1243,167 @@ async fn update_shape_rejects_tampered_predecessor_bindings() {
         tampered.check_shape().is_err(),
         "target volume mount changed"
     );
+}
+
+#[tokio::test]
+async fn assigned_pending_unavailable_image_does_not_resolve_or_swap_at_full_startup() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    bounded(h.m.start(&id, None)).await.unwrap();
+    bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+        .await
+        .unwrap();
+    let root = entry.snapshot().root_dataset();
+    let source_guid = h.pool.zfs.guid(&root).await.unwrap();
+    let original = entry.snapshot().image;
+    bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                image: Some("127.0.0.1:1/unavailable:deleted".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await
+    .unwrap();
+    let before: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+    let calls = h.m.inner.images.ensure_calls.load(Relaxed);
+    let result = full_startup(&h).await;
+    assert_eq!(
+        h.m.inner.images.ensure_calls.load(Relaxed),
+        calls,
+        "startup must never resolve a pending image"
+    );
+    result.unwrap();
+    assert_eq!(
+        h.m.entry(&id).unwrap().snapshot().stopped_at,
+        before.target.stopped_at
+    );
+    assert_eq!(h.pool.zfs.guid(&root).await.unwrap(), source_guid);
+    let pending: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+    assert_eq!(pending.digest().unwrap(), before.digest().unwrap());
+    assert!(pending.root_swap.is_none());
+    assert!(bounded(h.m.start(&id, None)).await.is_err());
+    assert_eq!(h.pool.zfs.guid(&root).await.unwrap(), source_guid);
+    let failed: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+    assert_eq!(failed.digest().unwrap(), before.digest().unwrap());
+    // Returning to the current image durably cancels the unavailable replacement.
+    let canceled = bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                image: Some(original.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await
+    .unwrap();
+    assert!(canceled.pending.is_none());
+    let cancellation: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+    assert!(cancellation.change.image.is_none());
+    assert!(cancellation.root_swap.is_none());
+    let mut unbound = cancellation.clone();
+    unbound.predecessor_target = None;
+    assert!(
+        unbound.check_shape().is_err(),
+        "an empty update needs a canceled-image predecessor"
+    );
+    // Crash after the cancellation journal, before its machine write: replay that predecessor.
+    h.m.inner
+        .store
+        .put_durable("machines", &id, &*before.target)
+        .unwrap();
+    full_startup(&h).await.unwrap();
+    let started = bounded(h.m.start(&id, None)).await.unwrap();
+    assert_eq!(started.image, original);
+    assert_eq!(h.pool.zfs.guid(&root).await.unwrap(), source_guid);
+    assert!(h
+        .m
+        .inner
+        .store
+        .get::<UpdateIntent>(UPDATES, &id)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn assigned_running_volume_patch_then_suspend_request_settles_and_starts_cold() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    bounded(h.m.start(&id, None)).await.unwrap();
+    let size_gb = entry.snapshot().volume.as_ref().unwrap().size_gb + 1;
+    bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                volume: Some(api::VolumeSize { size_gb }),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await
+    .unwrap();
+    h.host_calls();
+    bounded(h.m.stop(&id, Duration::from_secs(1), true, None))
+        .await
+        .unwrap();
+    let current: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+    assert_eq!(current.reference.phase, Phase::Settled);
+    let settlement = current.settlement.as_ref().unwrap();
+    assert!(settlement.checkpoint.is_none());
+    assert!(settlement.update.is_some());
+    assert!(!entry.snapshot().suspended);
+    assert!(!h
+        .host_calls()
+        .iter()
+        .any(|call| call.starts_with("snapshot ")));
+    full_startup(&h).await.unwrap();
+    let started = bounded(h.m.start(&id, None)).await.unwrap();
+    assert_eq!(started.volume.as_ref().unwrap().size_gb, size_gb);
+    let next: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+    assert!(matches!(next.mode, Mode::Fresh { .. }));
+    assert_eq!(next.reference.sequence, current.reference.sequence + 1);
+    assert!(next.consumed_update.is_some());
+}
+
+#[tokio::test]
+async fn assigned_unreadable_update_journal_defers_backing_cleanup() {
+    let (h, entry) = stopped(false).await;
+    let record = entry.snapshot();
+    let next = format!("{}.next", record.root_dataset());
+    let cached =
+        h.m.inner
+            .images
+            .seed(
+                &format!("alpine@sha256:{}", "9".repeat(64)),
+                crate::image::ImageConfig::default(),
+            )
+            .await
+            .unwrap();
+    h.pool.zfs.create(&next, 1 << 20).await.unwrap();
+    h.m.inner
+        .store
+        .put_durable(UPDATES, &record.id, &serde_json::json!({"unknown": true}))
+        .unwrap();
+    assert!(h.m.tidy(&entry).await.is_err());
+    assert!(h.m.finish_swap(&record, "root").await.is_err());
+    assert_eq!(h.m.sweep_orphans().await, 0);
+    assert!(h.m.delete_image(&cached.key).await.is_err());
+    assert_eq!(h.m.gc_images(chrono::Duration::zero()).await, 0);
+    let gb = 1u64 << 30;
+    h.pool
+        .answer("used,available", &format!("{}\n{}\n", 92 * gb, 8 * gb));
+    h.pool.answer("used", &format!("{gb}\n"));
+    h.m.assess(Utc::now()).await;
+    assert!(h.pool.zfs.exists(&cached.dataset()).await.unwrap());
+    assert!(h.pool.zfs.exists(&next).await.unwrap());
+    assert!(h.pool.zfs.exists(&record.root_dataset()).await.unwrap());
 }

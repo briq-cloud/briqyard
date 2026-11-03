@@ -188,8 +188,25 @@ impl UpdateIntent {
             crate::machine::update::pending_after(&self.source_record, self.change.clone());
         let pending_size = self.change.size.is_some();
         let volume_change = self.change.volume.is_some();
+        // Canceling an unresolved image leaves no image change to consume. The immediate
+        // predecessor retains the canceled pending image through the durable record write.
+        let canceled_image = self.change.image.is_none()
+            && self
+                .source_record
+                .pending
+                .as_ref()
+                .is_none_or(|p| p.image.is_none())
+            && self
+                .target
+                .pending
+                .as_ref()
+                .is_none_or(|p| p.image.is_none())
+            && self
+                .predecessor_target
+                .as_ref()
+                .is_some_and(|earlier| earlier.pending.as_ref().is_some_and(|p| p.image.is_some()));
         anyhow::ensure!(
-            (pending_size || volume_change || self.change.image.is_some())
+            (pending_size || volume_change || self.change.image.is_some() || canceled_image)
                 && self.change.entrypoint.is_none()
                 && self.change.cmd.is_none()
                 && self.change.env.is_none()

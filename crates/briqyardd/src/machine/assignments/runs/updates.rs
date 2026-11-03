@@ -698,29 +698,73 @@ impl Manager {
                 .context("assigned update current run missing")?;
             update.check(&current)?;
             self.ensure_assigned_volume_update(&update).await?;
-            self.ensure_assigned_root_update(&update).await?;
+            // Startup only completes an externally started swap with durable target identity.
+            // Resolving an image or creating/adopting .next belongs to the next assigned start.
+            if update
+                .root_swap
+                .as_ref()
+                .and_then(|swap| swap.target_guid)
+                .is_some()
+            {
+                self.apply_assigned_root_update(update).await?;
+            }
         }
         Ok(())
     }
 
+    /// Pending journals retain the machine's entire backing until run consumption is durable.
+    /// Unreadable authority must refuse cleanup, never imply that there are no references.
+    pub(in crate::machine) fn assigned_update_machines(
+        &self,
+    ) -> Result<std::collections::HashSet<String>> {
+        Ok(self
+            .inner
+            .store
+            .list::<UpdateIntent>(UPDATES)?
+            .into_iter()
+            .map(|update| update.machine)
+            .collect())
+    }
+
+    pub(in crate::machine) fn assigned_update_images(
+        &self,
+    ) -> Result<std::collections::HashSet<String>> {
+        Ok(self
+            .inner
+            .store
+            .list::<UpdateIntent>(UPDATES)?
+            .into_iter()
+            .filter_map(|update| update.resolved_image.map(|image| image.key))
+            .collect())
+    }
+
     pub(super) async fn ensure_assigned_root_update(&self, update: &UpdateIntent) -> Result<()> {
-        let Some(reference) = update.change.image.as_deref() else {
+        if update.change.image.is_none() {
             anyhow::ensure!(
                 update.resolved_image.is_none() && update.root_swap.is_none(),
                 "image update authority exists without an image change"
             );
             return Ok(());
-        };
+        }
         self.resolve_assigned_image_update(update).await?;
-        let mut resolved: UpdateIntent = self
+        let resolved: UpdateIntent = self
             .inner
             .store
             .get(UPDATES, &update.machine)?
             .context("resolved assigned image update missing")?;
+        self.apply_assigned_root_update(resolved).await
+    }
+
+    async fn apply_assigned_root_update(&self, mut resolved: UpdateIntent) -> Result<()> {
+        let reference = resolved
+            .change
+            .image
+            .as_deref()
+            .context("assigned root update image missing")?;
         let current: Current = self
             .inner
             .store
-            .get(RUNS, &update.machine)?
+            .get(RUNS, &resolved.machine)?
             .context("assigned image update current run missing")?;
         resolved.check(&current)?;
         anyhow::ensure!(
@@ -750,7 +794,7 @@ impl Manager {
                     .any(|snap| snap == crate::image::SNAP),
             "assigned image root snapshot is unavailable"
         );
-        self.check_clone_readers(&update.machine, None)?;
+        self.check_clone_readers(&resolved.machine, None)?;
 
         let zfs = &self.inner.zfs;
         let live = resolved.target.root_dataset();

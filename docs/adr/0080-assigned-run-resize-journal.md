@@ -47,13 +47,21 @@ run is still active.
   The durable intent precedes the record reservation and the external ZFS grow. Concurrent
   creates and growths therefore see the same committed disk use.
 - **Persist cancellation of a pending resize.** A stopped resize back to the current size
-  writes the no-pending target through the update journal. It cannot return success while
-  leaving an older pending intent that a later start would apply.
+  or unresolved image writes the no-pending target through the update journal. An empty
+  normalized image change requires the canceled image in its immediate predecessor.
+  Startup preserves an already stopped record's timestamps so that predecessor remains
+  exact. Cancellation cannot return success while leaving an older pending intent that
+  a later start would apply.
 - **Bind image changes to root replacement before the next run is reserved.** Image
   resolution and the intended image identity must be durable before the root swap starts.
-  Recovery may finish or refuse the existing `.next` swap only under that exact intent;
-  it must not let ordinary swap cleanup change the root GUID behind a settled run. The
-  next run records the verified resulting root GUID before launch.
+  Only the actual assigned start resolves a pending image and creates or adopts `.next`.
+  Startup finishes a swap only when its target GUID is already durable; unresolved images
+  and swaps without that GUID retain their intent and current backing without registry
+  access or new backing. Ordinary swap recovery and snapshot tidy defer while the update
+  journal holds the machine's backing, including staged and retired roots and their
+  snapshots. Resolved images remain named for request, age and pressure cleanup even
+  before a staged clone exists. Unreadable journals refuse cleanup. The next run records
+  the verified resulting root GUID before launch; durable consumption releases the hold.
 - **Keep run evidence immutable and chain the control change explicitly.** The update
   must not rewrite the observed process proof, run sequence, creation receipt, source
   identity, or prior-run hash. The run journal and reader must authenticate the update

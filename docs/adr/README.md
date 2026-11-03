@@ -75,4 +75,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0077](0077-immutable-warm-launch-identity.md) | Immutable warm-slot launch identity and durable source allocations; unbound consumption remains disabled |
 | [0078](0078-warm-data-volume-liability.md) | Full logical warm data-volume budgets, shared pool-space liability and reservation telemetry |
 | [0079](0079-dev-checked-release-bundle.md) | Local upgrade releases verify and include the checked runtime bundle |
-| [0080](0080-assigned-run-resize-journal.md) | Assigned-run resize stays fail-closed until a durable update journal covers the provider lifecycle |
+| [0080](0080-assigned-run-resize-journal.md) | Assigned-run resize journals the provider lifecycle; startup replays only durable root targets and retains pending backing |
