@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Harness from the workflow revision; suites and monitoring stack from the tested source.
+set -euo pipefail
+[ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo 'requires a disposable GitHub-hosted runner' >&2; exit 2; }
+echo 'ENVIRONMENT GATE: two-hosts (29) and restore (10) require independent root filesystems, systemd and ZFS pools; unavailable on this single hosted runner (ADR 0089).'
+case "${1:-}" in
+  stress)
+    # Four physical cores; 8 ordinary guests (1 GiB), plus feature forks and races.
+    # Admission race still derives its sizes from the full 12 GiB host capacity.
+    set +e
+    python3 -u hack/stress.py --namespaces 4 --per-namespace 2 --workers 4 --memory 128 --rounds 2 --crash --churn 4 2>&1 | tee native-logs/stress-driver.log
+    statuses=("${PIPESTATUS[@]}")
+    set -e
+    python3 - <<'PY'
+from pathlib import Path
+import re
+s = Path('native-logs/stress-driver.log').read_text()
+passed = len(re.findall(r'^.*?   ok   ', s, re.M))
+failed = len(re.findall(r'^.*?   BAD  ', s, re.M))
+print(f'native stress checks: {passed}/{passed + failed}; driver exit remains authoritative')
+PY
+    [ "${statuses[1]}" = 0 ] || exit "${statuses[1]}"
+    exit "${statuses[0]}"
+    ;;
+  monitoring)
+    # A real local daemon and an explicitly unreachable registered host exercise both
+    # up and down relay/scrape assertions. This does not stand in for a second daemon.
+    sudo python3 - <<'PY'
+from pathlib import Path
+import yaml
+p = Path('/etc/briqyard/fleet.yaml')
+c = yaml.safe_load(p.read_text())
+c['hosts'].append({'id': 'unreachable', 'url': 'http://127.0.0.1:27420', 'region': 'dev'})
+p.write_text(yaml.safe_dump(c, sort_keys=False))
+PY
+    sudo systemctl restart briqyard-fleet
+    ready=0
+    for _ in $(seq 1 90); do
+      if curl -fsS http://127.0.0.1:7430/v1/hosts | jq -e 'length == 2 and any(.id == "local" and .state == "ready") and any(.id == "unreachable" and .state == "down")' >/dev/null; then ready=1; break; fi
+      sleep 1
+    done
+    [ "$ready" = 1 ] || { echo 'monitoring host states did not settle'; exit 1; }
+    # Ephemeral credential stays outside artifacts and command arguments.
+    sudo sh -c 'umask 077; openssl rand -hex 24 > /etc/briqyard-monitoring-password'
+    sudo env GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password bash hack/install-monitoring.sh
+    machine=
+    cleanup() {
+      rc=$?
+      trap - EXIT
+      if [ -n "$machine" ]; then briqyard machine destroy "$machine" || true; fi
+      briqyard namespace rm native-monitoring || true
+      sudo rm -f /etc/briqyard-monitoring-password
+      exit "$rc"
+    }
+    trap cleanup EXIT
+    trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+    machine=$(briqyard machine run --namespace native-monitoring --name metrics --image alpine:3.20 --memory 128 -- sh -c 'while :; do echo metrics > /root/probe; sync; sleep 1; done' | jq -r .id)
+    # Rate queries require at least two samples of this running machine. Wait on
+    # Prometheus evidence rather than sleeping and hoping the panels have data.
+    sampled=0
+    for _ in $(seq 1 90); do
+      if curl -fsS http://127.0.0.1:9090/api/v1/query --data-urlencode 'query=count_over_time(briqyard_machine_cpu_seconds_total{namespace="native-monitoring"}[1m])' | jq -e '.data.result | length > 0 and all(.[]; (.value[1] | tonumber) >= 2)' >/dev/null; then sampled=1; break; fi
+      sleep 1
+    done
+    [ "$sampled" = 1 ] || { echo 'monitoring machine samples did not arrive'; exit 1; }
+    sudo env PROMETHEUS_URL=http://127.0.0.1:9090 GRAFANA_URL=http://127.0.0.1:3000 GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password CHECK_HOST=local bash hack/monitoring-check.sh
+    ;;
+  *) echo 'expected stress or monitoring' >&2; exit 2 ;;
+esac
