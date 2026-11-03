@@ -154,3 +154,10 @@ without the port (`Registry::expecting`). The pool-key call matched the local
 host's empty credential and returned 401. Give the second host its own loopback
 address, 127.0.0.2, rather than changing authentication. Manual dispatch can select
 only the two-host job for targeted fixture validation.
+
+The next attempt passed pool-key retrieval and failed bootstrap validation because
+an off-loopback listener defaults to TLS while its forwarded URL used HTTP.
+Bootstrap initially binds guest loopback as fc2 does; the development configuration
+then explicitly sets `api_tls: false` and binds the guest interface for QEMU's
+forward. Allowed clients remain the private QEMU network and loopback. No daemon
+validation or authentication rule is changed.

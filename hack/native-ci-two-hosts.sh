@@ -51,12 +51,15 @@ tar -C /srv/release -xf /tmp/release.tar
 # Same bootstrap as fc2; its pool key comes from the fleet, never a file.
 env BRIQYARD_RELEASE=file:///srv/release BRIQYARD_POOL_FILE_GB=15 BRIQYARD_ARC_GB=1 \
   BRIQYARD_TOKEN=fc2-token FLEET_URL=http://10.0.2.2:7430 \
-  ADVERTISE=http://127.0.0.2:27420 LISTEN=0.0.0.0:7420 ALLOWED_CLIENTS=10.0.2.0/24,127.0.0.1/32 bash hack/bootstrap-host.sh
+  ADVERTISE=http://127.0.0.2:27420 LISTEN=127.0.0.1:7420 ALLOWED_CLIENTS=10.0.2.0/24,127.0.0.1/32 bash hack/bootstrap-host.sh
 python3 - <<'PY'
 from pathlib import Path
 import yaml
 p=Path('/etc/briqyard/config.yaml'); c=yaml.safe_load(p.read_text())
 c['api_tls']=False
+c['listen']='0.0.0.0:7420'
+c['ingress']['bind']='0.0.0.0'
+c['ingress']['http']='0.0.0.0:8080'
 c['capacity']={'memory_mb':4096,'vcpus':8}
 p.write_text(yaml.safe_dump(c,sort_keys=False))
 # The suites parse these scalars as in the bootstrap output.
