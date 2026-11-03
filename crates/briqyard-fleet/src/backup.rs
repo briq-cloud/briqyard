@@ -10,7 +10,7 @@ use briqyard_objstore::ObjectStore;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The newest backup; one more per UTC day (`registry-<day>.json.age`), the last of that day.
@@ -27,13 +27,83 @@ pub struct Backup {
     /// Historical ACK state; never held across I/O or an await.
     last: Arc<Mutex<Written>>,
     blocked: Arc<AtomicBool>,
+    caller_outcomes: [AtomicU64; 4],
 }
 
 #[derive(Default)]
 struct Written {
     digest: Option<[u8; 32]>,
+    ack_timestamp_seconds: Option<u64>,
     /// The pool key of each host in it.
     keys: HashMap<String, PoolKey>,
+}
+
+/// Sanitized process-local observations only; no keys, digests or store details.
+pub struct Observation {
+    pub configured: bool,
+    pub publication_observed: Option<bool>,
+    pub last_ack_timestamp_seconds: Option<u64>,
+    pub caller_outcomes: [u64; 4],
+    /// match, mismatch, unknown (one-hot when rendered).
+    pub durable_match: usize,
+}
+
+pub fn observe(
+    backup: Option<&Backup>,
+    written: &tokio::sync::Mutex<Option<[u8; 32]>>,
+    durable_valid: &AtomicBool,
+) -> Observation {
+    let mut observation = Observation {
+        configured: backup.is_some(),
+        publication_observed: Some(false),
+        last_ack_timestamp_seconds: None,
+        caller_outcomes: [0; 4],
+        durable_match: 2,
+    };
+    let Some(backup) = backup else {
+        return observation;
+    };
+    observation.caller_outcomes =
+        std::array::from_fn(|i| backup.caller_outcomes[i].load(Ordering::Relaxed));
+    let Ok(last) = backup.last.try_lock() else {
+        observation.publication_observed = None;
+        return observation;
+    };
+    observation.publication_observed = Some(last.digest.is_some());
+    observation.last_ack_timestamp_seconds = last.ack_timestamp_seconds;
+    if let Ok(written) = written.try_lock() {
+        if durable_valid.load(Ordering::Acquire) {
+            if let (Some(ack), Some(durable)) = (last.digest, *written) {
+                observation.durable_match = usize::from(ack != durable);
+            }
+        }
+    }
+    observation
+}
+
+struct CallerOutcome<'a>(Option<&'a [AtomicU64; 4]>);
+
+impl CallerOutcome<'_> {
+    fn settle(&mut self, result: &Result<bool>) {
+        let outcome = match result {
+            Ok(true) => 0,
+            Ok(false) => 1,
+            Err(_) => 2,
+        };
+        self.0.take().unwrap()[outcome].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Drop for CallerOutcome<'_> {
+    fn drop(&mut self) {
+        if let Some(counters) = self.0.take() {
+            counters[3].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn ack_receipt_seconds() -> Option<u64> {
+    chrono::Utc::now().timestamp().try_into().ok()
 }
 
 // Field drop follows Drop::drop: block admission BEFORE releasing the owned lease.
@@ -93,6 +163,7 @@ impl Backup {
             turn: Default::default(),
             last: Default::default(),
             blocked: Default::default(),
+            caller_outcomes: Default::default(),
         }))
     }
 
@@ -123,8 +194,8 @@ impl Backup {
     async fn push_with_deadlines<P, F, D, T>(
         &self,
         reg: &Mutex<Registry>,
-        mut put: P,
-        mut deadline: D,
+        put: P,
+        deadline: D,
     ) -> Result<bool>
     where
         P: FnMut(String, Arc<[u8]>) -> F + Send + 'static,
@@ -132,88 +203,114 @@ impl Backup {
         D: FnMut() -> T + Send + 'static,
         T: std::future::Future<Output = ()> + Send + 'static,
     {
-        let turn = admit(self.turn.clone().lock_owned(), deadline()).await?;
-        if self.blocked.load(Ordering::Acquire) {
-            bail!("registry publication blocked after unexpected worker exit");
-        }
-        let reg = reg
-            .lock()
-            .map_err(|_| anyhow!("registry unavailable"))?
-            .clone();
-        let data = encode(&reg);
-        let digest: [u8; 32] = Sha256::digest(&data).into();
-        if self
-            .last
-            .lock()
-            .map_err(|_| anyhow!("backup ACK cache unavailable"))?
-            .digest
-            == Some(digest)
-        {
-            return Ok(false);
-        }
-        let sealed: Arc<[u8]> = age::encrypt(&self.recipient, &data)
-            .context("encrypt the registry")?
-            .into();
-        let written = Written {
-            digest: Some(digest),
-            keys: reg
-                .hosts
-                .values()
-                .filter(|h| !h.pool_key.is_empty())
-                .map(|h| (h.id.clone(), h.pool_key.clone()))
-                .collect(),
-        };
-        let objects = [
-            format!(
-                "fleet/registry-{}.json.age",
-                chrono::Utc::now().format("%Y-%m-%d")
-            ),
-            LATEST.to_string(),
-        ];
-        let last = self.last.clone();
-        let mut guard = Publication {
-            _turn: turn,
-            blocked: self.blocked.clone(),
-            armed: true,
-        };
-        let (reply, answer) = tokio::sync::oneshot::channel();
-        // No await between the snapshot and launch. The guard is owned even if the
-        // spawned future is destroyed before its first poll.
-        let worker = tokio::spawn(async move {
-            let mut reply = Some(reply);
-            let result = async {
-                for object in objects {
-                    let future = put(object.clone(), sealed.clone());
-                    tokio::pin!(future);
-                    tokio::select! {
-                        biased;
-                        result = &mut future => result,
-                        _ = deadline() => {
-                            respond(&mut reply, Err(anyhow!(
-                                "{object}: no answer within {} s", PUT_WITHIN.as_secs()
-                            )));
-                            // Await the SAME future. Neither a lost caller nor its
-                            // deadline permits cancellation, replacement or replay.
-                            future.await
-                        }
-                    }
-                    .context("write the registry's backup")?;
-                }
-                *last
-                    .lock()
-                    .map_err(|_| anyhow!("backup ACK cache unavailable"))? = written;
-                Ok(true)
-            }
-            .await;
-            // Returned backend errors are terminal client work. Unexpected destruction
-            // instead leaves this armed, blocking later publication before lease drop.
-            guard.disarm();
-            respond(&mut reply, result);
-        });
-        drop(worker); // Detach: request cleanup must never abort publication.
-        answer
+        self.push_with_clock(reg, put, deadline, ack_receipt_seconds)
             .await
-            .map_err(|_| anyhow!("registry publication worker ended unexpectedly"))?
+    }
+
+    async fn push_with_clock<P, F, D, T, C>(
+        &self,
+        reg: &Mutex<Registry>,
+        mut put: P,
+        mut deadline: D,
+        clock: C,
+    ) -> Result<bool>
+    where
+        P: FnMut(String, Arc<[u8]>) -> F + Send + 'static,
+        F: std::future::Future<Output = Result<()>> + Send + 'static,
+        D: FnMut() -> T + Send + 'static,
+        T: std::future::Future<Output = ()> + Send + 'static,
+        C: FnOnce() -> Option<u64> + Send + 'static,
+    {
+        let mut outcome = CallerOutcome(Some(&self.caller_outcomes));
+        let result = async {
+            let turn = admit(self.turn.clone().lock_owned(), deadline()).await?;
+            if self.blocked.load(Ordering::Acquire) {
+                bail!("registry publication blocked after unexpected worker exit");
+            }
+            let reg = reg
+                .lock()
+                .map_err(|_| anyhow!("registry unavailable"))?
+                .clone();
+            let data = encode(&reg);
+            let digest: [u8; 32] = Sha256::digest(&data).into();
+            if self
+                .last
+                .lock()
+                .map_err(|_| anyhow!("backup ACK cache unavailable"))?
+                .digest
+                == Some(digest)
+            {
+                return Ok(false);
+            }
+            let sealed: Arc<[u8]> = age::encrypt(&self.recipient, &data)
+                .context("encrypt the registry")?
+                .into();
+            let mut written = Written {
+                ack_timestamp_seconds: None,
+                digest: Some(digest),
+                keys: reg
+                    .hosts
+                    .values()
+                    .filter(|h| !h.pool_key.is_empty())
+                    .map(|h| (h.id.clone(), h.pool_key.clone()))
+                    .collect(),
+            };
+            let objects = [
+                format!(
+                    "fleet/registry-{}.json.age",
+                    chrono::Utc::now().format("%Y-%m-%d")
+                ),
+                LATEST.to_string(),
+            ];
+            let last = self.last.clone();
+            let mut guard = Publication {
+                _turn: turn,
+                blocked: self.blocked.clone(),
+                armed: true,
+            };
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            // No await between the snapshot and launch. The guard is owned even if the
+            // spawned future is destroyed before its first poll.
+            let worker = tokio::spawn(async move {
+                let mut reply = Some(reply);
+                let result = async {
+                    for object in objects {
+                        let future = put(object.clone(), sealed.clone());
+                        tokio::pin!(future);
+                        tokio::select! {
+                            biased;
+                            result = &mut future => result,
+                            _ = deadline() => {
+                                respond(&mut reply, Err(anyhow!(
+                                    "{object}: no answer within {} s", PUT_WITHIN.as_secs()
+                                )));
+                                // Await the SAME future. Neither a lost caller nor its
+                                // deadline permits cancellation, replacement or replay.
+                                future.await
+                            }
+                        }
+                        .context("write the registry's backup")?;
+                    }
+                    written.ack_timestamp_seconds = clock();
+                    *last
+                        .lock()
+                        .map_err(|_| anyhow!("backup ACK cache unavailable"))? = written;
+                    Ok(true)
+                }
+                .await;
+                // Returned backend errors are terminal client work. Unexpected destruction
+                // instead leaves this armed, blocking later publication before lease drop.
+                guard.disarm();
+                respond(&mut reply, result);
+            });
+            drop(worker); // Detach: request cleanup must never abort publication.
+            answer
+                .await
+                .map_err(|_| anyhow!("registry publication worker ended unexpectedly"))?
+        }
+        .await;
+        outcome.settle(&result);
+        result
     }
 
     /// Historical exact-key ACK eligibility; poisoning refuses eligibility.
@@ -547,6 +644,20 @@ pub(super) mod tests {
         cleanup(b, &writes).await;
     }
 
+    pub(crate) async fn acknowledge(st: &crate::AppState) {
+        st.backup
+            .as_ref()
+            .unwrap()
+            .push_with_clock(
+                &st.reg,
+                |_, _| async { Ok(()) },
+                || std::future::pending(),
+                || Some(99),
+            )
+            .await
+            .unwrap();
+    }
+
     pub(crate) async fn refuse_busy(b: &Backup, reg: &Mutex<Registry>) -> Result<bool> {
         b.push_with_deadlines(
             reg,
@@ -612,6 +723,15 @@ pub(super) mod tests {
                 .is_err());
         }
         drop(a);
+        assert_eq!(
+            outcomes(&b),
+            if timeout_caller {
+                [0, 0, 1, 0]
+            } else {
+                [0, 0, 0, 1]
+            }
+        );
+        assert!(b.last.lock().unwrap().ack_timestamp_seconds.is_none());
         // A's real blocking writer remains gated after its async caller is dropped.
         reg.lock()
             .unwrap()
@@ -717,6 +837,15 @@ pub(super) mod tests {
         );
         assert!(final_is_b, "both final objects must contain snapshot B");
         assert!(ack_is_b, "Written must acknowledge snapshot B");
+        assert!(b.last.lock().unwrap().ack_timestamp_seconds.is_some());
+        assert_eq!(
+            outcomes(&b),
+            if timeout_caller {
+                [1, 0, 1, 0]
+            } else {
+                [1, 0, 0, 1]
+            }
+        );
     }
 
     #[tokio::test]
@@ -743,6 +872,233 @@ pub(super) mod tests {
         tokio::time::timeout(CLEANUP_WITHIN, future)
             .await
             .expect("test completion deadline")
+    }
+
+    fn outcomes(b: &Backup) -> [u64; 4] {
+        std::array::from_fn(|i| b.caller_outcomes[i].load(Ordering::Relaxed))
+    }
+
+    #[tokio::test]
+    async fn observation_is_coherent_bounded_and_historical() {
+        let (_dir, b, reg) = fixture();
+        let written = tokio::sync::Mutex::new(None);
+        let valid = AtomicBool::new(false);
+        let snapshot = || observe(Some(&b), &written, &valid);
+        assert_eq!(snapshot().publication_observed, Some(false));
+        assert_eq!(snapshot().last_ack_timestamp_seconds, None);
+        assert_eq!(snapshot().durable_match, 2);
+        let calls = Arc::new(AtomicU64::new(0));
+        let puts = calls.clone();
+        assert!(b
+            .push_with_clock(
+                &reg,
+                move |_, _| {
+                    puts.fetch_add(1, Ordering::Relaxed);
+                    async { Ok(()) }
+                },
+                || std::future::pending(),
+                || Some(123)
+            )
+            .await
+            .unwrap());
+        for _ in 0..2 {
+            crate::signals::render_backup(&snapshot());
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(outcomes(&b), [1, 0, 0, 0]);
+        assert!(!b
+            .push_with_clock(
+                &reg,
+                |_, _| async { panic!("dedup PUT") },
+                || std::future::pending(),
+                || panic!("dedup changed receipt time")
+            )
+            .await
+            .unwrap());
+        assert_eq!(outcomes(&b), [1, 1, 0, 0]);
+        let digest = b.last.lock().unwrap().digest;
+        *written.lock().await = digest;
+        assert_eq!(snapshot().durable_match, 2);
+        valid.store(true, Ordering::Release);
+        *written.lock().await = None;
+        assert_eq!(snapshot().durable_match, 2);
+        *written.lock().await = digest;
+        assert_eq!(snapshot().durable_match, 0);
+        let turn = b.turn.lock().await;
+        b.blocked.store(true, Ordering::Release);
+        assert_eq!(snapshot().last_ack_timestamp_seconds, Some(123));
+        assert_eq!(snapshot().durable_match, 0);
+        drop(turn);
+        let durable = written.lock().await;
+        assert_eq!(snapshot().publication_observed, Some(true));
+        assert_eq!(snapshot().last_ack_timestamp_seconds, Some(123));
+        assert_eq!(snapshot().durable_match, 2);
+        drop(durable);
+        *written.lock().await = Some([42; 32]);
+        assert_eq!(snapshot().durable_match, 1);
+        // Reverse the two digests: mismatch has no direction.
+        {
+            let mut last = b.last.lock().unwrap();
+            last.digest = Some([42; 32]);
+        }
+        *written.lock().await = digest;
+        assert_eq!(snapshot().durable_match, 1);
+        {
+            let _last = b.last.lock().unwrap();
+            assert_eq!(snapshot().publication_observed, None);
+            assert_eq!(snapshot().last_ack_timestamp_seconds, None);
+            assert_eq!(snapshot().durable_match, 2);
+        }
+        let last = b.last.clone();
+        assert!(std::panic::catch_unwind(move || {
+            let _guard = last.lock().unwrap();
+            panic!("synthetic poison");
+        })
+        .is_err());
+        assert_eq!(snapshot().publication_observed, None);
+        assert_eq!(snapshot().last_ack_timestamp_seconds, None);
+        assert_eq!(snapshot().durable_match, 2);
+        // Disabled observations do not touch either locked cache.
+        let _durable = written.lock().await;
+        let disabled = observe(None, &written, &valid);
+        assert!(!disabled.configured);
+        assert_eq!(disabled.publication_observed, Some(false));
+        assert_eq!(disabled.caller_outcomes, [0; 4]);
+    }
+
+    #[tokio::test]
+    async fn ack_commit_before_reply_consumption_can_have_canceled_caller() {
+        let (_dir, b, reg) = fixture();
+        let mut caller = Box::pin(b.push_with_clock(
+            &reg,
+            |_, _| async { Ok(()) },
+            || std::future::pending(),
+            || Some(55),
+        ));
+        assert!(futures::poll!(&mut caller).is_pending());
+        // Lease release proves the owned transaction committed; caller is not polled.
+        drop(bounded(b.turn.lock()).await);
+        assert_eq!(b.last.lock().unwrap().ack_timestamp_seconds, Some(55));
+        drop(caller);
+        assert_eq!(outcomes(&b), [0, 0, 0, 1]);
+        assert!(!b
+            .push_with(&reg, |_, _| async { panic!("dedup issued PUT") })
+            .await
+            .unwrap());
+        assert_eq!(outcomes(&b), [0, 1, 0, 1]);
+        assert_eq!(b.last.lock().unwrap().ack_timestamp_seconds, Some(55));
+    }
+
+    #[tokio::test]
+    async fn timeout_reply_not_consumed_before_drop_is_canceled() {
+        let (_dir, b, reg) = fixture();
+        let writes = PutFixture::new();
+        let actual = writes.clone();
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let (fire, mut deadline) = manual_deadline(1);
+        let (elapsed, elapsed_wait) = tokio::sync::oneshot::channel();
+        let mut elapsed = Some(elapsed);
+        let mut index = 0;
+        let mut caller = Box::pin(b.push_with_deadlines(
+            &reg,
+            move |object, sealed| actual.lock().unwrap().put(object, sealed, entered.take()),
+            move || {
+                let future = deadline();
+                let elapsed = if index == 1 { elapsed.take() } else { None };
+                index += 1;
+                async move {
+                    future.await;
+                    if let Some(elapsed) = elapsed {
+                        let _ = elapsed.send(());
+                    }
+                }
+            },
+        ));
+        bounded(async {
+            tokio::select! {
+                _ = &mut caller => panic!("caller ended before entry"),
+                result = entering => result.unwrap(),
+            }
+        })
+        .await;
+        fire.send(()).unwrap();
+        bounded(elapsed_wait).await.unwrap();
+        // Worker has sent timeout and is waiting on the gated SAME backend future.
+        drop(caller);
+        assert_eq!(outcomes(&b), [0, 0, 0, 1]);
+        assert!(b.last.lock().unwrap().digest.is_none());
+        cleanup(&b, &writes).await;
+        assert!(b.last.lock().unwrap().digest.is_some());
+        assert_eq!(outcomes(&b), [0, 0, 0, 1]);
+    }
+
+    #[tokio::test]
+    async fn preparation_failure_is_a_failed_caller_preserving_ack_history() {
+        for seeded in [false, true] {
+            let (_dir, b, reg) = fixture();
+            if seeded {
+                b.push_with_clock(
+                    &reg,
+                    |_, _| async { Ok(()) },
+                    || std::future::pending(),
+                    || Some(33),
+                )
+                .await
+                .unwrap();
+            }
+            let prior = b.last.lock().unwrap().digest;
+            assert!(std::panic::catch_unwind(|| {
+                let _guard = reg.lock().unwrap();
+                panic!("synthetic registry poison");
+            })
+            .is_err());
+            assert!(b
+                .push_with(&reg, |_, _| async { panic!("preparation issued PUT") })
+                .await
+                .is_err());
+            assert_eq!(outcomes(&b), [u64::from(seeded), 0, 1, 0]);
+            assert_eq!(b.last.lock().unwrap().digest, prior);
+            assert_eq!(
+                b.last.lock().unwrap().ack_timestamp_seconds,
+                seeded.then_some(33)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gated_ack_compares_with_durable_digest_at_observation_time() {
+        let (_dir, b, reg) = fixture();
+        let writes = PutFixture::new();
+        let actual = writes.clone();
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let mut caller = Box::pin(b.push_with_clock(
+            &reg,
+            move |object, sealed| actual.lock().unwrap().put(object, sealed, entered.take()),
+            || std::future::pending(),
+            || Some(77),
+        ));
+        bounded(async {
+            tokio::select! {
+                _ = &mut caller => panic!("caller ended before entry"),
+                result = entering => result.unwrap(),
+            }
+        })
+        .await;
+        let written = tokio::sync::Mutex::new(Some([17; 32]));
+        let valid = AtomicBool::new(true);
+        assert_eq!(
+            observe(Some(&b), &written, &valid).publication_observed,
+            Some(false)
+        );
+        drop(caller);
+        cleanup(&b, &writes).await;
+        let observation = observe(Some(&b), &written, &valid);
+        assert_eq!(observation.last_ack_timestamp_seconds, Some(77));
+        assert_eq!(observation.durable_match, 1);
+        assert_eq!(*written.lock().await, Some([17; 32]));
+        assert_eq!(observation.caller_outcomes, [0, 0, 0, 1]);
     }
 
     fn fixture() -> (tempfile::TempDir, Backup, Mutex<Registry>) {
@@ -796,6 +1152,7 @@ pub(super) mod tests {
         }));
         drop(turn);
         assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert_eq!(outcomes(&b), [0, 0, 1, 1]);
         assert!(b.last.lock().unwrap().digest.is_none());
     }
 
@@ -815,6 +1172,8 @@ pub(super) mod tests {
         cleanup(&b, &writes).await;
         assert_eq!(objects.lock().unwrap().len(), 2);
         assert!(b.last.lock().unwrap().digest.is_some());
+        assert!(b.last.lock().unwrap().ack_timestamp_seconds.is_some());
+        assert_eq!(outcomes(&b), [0, 0, 0, 1]);
     }
 
     #[tokio::test]
@@ -831,6 +1190,7 @@ pub(super) mod tests {
                     .insert("next-snapshot".into(), "h1".into());
             }
             let prior_digest = b.last.lock().unwrap().digest;
+            let prior_time = b.last.lock().unwrap().ack_timestamp_seconds;
             let writes = PutFixture::new();
             let actual = writes.clone();
             let result = bounded(b.push_with(&reg, move |object, sealed| {
@@ -848,6 +1208,8 @@ pub(super) mod tests {
             .await;
             assert!(result.is_err());
             assert!(b.last.lock().unwrap().digest == prior_digest);
+            assert_eq!(b.last.lock().unwrap().ack_timestamp_seconds, prior_time);
+            assert_eq!(outcomes(&b), [u64::from(seeded), 0, 1, 0]);
             assert!(!b.blocked.load(Ordering::Acquire));
             cleanup(&b, &writes).await;
             assert!(bounded(b.push_with(&reg, |_, _| async { Ok(()) }))
@@ -953,8 +1315,27 @@ pub(super) mod tests {
 
     #[tokio::test]
     async fn timeout_can_later_ack_once_and_deduplicate_without_replay() {
-        for (latest, fail) in [(false, false), (true, false), (false, true), (true, true)] {
+        for (latest, fail, seeded) in [false, true].into_iter().flat_map(|latest| {
+            [false, true]
+                .into_iter()
+                .flat_map(move |fail| [false, true].map(move |seeded| (latest, fail, seeded)))
+        }) {
             let (_dir, b, reg) = fixture();
+            if seeded {
+                b.push_with_clock(
+                    &reg,
+                    |_, _| async { Ok(()) },
+                    || std::future::pending(),
+                    || Some(11),
+                )
+                .await
+                .unwrap();
+                reg.lock()
+                    .unwrap()
+                    .namespaces
+                    .insert("changed".into(), "h1".into());
+            }
+            let prior_digest = b.last.lock().unwrap().digest;
             let writes = PutFixture::new();
             let actual = writes.clone();
             let objects = writes.lock().unwrap().objects.clone();
@@ -963,7 +1344,7 @@ pub(super) mod tests {
             let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let calls = attempts.clone();
             let (fire, deadline) = manual_deadline(if latest { 2 } else { 1 });
-            let mut caller = Box::pin(b.push_with_deadlines(
+            let mut caller = Box::pin(b.push_with_clock(
                 &reg,
                 move |object, sealed| {
                     calls.fetch_add(1, Ordering::SeqCst);
@@ -983,6 +1364,7 @@ pub(super) mod tests {
                     }
                 },
                 deadline,
+                || Some(22),
             ));
             bounded(async {
                 tokio::select! {
@@ -994,13 +1376,23 @@ pub(super) mod tests {
             fire.send(()).unwrap();
             assert!(bounded(&mut caller).await.is_err());
             drop(caller);
-            assert!(b.last.lock().unwrap().digest.is_none());
+            assert_eq!(b.last.lock().unwrap().digest, prior_digest);
+            assert_eq!(
+                b.last.lock().unwrap().ack_timestamp_seconds,
+                seeded.then_some(11)
+            );
+            assert_eq!(outcomes(&b), [u64::from(seeded), 0, 1, 0]);
             assert!(b.turn.try_lock().is_err());
             writes.lock().unwrap().release();
             cleanup(&b, &writes).await;
             assert_eq!(objects.lock().unwrap().len(), 2);
             assert_eq!(attempts.load(Ordering::SeqCst), 2);
-            assert_eq!(b.last.lock().unwrap().digest.is_some(), !fail);
+            assert_eq!(b.last.lock().unwrap().digest.is_some(), seeded || !fail);
+            assert_eq!(
+                b.last.lock().unwrap().ack_timestamp_seconds,
+                if fail { seeded.then_some(11) } else { Some(22) }
+            );
+            assert_eq!(outcomes(&b), [u64::from(seeded), 0, 1, 0]);
             if fail {
                 continue;
             }
@@ -1009,6 +1401,8 @@ pub(super) mod tests {
                     .await
                     .unwrap()
             );
+            assert_eq!(outcomes(&b), [u64::from(seeded), 1, 1, 0]);
+            assert_eq!(b.last.lock().unwrap().ack_timestamp_seconds, Some(22));
         }
     }
 

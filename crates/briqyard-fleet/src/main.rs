@@ -101,6 +101,7 @@ struct AppState {
     refusals: signals::Refusals,
     /// The registry file's writes take turns (ADR 0043); the digest of what the last one wrote.
     written: Arc<tokio::sync::Mutex<Option<[u8; 32]>>>,
+    durable_observed_valid: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Writes a registry file, the fleet's alone (`0600`: it holds every host's token and pool
@@ -108,6 +109,16 @@ struct AppState {
 /// writer at a time (`AppState::save`, or `restore` with the fleet stopped): the temp file's
 /// name is fixed.
 fn write_registry(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    write_registry_with_sync(path, data, |directory| {
+        std::fs::File::open(directory)?.sync_all()
+    })
+}
+
+fn write_registry_with_sync(
+    path: &std::path::Path,
+    data: &[u8],
+    sync_directory: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("json.tmp");
@@ -126,7 +137,7 @@ fn write_registry(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     f.sync_all()?;
     std::fs::rename(&tmp, path)?;
     // The rename itself reaches the disk with the directory.
-    std::fs::File::open(path.parent().unwrap_or(std::path::Path::new(".")))?.sync_all()
+    sync_directory(path.parent().unwrap_or(std::path::Path::new(".")))
 }
 
 /// A host that does not even accept the connection is given five seconds. No deadline for
@@ -160,25 +171,47 @@ impl AppState {
     /// write left it writes nothing. The turn is held until the file and its directory are
     /// synced, even when the caller has gone. A failure is logged at `error` and returned.
     async fn save(&self) -> Result<()> {
+        self.save_with(write_registry).await
+    }
+
+    // Shared owned-save path: tests inject faults without a second writer.
+    async fn save_with<W>(&self, write: W) -> Result<()>
+    where
+        W: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()> + Send + 'static,
+    {
+        let Some(task) = self.save_task_with(write).await else {
+            return Ok(());
+        };
+        let written = task.await.unwrap_or_else(|e| Err(std::io::Error::other(e)));
+        if let Err(e) = &written {
+            tracing::error!(path = %self.state_path.display(), err = %e, "write the registry");
+        }
+        written.with_context(|| format!("write registry {}", self.state_path.display()))
+    }
+
+    async fn save_task_with<W>(
+        &self,
+        write: W,
+    ) -> Option<tokio::task::JoinHandle<std::io::Result<()>>>
+    where
+        W: FnOnce(&std::path::Path, &[u8]) -> std::io::Result<()> + Send + 'static,
+    {
         use sha2::{Digest, Sha256};
         let mut turn = self.written.clone().lock_owned().await;
         let data = backup::encode(&self.reg.lock().unwrap());
         let digest: [u8; 32] = Sha256::digest(&data).into();
         if *turn == Some(digest) {
-            return Ok(());
+            return None;
         }
         let path = self.state_path.clone();
-        let written = tokio::task::spawn_blocking(move || {
-            write_registry(&path, &data)?;
+        let durable_valid = self.durable_observed_valid.clone();
+        Some(tokio::task::spawn_blocking(move || {
+            durable_valid.store(false, std::sync::atomic::Ordering::Release);
+            write(&path, &data)?;
             *turn = Some(digest);
+            durable_valid.store(true, std::sync::atomic::Ordering::Release);
             Ok::<(), std::io::Error>(())
-        })
-        .await
-        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
-        if let Err(e) = &written {
-            tracing::error!(path = %self.state_path.display(), err = %e, "write the registry");
-        }
-        written.with_context(|| format!("write registry {}", self.state_path.display()))
+        }))
     }
 
     /// Writes the registry after a host acted on a request: the host's answer is the truth
@@ -314,6 +347,7 @@ async fn run(args: Args) -> Result<()> {
         restores: Default::default(),
         refusals: Default::default(),
         written: Default::default(),
+        durable_observed_valid: Default::default(),
     });
     tokio::spawn(backup::run(state.clone()));
     tokio::spawn(poll_static_hosts(state.clone()));

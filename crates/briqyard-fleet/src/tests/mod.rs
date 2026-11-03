@@ -51,6 +51,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
         restores: Default::default(),
         refusals: Default::default(),
         written: Default::default(),
+        durable_observed_valid: Default::default(),
     });
     Fleet { st, _dir: dir }
 }
