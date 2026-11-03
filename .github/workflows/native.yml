@@ -6,6 +6,11 @@ on:
         description: Source ref to build and test (empty uses workflow ref)
         required: false
         type: string
+      two_hosts_only:
+        description: Run only the two-host suites
+        required: false
+        default: false
+        type: boolean
   pull_request:
     paths:
       - 'crates/**'
@@ -21,6 +26,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   suites:
+    if: ${{ !inputs.two_hosts_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -109,6 +115,7 @@ jobs:
           path: native-logs/fleet-smoke.log
           if-no-files-found: ignore
   more-suites:
+    if: ${{ !inputs.two_hosts_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:

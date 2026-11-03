@@ -138,7 +138,7 @@ This establishes a usable VM creation interface, not Firecracker boot qualificat
 The native `two-hosts` job now attempts both complete suites with this independent
 root, systemd and identically named encrypted `byard` pool. It reuses bootstrap and
 `install-dev.sh`; the second host gets its pool key from the runner's fleet.
-QEMU user networking forwards its API to runner loopback port 27420 and reaches the
+QEMU user networking forwards its API to 127.0.0.2:27420 and reaches the
 fleet through 10.0.2.2. SSH authenticates with an ephemeral key and a pre-pinned
 host key. No external rendezvous, secret or service account is used. The runtime
 is built once from the selected source and transferred with its verified release
@@ -147,3 +147,10 @@ exec on the nested host measure actual Firecracker usability before the suites.
 
 Qualification of Firecracker and the 29/10-check suites is pending the native run.
 The existing two-host gate remains until both suites actually execute.
+
+The first full-main attempt failed before suites: both host URLs used 127.0.0.1
+with different ports, but fleet host identity deliberately compares the address
+without the port (`Registry::expecting`). The pool-key call matched the local
+host's empty credential and returned 401. Give the second host its own loopback
+address, 127.0.0.2, rather than changing authentication. Manual dispatch can select
+only the two-host job for targeted fixture validation.

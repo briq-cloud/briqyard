@@ -59,7 +59,7 @@ sudo qemu-system-x86_64 -enable-kvm -cpu host -smp 2 -m 6144 -display none \
   -serial "file:$WORK/serial.log" -monitor none \
   -drive "file=$WORK/root.qcow2,if=virtio,format=qcow2" \
   -drive "file=$WORK/seed.img,if=virtio,format=raw,readonly=on" \
-  -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:27420-:7420 -device virtio-net-pci,netdev=net0 &
+  -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.2:27420-:7420 -device virtio-net-pci,netdev=net0 &
 qemu_pid=$!
 printf '%s\n' "$qemu_pid" > "$WORK/pid"
 ready=0

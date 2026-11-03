@@ -33,7 +33,7 @@ c['capacity']={'memory_mb':4608,'vcpus':8}
 p.write_text(yaml.safe_dump(c,sort_keys=False))
 p=Path('/etc/briqyard/fleet.yaml'); c=yaml.safe_load(p.read_text())
 c['listen']='0.0.0.0:7430'; c['tls']='off'
-c['hosts'].append({'id':'fc2','url':'http://127.0.0.1:27420','token':'fc2-token','region':'dev'})
+c['hosts'].append({'id':'fc2','url':'http://127.0.0.2:27420','token':'fc2-token','region':'dev'})
 p.write_text(yaml.safe_dump(c,sort_keys=False))
 PY
 sudo systemctl restart briqyardd briqyard-fleet
@@ -51,7 +51,7 @@ tar -C /srv/release -xf /tmp/release.tar
 # Same bootstrap as fc2; its pool key comes from the fleet, never a file.
 env BRIQYARD_RELEASE=file:///srv/release BRIQYARD_POOL_FILE_GB=15 BRIQYARD_ARC_GB=1 \
   BRIQYARD_TOKEN=fc2-token FLEET_URL=http://10.0.2.2:7430 \
-  ADVERTISE=http://127.0.0.1:27420 LISTEN=0.0.0.0:7420 ALLOWED_CLIENTS=10.0.2.0/24,127.0.0.1/32 bash hack/bootstrap-host.sh
+  ADVERTISE=http://127.0.0.2:27420 LISTEN=0.0.0.0:7420 ALLOWED_CLIENTS=10.0.2.0/24,127.0.0.1/32 bash hack/bootstrap-host.sh
 python3 - <<'PY'
 from pathlib import Path
 import yaml
