@@ -40,7 +40,10 @@ impl Gate {
             Self::Ordinary => !op.starts_with("clone_") && op != "destination_bind_v1",
             Self::Sandbox(barrier) => barrier.allows(op),
             Self::Configured { active: true, .. } => true,
-            _ => matches!(op, "ping" | "clone_configure_v1" | "clone_activate_v1"),
+            _ => matches!(
+                op,
+                "ping" | "fs_sync" | "clone_configure_v1" | "clone_activate_v1"
+            ),
         }
     }
     pub(super) fn activation_requested(&self) -> bool {

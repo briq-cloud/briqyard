@@ -61,6 +61,8 @@ jobs:
       - name: Install isolated native host and fleet
         run: bash .native-harness/hack/native-ci.sh "$GITHUB_WORKSPACE"
       - name: e2e
+        env:
+          BRIQYARD_TEST_SEALS: "1"
         id: e2e
         run: |
           mkdir -p native-logs

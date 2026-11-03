@@ -132,6 +132,12 @@ pub(super) struct Harness {
     pub(super) m: Manager,
 }
 
+impl Harness {
+    pub(in crate::machine) fn fs_sync_fault(&self, fault: u32) {
+        self.host.fs_sync_fault.store(fault, Relaxed);
+    }
+}
+
 impl Manager {
     /// A create that answers once the machine is made, and started unless `start` is
     /// false: what most tests start from.

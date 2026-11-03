@@ -522,3 +522,21 @@ async fn builder_names_its_volume_exactly() {
     }
     assert!(h.m.record(builder(None), None).await.is_ok());
 }
+
+#[tokio::test]
+async fn both_seed_shapes_sync_before_sealing() {
+    for volume in [None, Some(2)] {
+        let (h, e, _) = source_shaped(false, volume).await;
+        assert_eq!(e.snapshot().volume.as_ref().map(|v| v.size_gb), volume);
+        let calls = h.host_calls();
+        let sync = calls
+            .iter()
+            .position(|s| s.starts_with("fs_sync "))
+            .unwrap();
+        let pause = calls
+            .iter()
+            .position(|s| s.starts_with("snapshot "))
+            .unwrap();
+        assert!(sync < pause);
+    }
+}

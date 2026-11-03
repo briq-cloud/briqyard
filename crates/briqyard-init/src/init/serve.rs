@@ -127,6 +127,16 @@ where
         return;
     }
     match req.op.as_str() {
+        "fs_sync" | "fs_freeze" => {
+            filesystems::serve(st.config(), input, stream, req).await;
+        }
+        "fs_thaw" => {
+            send(
+                &stream,
+                &Response::error("fs_thaw requires the freeze connection"),
+            )
+            .await
+        }
         "destination_bind_v1" => {
             let response = destination::bind(&st, req.destination_bind).await;
             send(&stream, &response).await;

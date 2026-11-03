@@ -67,6 +67,7 @@ cleanup() {
     done
   done
   [ -z "${STREAM_FILES:-}" ] || rm -rf "$STREAM_FILES"
+  [ -z "${seal_counts:-}" ] || rm -f "$seal_counts"
   suite_early_end "$rc"
 }
 trap cleanup EXIT
@@ -87,3 +88,4 @@ handover() {
 . "$(dirname "${BASH_SOURCE[0]}")/e2e-machines.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/e2e-siblings.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/e2e-storage.sh"
+if [ "${BRIQYARD_TEST_SEALS:-}" = 1 ]; then . "$(dirname "${BASH_SOURCE[0]}")/e2e-seals.sh"; fi

@@ -427,3 +427,25 @@ mod recovery;
 mod warm;
 
 pub(in crate::machine) mod launch_identity;
+
+#[tokio::test]
+async fn seal_sync_unknown_error_and_timeout_fail_before_pause() {
+    for fault in [1, 2, 3] {
+        let (h, builder) = reviewed_builder().await;
+        h.fs_sync_fault(fault);
+        h.host_calls();
+        let error =
+            h.m.snapshot(
+                &builder.id,
+                api::SnapshotRequest {
+                    memory: true,
+                    template: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("fs_sync"), "{error}");
+        assert!(!h.host_calls().iter().any(|s| s.starts_with("snapshot ")));
+    }
+}

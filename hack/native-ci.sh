@@ -32,6 +32,13 @@ c['network']['host_ports']=[9443]
 c['ingress'].update(tcp_ports='30000-32767', http='127.0.0.1:8080', advertise='127.0.0.1')
 c['registry_mirrors']={'docker.io':'http://127.0.0.1:7440'}
 c['capacity']={'memory_mb':12288,'vcpus':24}
+import hashlib
+init = hashlib.sha256(Path('native-release/briqyard-init-linux-x86_64').read_bytes()).hexdigest()
+c['templates'] = {'enabled': True, 'init_ready_init_sha256': init, 'sandbox_recipes': [
+    {'image': 'docker.io/library/alpine@sha256:85f2b723e106c34644cd5851d7e81ee87da98ac54672b29947c052a45d31dc2f',
+     'image_config_digest': 'sha256:706db57fb2063f39f69632c5b5c9c439633fda35110e65587c5d85553fd1cc38',
+     'init_sha256': init, 'size': {'vcpus': 1, 'memory_mb': 256}, 'volume_gb': gb}
+    for gb in [0, 1]]}
 p.write_text(yaml.safe_dump(c,sort_keys=False).replace('  host_ports:\n  - 9443\n', '  host_ports: [9443]\n'))
 PY
 cat > "$RUNNER_TEMP/native-fleet.yaml" <<'YAML'
