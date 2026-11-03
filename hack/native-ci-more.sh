@@ -31,7 +31,9 @@ import yaml
 p = Path('/etc/briqyard/fleet.yaml')
 c = yaml.safe_load(p.read_text())
 c['hosts'].append({'id': 'unreachable', 'url': 'http://127.0.0.1:27420', 'region': 'dev'})
-p.write_text(yaml.safe_dump(c, sort_keys=False))
+# PyYAML reads the fleet's `tls: off` as a boolean and writes `false`, which the fleet refuses.
+if c.get('tls') is False: c['tls'] = 'off'
+p.write_text(yaml.safe_dump(c, sort_keys=False).replace('tls: off', 'tls: off'))
 PY
     sudo systemctl restart briqyard-fleet
     ready=0
