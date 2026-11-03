@@ -127,6 +127,35 @@ groups:
           severity: warning
         annotations:
           summary: "Machine {{ .Labels.name }} ({{ .Labels.machine }}) of namespace {{ .Labels.namespace }} on host {{ .Labels.host }} restarted three times or more in ten minutes."
+      - uid: briqyard-backup-failed
+        title: "Backup failure observed"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: briqyard-prometheus
+            model:
+              refId: A
+              # Event series start at their first event, not at zero. Keep a first
+              # positive observation visible even when increase() has no baseline.
+              expr: 'sum by (host) ((briqyard_events_total{reason="backup_failed"} unless briqyard_events_total{reason="backup_failed"} offset 10m) or increase(briqyard_events_total{reason="backup_failed"}[10m]))'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: NoData
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host {{ .Labels.host }} has an observed backup failure in the ten-minute event window, or a positive counter without a ten-minute baseline."
+          description: "Inspect backup events and the store. This bounded event signal does not establish backup success, freshness or an RPO; a cleared alert is not recovery evidence."
       - uid: briqyard-out-of-room
         title: "Creates refused: no room"
         condition: C

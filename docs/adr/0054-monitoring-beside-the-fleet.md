@@ -32,6 +32,8 @@ Three things stand between a Prometheus and the hosts:
 
 **Dashboards and alerts are files in the repository** (`hack/monitoring/`), provisioned read-only into a `briqyard` folder: a fleet overview, a host, machines and tenants. Every query uses series the daemon and the fleet export; `hack/monitoring-check.sh` runs each against a live Grafana. Alerts, with a Slack webhook in `/etc/briqyard-monitoring/alerting.env` (root's, `0600`, the env file shape of ADR 0041): a target not answering for 2 minutes, a host condition, a pool over 80 %, a machine restarted three times in ten minutes (the daemon's crash loop, named by machine), and the three capacity rules `OPERATIONS.md` gave as Prometheus rules (creates refused for memory or disk, for pressure, a largest slot under `LARGEST_SLOT_MB`).
 
+**Backup failures use the existing event counter, grouped only by host, over ten minutes.** Any positive `increase()` alerts without a pending period. Because an event series is absent until its first event, a current positive counter without a sample ten minutes ago also alerts; this can include an older failure first seen after a scrape gap. This branch precedes `increase()` so a single first failure stays visible once a second unchanged sample arrives. No zero is substituted for missing data: Grafana uses `NoData`, query errors use `Error`, and scrape outages remain the separate target alert. This is a bounded observation signal, not backup success, recovery or an RPO. Only the host label reaches the alert; event data and messages do not.
+
 ## Rejected
 
 | Alternative | Why not |
