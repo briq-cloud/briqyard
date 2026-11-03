@@ -24,15 +24,52 @@ impl Mock {
         &self,
         id: &str,
         dir: &Path,
-        jail: Option<&fc::Jail>,
+        _jail: Option<&fc::Jail>,
         pid: u32,
-        disk_io: Arc<fc::DiskIo>,
+        _disk_io: Arc<fc::DiskIo>,
     ) -> Option<fc::Vm> {
-        if !self.paused.lock().unwrap().contains(&pid) {
+        self.record(format!("adopt {id} {pid}"));
+        self.adopt_process(id, dir, pid, true)
+    }
+
+    pub(super) fn adopt_process(
+        &self,
+        id: &str,
+        dir: &Path,
+        pid: u32,
+        paused: bool,
+    ) -> Option<fc::Vm> {
+        self.record(format!("adopt-state {id} {pid} paused={paused}"));
+        if self.paused.lock().unwrap().contains(&pid) != paused {
             return None;
         }
-        let mut vm = <Self as fc::Vmm>::adopt(self, id, dir, jail, pid, disk_io).await?;
-        vm.resumed = true;
-        Some(vm)
+        let procs = self.procs.lock().unwrap();
+        let process = procs
+            .iter()
+            .find(|process| process.pid == pid && process.id == id && !*process.exited.borrow())?;
+        let (api, _, _, _) = fc::paths(dir);
+        Some(fc::Vm {
+            pid,
+            api,
+            vsock: process.vsock.clone(),
+            dir: dir.into(),
+            chroot: None,
+            resumed: paused,
+            boot_identity: self
+                .adoption_profile
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|profile| fc::BootIdentity::ambiguous(profile))
+                .or_else(|| {
+                    process.boot_identity.as_ref().and_then(|identity| {
+                        (identity.device_profile != fc::LEGACY_PROFILE)
+                            .then(|| fc::BootIdentity::ambiguous(&identity.device_profile))
+                    })
+                }),
+            incarnation: Some(mock_incarnation(pid)),
+            exited: process.exited.subscribe(),
+            exit: Self::exit_of(process),
+        })
     }
 }

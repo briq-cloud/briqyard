@@ -192,7 +192,7 @@ fn reseed(entropy: &[u8; 32]) -> Result<()> {
     Ok(())
 }
 
-fn random_id() -> Result<[u8; 16]> {
+pub(super) fn random_id() -> Result<[u8; 16]> {
     let mut bytes = [0u8; 16];
     let mut filled = 0;
     while filled < bytes.len() {

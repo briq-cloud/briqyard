@@ -32,6 +32,7 @@ impl Manager {
             .ok_or_else(|| anyhow!("clone memory reader is missing"))?;
         {
             let mut r = e.rec.lock().unwrap();
+            let unbound_launch = r.launch_identity.is_some();
             let origin = r
                 .clone_origin
                 .as_mut()
@@ -46,12 +47,32 @@ impl Manager {
                     (&origin.stage, &next),
                     (CloneStage::Reserved, CloneStage::Loading)
                         | (CloneStage::Loading, CloneStage::Configuring)
+                        | (CloneStage::Loading, CloneStage::UnboundPaused)
+                        | (CloneStage::UnboundPaused, CloneStage::Configuring)
                         | (CloneStage::Configuring, CloneStage::IdentityDone)
                         | (CloneStage::IdentityDone, CloneStage::Active)
                         | (CloneStage::IdentityDone, CloneStage::Paused)
                         | (CloneStage::Paused, CloneStage::Active)
                 );
             anyhow::ensure!(allowed, "invalid clone stage transition");
+            if origin.stage == CloneStage::UnboundPaused && next == CloneStage::Configuring {
+                anyhow::ensure!(
+                    unbound_launch
+                        && origin.sandbox.as_ref().is_some_and(
+                            |binding| binding.bind.is_some() && binding.ack_sha256.is_none()
+                        ),
+                    "unbound configuration requires a frozen destination binding"
+                );
+            }
+            if next == CloneStage::UnboundPaused {
+                anyhow::ensure!(
+                    unbound_launch
+                        && origin.artifact.profile == guest::SANDBOX_READY_V1
+                        && origin.sandbox.is_none()
+                        && origin.identity.is_none(),
+                    "unbound pause requires an unassigned pristine launch"
+                );
+            }
             if next == CloneStage::Loading && origin.stage == CloneStage::Reserved {
                 let boot = self
                     .inner
@@ -64,6 +85,9 @@ impl Manager {
                 origin.launch_host_boot_id = Some(boot);
             }
             origin.stage = next.clone();
+        }
+        if e.snapshot().launch_identity.is_some() {
+            return self.persist_launch_transition(e, reader, next);
         }
         self.save(e)?;
         std::fs::File::open(self.inner.store.dir("machines"))?.sync_all()?;
@@ -125,6 +149,10 @@ impl Manager {
                 && e.identity_trusted.load(Relaxed)
                 && live.boot_identity.as_ref() == Some(&origin.artifact.boot_identity),
             "memory clone load/provenance is unconfirmed"
+        );
+        anyhow::ensure!(
+            e.snapshot().launch_identity.is_none(),
+            "unbound launch configuration requires a durable destination assignment"
         );
         let started = std::time::Instant::now();
         self.inner
@@ -228,6 +256,11 @@ impl Manager {
         live: &fc::Vm,
     ) -> Result<String> {
         let entire = std::time::Instant::now();
+        self.verify_live_launch(e, live)?;
+        anyhow::ensure!(
+            e.snapshot().launch_identity.is_none(),
+            "unbound launch activation requires a durable destination assignment"
+        );
         let operation = if e.snapshot().warm_slot.is_some() {
             "warm_claim"
         } else {
@@ -240,6 +273,22 @@ impl Manager {
             .is_some_and(|o| o.stage == CloneStage::Paused);
         if !paused {
             self.configure_memory_clone(e, live).await?;
+        }
+        self.activate_configured_clone(e, live, paused, operation, entire)
+            .await
+    }
+
+    pub(in crate::machine) async fn activate_configured_clone(
+        &self,
+        e: &Entry,
+        live: &fc::Vm,
+        paused: bool,
+        operation: &str,
+        entire: std::time::Instant,
+    ) -> Result<String> {
+        self.verify_live_launch(e, live)?;
+        if e.snapshot().launch_identity.is_some() {
+            self.check_assigned_activation(e, live)?;
         }
         let r = e.snapshot();
         let machine = r.id;

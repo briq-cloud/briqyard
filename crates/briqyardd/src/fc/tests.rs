@@ -3,6 +3,7 @@
 use super::*;
 use tokio::net::UnixListener;
 
+mod assigned_resume;
 mod balloon;
 
 #[test]

@@ -1,7 +1,12 @@
 use super::*;
 use crate::machine::tests::{harness_config, Harness};
 
+mod unbound;
+
 async fn source() -> (Harness, Arc<Entry>, api::SandboxSeed) {
+    source_with_unbound(false).await
+}
+async fn source_with_unbound(enabled: bool) -> (Harness, Arc<Entry>, api::SandboxSeed) {
     let h = harness_config(|c| {
         c.token = "test-admin".into();
         c.jailer = "/mock/jailer".into();
@@ -10,6 +15,7 @@ async fn source() -> (Harness, Arc<Entry>, api::SandboxSeed) {
         c.network.range = "10.64.0.0/22".into();
         c.templates.enabled = true;
         c.templates.warm_pools = true;
+        c.templates.unbound_warm_pools = enabled;
         c.templates.sandbox_recipes = vec![crate::config::SandboxRecipe {
             image: ALPINE.into(),
             image_config_digest: ALPINE_CONFIG_DIGEST.into(),
@@ -23,11 +29,12 @@ async fn source() -> (Harness, Arc<Entry>, api::SandboxSeed) {
         }];
     })
     .await;
-    assert!(!h
-        .m
-        .warm_pool_profiles()
-        .iter()
-        .any(|profile| profile == guest::SANDBOX_READY_V1));
+    assert_eq!(
+        h.m.warm_pool_profiles()
+            .iter()
+            .any(|profile| profile == guest::SANDBOX_READY_V1),
+        enabled
+    );
     h.namespace("operator");
     h.namespace("destination");
     let image =

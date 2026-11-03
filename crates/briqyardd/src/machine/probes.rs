@@ -445,6 +445,16 @@ impl Manager {
         failures: u32,
         last: String,
     ) {
+        if e.snapshot().assigned_run.is_some() {
+            self.fail_assigned_probe(
+                e,
+                pid,
+                kind == Kind::Startup && asked,
+                format!("{} failed {failures} times: {last}", kind.name()),
+            )
+            .await;
+            return;
+        }
         let _guard = e.lock.lock().await;
         let live = e.live.lock().unwrap().clone();
         let Some(live) = live.filter(|l| l.pid == pid) else {

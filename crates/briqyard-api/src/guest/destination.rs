@@ -51,7 +51,8 @@ impl DestinationBind {
         {
             return Err("invalid destination receipt digest");
         }
-        if c.template_profile.is_some()
+        if c.assigned_run_generation.is_some()
+            || c.template_profile.is_some()
             || c.hostname != self.identity.hostname
             || c.ip != self.identity.ip
             || c.gateway != self.identity.gateway
@@ -154,6 +155,12 @@ mod tests {
             }],
             receipt: "a".repeat(64),
         }
+    }
+    #[test]
+    fn ordinary_generation_cannot_relabel_pristine_builder_lineage() {
+        let mut bind = request();
+        bind.config.assigned_run_generation = Some("a".repeat(64));
+        assert!(bind.validate().is_err());
     }
     #[test]
     fn destination_roundtrip_preserves_application_and_identity() {

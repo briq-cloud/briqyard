@@ -22,6 +22,7 @@ mod client;
 mod clone;
 mod incarnation;
 mod process;
+mod process_proof;
 #[cfg(test)]
 mod tests;
 mod vmm;

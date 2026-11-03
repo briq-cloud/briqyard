@@ -167,6 +167,9 @@ fi
 for a in "$@"; do prop="$last_but_one"; last_but_one="$a"; done
 if [ -f "$DEV/answer.$prop" ]; then cat "$DEV/answer.$prop"; exit 0; fi
 case "$prop" in
+  guid)
+    [ -e "$DEV/$last" ] || missing "$last"
+    ls -di "$DEV/$last" | awk '{print $1}'; exit 0;;
   origin)
     [ -e "$DEV/$last" ] || missing "$last"
     if [ -f "$DEV/$last.origin" ]; then cat "$DEV/$last.origin"; else echo "-"; fi; exit 0;;
