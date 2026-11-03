@@ -78,12 +78,13 @@ async fn statistics_read_is_bounded() {
 #[test]
 fn compatibility_requires_exact_artifacts_transport_schema_and_known_profile() {
     let identity = BootIdentity {
-        schema: 1,
+        schema: BootIdentity::SCHEMA,
         device_profile: REPORTING_PROFILE.into(),
         kernel_sha256: "kernel".into(),
         vmm_sha256: "vmm".into(),
         host_kernel: "6.8".into(),
         transport: "mmio".into(),
+        cpu_config: "template".into(),
     };
     assert!(identity.compatible(&identity.with_reporting(false)));
     for key in [
@@ -93,10 +94,11 @@ fn compatibility_requires_exact_artifacts_transport_schema_and_known_profile() {
         "host_kernel",
         "transport",
         "device_profile",
+        "cpu_config",
     ] {
         let mut altered = serde_json::to_value(&identity).unwrap();
         altered[key] = if key == "schema" {
-            json!(2)
+            json!(1)
         } else {
             json!("other")
         };
@@ -142,12 +144,13 @@ fn memory_stat_components_are_optional_and_do_not_claim_to_sum_to_current() {
 #[test]
 fn adoption_invalidates_contradictions_but_preserves_identity_on_telemetry_failure() {
     let reporting = BootIdentity {
-        schema: 1,
+        schema: BootIdentity::SCHEMA,
         device_profile: REPORTING_PROFILE.into(),
         kernel_sha256: "kernel".into(),
         vmm_sha256: "vmm".into(),
         host_kernel: "test".into(),
         transport: "mmio".into(),
+        cpu_config: "template".into(),
     };
     let observed_reporting = BootIdentity::ambiguous(REPORTING_PROFILE);
     let unavailable = BootIdentity::ambiguous(UNAVAILABLE_PROFILE);
@@ -175,7 +178,7 @@ fn adoption_invalidates_contradictions_but_preserves_identity_on_telemetry_failu
         (0, REPORTING_PROFILE)
     );
     let mut future = reporting;
-    future.schema = 2;
+    future.schema = BootIdentity::SCHEMA + 1;
     assert_eq!(
         BootIdentity::after_adoption(Some(&future), None, true),
         Some(future)
@@ -185,12 +188,13 @@ fn adoption_invalidates_contradictions_but_preserves_identity_on_telemetry_failu
 #[test]
 fn matching_device_without_incarnation_cannot_certify_artifacts() {
     let legacy = BootIdentity {
-        schema: 1,
+        schema: BootIdentity::SCHEMA,
         device_profile: LEGACY_PROFILE.into(),
         kernel_sha256: "old-kernel".into(),
         vmm_sha256: "old-vmm".into(),
         host_kernel: "test".into(),
         transport: "mmio".into(),
+        cpu_config: "template".into(),
     };
     let identity = BootIdentity::after_adoption(Some(&legacy), None, false).unwrap();
     assert_eq!(identity.schema, 0);
@@ -233,4 +237,39 @@ async fn pinned_vmm_absent_device_action_error_preserves_legacy_classification()
     assert!(Client::new(&path).balloon_config().await.unwrap().is_none());
     let seen = server.await.unwrap();
     assert!(seen[0].starts_with("GET /balloon "));
+}
+
+#[test]
+fn a_record_without_the_template_is_the_generation_before_and_never_loads_memory() {
+    let host = BootIdentity {
+        schema: BootIdentity::SCHEMA,
+        device_profile: LEGACY_PROFILE.into(),
+        kernel_sha256: "kernel".into(),
+        vmm_sha256: "vmm".into(),
+        host_kernel: "6.8".into(),
+        transport: "mmio".into(),
+        cpu_config: "template".into(),
+    };
+    assert!(host.compatible(&host));
+    // As written by the release before: schema 1, no `cpu_config`.
+    let old: BootIdentity = serde_json::from_value(json!({
+        "schema": 1, "device_profile": LEGACY_PROFILE, "kernel_sha256": "kernel",
+        "vmm_sha256": "vmm", "host_kernel": "6.8", "transport": "mmio",
+    }))
+    .unwrap();
+    assert_eq!(old.cpu_config, "");
+    assert!(
+        !serde_json::to_string(&old).unwrap().contains("cpu_config"),
+        "written back as it was read"
+    );
+    assert!(old.known() && !old.compatible(&host));
+    // Same schema, other template: also refused.
+    let mut other = host.clone();
+    other.cpu_config = "another".into();
+    assert!(!other.compatible(&host));
+    assert!(!BootIdentity {
+        schema: BootIdentity::SCHEMA + 1,
+        ..host.clone()
+    }
+    .known());
 }

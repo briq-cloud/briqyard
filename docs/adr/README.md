@@ -75,3 +75,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0077](0077-immutable-warm-launch-identity.md) | Immutable warm-slot launch identity and durable source allocations; unbound consumption remains disabled |
 | [0081](0081-registry-publication-test-boundary.md) | Registry publication owns its work through terminal completion |
 | [0082](0082-registry-backup-observations.md) | Fixed process-local registry backup observations separate caller outcomes from worker ACKs and compare existing caches with observation-only durable validity |
+| [0087](0087-no-virtualization-extensions-in-guests.md) | VMX and SVM cleared from every x86_64 guest's CPUID by a custom CPU template, its digest part of the boot identity; KVM loaded with `nested` off |

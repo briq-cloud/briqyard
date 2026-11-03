@@ -105,6 +105,9 @@ pub struct Mount {
     pub device: String,
     pub path: String,
     pub fstype: String,
+    /// Mounted read-only: no growth, no seeding from the image's directory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

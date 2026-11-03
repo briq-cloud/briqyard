@@ -139,6 +139,7 @@ mod tests {
                     device: "/dev/vdc".into(),
                     path: "/work".into(),
                     fstype: "ext4".into(),
+                    read_only: false,
                 }],
                 sandbox_device: Some(super::super::SandboxDevice {
                     bytes: 2 << 30,
