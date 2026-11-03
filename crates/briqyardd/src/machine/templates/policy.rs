@@ -52,9 +52,7 @@ impl Manager {
             && cfg.templates.init_ready_init_sha256 == self.inner.images.init_sha256()
             && !cfg.jailer.as_os_str().is_empty()
             && cfg.kernel_args.is_empty()
-            && boot
-                .as_ref()
-                .is_some_and(|i| i.schema == 1 && i.compatible(i))
+            && boot.as_ref().is_some_and(|i| i.compatible(i))
             && self.inner.vmm.cpu_fingerprint().is_some()
             && !self.inner.images.registries.iter().any(|(host, _, _)| {
                 matches!(

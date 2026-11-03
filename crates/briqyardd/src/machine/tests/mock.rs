@@ -669,12 +669,13 @@ impl fc::Vmm for Mock {
     fn boot_identity(&self, reporting: bool) -> Option<fc::BootIdentity> {
         Some(
             fc::BootIdentity {
-                schema: 1,
+                schema: fc::BootIdentity::SCHEMA,
                 device_profile: fc::LEGACY_PROFILE.into(),
                 kernel_sha256: "kernel-digest".into(),
                 vmm_sha256: self.version(),
                 host_kernel: "test".into(),
                 transport: "mmio".into(),
+                cpu_config: "test-template".into(),
             }
             .with_reporting(reporting),
         )
