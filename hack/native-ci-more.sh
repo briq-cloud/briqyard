@@ -16,8 +16,8 @@ from pathlib import Path
 import re
 s = Path('native-logs/stress-driver.log').read_text()
 passed = len(re.findall(r'^.*?   ok   ', s, re.M))
-failed = len(re.findall(r'^.*?   BAD  ', s, re.M))
-print(f'native stress checks: {passed}/{passed + failed}; driver exit remains authoritative')
+failed = len(re.findall(r'^.*?   (?:BAD  |FAIL )', s, re.M))
+print(f'native stress checks: {passed}/{passed + failed}; logged checks; driver exit remains authoritative')
 PY
     [ "${statuses[1]}" = 0 ] || exit "${statuses[1]}"
     exit "${statuses[0]}"
@@ -54,7 +54,7 @@ PY
     }
     trap cleanup EXIT
     trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
-    machine=$(briqyard machine run --namespace native-monitoring --name metrics --image alpine:3.20 --memory 128 -- sh -c 'while :; do echo metrics > /root/probe; sync; sleep 1; done' | jq -r .id)
+    machine=$(briqyard machine run --namespace native-monitoring --name metrics --image alpine:3.20 --memory 128 --sleep never -- sh -c 'while :; do echo metrics > /root/probe; sync; sleep 1; done' | jq -r .id)
     # Rate queries require at least two samples of this running machine. Wait on
     # Prometheus evidence rather than sleeping and hoping the panels have data.
     sampled=0
