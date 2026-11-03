@@ -23,6 +23,6 @@ Rejected: mode 0666 (any process in the guest could write to the console, which 
 reads as init output); pipes forwarded by the init (a second copy of every log byte, and
 `/dev/stderr` would then be a pipe path, not the console).
 
-Evidence: regression test `console_is_opened_again_by_the_app_user` (root-only, run in CI)
+Evidence: regression test `run_as_app_user_reopens_its_console` (root-only, run in CI)
 shows EACCES before and success after, and refusal for a third user. hack/e2e.sh stays the
 end-to-end check. Why aarch64 passed is not established.
