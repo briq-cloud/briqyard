@@ -298,6 +298,11 @@ briqyard host upgrade --all --release 0.2.0               # every ready or drain
 briqyard host ls                                          # VERSION, and each host's note
 ```
 
+A release that changes the boot identity (ADR 0087: the CPU template) makes every seed sealed
+before it refused by name. With a control plane that names seeds in its creates: it stops naming
+them first (its creates boot cold), then the hosts upgrade and the seeds are sealed and qualified
+again, then it names the new ones.
+
 What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it is done):
 
 | Step | |

@@ -58,5 +58,8 @@ The daemon logs `kvm_nested` at start, and `briqyard doctor` warns while it is o
 - After the upgrade, every suspended machine, warm slot and seed made before it is cold-only: no
   warm hits until the pools refill with the new identity, and a seed generation has to be
   qualified and approved again (ADR 0076).
+- A create naming a seed sealed before the upgrade is refused until the seed is sealed again. A
+  control plane that names seeds rolls in three steps: stop naming them (its creates boot cold),
+  upgrade the hosts and seal the seeds again, then name the new seeds (`OPERATIONS.md`, Upgrade).
 - A machine that needs the extensions gets them through a runtime class that asks for them
   (a later ADR), never by default.

@@ -48,7 +48,9 @@ pub fn template(host_max_extended_leaf: u32) -> Value {
 /// What this host's guests boot with; none where Firecracker gives a guest no EL2.
 #[cfg(target_arch = "x86_64")]
 pub fn host_template() -> Option<Value> {
+    // `__cpuid` is unsafe up to Rust 1.86 (the crate's minimum is 1.85) and safe after.
     // SAFETY: CPUID is available on every x86_64 CPU.
+    #[allow(unused_unsafe)]
     let max = unsafe { std::arch::x86_64::__cpuid(0x8000_0000) }.eax;
     Some(template(max))
 }

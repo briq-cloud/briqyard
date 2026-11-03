@@ -9,7 +9,7 @@ state=$(briqyard machine get "$A" | jq -r .state)
 check "alpine running (${boot}s)" '[ "$state" = running ]'
 check "uname"        'briqyard machine exec "$A" -- uname -r | grep -q "^6\."'
 # ADR 0087. Meaningful on x86_64 only; no arm64 guest lists either flag, so it holds there too.
-check "no vmx or svm in the guest" '! briqyard machine exec "$A" -- grep -Ewq "vmx|svm" /proc/cpuinfo'
+check "no vmx or svm in the guest" 'briqyard machine exec "$A" -- sh -c "! grep -Ewq \"vmx|svm\" /proc/cpuinfo"'
 check "hostname"     '[ "$(briqyard machine exec "$A" -- hostname)" = alp ]'
 check "exit code"    'briqyard machine exec "$A" -- sh -c "exit 3"; [ $? = 3 ]'
 check "stdin"        '[ "$(echo hello | briqyard machine exec -i "$A" -- cat)" = hello ]'
