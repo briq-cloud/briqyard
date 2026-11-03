@@ -633,7 +633,7 @@ async fn durable_observation_failure_dedup_and_repair_preserve_save_semantics() 
 
 struct SaveGate {
     release: Option<std::sync::mpsc::Sender<()>>,
-    terminal: std::sync::mpsc::Receiver<()>,
+    terminal: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 impl SaveGate {
@@ -642,15 +642,20 @@ impl SaveGate {
             let _ = release.send(());
         }
     }
+
+    fn wait_for_terminal(&mut self) -> bool {
+        self.terminal.take().is_none_or(|terminal| {
+            terminal
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok()
+        })
+    }
 }
 
 impl Drop for SaveGate {
     fn drop(&mut self) {
         self.release();
-        let ended = self
-            .terminal
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .is_ok();
+        let ended = self.wait_for_terminal();
         assert!(
             ended || std::thread::panicking(),
             "owned save cleanup deadline"
@@ -683,30 +688,26 @@ async fn owned_save_settles_observation_after_parent_wait_is_dropped() {
         let (terminal, ended) = std::sync::mpsc::channel();
         let mut gate = SaveGate {
             release: Some(release),
-            terminal: ended,
+            terminal: Some(ended),
         };
-        let mut task =
-            f.st.save_task_with(move |path, data| {
-                let _terminal = SaveTerminal(terminal);
-                let _ = entered.send(());
-                released
-                    .recv_timeout(std::time::Duration::from_secs(10))
-                    .expect("save release deadline");
-                match fault {
-                    0 => write_registry(path, data),
-                    1 => Err(std::io::Error::other("synthetic save fault")),
-                    _ => panic!("synthetic save panic"),
-                }
-            })
-            .await
-            .unwrap();
+        let mut parent = Box::pin(f.st.save_with(move |path, data| {
+            let _terminal = SaveTerminal(terminal);
+            let _ = entered.send(());
+            released
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("save release deadline");
+            match fault {
+                0 => write_registry(path, data),
+                1 => Err(std::io::Error::other("synthetic save fault")),
+                _ => panic!("synthetic save panic"),
+            }
+        }));
+        assert!(futures::poll!(&mut parent).is_pending());
         tokio::time::timeout(std::time::Duration::from_secs(10), entering)
             .await
             .unwrap()
             .unwrap();
-        // Retain the actual closure handle while dropping its parent's pending wait.
-        let mut parent = Box::pin(&mut task);
-        assert!(futures::poll!(&mut parent).is_pending());
+        // Drop the actual save caller, which owns the worker's JoinHandle.
         drop(parent);
         assert!(f.st.written.try_lock().is_err());
         let observation = backup::observe(
@@ -718,21 +719,20 @@ async fn owned_save_settles_observation_after_parent_wait_is_dropped() {
         assert_eq!(observation.durable_match, 2);
         assert!(!f.st.durable_observed_valid.load(Ordering::Acquire));
         gate.release();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), &mut task)
+        // The writer's terminal signal covers its I/O; the owned turn is released
+        // only after the surrounding save closure settles or unwinds.
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(10), f.st.written.lock())
             .await
-            .expect("owned save join deadline");
-        if fault == 0 {
-            result.unwrap().unwrap();
-        } else if fault == 1 {
-            assert!(result.unwrap().is_err());
-        } else {
-            assert!(result.unwrap_err().is_panic());
-        }
+            .expect("owned save settlement deadline");
+        let unchanged = *settled == prior;
+        drop(settled);
+        assert!(gate.wait_for_terminal(), "owned save writer deadline");
         assert_eq!(
             f.st.durable_observed_valid.load(Ordering::Acquire),
             fault == 0
         );
-        assert_eq!(*f.st.written.lock().await == prior, fault != 0);
+        assert_eq!(unchanged, fault != 0);
+        assert_eq!(durable_match(&f.st), if fault == 0 { 1 } else { 2 });
     }
 }
 
