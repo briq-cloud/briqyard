@@ -36,18 +36,33 @@ pub(super) fn main_command(st: &State) -> Result<Command> {
         .write(true)
         .open("/dev/console")
         .context("/dev/console")?;
-    cmd.stdout(Stdio::from(console.try_clone()?));
-    cmd.stderr(Stdio::from(console));
     cmd.process_group(0);
     if !cfg.user.is_empty() {
         let (uid, gid, home) = lookup_user(&cfg.user)?;
+        give_console(&console, uid, gid)?;
         run_as(cmd.as_std_mut(), uid, gid, supplementary_groups(uid));
         if let Some(h) = home {
             cmd.env("HOME", h);
         }
     }
+    cmd.stdout(Stdio::from(console.try_clone()?));
+    cmd.stderr(Stdio::from(console));
     cmd.kill_on_drop(false);
     Ok(cmd)
+}
+
+/// Makes the console the app's own (mode stays 0600), so the app can open it again by path
+/// (`/dev/stderr`, `/proc/self/fd/2`) after the init drops root. Only the app and root can
+/// open it. ADR 0090.
+pub(super) fn give_console(console: &fs::File, uid: u32, gid: u32) -> Result<()> {
+    nix::unistd::fchown(
+        console.as_raw_fd(),
+        Some(nix::unistd::Uid::from_raw(uid)),
+        Some(nix::unistd::Gid::from_raw(gid)),
+    )
+    .context("chown the console to the app's user")?;
+    console.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 /// Runs the command as `uid`, `gid` and `groups` (none clears root's own). The child drops
@@ -303,6 +318,45 @@ mod tests {
         );
         // No supplementary group: root's own are dropped.
         assert_eq!(ids_run_as(65534, 100, vec![])[1..], ["100 100 100 100", ""]);
+    }
+
+    /// An app that is not root re-opens its stderr by path (nginx-unprivileged's error.log is
+    /// a symlink to /dev/stderr) and got EACCES on a root-owned console. Needs root:
+    /// `sudo <test binary> --ignored console` (CI runs it).
+    #[test]
+    #[ignore = "needs root"]
+    fn console_is_opened_again_by_the_app_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("console");
+        write(&path, b"", 0o600);
+        let console = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let (uid, gid) = (65534, 65533);
+        let reopen = |p: &Path| {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.arg("-c").arg(format!("echo hi >> {}", p.display()));
+            run_as(&mut cmd, 65534, 65534, vec![]);
+            let child = spawn_tracked(&mut cmd);
+            let pid = child.id() as i32;
+            let out = child.wait_with_output().expect("started");
+            untrack(pid);
+            out.status.success()
+        };
+        // The directory must let the app reach the file.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!reopen(&path), "root-owned 0600: EACCES");
+        give_console(&console, uid, gid).unwrap();
+        let m = fs::metadata(&path).unwrap();
+        assert_eq!((m.uid(), m.gid(), m.mode() & 0o7777), (uid, gid, 0o600));
+        assert!(reopen(&path), "owned by the app: opens");
+        // Nobody else gains access.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(format!("echo hi >> {}", path.display()));
+        run_as(&mut cmd, 65532, 65532, vec![]);
+        let child = spawn_tracked(&mut cmd);
+        let pid = child.id() as i32;
+        let out = child.wait_with_output().expect("started");
+        untrack(pid);
+        assert!(!out.status.success(), "another user is refused");
     }
 
     // --- the environment and the command ---
