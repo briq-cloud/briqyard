@@ -325,7 +325,7 @@ mod tests {
     /// `sudo <test binary> --ignored console` (CI runs it).
     #[test]
     #[ignore = "needs root"]
-    fn console_is_opened_again_by_the_app_user() {
+    fn run_as_app_user_reopens_its_console() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("console");
         write(&path, b"", 0o600);
