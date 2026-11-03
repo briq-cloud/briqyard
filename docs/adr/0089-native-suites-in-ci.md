@@ -14,6 +14,16 @@ The installer verifies the bundle's provenance and patches before activation. It
 pinned guest kernel, encrypted file-backed ZFS pool and networking are unchanged.
 `hack/install-dev.sh`, shared with `hack/vm.sh`, installs systemd units, the mirror,
 SSH authorization and a local release directory for the fleet upgrade check.
+It replaces the bootstrap-generated `briqyardd.service` with the development unit and
+installs the binaries in `/usr/local/bin`, so the suites run under the development unit,
+as on the Lima bench, not under the unit a production bootstrap writes.
+
+The harness (`hack/native-ci.sh`, `hack/install-dev.sh`) comes from the workflow's own
+revision; `bootstrap-host.sh`, `hack/config.dev.yaml`, the units and the mirror installer
+come from the tested source. A dispatch on a source ref much older than the workflow can
+therefore fail from script skew, not from a defect: compare such a run with the same
+harness on main before reading it as a regression. Dispatches for different refs run
+concurrently; each ref has its own concurrency group.
 The CI fixture reserves 12 GiB for guest admission and caps the ZFS ARC at 1 GiB;
 its 24 virtual CPU admission slots match the development fixture (4 physical
 runner cores). The pool is a sparse 40 GiB file. These are suite fixtures,

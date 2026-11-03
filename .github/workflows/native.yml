@@ -17,19 +17,19 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: native-${{ github.event.pull_request.number || github.ref }}
+  group: native-${{ github.event.pull_request.number || inputs.ref || github.ref }}
   cancel-in-progress: true
 jobs:
   suites:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       # Keep the harness from the workflow revision when dispatch tests an older source ref.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           path: .native-harness
@@ -41,10 +41,11 @@ jobs:
           ls -l /dev/kvm
           free -m
           df -h /
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Build the head
         run: |
           sudo apt-get update -qq
@@ -95,13 +96,13 @@ jobs:
             fi
           done
           echo "Durations: e2e ${E2E_SECONDS:-incomplete}s; fleet-smoke ${FLEET_SECONDS:-incomplete}s" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: native-e2e-log
           path: native-logs/e2e.log
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: native-fleet-smoke-log
