@@ -464,6 +464,52 @@ pub async fn wait_ready(uds: &Path, timeout: Duration) -> Result<String> {
     }
 }
 
+/// Every guest control exchange is bounded independently of other machines.
+pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn check_fs_answer(op: &str, r: &Response) -> Result<()> {
+    if r.kind == "error" {
+        return Err(answered(op, &r.message));
+    }
+    anyhow::ensure!(r.kind == "ok", "guest {op} answered {}", r.kind);
+    Ok(())
+}
+async fn sync_answer(mut conn: Box<dyn Conn>) -> Result<()> {
+    let answer: Response = read_frame(&mut conn).await?;
+    check_fs_answer("fs_sync", &answer)?;
+    let mut byte = [0];
+    anyhow::ensure!(
+        conn.read(&mut byte).await? == 0,
+        "fs_sync omitted terminal EOF"
+    );
+    Ok(())
+}
+/// A connection-scoped freeze; cancellation or Drop closes the connection.
+pub struct Frozen {
+    conn: Box<dyn Conn>,
+    pub filesystems: Vec<String>,
+}
+impl Frozen {
+    pub async fn thaw(mut self) -> Result<Response> {
+        tokio::time::timeout(CONTROL_TIMEOUT, async {
+            write_request(
+                &mut self.conn,
+                &Request {
+                    op: "fs_thaw".into(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            let answer: Response = read_frame(&mut self.conn).await?;
+            check_fs_answer("fs_thaw", &answer)?;
+            anyhow::ensure!(answer.thawed_by == "host", "freeze_expired");
+            Ok(answer)
+        })
+        .await
+        .context("guest fs_thaw timeout")?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -981,52 +1027,6 @@ mod tests {
             .unwrap();
         assert!(err.is::<FileTransferBusy>());
         server.await.unwrap();
-    }
-}
-
-/// Every guest control exchange is bounded independently of other machines.
-pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
-
-fn check_fs_answer(op: &str, r: &Response) -> Result<()> {
-    if r.kind == "error" {
-        return Err(answered(op, &r.message));
-    }
-    anyhow::ensure!(r.kind == "ok", "guest {op} answered {}", r.kind);
-    Ok(())
-}
-async fn sync_answer(mut conn: Box<dyn Conn>) -> Result<()> {
-    let answer: Response = read_frame(&mut conn).await?;
-    check_fs_answer("fs_sync", &answer)?;
-    let mut byte = [0];
-    anyhow::ensure!(
-        conn.read(&mut byte).await? == 0,
-        "fs_sync omitted terminal EOF"
-    );
-    Ok(())
-}
-/// A connection-scoped freeze; cancellation or Drop closes the connection.
-pub struct Frozen {
-    conn: Box<dyn Conn>,
-    pub filesystems: Vec<String>,
-}
-impl Frozen {
-    pub async fn thaw(mut self) -> Result<Response> {
-        tokio::time::timeout(CONTROL_TIMEOUT, async {
-            write_request(
-                &mut self.conn,
-                &Request {
-                    op: "fs_thaw".into(),
-                    ..Default::default()
-                },
-            )
-            .await?;
-            let answer: Response = read_frame(&mut self.conn).await?;
-            check_fs_answer("fs_thaw", &answer)?;
-            anyhow::ensure!(answer.thawed_by == "host", "freeze_expired");
-            Ok(answer)
-        })
-        .await
-        .context("guest fs_thaw timeout")?
     }
 }
 
