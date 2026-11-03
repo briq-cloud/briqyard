@@ -115,13 +115,76 @@ for ready/down states. This exercises all 18 existing checks, including down-hos
 A running local machine provides disk/CPU observations; checking waits for at least 12
 Prometheus samples (3 minutes at the 15 s scrape interval, capped at 300 s) before querying the dashboards. Credentials stay outside artifacts.
 
-The two-host gate above remains: a second daemon's own state, pool, ports and unit
+A second daemon's own state, pool, ports and unit
 are insufficient because the unmodified suites address the same absolute config,
 unit and pool on both hosts. Mount/systemd isolation would require another host
 fixture beyond a second daemon; it is not provided here. Hosted matrix jobs have no
 direct private connectivity or shared lifecycle orchestration. No transport or
 credentials are provisioned. The harness explicitly logs this environment gate in
 each added job and its summary; neither two-host suite is invoked partially or
-reported as passing. The existing 29 and 10 checks remain unchanged.
+reported as passing. The existing 29 and 10 checks remain unchanged. The nested host
+below replaced this gate.
 
-Qualification of the added jobs against main is pending the first dispatch.
+## Independent QEMU second-host probe
+
+The [two-host probe](https://github.com/briq-cloud/briqyard/actions/runs/41734138767)
+booted the checksum-pinned Ubuntu 24.04 cloud image dated 20261017 with QEMU/KVM,
+`-cpu host`, two vCPUs and 6144 MiB on `ubuntu-24.04`. The runner's
+`kvm_intel.nested` was `Y`; no reload was needed. SSH was ready after 14 s.
+Inside QEMU, `/dev/kvm` exposed API version 12 and `KVM_CREATE_VM` took 0.006195 s.
+This establishes a usable VM creation interface, not Firecracker boot qualification.
+
+The native `two-hosts` job now attempts both complete suites with this independent
+root, systemd and identically named encrypted `byard` pool. It reuses bootstrap and
+`install-dev.sh`; the second host gets its pool key from the runner's fleet.
+QEMU user networking forwards its API to 127.0.0.2:27420 and reaches the
+fleet through 10.0.2.2. SSH authenticates with an ephemeral key and a pre-pinned
+host key. No external rendezvous, secret or service account is used. The runtime
+is built once from the selected source and transferred with its verified release
+assets. Suite assertions and counts remain unchanged. A cold Alpine create and
+exec on the nested host measure actual Firecracker usability before the suites.
+
+
+The first full-main attempt failed before suites: both host URLs used 127.0.0.1
+with different ports, but fleet host identity deliberately compares the address
+without the port (`Registry::expecting`). The pool-key call matched the local
+host's empty credential and returned 401. Give the second host its own loopback
+address, 127.0.0.2, rather than changing authentication. Manual dispatch can select
+only the two-host job for targeted fixture validation.
+
+The next attempt passed pool-key retrieval and failed bootstrap validation because
+an off-loopback listener defaults to TLS while its forwarded URL used HTTP.
+Bootstrap initially binds guest loopback as fc2 does; the development configuration
+then explicitly sets `api_tls: false` and binds the guest interface for QEMU's
+forward. Allowed clients remain the private QEMU network and loopback. No daemon
+validation or authentication rule is changed.
+
+## Two-host qualification, 2026-11-04
+
+The [completed main-ref run](https://github.com/briq-cloud/briqyard/actions/runs/41737106165)
+tested source `fd9ec193c6b512a214c99cc1a07555c08870fdf8` with harness
+`a00b57607d7f3e0b2e3d7910198202a4324bb905`. Both complete suites passed:
+
+| Suite | Passed/total | Duration |
+|---|---:|---:|
+| fleet-two-hosts | 29/29 | 106 s |
+| fleet-restore | 10/10 | 4 s |
+
+This runner used `kvm_amd.nested=1`, unchanged by the probe. The independent
+Ubuntu host reached SSH in 11 s, exposed KVM API 12 and created a KVM VM in
+0.009144 s. Its first real Firecracker Alpine create plus exec took 15 s,
+including the cold image pull, disk preparation and two SSH commands: this is
+not a boot-only benchmark. The earlier Intel probe established API availability;
+this run establishes actual nested Firecracker boot and full suite execution on AMD.
+The 7m12s job completed successfully and retained `native-two-host-logs`.
+
+**Remove the two-host environment gate.** This qualification supersedes the
+single-runner restriction above: QEMU supplies the independent root, systemd and
+pool that a second daemon alone could not. No assertions were skipped, weakened
+or relabeled, and no `ALLOW_SKIPPED` override was used. The only dispatch selection
+in this validation omitted unrelated jobs, not any two-host suite checks.
+
+The `ubuntu-24.04` label promises no CPU vendor. The full run here is on AMD; on Intel only
+the KVM API was seen. A runner that cannot nest fails the job with exit 78, an `ENVIRONMENT
+GATE` line and a first line in the summary: the suites did not run, and a re-run may land on
+a runner that can. A job never passes without running them.
