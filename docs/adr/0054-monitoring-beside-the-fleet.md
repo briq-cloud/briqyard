@@ -34,6 +34,13 @@ Three things stand between a Prometheus and the hosts:
 
 **Backup failures use the existing event counter, grouped only by host, over ten minutes.** Any positive `increase()` alerts without a pending period. Because an event series is absent until its first event, a current positive counter without a sample ten minutes ago also alerts; this can include an older failure first seen after a scrape gap. This branch precedes `increase()` so a single first failure stays visible once a second unchanged sample arrives. Empty results leave this failure-only alert Normal: series absence before the first event is expected, whereas Grafana's `NoData` policy would [create a separate alert](https://grafana.com/docs/grafana/latest/alerting/fundamentals/alert-rule-evaluation/nodata-and-error-states/). Query errors use `Error`, and scrape outages remain the separate target alert. Normal or cleared failure alerts do not establish backup health, schedule coverage, recovery or an RPO. Only the host label reaches the alert; event data and messages do not.
 
+**Capacity and backup expressions have synthetic promtool fixtures, bound to the
+Grafana source and threshold.** `hack/monitoring-alert-check.py` uses the existing
+pinned Prometheus tool, supplied explicitly; it installs nothing. Source binding runs
+in CI, expression evaluation in the native monitoring qualification (DEVELOPMENT.md).
+These checks establish query behavior, not Grafana state transitions, notification
+delivery or physical saturation.
+
 ## Rejected
 
 | Alternative | Why not |

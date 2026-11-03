@@ -1,0 +1,187 @@
+# Synthetic PromQL truth values (1: threshold met, 0: not met, []: absent).
+# Expressions and thresholds are bound to Grafana by monitoring-alert-check.py.
+---
+evaluation_interval: 1m
+tests:
+- name: 'briqyard-out-of-room: cpu refusal and five-minute expiration'
+  interval: 1m
+  input_series:
+  - series: briqyard_fleet_unschedulable_total{region="test-region", resource="cpu"}
+    values: 0 1+0x6
+  promql_expr_test:
+  - expr: &capacity >-
+      (sum by (region, resource) (increase(briqyard_fleet_unschedulable_total{resource=~"memory|cpu|disk"}[5m]))) > bool 0
+    eval_time: 0m
+    exp_samples: []
+  - expr: *capacity
+    eval_time: 1m
+    exp_samples:
+    - labels: '{region="test-region", resource="cpu"}'
+      value: 1
+  - expr: *capacity
+    eval_time: 6m
+    exp_samples:
+    - labels: '{region="test-region", resource="cpu"}'
+      value: 0
+- name: 'briqyard-out-of-room: memory refusal and five-minute expiration'
+  interval: 1m
+  input_series:
+  - series: briqyard_fleet_unschedulable_total{region="test-region", resource="memory"}
+    values: 0 1+0x6
+  promql_expr_test:
+  - expr: *capacity
+    eval_time: 0m
+    exp_samples: []
+  - expr: *capacity
+    eval_time: 1m
+    exp_samples:
+    - labels: '{region="test-region", resource="memory"}'
+      value: 1
+  - expr: *capacity
+    eval_time: 6m
+    exp_samples:
+    - labels: '{region="test-region", resource="memory"}'
+      value: 0
+- name: 'briqyard-out-of-room: disk refusal and five-minute expiration'
+  interval: 1m
+  input_series:
+  - series: briqyard_fleet_unschedulable_total{region="test-region", resource="disk"}
+    values: 0 1+0x6
+  promql_expr_test:
+  - expr: *capacity
+    eval_time: 0m
+    exp_samples: []
+  - expr: *capacity
+    eval_time: 1m
+    exp_samples:
+    - labels: '{region="test-region", resource="disk"}'
+      value: 1
+  - expr: *capacity
+    eval_time: 6m
+    exp_samples:
+    - labels: '{region="test-region", resource="disk"}'
+      value: 0
+- name: 'briqyard-out-of-room: pressure excluded'
+  interval: 1m
+  input_series:
+  - series: briqyard_fleet_unschedulable_total{region="test-region",resource="pressure"}
+    values: 0 1
+  promql_expr_test:
+  - expr: *capacity
+    eval_time: 1m
+    exp_samples: []
+- name: 'briqyard-out-of-room: zero baseline'
+  interval: 1m
+  input_series:
+  - series: briqyard_fleet_unschedulable_total{region="test-region",resource="cpu"}
+    values: 0+0x2
+  promql_expr_test:
+  - expr: *capacity
+    eval_time: 1m
+    exp_samples:
+    - labels: '{region="test-region",resource="cpu"}'
+      value: 0
+- name: 'briqyard-out-of-room: first positive needs baseline'
+  interval: 1m
+  input_series:
+  - series: briqyard_fleet_unschedulable_total{region="test-region",resource="cpu"}
+    values: '1'
+  promql_expr_test:
+  - expr: *capacity
+    eval_time: 0m
+    exp_samples: []
+- name: 'briqyard-backup-failed: first positive, second unchanged, ten-minute expiration'
+  interval: 1m
+  input_series:
+  - series: briqyard_events_total{host="test-host",reason="backup_failed",namespace="test-namespace",name="test-machine"}
+    values: _ 1+0x14
+  promql_expr_test:
+  - expr: &backup >-
+      (sum by (host) ((briqyard_events_total{reason="backup_failed"} unless briqyard_events_total{reason="backup_failed"} offset 10m) or increase(briqyard_events_total{reason="backup_failed"}[10m]))) > bool 0
+    eval_time: 0m
+    exp_samples: []
+  - expr: *backup
+    eval_time: 1m
+    exp_samples:
+    - labels: '{host="test-host"}'
+      value: 1
+  - expr: *backup
+    eval_time: 2m
+    exp_samples:
+    - labels: '{host="test-host"}'
+      value: 1
+  - expr: *backup
+    eval_time: 10m
+    exp_samples:
+    - labels: '{host="test-host"}'
+      value: 1
+  - expr: *backup
+    eval_time: 11m
+    exp_samples:
+    - labels: '{host="test-host"}'
+      value: 0
+- name: 'briqyard-backup-failed: observed baseline and window expiration'
+  interval: 1m
+  input_series:
+  - series: briqyard_events_total{host="test-host",reason="backup_failed",namespace="test-namespace",name="test-machine"}
+    values: 0 1+0x12
+  promql_expr_test:
+  - expr: *backup
+    eval_time: 0m
+    exp_samples:
+    - labels: '{host="test-host"}'
+      value: 0
+  - expr: *backup
+    eval_time: 1m
+    exp_samples:
+    - labels: '{host="test-host"}'
+      value: 1
+  - expr: *backup
+    eval_time: 11m
+    exp_samples:
+    - labels: '{host="test-host"}'
+      value: 0
+- name: 'briqyard-backup-failed: reset and subsequent failure'
+  interval: 1m
+  input_series:
+  - series: briqyard_events_total{host="test-host",reason="backup_failed",namespace="test-namespace",name="test-machine"}
+    values: 5+0x10 0 1
+  promql_expr_test:
+  - expr: *backup
+    eval_time: 11m
+    exp_samples:
+    - labels: '{host="test-host"}'
+      value: 0
+  - expr: *backup
+    eval_time: 12m
+    exp_samples:
+    - labels: '{host="test-host"}'
+      value: 1
+- name: 'briqyard-backup-failed: stale single observation'
+  interval: 1m
+  input_series:
+  - series: briqyard_events_total{host="test-host",reason="backup_failed",namespace="test-namespace",name="test-machine"}
+    values: 1 stale
+  promql_expr_test:
+  - expr: *backup
+    eval_time: 1m
+    exp_samples: []
+- name: 'briqyard-backup-failed: absence before first failure'
+  interval: 1m
+  input_series: []
+  promql_expr_test:
+  - expr: *backup
+    eval_time: 0m
+    exp_samples: []
+  - expr: *backup
+    eval_time: 11m
+    exp_samples: []
+- name: 'briqyard-backup-failed: other event reason excluded'
+  interval: 1m
+  input_series:
+  - series: briqyard_events_total{host="test-host",reason="backup_succeeded"}
+    values: 0 1
+  promql_expr_test:
+  - expr: *backup
+    eval_time: 1m
+    exp_samples: []
