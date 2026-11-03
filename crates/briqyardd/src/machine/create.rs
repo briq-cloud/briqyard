@@ -12,9 +12,18 @@ impl Manager {
         let scope = self.inner.zfs.io_scope()?;
         scope
             .run(async {
-                let (e, how) = self.record(req, None).await?;
-                let made = self.view(&e);
+                // Acquire worker admission before any uncertain warm ownership transfer.
                 let child_scope = self.inner.zfs.io_scope()?;
+                let (e, how) = match self.record(req, None).await {
+                    Ok(recorded) => recorded,
+                    Err(error) => {
+                        // No make worker was dispatched, so settle this admission positively.
+                        // Dropping an unconsumed scope is intentionally treated as uncertain.
+                        child_scope.run(async {}).await;
+                        return Err(error);
+                    }
+                };
+                let made = self.view(&e);
                 self.spawn_make_admitted(child_scope, e, how);
                 Ok(made)
             })
@@ -30,6 +39,11 @@ impl Manager {
         let m = self.clone();
         tokio::spawn(async move {
             let warm = e.snapshot().warm_slot.is_some();
+            let operation = if matches!(how, Make::Assigned) {
+                metrics::warm::Operation::Claim
+            } else {
+                metrics::warm::Operation::Prepare
+            };
             let began = std::time::Instant::now();
             let result = scope.run(m.make_owned(&e, how)).await;
             if warm {
@@ -38,11 +52,12 @@ impl Manager {
                 } else {
                     metrics::warm::Outcome::Failure
                 };
-                m.inner.stats.warm.lock().unwrap().observe(
-                    metrics::warm::Operation::Prepare,
-                    outcome,
-                    began.elapsed(),
-                );
+                m.inner
+                    .stats
+                    .warm
+                    .lock()
+                    .unwrap()
+                    .observe(operation, outcome, began.elapsed());
             }
             match result {
                 Ok(())
@@ -65,8 +80,13 @@ impl Manager {
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
+        let _warm = if req.sandbox_seed.is_some() {
+            Some(self.inner.warm_lock.lock().await)
+        } else {
+            None
+        };
         let _admission = self.inner.namespace_lifecycle.read().await;
-        self.record_admitted(req, role).await
+        self.record_with_warm_slot(req, role, None, false).await
     }
 
     /// The caller already holds namespace admission (a gateway put keeps it through boot).
@@ -75,7 +95,12 @@ impl Manager {
         req: api::CreateMachineRequest,
         role: Option<Role>,
     ) -> Result<(Arc<Entry>, Make), MError> {
-        self.record_with_warm_slot(req, role, None).await
+        if req.sandbox_seed.is_some() {
+            return Err(invalid(
+                "sandbox create requires warm admission before namespace admission",
+            ));
+        }
+        self.record_with_warm_slot(req, role, None, false).await
     }
 
     pub(super) async fn record_warm_slot(
@@ -89,14 +114,16 @@ impl Manager {
             .warm_test_barrier("warm_admission", "*")
             .await;
         let _admission = self.inner.namespace_lifecycle.read().await;
-        self.record_with_warm_slot(req, None, Some(slot)).await
+        self.record_with_warm_slot(req, None, Some(slot), false)
+            .await
     }
 
-    async fn record_with_warm_slot(
+    pub(in crate::machine) async fn record_with_warm_slot(
         &self,
         req: api::CreateMachineRequest,
         role: Option<Role>,
         warm_slot: Option<warm::Slot>,
+        unbound_factory: bool,
     ) -> Result<(Arc<Entry>, Make), MError> {
         let _sandbox_turn = if req.sandbox_seed.is_some() {
             Some(self.inner.sandbox_create_lock.lock().await)
@@ -219,6 +246,8 @@ impl Manager {
             template_birth: None,
             clone_origin: None,
             warm_slot,
+            launch_identity: None,
+            assigned_run: None,
             rest: Default::default(),
             snapshots: Vec::new(),
             restoring: None,
@@ -318,7 +347,11 @@ impl Manager {
             })?;
             let sr = s.snapshot();
             if fork.snapshot.is_some() {
-                self.named_clone_spec(&req, &mut rec, &sr, fork)?;
+                if unbound_factory {
+                    self.unbound_warm_clone_spec(&req, &mut rec, &sr, fork)?;
+                } else {
+                    self.named_clone_spec(&req, &mut rec, &sr, fork)?;
+                }
             } else {
                 self.ordinary_operation(&sr)?;
                 if !sr.has_disks() {
@@ -353,6 +386,13 @@ impl Manager {
             src = Some((source, fork));
         } else {
             rec.image = req.image.clone();
+        }
+        if req.sandbox_seed.is_some() {
+            self.ensure_namespace(&req.namespace).await?;
+            // Keep the optional assignment journal future off every create/fill caller's stack.
+            if let Some(entry) = Box::pin(self.select_unbound_assignment(&req)).await? {
+                return Ok((entry, Make::Assigned));
+            }
         }
         if rec.root_key.is_empty() {
             rec.root_key = rec.image_key.clone();
@@ -401,6 +441,14 @@ impl Manager {
                     return Err(error);
                 }
             }
+        }
+        if e.snapshot().warm_slot.is_some()
+            && e.snapshot()
+                .clone_origin
+                .as_ref()
+                .is_some_and(|origin| origin.artifact.profile == guest::SANDBOX_READY_V1)
+        {
+            self.pin_launch_identity(&e)?;
         }
         self.freeze_sandbox_assignment(&e)?;
         let ip = e.snapshot().ip;
@@ -456,6 +504,23 @@ impl Manager {
         if matches!(how, Make::Existing) {
             return Ok(());
         }
+        if matches!(how, Make::Assigned) {
+            let record = e.snapshot();
+            let binding = record
+                .clone_origin
+                .as_ref()
+                .and_then(|o| o.sandbox.as_ref())
+                .ok_or_else(|| invalid("accepted assignment binding missing"))?;
+            return self
+                .start_destination_assignment(
+                    &record.namespace,
+                    &binding.request_id,
+                    &binding.create_sha256,
+                )
+                .await
+                .map(|_| ())
+                .map_err(MError::Other);
+        }
         let reference = e.snapshot().image;
         let image = match how {
             Make::Image => {
@@ -501,7 +566,7 @@ impl Manager {
             Make::Restore(b, key) => self.receive_disks(e, b, key.as_deref()).await,
             Make::Fork(src, fork) => self.make_disks(e, Some(src.as_ref()), Some(fork)).await,
             Make::Image => self.make_disks(e, None, None).await,
-            Make::Existing => return Ok(()),
+            Make::Existing | Make::Assigned => return Ok(()),
         };
         // A fork's or a restore's volume larger than its source's: its disk grows to it (ADR
         // 0040). A new volume is made at its size.
@@ -528,7 +593,7 @@ impl Manager {
                 Ev::normal(reason::FORKED, format!("forked from {from}"))
                     .data(json!({ "from": from }))
             }
-            Make::Existing => return Ok(()),
+            Make::Existing | Make::Assigned => return Ok(()),
             Make::Image => Ev::normal(reason::CREATED, format!("created from {}", r.image))
                 .data(json!({ "image": r.image, "digest": r.image_digest })),
         };
@@ -645,6 +710,11 @@ impl Manager {
                 "name reserved by a durable warm claim".into(),
             ));
         }
+        if self.assignment_name_held(&rec.namespace, &rec.name, &rec.id) {
+            return Err(MError::Conflict(
+                "name reserved by a pending destination assignment".into(),
+            ));
+        }
         let taken = machines.values().find(|e| {
             let r = e.rec.lock().unwrap();
             r.namespace == rec.namespace && r.name == rec.name && r.state != state::DESTROYING
@@ -660,7 +730,7 @@ impl Manager {
                 used.push(r.host_num as u32);
             }
         }
-        let held = namespace_use(&machines, &rec.namespace);
+        let held = self.namespace_use(&machines, &rec.namespace);
         if let Some(x) = over_quota(
             &rec.namespace,
             &t.rec.quota,
@@ -769,7 +839,7 @@ impl Manager {
                 z.clone_snapshot(&s.root_dataset(), &origin.snapshot, &r.root_dataset())
                     .await?;
                 crate::profile::stage("named_memory_clone", "disk_clone", &r.id, 0, started, true);
-                if origin.sandbox.is_none() {
+                if origin.sandbox.is_none() && r.launch_identity.is_none() {
                     return Ok(());
                 }
             } else {
@@ -812,7 +882,9 @@ impl Manager {
                 "-E",
                 "lazy_itable_init=0,lazy_journal_init=0",
             ]);
-            if r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some()) {
+            if r.launch_identity.is_some()
+                || r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some())
+            {
                 formatter.args(["-U", "random"]);
             }
             let out = formatter
@@ -827,7 +899,9 @@ impl Manager {
                     String::from_utf8_lossy(&out.stderr).trim()
                 ));
             }
-            if r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some()) {
+            if r.launch_identity.is_some()
+                || r.clone_origin.as_ref().is_some_and(|o| o.sandbox.is_some())
+            {
                 std::fs::File::open(&dev)?.sync_all()?;
                 self.check_sandbox_disk(&r, &dev)?;
             }

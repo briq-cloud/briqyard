@@ -425,3 +425,118 @@ async fn ordinary_admission_racing_fill_can_consume_headroom_and_refill_rechecks
     assert!(view.error.contains("headroom"));
     assert!(h.m.get(&ordinary.id).unwrap().ready);
 }
+
+#[tokio::test]
+async fn data_volumes_are_fully_budgeted_and_subtracted_from_disk_floor() {
+    let (h, _) = pool(1).await;
+    let entry = fill(&h).await;
+    {
+        let _completed = entry.lock.lock().await;
+    }
+    entry.rec.lock().unwrap().volume = Some(api::VolumeSpec {
+        size_gb: 2,
+        mount: "/work".into(),
+    });
+    h.m.inner.warm_policy.lock().unwrap().budget.data_disk_gb = 2;
+    let status = h.m.warm_catalog("t1").await.unwrap();
+    assert_eq!(status.charged.data_disk_gb, 2);
+    assert_eq!(
+        status.charged.root_disk_gb,
+        entry
+            .snapshot()
+            .clone_origin
+            .unwrap()
+            .artifact
+            .recipe
+            .root_disk_gb
+    );
+    assert!(status.blocked.is_empty());
+    h.m.inner.warm_policy.lock().unwrap().budget.data_disk_gb = 1;
+    assert!(h
+        .m
+        .warm_catalog("t1")
+        .await
+        .unwrap()
+        .blocked
+        .iter()
+        .any(|reason| reason.reason == "budget"));
+    h.m.inner.warm_policy.lock().unwrap().budget.data_disk_gb = 2;
+    let root = u64::from(status.charged.root_disk_gb);
+    // Roots alone would leave 17 GiB above a 16 GiB floor; full data leaves 15 GiB.
+    h.m.inner
+        .warm_probe_override
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .pool
+        .free = (root + 17) << 30;
+    assert!(h
+        .m
+        .warm_catalog("t1")
+        .await
+        .unwrap()
+        .blocked
+        .iter()
+        .any(|reason| reason.reason == "pressure"));
+    entry.rec.lock().unwrap().state = state::ERROR.into();
+    assert_eq!(
+        h.m.warm_catalog("t1").await.unwrap().charged.data_disk_gb,
+        2,
+        "failed/unknown cleanup retains its full data reservation"
+    );
+}
+
+#[tokio::test]
+async fn a_claim_cannot_erase_root_and_data_liability_from_a_usable_sample() {
+    let (h, _) = pool(1).await;
+    let entry = fill(&h).await;
+    {
+        let _completed = entry.lock.lock().await;
+    }
+    entry.rec.lock().unwrap().volume = Some(api::VolumeSpec {
+        size_gb: 2,
+        mount: "/work".into(),
+    });
+    h.m.inner.warm_policy.lock().unwrap().budget.data_disk_gb = 2;
+    let boundary = h.m.warm_probe_boundary().unwrap();
+    let root = u64::from(
+        entry
+            .snapshot()
+            .clone_origin
+            .unwrap()
+            .artifact
+            .recipe
+            .root_disk_gb,
+    );
+    let mut sample = crate::machine::warm::Sample {
+        at: std::time::Instant::now(),
+        memory_mb: 32768,
+        pool: crate::zfs::Pool {
+            used: 1 << 30,
+            free: (16 + root + 1) << 30,
+        },
+        boundary,
+    };
+    // Record-level accounting boundary only: native claim/volume behavior is not exercised.
+    entry
+        .rec
+        .lock()
+        .unwrap()
+        .warm_slot
+        .as_mut()
+        .unwrap()
+        .claimed = Some("accounting-claim".into());
+    *h.m.inner.warm_probe_override.lock().unwrap() = Some(Some(sample.clone()));
+    let status = h.m.warm_catalog("t1").await.unwrap();
+    assert_eq!(status.charged.data_disk_gb, 0);
+    assert!(status
+        .blocked
+        .iter()
+        .any(|reason| reason.reason == "pressure"));
+    sample.boundary = h.m.warm_probe_boundary().unwrap();
+    *h.m.inner.warm_probe_override.lock().unwrap() = Some(Some(sample));
+    assert!(h.m.warm_catalog("t1").await.unwrap().blocked.is_empty());
+}

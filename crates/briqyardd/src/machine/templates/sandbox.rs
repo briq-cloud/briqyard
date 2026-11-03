@@ -15,8 +15,7 @@ pub(in crate::machine) fn builder_config(device: guest::SandboxDevice) -> guest:
     }
 }
 pub(in crate::machine) use policy::pristine_config;
-#[cfg(test)]
 pub(in crate::machine) use start::binding_hash;
-pub(in crate::machine) use start::check_ack;
+pub(in crate::machine) use start::{check_ack, destination_bind};
 #[cfg(test)]
 mod tests;

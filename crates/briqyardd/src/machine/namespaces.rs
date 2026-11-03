@@ -76,7 +76,18 @@ impl Manager {
             let r = e.rec.lock().unwrap();
             r.namespace == id && r.is_namespaces()
         });
-        if in_use {
+        if in_use
+            || self.assignment_namespace_held(id)
+            || self
+                .inner
+                .launch_holds
+                .lock()
+                .unwrap()
+                .values()
+                .any(|identity| {
+                    identity.namespace == id || identity.subnet_index == t.rec.subnet_index
+                })
+        {
             return Err(MError::NamespaceInUse);
         }
         {

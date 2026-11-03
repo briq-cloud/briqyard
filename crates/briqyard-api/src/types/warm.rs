@@ -7,6 +7,9 @@ pub struct WarmResources {
     pub memory_mb: u32,
     pub cpu_millis: u32,
     pub root_disk_gb: u32,
+    /// Full newly allocated data volumes, without a sharing discount.
+    #[serde(skip_serializing_if = "zero_data_disk")]
+    pub data_disk_gb: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,4 +104,22 @@ pub struct WarmPoolSlot {
     pub machine_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+}
+
+fn zero_data_disk(n: &u32) -> bool {
+    *n == 0
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    #[test]
+    fn legacy_resource_wire_shape_defaults_data_to_zero_and_omits_it() {
+        let legacy = serde_json::json!({"memory_mb": 256, "cpu_millis": 1000, "root_disk_gb": 8});
+        let mut resources: WarmResources = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(resources.data_disk_gb, 0);
+        assert_eq!(serde_json::to_value(resources).unwrap(), legacy);
+        resources.data_disk_gb = 2;
+        assert_eq!(serde_json::to_value(resources).unwrap()["data_disk_gb"], 2);
+    }
 }

@@ -86,6 +86,11 @@ pub trait Vmm: Send + Sync {
         None
     }
 
+    /// Positive live kernel proof, including jailed credentials; unavailable is refusal.
+    fn verify_process(&self, _id: &str, _saved: &Incarnation, _uid: u32, _gid: u32) -> bool {
+        false
+    }
+
     /// Positive exit of an exact registered clone incarnation; no guest activation.
     async fn settle_clone_process(&self, _id: &str, _saved: &Incarnation) -> Result<bool> {
         Ok(false)
@@ -118,6 +123,12 @@ pub trait Vmm: Send + Sync {
     /// Only a confirmed paused slot can cross this boundary.
     async fn resume_paused(&self, _vm: &Vm) -> Result<()> {
         anyhow::bail!("paused slots unsupported")
+    }
+
+    /// Assignment-only retry on the original owned handle, after fresh process proof.
+    /// Confirm Paused -> Running or already Running; this never proves guest readiness.
+    async fn resume_assigned(&self, _vm: &Vm) -> Result<()> {
+        anyhow::bail!("assigned resume unsupported")
     }
 
     /// Gives a running machine's disks these limits now: the root disk, and the volume when
@@ -421,6 +432,22 @@ impl Vmm for Firecracker {
         Ok(())
     }
 
+    async fn resume_assigned(&self, vm: &Vm) -> Result<()> {
+        anyhow::ensure!(!*vm.exited.borrow(), "assigned process exited");
+        let client = Client::new(&vm.api);
+        let info = client.info().await?;
+        match info["state"].as_str() {
+            Some("Paused") => client.resume().await?,
+            Some("Running") => {}
+            _ => anyhow::bail!("assigned VMM state is unconfirmed"),
+        }
+        anyhow::ensure!(
+            !*vm.exited.borrow() && client.info().await?["state"] == "Running",
+            "assigned VMM did not confirm Running"
+        );
+        Ok(())
+    }
+
     fn host_boot_id(&self) -> Option<String> {
         super::host_boot_id()
     }
@@ -486,6 +513,10 @@ impl Vmm for Firecracker {
 
     async fn resume(&self, vm: &Vm) -> Result<()> {
         Client::new(&vm.api).resume().await.context("resume")
+    }
+
+    fn verify_process(&self, id: &str, saved: &Incarnation, uid: u32, gid: u32) -> bool {
+        super::process_proof::verify_process(id, saved, uid, gid)
     }
 
     fn kill(&self, pid: u32) {

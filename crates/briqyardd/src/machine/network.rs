@@ -11,6 +11,28 @@ impl Manager {
         Ok(())
     }
 
+    pub(super) fn free_namespace_subnet(
+        &self,
+        namespaces: &HashMap<String, Namespace>,
+    ) -> Result<u32> {
+        let mut used: Vec<u32> = namespaces.values().map(|t| t.rec.subnet_index).collect();
+        used.extend(
+            self.inner
+                .launch_holds
+                .lock()
+                .unwrap()
+                .values()
+                .map(|i| i.subnet_index),
+        );
+        used.extend(
+            self.assignment_targets()
+                .iter()
+                .map(|target| target.subnet_index),
+        );
+        netw::first_free(used, 0, self.inner.range.count() - 1)
+            .ok_or_else(|| anyhow!("no namespace subnet left"))
+    }
+
     pub(super) async fn ensure_namespace(&self, id: &str) -> Result<Namespace> {
         if let Some(t) = self.inner.namespaces.lock().unwrap().get(id) {
             return Ok(t.clone());
@@ -23,9 +45,7 @@ impl Manager {
         }
         let t = {
             let namespaces = self.inner.namespaces.lock().unwrap();
-            let used: Vec<u32> = namespaces.values().map(|t| t.rec.subnet_index).collect();
-            let idx = netw::first_free(used, 0, self.inner.range.count() - 1)
-                .ok_or_else(|| anyhow!("no namespace subnet left"))?;
+            let idx = self.free_namespace_subnet(&namespaces)?;
             Namespace::new(
                 NamespaceRec {
                     id: id.to_string(),
@@ -64,11 +84,15 @@ impl Manager {
             .lock()
             .unwrap()
             .values()
-            .map(|e| e.snapshot())
+            .filter_map(|entry| {
+                let record = entry.snapshot();
+                self.assignment_publication_allowed(&record, entry.identity_trusted.load(Relaxed))
+                    .then_some(record)
+            })
             .collect();
         let mut counted: Vec<String> = all.iter().map(|r| r.ip.clone()).collect();
         counted.sort();
-        let running = all.into_iter().filter(|r| r.state == state::RUNNING);
+        let running = all.iter().filter(|r| r.state == state::RUNNING);
         let mut pins = Vec::new();
         let mut members = Vec::new();
         for r in running {
@@ -79,7 +103,9 @@ impl Manager {
             {
                 continue;
             }
-            let Ok(policy) = self.policy_for(&r) else {
+            // Dependencies must come from the same publication-approved snapshot: a
+            // legacy via policy cannot expose an assigned target before its adoption.
+            let Ok(policy) = self.policy_for_records(r, &all) else {
                 continue;
             };
             pins.push((netw::tap_name(&r.id), r.ip.clone()));
@@ -144,30 +170,67 @@ impl Manager {
         } else {
             e.via.clone().unwrap_or_default()
         };
+        // Keep self-refusal before the live-map lookup, as in ordinary admission.
         if id == me {
             return Err(invalid("egress.via names the machine itself"));
         }
-        let target = self
-            .inner
-            .machines
-            .lock()
-            .unwrap()
-            .get(&id)
-            .map(|e| e.snapshot())
-            .filter(|r| r.state != state::DESTROYING)
-            .ok_or_else(|| invalid(format!("egress.via {id}: no such machine")))?;
-        if target.namespace != namespace {
-            return Err(invalid(format!(
-                "egress.via {id}: a machine of another namespace"
-            )));
-        }
-        Ok(target)
+        let entry = self.inner.machines.lock().unwrap().get(&id).cloned();
+        let target = entry.and_then(|entry| {
+            let record = entry.snapshot();
+            self.assignment_publication_allowed(&record, entry.identity_trusted.load(Relaxed))
+                .then_some(record)
+        });
+        checked_via_target(&id, target, namespace, me)
+    }
+
+    /// Resolve against one supplied snapshot during startup, before machines are loaded.
+    fn via_target_records(
+        e: &api::Egress,
+        namespace: &str,
+        me: &str,
+        records: &[Record],
+    ) -> Result<Record, MError> {
+        let id = if e.via_gateway() {
+            records
+                .iter()
+                .find(|record| {
+                    record.namespace == namespace
+                        && record.is_gateway()
+                        && record.state != state::DESTROYING
+                })
+                .map(|record| record.id.clone())
+                .ok_or_else(|| no_gateway(namespace))?
+        } else {
+            e.via.clone().unwrap_or_default()
+        };
+        let target = records.iter().find(|record| record.id == id).cloned();
+        checked_via_target(&id, target, namespace, me)
     }
 
     /// The policy a record asks for, resolved against its namespace, with the namespace's gateway:
     /// `None` for open with nothing to limit. An open machine's limits are its own over the
     /// host's (ADR 0018); `via` and `none` never reach the NAT, so they carry none.
     pub(super) fn policy_for(&self, r: &Record) -> Result<Option<(Ipv4Addr, nft::Policy)>, MError> {
+        self.policy_for_resolved(r, |egress, namespace, me| {
+            self.via_target(egress, namespace, me)
+        })
+    }
+
+    pub(super) fn policy_for_records(
+        &self,
+        r: &Record,
+        records: &[Record],
+    ) -> Result<Option<(Ipv4Addr, nft::Policy)>, MError> {
+        self.policy_for_resolved(r, |egress, namespace, me| {
+            Self::via_target_records(egress, namespace, me, records)
+        })
+    }
+
+    fn policy_for_resolved(
+        &self,
+        r: &Record,
+        resolve: impl FnOnce(&api::Egress, &str, &str) -> Result<Record, MError>,
+    ) -> Result<Option<(Ipv4Addr, nft::Policy)>, MError> {
         r.egress.check().map_err(invalid)?;
         let limits = self.inner.cfg.egress_limits.with(&r.limits);
         if r.egress.mode == api::egress::OPEN && limits.is_none() {
@@ -181,7 +244,7 @@ impl Manager {
         let p = match r.egress.mode.as_str() {
             api::egress::OPEN => nft::Policy::Open { ip, limits },
             api::egress::VIA => {
-                let target = self.via_target(&r.egress, &r.namespace, &r.id)?;
+                let target = resolve(&r.egress, &r.namespace, &r.id)?;
                 nft::Policy::Via {
                     ip,
                     to_tap: netw::tap_name(&target.id),
@@ -387,10 +450,22 @@ impl Manager {
 
     /// Republishes a namespace's names on its gateway.
     pub(super) fn refresh_dns(&self, t: &Namespace) {
+        self.inner
+            .dns
+            .set(t.subnet.gateway(), self.namespace_dns_names(&t.rec.id));
+    }
+
+    pub(super) fn namespace_dns_names(&self, namespace: &str) -> HashMap<String, Ipv4Addr> {
         let mut names: HashMap<String, Ipv4Addr> = HashMap::new();
         for e in self.inner.machines.lock().unwrap().values() {
             let r = e.rec.lock().unwrap();
-            if r.namespace != t.rec.id {
+            if r.namespace != namespace
+                || !self.assignment_publication_allowed(&r, e.identity_trusted.load(Relaxed))
+                || (r.launch_identity.is_some()
+                    && r.clone_origin
+                        .as_ref()
+                        .is_some_and(|origin| origin.stage != templates::CloneStage::Active))
+            {
                 continue;
             }
             if let Ok(ip) = r.ip.parse::<Ipv4Addr>() {
@@ -398,6 +473,26 @@ impl Manager {
                 names.insert(r.machine_host(), ip);
             }
         }
-        self.inner.dns.set(t.subnet.gateway(), names);
+        names
     }
+}
+
+fn checked_via_target(
+    id: &str,
+    target: Option<Record>,
+    namespace: &str,
+    me: &str,
+) -> Result<Record, MError> {
+    if id == me {
+        return Err(invalid("egress.via names the machine itself"));
+    }
+    let target = target
+        .filter(|record| record.state != state::DESTROYING)
+        .ok_or_else(|| invalid(format!("egress.via {id}: no such machine")))?;
+    if target.namespace != namespace {
+        return Err(invalid(format!(
+            "egress.via {id}: a machine of another namespace"
+        )));
+    }
+    Ok(target)
 }
