@@ -304,7 +304,7 @@ async fn assigned_image_root_swap_recovers_each_zfs_rename_boundary() {
             &id,
             api::UpdateMachineRequest {
                 spec: api::SpecChange {
-                    image: Some(image),
+                    image: Some(image.clone()),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -317,12 +317,32 @@ async fn assigned_image_root_swap_recovers_each_zfs_rename_boundary() {
             .await
             .unwrap();
         let mut update: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+        assert!(update.resolved_image.is_none());
+        assert!(update.root_swap.is_none());
         let root = update.target.root_dataset();
         let next = format!("{root}.next");
-        let base = update.resolved_image.as_ref().unwrap().dataset();
-        let swap = update.root_swap.as_mut().unwrap();
-        let source_guid = swap.source_guid;
-        let retired = swap.retired_dataset.clone();
+        let resolved_image = h.m.inner.images.ensure(&image).await.unwrap();
+        let source_guid = h.pool.zfs.guid(&root).await.unwrap();
+        let suffix = sha(format!(
+            "{}:{}:{}",
+            update.source_current_sha256, resolved_image.key, source_guid
+        )
+        .as_bytes());
+        let retired = format!(
+            "{}/root.u_{}",
+            update.source_record.dataset(),
+            &suffix[..24]
+        );
+        update.resolved_image = Some(resolved_image.clone());
+        update.root_swap = Some(RootSwap {
+            source_guid,
+            target_guid: None,
+            retired_dataset: retired.clone(),
+        });
+        let current: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+        update.check(&current).unwrap();
+        h.m.inner.store.put_durable(UPDATES, &id, &update).unwrap();
+        let base = resolved_image.dataset();
         h.pool
             .zfs
             .clone_snapshot(&base, crate::image::SNAP, &next)

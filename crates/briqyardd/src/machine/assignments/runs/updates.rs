@@ -83,7 +83,16 @@ impl Manager {
             "assigned update machine record differs from its target"
         );
         self.ensure_assigned_volume_update(&update).await?;
-        self.resolve_assigned_image_update(&update).await
+        // Prefetch image bytes before the admission locks, but do not persist a resolved image
+        // from this unlocked snapshot. A concurrent provider PATCH may replace the durable
+        // intent while the image is being fetched. The authoritative image/root-swap journal is
+        // written later by ensure_assigned_root_update under the entry lock.
+        if update.resolved_image.is_none() {
+            if let Some(reference) = update.change.image.as_deref() {
+                self.inner.images.ensure(reference).await?;
+            }
+        }
+        Ok(())
     }
 
     pub(in crate::machine) async fn update_assigned_volume(
