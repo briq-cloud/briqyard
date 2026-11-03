@@ -136,6 +136,7 @@ impl Manager {
                 tasks.push(tokio::spawn(ticket.finished()));
             }
         }
+        self.backup_census_step(&mut tasks);
         tasks
     }
 

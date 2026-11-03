@@ -5,6 +5,7 @@ use tokio::task::JoinHandle;
 
 const MAX_ADMITTED: usize = 128;
 pub(super) enum Work {
+    Census,
     Requested(Arc<Entry>, DateTime<Utc>),
     Scheduled(Arc<Entry>, DateTime<Utc>),
     Expire(Arc<Holder>),
@@ -44,6 +45,7 @@ impl Ticket {
     }
 }
 struct Run {
+    owner: Option<(String, String)>,
     resources: Mutex<Option<(OwnedMutexGuard<()>, OwnedSemaphorePermit)>>,
     active: Mutex<Option<OwnedSemaphorePermit>>,
     task: Mutex<Option<JoinHandle<()>>>,
@@ -51,6 +53,7 @@ struct Run {
 struct State {
     closed: bool,
     next: u64,
+    epoch: u64,
     running: HashMap<u64, Arc<Run>>,
 }
 pub(super) struct Jobs {
@@ -64,6 +67,7 @@ impl Jobs {
             state: Mutex::new(State {
                 closed: false,
                 next: 1,
+                epoch: 0,
                 running: HashMap::new(),
             }),
             admission: Arc::new(Semaphore::new(
@@ -71,6 +75,19 @@ impl Jobs {
             )),
             changed: Notify::new(),
         })
+    }
+    /// Bounded retained-job owner observations include jobs whose request waiter left.
+    pub fn has_owner(&self, machine: &str, namespace: &str) -> bool {
+        self.state.try_lock().is_ok_and(|s| {
+            s.running.values().any(|run| {
+                run.owner
+                    .as_ref()
+                    .is_some_and(|(m, n)| m == machine && n == namespace)
+            })
+        })
+    }
+    pub fn epoch(&self) -> u64 {
+        self.state.lock().unwrap().epoch
     }
     pub async fn reserve(&self) -> Result<OwnedSemaphorePermit, MError> {
         self.admission
@@ -108,6 +125,12 @@ impl Jobs {
         turn: OwnedMutexGuard<()>,
         admission: OwnedSemaphorePermit,
     ) -> Result<Ticket, MError> {
+        let owner = match &work {
+            Work::Requested(e, _) | Work::Scheduled(e, _) => Some(Owner::Machine(e.clone()).who()),
+            Work::Expire(h) => Some(Owner::Holder(h.clone()).who()),
+            Work::Delete { owner, .. } => Some(owner.who()),
+            Work::Census => None,
+        };
         let mut state = self.state.lock().unwrap();
         if state.closed {
             return Err(closed());
@@ -119,6 +142,7 @@ impl Jobs {
         let (respond, receiver) = oneshot::channel();
         let jobs = self.clone();
         let run = Arc::new(Run {
+            owner,
             resources: Mutex::new(Some((turn, admission))),
             active: Mutex::new(None),
             task: Mutex::new(None),
@@ -130,10 +154,21 @@ impl Jobs {
             }
             let reply = io_scope
                 .run(async {
-                    match manager.inner.backups.gate.clone().acquire_owned().await {
-                        Ok(active) => {
+                    // A census must never queue behind an unbounded stream transfer.
+                    let gate = manager.inner.backups.gate.clone();
+                    let active = if matches!(&work, Work::Census) {
+                        gate.try_acquire_owned().ok()
+                    } else {
+                        gate.acquire_owned().await.ok()
+                    };
+                    match active {
+                        Some(active) => {
                             *owned.active.lock().unwrap() = Some(active);
                             let reply = match work {
+                                Work::Census => {
+                                    manager.run_backup_census().await;
+                                    Reply::Background
+                                }
                                 Work::Requested(entry, now) => Reply::Requested(Box::new(
                                     manager.backup_entry(&entry, now).await,
                                 )),
@@ -155,7 +190,7 @@ impl Jobs {
                             };
                             reply
                         }
-                        Err(_) => Reply::Requested(Box::new(Err(closed()))),
+                        None => Reply::Requested(Box::new(Err(closed()))),
                     }
                 })
                 .await;
@@ -163,13 +198,18 @@ impl Jobs {
             // A dropped response receiver never cancels this retained whole-generation job.
             drop(owned.active.lock().unwrap().take());
             drop(owned.resources.lock().unwrap().take());
-            jobs.state.lock().unwrap().running.remove(&id);
+            {
+                let mut state = jobs.state.lock().unwrap();
+                state.running.remove(&id);
+                state.epoch = state.epoch.wrapping_add(1);
+            }
             drop(owned);
             jobs.changed.notify_waiters();
             let _ = respond.send(reply);
         });
         *run.task.lock().unwrap() = Some(task);
         state.running.insert(id, run);
+        state.epoch = state.epoch.wrapping_add(1);
         let _ = ready.send(());
         Ok(Ticket { receiver })
     }

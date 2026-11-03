@@ -1040,6 +1040,39 @@ async fn checkpoint_suspend_start_preserves_current_files_guest_lineage_and_publ
     }
 }
 
+#[tokio::test]
+async fn volume_free_assigned_run_starts_stops_and_starts_again_without_a_data_disk() {
+    for checkpoint in [false, true] {
+        let (h, entry) = stopped_with(checkpoint, None).await;
+        let id = entry.snapshot().id;
+        assert!(entry.snapshot().volume.is_none());
+        h.host_calls();
+        let first = bounded(h.m.start(&id, None)).await.unwrap();
+        assert_eq!(first.state, state::RUNNING);
+        let run: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+        assert_eq!(run.reference.phase, Phase::Observed);
+        assert!(run.data.is_none());
+        assert!(run.root.guid > 0);
+        h.m.verified_run_publication(&entry.snapshot()).unwrap();
+        bounded(h.m.stop(&id, Duration::from_secs(1), checkpoint, None))
+            .await
+            .unwrap();
+        let settled: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+        assert_eq!(settled.reference.phase, Phase::Settled);
+        assert!(settled.data.is_none());
+        restart(&h).unwrap();
+        let again = bounded(h.m.start(&id, None)).await.unwrap();
+        assert_eq!(again.state, state::RUNNING);
+        let next: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+        assert_eq!(next.reference.sequence, run.reference.sequence + 1);
+        assert!(next.data.is_none());
+        assert!(next.reader().unwrap().data.is_none());
+        bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+            .await
+            .unwrap();
+    }
+}
+
 fn volume_patch(size_gb: u32) -> api::UpdateMachineRequest {
     api::UpdateMachineRequest {
         spec: api::SpecChange {

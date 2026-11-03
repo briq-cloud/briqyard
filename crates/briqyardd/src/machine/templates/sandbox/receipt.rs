@@ -5,7 +5,8 @@ pub struct Binding {
     pub request_id: String,
     pub create_sha256: String,
     pub receipt: String,
-    pub device: guest::SandboxDevice,
+    /// The data drive the destination mounts; none when the seed has no third drive.
+    pub device: Option<guest::SandboxDevice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<guest::DestinationBind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
