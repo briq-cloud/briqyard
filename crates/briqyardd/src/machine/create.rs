@@ -14,7 +14,15 @@ impl Manager {
             .run(async {
                 // Acquire worker admission before any uncertain warm ownership transfer.
                 let child_scope = self.inner.zfs.io_scope()?;
-                let (e, how) = self.record(req, None).await?;
+                let (e, how) = match self.record(req, None).await {
+                    Ok(recorded) => recorded,
+                    Err(error) => {
+                        // No make worker was dispatched, so settle this admission positively.
+                        // Dropping an unconsumed scope is intentionally treated as uncertain.
+                        child_scope.run(async {}).await;
+                        return Err(error);
+                    }
+                };
                 let made = self.view(&e);
                 self.spawn_make_admitted(child_scope, e, how);
                 Ok(made)
