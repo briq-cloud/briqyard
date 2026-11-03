@@ -1,4 +1,4 @@
-# 0077: Account for complete warm data-volume liability
+# 0078: Account for complete warm data-volume liability
 
 Date: 2026-11-02
 Status: source candidate; native validation pending

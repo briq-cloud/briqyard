@@ -2,6 +2,7 @@
 //! parses bytes from guests, registries and the public; `main.rs` is the daemon.
 
 pub mod api;
+pub mod assignment_compatibility;
 pub mod conditions;
 pub mod config;
 pub mod console;

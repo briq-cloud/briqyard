@@ -23,6 +23,7 @@ mod clone;
 mod incarnation;
 mod memory;
 mod process;
+mod process_proof;
 mod recovery;
 #[cfg(any(target_os = "linux", test))]
 mod retirement;

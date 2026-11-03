@@ -1,6 +1,17 @@
 use super::*;
 
 impl Zfs {
+    /// Identity of the actual current dataset, not a caller-provided device path.
+    pub async fn guid(&self, name: &str) -> Result<u64> {
+        let guid = self
+            .get(name, "guid")
+            .await?
+            .parse::<u64>()
+            .context("invalid dataset GUID")?;
+        anyhow::ensure!(guid > 0, "missing dataset GUID");
+        Ok(guid)
+    }
+
     pub async fn exists(&self, name: &str) -> Result<bool> {
         match self
             .run(&["list", "-H", "-o", "name", &self.ds(name)])

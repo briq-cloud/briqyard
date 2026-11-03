@@ -67,6 +67,7 @@ impl Manager {
             warm_lock: tokio::sync::Mutex::new(()),
             sandbox_create_lock: tokio::sync::Mutex::new(()),
             warm_names: Mutex::new(HashMap::new()),
+            assignments: Mutex::new(assignments::State::default()),
             warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
             warm_sample: Mutex::new(None),
             warm_pool_cache: Mutex::new(None),
@@ -96,6 +97,7 @@ impl Manager {
             advertise,
             machines: Mutex::new(HashMap::new()),
             address_holds: Mutex::new(std::collections::HashSet::new()),
+            launch_holds: Mutex::new(BTreeMap::new()),
             namespaces: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
             endpoint_events,
@@ -145,6 +147,8 @@ impl Manager {
             .context("native recovery barrier")?;
         m.refresh_memory_host().await;
 
+        m.prepare_assigned_reboot_exits().await?;
+        m.verify_assigned_run_backing().await?;
         m.verify_clone_artifacts();
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
@@ -213,7 +217,11 @@ impl Manager {
                 .unwrap()
                 .insert(rec.id.clone(), Namespace::new(rec, subnet));
         }
+        self.recover_assigned_runs()?;
+        self.recover_destination_assignments()?;
+        self.recover_launch_transitions()?;
         let records = st.list::<Record>("machines")?;
+        self.recover_launch_holds(&records)?;
         // An address is one record's at a time: a `destroying` record whose address another
         // holds is a destroyed machine's, written back after its destroy by an older daemon.
         // Its destroy ran; another would take the address's counters, and its limits, from
@@ -223,9 +231,9 @@ impl Manager {
             .filter(|r| r.state != state::DESTROYING && !r.ip.is_empty())
             .map(|r| r.ip.clone())
             .collect();
-        let (records, stale): (Vec<Record>, Vec<Record>) = records
-            .into_iter()
-            .partition(|r| r.state != state::DESTROYING || !held.contains(&r.ip));
+        let (records, stale): (Vec<Record>, Vec<Record>) = records.into_iter().partition(|r| {
+            r.launch_identity.is_some() || r.state != state::DESTROYING || !held.contains(&r.ip)
+        });
         for r in stale {
             st.delete("machines", &r.id)?;
             tracing::warn!(
@@ -286,6 +294,22 @@ impl Manager {
         let ready = self.take_handed_ready();
         for e in entries {
             let rec = e.snapshot();
+            if rec.assigned_run.is_some() {
+                if self.recover_current_run(&e).await {
+                    adopted += 1;
+                } else {
+                    stopped += 1;
+                }
+                continue;
+            }
+            if rec.launch_identity.is_some() {
+                if self.recover_assigned_launch(&e).await {
+                    adopted += 1;
+                } else {
+                    stopped += 1;
+                }
+                continue;
+            }
             if warm::ready_slot(&rec) {
                 if self.recover_warm_slot(&e).await {
                     adopted += 1;
@@ -573,6 +597,9 @@ impl Manager {
         else {
             return false;
         };
+        if self.verify_live_launch(e, &vm).is_err() {
+            return false;
+        }
         let bound = rec
             .boot_incarnation
             .as_ref()
@@ -639,13 +666,25 @@ impl Manager {
             .values()
             .filter(|e| {
                 let r = e.rec.lock().unwrap();
-                stopped_by_host(&r) && !idle_past(r.last_used_at, r.sleep_window(), now)
+                (r.launch_identity.is_none()
+                    || (self.assigned_lifecycle(&r)
+                        && r.assigned_run
+                            .as_ref()
+                            .is_none_or(|run| run.phase == assignments::runs::Phase::Settled)))
+                    && stopped_by_host(&r)
+                    && !idle_past(r.last_used_at, r.sleep_window(), now)
             })
             .cloned()
             .collect();
         for e in left {
             let m = self.clone();
             tokio::spawn(async move {
+                if m.assigned_lifecycle(&e.snapshot()) {
+                    if stopped_by_host(&e.snapshot()) {
+                        let _ = m.start_assigned_boxed(&e, false).await;
+                    }
+                    return;
+                }
                 let _turns = e.lock_for_start().await;
                 // A call may have moved it meanwhile (a wake, a stop, a destroy).
                 if !stopped_by_host(&e.snapshot()) {

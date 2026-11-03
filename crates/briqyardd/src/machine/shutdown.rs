@@ -7,6 +7,10 @@ use std::time::Instant;
 impl Manager {
     /// Settles the state after the Firecracker process exited.
     pub(super) async fn settle_exit(&self, e: &Arc<Entry>, pid: u32) {
+        if e.snapshot().assigned_run.is_some() {
+            self.settle_current_run_exit(e, pid).await;
+            return;
+        }
         let machine = e.rec.lock().unwrap().id.clone();
         let started = Instant::now();
         stage("settle", "exit_observed", &machine, pid, started, true);
@@ -47,6 +51,7 @@ impl Manager {
         let revoked = self.unplug(&rec.id, &rec.ip).await;
         stage("settle", "network", &machine, pid, started, revoked.is_ok());
         *e.live.lock().unwrap() = None;
+        e.identity_trusted.store(false, Relaxed);
         // The init's report, or none: the process is gone, so the wait ends either way. A
         // process that ended without the init's word (killed, a kernel panic) reads as 255;
         // nothing the guest prints on its console can set its exit.
@@ -207,6 +212,12 @@ impl Manager {
         let (m, e) = (self.clone(), e.clone());
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
+            if m.assigned_lifecycle(&e.snapshot()) {
+                if let Err(err) = m.start_assigned_boxed(&e, false).await {
+                    tracing::warn!(machine = e.snapshot().id, err = %err, "assigned restart");
+                }
+                return;
+            }
             let _turns = e.lock_for_start().await;
             let r = e.snapshot();
             if r.state != state::STOPPED || r.stopped_reason != stop::EXIT {
@@ -309,7 +320,13 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
-        self.ordinary_operation(&e.snapshot())?;
+        if e.snapshot().assigned_run.is_none() {
+            if self.assigned_lifecycle(&e.snapshot()) && e.snapshot().pid == 0 {
+                self.check_assigned_bound_record(&e.snapshot())?;
+            } else {
+                self.ordinary_operation(&e.snapshot())?;
+            }
+        }
         self.stop_entry(&e, stop::USER, timeout, suspend, at)
             .await?;
         Ok(self.view(&e))
@@ -326,6 +343,11 @@ impl Manager {
         suspend: bool,
         at: Option<u64>,
     ) -> Result<(), MError> {
+        if e.snapshot().assigned_run.is_some() {
+            return self
+                .stop_assigned_public(e, why, timeout, suspend, at)
+                .await;
+        }
         let timeout = if timeout.is_zero() {
             Duration::from_secs(10)
         } else {
@@ -359,7 +381,9 @@ impl Manager {
                     }
                     return Ok(());
                 }
-                state::RUNNING => {}
+                state::RUNNING => {
+                    self.ordinary_operation(&r)?;
+                }
                 state::STOPPING => {
                     // Another stop is in flight: wait for the watcher to settle it. The wait
                     // is registered before the lock goes, or a settle in between is missed.
@@ -540,6 +564,12 @@ impl Manager {
     ) -> Result<Vec<String>, MError> {
         let e = e.clone();
         self.check_version(&e, at)?;
+        if e.snapshot().launch_identity.is_some() && self.destination_assignment_pending(id)? {
+            return Err(MError::Conflict(
+                "destination assignment must settle before destruction".into(),
+            ));
+        }
+        self.validate_launch_record(&e.snapshot())?;
         self.check_clone_readers(id, None)?;
         // No event: the destroy is one step, and `destroyed` ends it.
         e.set_state(state::DESTROYING, |_| None);
@@ -616,11 +646,19 @@ impl Manager {
             }
             z.destroy(&rec.dataset()).await.context("disks")?;
         }
-        let _ = tokio::fs::remove_dir_all(self.inner.cfg.run_dir().join(id)).await;
+        if rec.launch_identity.is_some() {
+            launch_identity::remove_dir(&self.inner.cfg.run_dir().join(id)).await?;
+        } else {
+            let _ = tokio::fs::remove_dir_all(self.inner.cfg.run_dir().join(id)).await;
+        }
         if let Some(j) = self.jail_for(&rec) {
-            let _ =
-                tokio::fs::remove_dir_all(fc::jail_root(&j.base, id).parent().unwrap_or(&j.base))
-                    .await;
+            let path = fc::jail_root(&j.base, id);
+            let path = path.parent().unwrap_or(&j.base);
+            if rec.launch_identity.is_some() {
+                launch_identity::remove_dir(path).await?;
+            } else {
+                let _ = tokio::fs::remove_dir_all(path).await;
+            }
         }
         for snapshot in &rec.snapshots {
             if snapshot.clone_artifact.is_some() {
@@ -641,6 +679,10 @@ impl Manager {
         self.hold_at_destroy(&rec, had_disks, e.backup_turn.clone())
             .await?;
         self.forget(&e)?;
+        // The source allocation is released only after verified exit and all cleanup.
+        if rec.launch_identity.is_some() {
+            self.release_launch_hold(id)?;
+        }
         self.remove_machine(&e);
         self.inner.vmm.forget_machine(id);
         self.inner

@@ -150,6 +150,16 @@ impl Meter {
         }
     }
 
+    /// Ownership changed after draining the previous owner's usage. Preserve host totals,
+    /// but never attribute the previous address or cumulative CPU baseline to the new owner.
+    pub fn rehome(&mut self, at: DateTime<Utc>) {
+        self.at = at;
+        self.cpu_usec = None;
+        self.net = Counters::default();
+        self.drops = EgressDrops::default();
+        self.readings = [None, None];
+    }
+
     /// What its counters added up to since the daemon started, as of the last tick.
     pub fn counted(&self) -> Usage {
         self.counted
@@ -695,5 +705,43 @@ mod tests {
             r("2026-10-20T14:00:00Z", "2026-11-20T15:00:00Z"),
             Err("at most 31 days at once".into())
         );
+    }
+
+    #[test]
+    fn ownership_transfer_keeps_host_totals_but_resets_cpu_and_address_baselines() {
+        let now = t("2026-10-20T14:00:00Z");
+        let mut meter = Meter::new(now);
+        meter.counters(
+            now,
+            Some(1_000_000),
+            Some(Counters {
+                internet_in: 100,
+                ..Default::default()
+            }),
+            (0, 0),
+        );
+        meter.counters(now, Some(2_000_000), None, (0, 0));
+        meter.drain();
+        let previous = meter.counted();
+        meter.rehome(now);
+        meter.counters(
+            now,
+            Some(9_000_000),
+            Some(Counters {
+                internet_in: 7,
+                ..Default::default()
+            }),
+            (0, 0),
+        );
+        let used = meter.drain()[&hour_of(now)];
+        assert_eq!(used.cpu_seconds, 0.0);
+        assert_eq!(used.internet_in_bytes, 7);
+        assert_eq!(meter.counted().cpu_seconds, previous.cpu_seconds);
+        assert_eq!(
+            meter.counted().internet_in_bytes,
+            previous.internet_in_bytes + 7
+        );
+        meter.counters(now, Some(9_250_000), None, (0, 0));
+        assert_eq!(meter.drain()[&hour_of(now)].cpu_seconds, 0.25);
     }
 }

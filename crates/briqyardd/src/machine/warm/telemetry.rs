@@ -85,7 +85,7 @@ impl Manager {
                 2
             } else if record.state == state::DESTROYING {
                 3
-            } else if ready_slot(&record) {
+            } else if ready_slot(&record) || unbound_ready_slot(&record) {
                 1
             } else if matches!(record.state.as_str(), state::CREATING | state::STARTING) {
                 0

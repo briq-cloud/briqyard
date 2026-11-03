@@ -200,6 +200,41 @@ async fn a_via_names_another_machine_of_the_namespace() {
 }
 
 #[tokio::test]
+async fn a_via_cannot_resolve_an_unverified_assigned_machine() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.namespace("t1");
+    let target = h.add("m_unverified", state::STOPPED, 256);
+    {
+        let mut record = target.rec.lock().unwrap();
+        record.namespace = "t1".into();
+        record.launch_identity = Some(
+            serde_json::from_value(json!({
+                "version": 1,
+                "namespace": "t1",
+                "subnet_index": record.subnet_index,
+                "host_num": record.host_num,
+                "uid": 1000,
+                "gid": 1000,
+                "jailed": true,
+                "jailer": "/mock/jailer",
+                "jail_base": "/var/lib/briqyard/jails",
+                "uid_base": 1000,
+                "template": null
+            }))
+            .unwrap(),
+        );
+    }
+    assert!(!target.identity_trusted.load(Relaxed));
+
+    let error =
+        h.m.check_egress(&egress("via", Some("m_unverified")), "t1", "m_request")
+            .unwrap_err();
+    assert!(
+        matches!(error, MError::Invalid(message) if message == "egress.via m_unverified: no such machine")
+    );
+}
+
+#[tokio::test]
 async fn a_gateway_destroyed_under_a_via_machine_leaves_it_reaching_nothing() {
     let h = harness("10.64.0.0/22", 4096).await;
     h.ready().await;

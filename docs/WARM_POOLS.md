@@ -31,9 +31,12 @@ need cleanup. Closed pools retain their bounded receipts and remain listed for a
 Desired counts reconcile in the existing periodic tick, at most one new slot per pool
 per pass, through ordinary full admission. Source snapshot IDs/generations, owner,
 profile, recipe, boot/CPU/init identities and network policy are fingerprinted together.
-Changed or unavailable inputs stop new claims/refills and drain unused slots. The current implemented
-profile is `init-ready-v1`; the pool API consumes a template profile and
-fingerprint, so future qualified service barriers can use the same lifecycle. Full
+Changed or unavailable inputs stop new claims/refills and drain unused slots. Configured
+warm pools currently use `init-ready-v1`. A separate, default-off
+`templates.unbound_warm_pools` gate supports pristine `sandbox-ready-v1` factory slots and
+selection by an eligible ordinary `sandbox_seed` create. It does not relax configured-pool
+or public named-clone profile checks. Keep this gate off until native process, disk, network,
+recovery and failure-path qualification passes. Full
 running-service/Postgres/prepared-process/mid-episode cloning remains open.
 
 A claim durably binds its request key to exactly one preassigned machine before resume.

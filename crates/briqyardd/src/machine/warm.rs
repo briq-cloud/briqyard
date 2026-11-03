@@ -6,7 +6,11 @@ mod claims;
 mod lifecycle;
 mod policy;
 mod telemetry;
+mod unbound;
+mod unbound_factory;
+mod unbound_selector;
 pub(super) use policy::Sample;
+use unbound_selector::unbound_ready_slot;
 #[cfg(test)]
 mod tests;
 const POOLS: &str = "warm-pools";
@@ -76,7 +80,10 @@ impl Manager {
         {
             self.named_memory_profiles()
                 .into_iter()
-                .filter(|profile| profile == guest::INIT_READY_V1)
+                .filter(|profile| {
+                    profile == guest::INIT_READY_V1
+                        || (profile == guest::SANDBOX_READY_V1 && self.unbound_warm_available())
+                })
                 .collect()
         } else {
             Vec::new()
@@ -124,10 +131,15 @@ impl Manager {
             .find(|s| s.id == snapshot || s.name.as_deref() == Some(snapshot))
             .ok_or_else(|| MError::NoSnapshot(snapshot.into()))?;
         let (artifact, _) = self.checked_clone_artifact(&r, s, namespace)?;
-        if artifact.profile != guest::INIT_READY_V1 {
+        if artifact.profile != guest::INIT_READY_V1
+            && !(artifact.profile == guest::SANDBOX_READY_V1 && self.unbound_warm_available())
+        {
             return Err(invalid(
                 "configured paused pools support only init-ready-v1",
             ));
+        }
+        if artifact.profile == guest::SANDBOX_READY_V1 {
+            self.check_sandbox_artifact(&r, &artifact)?;
         }
         Ok((s.id.clone(), artifact))
     }
@@ -183,7 +195,7 @@ impl Manager {
                 "claimed"
             } else {
                 match r.state.as_str() {
-                    _ if ready_slot(&r) => {
+                    _ if ready_slot(&r) || unbound_ready_slot(&r) => {
                         view.ready += 1;
                         "ready"
                     }

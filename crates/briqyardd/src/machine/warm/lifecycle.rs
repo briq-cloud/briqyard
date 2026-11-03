@@ -6,6 +6,9 @@ impl Manager {
         e: &Entry,
         live: &fc::Vm,
     ) -> Result<String> {
+        if e.snapshot().launch_identity.is_some() {
+            return self.prepare_unbound_warm_slot(e, live).await;
+        }
         let started = std::time::Instant::now();
         let version = self.configure_memory_clone(e, live).await?;
         self.inner.vmm.pause(live).await.context("park warm slot")?;
@@ -70,7 +73,10 @@ impl Manager {
             for e in entries {
                 let r = e.snapshot();
                 // A durable claim intent owns its slot even before the record rename.
-                if pool.claims.values().any(|c| c.machine == r.id) {
+                if pool.claims.values().any(|c| c.machine == r.id)
+                    || (r.launch_identity.is_some()
+                        && self.destination_assignment_owns(&r.id).unwrap_or(true))
+                {
                     continue;
                 }
                 if current.is_err()
@@ -134,7 +140,7 @@ impl Manager {
         Ok(())
     }
 
-    pub(super) async fn allocate_warm_slot(
+    pub(in crate::machine) async fn allocate_warm_slot(
         &self,
         pool: &Pool,
         name: String,
@@ -160,7 +166,12 @@ impl Manager {
                     fingerprint: pool.fingerprint.clone(),
                     claimed,
                 };
-                let (e, how) = self.record_warm_slot(request, slot).await?;
+                let (e, how) = if pool.artifact.profile == guest::SANDBOX_READY_V1 {
+                    self.record_unbound_warm_slot(pool, request.name.clone(), slot)
+                        .await?
+                } else {
+                    self.record_warm_slot(request, slot).await?
+                };
                 let origin = e
                     .snapshot()
                     .clone_origin
@@ -230,6 +241,7 @@ impl Manager {
                 bound,
             );
             if bound
+                && self.verify_live_launch(e, &vm).is_ok()
                 && identity.as_ref() == Some(&origin.artifact.boot_identity)
                 && origin.stage == templates::CloneStage::Paused
                 && origin.identity.is_some()

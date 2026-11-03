@@ -1,4 +1,4 @@
-# ADR 0078: Complete checked runtime releases for development
+# ADR 0079: Complete checked runtime releases for development
 
 2026-11-02 · Status: accepted
 

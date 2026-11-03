@@ -7,7 +7,8 @@ pub struct WarmResources {
     pub memory_mb: u32,
     pub cpu_millis: u32,
     pub root_disk_gb: u32,
-    /// Full logical data-volume liability; zero permits no warm data volumes.
+    /// Full logical data-volume liability; a zero budget permits no warm data volumes.
+    #[serde(skip_serializing_if = "zero_data_disk")]
     pub data_disk_gb: u32,
 }
 
@@ -105,22 +106,21 @@ pub struct WarmPoolSlot {
     pub request_id: Option<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn zero_data_disk(n: &u32) -> bool {
+    *n == 0
+}
 
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
     #[test]
-    fn absent_data_budget_is_zero_and_round_trip_preserves_explicit_liability() {
-        let previous = serde_json::json!({"memory_mb": 256, "cpu_millis": 1000, "root_disk_gb": 8});
-        let mut resources: WarmResources = serde_json::from_value(previous).unwrap();
+    fn legacy_resource_wire_shape_defaults_data_to_zero_and_omits_it() {
+        let legacy = serde_json::json!({"memory_mb": 256, "cpu_millis": 1000, "root_disk_gb": 8});
+        let mut resources: WarmResources = serde_json::from_value(legacy.clone()).unwrap();
         assert_eq!(resources.data_disk_gb, 0);
-        resources.data_disk_gb = 12;
-        let encoded = serde_json::to_value(resources).unwrap();
-        assert_eq!(encoded["data_disk_gb"], 12);
-        assert_eq!(
-            serde_json::from_value::<WarmResources>(encoded).unwrap(),
-            resources
-        );
+        assert_eq!(serde_json::to_value(resources).unwrap(), legacy);
+        resources.data_disk_gb = 2;
+        assert_eq!(serde_json::to_value(resources).unwrap()["data_disk_gb"], 2);
         for invalid in [serde_json::json!(-1), serde_json::json!(4294967296_u64)] {
             let value = serde_json::json!({"data_disk_gb": invalid});
             assert!(serde_json::from_value::<WarmResources>(value).is_err());

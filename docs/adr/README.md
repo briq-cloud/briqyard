@@ -74,5 +74,7 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 
 | [0075](0075-sandbox-destination-binding.md) | One-way complete sandbox guest configuration before main, with durable consumption and replay fencing |
 | [0076](0076-operator-sandbox-seeds.md) | Operator-produced pristine sandbox topology, ordinary-create receipts and exact destination acknowledgment; native qualification gates enablement |
-| [0077](0077-warm-data-volume-liability.md) | Full logical warm data-volume budgets, shared pool-space liability and reservation telemetry |
-| [0078](0078-dev-checked-release-bundle.md) | Local upgrade releases verify and include the checked runtime bundle |
+| [0077](0077-immutable-warm-launch-identity.md) | Immutable warm-slot launch identity and durable source allocations; unbound consumption remains disabled |
+| [0078](0078-warm-data-volume-liability.md) | Full logical warm data-volume budgets, shared pool-space liability and reservation telemetry |
+| [0079](0079-dev-checked-release-bundle.md) | Local upgrade releases verify and include the checked runtime bundle |
+| [0084](0084-assigned-run-physical-memory.md) | Assigned continuation physical memory admission, launch tracking and independent disk liabilities |

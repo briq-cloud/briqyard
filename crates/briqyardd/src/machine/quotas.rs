@@ -134,7 +134,7 @@ impl Manager {
             .ok_or(MError::NotFound)?
             .rec
             .quota;
-        let used = namespace_use(&self.inner.machines.lock().unwrap(), namespace);
+        let used = self.namespace_use(&self.inner.machines.lock().unwrap(), namespace);
         Ok(api::NamespaceQuota {
             namespace: namespace.into(),
             quota,

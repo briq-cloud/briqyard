@@ -18,6 +18,10 @@
 //! unknown fields are ignored; an unknown `op` is answered `error` "unknown op <op>"; an
 //! unknown response `type` in a stream is skipped. The init says its version in `pong`.
 
+mod boot_bundle;
+pub use boot_bundle::{boot_bundle_fingerprint_bytes, boot_file_mode, effective_boot_file_mode};
+mod assigned_run;
+pub use assigned_run::AssignedRunProof;
 mod clone;
 mod destination;
 pub use clone::{CloneConfigure, CloneIdentity, CloneStatus, INIT_READY_V1};
@@ -71,6 +75,9 @@ pub struct Config {
     /// Internal fixed data-device topology for a pristine sandbox seed and its destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_device: Option<SandboxDevice>,
+    /// Ordinary assigned boot generation; not a continuity nonce or expected init digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_run_generation: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +210,9 @@ pub struct Response {
     /// Digest of the actual running init executable, cached from /proc/self/exe.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub init_sha256: String,
+    /// Ordinary assigned guest boot proof. Absent from legacy init/configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_run: Option<AssignedRunProof>,
 }
 
 fn is_false(value: &bool) -> bool {

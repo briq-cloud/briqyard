@@ -49,6 +49,7 @@ macro_rules! log {
 
 struct State {
     cfg: Config,
+    assigned_run: Option<guest::AssignedRunProof>,
     destination: OnceLock<(Config, Vec<(String, String)>)>,
     env: Vec<(String, String)>,
     main_pid: Mutex<Option<i32>>,
@@ -67,6 +68,7 @@ impl State {
     }
 }
 
+mod assigned_run;
 mod boot;
 mod clone;
 mod clone_identity;
@@ -183,9 +185,15 @@ async fn run() -> ExitReport {
     if let Err(e) = setup_mounts(&cfg) {
         return failed(125, format!("mounts: {e:#}"));
     }
-    if let Err(e) = write_files(&files) {
+    if let Err(e) = write_boot_files(&cfg, &files) {
         return failed(125, format!("boot files: {e:#}"));
     }
+    // Historical install evidence: trusted names/network setup below may legitimately
+    // replace e.g. /etc/hosts, just as it did for legacy boots.
+    let assigned_run = match assigned_run::boot_proof(&cfg, &files) {
+        Ok(proof) => proof,
+        Err(error) => return failed(125, format!("assigned boot proof: {error:#}")),
+    };
     if template {
         if let Err(e) = clone_identity::prepare_builder().await {
             return failed(125, format!("template quarantine: {e:#}"));
@@ -209,6 +217,7 @@ async fn run() -> ExitReport {
     let env = build_env(&cfg.env);
     let st = Arc::new(State {
         cfg,
+        assigned_run,
         destination: OnceLock::new(),
         env,
         main_pid: Mutex::new(None),
@@ -225,6 +234,11 @@ async fn run() -> ExitReport {
                 break;
             }
             activate.await;
+        }
+    }
+    if st.assigned_run.is_some() {
+        if let Err(error) = serve_assigned(st.clone()).await {
+            return failed(125, format!("assigned proof listener: {error:#}"));
         }
     }
     let mut cmd = match main_command(&st) {
@@ -249,7 +263,7 @@ async fn run() -> ExitReport {
     // failed boot, whichever of the pong and the exit report the host sees first.
     if template {
         st.clone_gate.lock().await.mark_active();
-    } else {
+    } else if st.assigned_run.is_none() {
         tokio::spawn(serve(st.clone()));
     }
     log!("started pid={pid} {}", argv_string(cmd.as_std()));

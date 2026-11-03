@@ -47,6 +47,14 @@ enum Cmd {
     /// Print the SHA-256 of the API's certificate, making the certificate if there is none
     /// yet; nothing when the API is plain HTTP. What the fleet pins (ADR 0020).
     TlsFingerprint,
+    /// Print supported persistent launch-allocation protocols without opening host state.
+    StateCapabilities,
+    /// Print destination assignment support without reading configuration or host state.
+    AssignmentCapabilities,
+    /// Print assigned-run support without reading configuration or host state.
+    AssignedRunCapabilities,
+    /// Print lifecycle support without reading configuration or host state.
+    AssignedRunLifecycleCapabilities,
 }
 
 fn main() {
@@ -85,6 +93,24 @@ fn one_malloc_arena() {
 }
 
 async fn run(args: Args) -> Result<()> {
+    if matches!(args.cmd, Some(Cmd::StateCapabilities)) {
+        println!("launch-identity-v1");
+        return Ok(());
+    }
+    if matches!(args.cmd, Some(Cmd::AssignmentCapabilities)) {
+        println!("destination-assignment-v1");
+        return Ok(());
+    }
+    if matches!(args.cmd, Some(Cmd::AssignedRunCapabilities)) {
+        println!("assigned-run-v1");
+        return Ok(());
+    }
+    if matches!(args.cmd, Some(Cmd::AssignedRunLifecycleCapabilities)) {
+        println!("assigned-run-lifecycle-v1");
+        return Ok(());
+    }
+    // Capture before an installer replaces this path; /proc/self/exe later names old bytes.
+    let executable = std::env::current_exe()?;
     let default = PathBuf::from("/etc/briqyard/config.yaml");
     let path = if args.config.exists() {
         Some(args.config.as_path())
@@ -267,20 +293,43 @@ async fn run(args: Args) -> Result<()> {
     };
     // SIGTERM (a stop, a reboot) suspends the machines; SIGUSR2 (an upgrade) leaves them
     // running for the next daemon to adopt (ADR 0027).
+    let mut handover_admission = None;
     let hand_over = {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = signal(SignalKind::terminate())?;
         let mut usr2 = signal(SignalKind::user_defined2())?;
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => false,
-            _ = term.recv() => false,
-            _ = usr2.recv() => true,
-            served = &mut server => {
-                served??;
-                return Err(anyhow!("the API stopped serving"));
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => break false,
+                _ = term.recv() => break false,
+                _ = usr2.recv() => {
+                    // Admission may still be held by an in-flight request. Keep stop
+                    // signals and server termination live while its bounded fence waits.
+                    let admission = tokio::select! {
+                        _ = tokio::signal::ctrl_c() => break false,
+                        _ = term.recv() => break false,
+                        served = &mut server => {
+                            served??;
+                            return Err(anyhow!("the API stopped serving"));
+                        }
+                        admission = mgr.handover_admission(&executable) => admission,
+                    };
+                    match admission {
+                    Ok(admission) => {
+                        handover_admission = Some(admission);
+                        break true;
+                    }
+                    Err(error) => tracing::error!(err = %error, "handover refused; daemon remains serving"),
+                    }
+                },
+                served = &mut server => {
+                    served??;
+                    return Err(anyhow!("the API stopped serving"));
+                }
             }
         }
     };
+    let _handover_admission = handover_admission;
     tracing::info!(hand_over, "shutting down");
     let deadline = tokio::time::Instant::now() + DRAIN;
     if hand_over {

@@ -30,6 +30,8 @@ pub(super) enum Boots {
 pub(super) struct Proc {
     pub(super) pid: u32,
     pub(super) id: String,
+    pub(super) uid: u32,
+    pub(super) gid: u32,
     pub(super) vsock: PathBuf,
     pub(super) console: PathBuf,
     pub(super) boots: Boots,
@@ -102,10 +104,16 @@ pub(super) struct Mock {
     pub(super) file_stream_v1: AtomicBool,
     pub(super) exec_stream_v1: AtomicBool,
     pub(super) paused: Mutex<std::collections::HashSet<u32>>,
-    clone_status: Mutex<HashMap<PathBuf, guest::CloneStatus>>,
+    pub(super) clone_status: Mutex<HashMap<PathBuf, guest::CloneStatus>>,
+    pub(super) adoption_profile: Mutex<Option<String>>,
     pub(in crate::machine) destination_requests: Mutex<HashMap<PathBuf, guest::DestinationBind>>,
     pub(in crate::machine) destination_bad_ack: AtomicBool,
     pub(in crate::machine) destination_refuse: AtomicBool,
+    pub(in crate::machine) assigned_resume_loss: AtomicBool,
+    pub(in crate::machine) assigned_resume_credentials: AtomicBool,
+    pub(in crate::machine) destination_ack_loss: AtomicBool,
+    pub(in crate::machine) run_fault: std::sync::atomic::AtomicU32,
+    pub(in crate::machine) run_proofs: Mutex<HashMap<PathBuf, guest::AssignedRunProof>>,
     pub(super) init_digests: Mutex<HashMap<PathBuf, String>>,
     /// The limits each machine's disks have now: given at boot, changed live, and
     /// whether the volume was given them too.
@@ -178,9 +186,15 @@ impl Mock {
             exec_stream_v1: AtomicBool::new(false),
             paused: Mutex::new(std::collections::HashSet::new()),
             clone_status: Mutex::new(HashMap::new()),
+            adoption_profile: Mutex::new(None),
             destination_requests: Mutex::new(HashMap::new()),
             destination_bad_ack: AtomicBool::new(false),
             destination_refuse: AtomicBool::new(false),
+            assigned_resume_loss: AtomicBool::new(false),
+            assigned_resume_credentials: AtomicBool::new(false),
+            destination_ack_loss: AtomicBool::new(false),
+            run_fault: std::sync::atomic::AtomicU32::new(0),
+            run_proofs: Mutex::new(HashMap::new()),
             init_digests: Mutex::new(HashMap::new()),
             disks: Mutex::new(HashMap::new()),
             roots: Mutex::new(HashMap::new()),
@@ -276,6 +290,8 @@ impl Mock {
         self.procs.lock().unwrap().push(Proc {
             pid,
             id: id.into(),
+            uid: 0,
+            gid: 0,
             vsock,
             console,
             boots: Boots::Ready(Duration::ZERO),
@@ -374,6 +390,17 @@ impl Mock {
 
 #[async_trait::async_trait]
 impl fc::Vmm for Mock {
+    fn verify_process(&self, id: &str, saved: &fc::Incarnation, uid: u32, gid: u32) -> bool {
+        saved == &mock_incarnation(saved.pid)
+            && self.procs.lock().unwrap().iter().any(|process| {
+                process.id == id
+                    && process.pid == saved.pid
+                    && process.uid == uid
+                    && process.gid == gid
+                    && !*process.exited.borrow()
+            })
+    }
+
     async fn warm_test_barrier(&self, phase: &str, id: &str) {
         self.wait_network(phase, id).await;
     }
@@ -494,7 +521,24 @@ impl fc::Vmm for Mock {
                 .join("state/machines")
                 .join(format!("{}.json", b.id));
             let persisted: Record = serde_json::from_slice(&std::fs::read(path)?)?;
-            assert_eq!(persisted.boot_identity, b.boot_identity);
+            if persisted.assigned_run.is_some() {
+                let run: serde_json::Value = serde_json::from_slice(&std::fs::read(
+                    b.dir
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .join("state/assigned-runs")
+                        .join(format!("{}.json", b.id)),
+                )?)?;
+                assert_eq!(run["launch_started"], true);
+                assert_eq!(
+                    run["expected_boot_identity"],
+                    serde_json::to_value(&b.boot_identity)?
+                );
+            } else {
+                assert_eq!(persisted.boot_identity, b.boot_identity);
+            }
             assert!(!persisted.suspended);
         }
         self.record(format!("boot {} tap={} resume={}", b.id, b.tap, b.resume));
@@ -520,37 +564,62 @@ impl fc::Vmm for Mock {
         }
         tokio::fs::create_dir_all(&b.dir).await?;
         let (api, vsock, console, _) = fc::paths(&b.dir);
-        let snapshot = b.dir.join("snap.mem");
+        let [snapshot_state, snapshot] =
+            fc::snapshot_files(&b.dir, b.jail.as_ref().map(|j| j.base.as_path()), &b.id);
         if b.resume && !snapshot.exists() {
             return Err(fc::ResumeFailed("memory file missing".into()).into());
         }
         let resumed = b.resume || b.memory_clone.is_some();
-        let mut tar = tar::Archive::new(std::fs::File::open(&b.config_drive)?);
-        for entry in tar.entries()? {
-            let mut entry = entry?;
-            if entry.path()?.as_ref() == Path::new(guest::CONFIG_NAME) {
-                let cfg: guest::Config = serde_json::from_reader(&mut entry)?;
-                if cfg.template_profile.is_some() {
-                    self.clone_status.lock().unwrap().insert(
-                        vsock.clone(),
-                        guest::CloneStatus {
+        if !b.resume {
+            let mut tar = tar::Archive::new(std::fs::File::open(&b.config_drive)?);
+            for entry in tar.entries()? {
+                let mut entry = entry?;
+                if entry.path()?.as_ref() == Path::new(guest::CONFIG_NAME) {
+                    let cfg: guest::Config = serde_json::from_reader(&mut entry)?;
+                    if let Some(generation) = &cfg.assigned_run_generation {
+                        use sha2::{Digest, Sha256};
+                        let bytes = std::fs::read(&b.config_drive)?;
+                        let (_, files) =
+                            crate::machine::assignments::runs::parse_drive_for_test(&bytes)?;
+                        let proof = guest::AssignedRunProof {
                             protocol: 1,
-                            profile: cfg.template_profile.clone().unwrap(),
-                            ram_marker: "0123456789abcdef0123456789abcdef".into(),
-                            stage: "builder".into(),
-                            identity: None,
-                        },
-                    );
-                    use sha2::{Digest, Sha256};
-                    self.init_digests
-                        .lock()
-                        .unwrap()
-                        .insert(vsock.clone(), hex::encode(Sha256::digest(b"init")));
+                            generation: generation.clone(),
+                            init_sha256: hex::encode(Sha256::digest(b"init")),
+                            boot_bundle_sha256: hex::encode(Sha256::digest(
+                                guest::boot_bundle_fingerprint_bytes(&cfg, &files)
+                                    .map_err(|e| anyhow!(e))?,
+                            )),
+                            boot_marker: "abcdef0123456789abcdef0123456789".into(),
+                        };
+                        self.init_digests
+                            .lock()
+                            .unwrap()
+                            .insert(vsock.clone(), proof.init_sha256.clone());
+                        self.run_proofs.lock().unwrap().insert(vsock.clone(), proof);
+                        self.clone_status.lock().unwrap().remove(&vsock);
+                    }
+                    if cfg.template_profile.is_some() {
+                        self.clone_status.lock().unwrap().insert(
+                            vsock.clone(),
+                            guest::CloneStatus {
+                                protocol: 1,
+                                profile: cfg.template_profile.clone().unwrap(),
+                                ram_marker: "0123456789abcdef0123456789abcdef".into(),
+                                stage: "builder".into(),
+                                identity: None,
+                            },
+                        );
+                        use sha2::{Digest, Sha256};
+                        self.init_digests
+                            .lock()
+                            .unwrap()
+                            .insert(vsock.clone(), hex::encode(Sha256::digest(b"init")));
+                    }
                 }
             }
         }
         let _ = std::fs::remove_file(&snapshot);
-        let _ = std::fs::remove_file(b.dir.join("snap.state"));
+        let _ = std::fs::remove_file(snapshot_state);
         let pid = self
             .next_pid
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -559,6 +628,8 @@ impl fc::Vmm for Mock {
         self.procs.lock().unwrap().push(Proc {
             pid,
             id: b.id.clone(),
+            uid: b.jail.as_ref().map_or(0, |jail| jail.uid),
+            gid: b.jail.as_ref().map_or(0, |jail| jail.gid),
             vsock: vsock.clone(),
             console,
             boots: boots.clone(),
@@ -576,6 +647,10 @@ impl fc::Vmm for Mock {
         if let Some(root) = &chroot {
             std::fs::create_dir_all(root)?;
         }
+        anyhow::ensure!(
+            self.run_fault.load(Relaxed) != 6,
+            "injected lost launch reply"
+        );
         Ok(fc::Vm {
             #[cfg(target_os = "linux")]
             identity: None,
@@ -596,32 +671,14 @@ impl fc::Vmm for Mock {
         &self,
         id: &str,
         dir: &Path,
-        _jail: Option<&fc::Jail>,
+        jail: Option<&fc::Jail>,
         pid: u32,
         _disk_io: Arc<fc::DiskIo>,
     ) -> Option<fc::Vm> {
         self.record(format!("adopt {id} {pid}"));
-        let procs = self.procs.lock().unwrap();
-        let p = procs
-            .iter()
-            .find(|p| p.pid == pid && p.id == id && !*p.exited.borrow())?;
-        let (api, _, _, _) = fc::paths(dir);
-        Some(fc::Vm {
-            #[cfg(target_os = "linux")]
-            identity: None,
-            pid,
-            api,
-            vsock: p.vsock.clone(),
-            dir: dir.to_path_buf(),
-            chroot: None,
-            resumed: false,
-            boot_identity: p
-                .boot_identity
-                .as_ref()
-                .map(|i| fc::BootIdentity::ambiguous(&i.device_profile)),
-            incarnation: Some(mock_incarnation(pid)),
-            exited: p.exited.subscribe(),
-            exit: Self::exit_of(p),
+        self.adopt_process(id, dir, pid, false).map(|mut vm| {
+            vm.chroot = jail.map(|j| fc::jail_root(&j.base, id));
+            vm
         })
     }
 
@@ -638,6 +695,32 @@ impl fc::Vmm for Mock {
     async fn resume_paused(&self, vm: &fc::Vm) -> Result<()> {
         self.resume_slot(vm.pid)
     }
+    async fn resume_assigned(&self, vm: &fc::Vm) -> Result<()> {
+        let (_, _, exited) = self.proc_at(&vm.vsock)?;
+        anyhow::ensure!(!*exited.borrow(), "assigned process exited");
+        if self.paused.lock().unwrap().remove(&vm.pid) {
+            self.record(format!("assigned_resume paused {}", vm.pid));
+        } else {
+            self.record(format!("assigned_resume running {}", vm.pid));
+        }
+        if self.assigned_resume_credentials.swap(false, Relaxed) {
+            if let Some(process) = self
+                .procs
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|process| process.pid == vm.pid)
+            {
+                process.gid += 1;
+            }
+        }
+        anyhow::ensure!(
+            !self.assigned_resume_loss.swap(false, Relaxed),
+            "injected assigned resume response loss"
+        );
+        Ok(())
+    }
+
     async fn adopt_paused(
         &self,
         id: &str,

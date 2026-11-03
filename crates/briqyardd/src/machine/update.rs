@@ -18,6 +18,11 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        if e.snapshot().assigned_run.is_some() {
+            return Err(MError::Conflict(
+                "assigned-run updates require journal integration; pending intent retained".into(),
+            ));
+        }
         self.ordinary_operation(&e.snapshot())?;
         if let Some(sl) = &req.sleep {
             api::parse_sleep(sl).map_err(invalid)?;
@@ -156,6 +161,12 @@ impl Manager {
     /// stop, whose events move the version.
     pub async fn restart(&self, id: &str, at: Option<u64>) -> Result<api::Machine, MError> {
         let e = self.own_entry(id)?;
+        if self.assigned_lifecycle(&e.snapshot()) {
+            self.stop_entry(&e, stop::USER, Duration::ZERO, false, at)
+                .await?;
+            self.start_assigned_public(&e, None, false, true).await?;
+            return Ok(self.view(&e));
+        }
         self.ordinary_operation(&e.snapshot())?;
         self.stop_entry(&e, stop::USER, Duration::ZERO, false, at)
             .await?;
@@ -200,7 +211,7 @@ impl Manager {
             let over = over_quota(
                 &namespace,
                 &quota,
-                &namespace_use(&machines, &namespace),
+                &self.namespace_use(&machines, &namespace),
                 &need,
             );
             if over.is_none() {
