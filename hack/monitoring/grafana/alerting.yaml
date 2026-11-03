@@ -181,7 +181,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Creates in region {{ .Labels.region }} were refused for want of {{ .Labels.resource }}: add a host there."
+          summary: "Creates in region {{ .Labels.region }} were refused for want of {{ .Labels.resource }}: check capacity and host compatibility."
       - uid: briqyard-host-pressure
         title: "Creates refused: host under pressure"
         condition: C
