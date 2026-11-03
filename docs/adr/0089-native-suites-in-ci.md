@@ -92,3 +92,36 @@ A network namespace alone does not isolate those resources. A second hosted job
 also needs an authenticated private transport between ephemeral runners.
 Keep `fleet-two-hosts` and `fleet-restore` as a follow-up requiring proper host
 isolation rather than rewriting their assertions or faking the second host.
+
+## Additional hosted suites
+
+Stress and monitoring each get an independent runner, in parallel with the original
+job. Each builds the dispatched source and uses the harness from the workflow revision.
+Actions remain SHA-pinned. Suite output, counts and elapsed seconds are retained even
+on failure; the stress driver's exit status, API failures and invariant breaks remain
+authoritative (its count varies with the observed resources).
+
+Stress uses four namespaces, two 128 MiB machines each, four workers, two full
+rounds, SIGKILL recovery and four churn cycles per namespace. Eight ordinary guests
+consume 1 GiB before forks; four workers match the four physical cores. The full
+12 GiB admission limit remains: the driver derives its four capacity-race machines
+from free capacity, requiring accepted and refused starts without exceeding it.
+All feature phases, host invariants and the default 32 MiB RSS-growth bound remain.
+
+Monitoring installs the source's digest-pinned Prometheus/Grafana stack. Its fleet
+registers the local daemon and an explicitly unreachable loopback endpoint, then waits
+for ready/down states. This exercises all 18 existing checks, including down-host
+503 and Prometheus up=0. The unreachable entry is not a simulated second daemon.
+A running local machine provides disk/CPU observations; checking waits for at least 12
+Prometheus samples (3 minutes at the 15 s scrape interval, capped at 300 s) before querying the dashboards. Credentials stay outside artifacts.
+
+The two-host gate above remains: a second daemon's own state, pool, ports and unit
+are insufficient because the unmodified suites address the same absolute config,
+unit and pool on both hosts. Mount/systemd isolation would require another host
+fixture beyond a second daemon; it is not provided here. Hosted matrix jobs have no
+direct private connectivity or shared lifecycle orchestration. No transport or
+credentials are provisioned. The harness explicitly logs this environment gate in
+each added job and its summary; neither two-host suite is invoked partially or
+reported as passing. The existing 29 and 10 checks remain unchanged.
+
+Qualification of the added jobs against main is pending the first dispatch.
