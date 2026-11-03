@@ -629,6 +629,10 @@ impl Manager {
     /// What a swap cut short left: a clone made beside the disk goes; one the disk was
     /// renamed away from goes into its place; then the disk owns its history.
     pub(super) async fn finish_swap(&self, r: &Record, disk: &str) -> Result<()> {
+        anyhow::ensure!(
+            !self.assigned_update_machines()?.contains(&r.id),
+            "pending assigned update retains disk swap authority"
+        );
         let z = &self.inner.zfs;
         let live = r.disk_dataset(disk);
         let next = format!("{live}.next");
@@ -680,7 +684,7 @@ impl Manager {
         {
             return Ok(Vec::new());
         }
-        if r.restoring.is_some() {
+        if r.restoring.is_some() || self.assigned_update_machines()?.contains(&r.id) {
             return Ok(Vec::new());
         }
         self.remove_stray_memory(&r);

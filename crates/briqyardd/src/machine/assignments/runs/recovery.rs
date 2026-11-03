@@ -19,10 +19,24 @@ impl Manager {
             .store
             .get::<Record>("machines", &run.machine)?
             .context("run machine record missing")?;
-        let old_machine = intent
-            .predecessor
-            .as_ref()
-            .map_or(&run.prior, |old| &old.target);
+        let old_machine = match intent.predecessor.as_ref() {
+            Some(_)
+                if run
+                    .settlement
+                    .as_ref()
+                    .is_some_and(|settlement| settlement.update.is_some()) =>
+            {
+                run.settlement
+                    .as_ref()
+                    .and_then(|settlement| settlement.update.as_ref())
+                    .map(|update| update.target.as_ref())
+                    .unwrap()
+            }
+            Some(old) if old.reference.sequence == run.reference.sequence => &old.target,
+            Some(_) if run.consumed_update.is_some() => &run.prior,
+            Some(old) => &old.target,
+            None => &run.prior,
+        };
         let prior = run.record_fingerprint(&machine)? == run.record_fingerprint(old_machine)?;
         let target = run.record_fingerprint(&machine)? == run.record_fingerprint(&run.target)?;
         anyhow::ensure!(
@@ -76,7 +90,26 @@ impl Manager {
         self.inner
             .store
             .put_durable(READERS, &run.machine, &intent.reader)?;
-        self.inner.store.delete_durable(INTENTS, &run.machine)
+        if let Some(hash) = &run.consumed_update_sha256 {
+            if let Some(update) = self
+                .inner
+                .store
+                .get::<UpdateIntent>(UPDATES, &run.machine)?
+            {
+                anyhow::ensure!(
+                    update.digest()? == *hash
+                        && run.consumed_update.as_ref().is_some_and(|consumed| consumed
+                            .digest()
+                            .ok()
+                            .as_ref()
+                            == Some(hash)),
+                    "consumed assigned update intent differs"
+                );
+                self.inner.store.delete_durable(UPDATES, &run.machine)?;
+            }
+        }
+        self.inner.store.delete_durable(INTENTS, &run.machine)?;
+        Ok(())
     }
 
     pub(super) fn check_run_creation_authority(&self, run: &Current) -> Result<()> {
@@ -124,6 +157,18 @@ impl Manager {
             );
             self.reconcile_assigned_run(&intent)?;
         }
+        for update in self.inner.store.list::<UpdateIntent>(UPDATES)? {
+            let stored = self
+                .inner
+                .store
+                .get::<UpdateIntent>(UPDATES, &update.machine)?
+                .context("assigned update stored under wrong key")?;
+            anyhow::ensure!(
+                serde_json::to_value(&stored)? == serde_json::to_value(&update)?,
+                "assigned update key conflict"
+            );
+            self.recover_assigned_update(&update)?;
+        }
         let machines = self.inner.store.list::<Record>("machines")?;
         for current in self.inner.store.list::<Current>(RUNS)? {
             current.check()?;
@@ -141,10 +186,22 @@ impl Manager {
                 .iter()
                 .find(|machine| machine.id == current.machine)
                 .context("current run machine missing")?;
+            let update = self
+                .inner
+                .store
+                .get::<UpdateIntent>(UPDATES, &current.machine)?;
+            let machine_matches = match update {
+                Some(update) => {
+                    update.check(&current)?;
+                    updates::matches_authorized_update_target(machine, &current, &update)?
+                }
+                None => {
+                    current.record_fingerprint(machine)?
+                        == current.record_fingerprint(&current.target)?
+                }
+            };
             anyhow::ensure!(
-                machine.assigned_run.as_ref() == Some(&current.reference)
-                    && current.record_fingerprint(machine)?
-                        == current.record_fingerprint(&current.target)?,
+                machine.assigned_run.as_ref() == Some(&current.reference) && machine_matches,
                 "machine/current-run link differs"
             );
             let reader = self
@@ -272,8 +329,25 @@ impl Manager {
         current.check()?;
         if current.reference.phase == Phase::Settled {
             let (root, data) = self.current_run_disks(&current.target).await?;
+            let expected_root = match self
+                .inner
+                .store
+                .get::<UpdateIntent>(UPDATES, &current.machine)?
+            {
+                Some(update) => {
+                    update.check(current)?;
+                    match update.root_swap.as_ref().and_then(|swap| swap.target_guid) {
+                        Some(guid) => Disk {
+                            dataset: current.root.dataset.clone(),
+                            guid,
+                        },
+                        None => current.root.clone(),
+                    }
+                }
+                None => current.root.clone(),
+            };
             anyhow::ensure!(
-                root == current.root && data == current.data,
+                root == expected_root && data == current.data,
                 "settled CURRENT disks changed"
             );
             if let Some(checkpoint) = current

@@ -3,14 +3,23 @@ mod adoption;
 mod bind;
 mod live;
 mod publication;
-use crate::machine::templates::tests::launch_identity::prepared;
+use crate::machine::templates::tests::launch_identity::prepared_with;
 
 pub(in crate::machine) async fn fixture() -> (
     crate::machine::tests::Harness,
     Arc<Entry>,
     api::CreateMachineRequest,
 ) {
-    let (h, entry) = prepared().await;
+    fixture_with(Some(2)).await
+}
+pub(in crate::machine) async fn fixture_with(
+    volume: Option<u32>,
+) -> (
+    crate::machine::tests::Harness,
+    Arc<Entry>,
+    api::CreateMachineRequest,
+) {
+    let (h, entry) = prepared_with(volume).await;
     h.namespace("destination");
     for namespace in h.m.inner.namespaces.lock().unwrap().values() {
         h.m.inner
@@ -114,6 +123,40 @@ async fn assignment_intent_is_not_a_miss_and_transfers_full_quota_once_on_recove
         .get::<serde_json::Value>("launch-holds", &assigned.id)
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn volume_free_slot_recovers_with_root_only_charge_and_exact_request_shape() {
+    let (h, entry, request) = fixture_with(None).await;
+    assert!(request.volume.is_none());
+    let before = entry.snapshot();
+    assert!(before.volume.is_none());
+    // A request naming a volume does not match a slot that has none.
+    let mut with_volume = request.clone();
+    with_volume.volume = Some(api::VolumeSpec {
+        size_gb: 2,
+        mount: "/work".into(),
+    });
+    assert!(h
+        .m
+        .stage_destination_assignment(with_volume, &entry, 2)
+        .await
+        .is_err());
+    assert!(!h.m.destination_assignment_owns(&before.id).unwrap());
+    h.m.stage_destination_assignment(request.clone(), &entry, 2)
+        .await
+        .unwrap();
+    restart_load(&h.m).unwrap();
+    let assigned = h.m.entry(&before.id).unwrap().snapshot();
+    assert_eq!(assigned.namespace, "destination");
+    assert!(assigned.volume.is_none());
+    assert_eq!(assigned.launch_identity, before.launch_identity);
+    let sandbox = assigned.clone_origin.as_ref().unwrap().sandbox.as_ref();
+    assert!(sandbox.unwrap().device.is_none());
+    assert_eq!(
+        h.m.quota("destination").unwrap().used.disk_gb,
+        before.clone_origin.unwrap().artifact.recipe.root_disk_gb
+    );
 }
 
 #[tokio::test]

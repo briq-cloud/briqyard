@@ -7,6 +7,13 @@ async fn source() -> (Harness, Arc<Entry>, api::SandboxSeed) {
     source_with_unbound(false).await
 }
 async fn source_with_unbound(enabled: bool) -> (Harness, Arc<Entry>, api::SandboxSeed) {
+    source_shaped(enabled, Some(2)).await
+}
+/// A sealed seed whose recipe has this `/work` volume (none: the two-drive topology).
+async fn source_shaped(
+    enabled: bool,
+    volume: Option<u32>,
+) -> (Harness, Arc<Entry>, api::SandboxSeed) {
     let h = harness_config(|c| {
         c.token = "test-admin".into();
         c.jailer = "/mock/jailer".into();
@@ -16,17 +23,22 @@ async fn source_with_unbound(enabled: bool) -> (Harness, Arc<Entry>, api::Sandbo
         c.templates.enabled = true;
         c.templates.warm_pools = true;
         c.templates.unbound_warm_pools = enabled;
-        c.templates.sandbox_recipes = vec![crate::config::SandboxRecipe {
-            image: ALPINE.into(),
-            image_config_digest: ALPINE_CONFIG_DIGEST.into(),
-            init_sha256: hex::encode(Sha256::digest(b"init")),
-            size: api::Size {
-                vcpus: 1,
-                memory_mb: 256,
-                cpu_millis: None,
-            },
-            volume_gb: 2,
-        }];
+        // Both shapes of the same image and size are approved side by side: the request's
+        // volume (none, or 2 GiB at /work) is what picks one.
+        c.templates.sandbox_recipes = [2, 0]
+            .into_iter()
+            .map(|volume_gb| crate::config::SandboxRecipe {
+                image: ALPINE.into(),
+                image_config_digest: ALPINE_CONFIG_DIGEST.into(),
+                init_sha256: hex::encode(Sha256::digest(b"init")),
+                size: api::Size {
+                    vcpus: 1,
+                    memory_mb: 256,
+                    cpu_millis: None,
+                },
+                volume_gb,
+            })
+            .collect();
     })
     .await;
     assert_eq!(
@@ -62,6 +74,10 @@ async fn source_with_unbound(enabled: bool) -> (Harness, Arc<Entry>, api::Sandbo
                 size: image_size(),
                 template_build: Some(guest::SANDBOX_READY_V1.into()),
                 start: Some(true),
+                volume: volume.map(|size_gb| api::VolumeSpec {
+                    size_gb,
+                    mount: "/work".into(),
+                }),
                 ..Default::default()
             },
             None,
@@ -104,6 +120,12 @@ fn image_size() -> api::Size {
         memory_mb: 256,
         cpu_millis: None,
     }
+}
+fn volume_free(mut request: api::CreateMachineRequest) -> api::CreateMachineRequest {
+    request.volume = None;
+    request.cmd = Some(vec!["-ec".into(), "sleep infinity".into()]);
+    request.files[0].path = "/start".into();
+    request
 }
 fn destination(seed: api::SandboxSeed) -> api::CreateMachineRequest {
     api::CreateMachineRequest {
@@ -344,7 +366,7 @@ async fn sandbox_recipe_artifact_and_create_match_full_cpu_representations_only(
         cpu_millis: Some(1000),
         ..implicit
     };
-    assert!(h.m.sandbox_recipe(ALPINE, explicit).is_ok());
+    assert!(h.m.sandbox_recipe(ALPINE, explicit, Some(2)).is_ok());
     let record = source.snapshot();
     let artifact = record.snapshots[0].clone_artifact.as_ref().unwrap();
     let mut represented = artifact.clone();
@@ -378,7 +400,7 @@ async fn sandbox_recipe_artifact_and_create_match_full_cpu_representations_only(
             ..explicit
         },
     ] {
-        assert!(h.m.sandbox_recipe(ALPINE, size).is_err());
+        assert!(h.m.sandbox_recipe(ALPINE, size, Some(2)).is_err());
         let mut changed = artifact.clone();
         changed.recipe.size = size;
         assert!(h.m.check_sandbox_artifact(&record, &changed).is_err());
@@ -400,4 +422,103 @@ async fn sandbox_recipe_artifact_and_create_match_full_cpu_representations_only(
         h.m.record(request, None).await,
         Err(MError::Conflict(_))
     ));
+}
+
+#[tokio::test]
+async fn volume_free_builder_seals_two_drives_and_serves_only_volume_free_creates() {
+    let (h, source, seed) = source_shaped(false, None).await;
+    let record = source.snapshot();
+    assert!(record.volume.is_none());
+    let artifact = record.snapshots[0].clone_artifact.as_ref().unwrap();
+    assert!(artifact.recipe.config.sandbox_device.is_none());
+    assert!(pristine_config(&artifact.recipe.config));
+    // The builder's own config drive carries the profile and no data device.
+    let drive = crate::machine::start::config_drive(&record, Ipv4Addr::new(10, 64, 0, 1)).unwrap();
+    assert!(!String::from_utf8_lossy(&drive).contains("sandbox_device"));
+    // A create naming a volume, of any capacity, is refused and consumes nothing.
+    for size_gb in [1, 2, 3] {
+        assert!(h
+            .m
+            .record(destination_sized(&seed, size_gb), None)
+            .await
+            .is_err());
+    }
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), 1);
+    // Its own shape is served: no volume, no mount, no data device in the frozen payload.
+    let req = volume_free(destination(seed));
+    let (e, _) = h.m.record(req.clone(), None).await.unwrap();
+    h.disks(&e).await;
+    h.m.start_entry(&e, true).await.unwrap();
+    let record = e.snapshot();
+    assert!(record.volume.is_none());
+    let origin = record.clone_origin.unwrap();
+    let binding = origin.sandbox.unwrap();
+    assert!(binding.device.is_none());
+    let payload = binding.bind.unwrap();
+    assert!(payload.config.sandbox_device.is_none());
+    assert!(payload.config.mounts.is_empty());
+    assert_eq!(payload.config.env["DESTINATION"], "installed");
+    assert_eq!(binding.ack_sha256.unwrap(), binding_hash(&payload).unwrap());
+    assert_eq!(origin.stage, CloneStage::Active);
+    // Exactly the same request replays; the same body with a volume is a different one.
+    let (same, how) = h.m.record(req, None).await.unwrap();
+    assert_eq!(same.snapshot().id, record.id);
+    assert!(matches!(how, Make::Existing));
+}
+
+fn destination_sized(seed: &api::SandboxSeed, size_gb: u32) -> api::CreateMachineRequest {
+    let mut request = destination(seed.clone());
+    request.volume.as_mut().unwrap().size_gb = size_gb;
+    request
+}
+
+#[tokio::test]
+async fn volume_seed_refuses_volume_free_and_misshapen_creates() {
+    let (h, _, seed) = source().await;
+    // Both shapes are approved for this image and size, so only the seed's own device decides.
+    let free = volume_free(destination(seed.clone()));
+    assert!(h.m.sandbox_recipe(ALPINE, free.size, None).is_ok());
+    let Err(error) = h.m.record(free, None).await else {
+        panic!("a volume-free create must not claim a volume seed");
+    };
+    assert!(error.to_string().contains("data device"), "{error}");
+    for (mount, size_gb) in [("/data", 2), ("/", 2), ("/work", 3)] {
+        let mut request = destination(seed.clone());
+        *request.volume.as_mut().unwrap() = api::VolumeSpec {
+            size_gb,
+            mount: mount.into(),
+        };
+        assert!(
+            h.m.record(request, None).await.is_err(),
+            "{mount} {size_gb}"
+        );
+    }
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), 1);
+    assert!(h.m.record(destination(seed), None).await.is_ok());
+}
+
+#[tokio::test]
+async fn builder_names_its_volume_exactly() {
+    let (h, _, _) = source_shaped(false, Some(2)).await;
+    h.namespace("other");
+    let builder = |volume: Option<(u32, &str)>| api::CreateMachineRequest {
+        namespace: "other".into(),
+        name: "builder".into(),
+        image: ALPINE.into(),
+        size: image_size(),
+        template_build: Some(guest::SANDBOX_READY_V1.into()),
+        start: Some(true),
+        volume: volume.map(|(size_gb, mount)| api::VolumeSpec {
+            size_gb,
+            mount: mount.into(),
+        }),
+        ..Default::default()
+    };
+    for refused in [Some((3, "/work")), Some((2, "/data")), Some((0, "/work"))] {
+        assert!(
+            h.m.record(builder(refused), None).await.is_err(),
+            "{refused:?}"
+        );
+    }
+    assert!(h.m.record(builder(None), None).await.is_ok());
 }

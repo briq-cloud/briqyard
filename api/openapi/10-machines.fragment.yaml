@@ -124,7 +124,7 @@
       type: object
       additionalProperties: false
       required: [machine_id, snapshot, generation, request_id]
-      description: "operator-produced pristine sandbox only; exclusive with fork, restore and template_build; exact approved image/size and fresh fixed-capacity /work volume, start:true required; no cold fallback after submission"
+      description: "operator-produced pristine sandbox only; exclusive with fork, restore and template_build; exact approved image/size/volume shape (a fresh fixed-capacity /work volume of the sealed capacity, or no volume when the seed has none), start:true required; no cold fallback after submission"
       properties:
         machine_id: { type: string }
         snapshot: { type: string, description: "immutable sealed snapshot id" }

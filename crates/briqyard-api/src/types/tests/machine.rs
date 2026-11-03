@@ -404,3 +404,33 @@ fn update_machine_request() {
     .unwrap_err();
     assert!(err.to_string().contains("unknown field `mount`"), "{err}");
 }
+
+#[test]
+fn sandbox_seed_volume_is_absent_or_a_work_volume() {
+    let id = |s: &str| s.to_string();
+    let mut request = CreateMachineRequest {
+        start: Some(true),
+        sandbox_seed: Some(SandboxSeed {
+            machine_id: id("m_abc"),
+            snapshot: id("s_abc"),
+            generation: id("g_abc"),
+            request_id: id("request-1"),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(request.check_sandbox_seed(), Ok(()), "volume-free");
+    for (mount, size_gb, ok) in [("/work", 2, true), ("/data", 2, false), ("/work", 0, false)] {
+        request.volume = Some(VolumeSpec {
+            size_gb,
+            mount: mount.into(),
+        });
+        assert_eq!(
+            request.check_sandbox_seed().is_ok(),
+            ok,
+            "{mount} {size_gb}"
+        );
+    }
+    request.volume = None;
+    request.start = Some(false);
+    assert!(request.check_sandbox_seed().is_err());
+}

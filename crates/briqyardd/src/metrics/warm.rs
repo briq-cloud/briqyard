@@ -201,8 +201,8 @@ pub fn render(out: &mut String, snapshot: &Snapshot, operations: &Operations) {
         for (name, help, field) in [
             ("briqyard_warm_pool_reserved_memory_bytes", "Full recipe RAM reservation, including failed or unreleased slots; not resident usage.", 0),
             ("briqyard_warm_pool_reserved_cpu_millis", "Full CPU millis reserved by unclaimed slots.", 1),
-            ("briqyard_warm_pool_reserved_data_disk_bytes", "Full logical data-volume reservation without a sharing discount; not physical usage.", 3),
             ("briqyard_warm_pool_reserved_root_disk_bytes", "Full logical root reservation without a copy-on-write discount; not physical usage.", 2),
+            ("briqyard_warm_pool_reserved_data_disk_bytes", "Full logical data-volume reservation; not physical usage.", 3),
         ] {
             family(out, name, "gauge", help, snapshot.pools.iter().map(|p| (p.labels(), resource(p.charged, field).to_string())).collect());
         }
@@ -210,8 +210,8 @@ pub fn render(out: &mut String, snapshot: &Snapshot, operations: &Operations) {
     for (name, help, field) in [
         ("briqyard_warm_memory_bytes", "Full RAM reservations and configured budget/headroom, distinct from measured availability.", 0),
         ("briqyard_warm_cpu_millis", "Full CPU millis reservations and configured budget/headroom.", 1),
-        ("briqyard_warm_data_disk_bytes", "Full logical data-volume reservations and configured data-volume budget.", 3),
         ("briqyard_warm_root_disk_bytes", "Full logical root reservations and budget; headroom is the absolute free-space floor.", 2),
+        ("briqyard_warm_data_disk_bytes", "Full logical data-volume reservations and budget; data headroom is zero because the shared pool floor is reported with root headroom.", 3),
     ] {
         let mut values = vec![("kind=\"budget\"".into(), resource(snapshot.budget, field).to_string()), ("kind=\"headroom\"".into(), resource(snapshot.headroom, field).to_string())];
         if snapshot.available { values.push(("kind=\"reserved\"".into(), resource(snapshot.charged, field).to_string())); }
@@ -325,8 +325,8 @@ mod tests {
         let resources = api::WarmResources {
             memory_mb: 768,
             cpu_millis: 1500,
-            data_disk_gb: 6,
             root_disk_gb: 24,
+            data_disk_gb: 12,
         };
         let snapshot = Snapshot {
             available: true,
@@ -350,14 +350,14 @@ mod tests {
             budget: api::WarmResources {
                 memory_mb: 2048,
                 cpu_millis: 3000,
-                data_disk_gb: 0,
                 root_disk_gb: 64,
+                data_disk_gb: 32,
             },
             headroom: api::WarmResources {
                 memory_mb: 512,
                 cpu_millis: 1000,
-                data_disk_gb: 0,
                 root_disk_gb: 16,
+                data_disk_gb: 0,
             },
             memory_floor_mb: 1024,
             max_fills: 2,
@@ -394,13 +394,14 @@ mod tests {
         let labels = "namespace=\"team\",pool=\"tools\",catalog=\"shell-small\",type=\"shell\",memory_mb=\"256\",vcpus=\"1\",cpu_millis=\"500\"";
         for expected in [
             format!("briqyard_warm_pool_shortfall{{{labels}}} 2\n"),
+            format!("briqyard_warm_pool_reserved_data_disk_bytes{{{labels}}} 12884901888\n"),
+            "briqyard_warm_data_disk_bytes{kind=\"reserved\"} 12884901888\n".into(),
+            "briqyard_warm_data_disk_bytes{kind=\"budget\"} 34359738368\n".into(),
             format!("briqyard_warm_pool_slots{{{labels},state=\"draining\"}} 1\n"),
             format!("briqyard_warm_pool_blocked{{{labels},reason=\"pressure\"}} 1\n"),
             "briqyard_warm_memory_bytes{kind=\"reserved\"} 805306368\n".into(),
             "briqyard_warm_memory_available_bytes 3221225472\n".into(),
             "briqyard_warm_root_disk_bytes{kind=\"reserved\"} 25769803776\n".into(),
-            "briqyard_warm_data_disk_bytes{kind=\"reserved\"} 6442450944\n".into(),
-            format!("briqyard_warm_pool_reserved_data_disk_bytes{{{labels}}} 6442450944\n"),
             "briqyard_warm_operations_total{operation=\"claim\",outcome=\"miss\"} 1\n".into(),
             "briqyard_warm_operation_seconds_total{operation=\"claim\",outcome=\"success\"} 0.08\n"
                 .into(),

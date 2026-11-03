@@ -30,21 +30,21 @@ impl Manager {
                 && record.cmd.as_ref().is_none_or(Vec::is_empty),
             "unbound preparation requires an unassigned slot without destination workload"
         );
-        let device = origin
-            .artifact
-            .recipe
-            .config
-            .sandbox_device
-            .as_ref()
-            .context("unbound artifact omitted sealed work-device geometry")?;
+        // The slot's volume is exactly the sealed device: a /work volume of its capacity, or
+        // none when the artifact has no third drive.
         anyhow::ensure!(
-            device.drive_id == "data"
-                && device.logical_sector_bytes == 512
-                && record
-                    .volume
-                    .as_ref()
-                    .is_some_and(|volume| volume.mount == "/work"
-                        && u64::from(volume.size_gb).checked_mul(1 << 30) == Some(device.bytes)),
+            match (
+                &origin.artifact.recipe.config.sandbox_device,
+                &record.volume
+            ) {
+                (None, None) => true,
+                (Some(device), Some(volume)) =>
+                    device.drive_id == "data"
+                        && device.logical_sector_bytes == 512
+                        && volume.mount == "/work"
+                        && u64::from(volume.size_gb).checked_mul(1 << 30) == Some(device.bytes),
+                _ => false,
+            },
             "unbound work volume differs from the sealed device"
         );
         self.verify_live_launch(entry, live)?;

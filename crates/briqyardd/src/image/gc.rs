@@ -135,11 +135,12 @@ impl Builder {
         Ok(true)
     }
 
-    /// Removes images no machine clones that were built more than `keep` ago.
-    pub async fn gc(&self, keep: chrono::Duration) -> Result<usize> {
+    /// Removes images built more than `keep` ago that no machine clones or journal names.
+    pub async fn gc(&self, keep: chrono::Duration, named: &HashSet<String>) -> Result<usize> {
         let mut removed = 0;
         for (im, clones) in self.list().await? {
             if clones == 0
+                && !named.contains(&im.key)
                 && Utc::now() - im.built_at > keep
                 && self.remove(&im.key, Removal::Unused).await?
             {
