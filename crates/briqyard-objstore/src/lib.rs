@@ -53,6 +53,7 @@ pub struct ListedObject {
     pub key: String,
     pub bytes: u64,
     identity: String,
+    version: Option<String>,
 }
 
 /// Exhaustion is explicit: reaching a limit must never look like an empty remainder.
@@ -74,8 +75,21 @@ impl ListedObject {
         Ok(Self {
             key,
             bytes: meta.size,
-            identity: format!("{:?}/{:?}/{}", meta.e_tag, meta.version, meta.last_modified),
+            identity: format!("{:?}/{}", meta.e_tag, meta.last_modified),
+            version: meta.version.clone(),
         })
+    }
+
+    fn matches(&self, meta: &object_store::ObjectMeta) -> Result<bool> {
+        let current = Self::of(meta)?;
+        // LIST may omit a version that GET supplies. A version observed by LIST must match.
+        Ok(self.key == current.key
+            && self.bytes == current.bytes
+            && self.identity == current.identity
+            && self
+                .version
+                .as_ref()
+                .is_none_or(|version| current.version.as_ref() == Some(version)))
     }
 }
 
@@ -288,10 +302,7 @@ impl ObjectStore {
             .get(&Self::path(&listed.key)?)
             .await
             .map_err(|e| self.failed("get", &listed.key, e))?;
-        anyhow::ensure!(
-            ListedObject::of(&got.meta)? == *listed,
-            "census metadata changed"
-        );
+        anyhow::ensure!(listed.matches(&got.meta)?, "census metadata changed");
         read_bounded(self.reader(got, &listed.key), listed.bytes, limit).await
     }
 
@@ -607,6 +618,102 @@ mod tests {
             store.get_bytes("backups-other/protected").await.unwrap(),
             b"keep"
         );
+    }
+
+    #[tokio::test]
+    async fn census_s3_get_only_versions_preserve_list_identity_checks() {
+        use http_body_util::BodyExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Clone, Debug)]
+        struct VersionedS3(Arc<AtomicBool>);
+
+        impl HttpConnector for VersionedS3 {
+            fn connect(&self, _: &ClientOptions) -> object_store::Result<HttpClient> {
+                Ok(HttpClient::new(self.clone()))
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl HttpService for VersionedS3 {
+            async fn call(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+                assert_eq!(req.method(), http::Method::GET);
+                let list = req
+                    .uri()
+                    .query()
+                    .is_some_and(|query| query.contains("list-type=2"));
+                let body = if list {
+                    "<ListBucketResult><IsTruncated>false</IsTruncated><Contents>\
+                     <Key>backups/m/a.json</Key>\
+                     <LastModified>2026-11-03T00:00:00Z</LastModified>\
+                     <ETag>\"stable\"</ETag><Size>3</Size>\
+                     </Contents></ListBucketResult>"
+                } else {
+                    assert!(req.uri().path().ends_with("/backups/m/a.json"));
+                    "abc"
+                };
+                let mut response = http::Response::builder()
+                    .status(200)
+                    .header("content-length", body.len().to_string());
+                if !list {
+                    response = response
+                        .header("last-modified", "Tue, 03 Nov 2026 00:00:00 GMT")
+                        .header(
+                            "etag",
+                            if self.0.load(Ordering::Relaxed) {
+                                "\"changed\""
+                            } else {
+                                "\"stable\""
+                            },
+                        )
+                        .header("x-amz-version-id", "current-version");
+                }
+                let body = http_body_util::Full::new(bytes::Bytes::from_static(body.as_bytes()))
+                    .map_err(|never: std::convert::Infallible| match never {});
+                Ok(response.body(HttpResponseBody::new(body)).unwrap())
+            }
+        }
+
+        // Use the SDK's actual S3 LIST/GET decoders with an in-memory HTTP service.
+        // No listening socket, task, credentials from the environment or live bucket.
+        let changed = Arc::new(AtomicBool::new(false));
+        let inner = AmazonS3Builder::new()
+            .with_bucket_name("bucket")
+            .with_endpoint("http://fixture.invalid")
+            .with_allow_http(true)
+            .with_region("fixture")
+            .with_skip_signature(true)
+            .with_http_connector(VersionedS3(changed.clone()))
+            .build()
+            .unwrap();
+        let store = ObjectStore {
+            inner: Arc::new(inner),
+            scheme: "s3",
+            url: "s3://bucket".into(),
+        };
+        let listing = store.list_bounded("backups", 1).await.unwrap();
+        assert!(listing.complete);
+        let listed = &listing.objects[0];
+        assert_eq!(store.get_bytes_bounded(listed, 3).await.unwrap(), b"abc");
+
+        let mut meta = object_store::ObjectMeta {
+            location: ObjectStore::path(&listed.key).unwrap(),
+            last_modified: "2026-11-03T00:00:00Z".parse().unwrap(),
+            size: 3,
+            e_tag: Some("\"stable\"".into()),
+            version: Some("current-version".into()),
+        };
+        let versioned = ListedObject::of(&meta).unwrap();
+        assert_eq!(
+            store.get_bytes_bounded(&versioned, 3).await.unwrap(),
+            b"abc"
+        );
+        meta.version = Some("older-version".into());
+        let versioned = ListedObject::of(&meta).unwrap();
+        assert!(store.get_bytes_bounded(&versioned, 3).await.is_err());
+
+        changed.store(true, Ordering::Relaxed);
+        assert!(store.get_bytes_bounded(listed, 3).await.is_err());
     }
 
     #[tokio::test]

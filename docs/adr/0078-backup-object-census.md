@@ -29,6 +29,8 @@ fields, invalid IDs, duplicate fields/disks, foreign stream paths, nonolder base
 sizes or incremental flags and malformed encryption envelopes remain malformed. No key is
 requested and sealed contents are never opened. A GET must match the listed size and provider
 identity and return its exact expected length. A changed/missing/oversized read stays unknown.
+Version identity is checked when LIST supplied it; a version reported only by GET is accepted
+when the listed path, length, ETag and modification time still match.
 Each disk's transitive bases must have matching machine, namespace, disk and key identity.
 Only stream existence and length are observed: ciphertext authenticity, content hashes, key
 availability, snapshot identity and successful restore remain unqualified.
