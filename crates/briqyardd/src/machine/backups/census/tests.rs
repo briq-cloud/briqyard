@@ -164,7 +164,10 @@ async fn publication_foreign_owners_truncation_corruption_and_repeats() {
         "key_id=",
         "namespace=",
     ] {
-        assert!(!out.contains(secret), "{secret}");
+        assert!(
+            !out.contains(secret),
+            "census metrics must omit sensitive fixture values"
+        );
     }
 }
 
