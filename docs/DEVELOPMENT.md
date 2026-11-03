@@ -61,6 +61,23 @@ cat /tmp/briqyard-vm.lock             # who holds it while it is held: pid, tree
 
 Build and edit outside the lock; hold it only while the VMs run your build, and leave both hosts `ready` with no machines of yours behind.
 
+`hack/vm.sh install` requires `BRIQYARD_CHECKED_BUNDLE` (a local path also visible in the VM)
+and `BRIQYARD_CHECKED_BUNDLE_SHA256` (the digest from a trusted release manifest). Use an
+official release whose tag resolves to the successful release workflow's source commit;
+check the asset digest and architecture-specific `SHA256SUMS` before supplying it. The
+helper checks the bundle against the current source pin and reuses bootstrap's complete
+provenance, validation and member checks. It stages the bundle beside the four local
+binaries and includes all five assets in the local release manifest. It downloads nothing.
+A missing or incompatible bundle fails before build or installation.
+
+Fleet smoke requires every registered host to answer: global listings deliberately fail
+when a host is down. Starting a provisioned second VM may suffice; first verify its daemon,
+registration and empty dedicated fixture state. The suite can place a test machine there,
+and temporarily drains other ready hosts during the local host upgrade. Its upgrade
+activates the checked Firecracker and jailer plus immutable init paths; repeat lifecycle
+validation against those resulting bindings when they differ from the previous run.
+
+
 fc's pool is on a Lima disk of its own, so a full root disk can no longer suspend it:
 
 ```bash

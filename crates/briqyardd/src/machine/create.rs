@@ -266,12 +266,8 @@ impl Manager {
                 .as_ref()
                 .is_some_and(|b| b.profile == guest::SANDBOX_READY_V1)
             {
-                let recipe = self.sandbox_recipe(&req.image, req.size)?;
+                // The builder's data drive is exactly the request's (checked against the recipe).
                 rec.cmd = Some(vec![]);
-                rec.volume = Some(api::VolumeSpec {
-                    size_gb: recipe.volume_gb,
-                    mount: "/work".into(),
-                });
             } else {
                 rec.cmd = Some(templates::builder_config().cmd);
             }

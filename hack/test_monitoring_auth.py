@@ -330,6 +330,7 @@ while :; do read -r -t 0.05 _ || :; done
             ready = Path(tmp) / "child-ready"
             terminated = Path(tmp) / "child-terminated"
             survived = Path(tmp) / "child-survived"
+            parent_pid = Path(tmp) / "parent-pid"
             child_code = "\n".join(
                 (
                     "import pathlib, signal, sys, time",
@@ -345,11 +346,15 @@ while :; do read -r -t 0.05 _ || :; done
             )
             parent_code = "\n".join(
                 (
-                    "import pathlib, subprocess, sys, time",
-                    "ready, terminated, survived = map(pathlib.Path, sys.argv[1:4])",
+                    "import os, pathlib, subprocess, sys, time",
+                    "ready, terminated, survived, parent_pid = map(pathlib.Path, sys.argv[1:5])",
+                    "parent_pid.write_text(str(os.getpid()), encoding='utf-8')",
                     "child = subprocess.Popen(",
-                    "    [sys.executable, '-c', sys.argv[4], str(ready), str(terminated), str(survived)]",
+                    "    [sys.executable, '-c', sys.argv[5], str(ready), str(terminated), str(survived)]",
                     ")",
+                    "deadline = time.monotonic() + 2",
+                    "while not ready.exists() and time.monotonic() < deadline: time.sleep(0.01)",
+                    "if not ready.exists(): raise SystemExit(7)",
                     "time.sleep(30)",
                 )
             )
@@ -360,9 +365,10 @@ while :; do read -r -t 0.05 _ || :; done
                 str(ready),
                 str(terminated),
                 str(survived),
+                str(parent_pid),
                 child_code,
             ]
-            self._timeout_after_child_ready(args, ready)
+            self._timeout_after_child_ready(args, ready, parent_pid)
             self.assertEqual(terminated.read_text(encoding="utf-8"), "terminated")
             self.assertFalse(survived.exists())
 
@@ -370,6 +376,7 @@ while :; do read -r -t 0.05 _ || :; done
         with tempfile.TemporaryDirectory() as tmp:
             ready = Path(tmp) / "child-ready"
             survived = Path(tmp) / "child-survived"
+            parent_pid = Path(tmp) / "parent-pid"
             child_code = "\n".join(
                 (
                     "import pathlib, signal, sys, time",
@@ -382,21 +389,25 @@ while :; do read -r -t 0.05 _ || :; done
             )
             parent_code = "\n".join(
                 (
-                    "import pathlib, subprocess, sys, time",
-                    "ready, survived = map(pathlib.Path, sys.argv[1:3])",
+                    "import os, pathlib, subprocess, sys, time",
+                    "ready, survived, parent_pid = map(pathlib.Path, sys.argv[1:4])",
+                    "parent_pid.write_text(str(os.getpid()), encoding='utf-8')",
                     "child = subprocess.Popen(",
-                    "    [sys.executable, '-c', sys.argv[3], str(ready), str(survived)],",
+                    "    [sys.executable, '-c', sys.argv[4], str(ready), str(survived)],",
                     "    stdout=subprocess.DEVNULL,",
                     "    stderr=subprocess.DEVNULL,",
                     ")",
+                    "deadline = time.monotonic() + 2",
+                    "while not ready.exists() and time.monotonic() < deadline: time.sleep(0.01)",
+                    "if not ready.exists(): raise SystemExit(7)",
                     "time.sleep(30)",
                 )
             )
-            args = [sys.executable, "-c", parent_code, str(ready), str(survived), child_code]
-            self._timeout_after_child_ready(args, ready)
+            args = [sys.executable, "-c", parent_code, str(ready), str(survived), str(parent_pid), child_code]
+            self._timeout_after_child_ready(args, ready, parent_pid)
             self.assertFalse(survived.exists())
 
-    def _timeout_after_child_ready(self, args: list[str], ready: Path) -> None:
+    def _timeout_after_child_ready(self, args: list[str], ready: Path, parent_pid: Path) -> None:
         real_popen = subprocess.Popen
         process = None
 
@@ -419,6 +430,8 @@ while :; do read -r -t 0.05 _ || :; done
                 with self.assertRaises(subprocess.TimeoutExpired):
                     _run_bounded(args, env=os.environ.copy(), timeout=0.2)
             self.assertFalse(_process_group_exists(process), "timeout left an owned process group alive")
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(int(parent_pid.read_text(encoding="utf-8")), 0)
         finally:
             if process is not None:
                 self._cleanup_test_process(process)

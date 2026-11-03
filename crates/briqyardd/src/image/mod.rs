@@ -95,6 +95,8 @@ pub struct Builder {
     pub events: Option<Events>,
     /// Pulls run at once (`PULLS_AT_ONCE`, ADR 0048): an image already built takes no turn.
     pulls: tokio::sync::Semaphore,
+    #[cfg(test)]
+    pub(crate) ensure_calls: std::sync::atomic::AtomicUsize,
 }
 
 /// Pulls and builds of different images at once on a host (ADR 0048); one image's creates
@@ -138,6 +140,8 @@ impl Builder {
             resolve_ttl: std::time::Duration::from_secs(600),
             events: None,
             pulls: tokio::sync::Semaphore::new(PULLS_AT_ONCE),
+            #[cfg(test)]
+            ensure_calls: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
