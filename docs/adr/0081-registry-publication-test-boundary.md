@@ -1,4 +1,4 @@
-# ADR 0079: Registry publication owns its work through terminal completion
+# ADR 0081: Registry publication owns its work through terminal completion
 
 2026-11-03 · Status: implemented candidate; validation pending
 
