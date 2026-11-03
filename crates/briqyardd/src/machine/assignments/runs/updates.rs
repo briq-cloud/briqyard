@@ -270,7 +270,7 @@ impl Manager {
         self.room_on_pool(to - from).await?;
 
         let existing = self.inner.store.get::<UpdateIntent>(UPDATES, &record.id)?;
-        let (source_record, mut change, disk_limits, mut target, source_sha256) =
+        let (source_record, mut change, disk_limits, mut target, source_sha256, predecessor_target) =
             if let Some(existing) = existing {
                 existing
                     .check(&current)
@@ -289,8 +289,9 @@ impl Manager {
                     existing.source_record,
                     existing.change,
                     existing.disk_limits,
-                    existing.target,
+                    existing.target.clone(),
                     existing.source_current_sha256,
+                    Some(existing.target),
                 )
             } else {
                 (
@@ -299,6 +300,7 @@ impl Manager {
                     None,
                     Box::new(record.clone()),
                     current.authority_sha256()?,
+                    None,
                 )
             };
 
@@ -323,6 +325,7 @@ impl Manager {
             change,
             disk_limits,
             target: target.clone(),
+            predecessor_target,
             resolved_image: None,
             root_swap: None,
         };
@@ -460,8 +463,10 @@ impl Manager {
         let mut intent_disk_limits = disk_limits.clone();
         let mut resolved_image = None;
         let mut root_swap = None;
+        let mut predecessor_target = None;
         if let Some(existing) = &existing {
             if !existing_is_settlement {
+                predecessor_target = Some(existing.target.clone());
                 source_record = existing.source_record.as_ref().clone();
                 source_current_sha256 = existing.source_current_sha256.clone();
                 change.image = image.or(existing.change.image.clone());
@@ -478,6 +483,16 @@ impl Manager {
                 root_swap = existing.root_swap.clone();
             }
         }
+        // An image equal to the current one changes nothing, so it is not a change of the
+        // intent, unless a pending image has to be canceled by it.
+        if change.image.as_ref() == Some(&source_record.image)
+            && source_record
+                .pending
+                .as_ref()
+                .is_none_or(|pending| pending.image.is_none())
+        {
+            change.image = None;
+        }
         let pending = crate::machine::update::pending_after(&source_record, change.clone());
         let target_disk_limits = intent_disk_limits.as_ref().map_or_else(
             || source_record.disk_limits.clone(),
@@ -489,6 +504,13 @@ impl Manager {
             intent_disk_limits = Some(target_disk_limits.clone());
         }
         if pending == record.pending && target_disk_limits == record.disk_limits {
+            // The same request again: its target is reserved, but the growth may not have
+            // finished before the first one failed.
+            if let Some(existing) = existing.as_ref().filter(|_| !existing_is_settlement) {
+                self.ensure_assigned_volume_update(existing)
+                    .await
+                    .map_err(MError::Other)?;
+            }
             return Ok(self.view(entry));
         }
         let mut target = record.clone();
@@ -532,6 +554,7 @@ impl Manager {
             change,
             disk_limits: intent_disk_limits,
             target: Box::new(target.clone()),
+            predecessor_target,
             resolved_image,
             root_swap,
         };
@@ -594,8 +617,12 @@ impl Manager {
                     .store
                     .put_durable("machines", &update.machine, &repaired)?;
             }
-        } else if matches_update_image(&machine, &update.source_record)
-            && machine.pending == update.source_record.pending
+        } else if (matches_update_image(&machine, &update.source_record)
+            && machine.pending == update.source_record.pending)
+            || update
+                .predecessor_target
+                .as_deref()
+                .is_some_and(|earlier| matches_update_target(&machine, earlier))
         {
             self.inner
                 .store

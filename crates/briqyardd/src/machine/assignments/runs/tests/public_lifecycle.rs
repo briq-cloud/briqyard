@@ -423,6 +423,7 @@ async fn concurrent_assigned_volume_growths_reserve_namespace_quota_atomically()
             },
             disk_limits: None,
             target: Box::new(target.clone()),
+            predecessor_target: None,
             resolved_image: None,
             root_swap: None,
         };
@@ -962,4 +963,112 @@ async fn checkpoint_suspend_start_preserves_current_files_guest_lineage_and_publ
             .await
             .unwrap();
     }
+}
+
+fn volume_patch(size_gb: u32) -> api::UpdateMachineRequest {
+    api::UpdateMachineRequest {
+        spec: api::SpecChange {
+            volume: Some(api::VolumeSize { size_gb }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn coalesced_growth_interrupted_before_record_write_recovers_from_predecessor() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    bounded(h.m.start(&id, None)).await.unwrap();
+    bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+        .await
+        .unwrap();
+    let first_gb = entry.snapshot().volume.as_ref().unwrap().size_gb + 1;
+    let second_gb = first_gb + 1;
+    bounded(h.m.update(&id, volume_patch(first_gb), None))
+        .await
+        .unwrap();
+    let after_first = entry.snapshot();
+    bounded(h.m.update(&id, volume_patch(second_gb), None))
+        .await
+        .unwrap();
+
+    // The second intent replaced the first, then the daemon died before the record write.
+    h.m.inner
+        .store
+        .put_durable("machines", &id, &after_first)
+        .unwrap();
+    restart(&h).expect("the machine at the immediate predecessor of the intent recovers");
+    let entry = h.m.entry(&id).unwrap();
+    assert_eq!(entry.snapshot().volume.as_ref().unwrap().size_gb, second_gb);
+    h.m.recover_assigned_update_backing().await.unwrap();
+    let data = entry.snapshot().data_dataset();
+    assert_eq!(
+        h.pool.zfs.volsize(&data).await.unwrap(),
+        u64::from(second_gb) << 30
+    );
+}
+
+#[tokio::test]
+async fn identical_stopped_growth_retry_finishes_the_unfinished_grow() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    bounded(h.m.start(&id, None)).await.unwrap();
+    bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+        .await
+        .unwrap();
+    let source_gb = entry.snapshot().volume.as_ref().unwrap().size_gb;
+    let target_gb = source_gb + 1;
+    bounded(h.m.update(&id, volume_patch(target_gb), None))
+        .await
+        .unwrap();
+
+    // The target was persisted but the grow did not happen.
+    let data = entry.snapshot().data_dataset();
+    std::fs::write(
+        h.pool.dev().join("byard").join(&data),
+        (u64::from(source_gb) << 30).to_string(),
+    )
+    .unwrap();
+    bounded(h.m.update(&id, volume_patch(target_gb), None))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.pool.zfs.volsize(&data).await.unwrap(),
+        u64::from(target_gb) << 30,
+        "the retry completes the growth instead of acknowledging it"
+    );
+}
+
+#[tokio::test]
+async fn stopped_resize_with_unchanged_image_is_accepted() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    bounded(h.m.start(&id, None)).await.unwrap();
+    bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+        .await
+        .unwrap();
+    let current = entry.snapshot();
+    let larger = api::Size {
+        vcpus: current.size.vcpus + 1,
+        memory_mb: current.size.memory_mb + 256,
+        cpu_millis: None,
+    };
+    let updated = bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                size: Some(larger),
+                image: Some(current.image.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await
+    .expect("an image equal to the current one is not a change");
+    let pending = updated.pending.expect("the size waits for the next start");
+    assert_eq!(pending.size, Some(larger));
+    assert!(pending.image.is_none());
 }

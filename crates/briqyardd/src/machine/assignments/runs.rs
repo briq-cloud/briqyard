@@ -130,6 +130,10 @@ struct UpdateIntent {
     change: api::SpecChange,
     disk_limits: Option<api::DiskLimits>,
     target: Box<Record>,
+    /// The target of the intent this one replaced, while that intent was outstanding. A crash
+    /// between writing this intent and its target leaves the machine at that earlier target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    predecessor_target: Option<Box<Record>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resolved_image: Option<crate::image::Image>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +173,9 @@ impl UpdateIntent {
                 && self.machine == self.source_record.id
                 && self.machine == self.target.id
                 && self.source_record.assigned_run == self.target.assigned_run
+                && self.predecessor_target.as_ref().is_none_or(|earlier| {
+                    earlier.id == self.machine && earlier.assigned_run == self.target.assigned_run
+                })
                 && source_phase_allowed,
             "assigned update source or target differs"
         );
