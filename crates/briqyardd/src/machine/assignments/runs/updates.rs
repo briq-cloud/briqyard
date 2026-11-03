@@ -153,6 +153,17 @@ impl Manager {
 
         // The map lock makes this durable target the quota reservation seen by every other
         // create, start, or growth admission. Persist authority before exposing the new use.
+        // Memory may hold the previous target after its machine write failed. Make that
+        // target durable before discarding its predecessor, using startup's exact validation.
+        // On any failure the old journal and its capacity reservation remain authoritative.
+        if let Some(existing) = self.inner.store.get::<UpdateIntent>(UPDATES, &target.id)? {
+            self.recover_assigned_update(&existing)?;
+            // Matching bytes can come from a rename whose directory sync failed. The
+            // store syncs file contents before rename; complete that durable boundary too.
+            std::fs::File::open(self.inner.store.dir("machines"))
+                .and_then(|directory| directory.sync_all())
+                .context("sync reconciled assigned machine directory")?;
+        }
         self.inner.store.put_durable(UPDATES, &target.id, intent)?;
         *entry.rec.lock().unwrap() = target.clone();
         self.inner

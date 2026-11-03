@@ -1072,3 +1072,116 @@ async fn stopped_resize_with_unchanged_image_is_accepted() {
     assert_eq!(pending.size, Some(larger));
     assert!(pending.image.is_none());
 }
+
+#[tokio::test]
+async fn failed_machine_write_then_coalesce_and_crash_retains_recoverable_authority() {
+    for running in [false, true] {
+        let (h, entry) = stopped(false).await;
+        let id = entry.snapshot().id;
+        bounded(h.m.start(&id, None)).await.unwrap();
+        if !running {
+            bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+                .await
+                .unwrap();
+        }
+        let first_gb = entry.snapshot().volume.as_ref().unwrap().size_gb + 1;
+        bounded(h.m.update(&id, volume_patch(first_gb), None))
+            .await
+            .unwrap();
+        // Fail the real atomic machine write, retaining its previous durable record.
+        let blocked =
+            h.m.inner
+                .store
+                .dir("machines")
+                .join(format!("{id}.json.tmp"));
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(bounded(h.m.update(&id, volume_patch(first_gb + 1), None))
+            .await
+            .is_err());
+        assert_eq!(
+            entry.snapshot().volume.as_ref().unwrap().size_gb,
+            first_gb + 1
+        );
+        let durable: Record = h.m.inner.store.get("machines", &id).unwrap().unwrap();
+        assert_eq!(durable.volume.as_ref().unwrap().size_gb, first_gb);
+        let outstanding: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+        assert!(bounded(h.m.update(&id, volume_patch(first_gb + 2), None))
+            .await
+            .is_err());
+        let retained: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+        // Crash now: discard memory, unblock storage, and run normal startup recovery.
+        std::fs::remove_dir(blocked).unwrap();
+        restart(&h).expect("the last durable machine must still match the retained journal");
+        assert_eq!(
+            retained.digest().unwrap(),
+            outstanding.digest().unwrap(),
+            "failed reconciliation must not replace the outstanding authority"
+        );
+        let recovered = h.m.entry(&id).unwrap().snapshot();
+        assert_eq!(recovered.volume.as_ref().unwrap().size_gb, first_gb + 1);
+        h.m.recover_assigned_update_backing().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn update_shape_rejects_tampered_predecessor_bindings() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    bounded(h.m.start(&id, None)).await.unwrap();
+    bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+        .await
+        .unwrap();
+    let first_gb = entry.snapshot().volume.as_ref().unwrap().size_gb + 1;
+    bounded(h.m.update(&id, volume_patch(first_gb), None))
+        .await
+        .unwrap();
+    bounded(h.m.update(&id, volume_patch(first_gb + 1), None))
+        .await
+        .unwrap();
+    let update: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+    update.check_shape().unwrap();
+    let earlier = serde_json::to_value(update.predecessor_target.as_ref().unwrap()).unwrap();
+    let mutations = [
+        ("id", serde_json::json!("m_other")),
+        ("namespace", serde_json::json!("other")),
+        ("root_key", serde_json::json!("other-root")),
+        ("image", serde_json::json!("other:latest")),
+        ("created_at", serde_json::json!("2000-01-01T00:00:00Z")),
+        ("env", serde_json::json!({"INJECTED": "value"})),
+        ("clone_origin", serde_json::Value::Null),
+        (
+            "volume",
+            serde_json::json!({"size_gb": first_gb, "mount": "/other"}),
+        ),
+        (
+            "volume",
+            serde_json::json!({"size_gb": first_gb - 2, "mount": earlier["volume"]["mount"]}),
+        ),
+        (
+            "volume",
+            serde_json::json!({"size_gb": first_gb + 2, "mount": earlier["volume"]["mount"]}),
+        ),
+        ("volume", serde_json::Value::Null),
+        ("pending", serde_json::json!({"env": {"INJECTED": "value"}})),
+        (
+            "pending",
+            serde_json::json!({"size": {"vcpus": 0, "memory_mb": 0}}),
+        ),
+    ];
+    for (field, value) in mutations {
+        let mut tampered = update.clone();
+        let mut record = earlier.clone();
+        record[field] = value;
+        tampered.predecessor_target = Some(Box::new(serde_json::from_value(record).unwrap()));
+        assert!(
+            tampered.check_shape().is_err(),
+            "tampered predecessor {field} accepted"
+        );
+    }
+    let mut tampered = update.clone();
+    tampered.target.volume.as_mut().unwrap().mount = "/other".into();
+    assert!(
+        tampered.check_shape().is_err(),
+        "target volume mount changed"
+    );
+}

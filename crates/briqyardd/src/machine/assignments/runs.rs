@@ -179,18 +179,10 @@ impl UpdateIntent {
                 && source_phase_allowed,
             "assigned update source or target differs"
         );
-        let mut projected = self.target.as_ref().clone();
-        projected.pending = self.source_record.pending.clone();
-        projected.pending_since = self.source_record.pending_since;
-        projected.version = self.source_record.version;
-        projected.updated_at = self.source_record.updated_at;
-        projected.last_used_at = self.source_record.last_used_at;
-        projected.disk_limits = self.source_record.disk_limits.clone();
-        projected.volume = self.source_record.volume.clone();
-        anyhow::ensure!(
-            serde_json::to_value(projected)? == serde_json::to_value(&*self.source_record)?,
-            "assigned update changes fields outside pending spec and event version"
-        );
+        self.check_record_changes(&self.target)?;
+        if let Some(earlier) = self.predecessor_target.as_deref() {
+            self.check_record_changes(earlier)?;
+        }
         let pending = self.target.pending.as_ref();
         let expected_pending =
             crate::machine::update::pending_after(&self.source_record, self.change.clone());
@@ -245,6 +237,60 @@ impl UpdateIntent {
             }
             _ => anyhow::bail!("assigned image update lacks exact root-swap authority"),
         }
+        Ok(())
+    }
+
+    /// Every recoverable record preserves the source bindings. Only the same bounded
+    /// resize projection is allowed for the target and its immediate predecessor.
+    fn check_record_changes(&self, record: &Record) -> Result<()> {
+        if let Some(pending) = &record.pending {
+            pending.check().map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                pending.entrypoint.is_none()
+                    && pending.cmd.is_none()
+                    && pending.env.is_none()
+                    && pending.files.is_none()
+                    && pending.ports.is_none()
+                    && pending.restart.is_none()
+                    && pending.volume.as_ref().is_none_or(|pending| {
+                        record
+                            .volume
+                            .as_ref()
+                            .is_some_and(|volume| pending.size_gb == volume.size_gb)
+                    }),
+                "assigned update record contains unsupported pending fields"
+            );
+        }
+        anyhow::ensure!(
+            record.pending_since.is_some() == record.pending.is_some(),
+            "assigned update record pending timestamp differs"
+        );
+        let mut projected = record.clone();
+        match (
+            &mut projected.volume,
+            &self.source_record.volume,
+            &self.target.volume,
+        ) {
+            (Some(volume), Some(source), Some(target)) => {
+                anyhow::ensure!(
+                    volume.size_gb >= source.size_gb && volume.size_gb <= target.size_gb,
+                    "assigned update record volume is outside source and target"
+                );
+                volume.size_gb = source.size_gb;
+            }
+            (None, None, None) => {}
+            _ => anyhow::bail!("assigned update record changes volume presence"),
+        }
+        projected.pending = self.source_record.pending.clone();
+        projected.pending_since = self.source_record.pending_since;
+        projected.version = self.source_record.version;
+        projected.updated_at = self.source_record.updated_at;
+        projected.last_used_at = self.source_record.last_used_at;
+        projected.disk_limits = self.source_record.disk_limits.clone();
+        anyhow::ensure!(
+            serde_json::to_value(projected)? == serde_json::to_value(&*self.source_record)?,
+            "assigned update changes fields outside pending spec and event version"
+        );
         Ok(())
     }
 

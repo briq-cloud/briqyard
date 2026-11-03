@@ -26,6 +26,13 @@ run is still active.
   source/target record, `Current`, and reader states at startup; delete the intent only
   after all three durable records agree. A conflicting or unknown state remains
   quarantined with its backing and capacity charges retained.
+- **Reconcile before replacing an outstanding intent.** A failed machine write can leave
+  memory at the latest target while disk still holds its predecessor. Before replacing
+  the intent, validate and durably reconcile that existing transition using startup's exact
+  source/target matching. A failure retains the existing intent and quota reservation.
+  One predecessor is then sufficient; no history chain is needed. Both target and
+  predecessor preserve source ownership, creation, workload and backing bindings, allowing
+  only pending image/size/volume, event versions, disk limits and data-volume size growth.
 - **Treat volume growth as an idempotent external side effect.** Recovery must inspect
   the existing zvol size and either finish growth to the journaled target or retain the
   intent on mismatch. A command error alone cannot establish whether growth occurred.
