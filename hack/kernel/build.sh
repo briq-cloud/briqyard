@@ -96,7 +96,7 @@ find "$ZDIR/module" -name '*.ko' | sort | while read -r ko; do
   install -D -m 0644 "$ko" "$TREE/extra/$(basename "$ko")"
   strip --strip-debug "$TREE/extra/$(basename "$ko")"
 done
-ls -l "$TREE/extra"
+(cd "$TREE" && sha256sum extra/*.ko modules.dep)
 depmod -e -F "$KDIR/System.map" -b "$STAGE" "$RELEASE"
 grep -q '^extra/zfs.ko:' "$TREE/modules.dep" || { echo "zfs.ko is not in modules.dep" >&2; exit 1; }
 
@@ -109,6 +109,13 @@ truncate -s "${mib}M" "$OUT/nested-modules-x86_64.ext4"
 fakeroot sh -c "chown -R 0:0 '$TREE' && mkfs.ext4 -F -q -L briqyard-modules \
   -U 8c1a3c5e-3b1d-4d1e-9d0a-6a1f0b1d0001 -E hash_seed=8c1a3c5e-3b1d-4d1e-9d0a-6a1f0b1d0002 \
   -O ^has_journal -m 0 -d '$TREE' '$OUT/nested-modules-x86_64.ext4'"
+# mke2fs copies each file's change time, which is when it was last touched: zero them.
+{
+  (cd "$TREE" && find . -mindepth 1 | sed 's|^\.||') | while read -r p; do
+    echo "sif \"$p\" ctime 0"; echo "sif \"$p\" ctime_extra 0"
+  done
+  echo "sif <2> ctime 0"; echo "sif <2> ctime_extra 0"
+} | debugfs -w -f - "$OUT/nested-modules-x86_64.ext4" >/dev/null
 e2fsck -fn "$OUT/nested-modules-x86_64.ext4"
 
 step "versions and sums"
