@@ -29,7 +29,9 @@ Facts, read in Firecracker v1.17.0 (`95f868c8e`) and Linux 7.4-rc1 on 2026-11-03
 runtime_classes:
   nested:
     kernel: /var/lib/briqyard/classes/nested/vmlinux
-    modules: /var/lib/briqyard/classes/nested/modules.ext4   # optional
+    modules: /var/lib/briqyard/classes/nested/modules.ext4   # optional, needs release
+    release: 6.18.54-briqyard-nested
+    versions: /var/lib/briqyard/classes/nested/versions.json # optional, for the host's status
     nested: true
 ```
 
@@ -50,16 +52,19 @@ about `nested` on a host configured with a `nested: true` class. The class's ide
 
 **A class's modules reach the guest as a read-only drive.** `modules` is an ext4 image of one
 `lib/modules/<release>` tree with its `depmod` files, built with the class's kernel. The daemon
-attaches it read-only as `/dev/vdd`, the slot after the volume's `/dev/vdc` whether or not the
-machine has a volume, and lists it in the guest's configuration (`mounts`, with `read_only`,
-which ADR 0087 added); the init mounts it at `/lib/modules/<release>` before the program starts. An image never carries modules, so it never has to match a host's kernel. The one
+attaches it read-only as the last drive, after the volume if the machine has one (Firecracker
+names virtio disks in the order it is given them: `/dev/vdd` with a volume, `/dev/vdc` without),
+and lists it in the guest's configuration (`mounts`, with `read_only`, which ADR 0087 added); the
+init mounts it at `/lib/modules/<release>` before the program starts. The class configuration
+carries `release`, which names that directory, and optionally `versions`, the `versions.json` of
+the release, which the host's status reads. An image never carries modules, so it never has to match a host's kernel. The one
 coupling left: an image's ZFS tools must be of the OpenZFS version of the class's `zfs.ko`; the
 host's status shows each class's kernel release and OpenZFS version.
 
 **A nested machine takes no memory snapshot** (fact 1). A stop with `suspend` (asked, idle, a
 daemon's shutdown) is a plain stop, its event saying `suspend: refused (runtime class nested)`;
 a wake is a cold boot; a hand-over (ADR 0051) adopts it as any machine; a snapshot with memory
-and a memory fork are 409 `invalid_state` naming the class; no warm slot or seed is made of it.
+and a memory fork are 409 `bad_state` naming the class; no warm slot or seed is made of it.
 Its disks fork, back up and restore as any machine's.
 
 **The fleet places by class.** A heartbeat lists the classes the host serves
@@ -71,13 +76,17 @@ when one has room (fact 5: a host that serves it shares the risk with every mach
 dedicated host is the intended deployment; no taint primitive, this one rule.
 
 **The `nested` class's kernel is built here.** Firecracker's 6.18 guest configuration (the one
-upstream validates) plus `hack/kernel/nested.config`: `KVM`, `KVM_AMD`, `KVM_INTEL`,
-`NF_TABLES_INET`, `NF_TABLES_BRIDGE`, `NFT_MASQ`, `NFT_REJECT`, `NFT_LIMIT`, `NFT_FIB_INET`,
-`NF_CT_NETLINK`, `MODULE_UNLOAD`, built in. OpenZFS is built against it as a loadable module,
-never into the kernel: CDDL and GPL code combined in one binary is not distributable, a separate
-module is how distributions ship it. The release workflow builds both for x86_64 and pins their
-SHA-256 in `SHA256SUMS-x86_64`; the bootstrap installs them when `BRIQYARD_RUNTIME_CLASSES` names
-`nested`.
+upstream validates) plus `hack/kernel/nested.config`: `VIRTUALIZATION`, `KVM`, `KVM_AMD`,
+`KVM_INTEL`, `NF_TABLES_INET`, `NF_TABLES_BRIDGE`, `NF_TABLES_ARP`, `NFT_BRIDGE_META`, `NFT_MASQ`,
+`NFT_REJECT`, `NFT_REJECT_INET`, `NFT_BRIDGE_REJECT`, `NFT_LIMIT`, `NF_TABLES_IPV6`,
+`NFT_FIB_IPV4`, `NFT_FIB_IPV6`, `NFT_FIB_INET`, `NF_CT_NETLINK`, `MODULE_UNLOAD`, built in, and
+`LOCALVERSION=-briqyard-nested`: the release is `6.18.54-briqyard-nested`. OpenZFS is built against
+it as a loadable module, never into the kernel: CDDL and GPL code combined in one binary is not
+distributable, a separate module is how distributions ship it. The release workflow builds both
+for x86_64 and pins their SHA-256 in `SHA256SUMS-x86_64`: `nested-vmlinux-x86_64`,
+`nested-modules-x86_64.ext4` and `nested-versions-x86_64.json` (`kernel_release`, `kernel`,
+`openzfs`, the sources and their SHA-256). The bootstrap installs them when
+`BRIQYARD_RUNTIME_CLASSES` names `nested`.
 
 **Acceptance.** On an x86_64 host serving `nested`: a `nested` machine lists `/dev/kvm`, and inside
 it `cargo test --workspace` (the root test included), `hack/e2e.sh` and `hack/fleet-smoke.sh`
