@@ -373,6 +373,9 @@ struct RunArgs {
     /// Through a fleet: place a new namespace on a host of this region
     #[arg(long, default_value = "")]
     region: String,
+    /// The runtime class it runs under: `default`, or one the host serves (`nested` has /dev/kvm)
+    #[arg(long, default_value = "")]
+    runtime_class: String,
     /// K=V, repeatable: its metadata, what `machine ls -l` selects on
     #[arg(short = 'l', long = "label")]
     labels: Vec<String>,

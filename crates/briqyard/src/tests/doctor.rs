@@ -82,3 +82,17 @@ fn doctor_reads_needrestart_patterns_as_needrestart_matches_them() {
     assert!(!spared("^briqyard[dx]"));
     assert!(!spared("^dbus"));
 }
+
+#[test]
+fn kvm_options_ask_for_nested_only_with_nested_one() {
+    use crate::doctor::kvm_conf_nested;
+    assert!(!kvm_conf_nested(
+        "options kvm_amd nested=0\noptions kvm_intel nested=0\n"
+    ));
+    assert!(kvm_conf_nested(
+        "options kvm_amd nested=1\noptions kvm_intel nested=1\n"
+    ));
+    assert!(!kvm_conf_nested("# options kvm_intel nested=1\n"));
+    assert!(!kvm_conf_nested("options zfs nested=1\n"));
+    assert!(!kvm_conf_nested(""));
+}

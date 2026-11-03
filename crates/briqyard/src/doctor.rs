@@ -121,9 +121,12 @@ pub(super) fn doctor() {
     if let Some(nested) =
         briqyard_api::kvm::nested(std::path::Path::new(briqyard_api::kvm::SYS_MODULE))
     {
+        // A host that serves the nested runtime class asks for it (ADR 0088).
+        let serves_nested = std::fs::read_to_string("/etc/modprobe.d/briqyard-kvm.conf")
+            .is_ok_and(|conf| kvm_conf_nested(&conf));
         warn(
             "KVM nested virtualization off",
-            !nested,
+            !nested || serves_nested,
             "guests may be given virtualization extensions of their own (ADR 0087): \
              hack/bootstrap-host.sh writes /etc/modprobe.d/briqyard-kvm.conf, applied at the next boot",
         );
@@ -132,6 +135,17 @@ pub(super) fn doctor() {
         eprintln!("{bad} missing");
         std::process::exit(1);
     }
+}
+
+/// Whether the host's KVM options ask for `nested` (the nested runtime class, ADR 0088): the
+/// file `hack/bootstrap-host.sh` writes says `nested=1` for it.
+pub(super) fn kvm_conf_nested(conf: &str) -> bool {
+    conf.lines().any(|line| {
+        let mut words = line.split_whitespace();
+        words.next() == Some("options")
+            && words.next().is_some_and(|m| m.starts_with("kvm_"))
+            && words.any(|w| w == "nested=1")
+    })
 }
 
 /// needrestart's configuration in the order it evaluates it: `needrestart.conf`, then each
