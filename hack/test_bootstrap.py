@@ -118,7 +118,7 @@ fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
         env = dict(os.environ, RELEASE=str(self.release), RELEASE_TOKEN="", ARCH="x86_64",
                    KERNEL_SHA256=self.kernel_sha, KERNEL_URL=str(self.root / "new-kernel"),
                    LIVE_CONFIG=str(self.config), OLD_CONFIG=str(self.old_config),
-                   VALIDATED_CONFIG=str(self.root / "validated"), HANDOVER=str(self.root / "handover"), **extra)
+                   VALIDATED_CONFIG=str(self.root / "validated"), HANDOVER=str(self.root / "handover"), **({"NESTED": "0"} | extra))
         return subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
 
     def assert_untouched(self, result):
@@ -149,6 +149,46 @@ fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(yaml.safe_load(self.config.read_text()), current)
         self.assertEqual({key: Path(current[key]).stat().st_ino for key in before}, before)
+
+    def nested_assets(self):
+        (self.release / "nested-vmlinux-x86_64").write_text("nested kernel\n")
+        (self.release / "nested-modules-x86_64.ext4").write_text("nested modules\n")
+        (self.release / "nested-versions-x86_64.json").write_text(
+            json.dumps({"kernel_release": "6.18.54-briqyard-nested", "openzfs": "2.4.1"}))
+        self.sums()
+
+    def test_nested_class_is_installed_by_digest_and_written_to_the_config(self):
+        self.nested_assets()
+        result = self.run_install(NESTED="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        classes = yaml.safe_load(self.config.read_text())["runtime_classes"]
+        self.assertEqual(list(classes), ["nested"])
+        written = json.loads(json.dumps(classes))
+        nested = classes["nested"]
+        self.assertTrue(nested.pop("nested"))
+        self.assertEqual(nested.pop("release"), "6.18.54-briqyard-nested")
+        for field, name in (("kernel", "vmlinux"), ("modules", "modules.ext4"), ("versions", "versions.json")):
+            path = Path(nested.pop(field))
+            self.assertEqual(path.name, name)
+            self.assertEqual(path.parent.name, sha(path))
+            self.assertEqual(path.parent.parent, self.root / "var/lib/briqyard/classes/nested")
+        self.assertEqual(nested, {})
+        # Run again: the same paths, one class.
+        self.old_config.write_bytes(self.config.read_bytes())
+        again = self.run_install(NESTED="1")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(yaml.safe_load(self.config.read_text())["runtime_classes"], written)
+
+    def test_nested_class_asset_with_another_digest_refuses_before_anything_is_activated(self):
+        self.nested_assets()
+        (self.release / "nested-modules-x86_64.ext4").write_text("tampered\n")
+        self.assert_untouched(self.run_install(NESTED="1"))
+
+    def test_no_class_without_the_variable(self):
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("runtime_classes", yaml.safe_load(self.config.read_text()))
+        self.assertFalse((self.root / "var/lib/briqyard/classes").exists())
 
     def test_floor_can_advance_after_probes_before_copy_with_full_candidate(self):
         floor = self.root / "data/state/meta/required-assignment-protocol.json"

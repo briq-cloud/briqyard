@@ -458,6 +458,9 @@ pub(super) fn refuse_class(
     class: &str,
     region: &str,
 ) -> Result<(), Refusal> {
+    if api::class_name(class) == api::DEFAULT_CLASS {
+        return Ok(());
+    }
     let why = match host.and_then(|id| reg.hosts.get(id)) {
         Some(h) => h.without_class(namespace, class),
         None if host.is_some() => None,

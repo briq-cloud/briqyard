@@ -299,7 +299,7 @@ impl Manager {
             // The root disk comes from the backup: made from what it was made from.
             rec.root_key = was.root_key;
             rec.runtime_class = classes::inherited(
-                &rec.runtime_class,
+                &req.runtime_class,
                 &was.runtime_class,
                 "a restore",
                 "the backup's",
@@ -358,7 +358,7 @@ impl Manager {
             })?;
             let sr = s.snapshot();
             rec.runtime_class = classes::inherited(
-                &rec.runtime_class,
+                &req.runtime_class,
                 &sr.runtime_class,
                 "a fork",
                 "its source's",

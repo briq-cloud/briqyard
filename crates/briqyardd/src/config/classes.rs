@@ -5,7 +5,7 @@ use super::*;
 /// One class: the kernel its machines boot, the modules that go with it, and whether they see
 /// the CPU's virtualization extensions.
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct RuntimeClass {
     /// The uncompressed guest kernel.
     pub kernel: PathBuf,

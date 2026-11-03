@@ -51,6 +51,7 @@ fn bootstrap_config_creation_preserves_existing_operator_warm_policy() {
             .env("jailer", "/test/jailer")
             .env("kernel", "/test/kernel")
             .env("init", "/test/init")
+            .env("NESTED", "0")
             .status()
             .unwrap()
     };

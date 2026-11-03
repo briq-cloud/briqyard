@@ -117,16 +117,19 @@ async fn the_guest_mounts_the_modules_read_only_at_their_release() {
     assert!(h.m.modules_mount(&rec).is_none());
     rec.runtime_class.clear();
     assert!(h.m.modules_mount(&rec).is_none());
-    // The mount is in the config drive the boot reads.
-    let gw = Ipv4Addr::new(10, 64, 1, 1);
+    // The mount is in the config drive the boot reads, after the volume's.
+    let mut rec = record();
     rec.runtime_class = "nested".into();
-    let drive = config_drive(&rec, gw, h.m.modules_mount(&rec)).unwrap();
+    let drive = config_drive(&rec, Ipv4Addr::new(10, 64, 1, 1), h.m.modules_mount(&rec)).unwrap();
     let mut tar = tar::Archive::new(std::io::Cursor::new(drive));
     let mut entry = tar.entries().unwrap().next().unwrap().unwrap();
     let cfg: guest::Config = serde_json::from_reader(&mut entry).unwrap();
-    let last = cfg.mounts.last().unwrap();
-    assert_eq!(last.device, "/dev/vdd");
-    assert!(last.read_only);
+    let devices: Vec<_> = cfg
+        .mounts
+        .iter()
+        .map(|m| (m.device.as_str(), m.read_only))
+        .collect();
+    assert_eq!(devices, [("/dev/vdc", false), ("/dev/vdd", true)]);
 }
 
 #[tokio::test]

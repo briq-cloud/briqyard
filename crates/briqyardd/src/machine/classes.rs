@@ -25,7 +25,7 @@ pub(super) fn inherited(
     what: &str,
     whose: &str,
 ) -> Result<String, MError> {
-    if !requested.is_empty() && requested != source {
+    if !requested.is_empty() && normalized(requested) != source {
         return Err(invalid(format!(
             "{what} keeps {whose} runtime class ({}), and the request says {requested}",
             api::class_name(source)
