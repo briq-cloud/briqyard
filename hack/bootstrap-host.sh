@@ -34,6 +34,11 @@
 # fleet's, asked with BRIQYARD_TOKEN and never written here; without, a key made into
 # BRIQYARD_KEY_FILE (/etc/briqyard/pool.key, 0600). Swap is turned off for good: guest memory
 # paged out would reach a disk in clear.
+#
+# BRIQYARD_RUNTIME_CLASSES=nested (x86_64, with BRIQYARD_RELEASE; set it on every run) makes the
+# host serve the `nested` runtime class (ADR 0088): the release's kernel and modules go to
+# /var/lib/briqyard/classes/nested, the class is written into the config, and KVM keeps `nested`
+# on, so machines of that class can run a hypervisor. Without it KVM loads with `nested` off.
 set -euo pipefail
 POOL=${BRIQYARD_POOL:-byard}
 POOL_DEVICE=${BRIQYARD_POOL_DEVICE:-}
@@ -53,6 +58,12 @@ ALLOW_PUBLIC=${ALLOW_PUBLIC:-}
 ARC_GB=${BRIQYARD_ARC_GB:-}
 KEY_FILE=${BRIQYARD_KEY_FILE:-/etc/briqyard/pool.key}
 ARCH=$(uname -m)
+CLASSES=${BRIQYARD_RUNTIME_CLASSES:-}
+NESTED=0
+for class in ${CLASSES//,/ }; do
+  [ "$class" = nested ] || { echo "BRIQYARD_RUNTIME_CLASSES: $class is not a class the release builds (nested)"; exit 1; }
+  NESTED=1
+done
 
 # Release installs use their checked Firecracker bundle. Local ./bin installs use the pinned
 # upstream archive below. Boot identity includes binary and kernel digests: version equality
@@ -73,6 +84,10 @@ esac
 
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 [ -e /dev/kvm ] || { echo "/dev/kvm is missing: this server has no KVM"; exit 1; }
+if [ "$NESTED" = 1 ]; then
+  [ "$ARCH" = x86_64 ] || { echo "BRIQYARD_RUNTIME_CLASSES=nested needs an x86_64 host"; exit 1; }
+  [ -n "$RELEASE" ] || { echo "BRIQYARD_RUNTIME_CLASSES=nested installs the release's kernel and modules: set BRIQYARD_RELEASE"; exit 1; }
+fi
 [ -n "$KERNEL_SHA256" ] || { echo "KERNEL_SHA256 is not pinned for $ARCH: set it to the sha256sum of $KERNEL_URL"; exit 1; }
 # The token goes into a configuration written now, and asks the fleet for the pool's key; an
 # upgrade (a configuration there, the pool open) needs neither (ADR 0027).
@@ -160,14 +175,23 @@ echo "$((ARC_GB << 30))" > /sys/module/zfs/parameters/zfs_arc_max
 echo "   at most $ARC_GB GB"
 
 # No guest runs a hypervisor of its own (ADR 0087): KVM keeps the extensions out of its
-# supported CPUID, and the daemon clears them from every guest as well. The parameter is
-# read-only while the module is loaded: it applies from the next boot.
-echo "== kvm nested off"
-cat > /etc/modprobe.d/briqyard-kvm.conf <<'EOF'
-options kvm_amd nested=0
-options kvm_intel nested=0
+# supported CPUID, and the daemon clears them from every guest as well. Only a host that serves
+# the nested class (ADR 0088) loads KVM with `nested` on. The parameter is read-only while the
+# module is loaded: it applies from the next boot, or now when no machine runs.
+echo "== kvm nested $([ "$NESTED" = 1 ] && echo on || echo off)"
+cat > /etc/modprobe.d/briqyard-kvm.conf <<EOF
+options kvm_amd nested=$NESTED
+options kvm_intel nested=$NESTED
 EOF
-echo "   from the next boot"
+kvm_nested() { cat /sys/module/kvm_intel/parameters/nested /sys/module/kvm_amd/parameters/nested 2>/dev/null | head -n1 || true; }
+if [ "$NESTED" = 1 ] && [[ "$(kvm_nested)" != [Y1] ]]; then
+  if ! pgrep -x firecracker >/dev/null; then
+    modprobe -r kvm_intel kvm_amd 2>/dev/null || true
+    modprobe kvm_intel 2>/dev/null || modprobe kvm_amd 2>/dev/null || true
+  fi
+  [[ "$(kvm_nested)" == [Y1] ]] || fail "KVM is loaded with nested off and machines run: reboot the host, then run this again (nothing activated)"
+fi
+echo "   done"
 
 echo "== no swap"
 # Guest memory the kernel pages out would land on a disk in clear (ADR 0026): swap goes, and
@@ -508,6 +532,45 @@ path.write_bytes(text.encode("utf-8"))
 PYCONFIG
 }
 
+# Writes the class into the config's `runtime_classes`: the whole block is replaced when it is
+# there, appended when not. The class's files are immutable, so a new release is a new path.
+runtime_class() {
+  python3 - "$@" <<'PYCLASS'
+import json
+from pathlib import Path
+import sys
+import yaml
+
+path, name, kernel, modules, release, versions = sys.argv[1:]
+text = Path(path).read_bytes().decode("utf-8")
+try:
+    config = yaml.compose(text)
+except yaml.YAMLError:
+    raise SystemExit("cannot parse runtime configuration") from None
+if not isinstance(config, yaml.MappingNode) or config.flow_style:
+    raise SystemExit("runtime classes require a block configuration mapping")
+block = "runtime_classes:\n  %s:\n" % name + "".join(
+    "    %s: %s\n" % (k, json.dumps(v) if isinstance(v, str) else str(v).lower())
+    for k, v in (("kernel", kernel), ("modules", modules), ("release", release),
+                 ("versions", versions), ("nested", True)))
+spans = [(k.start_mark.index, v.end_mark.index) for k, v in config.value
+         if isinstance(k, yaml.ScalarNode) and k.value == "runtime_classes"]
+if len(spans) > 1:
+    raise SystemExit("duplicate runtime_classes in configuration")
+if spans:
+    start, end = spans[0]
+    after = text[end:]
+    text = text[:start] + block.rstrip("\n") + ("" if after.startswith("\n") else "\n") + after
+else:
+    text += ("" if not text or text.endswith("\n") else "\n") + block
+try:
+    yaml.compose(text)
+except yaml.YAMLError:
+    raise SystemExit("cannot preserve runtime configuration syntax") from None
+Path(path).write_bytes(text.encode("utf-8"))
+PYCLASS
+}
+
 runtime_kernel() {
   python3 - "$1" <<'PYKERNEL'
 from pathlib import Path
@@ -753,6 +816,13 @@ if [ -n "$RELEASE" ]; then
     sha=$(awk -v f="$asset" '$2 == f {print $1}' "$new/SHA256SUMS")
     [[ "$sha" =~ ^[a-f0-9]{64}$ ]] && echo "$sha  $new/$b" | sha256sum -c --quiet - 2>/dev/null || fail "$asset: digest differs from the release's SHA256SUMS-$ARCH"
   done
+  if [ "$NESTED" = 1 ]; then
+    for asset in nested-vmlinux-x86_64 nested-modules-x86_64.ext4 nested-versions-x86_64.json; do
+      release_file "$asset" "$new/$asset"
+      sha=$(awk -v f="$asset" '$2 == f {print $1}' "$new/SHA256SUMS")
+      [[ "$sha" =~ ^[a-f0-9]{64}$ ]] && echo "$sha  $new/$asset" | sha256sum -c --quiet - 2>/dev/null || fail "$asset: digest differs from the release's SHA256SUMS-$ARCH"
+    done
+  fi
   checked_bundle "$new/firecracker-checked" "$ARCH" "$new/checked"
   cp "$new/checked/firecracker" "$new/firecracker"
   cp "$new/checked/jailer" "$new/jailer"
@@ -777,6 +847,18 @@ fi
 if ! echo "$KERNEL_SHA256  $kernel" | sha256sum -c --quiet - 2>/dev/null; then
   fetch "$KERNEL_URL" "$KERNEL_SHA256" "$new/vmlinux"
   kernel=$(immutable_runtime "$new/vmlinux" vmlinux)
+fi
+
+# The nested class's files, immutable like the runtime's: by digest under the class's directory.
+if [ "$NESTED" = 1 ]; then
+  runtime_root=/var/lib/briqyard/classes/nested
+  class_kernel=$(immutable_runtime "$new/nested-vmlinux-x86_64" vmlinux)
+  class_modules=$(immutable_runtime "$new/nested-modules-x86_64.ext4" modules.ext4)
+  class_versions=$(immutable_runtime "$new/nested-versions-x86_64.json" versions.json)
+  runtime_root=/usr/local/lib/briqyard/runtime
+  class_release=$(jq -r .kernel_release "$new/nested-versions-x86_64.json")
+  [ -n "$class_release" ] && [ "$class_release" != null ] || fail "nested-versions-x86_64.json has no kernel_release"
+  echo "   nested: kernel $class_release, OpenZFS $(jq -r .openzfs "$new/nested-versions-x86_64.json")"
 fi
 
 echo "== config"
@@ -820,6 +902,7 @@ EOF
 fi
 # One candidate contains all changed launch paths. Validate it with the staged daemon.
 runtime_config "$candidate" "$firecracker" "$jailer" "$kernel" "$init"
+[ "$NESTED" = 0 ] || runtime_class "$candidate" nested "$class_kernel" "$class_modules" "$class_release" "$class_versions"
 chmod 0600 "$candidate"
 daemon_sha=$(sha256sum "$new/briqyardd" | awk '{print $1}')
 runtime_assignment_compatible "$new/briqyardd" "$config_path" "$candidate" || fail "assignment state requires a compatible daemon: nothing activated"
