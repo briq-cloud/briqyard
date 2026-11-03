@@ -112,7 +112,7 @@ fn a_host_under_pressure_takes_no_new_namespace() {
     let mut cleared = host("a", 100_000, 0, 1);
     cleared.conditions = vec![condition(api::condition::DISK_PRESSURE, false)];
     reg.heartbeat(cleared, now);
-    assert_eq!(reg.place("t2", "", "", 512, 0, 0, &p).as_deref(), Some("a"));
+    assert_eq!(reg.place("t2", "", 512, 0, 0, &p).as_deref(), Some("a"));
 }
 
 /// A host of `region` with `free` MB of memory and `disk` MB of disk free.
@@ -185,9 +185,9 @@ fn a_shortage_names_what_ran_out() {
     // No region asked: every region's hosts, and none has 1 TB.
     assert_eq!(short("", 30_000, 1_000_000), Resource::Disk);
     // What place refuses, shortage names; what it takes, it would not be asked about.
-    assert_eq!(reg.place("t1", "gra", "", 30_000, 10_000, 0, &p), None);
+    assert_eq!(reg.place("t1", "gra", 30_000, 10_000, 0, &p), None);
     assert_eq!(
-        reg.place("t2", "gra", "", 30_000, 2_000, 0, &p).as_deref(),
+        reg.place("t2", "gra", 30_000, 2_000, 0, &p).as_deref(),
         Some("a")
     );
 }
@@ -205,22 +205,18 @@ fn a_new_namespace_is_placed_in_its_region_and_its_region_is_its_hosts() {
     let p = Policy::default();
     // vin1 is the emptiest; t1 asks for gra.
     assert_eq!(
-        reg.place("t1", "gra", "", 512, 0, 0, &p).as_deref(),
+        reg.place("t1", "gra", 512, 0, 0, &p).as_deref(),
         Some("gra1")
     );
     assert_eq!(reg.region_of("t1"), Some("gra"));
     assert_eq!(
-        reg.place("t2", "", "", 512, 0, 0, &p).as_deref(),
+        reg.place("t2", "", 512, 0, 0, &p).as_deref(),
         Some("vin1"),
         "any"
     );
+    assert_eq!(reg.place("t3", "sgp", 512, 0, 0, &p), None, "no host there");
     assert_eq!(
-        reg.place("t3", "sgp", "", 512, 0, 0, &p),
-        None,
-        "no host there"
-    );
-    assert_eq!(
-        reg.place("t4", "gra", "", 60_000, 0, 0, &p),
+        reg.place("t4", "gra", 60_000, 0, 0, &p),
         None,
         "the region is full, whatever the others have"
     );
@@ -228,7 +224,7 @@ fn a_new_namespace_is_placed_in_its_region_and_its_region_is_its_hosts() {
     // Pinned, a namespace's machines go to its host whatever is asked: the caller refuses
     // another region.
     assert_eq!(
-        reg.place("t1", "vin", "", 512, 0, 0, &p).as_deref(),
+        reg.place("t1", "vin", 512, 0, 0, &p).as_deref(),
         Some("gra1")
     );
     let h = reg.host_of_namespace("t1").unwrap();
@@ -319,8 +315,7 @@ fn a_heartbeat_drops_pins_the_host_no_longer_has() {
     reg.namespaces.insert("tb".into(), "b".into());
     // A placement just pinned t3 to a (the emptier host); a does not list it yet: the pin stays.
     assert_eq!(
-        reg.place("t3", "", "", 10, 0, 0, &Policy::default())
-            .as_deref(),
+        reg.place("t3", "", 10, 0, 0, &Policy::default()).as_deref(),
         Some("a")
     );
     let mut a = host("a", 1000, 0, 1);
@@ -379,7 +374,7 @@ fn retire_waits_for_the_host_to_empty() {
         ["a"]
     );
     assert_eq!(
-        reg.place("t2", "", "", 10, 0, 0, &Policy::default()),
+        reg.place("t2", "", 10, 0, 0, &Policy::default()),
         None,
         "no placement on a retiring host"
     );
@@ -390,7 +385,7 @@ fn retire_waits_for_the_host_to_empty() {
         assert_eq!(reg.hosts["a"].state, state);
         assert!(reg.retirable().is_empty(), "{state}");
         assert_eq!(
-            reg.place("t2", "", "", 10, 0, 0, &Policy::default()),
+            reg.place("t2", "", 10, 0, 0, &Policy::default()),
             None,
             "{state}"
         );
@@ -409,35 +404,32 @@ fn placement_pins_namespaces_and_picks_the_emptiest_host() {
     reg.heartbeat(host("b", 100_000, 20_000, 2), now);
     reg.heartbeat(host("c", 100_000, 50_000, 5), now);
     let p = Policy::default();
-    assert_eq!(reg.place("t1", "", "", 512, 0, 0, &p).as_deref(), Some("b"));
+    assert_eq!(reg.place("t1", "", 512, 0, 0, &p).as_deref(), Some("b"));
     assert_eq!(
-        reg.place("t1", "", "", 512, 0, 0, &p).as_deref(),
+        reg.place("t1", "", 512, 0, 0, &p).as_deref(),
         Some("b"),
         "a namespace stays where it is"
     );
     // c is next; a is over the ceiling.
     reg.hosts.get_mut("b").unwrap().used.memory_mb = 99_000;
-    assert_eq!(reg.place("t2", "", "", 512, 0, 0, &p).as_deref(), Some("c"));
+    assert_eq!(reg.place("t2", "", 512, 0, 0, &p).as_deref(), Some("c"));
     assert_eq!(
-        reg.place("t3", "", "", 60_000, 0, 0, &p),
+        reg.place("t3", "", 60_000, 0, 0, &p),
         None,
         "nothing has room"
     );
     reg.hosts.get_mut("c").unwrap().disk_free_mb = 1000;
     assert_eq!(
-        reg.place("t4", "", "", 512, 5000, 0, &p),
+        reg.place("t4", "", 512, 5000, 0, &p),
         None,
         "c has memory but no disk"
     );
-    assert_eq!(
-        reg.place("t5", "", "", 512, 500, 0, &p).as_deref(),
-        Some("c")
-    );
+    assert_eq!(reg.place("t5", "", 512, 500, 0, &p).as_deref(), Some("c"));
 }
 
 /// `place` and `hold`, as a create does them.
 fn placed(reg: &mut Registry, namespace: &str, mb: u32, disk: u64) -> Option<(String, u64)> {
-    let host = reg.place(namespace, "", "", mb, disk, 0, &Policy::default())?;
+    let host = reg.place(namespace, "", mb, disk, 0, &Policy::default())?;
     let hold = reg.hold(&host, mb, disk, 0);
     Some((host, hold))
 }
@@ -588,22 +580,21 @@ fn cpu_holds_reserve_fractional_slots_and_cpu_full_hosts_are_not_placed() {
     for i in 0..4 {
         let namespace = format!("n{i}");
         assert_eq!(
-            reg.place(&namespace, "", "", 128, 0, 250, &policy)
-                .as_deref(),
+            reg.place(&namespace, "", 128, 0, 250, &policy).as_deref(),
             Some("fraction")
         );
         holds.push(reg.hold("fraction", 128, 0, 250));
     }
     assert_eq!(reg.hosts["fraction"].used.cpu_millis(), 1000);
-    assert!(reg.place("full", "", "", 128, 0, 250, &policy).is_none());
+    assert!(reg.place("full", "", 128, 0, 250, &policy).is_none());
     assert_eq!(reg.shortage("", 128, 0, 250, &policy), Resource::Cpu);
     reg.release("fraction", holds[0]);
     assert_eq!(
-        reg.place("freed", "", "", 128, 0, 250, &policy).as_deref(),
+        reg.place("freed", "", 128, 0, 250, &policy).as_deref(),
         Some("fraction")
     );
     reg.hosts.get_mut("fraction").unwrap().capacity.cpu_millis = None;
-    assert!(reg.place("legacy", "", "", 128, 0, 250, &policy).is_none());
+    assert!(reg.place("legacy", "", 128, 0, 250, &policy).is_none());
 }
 
 #[test]
@@ -618,25 +609,31 @@ fn a_class_is_placed_on_a_host_that_serves_it_and_default_avoids_nested() {
     }];
     reg.heartbeat(with, now);
     reg.heartbeat(host("without", 100_000, 80_000, 1), now);
-    let p = Policy::default();
+    let with_class = |class: &str| Policy {
+        runtime_class: class.into(),
+        ..Policy::default()
+    };
     // `with` has the most room, and the only one that serves nested.
     assert_eq!(
-        reg.place("t1", "", "nested", 512, 0, 0, &p).as_deref(),
+        reg.place("t1", "", 512, 0, 0, &with_class("nested"))
+            .as_deref(),
         Some("with")
     );
-    assert_eq!(reg.place("t2", "", "gvisor", 512, 0, 0, &p), None);
+    assert_eq!(reg.place("t2", "", 512, 0, 0, &with_class("gvisor")), None);
     // A default namespace goes to `without` while it has room, whatever the memory says.
     assert_eq!(
-        reg.place("t3", "", "", 512, 0, 0, &p).as_deref(),
+        reg.place("t3", "", 512, 0, 0, &with_class("")).as_deref(),
         Some("without")
     );
     assert_eq!(
-        reg.place("t4", "", "default", 512, 0, 0, &p).as_deref(),
+        reg.place("t4", "", 512, 0, 0, &with_class("default"))
+            .as_deref(),
         Some("without")
     );
     // And to `with` when `without` has none.
     assert_eq!(
-        reg.place("t5", "", "", 30_000, 0, 0, &p).as_deref(),
+        reg.place("t5", "", 30_000, 0, 0, &with_class(""))
+            .as_deref(),
         Some("with")
     );
     let h = &reg.hosts["without"];

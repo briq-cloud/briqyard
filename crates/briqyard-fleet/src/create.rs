@@ -129,6 +129,7 @@ pub(super) async fn create_machine(
         } else {
             "init-ready-v1".into()
         },
+        runtime_class: req.runtime_class.clone(),
         ..st.policy.clone()
     };
     let ask = Ask {
@@ -248,7 +249,6 @@ pub(super) async fn create_machine(
                 reg.place(
                     &req.namespace,
                     &req.region,
-                    &req.runtime_class,
                     ask.memory_mb,
                     ask.disk_mb,
                     ask.cpu_millis,

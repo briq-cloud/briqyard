@@ -330,6 +330,8 @@ pub struct Policy {
     pub require_egress_siblings: bool,
     pub require_named_memory: bool,
     pub named_memory_profile: String,
+    /// The runtime class the placement serves (ADR 0088); empty: `default`.
+    pub runtime_class: String,
     /// A host above this share of its memory takes no new namespace.
     pub fill_ceiling: f64,
     /// A host silent for this long is down.
@@ -342,6 +344,7 @@ impl Default for Policy {
             require_egress_siblings: false,
             require_named_memory: false,
             named_memory_profile: "init-ready-v1".into(),
+            runtime_class: String::new(),
             fill_ceiling: 0.85,
             down_after: Duration::seconds(60),
         }
@@ -570,7 +573,6 @@ impl Registry {
         &mut self,
         namespace: &str,
         region: &str,
-        class: &str,
         need_mb: u32,
         need_disk_mb: u64,
         need_cpu_millis: u32,
@@ -591,7 +593,7 @@ impl Registry {
                                         .iter()
                                         .any(|p| p == &policy.named_memory_profile)))
                             && (region.is_empty() || h.region == region)
-                            && api::serves_class(&h.runtime_classes, class)
+                            && api::serves_class(&h.runtime_classes, &policy.runtime_class)
                             && h.free_memory_mb() >= need_mb
                             && h.has_disk(need_disk_mb)
                             && h.has_cpu(need_cpu_millis)
@@ -599,8 +601,9 @@ impl Registry {
                     // A default machine goes where nothing runs a hypervisor of its own when
                     // such a host has room (ADR 0088); then the most free memory.
                     .max_by_key(|h| {
-                        let shared_with_nested =
-                            api::class_name(class) == api::DEFAULT_CLASS && h.serves_nested();
+                        let shared_with_nested = api::class_name(&policy.runtime_class)
+                            == api::DEFAULT_CLASS
+                            && h.serves_nested();
                         (!shared_with_nested, h.free_memory_mb())
                     })?;
                 let id = best.id.clone();
