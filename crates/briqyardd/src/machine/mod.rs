@@ -29,6 +29,7 @@ use tokio::sync::{broadcast, Notify};
 
 mod assignments;
 mod backups;
+mod classes;
 mod create;
 mod endpoints;
 mod exec;
@@ -90,6 +91,10 @@ pub enum MError {
     NotRunning(String),
     #[error("machine is busy: {0}")]
     BadState(String),
+    /// The machine's runtime class does not do what was asked (ADR 0088): a memory snapshot of
+    /// a nested machine.
+    #[error("{0}")]
+    Refused(String),
     #[error("the host is full: {0}")]
     Capacity(String),
     /// Past a limit of the namespace's quota (ADR 0025).
@@ -193,6 +198,9 @@ pub struct Record {
     #[serde(default)]
     pub files: Vec<api::File>,
     pub size: api::Size,
+    /// The runtime class it boots under (ADR 0088); empty: `default`. Fixed for its life.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime_class: String,
     #[serde(default)]
     pub volume: Option<api::VolumeSpec>,
     #[serde(default)]
