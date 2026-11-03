@@ -29,6 +29,11 @@ run is still active.
   intent on mismatch. A command error alone cannot establish whether growth occurred.
   Do not expose the new logical volume size until its target is durable. A resize that
   changes the next boot's workload invalidates any saved memory checkpoint.
+- **Bind image changes to root replacement before the next run is reserved.** Image
+  resolution and the intended image identity must be durable before the root swap starts.
+  Recovery may finish or refuse the existing `.next` swap only under that exact intent;
+  it must not let ordinary swap cleanup change the root GUID behind a settled run. The
+  next run records the verified resulting root GUID before launch.
 - **Keep run evidence immutable and chain the control change explicitly.** The update
   must not rewrite the observed process proof, run sequence, creation receipt, source
   identity, or prior-run hash. The run journal and reader must authenticate the update
