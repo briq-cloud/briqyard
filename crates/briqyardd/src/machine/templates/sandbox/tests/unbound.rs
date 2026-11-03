@@ -192,6 +192,20 @@ async fn desired_zero_falls_back_to_the_same_seed_restore() {
 }
 
 #[tokio::test]
+async fn stale_operator_catalog_makes_the_unbound_pool_a_seed_restore_miss() {
+    let (h, seed, slot) = bounded(pool()).await;
+    h.m.inner.warm_policy.lock().unwrap().catalog.clear();
+
+    let request = destination(seed);
+    let (entry, make) = bounded(h.m.record(request.clone(), None)).await.unwrap();
+    assert_ne!(entry.snapshot().id, slot.snapshot().id);
+    assert!(matches!(make, Make::Fork(_, _)));
+    let binding = entry.snapshot().clone_origin.unwrap().sandbox.unwrap();
+    assert_eq!(binding.create_sha256, request_digest(&request).unwrap());
+    assert!(slot.snapshot().warm_slot.unwrap().claimed.is_none());
+}
+
+#[tokio::test]
 async fn invalid_resources_and_uncertain_intent_never_consume_another_destination() {
     let (h, seed, slot) = bounded(pool()).await;
     let mut request = destination(seed);

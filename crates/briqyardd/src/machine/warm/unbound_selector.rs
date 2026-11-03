@@ -48,7 +48,14 @@ impl Manager {
             if pool.closed || pool.desired == 0 {
                 continue;
             }
-            self.pool_current(&pool)?;
+            // A pool is only an accelerator for this already-valid seed request. If its
+            // operator catalog or source artifact has gone stale, do not let that stale
+            // accelerator prevent the ordinary seed restore from serving the request.
+            match self.pool_current(&pool) {
+                Ok(()) => {}
+                Err(MError::Invalid(_) | MError::Conflict(_) | MError::NotFound) => continue,
+                Err(error) => return Err(error),
+            }
             if pool.artifact.recipe.image != request.image
                 || !pool
                     .artifact
