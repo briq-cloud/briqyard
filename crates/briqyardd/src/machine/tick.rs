@@ -247,7 +247,7 @@ impl Manager {
     /// Removes unused images until they freed `need` bytes: an image a record names is in
     /// use, even before its machine's disk clones it.
     async fn free_images(&self, need: u64) {
-        let named: std::collections::HashSet<String> = self
+        let mut named: std::collections::HashSet<String> = self
             .inner
             .machines
             .lock()
@@ -255,6 +255,13 @@ impl Manager {
             .values()
             .map(|e| e.rec.lock().unwrap().image_key.clone())
             .collect();
+        match self.assigned_update_images() {
+            Ok(images) => named.extend(images),
+            Err(error) => {
+                tracing::warn!(err = %error, "assigned updates unreadable: image pressure cleanup deferred");
+                return;
+            }
+        }
         match self.inner.images.free(need, &named).await {
             Ok((0, _)) => {}
             Ok((n, freed)) => tracing::info!(

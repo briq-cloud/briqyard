@@ -10,9 +10,19 @@ impl Manager {
             .context("current run missing")?;
         current.check()?;
         self.check_run_creation_authority(&current)?;
+        let update = self.inner.store.get::<UpdateIntent>(UPDATES, &record.id)?;
+        let record_matches = match update {
+            Some(update) => {
+                update.check(&current)?;
+                updates::matches_authorized_update_target(record, &current, &update)?
+            }
+            None => {
+                current.record_fingerprint(record)?
+                    == current.record_fingerprint(&current.target)?
+            }
+        };
         anyhow::ensure!(
-            current.record_fingerprint(record)? == current.record_fingerprint(&current.target)?
-                && record.assigned_run.as_ref() == Some(&current.reference),
+            record_matches && record.assigned_run.as_ref() == Some(&current.reference),
             "record differs from current run authority"
         );
         let reader: Reader = self

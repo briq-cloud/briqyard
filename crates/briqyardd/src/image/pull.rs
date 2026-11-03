@@ -67,6 +67,9 @@ impl Builder {
     /// `ensure`, calling `pulling` once when this call waits for a pull: its own, a turn for
     /// one, or another call's of the same image (a create's `pulling` event, ADR 0048).
     pub async fn ensure_noting(&self, reference: &str, pulling: impl Fn()) -> Result<Image> {
+        #[cfg(test)]
+        self.ensure_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let noted = std::sync::Once::new();
         let pulling = || noted.call_once(&pulling);
         let r: Reference = reference

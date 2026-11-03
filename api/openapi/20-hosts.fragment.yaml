@@ -336,7 +336,7 @@
         memory_mb: { type: integer, minimum: 0 }
         cpu_millis: { type: integer, minimum: 0 }
         root_disk_gb: { type: integer, minimum: 0, description: "Full logical roots, without a copy-on-write discount" }
-        data_disk_gb: { type: integer, minimum: 0, default: 0, description: "Full newly allocated data volumes, without a sharing discount; omitted when zero" }
+        data_disk_gb: { type: integer, minimum: 0, default: 0, description: "Full logical data-volume liability; zero budget permits none; omitted when zero" }
     WarmCatalogEntry:
       type: object
       required: [id, namespace, type, source_machine, snapshot, generation, size, max_ready]

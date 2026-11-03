@@ -3106,8 +3106,8 @@
     {
       "id": 35,
       "type": "timeseries",
-      "title": "Warm logical root reservations",
-      "description": "Full logical root sizes, including failed or unreleased slots. These are not physical disk usage; copy-on-write sharing does not reduce the reservation.",
+      "title": "Warm logical disk reservations",
+      "description": "Full logical root and data-volume sizes, including failed or unreleased slots. These are not physical disk usage; copy-on-write sharing does not reduce the reservation.",
       "datasource": {
         "type": "prometheus",
         "uid": "briqyard-prometheus"
@@ -3126,7 +3126,7 @@
             "uid": "briqyard-prometheus"
           },
           "expr": "briqyard_warm_root_disk_bytes{host=\"$host\",kind=~\"reserved|budget\"}",
-          "legendFormat": "host {{kind}}",
+          "legendFormat": "host {{kind}} root",
           "range": true,
           "instant": false
         },
@@ -3137,7 +3137,29 @@
             "uid": "briqyard-prometheus"
           },
           "expr": "briqyard_warm_pool_reserved_root_disk_bytes{host=\"$host\"}",
-          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m reserved",
+          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m reserved root",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_data_disk_bytes{host=\"$host\",kind=~\"reserved|budget\"}",
+          "legendFormat": "host {{kind}} data",
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "briqyard-prometheus"
+          },
+          "expr": "briqyard_warm_pool_reserved_data_disk_bytes{host=\"$host\"}",
+          "legendFormat": "{{namespace}}/{{pool}} {{catalog}} {{type}} {{memory_mb}}MiB {{vcpus}}vCPU {{cpu_millis}}m reserved data",
           "range": true,
           "instant": false
         }
