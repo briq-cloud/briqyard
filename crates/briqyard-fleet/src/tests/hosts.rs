@@ -792,3 +792,268 @@ async fn metrics_take_the_metrics_token_or_the_apis() {
     let (s, _, _) = call(&f.st, "GET", "/v1/status", "", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
+
+fn publication_fleet() -> Fleet {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = age::x25519::Identity::generate();
+    let state_path = dir.path().join("registry.json");
+    let cfg = config::Config {
+        hosts: vec![
+            config::StaticHost {
+                id: "s1".into(),
+                url: "http://10.0.0.1:7420".into(),
+                token: "fixture-one".into(),
+                ..Default::default()
+            },
+            config::StaticHost {
+                id: "s2".into(),
+                url: "http://10.0.0.2:7420".into(),
+                token: "fixture-two".into(),
+                ..Default::default()
+            },
+        ],
+        backup: config::Backup {
+            store: format!("file://{}", dir.path().join("objects").display()),
+            recipient: identity.to_public().to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    fleet_at(cfg, dir, state_path)
+}
+
+fn key_headers(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    headers
+}
+
+fn key_info(last: u8) -> Option<axum::extract::ConnectInfo<std::net::SocketAddr>> {
+    Some(axum::extract::ConnectInfo(([10, 0, 0, last], 40000).into()))
+}
+
+fn key_request(last: u8) -> api::HostKeyRequest {
+    serde_json::from_value(serde_json::json!({"url": format!("http://10.0.0.{last}:7420")}))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn backed_keys_remain_available_during_daily_and_latest_publication() {
+    for latest in [false, true] {
+        let f = publication_fleet();
+        let key = f.st.reg.lock().unwrap().pool_key("s1").unwrap().0;
+        f.st.save().await.unwrap();
+        let b = f.st.backup.as_ref().unwrap();
+        b.push(&f.st.reg).await.unwrap();
+        backup::tests::with_stalled_publication(&f.st, latest, async {
+            let old = call(
+                &f.st,
+                "POST",
+                "/v1/hosts/key",
+                "fixture-one",
+                Some(serde_json::json!({"url": "http://10.0.0.1:7420"})),
+            );
+            let (status, _, _) = tokio::time::timeout(std::time::Duration::from_secs(10), old)
+                .await
+                .expect("backed key availability deadline");
+            assert_eq!(status, StatusCode::OK);
+            assert!(b.holds("s1", &key).await);
+            // Exercise the handler's real save, released key gate and bounded
+            // publication admission, using the same injected admission boundary.
+            let publishing = f.st.clone();
+            let result = crate::hosts::host_key_with(
+                f.st.clone(),
+                key_info(2),
+                key_headers("fixture-two"),
+                key_request(2),
+                std::future::pending(),
+                move || async move {
+                    assert!(publishing.key_turn.try_lock().is_ok());
+                    backup::tests::refuse_busy(publishing.backup.as_ref().unwrap(), &publishing.reg)
+                        .await
+                },
+            )
+            .await;
+            let refusal = result.err().expect("unbacked key must be refused");
+            assert_eq!(refusal.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(refusal.code, "backup");
+            assert!(!refusal.error.contains("fixture-two"));
+            let new_key = f.st.reg.lock().unwrap().hosts["s2"].pool_key.clone();
+            assert!(!new_key.is_empty());
+            assert!(!b.holds("s2", &new_key).await);
+            assert!(f.st.key_turn.try_lock().is_ok());
+        })
+        .await;
+        // The late publication's snapshot preceded s2's key. A later request backs
+        // that exact key and can then serve it.
+        let (status, _, _) = call(
+            &f.st,
+            "POST",
+            "/v1/hosts/key",
+            "fixture-two",
+            Some(serde_json::json!({"url": "http://10.0.0.2:7420"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn key_admission_deadline_refuses_without_mutation() {
+    let f = publication_fleet();
+    let turn = f.st.key_turn.lock().await;
+    let result = crate::hosts::host_key_with(
+        f.st.clone(),
+        key_info(1),
+        key_headers("fixture-one"),
+        key_request(1),
+        std::future::ready(()),
+        || async { panic!("busy key gate published") },
+    )
+    .await;
+    let refusal = result.err().expect("key admission must fail");
+    assert_eq!(refusal.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(refusal.code, "registry");
+    assert!(f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty());
+    drop(turn);
+}
+
+#[tokio::test]
+async fn key_response_rechecks_ack_identity_token_address_and_current_key() {
+    for change in ["remove", "key", "token", "address", "identity", "no-ack"] {
+        let f = publication_fleet();
+        let publishing = f.st.clone();
+        let result = crate::hosts::host_key_with(
+            f.st.clone(),
+            key_info(1),
+            key_headers("fixture-one"),
+            key_request(1),
+            std::future::pending(),
+            move || async move {
+                assert!(publishing.key_turn.try_lock().is_ok());
+                // A successful or deduplicated push is not itself an ACK for the
+                // captured key. Final identity checks also run after a real ACK.
+                if change == "no-ack" {
+                    return Ok(false);
+                }
+                publishing
+                    .backup
+                    .as_ref()
+                    .unwrap()
+                    .push(&publishing.reg)
+                    .await?;
+                let mut reg = publishing.reg.lock().unwrap();
+                if change == "remove" {
+                    reg.hosts.remove("s1");
+                } else {
+                    let host = reg.hosts.get_mut("s1").unwrap();
+                    match change {
+                        "key" => host.pool_key = Default::default(),
+                        "token" => host.token = "fixture-rotated".into(),
+                        "address" => host.url = "http://10.0.0.9:7420".into(),
+                        "identity" => host.id = "replacement".into(),
+                        _ => unreachable!(),
+                    }
+                }
+                Ok(true)
+            },
+        )
+        .await;
+        let refusal = result
+            .err()
+            .expect("changed identity/key must not receive a key");
+        assert_ne!(refusal.status, StatusCode::OK);
+        assert!(!refusal.error.contains("fixture-one"));
+        assert!(!refusal.error.contains("fixture-rotated"));
+    }
+}
+
+#[tokio::test]
+async fn concurrent_same_host_key_requests_serve_one_persisted_acknowledged_key() {
+    let f = publication_fleet();
+    let (one, two) = tokio::join!(
+        call(
+            &f.st,
+            "POST",
+            "/v1/hosts/key",
+            "fixture-one",
+            Some(serde_json::json!({"url": "http://10.0.0.1:7420"}))
+        ),
+        call(
+            &f.st,
+            "POST",
+            "/v1/hosts/key",
+            "fixture-one",
+            Some(serde_json::json!({"url": "http://10.0.0.1:7420"}))
+        )
+    );
+    assert_eq!(one.0, StatusCode::OK);
+    assert_eq!(two.0, StatusCode::OK);
+    let same = json(&one.2)["key"] == json(&two.2)["key"];
+    assert!(
+        same,
+        "concurrent requests must agree without printing key material"
+    );
+    let key = f.st.reg.lock().unwrap().hosts["s1"].pool_key.clone();
+    assert!(saved(&f.st).hosts["s1"].pool_key == key);
+    assert!(f.st.backup.as_ref().unwrap().holds("s1", &key).await);
+}
+
+#[tokio::test]
+async fn failed_local_key_save_rolls_back_before_publication() {
+    let f = publication_fleet();
+    std::fs::create_dir(f.st.state_path.with_extension("json.tmp")).unwrap();
+    let result = crate::hosts::host_key_with(
+        f.st.clone(),
+        key_info(1),
+        key_headers("fixture-one"),
+        key_request(1),
+        std::future::pending(),
+        || async { panic!("failed local save published a key") },
+    )
+    .await;
+    let refusal = result.err().expect("local save must fail");
+    assert_eq!(refusal.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(refusal.code, "registry");
+    assert!(f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty());
+    assert!(f.st.key_turn.try_lock().is_ok());
+}
+
+#[tokio::test]
+async fn requested_restore_source_key_keeps_its_own_authorization_during_key_admission() {
+    let f = publication_fleet();
+    let (source, destination) = {
+        let mut reg = f.st.reg.lock().unwrap();
+        (reg.pool_key("s1").unwrap().0, reg.pool_key("s2").unwrap().0)
+    };
+    let source_id = api::poolkey::id(source.expose()).unwrap();
+    let turn = f.st.key_turn.lock().await;
+    let rs = api::RestoreSpec {
+        machine_id: "fixture-machine".into(),
+        backup: "fixture-backup".into(),
+    };
+    let request = || {
+        Some(serde_json::json!({
+            "url": "http://10.0.0.2:7420", "key_id": source_id,
+            "restore": {"machine_id": rs.machine_id, "backup": rs.backup},
+        }))
+    };
+    let (status, _, _) = call(&f.st, "POST", "/v1/hosts/key", "fixture-two", request()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    f.st.restores.open("s2", &rs, std::time::Instant::now());
+    let (status, _, body) = call(&f.st, "POST", "/v1/hosts/key", "fixture-two", request()).await;
+    assert_eq!(status, StatusCode::OK);
+    let returned = json(&body);
+    let is_source = returned["key"].as_str() == Some(source.expose());
+    let is_destination = returned["key"].as_str() == Some(destination.expose());
+    assert!(
+        is_source && !is_destination,
+        "restore must receive the authorized source key"
+    );
+    let (status, _, _) = call(&f.st, "POST", "/v1/hosts/key", "fixture-two", request()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    drop(turn);
+}

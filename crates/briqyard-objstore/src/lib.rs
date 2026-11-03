@@ -47,6 +47,14 @@ pub struct ObjectStore {
     url: String,
 }
 
+// Use the same SDK constructor for small PUTs and multipart completion.
+fn local_filesystem(path: &str) -> Result<LocalFileSystem> {
+    Ok(LocalFileSystem::new_with_prefix(path)
+        .with_context(|| format!("backup store {path}"))?
+        .with_automatic_cleanup(true)
+        .with_fsync(true))
+}
+
 pub type Reader = Box<dyn AsyncRead + Unpin + Send>;
 
 impl ObjectStore {
@@ -75,9 +83,7 @@ impl ObjectStore {
                 return Err(anyhow!("backup.store: file:// needs a path"));
             }
             std::fs::create_dir_all(path).with_context(|| format!("backup store {path}"))?;
-            let fs = LocalFileSystem::new_with_prefix(path)
-                .with_context(|| format!("backup store {path}"))?
-                .with_automatic_cleanup(true);
+            let fs = local_filesystem(path)?;
             return Ok(Self {
                 inner: Arc::new(fs),
                 scheme: "file",
@@ -416,6 +422,21 @@ mod tests {
         );
         assert_eq!(s3_code("<Code>a b</Code>"), None);
         assert_eq!(s3_code("not xml"), None);
+    }
+
+    #[test]
+    fn local_sdk_constructor_enables_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = local_filesystem(dir.path().to_str().unwrap()).unwrap();
+        // SDK has no getter. Inspect only the fsync field; never print the Debug
+        // string, which also contains the configured path.
+        let debug = format!("{fs:?}");
+        let enabled = debug
+            .split("fsync: ")
+            .nth(1)
+            .and_then(|field| field.split([',', ' ', '}']).next())
+            == Some("true");
+        assert!(enabled, "the shared SDK constructor must enable fsync");
     }
 
     #[tokio::test]
