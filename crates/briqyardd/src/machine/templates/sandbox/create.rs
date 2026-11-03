@@ -11,15 +11,12 @@ impl Manager {
             .sandbox_seed
             .as_ref()
             .ok_or_else(|| invalid("sandbox selector missing"))?;
-        let recipe = self.sandbox_recipe(&req.image, req.size)?;
-        if req
-            .volume
-            .as_ref()
-            .is_none_or(|v| v.size_gb != recipe.volume_gb || v.mount != "/work")
-        {
-            return Err(invalid(
-                "sandbox destination volume must match the sealed device capacity",
-            ));
+        // The request names the seed's shape exactly: its /work volume of the sealed capacity,
+        // or none for a volume-free seed. Anything else is refused, never adapted.
+        let recipe =
+            self.sandbox_recipe(&req.image, req.size, req.volume.as_ref().map(|v| v.size_gb))?;
+        if req.volume.as_ref().is_some_and(|v| v.mount != "/work") {
+            return Err(invalid("sandbox destination volume must mount at /work"));
         }
         let snapshot = source
             .snapshots
@@ -33,6 +30,11 @@ impl Manager {
             || artifact.recipe.image != req.image
         {
             return Err(invalid("sandbox seed generation/image/size mismatch"));
+        }
+        if artifact.recipe.config.sandbox_device != recipe.device() {
+            return Err(invalid(
+                "sandbox destination volume differs from the seed's data device",
+            ));
         }
         let fork = api::ForkSpec {
             machine_id: source.id.clone(),
@@ -69,7 +71,7 @@ impl Manager {
         let (mut config, files) =
             crate::machine::start::resolved_guest_config(&preview, Ipv4Addr::new(10, 64, 0, 1))?;
         config.files.clear();
-        config.sandbox_device = Some(recipe.device());
+        config.sandbox_device = recipe.device();
         let preview_bind = guest::DestinationBind {
             config,
             files: files

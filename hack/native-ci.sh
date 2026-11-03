@@ -17,7 +17,8 @@ cp "$TARGET/x86_64-unknown-linux-musl/release/briqyard-init" "$R/briqyard-init-l
 # Published checked bundle; bootstrap verifies its internal source, patch and binary evidence.
 B=firecracker-checked-linux-x86_64.tar.gz
 curl -fsSL "https://github.com/briq-cloud/briqyard/releases/download/v0.1.17/$B" -o "$R/$B"
-echo "2e410f2e852d9898fc0193afe28f3c4606421cef58b30fb64bbb69618ec1a65c  $R/$B" | sha256sum -c -
+BSHA=2e410f2e852d9898fc0193afe28f3c4606421cef58b30fb64bbb69618ec1a65c
+echo "$BSHA  $R/$B" | sha256sum -c -
 (cd "$R" && sha256sum -- briq*-linux-* firecracker-checked-linux-*.tar.gz > SHA256SUMS-x86_64)
 # Use the real checked release installation path with this head's binaries.
 sudo env BRIQYARD_RELEASE="file://$R" BRIQYARD_POOL_FILE_GB=40 BRIQYARD_ARC_GB=1 LISTEN=127.0.0.1:7420 bash hack/bootstrap-host.sh
@@ -47,9 +48,7 @@ placement:
 YAML
 sudo systemctl stop briqyardd
 sudo systemctl start ssh
-sudo env FLEET_CONFIG="$RUNNER_TEMP/native-fleet.yaml" bash "$HARNESS/install-dev.sh" "$TARGET" "$PWD"
-sudo cp "$R/$B" /var/lib/briqyard-fleet/release/
-sudo sh -c 'cd /var/lib/briqyard-fleet/release && sha256sum briq*-linux-* firecracker-checked-linux-*.tar.gz > SHA256SUMS-x86_64'
+sudo env FLEET_CONFIG="$RUNNER_TEMP/native-fleet.yaml" bash "$HARNESS/install-dev.sh" "$TARGET" "$R/$B" "$BSHA" "$PWD"
 for _ in $(seq 1 60); do
   briqyard status >/dev/null 2>&1 && curl -fsS http://127.0.0.1:7430/v1/hosts | jq -e 'length == 1 and all(.state == "ready")' >/dev/null && exit 0
   sleep 1

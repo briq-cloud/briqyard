@@ -105,10 +105,10 @@ impl CreateMachineRequest {
             || self
                 .volume
                 .as_ref()
-                .is_none_or(|v| v.mount != "/work" || v.size_gb == 0)
+                .is_some_and(|v| v.mount != "/work" || v.size_gb == 0)
         {
             return Err(
-                "sandbox seed requires exclusive selection, start:true and fresh /work volume",
+                "sandbox seed requires exclusive selection, start:true and no volume or a fresh /work volume",
             );
         }
         Ok(())

@@ -2,7 +2,9 @@
 # Install a development build on Linux; shared by Lima and native CI. Run as root.
 set -euo pipefail
 TARGET=${1:?target directory}
-SRC=${2:-$(cd "$(dirname "$0")/.." && pwd)}
+BUNDLE=${2:?checked release bundle path}
+BUNDLE_SHA256=${3:?trusted release bundle SHA256}
+SRC=${4:-$(cd "$(dirname "$0")/.." && pwd)}
 command -v conntrack >/dev/null || { apt-get update -qq; apt-get install -y -qq conntrack; }
 T=$TARGET/release
 install -m 0755 "$T/briqyardd" /usr/local/bin/briqyardd
@@ -15,11 +17,10 @@ cp "$SRC/hack/briqyardd.service" /etc/systemd/system/briqyardd.service
 cp "${FLEET_CONFIG:-$SRC/hack/fleet.dev.yaml}" /etc/briqyard/fleet.yaml
 cp "$SRC/hack/briqyard-fleet.service" /etc/systemd/system/briqyard-fleet.service
 # What hack/fleet-smoke.sh upgrades the local host to (ADR 0027): this build under a release's
-# names with its digests, and the fleet's SSH key, authorized for root on the host itself.
+# names with its digests and the checked bundle (ADR 0079), and the fleet's SSH key, authorized for root on the host itself.
 R=/var/lib/briqyard-fleet/release
-mkdir -p "$R"
-for b in briqyardd briqyard-init briqyard briqyard-fleet; do cp "/usr/local/bin/$b" "$R/$b-linux-$(uname -m)"; done
-(cd "$R" && sha256sum briq*-linux-* > "SHA256SUMS-$(uname -m)")
+python3 "$SRC/hack/dev-release.py" stage "$BUNDLE" "$BUNDLE_SHA256" --arch "$(uname -m)" \
+  --binaries /usr/local/bin --output "$R"
 [ -f /etc/briqyard/fleet_ssh_key ] || ssh-keygen -q -t ed25519 -N "" -C briqyard-fleet -f /etc/briqyard/fleet_ssh_key
 install -d -m 0700 /root/.ssh
 grep -qxF "$(cat /etc/briqyard/fleet_ssh_key.pub)" /root/.ssh/authorized_keys 2>/dev/null || cat /etc/briqyard/fleet_ssh_key.pub >> /root/.ssh/authorized_keys

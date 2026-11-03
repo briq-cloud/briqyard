@@ -23,14 +23,23 @@ impl Manager {
         if !self.unbound_warm_available() {
             return Err(invalid("unbound warm pools disabled"));
         }
-        let recipe = self.sandbox_recipe(&pool.artifact.recipe.image, pool.artifact.recipe.size)?;
+        let recipe = self.sandbox_recipe(
+            &pool.artifact.recipe.image,
+            pool.artifact.recipe.size,
+            pool.artifact
+                .recipe
+                .config
+                .sandbox_device
+                .as_ref()
+                .map(|d| d.gb()),
+        )?;
         let request = api::CreateMachineRequest {
             namespace: pool.namespace.clone(),
             name,
             image: recipe.image.clone(),
             size: recipe.size,
-            volume: Some(api::VolumeSpec {
-                size_gb: recipe.volume_gb,
+            volume: recipe.volume().map(|size_gb| api::VolumeSpec {
+                size_gb,
                 mount: "/work".into(),
             }),
             sleep: "never".into(),

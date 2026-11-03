@@ -111,13 +111,7 @@ impl Intent {
             request_id: seed.request_id.clone(),
             create_sha256: digest,
             receipt: String::new(),
-            device: origin
-                .artifact
-                .recipe
-                .config
-                .sandbox_device
-                .clone()
-                .context("sealed device missing")?,
+            device: origin.artifact.recipe.config.sandbox_device.clone(),
             bind: None,
             ack_sha256: None,
         });
@@ -237,13 +231,7 @@ impl Intent {
         );
         anyhow::ensure!(
             binding.receipt == frozen_receipt(b)?
-                && binding.device
-                    == artifact
-                        .recipe
-                        .config
-                        .sandbox_device
-                        .clone()
-                        .context("sealed device missing")?,
+                && binding.device == artifact.recipe.config.sandbox_device,
             "assignment frozen destination receipt or device differs"
         );
         anyhow::ensure!(

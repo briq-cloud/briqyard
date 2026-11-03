@@ -515,7 +515,7 @@ snapshot, or is whole.
   | `briqyard_machine_state` | same, `state` | 1, one series per machine |
   | `briqyard_machine_boot_seconds` | same | its last start, `starting` to `running` |
   | `briqyard_warm_pool_{desired,max_ready,shortfall,slots,blocked}`, `_reserved_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | namespace, pool, catalog, type, exact numeric size; bounded state/reason | actual warm counts, upper targets and full unclaimed reservations |
-  | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the absolute free-space floor |
+  | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the shared absolute free-space floor; data headroom is zero |
   | `briqyard_warm_{memory_available_bytes,disk_free_bytes,probe_age_seconds,probe_available,probe_valid,accounting_available}` | | cached physical availability, sample age/validity and accounting availability; a scrape runs no probe |
   | `briqyard_warm_operations_total`, `_operation_seconds_total`, `_operation_last_seconds` | `operation="prepare\|claim"`, `outcome="success\|miss\|failure"` | host prepare-worker and claim-to-host-readiness observations; excludes fleet and public API transport |
   | `briqyard_warm_fill_blocked_total` | bounded `reason` | actual refused refill attempts |

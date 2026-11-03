@@ -8,13 +8,17 @@
 # $CHECK_HOST (default: the first host up). Unobserved warm data may be absent, checked
 # against the host's explicit accounting/pool/probe counters. Changes nothing.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+set +x
+script_dir=${BASH_SOURCE[0]%/*}
+cd "$script_dir/.."
 BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7430}
-token=${BRIQYARD_METRICS_TOKEN:-${BRIQYARD_TOKEN:-}}
-auth=(); [ -n "$token" ] && auth=(-H "Authorization: Bearer $token")
-api_auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && api_auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
-get() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL$1"; }
-code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+has_metrics_token=false; [ -n "${BRIQYARD_METRICS_TOKEN:-${BRIQYARD_TOKEN:-}}" ] && has_metrics_token=true
+source hack/monitoring-auth.sh
+monitoring_auth_init
+get() { curl_metrics -fsS "$BRIQYARD_URL$1"; }
+api_get() { curl_api -fsS "$BRIQYARD_URL$1"; }
+code() { curl_plain -s -o /dev/null -w '%{http_code}' "$@"; }
+metrics_code() { curl_metrics -s -o /dev/null -w '%{http_code}' "$@"; }
 # A host in these states runs its daemon: its metrics come through and it is up.
 serving='select(.state | test("^(ready|draining|retiring|upgrading)$"))'
 pass=0; fail=0
@@ -45,38 +49,38 @@ warm_optional() {
 
 echo "== discovery"
 targets=$(get /v1/metrics/targets)
-hosts=$(curl -fsS ${api_auth[@]+"${api_auth[@]}"} "$BRIQYARD_URL/v1/hosts")
+hosts=$(api_get /v1/hosts)
 # What a target list must hold: the hosts that serve or are down, by id, with their regions.
 want=$(jq -c '[.[] | select(.state | test("^(ready|draining|retiring|upgrading|down)$")) | {host: .id, region}] | sort' <<<"$hosts")
 check "the fleet's own /metrics first" 'jq -e ".[0].labels == {instance: \"fleet\"}" <<<"$targets" >/dev/null'
 check "one target per host that may run a daemon" '[ "$(jq -c "[.[1:][] | .labels | {host, region}] | sort" <<<"$targets")" = "$want" ]'
 check "each through its relay, instance its id" 'jq -e "all(.[1:][]; .labels.__metrics_path__ == \"/v1/hosts/\(.labels.host)/metrics\" and .labels.instance == .labels.host)" <<<"$targets" >/dev/null'
 check "every target at the address asked" '[ "$(jq -r "[.[].targets[]] | unique | .[]" <<<"$targets")" = "${BRIQYARD_URL#*://}" ]'
-if [ -n "$token" ]; then
+if $has_metrics_token; then
   check "the targets: 401 without a token" '[ "$(code "$BRIQYARD_URL/v1/metrics/targets")" = 401 ]'
 fi
 
 echo "== relay"
 for id in $(jq -r ".[] | $serving | .id" <<<"$hosts"); do
   check "$id: its metrics, relayed" 'get "/v1/hosts/$id/metrics" | grep -q "^# TYPE briqyard_machines_total gauge$"'
-  if [ -n "$token" ]; then
+  if $has_metrics_token; then
     check "$id: 401 without a token" '[ "$(code "$BRIQYARD_URL/v1/hosts/$id/metrics")" = 401 ]'
   fi
 done
 for id in $(jq -r '.[] | select(.state == "down") | .id' <<<"$hosts"); do
-  check "$id: down, 503" '[ "$(code ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/hosts/$id/metrics")" = 503 ]'
+  check "$id: down, 503" '[ "$(metrics_code "$BRIQYARD_URL/v1/hosts/$id/metrics")" = 503 ]'
 done
-check "an unknown host: 404" '[ "$(code ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/hosts/no-such-host/metrics")" = 404 ]'
+check "an unknown host: 404" '[ "$(metrics_code "$BRIQYARD_URL/v1/hosts/no-such-host/metrics")" = 404 ]'
 fleet_metrics=$(get /metrics)
 check "each host's state on the fleet's /metrics" '[ "$(grep -c "^briqyard_fleet_host_state{" <<<"$fleet_metrics")" = "$(jq length <<<"$hosts")" ]'
 
 if [ -n "${PROMETHEUS_URL:-}" ]; then
   echo "== prometheus"
   n=$(jq length <<<"$targets")
-  scraped() { curl -fsS "$PROMETHEUS_URL/api/v1/targets?state=active" | jq '[.data.activeTargets[] | select(.health != "unknown")] | length'; }
+  scraped() { curl_plain -fsS "$PROMETHEUS_URL/api/v1/targets?state=active" | jq '[.data.activeTargets[] | select(.health != "unknown")] | length'; }
   for _ in $(seq 1 60); do [ "$(scraped)" = "$n" ] && break; sleep 1; done
   check "every target scraped ($n)" '[ "$(scraped)" = "$n" ]'
-  up() { curl -fsS "$PROMETHEUS_URL/api/v1/query" --data-urlencode "query=$1" | jq -r '[.data.result[].value[1]] | join(",")'; }
+  up() { curl_plain -fsS "$PROMETHEUS_URL/api/v1/query" --data-urlencode "query=$1" | jq -r '[.data.result[].value[1]] | join(",")'; }
   check "the fleet: up" '[ "$(up "up{instance=\"fleet\"}")" = 1 ]'
   for id in $(jq -r ".[] | $serving | .id" <<<"$hosts"); do
     check "$id: up" '[ "$(up "up{host=\"$id\"}")" = 1 ]'
@@ -88,11 +92,10 @@ fi
 
 if [ -n "${PROMETHEUS_URL:-}" ] && [ -n "${GRAFANA_URL:-}" ] && [ -n "${GRAFANA_PASSWORD_FILE:-}" ]; then
   echo "== dashboards: every query returns data"
-  gauth=(-u "admin:$(head -n1 "$GRAFANA_PASSWORD_FILE")")
-  host=${CHECK_HOST:-$(curl -fsS "$PROMETHEUS_URL/api/v1/query" --data-urlencode 'query=up{host!=""} == 1' | jq -r '[.data.result[].metric.host] | sort | .[0]')}
+  host=${CHECK_HOST:-$(curl_plain -fsS "$PROMETHEUS_URL/api/v1/query" --data-urlencode 'query=up{host!=""} == 1' | jq -r '[.data.result[].metric.host] | sort | .[0]')}
   for f in hack/monitoring/dashboards/*.json; do
     uid=$(jq -r .uid "$f")
-    check "$uid: provisioned" '[ "$(curl -fsS "${gauth[@]}" "$GRAFANA_URL/api/dashboards/uid/$uid" | jq -r .meta.provisioned)" = true ]'
+    check "$uid: provisioned" '[ "$(curl_grafana -fsS "$GRAFANA_URL/api/dashboards/uid/$uid" | jq -r .meta.provisioned)" = true ]'
     empty=()
     total=0
     optional=0
@@ -103,7 +106,7 @@ if [ -n "${PROMETHEUS_URL:-}" ] && [ -n "${GRAFANA_URL:-}" ] && [ -n "${GRAFANA_
       body=$(jq -n --arg e "$expr" --argjson i "$instant" '{from: "now-30m", to: "now", queries: [{refId: "A",
         datasource: {type: "prometheus", uid: "briqyard-prometheus"}, expr: $e, instant: $i, range: ($i | not),
         intervalMs: 60000, maxDataPoints: 100}]}')
-      answer=$(curl -fsS "${gauth[@]}" -H 'Content-Type: application/json' -d "$body" "$GRAFANA_URL/api/ds/query")
+      answer=$(curl_grafana -fsS -H 'Content-Type: application/json' -d "$body" "$GRAFANA_URL/api/ds/query")
       if jq -e '.results.A.error // empty' <<<"$answer" >/dev/null; then
         empty+=("$title ($ref): query error")
         continue
