@@ -35,8 +35,8 @@ cli_auth = name == 'briqyard' and os.environ.get('BRIQYARD_TOKEN') == needles[0]
 header = None
 if name == 'curl':
     clean = clean and args[0] == '--disable'
-    config = args[args.index('--config') + 1]
-    text = sys.stdin.read() if config == '-' else pathlib.Path(config).read_text()
+    config = args[args.index('--config') + 1] if '--config' in args else None
+    text = (sys.stdin.read() if config == '-' else pathlib.Path(config).read_text()) if config else ''
     header = shlex.split(text)[2] if text.strip() else None
 with open(os.environ['AUDIT'], 'a') as out:
     out.write(json.dumps(dict(name=name, clean=clean, header=header, cli_auth=cli_auth)) + '\\n')
@@ -128,7 +128,7 @@ advertise=http://fixture.invalid
 RESTORE_STARTED=1
 on_fleet() {{ hosts >/dev/null; }}
 on_second() {{ :; }}
-host_key >/dev/null
+key=$(host_key)
 SUITE_DONE=1
 '''
                 result = self.run_script(script, env)

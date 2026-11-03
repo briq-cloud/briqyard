@@ -69,7 +69,7 @@ host_key() (
   BRIQYARD_TOKEN=$token
   unset BRIQYARD_METRICS_TOKEN GRAFANA_PASSWORD_FILE
   curl_auth_dir=
-  monitoring_auth_init
+  monitoring_auth_init || exit 1
   $CURL -X POST -H 'Content-Type: application/json' \
     -d "{\"url\": \"$advertise\"}" "$BRIQYARD_URL/v1/hosts/key" | jq -r .key
 )
