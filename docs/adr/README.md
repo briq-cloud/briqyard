@@ -73,3 +73,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0075](0075-sandbox-destination-binding.md) | One-way complete sandbox guest configuration before main, with durable consumption and replay fencing |
 | [0076](0076-operator-sandbox-seeds.md) | Operator-produced pristine sandbox topology, ordinary-create receipts and exact destination acknowledgment; native qualification gates enablement |
 | [0077](0077-immutable-warm-launch-identity.md) | Immutable warm-slot launch identity and durable source allocations; unbound consumption remains disabled |
+| [0089](0089-volume-free-sandbox-seeds.md) | A sandbox recipe may declare no data volume (`volume_gb: 0`): its seed seals two drives and serves only volume-free creates, a volume seed only matching `/work` volumes; the builder and the request name the volume, unbound pools key on the shape |
