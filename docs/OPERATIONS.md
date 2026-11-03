@@ -490,6 +490,27 @@ backup until sent elsewhere. A restore to one (`briqyard machine snapshot restor
 keeps the backup chain correct: the next backup continues from the newest backup made before the
 snapshot, or is whole.
 
+### Backup-object census (ADR 0083)
+
+With a backup store configured, a daemon attempts one bounded read-only census daily, first
+one day after startup. A busy backup gate skips the attempt; shutdown closes admission and
+drains already admitted work. Active work is limited to 30 seconds, 4,096 listed objects,
+64 KiB per metadata record and 8 MiB total reserved metadata reads, one request at a time.
+SDK listing pages and transport buffers are additional overhead.
+
+`briqyard_backup_census_*` gauges expose the last attempt's scalar observations, without
+object keys, machine/namespace labels, names, sealed metadata or key IDs. Check
+`finished_timestamp_seconds`, `failed`, `enumeration_complete` and `metadata_complete` before
+interpreting counts. Before an attempt or while unsettled, coverage is unknown; after two
+days or a backwards clock step it is incomplete. A timeout/failure clears coverage.
+Missing streams, size mismatches and unresolved chains warrant investigation; this is no
+content-hash, encryption or restore test. `local_activity` flags some local backup races,
+not all races. Unreferenced streams may still be publishing. Unresolved owners may be on
+another host or retained by authorities unavailable here. Exhaustion is not atomic coverage.
+`global_ownership_qualified` and `deletion_qualified` always remain zero, including on quiet,
+repeated scans. No count authorizes deletion. Other prefixes, versions, multipart uploads,
+registry backups, operator archives and local backing/reference scopes are excluded.
+
 ## Watch
 
 - `GET /healthz`: the daemon is up. `GET /v1/status`: capacity, use, free disk, `conditions`.

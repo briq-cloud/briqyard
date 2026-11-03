@@ -217,6 +217,7 @@ impl Manager {
         host.conditions = self.conditions();
         host.events = self.inner.events.emitted();
         host.resident_bytes = metrics::resident_bytes();
+        host.backup_census = self.backup_census_observation();
         host.counters = vec![
             (
                 "briqyard_boots_total",
