@@ -74,4 +74,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0076](0076-operator-sandbox-seeds.md) | Operator-produced pristine sandbox topology, ordinary-create receipts and exact destination acknowledgment; native qualification gates enablement |
 | [0077](0077-immutable-warm-launch-identity.md) | Immutable warm-slot launch identity and durable source allocations; unbound consumption remains disabled |
 
-| [0078](0078-backup-object-census.md) | Bounded read-only backup-object observations; local owner evidence, never global ownership or deletion authority |
+| [0083](0083-backup-object-census.md) | Bounded read-only backup-object observations; local owner evidence, never global ownership or deletion authority |

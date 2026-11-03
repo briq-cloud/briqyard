@@ -1,4 +1,4 @@
-# ADR 0078: Bounded backup-object observations
+# ADR 0083: Bounded backup-object observations
 
 2026-11-03 · Status: source candidate; execution and native qualification pending.
 

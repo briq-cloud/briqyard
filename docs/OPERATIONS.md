@@ -485,7 +485,7 @@ backup until sent elsewhere. A restore to one (`briqyard machine snapshot restor
 keeps the backup chain correct: the next backup continues from the newest backup made before the
 snapshot, or is whole.
 
-### Backup-object census (ADR 0078)
+### Backup-object census (ADR 0083)
 
 With a backup store configured, a daemon attempts one bounded read-only census daily, first
 one day after startup. A busy backup gate skips the attempt; shutdown closes admission and
