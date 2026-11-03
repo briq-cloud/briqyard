@@ -1,0 +1,87 @@
+name: native
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Source ref to build and test (empty uses workflow ref)
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.*'
+      - 'rust-toolchain*'
+      - 'hack/**'
+      - 'api/**'
+      - '.github/workflows/native.yml'
+permissions:
+  contents: read
+concurrency:
+  group: native-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  suites:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Record tested identity and host
+        run: |
+          git rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          uname -a | tee -a "$GITHUB_STEP_SUMMARY"
+          ls -l /dev/kvm
+          free -m
+          df -h /
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the head
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools pkg-config libssl-dev bc jq openssl postgresql-client openssh-server python3-yaml
+          cargo build --release --locked --workspace --exclude briqyard-init
+          cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl
+      - name: Install isolated native host and fleet
+        run: bash hack/native-ci.sh
+      - name: e2e
+        id: e2e
+        run: |
+          mkdir -p native-logs
+          set -o pipefail
+          start=$SECONDS
+          bash hack/e2e.sh 2>&1 | tee native-logs/e2e.log
+          echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
+      - name: fleet-smoke
+        if: ${{ !cancelled() && steps.e2e.outcome != 'skipped' }}
+        id: fleet
+        run: |
+          mkdir -p native-logs
+          set -o pipefail
+          start=$SECONDS
+          bash hack/fleet-smoke.sh 2>&1 | tee native-logs/fleet-smoke.log
+          echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
+      - name: Suite counts
+        if: always()
+        env:
+          E2E_SECONDS: ${{ steps.e2e.outputs.duration }}
+          FLEET_SECONDS: ${{ steps.fleet.outputs.duration }}
+        run: |
+          for suite in e2e fleet-smoke; do
+            echo "### $suite" >> "$GITHUB_STEP_SUMMARY"
+            if [ -f "native-logs/$suite.log" ]; then
+              grep -E '^passed |^ENDED EARLY|^NOT A FULL RUN' "native-logs/$suite.log" >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo 'Did not start' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          echo "Durations: e2e ${E2E_SECONDS:-incomplete}s; fleet-smoke ${FLEET_SECONDS:-incomplete}s" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-suite-logs
+          path: native-logs/*.log
+          if-no-files-found: ignore
