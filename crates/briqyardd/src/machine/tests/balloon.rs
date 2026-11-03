@@ -43,8 +43,10 @@ async fn a_new_cold_boot_persists_reporting_identity_and_keeps_full_reservation(
     assert!(stats.balloon.is_none(), "no tick has sampled yet");
 }
 
+/// Memory written before boot identities existed carries the CPUID it was taken with
+/// (ADR 0087): it is never loaded, the start is a cold boot with the current identity.
 #[tokio::test]
-async fn legacy_memory_resumes_after_reporting_is_enabled_without_relabeling() {
+async fn legacy_memory_without_identity_boots_cold() {
     let h = reporting_harness().await;
     let e = h.add("m_old", state::STOPPED, 256);
     h.disks(&e).await;
@@ -58,10 +60,11 @@ async fn legacy_memory_resumes_after_reporting_is_enabled_without_relabeling() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("snap.mem"), "legacy memory").unwrap();
     h.m.start("m_old", None).await.unwrap();
-    assert!(e.live.lock().unwrap().as_ref().unwrap().resumed);
-    assert!(h.stored("m_old").unwrap().boot_identity.is_none());
-    h.m.measure(Utc::now()).await;
-    assert!(!h.host.calls().iter().any(|s| s == "balloon-statistics"));
+    assert!(!e.live.lock().unwrap().as_ref().unwrap().resumed);
+    assert_eq!(
+        h.stored("m_old").unwrap().boot_identity,
+        h.host.boot_identity(true)
+    );
 }
 
 #[tokio::test]
@@ -73,6 +76,7 @@ async fn missing_legacy_memory_falls_back_with_a_durable_current_profile() {
         let mut rec = e.rec.lock().unwrap();
         rec.suspended = true;
         rec.vmm_version = h.host.version();
+        rec.boot_identity = h.host.boot_identity(true);
     }
     h.m.start("m_missing", None).await.unwrap();
     assert!(!e.live.lock().unwrap().as_ref().unwrap().resumed);
@@ -96,7 +100,7 @@ async fn unknown_identity_refuses_memory_load_and_keeps_named_snapshot() {
     let e = h.add("m_future", state::STOPPED, 256);
     h.disks(&e).await;
     let mut future = h.host.boot_identity(true).unwrap();
-    future.schema = 2;
+    future.schema = fc::BootIdentity::SCHEMA + 1;
     {
         let mut rec = e.rec.lock().unwrap();
         rec.suspended = true;
@@ -384,4 +388,41 @@ async fn failed_observation_retains_metadata_but_unbound_memory_is_ambiguous_and
         .await
         .unwrap();
     assert_eq!(h.m.get(&machine.id).unwrap().state, state::STOPPED);
+}
+
+/// ADR 0087: a snapshot resumes with the CPUID it was taken with, so one of an older
+/// template generation is never loaded: the start is a cold boot, not a failure.
+#[tokio::test]
+async fn suspended_machine_of_another_template_generation_boots_cold() {
+    type Change = fn(&mut Option<fc::BootIdentity>);
+    let older: [(&str, Change); 3] = [
+        ("schema 1", |i| {
+            let i = i.as_mut().unwrap();
+            i.schema = 1;
+            i.cpu_config = String::new();
+        }),
+        ("another template", |i| {
+            i.as_mut().unwrap().cpu_config = "another".into()
+        }),
+        ("no identity", |i| *i = None),
+    ];
+    for (name, change) in older {
+        let h = reporting_harness().await;
+        let machine = h.m.create_made(h.request("reporting")).await.unwrap();
+        h.m.stop(&machine.id, Duration::ZERO, true, None)
+            .await
+            .unwrap();
+        {
+            let e = h.m.entry(&machine.id).unwrap();
+            let mut r = e.rec.lock().unwrap();
+            assert!(r.suspended);
+            change(&mut r.boot_identity);
+        }
+        h.m.start(&machine.id, None).await.unwrap();
+        assert_eq!(h.reasons(&machine.id).last().unwrap(), "started", "{name}");
+        // The cold boot records the host's current identity: the next suspend resumes.
+        let now = h.stored(&machine.id).unwrap().boot_identity.unwrap();
+        assert_eq!(now.schema, fc::BootIdentity::SCHEMA, "{name}");
+        assert_eq!(now.cpu_config, "test-template", "{name}");
+    }
 }
