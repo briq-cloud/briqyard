@@ -16,6 +16,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -367,12 +368,9 @@ while :; do read -r -t 0.05 _ || :; done
                 str(parent_pid),
                 child_code,
             ]
-            with self.assertRaises(subprocess.TimeoutExpired):
-                _run_bounded(args, env=os.environ.copy(), timeout=0.2)
+            self._timeout_after_child_ready(args, ready, parent_pid)
             self.assertEqual(terminated.read_text(encoding="utf-8"), "terminated")
             self.assertFalse(survived.exists())
-            with self.assertRaises(ProcessLookupError):
-                os.killpg(int(parent_pid.read_text(encoding="utf-8")), 0)
 
     def test_timeout_kills_term_ignoring_descendant_with_redirected_streams(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -406,14 +404,40 @@ while :; do read -r -t 0.05 _ || :; done
                 )
             )
             args = [sys.executable, "-c", parent_code, str(ready), str(survived), str(parent_pid), child_code]
-            with self.assertRaises(subprocess.TimeoutExpired):
-                _run_bounded(args, env=os.environ.copy(), timeout=0.2)
+            self._timeout_after_child_ready(args, ready, parent_pid)
             self.assertFalse(survived.exists())
+
+    def _timeout_after_child_ready(self, args: list[str], ready: Path, parent_pid: Path) -> None:
+        real_popen = subprocess.Popen
+        process = None
+
+        def start_ready(*popen_args, **kwargs):
+            nonlocal process
+            process = real_popen(*popen_args, **kwargs)
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                if process.poll() is not None:
+                    self.fail("timeout fixture parent exited before child readiness")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.fail("timeout fixture child did not become ready before deadline")
+                time.sleep(min(0.01, remaining))
+            return process
+
+        try:
+            # Start the actual timeout only after the child's signal handler is installed.
+            with mock.patch.object(subprocess, "Popen", side_effect=start_ready):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    _run_bounded(args, env=os.environ.copy(), timeout=0.2)
+            self.assertFalse(_process_group_exists(process), "timeout left an owned process group alive")
             with self.assertRaises(ProcessLookupError):
                 os.killpg(int(parent_pid.read_text(encoding="utf-8")), 0)
+        finally:
+            if process is not None:
+                self._cleanup_test_process(process)
 
     def _cleanup_test_process(self, process: subprocess.Popen[str]) -> None:
-        if process.poll() is None:
+        if _process_group_exists(process):
             _terminate_process_group(process)
         else:
             process.communicate(timeout=5)

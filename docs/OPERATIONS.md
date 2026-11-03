@@ -720,9 +720,32 @@ GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitor
 | Host condition | a host condition true for a minute (`memory_pressure`, `disk_pressure`…) |
 | Pool over 80 % | for 5 minutes |
 | Machine in a crash loop | restarted 3 times in 10 minutes by its policy |
-| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|disk"}` grew: add a host in the region |
+| Backup failure observed | a host's `backup_failed` counter grew in 10 minutes, or is positive without a ten-minute baseline; one observed failure is enough |
+| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|cpu\|disk"}` grew: check regional capacity and host compatibility |
 | Creates refused: host under pressure | `{resource="pressure"}` grew: free the namespace's host |
 | Largest slot too small | a region's largest memory slot under `LARGEST_SLOT_MB` for 10 minutes |
+
+**Creates refused: no room** covers memory, CPU time and disk placement refusals.
+CPU refusals also include hosts that do not report CPU-time capacity. Upgrade such a
+host before retrying; adding a different host does not fix a namespace or fork bound
+to it. For an unbound placement with exhausted capacity, add capacity in its region.
+It needs counter samples before and after the refusal; a first positive sample alone
+does not establish an increase. A firing or resolved rule is not proof that its
+notification reached the operator; check delivery separately.
+
+For **Backup failure observed**, inspect the host's backup events and store availability.
+Coverage is daemon machine-backup failure events; registry publication and generation
+coverage need separate signals.
+The alert carries only the host, never backup IDs, object keys or event errors. A first
+positive observation can reflect an older failure after a scrape gap. Counter decreases
+observed within the window are handled by `increase()`; failures between scrapes or across
+an unobserved reset can be missed. Event series are absent before their first event, so
+an empty query leaves this failure-only alert Normal. That does not establish backup
+health or schedule coverage. Query errors remain Error; a missing host among other
+results follows Grafana's missing-series handling. Neither missing data, a reset nor a
+cleared alert proves success. The separate **Not answering** rule covers failed scrapes.
+This ten-minute event signal establishes no backup freshness, recovery or RPO; verify a
+successful backup and restore independently.
 
 **The proxy**, beside the fleet's site (step 6 of First OVH host), with a DNS record for the
 name:

@@ -127,8 +127,8 @@ groups:
           severity: warning
         annotations:
           summary: "Machine {{ .Labels.name }} ({{ .Labels.machine }}) of namespace {{ .Labels.namespace }} on host {{ .Labels.host }} restarted three times or more in ten minutes."
-      - uid: briqyard-out-of-room
-        title: "Creates refused: no room"
+      - uid: briqyard-backup-failed
+        title: "Backup failure observed"
         condition: C
         data:
           - refId: A
@@ -136,7 +136,9 @@ groups:
             datasourceUid: briqyard-prometheus
             model:
               refId: A
-              expr: 'sum by (region, resource) (increase(briqyard_fleet_unschedulable_total{resource=~"memory|disk"}[5m]))'
+              # Event series start at their first event, not at zero. Keep a first
+              # positive observation visible even when increase() has no baseline.
+              expr: 'sum by (host) ((briqyard_events_total{reason="backup_failed"} unless briqyard_events_total{reason="backup_failed"} offset 10m) or increase(briqyard_events_total{reason="backup_failed"}[10m]))'
               instant: true
           - refId: C
             datasourceUid: __expr__
@@ -152,7 +154,34 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Creates in region {{ .Labels.region }} were refused for want of {{ .Labels.resource }}: add a host there."
+          summary: "Host {{ .Labels.host }} has an observed backup failure in the ten-minute event window, or a positive counter without a ten-minute baseline."
+          description: "Inspect backup events and the store. This bounded event signal does not establish backup success, freshness or an RPO; a cleared alert is not recovery evidence."
+      - uid: briqyard-out-of-room
+        title: "Creates refused: no room"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: briqyard-prometheus
+            model:
+              refId: A
+              expr: 'sum by (region, resource) (increase(briqyard_fleet_unschedulable_total{resource=~"memory|cpu|disk"}[5m]))'
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Creates in region {{ .Labels.region }} were refused for want of {{ .Labels.resource }}: check capacity and host compatibility."
       - uid: briqyard-host-pressure
         title: "Creates refused: host under pressure"
         condition: C

@@ -19,10 +19,11 @@ Before this change the fleet's only capacity signal was a 503 `capacity` answer 
 | `resource` | When | A new host fixes it |
 |---|---|---|
 | `memory` | A new tenant: no host of the region is ready and under its fill ceiling with the memory free (no host at all included), or those with the room are under `memory_pressure` (or `storage_stalled`, ADR 0046: then the fix is the operator's, which the `host_condition` event names) | yes |
-| `disk` | A new tenant: hosts have the memory, none the disk (a volume plus 2 GB), or those with both are under `disk_pressure` | yes |
+| `cpu` | A new tenant: hosts with the requested memory lack enough CPU time or do not report CPU-time capacity (ADR 0057); also a pinned namespace's or fork source's host missing that report | for unbound capacity exhaustion; a bound host missing the report needs an upgrade |
+| `disk` | A new tenant: hosts have the memory and CPU time, none the disk (a volume plus 2 GB), or those with all three are under `disk_pressure` | yes |
 | `pressure` | The host the create is bound to (a pinned tenant's, a fork's source's) is under a condition (ADR 0021) | no: the tenant's machines stay on its host (ADR 0006), so that host must be freed |
 
-A host under a condition is short of what its condition names, so a new tenant refused for it counts as `memory` or `disk` (the condition of the host with the most memory free among those with the room). That keeps the scaler's rule to one line: `memory` or `disk` grew, add a host in the region. A host's own refusal (its answer passes through, ADR 0013) is not counted: a host the fleet thought had room, or a pinned tenant's, and the daemon does not say which resource. So a pinned tenant's machine refused by its own host, full but under its pressure thresholds, is neither counted nor logged by the fleet; `memory_pressure` at 95 % of capacity (the default) keeps that window small.
+A host under a condition is short of what its condition names, so a new tenant refused for it counts as `memory` or `disk` (the condition of the host with the most memory free among those with the room). The capacity alert includes `memory`, `cpu` and `disk`. CPU coverage follows the CPU-time admission added in ADR 0057: distinguish exhausted capacity from a missing CPU-time report before adding capacity or upgrading a host. A different host does not fix a namespace or fork bound to a host missing that report. A host's own refusal (its answer passes through, ADR 0013) is not counted: a host the fleet thought had room, or a pinned tenant's, and the daemon does not say which resource. So a pinned tenant's machine refused by its own host, full but under its pressure thresholds, is neither counted nor logged by the fleet; `memory_pressure` at 95 % of capacity (the default) keeps that window small.
 
 **The signals, on the fleet's `GET /metrics`** (Prometheus text, written as the daemon's, the helpers shared in `briqyard_api::metrics`):
 
@@ -31,11 +32,11 @@ A host under a condition is short of what its condition names, so a new tenant r
 | `briqyard_fleet_hosts` | `state` | hosts in the registry (`ready` always present) |
 | `briqyard_fleet_free_mb` | `resource="memory\|disk"`, `region` | free on the region's hosts that take a new tenant (ready, under the fill ceiling, no condition), summed |
 | `briqyard_fleet_largest_slot_mb` | same | the most free on one of them: the largest machine the region still takes |
-| `briqyard_fleet_unschedulable_total` | `resource="memory\|disk\|pressure"`, `region` | refusals since the fleet started |
+| `briqyard_fleet_unschedulable_total` | `resource="memory\|cpu\|disk\|pressure"`, `region` | refusals since the fleet started |
 
 Every region a host is in has every series, zeros included, so `increase()` works from the first scrape. A region asked that no host is in counts as `region="other"`: a caller's typo never makes a new series. `other`, and `""` when every host has a region, have the counter only: a room of 0 there would read as a full region. `/v1/status` leaves their `free` and `largest_slot` out. `/metrics` takes the API's token, or `metrics_token` when set (then only it), and none on a loopback listener with `tls` unset: the daemon's rule (ADR 0021).
 
-**The same numbers elsewhere.** `GET /v1/status` gets `regions` (additive, ADR 0027): per region `free`, `largest_slot` (`memory_mb`, `disk_mb`) and `unschedulable` (`memory`, `disk`, `pressure`). `briqyard host ls` prints them under the hosts. Each refusal is a `warn` line, `unschedulable`, with `resource`, `region`, `tenant`, `host` (a pinned one), the ask (`memory_mb`, `disk_mb`) and the region's largest slot (`largest_memory_mb`, `largest_disk_mb`), for log-based alerts.
+**The same numbers elsewhere.** `GET /v1/status` gets `regions` (additive, ADR 0027): per region `free`, `largest_slot` (`memory_mb`, `disk_mb`) and `unschedulable` (`memory`, `cpu`, `disk`, `pressure`). `briqyard host ls` prints them under the hosts. Each refusal is a `warn` line, `unschedulable`, with `resource`, `region`, `tenant`, `host` (a pinned one), the ask (`memory_mb`, `disk_mb`) and the region's largest slot (`largest_memory_mb`, `largest_disk_mb`), for log-based alerts.
 
 **The counters live in memory.** A restart resets them, which Prometheus counters allow. Nothing is persisted: the gauges are read from the registry at each scrape.
 
