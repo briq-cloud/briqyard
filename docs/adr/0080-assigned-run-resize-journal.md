@@ -17,6 +17,22 @@ run is still active.
 - **Keep assigned-run updates fail-closed until journal integration exists.** A PATCH
   must not grow the data volume, change pending configuration, or rewrite run evidence
   unless a durable update intent can reconcile those effects after interruption.
+- **Journal updates as authority transitions.** Each update intent must bind the exact
+  source `Current` hash and machine-record fingerprint to the complete target record,
+  normalized patch, and target DATA-volume geometry. Serialize it with the assigned-run
+  lifecycle turn. Persist the intent before disk or record mutation; reconcile the exact
+  source/target record, `Current`, and reader states at startup; delete the intent only
+  after all three durable records agree. A conflicting or unknown state remains
+  quarantined with its backing and capacity charges retained.
+- **Treat volume growth as an idempotent external side effect.** Recovery must inspect
+  the existing zvol size and either finish growth to the journaled target or retain the
+  intent on mismatch. A command error alone cannot establish whether growth occurred.
+  Do not expose the new logical volume size until its target is durable. A resize that
+  changes the next boot's workload invalidates any saved memory checkpoint.
+- **Keep run evidence immutable and chain the control change explicitly.** The update
+  must not rewrite the observed process proof, run sequence, creation receipt, source
+  identity, or prior-run hash. The run journal and reader must authenticate the update
+  transition so the next run can use the exact settled target as its predecessor.
 - **Treat the full provider resize lifecycle as a pre-enable requirement.** Integration
   must cover a running volume-only PATCH, stop and settlement, subsequent stopped
   size/image PATCHes, daemon restart, and the next assigned start. It must retain the
