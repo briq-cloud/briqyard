@@ -107,6 +107,7 @@ impl Manager {
                 .check_capacity(m.capacity())?;
         }
         m.load()?;
+        m.recover_assigned_update_backing().await?;
         m.prepare_assigned_reboot_exits().await?;
         m.verify_assigned_run_backing().await?;
         m.verify_clone_artifacts();

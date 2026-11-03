@@ -1,6 +1,6 @@
 # ADR 0080: Assigned-run resize requires a durable update journal
 
-2026-11-03 · Accepted, lifecycle integration pending
+2026-11-03 · Accepted, full resize lifecycle integration pending
 
 ## Context
 
@@ -14,9 +14,11 @@ run is still active.
 
 ## Decisions
 
-- **Keep assigned-run updates fail-closed until journal integration exists.** A PATCH
-  must not grow the data volume, change pending configuration, or rewrite run evidence
-  unless a durable update intent can reconcile those effects after interruption.
+- **Journal the provider's stopped resize as one transition.** A stopped PATCH may combine
+  image, size, disk limits and data-volume growth. The durable update intent records the
+  complete pending target; image resolution and root replacement are separately replayable
+  under that intent. A running volume-only PATCH grows the data disk immediately and marks
+  the filesystem growth pending for the next cold start.
 - **Journal updates as authority transitions.** Each update intent must bind the exact
   source `Current` hash and machine-record fingerprint to the complete target record,
   normalized patch, and target DATA-volume geometry. Serialize it with the assigned-run
@@ -48,6 +50,9 @@ run is still active.
 
 ## Consequences
 
-This candidate does not claim assigned-run resize compatibility or warm-pool enablement.
-Removing the guard requires a separate durable transition design with crash/replay tests;
-ordinary `pending` fields alone are not sufficient evidence for volume or image changes.
+The current journal covers the provider's running volume PATCH and combined stopped resize,
+including image-root replacement, retries, machine-record and ZFS repair after interruption,
+and the next-run chain. The old root remains available until the consumed update and next
+run authority are durable, then normal snapshot tidying retires it. This does not establish
+warm-pool enablement or native qualification. Ordinary `pending` fields alone are not
+sufficient evidence for volume or image changes.

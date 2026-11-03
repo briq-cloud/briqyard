@@ -65,6 +65,7 @@ impl Store {
             "assigned-run-intents",
             "assigned-runs",
             "assigned-run-readers",
+            "assigned-run-updates",
         ] {
             private_dir(&root.join(d))?;
         }
