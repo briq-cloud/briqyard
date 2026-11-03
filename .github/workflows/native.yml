@@ -206,7 +206,7 @@ jobs:
         run: |
           git -C "$GITHUB_WORKSPACE" rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
           uname -a | tee -a "$GITHUB_STEP_SUMMARY"
-          ls -l /dev/kvm
+          ls -l /dev/kvm || echo '/dev/kvm is missing: the second-host step reports the environment gate'
           free -m
           df -h /
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable

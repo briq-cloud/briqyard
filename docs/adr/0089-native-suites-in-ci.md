@@ -115,16 +115,15 @@ for ready/down states. This exercises all 18 existing checks, including down-hos
 A running local machine provides disk/CPU observations; checking waits for at least 12
 Prometheus samples (3 minutes at the 15 s scrape interval, capped at 300 s) before querying the dashboards. Credentials stay outside artifacts.
 
-The two-host gate above remains: a second daemon's own state, pool, ports and unit
+A second daemon's own state, pool, ports and unit
 are insufficient because the unmodified suites address the same absolute config,
 unit and pool on both hosts. Mount/systemd isolation would require another host
 fixture beyond a second daemon; it is not provided here. Hosted matrix jobs have no
 direct private connectivity or shared lifecycle orchestration. No transport or
 credentials are provisioned. The harness explicitly logs this environment gate in
 each added job and its summary; neither two-host suite is invoked partially or
-reported as passing. The existing 29 and 10 checks remain unchanged.
-
-Qualification of the added jobs against main is pending the first dispatch.
+reported as passing. The existing 29 and 10 checks remain unchanged. The nested host
+below replaced this gate.
 
 ## Independent QEMU second-host probe
 
@@ -145,8 +144,6 @@ is built once from the selected source and transferred with its verified release
 assets. Suite assertions and counts remain unchanged. A cold Alpine create and
 exec on the nested host measure actual Firecracker usability before the suites.
 
-Qualification of Firecracker and the 29/10-check suites is pending the native run.
-The existing two-host gate remains until both suites actually execute.
 
 The first full-main attempt failed before suites: both host URLs used 127.0.0.1
 with different ports, but fleet host identity deliberately compares the address
@@ -186,3 +183,8 @@ single-runner restriction above: QEMU supplies the independent root, systemd and
 pool that a second daemon alone could not. No assertions were skipped, weakened
 or relabeled, and no `ALLOW_SKIPPED` override was used. The only dispatch selection
 in this validation omitted unrelated jobs, not any two-host suite checks.
+
+The `ubuntu-24.04` label promises no CPU vendor. The full run here is on AMD; on Intel only
+the KVM API was seen. A runner that cannot nest fails the job with exit 78, an `ENVIRONMENT
+GATE` line and a first line in the summary: the suites did not run, and a re-run may land on
+a runner that can. A job never passes without running them.

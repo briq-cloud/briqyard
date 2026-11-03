@@ -15,8 +15,15 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+# This runner cannot host the second machine: nothing was tested, a re-run may land on one that can.
+gate() {
+  echo "ENVIRONMENT GATE: $1"
+  [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "**ENVIRONMENT GATE, the two-host suites did not run on this runner: $1. Re-run; this is not a suite failure.**" >> "$GITHUB_STEP_SUMMARY"
+  exit 78
+}
 uname -a
 lscpu
+[ -e /dev/kvm ] || gate 'no /dev/kvm on the runner'
 ls -l /dev/kvm
 for module in kvm_intel kvm_amd; do
   param=/sys/module/$module/parameters/nested
@@ -26,10 +33,12 @@ for module in kvm_intel kvm_amd; do
     Y|1) ;;
     *)
       # No VMs have been started by this job. Reload only the vendor module.
-      if sudo modprobe -r "$module"; then sudo modprobe "$module" nested=1; fi
+      { sudo modprobe -r "$module" && sudo modprobe "$module" nested=1; } || gate "cannot enable nesting in $module"
       ;;
   esac
+  [ -e /dev/kvm ] || gate "/dev/kvm gone after reloading $module"
   echo "nested after: $module $(cat "$param")"
+  case "$(cat "$param")" in Y|1) ;; *) gate "nesting stays off in $module" ;; esac
 done
 sudo apt-get update -qq
 sudo apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils
@@ -69,8 +78,9 @@ for _ in $(seq 1 180); do
   sleep 1
 done
 echo "QEMU SSH boot seconds: $((SECONDS-start))"
-[ "$ready" = 1 ] || { echo 'ENVIRONMENT GATE: QEMU failed to boot'; exit 1; }
-ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 'sudo bash -s' <<'GUEST'
+[ "$ready" = 1 ] || gate 'QEMU failed to boot the second host'
+guest_rc=0
+ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 'sudo bash -s' <<'GUEST' || guest_rc=$?
 set -euo pipefail
 uname -a
 lscpu
@@ -86,10 +96,12 @@ try:
     os.close(vm); os.close(kvm)
     print('Nested KVM_CREATE_VM seconds:',time.monotonic()-start)
 except OSError as e:
-    print('ENVIRONMENT GATE: nested KVM unavailable:',e)
-    sys.exit(1)
+    print('nested KVM unavailable:',e)
+    sys.exit(78)
 PY
 GUEST
+[ "$guest_rc" != 78 ] || gate 'nested KVM unavailable inside the second host'
+[ "$guest_rc" = 0 ] || exit "$guest_rc"
 
 printf '%s\n' "$qemu_pid" > "$WORK/pid"
 # Suite shell adapter: preserve every argument through SSH's command string.
