@@ -14,6 +14,17 @@ The installer verifies the bundle's provenance and patches before activation. It
 pinned guest kernel, encrypted file-backed ZFS pool and networking are unchanged.
 `hack/install-dev.sh`, shared with `hack/vm.sh`, installs systemd units, the mirror,
 SSH authorization and a local release directory for the fleet upgrade check.
+The CI fixture reserves 12 GiB for guest admission and caps the ZFS ARC at 1 GiB;
+its 24 virtual CPU admission slots match the development fixture (4 physical
+runner cores). The pool is a sparse 40 GiB file. These are suite fixtures,
+not production capacity or performance recommendations. The setup script refuses
+to run outside a GitHub-hosted runner.
+
+The runner is dedicated to this daemon: stop Docker and remove its host-wide
+FORWARD drop policy before bootstrap. briqyard's own nftables chains continue to
+apply the suite's egress and isolation checks. Docker documents that its forwarding
+policy can drop unrelated routed traffic:
+https://docs.docker.com/engine/network/packet-filtering-firewalls/#docker-on-a-router.
 
 Each suite retains its complete log as an artifact and prints its final counts and
 duration in the job summary. Early termination remains a failure. No checks are
@@ -32,8 +43,8 @@ file-backed pool.
 
 Choose x86_64 because only it exposes KVM. ARM support requires a runner with KVM;
 portable ARM checks continue independently. The probe's branch push trigger bootstraps
-the new workflow before it exists on the default branch; retain manual dispatch only
-after the measurements are collected.
+the new workflow before it exists on the default branch; it is removed after
+the measurements, leaving manual dispatch.
 
 ## Qualification
 

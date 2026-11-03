@@ -27,7 +27,14 @@ build() {
 
 install() {
   build
-  limactl shell "$VM" sudo env VMHOME="$VMHOME" bash "$SRC/hack/install-dev.sh" "$TARGET"
+  limactl shell "$VM" sudo bash -s -- "$VMHOME" "$SRC" "$TARGET" <<'EOF'
+set -e
+H=$1 SRC=$2 TARGET=$3
+mkdir -p /var/lib/briqyard
+[ -f /usr/local/bin/firecracker ] || install -m 0755 "$H/fc/firecracker" /usr/local/bin/firecracker
+[ -f /var/lib/briqyard/vmlinux ] || cp "$H/fc/vmlinux" /var/lib/briqyard/vmlinux
+exec bash "$SRC/hack/install-dev.sh" "$TARGET"
+EOF
 }
 
 case "$cmd" in

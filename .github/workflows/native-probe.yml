@@ -1,9 +1,6 @@
 name: native-probe
 on:
   workflow_dispatch:
-  push:
-    branches: [ci/native-suites]
-    paths: [.github/workflows/native-probe.yml]
 permissions:
   contents: read
 jobs:

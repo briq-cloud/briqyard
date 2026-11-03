@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
       - name: Record tested identity and host
         run: |
-          git rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          git -C "$GITHUB_WORKSPACE" rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
           uname -a | tee -a "$GITHUB_STEP_SUMMARY"
           ls -l /dev/kvm
           free -m
@@ -61,7 +61,9 @@ jobs:
           start=$SECONDS
           set +e
           bash hack/e2e.sh 2>&1 | tee native-logs/e2e.log
-          rc=${PIPESTATUS[0]}
+          statuses=("${PIPESTATUS[@]}")
+          rc=${statuses[0]}
+          if [ "${statuses[1]}" != 0 ]; then rc=${statuses[1]}; fi
           echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
           exit "$rc"
       - name: fleet-smoke
@@ -73,7 +75,9 @@ jobs:
           start=$SECONDS
           set +e
           bash hack/fleet-smoke.sh 2>&1 | tee native-logs/fleet-smoke.log
-          rc=${PIPESTATUS[0]}
+          statuses=("${PIPESTATUS[@]}")
+          rc=${statuses[0]}
+          if [ "${statuses[1]}" != 0 ]; then rc=${statuses[1]}; fi
           echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
           exit "$rc"
       - name: Suite counts
@@ -94,6 +98,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-suite-logs
-          path: native-logs/*.log
+          name: native-e2e-log
+          path: native-logs/e2e.log
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-fleet-smoke-log
+          path: native-logs/fleet-smoke.log
           if-no-files-found: ignore
