@@ -286,6 +286,7 @@ mod replay_tests {
                     device: "/dev/vdc".into(),
                     path: "/work".into(),
                     fstype: "ext4".into(),
+                    read_only: false,
                 }],
                 sandbox_device: Some(guest::SandboxDevice {
                     bytes: 2 << 30,
