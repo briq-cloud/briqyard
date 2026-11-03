@@ -27,7 +27,9 @@ impl Manager {
         let identity = self
             .memory_identity(e, &r)
             .ok_or_else(|| invalid("template requires strong boot provenance"))?;
-        if identity.schema != 1 || !e.identity_trusted.load(Relaxed) || r.boot_incarnation.is_none()
+        if identity.schema != fc::BootIdentity::SCHEMA
+            || !e.identity_trusted.load(Relaxed)
+            || r.boot_incarnation.is_none()
         {
             return Err(invalid("template boot provenance is unconfirmed"));
         }
@@ -107,7 +109,7 @@ impl Manager {
         let identity = snapshot
             .boot_identity
             .clone()
-            .filter(|i| i.schema == 1)
+            .filter(|i| i.schema == fc::BootIdentity::SCHEMA)
             .ok_or_else(|| invalid("template snapshot lacks strong boot identity"))?;
         snapshot.clone_artifact = Some(CloneArtifact {
             schema: 1,

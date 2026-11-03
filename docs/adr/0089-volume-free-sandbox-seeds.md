@@ -41,8 +41,8 @@ disagreement between host record and drives fails closed in the guest too.
 `check_sandbox_seed` requires `/work` and a positive size only when a volume is given. The
 daemon looks the recipe up by the request's volume, then compares the seed's sealed device with
 the recipe's, so a volume request for an existing size cannot reach a volume-free seed. A
-refusal is an invalid request, as today; a cold fallback stays the business of the
-generation check (see the interaction below), never of the shape.
+refusal is an invalid request, as today. The generation check refuses a seed of another
+generation (ADR 0087) and the shape check refuses after it; neither falls back to a cold create.
 
 **A builder names its volume as a create does.** `template_build: sandbox-ready-v1` may carry
 `volume: {size_gb, mount: "/work"}`; without one it builds the volume-free shape. This replaces
@@ -58,6 +58,11 @@ the slot's, so a volume-free slot serves only a volume-free create. Data-volume 
 zero for such a slot; the positive `data_disk_gb` budget that enabling unbound pools still
 requires is unchanged here.
 
+**An assigned machine's run follows its record's volume.** The run journal (`Current`, `Reader`,
+`Checkpoint`) holds `data: Option<Disk>`, set from `record.volume` as the ordinary start does, and
+the continuation boots with a data drive only when the record has a volume. A volume-free
+assigned machine stops and starts like any other. Journals written with a data disk read as before.
+
 ## Alternatives
 
 - **`volume_gb: Option<u32>`, absent for none.** A forgotten field would silently change a
@@ -71,17 +76,20 @@ requires is unchanged here.
 
 ## Consequences
 
-- Existing seeds keep their topology and stay valid; their recipes need no change. A new image
-  digest of init is already required by the guest change, so seeds are re-sealed with the release.
+- Existing recipes need no change (a positive `volume_gb` keeps its meaning). Seeds are re-sealed
+  with the release because init's digest changes (ADR 0087), not because of this ADR.
+- Records of volume-free machines carry `Binding.device: null` and `data: null` in run journals, which
+  a previous-release daemon fails to load at startup. Acceptable while no seed is deployed.
 - A volume-free seed is a new artifact: the operator builds and seals it once per image and
   size, in addition to the volume seed, and raises the pool catalog by one entry.
 - Capacity: a volume-free slot holds a root disk and memory, no data disk.
 - No openapi schema changes; `sandbox_seed` documentation says the volume is optional.
-- Interaction with ADR 0087 (boot identity schema 2, `Mount.read_only`, a seed of another
-  generation falling back cold with a visible origin): orthogonal. This ADR changes the recipe
-  and the drive topology; that one changes the boot identity and the generation outcome. Both
-  go in one release with one seed re-qualification. The device comparison here runs
-  after the generation comparison, so a stale generation keeps whatever outcome that ADR gives it.
+- Interaction with ADR 0087 (boot identity schema 2, `Mount.read_only`, a create naming a seed of
+  another generation refused): orthogonal. This ADR changes the recipe and the drive topology;
+  that one changes the boot identity and the generation outcome. Both go in one release with one
+  seed re-qualification. The device comparison here runs after the generation comparison; a stale
+  generation is refused first, and a shape mismatch is refused after it, with no cold fallback in
+  either case.
 
 ## Tests
 
@@ -89,6 +97,6 @@ Config parsing (old config unchanged, `0`, missing field, coexisting shapes, dup
 `check_sandbox_seed`, `DestinationBind` validation, the volume matrix above on a real seal and
 on a pool, a volume-free builder (record, config drive, artifact), builder volume refusals,
 clone-spec topology, factory slot and pool fingerprint, assignment and recovery of a
-volume-free slot, and the guest's absent-drive check. Native Linux still has to run: a
+volume-free slot, a volume-free assigned machine's stop and start, and the guest's absent-drive check. Native Linux still has to run: a
 volume-free seal and clone in Firecracker, boot with two drives, `/work` absent after bind,
 the init's sysfs check, and the ready-slot timing for the new shape.

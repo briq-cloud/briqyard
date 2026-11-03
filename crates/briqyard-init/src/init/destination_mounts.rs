@@ -5,6 +5,10 @@ pub(super) fn setup(cfg: &Config) -> Result<()> {
     sandbox_device::prepare(cfg.sandbox_device.as_ref())?;
     for volume in &cfg.mounts {
         let path = Path::new(&volume.path);
+        anyhow::ensure!(
+            !volume.read_only,
+            "a sandbox destination has no read-only mount"
+        );
         let seed = stage(path)?;
         mount(
             Some(volume.device.as_str()),

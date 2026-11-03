@@ -1,22 +1,29 @@
 use super::*;
 
 impl Manager {
-    pub(super) async fn current_run_disks(&self, record: &Record) -> Result<(Disk, Disk)> {
-        anyhow::ensure!(record.volume.is_some(), "assigned work disk missing");
+    /// The root disk and, when the record has a volume, the data disk; a volume-free
+    /// machine has no data disk to identify.
+    pub(super) async fn current_run_disks(&self, record: &Record) -> Result<(Disk, Option<Disk>)> {
         let root = record.root_dataset();
-        let data = record.data_dataset();
         let root = Disk {
             guid: self.inner.zfs.guid(&root).await?,
             dataset: root,
         };
-        let data = Disk {
-            guid: self.inner.zfs.guid(&data).await?,
-            dataset: data,
+        let data = match &record.volume {
+            Some(_) => {
+                let data = record.data_dataset();
+                let data = Disk {
+                    guid: self.inner.zfs.guid(&data).await?,
+                    dataset: data,
+                };
+                anyhow::ensure!(
+                    root.guid != data.guid,
+                    "root and data identify the same dataset"
+                );
+                Some(data)
+            }
+            None => None,
         };
-        anyhow::ensure!(
-            root.guid != data.guid,
-            "root and data identify the same dataset"
-        );
         Ok((root, data))
     }
 
@@ -108,7 +115,7 @@ impl Manager {
                 .context("fresh boot identity unavailable")?
         };
         anyhow::ensure!(
-            expected_boot_identity.schema == 1,
+            expected_boot_identity.known(),
             "run boot identity schema unsupported"
         );
         let mode = if let (true, Some(previous)) = (checkpoint, previous.as_ref()) {
@@ -235,7 +242,7 @@ impl Current {
                 && self.reference.sequence > 0
                 && hex_id(&self.host_generation, 64)
                 && fc::valid_host_boot_id(&self.host_boot_id)
-                && self.expected_boot_identity.schema == 1
+                && self.expected_boot_identity.known()
                 && self.machine == self.prior.id
                 && self.receipt.machine == self.machine
                 && self.target.id == self.machine
@@ -273,10 +280,15 @@ impl Current {
                 && binding.create_sha256 == self.receipt.create_sha256
                 && self.prior.namespace == self.receipt.namespace
                 && self.root.dataset == self.prior.root_dataset()
-                && self.data.dataset == self.prior.data_dataset()
                 && self.root.guid > 0
-                && self.data.guid > 0
-                && self.root.guid != self.data.guid,
+                && match (&self.prior.volume, &self.data) {
+                    (Some(_), Some(data)) =>
+                        data.dataset == self.prior.data_dataset()
+                            && data.guid > 0
+                            && data.guid != self.root.guid,
+                    (None, None) => true,
+                    _ => false,
+                },
             "run changes creation authority or current backing identity"
         );
         let old = self

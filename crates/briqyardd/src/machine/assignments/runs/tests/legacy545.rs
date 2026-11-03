@@ -150,8 +150,8 @@ impl OldCurrent {
                 guid: current.root.guid,
             },
             data: OldDisk {
-                dataset: current.data.dataset.clone(),
-                guid: current.data.guid,
+                dataset: current.data.as_ref().unwrap().dataset.clone(),
+                guid: current.data.as_ref().unwrap().guid,
             },
             host_boot_id: current.host_boot_id.clone(),
             expected_boot_identity: current.expected_boot_identity.clone(),

@@ -33,7 +33,7 @@ pub(super) struct Checkpoint {
     config: templates::ArtifactFile,
     workload_sha256: String,
     root: Disk,
-    data: Disk,
+    data: Option<Disk>,
     boot_identity: fc::BootIdentity,
     lineage: Lineage,
 }

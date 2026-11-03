@@ -72,7 +72,8 @@ struct Current {
     target: Box<Record>,
     creation_reader: templates::CloneReader,
     root: Disk,
-    data: Disk,
+    /// None for a machine without a data volume.
+    data: Option<Disk>,
     host_boot_id: String,
     expected_boot_identity: fc::BootIdentity,
     mode: Mode,
@@ -98,7 +99,7 @@ struct Reader {
     reference: RunRef,
     current_sha256: String,
     root: Disk,
-    data: Disk,
+    data: Option<Disk>,
     backing: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
