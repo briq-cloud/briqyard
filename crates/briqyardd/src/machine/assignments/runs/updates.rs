@@ -156,14 +156,7 @@ impl Manager {
         // Memory may hold the previous target after its machine write failed. Make that
         // target durable before discarding its predecessor, using startup's exact validation.
         // On any failure the old journal and its capacity reservation remain authoritative.
-        if let Some(existing) = self.inner.store.get::<UpdateIntent>(UPDATES, &target.id)? {
-            self.recover_assigned_update(&existing)?;
-            // Matching bytes can come from a rename whose directory sync failed. The
-            // store syncs file contents before rename; complete that durable boundary too.
-            std::fs::File::open(self.inner.store.dir("machines"))
-                .and_then(|directory| directory.sync_all())
-                .context("sync reconciled assigned machine directory")?;
-        }
+        self.repair_outstanding_update_record(&target.id)?;
         self.inner.store.put_durable(UPDATES, &target.id, intent)?;
         *entry.rec.lock().unwrap() = target.clone();
         self.inner
@@ -584,6 +577,24 @@ impl Manager {
         Ok(self.view(entry))
     }
 
+    /// Make the machine file match the outstanding update, if there is one. A failed machine
+    /// write leaves memory and the journal at the newest target and the file at its predecessor;
+    /// startup repairs that, so every durable journal write that startup then checks against the
+    /// file (a newer update, a run reservation, a run transition) repairs it first, under the
+    /// entry lock. On failure the existing journal is kept.
+    pub(super) fn repair_outstanding_update_record(&self, machine: &str) -> Result<()> {
+        let Some(update) = self.inner.store.get::<UpdateIntent>(UPDATES, machine)? else {
+            return Ok(());
+        };
+        self.recover_assigned_update(&update)?;
+        // Matching bytes can come from a rename whose directory sync failed. The
+        // store syncs file contents before rename; complete that durable boundary too.
+        std::fs::File::open(self.inner.store.dir("machines"))
+            .and_then(|directory| directory.sync_all())
+            .context("sync reconciled assigned machine directory")?;
+        Ok(())
+    }
+
     pub(super) fn recover_assigned_update(&self, update: &UpdateIntent) -> Result<()> {
         let current: Current = self
             .inner
@@ -681,6 +692,12 @@ impl Manager {
         let manager = self.clone();
         let entry = Arc::clone(entry);
         tokio::spawn(async move {
+            // `tidy` requires the machine's lock. The start that consumed the update does not
+            // hold it here, so it is taken like any other lifecycle step.
+            let _lock = entry.lock.lock().await;
+            if !manager.holds(&entry) {
+                return;
+            }
             for snapshot in snapshots {
                 manager.remove_memory(&source, &snapshot);
             }

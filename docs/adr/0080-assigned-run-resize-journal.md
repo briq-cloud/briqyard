@@ -26,10 +26,12 @@ run is still active.
   source/target record, `Current`, and reader states at startup; delete the intent only
   after all three durable records agree. A conflicting or unknown state remains
   quarantined with its backing and capacity charges retained.
-- **Reconcile before replacing an outstanding intent.** A failed machine write can leave
-  memory at the latest target while disk still holds its predecessor. Before replacing
-  the intent, validate and durably reconcile that existing transition using startup's exact
-  source/target matching. A failure retains the existing intent and quota reservation.
+- **Repair the machine record before every journal write that startup checks against it.**
+  A failed machine write can leave memory and the update journal at the latest target while
+  the file still holds its predecessor. Before replacing the intent, before reserving a run
+  and before journaling any run transition (a guest exit's settlement included), validate and
+  durably reconcile the outstanding update using startup's exact source/target matching, and
+  sync the machine directory. A failure retains the existing intent and quota reservation.
   One predecessor is then sufficient; no history chain is needed. Both target and
   predecessor preserve source ownership, creation, workload and backing bindings, allowing
   only pending image/size/volume, event versions, disk limits and data-volume size growth.

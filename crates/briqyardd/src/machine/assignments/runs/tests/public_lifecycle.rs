@@ -1,14 +1,26 @@
 //! Public Manager callers must compose private run authority without duplicate launches.
 use super::*;
 use crate::machine::assignments::runs::recovery::RunRecovery;
+use crate::machine::assignments::runs::terminal::Disposition;
 
 fn bounded<T>(
+    future: impl std::future::Future<Output = T>,
+) -> impl std::future::Future<Output = T> {
+    bounded_for(10, future)
+}
+
+/// A start that consumes an image update replaces the root and then reserves the run: both are
+/// many fake-ZFS process spawns, about 11 s together on a loaded host. The bound only catches a hang.
+const START_WITH_IMAGE_SWAP_SECONDS: u64 = 60;
+
+fn bounded_for<T>(
+    seconds: u64,
     future: impl std::future::Future<Output = T>,
 ) -> impl std::future::Future<Output = T> {
     // Keep several large Manager futures out of this multi-operation test's stack frame.
     let future = Box::pin(future);
     async move {
-        tokio::time::timeout(Duration::from_secs(10), future)
+        tokio::time::timeout(Duration::from_secs(seconds), future)
             .await
             .expect("public assigned lifecycle operation must complete")
     }
@@ -691,7 +703,9 @@ async fn assigned_image_root_swap_recovers_each_zfs_rename_boundary() {
             assert_eq!(h.pool.zfs.exists(&next).await.unwrap(), boundary == 1);
             let pending: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
             assert!(pending.root_swap.as_ref().unwrap().target_guid.is_none());
-            bounded(h.m.start(&id, None)).await.unwrap();
+            bounded_for(START_WITH_IMAGE_SWAP_SECONDS, h.m.start(&id, None))
+                .await
+                .unwrap();
             let installed_guid = h.pool.zfs.guid(&root).await.unwrap();
             assert_ne!(installed_guid, source_guid);
             if let Some(target_guid) = target_guid {
@@ -713,7 +727,9 @@ async fn assigned_image_root_swap_recovers_each_zfs_rename_boundary() {
             RunRecovery::Settled
         );
         full_startup(&h).await.unwrap();
-        bounded(h.m.start(&id, None)).await.unwrap();
+        bounded_for(START_WITH_IMAGE_SWAP_SECONDS, h.m.start(&id, None))
+            .await
+            .unwrap();
     }
 }
 
@@ -1180,6 +1196,95 @@ async fn failed_machine_write_then_coalesce_and_crash_retains_recoverable_author
         assert_eq!(recovered.volume.as_ref().unwrap().size_gb, first_gb + 1);
         h.m.recover_assigned_update_backing().await.unwrap();
     }
+}
+
+/// A coalesced update whose machine write failed: memory and the journal hold the newest
+/// target, the machine file still holds the predecessor. Leaves the storage unblocked.
+async fn stale_machine_after_failed_coalesced_write(
+    h: &crate::machine::tests::Harness,
+    id: &str,
+    running: bool,
+) -> u32 {
+    let entry = h.m.entry(id).unwrap();
+    bounded(h.m.start(id, None)).await.unwrap();
+    if !running {
+        bounded(h.m.stop(id, Duration::from_secs(1), false, None))
+            .await
+            .unwrap();
+    }
+    let first_gb = entry.snapshot().volume.as_ref().unwrap().size_gb + 1;
+    bounded(h.m.update(id, volume_patch(first_gb), None))
+        .await
+        .unwrap();
+    let blocked =
+        h.m.inner
+            .store
+            .dir("machines")
+            .join(format!("{id}.json.tmp"));
+    std::fs::create_dir(&blocked).unwrap();
+    assert!(bounded(h.m.update(id, volume_patch(first_gb + 1), None))
+        .await
+        .is_err());
+    std::fs::remove_dir(blocked).unwrap();
+    let durable: Record = h.m.inner.store.get("machines", id).unwrap().unwrap();
+    assert_eq!(durable.volume.as_ref().unwrap().size_gb, first_gb);
+    assert_eq!(
+        entry.snapshot().volume.as_ref().unwrap().size_gb,
+        first_gb + 1
+    );
+    first_gb + 1
+}
+
+fn assert_no_run_intent_and_clean_load(h: &crate::machine::tests::Harness, id: &str, gb: u32) {
+    assert!(
+        h.m.inner
+            .store
+            .get::<Intent>(INTENTS, id)
+            .unwrap()
+            .is_none(),
+        "no run intent is left behind"
+    );
+    let durable: Record = h.m.inner.store.get("machines", id).unwrap().unwrap();
+    assert_eq!(durable.volume.as_ref().unwrap().size_gb, gb);
+    restart(h).expect("the next daemon start loads the repaired machine");
+    assert_eq!(
+        h.m.entry(id)
+            .unwrap()
+            .snapshot()
+            .volume
+            .as_ref()
+            .unwrap()
+            .size_gb,
+        gb
+    );
+}
+
+#[tokio::test]
+async fn start_after_failed_coalesced_machine_write_repairs_the_record_first() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    let gb = stale_machine_after_failed_coalesced_write(&h, &id, false).await;
+    let started = bounded(h.m.start(&id, None))
+        .await
+        .expect("start repairs the machine record before reserving the run");
+    assert_eq!(started.state, state::RUNNING);
+    assert_eq!(started.volume.as_ref().unwrap().size_gb, gb);
+    assert_no_run_intent_and_clean_load(&h, &id, gb);
+}
+
+#[tokio::test]
+async fn guest_exit_after_failed_coalesced_machine_write_settles_and_restarts_clean() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    let gb = stale_machine_after_failed_coalesced_write(&h, &id, true).await;
+    let live = entry.live.lock().unwrap().clone().unwrap();
+    h.m.inner.vmm.kill(live.pid);
+    h.m.settle_assigned_run(&entry, Disposition::Stopped)
+        .await
+        .expect("settlement repairs the machine record before journaling the transition");
+    let settled: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+    assert_eq!(settled.reference.phase, Phase::Settled);
+    assert_no_run_intent_and_clean_load(&h, &id, gb);
 }
 
 #[tokio::test]

@@ -439,12 +439,11 @@ impl Manager {
                 return 0;
             }
         }
-        match self.assigned_update_machines() {
-            Ok(machines) => known.extend(machines),
-            Err(error) => {
-                tracing::error!(err = %error, "assigned updates unreadable: orphan cleanup deferred");
-                return 0;
-            }
+        // Every update names a machine that load kept (it refuses a journal without its record),
+        // so only an unreadable journal matters here.
+        if let Err(error) = self.assigned_update_machines() {
+            tracing::error!(err = %error, "assigned updates unreadable: orphan cleanup deferred");
+            return 0;
         }
         let mut swept = 0;
         for (pid, id) in self.inner.vmm.processes() {

@@ -439,6 +439,9 @@ impl Manager {
             need.cpu_millis(),
         )?;
         self.inner.store.ensure_assigned_run_lifecycle_floor()?;
+        // The intent is checked against the machine file at once: repair a file a failed
+        // update write left at its predecessor target first.
+        self.repair_outstanding_update_record(&intent.current.machine)?;
         // Cache reservation before uncertain persistence: even the first failed write
         // cannot turn this process into a second run or a second physical allocation.
         let _writes = entry.removed.lock().unwrap();
