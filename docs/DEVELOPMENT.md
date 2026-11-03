@@ -8,11 +8,14 @@ same step.
 
 Native PR evidence comes from the `native` GitHub Actions workflow on `ubuntu-24.04`
 with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head;
-manual dispatch accepts a ref. The job summaries contain e2e, fleet-smoke, stress and monitoring counts
+manual dispatch accepts a ref. The job summaries contain e2e, fleet-smoke, stress, monitoring, two-hosts and restore counts
 and durations; the `native-*-log` artifacts contain their complete output. These checks are
 not required checks yet. Stress and monitoring run on separate runners in parallel. Monitoring covers a
-ready daemon and an explicitly unreachable registered host (18 checks). Two-host
-suites still need independent Linux hosts
+ready daemon and an explicitly unreachable registered host (18 checks). The two-host job boots
+an independent Ubuntu 24.04 QEMU/KVM host (2 vCPUs, 6 GiB), provisions it through the shared
+bootstrap and development installer, and runs all 29 two-host and 10 restore checks.
+`native-two-host-logs` retains both suites, host journals and boot measurements. Manual
+dispatch can select `two_hosts_only` for targeted validation
 ([ADR 0089](adr/0089-native-suites-in-ci.md)).
 
 ## On a Linux host with KVM

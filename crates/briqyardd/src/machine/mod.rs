@@ -403,7 +403,10 @@ fn made_never(r: &Record) -> MError {
 
 /// A guest call's error: `not_running` when the guest cannot be reached (a machine whose guest
 /// exits as the call comes), else as it is.
-fn not_running_if_unreachable(err: anyhow::Error) -> MError {
+pub(crate) fn not_running_if_unreachable(err: anyhow::Error) -> MError {
+    if err.is::<guestc::Closed>() {
+        return MError::NotRunning("the machine went down during the call".into());
+    }
     match err.downcast::<guestc::Unreachable>() {
         Ok(u) => MError::NotRunning(u.to_string()),
         Err(err) => MError::Other(err),

@@ -630,6 +630,20 @@ class Run:
                 return float(line.split()[1]) / (1 << 20)
         return None
 
+    def dump_consoles(self, label, ids, lines=60):
+        """The evidence of a failed cycle, read before its machines are destroyed: for each one its
+        state, exit info and the last console lines. Never raises: it must not hide the failure."""
+        for mid in ids:
+            out = [f"   CONSOLE {label} {mid}"]
+            try:
+                m = self.mget(mid)
+                out.append(f"      state={m['state']} stopped_reason={m.get('stopped_reason')} exit={m.get('exit')} error={m.get('error')}")
+                page = self.api.call("GET", f"/v1/machines/{mid}/logs?limit=5000", op="logs")
+                out += [f"      | {l.get('ts', '')} {l.get('line', '')}" for l in page.get("lines", [])[-lines:]]
+            except Exception as e:
+                out.append(f"      (unreadable: {str(e)[:200]})")
+            self.log("\n".join(out))
+
     def churn(self):
         """Cycles of everything a machine goes through, each ending with the namespaces empty
         again; the daemon's memory is read after each. What the first cycle settles (caches,
@@ -703,6 +717,9 @@ class Run:
                 self.wait_state(mid, {"stopped"}, timeout=120)
                 self.api.call("POST", f"/v1/machines/{mid}/start", op="resume", timeout=180)
                 self.wait_state(mid, {"running"}, timeout=self.a.boot_timeout)
+            except Exception:
+                self.dump_consoles(f"{t}/c{c}", made)
+                raise
             finally:
                 for x in reversed(made):
                     self.api.call("DELETE", f"/v1/machines/{x}", op="destroy", timeout=180)

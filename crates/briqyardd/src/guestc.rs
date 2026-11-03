@@ -129,27 +129,82 @@ pub struct FileTransferBusy;
 pub struct Unreachable(pub String);
 
 /// Connects to the init: open Firecracker's socket, ask for the guest port, wait for its OK.
+///
+/// A reset of the socket during the handshake (Firecracker's muxer tearing down a connection
+/// as the guest's vsock is reset, a restore or a restart of the init) happens before any
+/// request was written: nothing reached the guest, so the handshake is tried again, a few
+/// times, then reported as an unreachable guest. Only the handshake is retried: once a request
+/// is sent, a command may have started and is never sent twice.
 pub async fn dial(uds: &Path) -> Result<UnixStream> {
-    let mut s = UnixStream::connect(uds)
-        .await
-        .map_err(|e| Unreachable(format!("vsock {}: {e}", uds.display())))?;
+    let mut attempt = 1;
+    loop {
+        match handshake(uds).await {
+            Err(Handshake::Reset(_)) if attempt < HANDSHAKE_ATTEMPTS => {
+                attempt += 1;
+                tokio::time::sleep(HANDSHAKE_PAUSE * attempt).await;
+            }
+            Err(Handshake::Reset(e)) => {
+                return Err(Unreachable(format!(
+                    "vsock {}: reset {HANDSHAKE_ATTEMPTS} times: {e}",
+                    uds.display()
+                ))
+                .into())
+            }
+            Err(Handshake::Failed(e)) => return Err(e),
+            Ok(s) => return Ok(s),
+        }
+    }
+}
+
+const HANDSHAKE_ATTEMPTS: u32 = 4;
+const HANDSHAKE_PAUSE: Duration = Duration::from_millis(100);
+
+enum Handshake {
+    /// The socket was reset before the guest answered: nothing was delivered.
+    Reset(std::io::Error),
+    Failed(anyhow::Error),
+}
+
+fn is_reset(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(e.kind(), ConnectionReset | ConnectionAborted | BrokenPipe)
+}
+
+impl From<std::io::Error> for Handshake {
+    fn from(e: std::io::Error) -> Self {
+        if is_reset(&e) {
+            Handshake::Reset(e)
+        } else {
+            Handshake::Failed(e.into())
+        }
+    }
+}
+
+async fn handshake(uds: &Path) -> std::result::Result<UnixStream, Handshake> {
+    let mut s = UnixStream::connect(uds).await.map_err(|e| {
+        Handshake::Failed(Unreachable(format!("vsock {}: {e}", uds.display())).into())
+    })?;
     s.write_all(format!("CONNECT {}\n", guest::PORT).as_bytes())
         .await?;
     let mut r = BufReader::new(s);
     let mut line = String::new();
     tokio::time::timeout(Duration::from_secs(5), r.read_line(&mut line))
         .await
-        .context("vsock connect")??;
+        .map_err(|e| Handshake::Failed(anyhow::Error::new(e).context("vsock connect")))??;
     if !line.starts_with("OK ") {
-        return Err(Unreachable(format!("vsock connect refused: {}", line.trim())).into());
+        return Err(Handshake::Failed(
+            Unreachable(format!("vsock connect refused: {}", line.trim())).into(),
+        ));
     }
     Ok(r.into_inner())
 }
 
 /// Writes one frame: a request, or an exec's input after it.
 pub async fn write_request<W: AsyncWrite + Unpin>(s: &mut W, req: &Request) -> Result<()> {
-    s.write_all(&guest::encode_frame(req)?).await?;
-    s.flush().await?;
+    s.write_all(&guest::encode_frame(req)?)
+        .await
+        .map_err(after_write)?;
+    s.flush().await.map_err(after_write)?;
     Ok(())
 }
 
@@ -160,14 +215,25 @@ where
     T: serde::de::DeserializeOwned,
 {
     let mut hdr = [0u8; 4];
-    s.read_exact(&mut hdr).await?;
+    s.read_exact(&mut hdr).await.map_err(after_write)?;
     let n = u32::from_be_bytes(hdr) as usize;
     if n > guest::MAX_FRAME {
         return Err(anyhow!("frame too large"));
     }
     let mut body = vec![0u8; n];
-    s.read_exact(&mut body).await?;
+    s.read_exact(&mut body).await.map_err(after_write)?;
     Ok(guest::decode_frame(&body)?)
+}
+
+/// An io error on a connection whose request was already sent: a reset or an end of stream
+/// is the guest going away, [`Closed`]. The command may have started, so nothing sends
+/// it again; the caller reports it (ADR 0091).
+pub(crate) fn after_write(e: std::io::Error) -> anyhow::Error {
+    if is_reset(&e) || e.kind() == std::io::ErrorKind::UnexpectedEof {
+        Closed.into()
+    } else {
+        e.into()
+    }
 }
 
 #[derive(Debug)]
@@ -237,18 +303,7 @@ pub async fn collect<R: AsyncRead + Unpin>(s: &mut R) -> Result<ExecOutput> {
         timed_out: false,
     };
     loop {
-        let r: Response = match read_frame(s).await {
-            Ok(r) => r,
-            Err(e) => {
-                if e.downcast_ref::<std::io::Error>()
-                    .map(|e| e.kind() == std::io::ErrorKind::UnexpectedEof)
-                    .unwrap_or(false)
-                {
-                    return Err(Closed.into());
-                }
-                return Err(e);
-            }
-        };
+        let r: Response = read_frame(s).await?;
         match r.kind.as_str() {
             "stdout" => append(&mut out.stdout, &r.data),
             "stderr" => append(&mut out.stderr, &r.data),
@@ -450,6 +505,95 @@ mod tests {
         let err = dial(&gone).await.unwrap_err();
         assert!(err.to_string().contains("Connection refused"), "{err}");
         assert!(err.is::<Unreachable>());
+    }
+
+    #[tokio::test]
+    async fn dial_retries_a_reset_handshake_and_gives_up_as_unreachable() {
+        // A Firecracker that resets the first two handshakes (it closes with the CONNECT
+        // line's tail unread, which a stream socket reports to the peer as a reset), then
+        // answers.
+        let (_dir, path) = socket();
+        let ln = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut s, _) = ln.accept().await.unwrap();
+                let mut one = [0u8; 1];
+                s.read_exact(&mut one).await.unwrap();
+                drop(s);
+            }
+            let (s, _) = ln.accept().await.unwrap();
+            let mut r = BufReader::new(s);
+            let mut line = String::new();
+            r.read_line(&mut line).await.unwrap();
+            r.get_mut().write_all(OK.as_bytes()).await.unwrap();
+            r
+        });
+        let attempts = tokio::time::timeout(Duration::from_secs(10), dial(&path)).await;
+        let dialed = attempts.expect("dial hung");
+        if cfg!(target_os = "linux") {
+            dialed.expect("the third handshake answers");
+            server.await.unwrap();
+        } else {
+            // Other kernels report the hang-up as an end of stream instead of a reset.
+            let _ = dialed;
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn only_a_reset_is_retried() {
+        use std::io::{Error, ErrorKind::*};
+        for k in [ConnectionReset, ConnectionAborted, BrokenPipe] {
+            assert!(is_reset(&Error::from(k)));
+        }
+        for k in [ConnectionRefused, NotFound, UnexpectedEof, TimedOut] {
+            assert!(!is_reset(&Error::from(k)));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reset_after_the_request_is_closed_and_the_request_is_not_sent_again() {
+        // The stand-in answers the handshake, reads the request, then closes with the rest of
+        // what the client wrote unread (a reset on Linux, an end of stream elsewhere): either
+        // way a closed connection, and the listener sees exactly one connection.
+        let (_dir, path) = socket();
+        let ln = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let mut accepted = 0;
+            let (s, _) = ln.accept().await.unwrap();
+            accepted += 1;
+            let mut r = BufReader::new(s);
+            let mut line = String::new();
+            r.read_line(&mut line).await.unwrap();
+            r.get_mut().write_all(OK.as_bytes()).await.unwrap();
+            let mut one = [0u8; 1];
+            r.read_exact(&mut one).await.unwrap();
+            drop(r);
+            // A second connection would be a second run of the command.
+            let more = tokio::time::timeout(Duration::from_millis(1500), ln.accept()).await;
+            assert!(more.is_err(), "the request was sent again");
+            accepted
+        });
+        let req = Request {
+            cmd: vec!["true".into()],
+            ..Default::default()
+        };
+        let mut s = session(&path, req).await.unwrap();
+        let err = collect(&mut s).await.unwrap_err();
+        assert!(err.is::<Closed>(), "{err:#}");
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[test]
+    fn a_reset_after_the_write_is_closed() {
+        assert!(
+            after_write(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)).is::<Closed>()
+        );
+        use std::io::{Error, ErrorKind::*};
+        for k in [ConnectionReset, ConnectionAborted, BrokenPipe] {
+            assert!(after_write(Error::from(k)).is::<Closed>());
+        }
+        assert!(!after_write(Error::from(PermissionDenied)).is::<Closed>());
     }
 
     #[tokio::test]
