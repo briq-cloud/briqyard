@@ -17,7 +17,7 @@ pub(super) fn host_memory(guest_mb: u32) -> Result<u32, MError> {
 
 impl Entry {
     pub(super) fn unresolved_launch(&self, rec: &Record) -> bool {
-        self.launch_pending
+        self.launch_unproven
             .load(std::sync::atomic::Ordering::SeqCst)
             || (self.live.lock().unwrap().is_some() && !holds_memory(&rec.state))
     }
@@ -43,14 +43,15 @@ impl Entry {
 impl Manager {
     /// Mark ownership before entering the factory, including a legacy resume fallback.
     pub(super) async fn boot_reserved(&self, e: &Entry, boot: &fc::Boot) -> Result<fc::Vm> {
-        e.launch_pending
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        use std::sync::atomic::Ordering::SeqCst;
+        e.launch_unproven.store(false, SeqCst);
+        e.launch_pending.store(true, SeqCst);
         let result = self.inner.vmm.boot(boot).await;
         if result.is_err() {
-            e.launch_pending.store(
-                self.inner.vmm.launch_settlement(&boot.id) != fc::LaunchSettlement::Settled,
-                std::sync::atomic::Ordering::SeqCst,
-            );
+            let unproven =
+                self.inner.vmm.launch_settlement(&boot.id) != fc::LaunchSettlement::Settled;
+            e.launch_unproven.store(unproven, SeqCst);
+            e.launch_pending.store(unproven, SeqCst);
         }
         result
     }
@@ -62,6 +63,8 @@ impl Manager {
             && self.inner.vmm.launch_settlement(&e.snapshot().id) == fc::LaunchSettlement::Settled
         {
             e.launch_pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            e.launch_unproven
                 .store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
@@ -102,15 +105,17 @@ impl Manager {
                 "host memory prerequisite: {reason}"
             )));
         }
+        // A boot in flight or a destroy in its grace has a known charge, already counted by
+        // `committed`. Only a charge nobody can state refuses every admission: a launch that
+        // failed with no proof its VMM never started, a ceiling that overflows.
         if machines.values().any(|e| {
             e.unresolved_launch(&e.snapshot())
-                || e.snapshot().state == state::DESTROYING
                 || (e.commits_memory(&e.snapshot())
                     && e.memory_protection
                         .lock()
                         .unwrap()
                         .as_ref()
-                        .is_some_and(|p| p.degraded.is_some()))
+                        .is_some_and(|p| p.charge_mb == u32::MAX))
         }) {
             return Err(MError::Capacity(
                 "live VMM memory protection unresolved".into(),

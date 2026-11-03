@@ -28,10 +28,11 @@ async fn leaf_failure_retains_destroying_disks_record_and_reservation_then_retri
         committed(&h.m.inner.machines.lock().unwrap()).0.memory_mb,
         768
     );
+    // The charge is known and counted above: the others are admitted against it.
     assert!(h
         .m
         .memory_admission(&h.m.inner.machines.lock().unwrap())
-        .is_err());
+        .is_ok());
     assert!(!h
         .host
         .calls
@@ -437,10 +438,6 @@ async fn pending_launch_reconciliation_cannot_use_an_old_epoch_during_an_active_
     let turn = e.lock.lock().await;
     h.m.tick().await;
     assert!(e.launch_pending.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(h
-        .m
-        .memory_admission(&h.m.inner.machines.lock().unwrap())
-        .is_err());
     e.set_state(state::ERROR, |_| None);
     drop(turn);
     // This explicit synthetic factory has no child; a quiescent subsequent tick may
@@ -451,4 +448,45 @@ async fn pending_launch_reconciliation_cannot_use_an_old_epoch_during_an_active_
         committed(&h.m.inner.machines.lock().unwrap()).0.memory_mb,
         0
     );
+}
+
+/// A boot in flight and a destroy in its grace have charges `committed` already counts: they
+/// must not refuse the others, so a burst is admitted up to capacity and no further.
+#[tokio::test]
+async fn boots_and_destroys_in_flight_do_not_fence_a_burst_of_admissions() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let booting = h.add("m_booting", state::STARTING, 512);
+    booting
+        .launch_pending
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    h.add("m_leaving", state::DESTROYING, 512);
+    let burst: Vec<_> = (0..8)
+        .map(|n| h.add(&format!("m_burst_{n}"), state::STOPPED, 512))
+        .collect();
+    // 768 MB each: the two above hold 1536 of 4096, so three more fit and the rest do not.
+    let mut admitted = 0;
+    for entry in &burst {
+        match h.m.reserve(entry, None) {
+            Ok(_) => admitted += 1,
+            Err(MError::Capacity(message)) => {
+                assert!(!message.contains("unresolved"), "{message}");
+            }
+            Err(other) => panic!("{other}"),
+        }
+    }
+    assert_eq!(admitted, 3);
+}
+
+/// An unknown charge, by contrast, refuses everything.
+#[tokio::test]
+async fn a_failed_launch_without_proof_still_fences_admission() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let e = h.add("m_unproven", state::ERROR, 512);
+    e.launch_unproven
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let next = h.add("m_next", state::STOPPED, 512);
+    assert!(matches!(
+        h.m.reserve(&next, None),
+        Err(MError::Capacity(message)) if message.contains("unresolved")
+    ));
 }

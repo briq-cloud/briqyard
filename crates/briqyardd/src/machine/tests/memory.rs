@@ -73,7 +73,7 @@ async fn the_last_physical_slot_is_reserved_under_the_existing_lock() {
 }
 
 #[tokio::test]
-async fn positive_adoption_survives_policy_failure_and_blocks_new_admission() {
+async fn positive_adoption_survives_policy_failure_and_keeps_its_charge() {
     let h = harness("10.64.0.0/22", 4096).await;
     h.namespace("t1");
     let ours = h.add("m_ours", state::RUNNING, 256);
@@ -97,10 +97,26 @@ async fn positive_adoption_survives_policy_failure_and_blocks_new_admission() {
         .conditions()
         .iter()
         .any(|c| c.kind == "memory_protection" && c.status));
+    // The charge is known (1024 MB, counted above), so admission goes on against it; the
+    // condition above tells the operator. An unknown charge refuses all of it.
+    assert!(h
+        .m
+        .memory_admission(&h.m.inner.machines.lock().unwrap())
+        .is_ok());
+    *ours.memory_protection.lock().unwrap() = Some(fc::MemoryProtection {
+        charge_mb: u32::MAX,
+        degraded: Some("process_identity_unverified"),
+        contained: false,
+    });
     assert!(matches!(
         h.m.create_made(h.request("refused")).await,
         Err(MError::Capacity(_))
     ));
+    *ours.memory_protection.lock().unwrap() = Some(fc::MemoryProtection {
+        charge_mb: 1024,
+        degraded: Some("policy_write_denied"),
+        contained: false,
+    });
     assert!(!h
         .host
         .calls

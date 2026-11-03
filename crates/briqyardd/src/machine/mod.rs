@@ -552,6 +552,8 @@ struct Entry {
     live: Mutex<Option<fc::Vm>>,
     memory_protection: Mutex<Option<fc::MemoryProtection>>,
     launch_pending: AtomicBool,
+    /// A boot that failed without proof its VMM never started: its charge is unknown.
+    launch_unproven: AtomicBool,
     pending_adoption: Mutex<Option<(fc::Vm, bool)>>,
     /// Confirmed for this daemon's live handle; never inferred from an old record alone.
     identity_trusted: AtomicBool,
@@ -593,6 +595,7 @@ impl Entry {
             live: Mutex::new(None),
             memory_protection: Mutex::new(None),
             launch_pending: AtomicBool::new(false),
+            launch_unproven: AtomicBool::new(false),
             pending_adoption: Mutex::new(None),
             identity_trusted: AtomicBool::new(false),
             stop_req: Mutex::new(None),
