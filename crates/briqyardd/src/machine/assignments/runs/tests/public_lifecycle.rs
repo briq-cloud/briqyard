@@ -286,6 +286,286 @@ async fn assigned_volume_update_repairs_exact_zvol_after_restart() {
 }
 
 #[tokio::test]
+async fn assigned_stopped_volume_growth_is_refused_by_namespace_disk_quota() {
+    let (h, entry) = stopped(false).await;
+    let before = entry.snapshot();
+    let id = before.id.clone();
+    bounded(h.m.start(&id, None)).await.unwrap();
+    bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+        .await
+        .unwrap();
+    let volume_gb = before.volume.as_ref().unwrap().size_gb;
+    let held = h.m.quota("destination").unwrap().used.disk_gb;
+    h.m.set_quota(
+        "destination",
+        api::Quota {
+            disk_gb: Some(held),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let result = bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                volume: Some(api::VolumeSize {
+                    size_gb: volume_gb + 1,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await;
+    assert!(matches!(result, Err(MError::Quota(_))));
+    assert_eq!(entry.snapshot().volume.unwrap().size_gb, volume_gb);
+    assert!(h
+        .m
+        .inner
+        .store
+        .get::<UpdateIntent>(UPDATES, &id)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn assigned_running_volume_growth_is_refused_by_namespace_disk_quota() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    bounded(h.m.start(&id, None)).await.unwrap();
+    let current = entry.snapshot();
+    let volume_gb = current.volume.as_ref().unwrap().size_gb;
+    let held = h.m.quota("destination").unwrap().used.disk_gb;
+    h.m.set_quota(
+        "destination",
+        api::Quota {
+            disk_gb: Some(held),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let result = bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                volume: Some(api::VolumeSize {
+                    size_gb: volume_gb + 1,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await;
+    assert!(matches!(result, Err(MError::Quota(_))));
+    assert_eq!(entry.snapshot().volume.unwrap().size_gb, volume_gb);
+    assert!(h
+        .m
+        .inner
+        .store
+        .get::<UpdateIntent>(UPDATES, &id)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn concurrent_assigned_volume_growths_reserve_namespace_quota_atomically() {
+    let (h, _, _) = super::super::super::tests::fixture().await;
+    let namespace = "destination";
+    let mut entries = Vec::new();
+    for id in ["m_resize_a", "m_resize_b"] {
+        let mut record = crate::machine::tests::record();
+        record.id = id.into();
+        record.namespace = namespace.into();
+        record.volume = Some(api::VolumeSpec {
+            size_gb: 1,
+            mount: "/work".into(),
+        });
+        let entry = Entry::new(record.clone(), h.m.inner.events.clone());
+        h.m.inner
+            .machines
+            .lock()
+            .unwrap()
+            .insert(id.into(), entry.clone());
+        entries.push((entry, record));
+    }
+    h.m.set_quota(
+        namespace,
+        api::Quota {
+            disk_gb: Some(3),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let gate = Arc::new(std::sync::Barrier::new(3));
+    let mut tasks = Vec::new();
+    for (entry, source) in entries {
+        let manager = h.m.clone();
+        let gate = gate.clone();
+        let mut target = source.clone();
+        target.volume.as_mut().unwrap().size_gb = 2;
+        let intent = UpdateIntent {
+            schema: 1,
+            machine: source.id.clone(),
+            source_current_sha256: "a".repeat(64),
+            source_record: Box::new(source),
+            change: api::SpecChange {
+                volume: Some(api::VolumeSize { size_gb: 2 }),
+                ..Default::default()
+            },
+            disk_limits: None,
+            target: Box::new(target.clone()),
+            resolved_image: None,
+            root_swap: None,
+        };
+        tasks.push(tokio::task::spawn_blocking(move || {
+            gate.wait();
+            manager.persist_assigned_update(&entry, &target, &intent, Some(1))
+        }));
+    }
+    gate.wait();
+    let results = futures::future::join_all(tasks).await;
+    let successes = results
+        .into_iter()
+        .map(|result| result.unwrap())
+        .filter(Result::is_ok)
+        .count();
+    assert_eq!(successes, 1, "only one growth fits the remaining quota");
+    assert_eq!(h.m.quota(namespace).unwrap().used.disk_gb, 3);
+}
+
+#[tokio::test]
+async fn assigned_stopped_resize_back_to_current_size_cancels_pending_change() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    bounded(h.m.start(&id, None)).await.unwrap();
+    bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+        .await
+        .unwrap();
+    let current_size = entry.snapshot().size;
+    let larger = api::Size {
+        vcpus: current_size.vcpus + 1,
+        memory_mb: current_size.memory_mb + 256,
+        cpu_millis: None,
+    };
+    bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                size: Some(larger),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        entry.snapshot().pending.as_ref().unwrap().size,
+        Some(larger)
+    );
+
+    let canceled = bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                size: Some(current_size),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await
+    .unwrap();
+    assert!(canceled.pending.is_none());
+    let update: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+    assert!(update.target.pending.is_none());
+
+    restart(&h).expect("the cancellation transition is durable across startup");
+    let started = bounded(h.m.start(&id, None)).await.unwrap();
+    assert_eq!(started.state, state::RUNNING);
+    assert_eq!(started.size, current_size);
+    assert!(started.pending.is_none());
+    assert!(h
+        .m
+        .inner
+        .store
+        .get::<UpdateIntent>(UPDATES, &id)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn running_volume_update_settles_and_recovers_before_next_resize() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    bounded(h.m.start(&id, None)).await.unwrap();
+    let target_gb = entry.snapshot().volume.as_ref().unwrap().size_gb + 1;
+    bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                volume: Some(api::VolumeSize { size_gb: target_gb }),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await
+    .unwrap();
+    bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+        .await
+        .unwrap();
+
+    let settled: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+    let update: UpdateIntent = h.m.inner.store.get(UPDATES, &id).unwrap().unwrap();
+    assert_eq!(settled.reference.phase, Phase::Settled);
+    assert_eq!(
+        settled
+            .settlement
+            .as_deref()
+            .unwrap()
+            .update_sha256
+            .as_deref(),
+        Some(update.digest().unwrap().as_str())
+    );
+
+    restart(&h).expect("startup accepts the settlement-authorized volume update");
+    let recovered = h.m.entry(&id).unwrap();
+    assert_eq!(
+        recovered.snapshot().volume.as_ref().unwrap().size_gb,
+        target_gb
+    );
+    h.m.ensure_entry_assigned_update_backing(&recovered)
+        .await
+        .expect("the settled record and retained update agree after recovery");
+
+    let started = bounded(h.m.start(&id, None)).await.unwrap();
+    assert_eq!(started.state, state::RUNNING);
+    assert_eq!(started.volume.as_ref().unwrap().size_gb, target_gb);
+    let current: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+    assert!(current.consumed_update.is_some());
+    assert!(h
+        .m
+        .inner
+        .store
+        .get::<UpdateIntent>(UPDATES, &id)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn assigned_image_root_swap_recovers_each_zfs_rename_boundary() {
     for boundary in 0..4 {
         let (h, entry) = stopped(false).await;

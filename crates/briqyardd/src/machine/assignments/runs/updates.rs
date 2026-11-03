@@ -14,6 +14,25 @@ pub(super) fn matches_update_target(actual: &Record, expected: &Record) -> bool 
     matches_update_image(actual, expected) && actual.pending == expected.pending
 }
 
+pub(super) fn matches_authorized_update_target(
+    actual: &Record,
+    current: &Current,
+    update: &UpdateIntent,
+) -> Result<bool> {
+    if matches_update_target(actual, &update.target) {
+        return Ok(true);
+    }
+    let digest = update.digest()?;
+    let settled_authority = current.settlement.as_deref().is_some_and(|settlement| {
+        settlement.update_sha256.as_deref() == Some(digest.as_str())
+            && settlement
+                .update
+                .as_deref()
+                .is_some_and(|settled| settled.digest().ok().as_ref() == Some(&digest))
+    });
+    Ok(settled_authority && matches_current_target(actual, current, update)?)
+}
+
 pub(super) fn matches_current_target(
     actual: &Record,
     current: &Current,
@@ -24,6 +43,33 @@ pub(super) fn matches_current_target(
         && actual.pending == update.target.pending
         && actual.volume == update.target.volume
         && actual.disk_limits == update.target.disk_limits)
+}
+
+pub(super) fn matches_settled_update_target(actual: &Record, expected: &Record) -> Result<bool> {
+    if !actual
+        .assigned_run
+        .as_ref()
+        .is_some_and(|run| run.phase == Phase::Settled)
+        || !expected.assigned_run.as_ref().is_some_and(|run| {
+            run.phase == Phase::Observed
+                && actual.assigned_run.as_ref().is_some_and(|settled| {
+                    settled.schema == run.schema && settled.sequence == run.sequence
+                })
+        })
+    {
+        return Ok(false);
+    }
+    let mut projected = expected.clone();
+    projected.assigned_run = actual.assigned_run.clone();
+    projected.pid = actual.pid;
+    projected.suspended = actual.suspended;
+    if let (Some(projected_origin), Some(actual_origin)) = (
+        projected.clone_origin.as_mut(),
+        actual.clone_origin.as_ref(),
+    ) {
+        projected_origin.mapping_exited = actual_origin.mapping_exited;
+    }
+    Ok(projection::authority(actual)? == projection::authority(&projected)?)
 }
 
 pub(super) fn apply_consumed_update(
@@ -67,6 +113,54 @@ pub(super) fn apply_consumed_update(
 }
 
 impl Manager {
+    pub(super) fn persist_assigned_update(
+        &self,
+        entry: &Arc<Entry>,
+        target: &Record,
+        intent: &UpdateIntent,
+        disk_growth_gb: Option<u32>,
+    ) -> Result<(), MError> {
+        let namespace = target.namespace.clone();
+        let quota = self
+            .namespace_of(&namespace)
+            .map(|tenant| tenant.rec.quota)
+            .unwrap_or_default();
+        let machines = self.inner.machines.lock().unwrap();
+        if !machines
+            .get(&target.id)
+            .is_some_and(|current| Arc::ptr_eq(current, entry))
+        {
+            return Err(MError::NotFound);
+        }
+        let removed = entry.removed.lock().unwrap();
+        if *removed {
+            return Err(MError::NotFound);
+        }
+        if let Some(disk_growth_gb) = disk_growth_gb.filter(|growth| *growth > 0) {
+            let need = api::QuotaUse {
+                disk_gb: disk_growth_gb,
+                ..Default::default()
+            };
+            if let Some(exceeded) = over_quota(
+                &namespace,
+                &quota,
+                &self.namespace_use(&machines, &namespace),
+                &need,
+            ) {
+                return Err(MError::Quota(exceeded.to_string()));
+            }
+        }
+
+        // The map lock makes this durable target the quota reservation seen by every other
+        // create, start, or growth admission. Persist authority before exposing the new use.
+        self.inner.store.put_durable(UPDATES, &target.id, intent)?;
+        *entry.rec.lock().unwrap() = target.clone();
+        self.inner
+            .store
+            .put_durable("machines", &target.id, target)?;
+        Ok(())
+    }
+
     pub(super) async fn ensure_entry_assigned_update_backing(&self, entry: &Entry) -> Result<()> {
         let record = entry.snapshot();
         let Some(update) = self.inner.store.get::<UpdateIntent>(UPDATES, &record.id)? else {
@@ -79,7 +173,7 @@ impl Manager {
             .context("assigned update current run missing")?;
         update.check(&current)?;
         anyhow::ensure!(
-            matches_update_target(&record, &update.target),
+            matches_authorized_update_target(&record, &current, &update)?,
             "assigned update machine record differs from its target"
         );
         self.ensure_assigned_volume_update(&update).await?;
@@ -208,27 +302,6 @@ impl Manager {
                 )
             };
 
-        let namespace = record.namespace.clone();
-        let quota = self
-            .namespace_of(&namespace)
-            .map(|t| t.rec.quota)
-            .unwrap_or_default();
-        let need = api::QuotaUse {
-            disk_gb: to - from,
-            ..Default::default()
-        };
-        {
-            let machines = self.inner.machines.lock().unwrap();
-            if let Some(exceeded) = over_quota(
-                &namespace,
-                &quota,
-                &self.namespace_use(&machines, &namespace),
-                &need,
-            ) {
-                return Err(MError::Quota(exceeded.to_string()));
-            }
-        }
-
         change.volume = Some(requested);
         target.volume.as_mut().unwrap().size_gb = to;
         target.pending = crate::machine::update::pending_after(&record, change.clone());
@@ -256,19 +329,9 @@ impl Manager {
         intent
             .check(&current)
             .map_err(|error| MError::Conflict(format!("assigned update intent: {error:#}")))?;
-        {
-            let removed = entry.removed.lock().unwrap();
-            if *removed {
-                return Err(MError::NotFound);
-            }
-            // Reserve tenant quota durably before the non-transactional ZFS grow. Recovery
-            // repeats the idempotent grow from this exact target if the command outcome is lost.
-            self.inner.store.put_durable(UPDATES, &record.id, &intent)?;
-            *entry.rec.lock().unwrap() = target.as_ref().clone();
-            self.inner
-                .store
-                .put_durable("machines", &record.id, &*target)?;
-        }
+        // Reserve tenant quota durably before the non-transactional ZFS grow. Recovery repeats
+        // the idempotent grow from this exact target if the command outcome is lost.
+        self.persist_assigned_update(entry, &target, &intent, Some(to - from))?;
         self.ensure_assigned_volume_update(&intent)
             .await
             .map_err(MError::Other)?;
@@ -428,10 +491,6 @@ impl Manager {
         if pending == record.pending && target_disk_limits == record.disk_limits {
             return Ok(self.view(entry));
         }
-        let disk_limits_changed = target_disk_limits != record.disk_limits;
-        if pending.is_none() && !disk_limits_changed {
-            return Ok(self.view(entry));
-        }
         let mut target = record.clone();
         if let Some((_, to)) = growth {
             target.volume.as_mut().unwrap().size_gb = to;
@@ -479,20 +538,9 @@ impl Manager {
         intent
             .check(&current)
             .map_err(|error| MError::Conflict(format!("assigned update intent: {error:#}")))?;
-        {
-            let removed = entry.removed.lock().unwrap();
-            if *removed {
-                return Err(MError::NotFound);
-            }
-            // The durable intent precedes the in-memory and record transition. If its write
-            // fails, this request has not changed the machine. If the following record write
-            // fails, startup repairs from the already-durable intent.
-            self.inner.store.put_durable(UPDATES, &record.id, &intent)?;
-            *entry.rec.lock().unwrap() = target.clone();
-            self.inner
-                .store
-                .put_durable("machines", &record.id, &target)?;
-        }
+        // Record the target volume in the quota map under the same lock as admission. The
+        // intent still precedes this record transition so startup can finish an interrupted grow.
+        self.persist_assigned_update(entry, &target, &intent, growth.map(|(from, to)| to - from))?;
         if let Some((from, to)) = growth {
             self.ensure_assigned_volume_update(&intent)
                 .await

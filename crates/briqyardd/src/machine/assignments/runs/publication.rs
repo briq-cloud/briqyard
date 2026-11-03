@@ -14,7 +14,7 @@ impl Manager {
         let record_matches = match update {
             Some(update) => {
                 update.check(&current)?;
-                updates::matches_update_target(record, &update.target)
+                updates::matches_authorized_update_target(record, &current, &update)?
             }
             None => {
                 current.record_fingerprint(record)?

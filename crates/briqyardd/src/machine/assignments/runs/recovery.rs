@@ -193,7 +193,7 @@ impl Manager {
             let machine_matches = match update {
                 Some(update) => {
                     update.check(&current)?;
-                    updates::matches_update_target(machine, &update.target)
+                    updates::matches_authorized_update_target(machine, &current, &update)?
                 }
                 None => {
                     current.record_fingerprint(machine)?

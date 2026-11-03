@@ -283,6 +283,27 @@ impl Manager {
 impl Current {
     pub(super) fn check(&self) -> Result<()> {
         self.receipt.check()?;
+        let consumed_update_is_valid = match &self.consumed_update {
+            Some(update) => {
+                let direct_source = self.previous_run_sha256.as_deref()
+                    == Some(update.source_current_sha256.as_str());
+                // A volume update can be acknowledged while Observed, then carried through
+                // a Settled predecessor. Intent::check authenticates that exact settlement
+                // before this consumed update becomes the next run's immutable prior.
+                let settled_target =
+                    updates::matches_settled_update_target(&self.prior, &update.target)?;
+                let settled_source =
+                    self.previous_run_sha256.is_some() && !direct_source && settled_target;
+                let target_matches =
+                    updates::matches_update_target(&self.prior, &update.target) || settled_target;
+                update.check_shape().is_ok()
+                    && update.machine == self.machine
+                    && hex_id(&update.source_current_sha256, 64)
+                    && (direct_source || settled_source)
+                    && target_matches
+            }
+            None => true,
+        };
         anyhow::ensure!(
             matches!(self.schema, 1 | 3)
                 && self.reference.schema == self.schema
@@ -306,13 +327,7 @@ impl Current {
                             .as_ref()
                             .is_some_and(|update| update.digest().ok().as_ref() == Some(hash))
                 })
-                && self.consumed_update.as_ref().is_none_or(|update| {
-                    update.check_shape().is_ok()
-                        && update.machine == self.machine
-                        && update.source_current_sha256
-                            == self.previous_run_sha256.clone().unwrap_or_default()
-                        && updates::matches_update_target(&self.prior, &update.target)
-                })
+                && consumed_update_is_valid
                 && self.prior.restoring.is_none()
                 && self.prior_control_sha256 == self.record_fingerprint(&self.prior)?,
             "invalid exact run authority"
@@ -627,13 +642,18 @@ impl Intent {
                         && self.current.host_generation != prior.host_generation
                         && match &self.current.consumed_update {
                             Some(update) => {
+                                let target_matches = updates::matches_update_target(
+                                    &self.current.prior,
+                                    &update.target,
+                                ) || updates::matches_current_target(
+                                    &self.current.prior,
+                                    prior,
+                                    update,
+                                )?;
                                 update.check(prior).is_ok()
                                     && self.current.consumed_update_sha256.as_ref()
                                         == update.digest().ok().as_ref()
-                                    && updates::matches_update_target(
-                                        &self.current.prior,
-                                        &update.target,
-                                    )
+                                    && target_matches
                             }
                             None => {
                                 self.current.record_fingerprint(&self.current.prior)?

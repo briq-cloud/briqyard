@@ -1,6 +1,6 @@
 # ADR 0080: Assigned-run resize requires a durable update journal
 
-2026-11-03 · Accepted, full resize lifecycle integration pending
+2026-11-03 · Accepted; native qualification pending
 
 ## Context
 
@@ -31,6 +31,17 @@ run is still active.
   intent on mismatch. A command error alone cannot establish whether growth occurred.
   Do not expose the new logical volume size until its target is durable. A resize that
   changes the next boot's workload invalidates any saved memory checkpoint.
+- **Keep the exact volume intent through run settlement.** Stopping a process changes its
+  run phase and PID, but does not revoke a volume update already acknowledged against that
+  observed run. The settlement digest must authorize the exact update during startup repair
+  and when the next run consumes it. Other record differences still fail closed.
+- **Reserve namespace disk quota with the target record.** Running and stopped growth check
+  quota and persist the journaled volume target while holding the machine-map admission lock.
+  The durable intent precedes the record reservation and the external ZFS grow. Concurrent
+  creates and growths therefore see the same committed disk use.
+- **Persist cancellation of a pending resize.** A stopped resize back to the current size
+  writes the no-pending target through the update journal. It cannot return success while
+  leaving an older pending intent that a later start would apply.
 - **Bind image changes to root replacement before the next run is reserved.** Image
   resolution and the intended image identity must be durable before the root swap starts.
   Recovery may finish or refuse the existing `.next` swap only under that exact intent;
