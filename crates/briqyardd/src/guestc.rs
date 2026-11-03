@@ -201,8 +201,10 @@ async fn handshake(uds: &Path) -> std::result::Result<UnixStream, Handshake> {
 
 /// Writes one frame: a request, or an exec's input after it.
 pub async fn write_request<W: AsyncWrite + Unpin>(s: &mut W, req: &Request) -> Result<()> {
-    s.write_all(&guest::encode_frame(req)?).await?;
-    s.flush().await?;
+    s.write_all(&guest::encode_frame(req)?)
+        .await
+        .map_err(after_write)?;
+    s.flush().await.map_err(after_write)?;
     Ok(())
 }
 
@@ -213,14 +215,25 @@ where
     T: serde::de::DeserializeOwned,
 {
     let mut hdr = [0u8; 4];
-    s.read_exact(&mut hdr).await?;
+    s.read_exact(&mut hdr).await.map_err(after_write)?;
     let n = u32::from_be_bytes(hdr) as usize;
     if n > guest::MAX_FRAME {
         return Err(anyhow!("frame too large"));
     }
     let mut body = vec![0u8; n];
-    s.read_exact(&mut body).await?;
+    s.read_exact(&mut body).await.map_err(after_write)?;
     Ok(guest::decode_frame(&body)?)
+}
+
+/// An io error on a connection whose request was already sent: a reset is the guest going
+/// away, [`Closed`], as an end of stream is. The command may have started, so nothing sends
+/// it again; the caller reports it (ADR 0091).
+fn after_write(e: std::io::Error) -> anyhow::Error {
+    if is_reset(&e) {
+        Closed.into()
+    } else {
+        e.into()
+    }
 }
 
 #[derive(Debug)]
@@ -547,6 +560,48 @@ mod tests {
         for k in [ConnectionRefused, NotFound, UnexpectedEof, TimedOut] {
             assert!(!is_reset(&Error::from(k)));
         }
+    }
+
+    #[tokio::test]
+    async fn a_reset_after_the_request_is_closed_and_the_request_is_not_sent_again() {
+        // The stand-in answers the handshake, reads the request, then closes with the rest of
+        // what the client wrote unread (a reset on Linux, an end of stream elsewhere): either
+        // way a closed connection, and the listener sees exactly one connection.
+        let (_dir, path) = socket();
+        let ln = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let mut accepted = 0;
+            let (s, _) = ln.accept().await.unwrap();
+            accepted += 1;
+            let mut r = BufReader::new(s);
+            let mut line = String::new();
+            r.read_line(&mut line).await.unwrap();
+            r.get_mut().write_all(OK.as_bytes()).await.unwrap();
+            let mut one = [0u8; 1];
+            r.read_exact(&mut one).await.unwrap();
+            drop(r);
+            // A second connection would be a second run of the command.
+            let more = tokio::time::timeout(Duration::from_millis(1500), ln.accept()).await;
+            assert!(more.is_err(), "the request was sent again");
+            accepted
+        });
+        let req = Request {
+            cmd: vec!["true".into()],
+            ..Default::default()
+        };
+        let mut s = session(&path, req).await.unwrap();
+        let err = collect(&mut s).await.unwrap_err();
+        assert!(err.is::<Closed>(), "{err:#}");
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[test]
+    fn a_reset_after_the_write_is_closed() {
+        use std::io::{Error, ErrorKind::*};
+        for k in [ConnectionReset, ConnectionAborted, BrokenPipe] {
+            assert!(after_write(Error::from(k)).is::<Closed>());
+        }
+        assert!(!after_write(Error::from(PermissionDenied)).is::<Closed>());
     }
 
     #[tokio::test]
