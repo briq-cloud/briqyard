@@ -654,7 +654,7 @@ pub(super) mod tests {
             .push_with_clock(
                 &st.reg,
                 |_, _| async { Ok(()) },
-                || std::future::pending(),
+                std::future::pending,
                 || Some(99),
             )
             .await
@@ -899,7 +899,7 @@ pub(super) mod tests {
                     puts.fetch_add(1, Ordering::Relaxed);
                     async { Ok(()) }
                 },
-                || std::future::pending(),
+                std::future::pending,
                 || Some(123)
             )
             .await
@@ -913,7 +913,7 @@ pub(super) mod tests {
             .push_with_clock(
                 &reg,
                 |_, _| async { panic!("dedup PUT") },
-                || std::future::pending(),
+                std::future::pending,
                 || panic!("dedup changed receipt time")
             )
             .await
@@ -975,7 +975,7 @@ pub(super) mod tests {
         let mut caller = Box::pin(b.push_with_clock(
             &reg,
             |_, _| async { Ok(()) },
-            || std::future::pending(),
+            std::future::pending,
             || Some(55),
         ));
         assert!(futures::poll!(&mut caller).is_pending());
@@ -1044,7 +1044,7 @@ pub(super) mod tests {
                 b.push_with_clock(
                     &reg,
                     |_, _| async { Ok(()) },
-                    || std::future::pending(),
+                    std::future::pending,
                     || Some(33),
                 )
                 .await
@@ -1079,7 +1079,7 @@ pub(super) mod tests {
         let mut caller = Box::pin(b.push_with_clock(
             &reg,
             move |object, sealed| actual.lock().unwrap().put(object, sealed, entered.take()),
-            || std::future::pending(),
+            std::future::pending,
             || Some(77),
         ));
         bounded(async {
@@ -1328,7 +1328,7 @@ pub(super) mod tests {
                 b.push_with_clock(
                     &reg,
                     |_, _| async { Ok(()) },
-                    || std::future::pending(),
+                    std::future::pending,
                     || Some(11),
                 )
                 .await
