@@ -73,4 +73,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0075](0075-sandbox-destination-binding.md) | One-way complete sandbox guest configuration before main, with durable consumption and replay fencing |
 | [0076](0076-operator-sandbox-seeds.md) | Operator-produced pristine sandbox topology, ordinary-create receipts and exact destination acknowledgment; native qualification gates enablement |
 | [0077](0077-immutable-warm-launch-identity.md) | Immutable warm-slot launch identity and durable source allocations; unbound consumption remains disabled |
-| [0080](0080-registry-backup-observations.md) | Fixed process-local registry backup observations separate caller outcomes from worker ACKs and compare existing caches with observation-only durable validity |
+| [0082](0082-registry-backup-observations.md) | Fixed process-local registry backup observations separate caller outcomes from worker ACKs and compare existing caches with observation-only durable validity |

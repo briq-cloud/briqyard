@@ -1,10 +1,10 @@
-# ADR 0080: Observe registry backup ACKs through existing caches
+# ADR 0082: Observe registry backup ACKs through existing caches
 
 2026-11-03 · Status: implemented candidate; validation pending
 
 ## Context
 
-The registry publication worker can finish after its caller times out or leaves (ADR 0079).
+The registry publication worker can finish after its caller times out or leaves (ADR 0081).
 Caller results and worker ACKs therefore describe independent facts.
 
 ## Decisions

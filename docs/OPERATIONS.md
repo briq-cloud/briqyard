@@ -643,7 +643,7 @@ See [the fleet runbook](FLEET-OPERATIONS.md#the-fleet-in-docker-adr-0060).
 See [the fleet runbook](FLEET-OPERATIONS.md#the-registrys-backup-adr-0032).
 
 The fleet's `/metrics` always includes these five families (prefix
-`briqyard_fleet_registry_backup_`), ten samples total (ADR 0080):
+`briqyard_fleet_registry_backup_`), ten samples total (ADR 0082):
 
 | Suffix | Type and meaning |
 |---|---|
