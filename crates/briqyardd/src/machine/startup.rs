@@ -60,12 +60,21 @@ impl Manager {
             #[cfg(test)]
             warm_probe_override: Mutex::new(None),
             verified_templates: Mutex::new(std::collections::HashSet::new()),
-            vmm: Arc::new(fc::Firecracker {
-                binary: cfg.firecracker.clone(),
-                pci: cfg.pci,
-                console_max: (cfg.console_max_mb as u64) << 20,
-                version: fc::vmm_version(&cfg.firecracker)?,
-                identity: fc::BootIdentity::read(&cfg.kernel, &cfg.firecracker, cfg.pci)?,
+            vmm: Arc::new({
+                let cpu_template = fc::host_template();
+                fc::Firecracker {
+                    binary: cfg.firecracker.clone(),
+                    pci: cfg.pci,
+                    console_max: (cfg.console_max_mb as u64) << 20,
+                    version: fc::vmm_version(&cfg.firecracker)?,
+                    identity: fc::BootIdentity::read(
+                        &cfg.kernel,
+                        &cfg.firecracker,
+                        cfg.pci,
+                        fc::digest(cpu_template.as_ref()),
+                    )?,
+                    cpu_template,
+                }
             }),
             guest: Arc::new(guestc::Vsock),
             net: Arc::new(host::HostNet::new().await?),

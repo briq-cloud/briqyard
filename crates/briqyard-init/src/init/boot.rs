@@ -119,7 +119,12 @@ pub(super) fn read_config_archive<R: Read>(r: R) -> Result<(Config, Vec<BootFile
 pub(super) fn setup_mounts(cfg: &Config) -> Result<()> {
     for m in &cfg.mounts {
         let path = Path::new(&m.path);
-        let seed = stage_mount_point(path)?;
+        let seed = if m.read_only {
+            fs::create_dir_all(path).with_context(|| format!("create {}", m.path))?;
+            None
+        } else {
+            Some(stage_mount_point(path)?)
+        };
         let fstype = if m.fstype.is_empty() {
             "ext4"
         } else {
@@ -129,11 +134,11 @@ pub(super) fn setup_mounts(cfg: &Config) -> Result<()> {
             Some(m.device.as_str()),
             path,
             Some(fstype),
-            MsFlags::MS_NOATIME,
-            (fstype == "ext4").then_some("discard"),
+            mount_flags(m),
+            (fstype == "ext4" && !m.read_only).then_some("discard"),
         )
         .with_context(|| format!("mount {} on {}", m.device, m.path))?;
-        if fstype == "ext4" {
+        if fstype == "ext4" && !m.read_only {
             match grow_filesystem(&m.device, path) {
                 Ok(Some((was, now))) => log!("volume {}: grown from {was} to {now} MB", m.path),
                 Ok(None) => {}
@@ -141,9 +146,20 @@ pub(super) fn setup_mounts(cfg: &Config) -> Result<()> {
                 Err(e) => log!("volume {}: not grown: {e:#}", m.path),
             }
         }
-        seed_mount_point(path, seed);
+        if let Some(seed) = seed {
+            seed_mount_point(path, seed);
+        }
     }
     Ok(())
+}
+
+/// A volume is mounted without access times; a read-only one also refuses writes.
+fn mount_flags(m: &guest::Mount) -> MsFlags {
+    if m.read_only {
+        MsFlags::MS_NOATIME | MsFlags::MS_RDONLY
+    } else {
+        MsFlags::MS_NOATIME
+    }
 }
 
 nix::ioctl_write_ptr!(ext4_resize_fs, b'f', 16, u64);
@@ -659,6 +675,27 @@ mod tests {
         seed_mount_point(&data, seed);
         assert_eq!(names(&data), ["PG_VERSION", "lost+found"]);
         assert!(!root.path().join("data.briqyard-seed").exists());
+    }
+
+    #[test]
+    fn read_only_mount_refuses_writes() {
+        let mut m = guest::Mount {
+            device: "/dev/vdc".into(),
+            path: "/lib/modules".into(),
+            fstype: "ext4".into(),
+            read_only: false,
+        };
+        assert_eq!(mount_flags(&m), MsFlags::MS_NOATIME);
+        m.read_only = true;
+        assert!(mount_flags(&m).contains(MsFlags::MS_RDONLY | MsFlags::MS_NOATIME));
+        let wire: guest::Mount =
+            serde_json::from_str(r#"{"device":"/dev/vdc","path":"/work","fstype":"ext4"}"#)
+                .unwrap();
+        assert!(
+            !wire.read_only,
+            "a config without the field mounts read-write"
+        );
+        assert!(!serde_json::to_string(&wire).unwrap().contains("read_only"));
     }
 
     #[test]

@@ -76,3 +76,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0078](0078-warm-data-volume-liability.md) | Full logical warm data-volume budgets, shared pool-space liability and reservation telemetry |
 | [0079](0079-dev-checked-release-bundle.md) | Local upgrade releases verify and include the checked runtime bundle |
 | [0080](0080-assigned-run-resize-journal.md) | Assigned-run resize journals the provider lifecycle; startup replays only durable root targets and retains pending backing |
+| [0087](0087-no-virtualization-extensions-in-guests.md) | VMX and SVM cleared from every x86_64 guest's CPUID by a custom CPU template, its digest part of the boot identity; KVM loaded with `nested` off |

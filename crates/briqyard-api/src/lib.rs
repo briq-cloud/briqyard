@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod files;
 pub mod guest;
+pub mod kvm;
 #[cfg(feature = "listeners")]
 pub mod listeners;
 pub mod metrics;

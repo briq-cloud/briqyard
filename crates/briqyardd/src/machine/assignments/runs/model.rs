@@ -146,7 +146,7 @@ impl Manager {
                 .context("fresh boot identity unavailable")?
         };
         anyhow::ensure!(
-            expected_boot_identity.schema == 1,
+            expected_boot_identity.known(),
             "run boot identity schema unsupported"
         );
         let checkpoint = checkpoint && consumed_update.is_none();
@@ -310,7 +310,7 @@ impl Current {
                 && self.reference.sequence > 0
                 && hex_id(&self.host_generation, 64)
                 && fc::valid_host_boot_id(&self.host_boot_id)
-                && self.expected_boot_identity.schema == 1
+                && self.expected_boot_identity.known()
                 && self.machine == self.prior.id
                 && self.receipt.machine == self.machine
                 && self.target.id == self.machine
