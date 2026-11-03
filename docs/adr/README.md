@@ -75,3 +75,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0077](0077-immutable-warm-launch-identity.md) | Immutable warm-slot launch identity and durable source allocations; unbound consumption remains disabled |
 | [0083](0083-backup-object-census.md) | Bounded read-only backup-object observations; local owner evidence, never global ownership or deletion authority |
 | [0087](0087-no-virtualization-extensions-in-guests.md) | VMX and SVM cleared from every x86_64 guest's CPUID by a custom CPU template, its digest part of the boot identity; KVM loaded with `nested` off |
+| [0090](0090-app-console-ownership.md) | The app owns the console it writes to: the init hands it to the app user before dropping privileges, mode kept 0600 |
