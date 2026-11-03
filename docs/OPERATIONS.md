@@ -716,9 +716,14 @@ GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitor
 | Pool over 80 % | for 5 minutes |
 | Machine in a crash loop | restarted 3 times in 10 minutes by its policy |
 | Backup failure observed | a host's `backup_failed` counter grew in 10 minutes, or is positive without a ten-minute baseline; one observed failure is enough |
-| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|disk"}` grew: add a host in the region |
+| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|cpu\|disk"}` grew: add a host in the region |
 | Creates refused: host under pressure | `{resource="pressure"}` grew: free the namespace's host |
 | Largest slot too small | a region's largest memory slot under `LARGEST_SLOT_MB` for 10 minutes |
+
+**Creates refused: no room** covers memory, CPU time and disk placement refusals.
+It needs counter samples before and after the refusal; a first positive sample alone
+does not establish an increase. A firing or resolved rule is not proof that its
+notification reached the operator; check delivery separately.
 
 For **Backup failure observed**, inspect the host's backup events and store availability.
 Coverage is daemon machine-backup failure events; registry publication and generation

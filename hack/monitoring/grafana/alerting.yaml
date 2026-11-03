@@ -165,7 +165,7 @@ groups:
             datasourceUid: briqyard-prometheus
             model:
               refId: A
-              expr: 'sum by (region, resource) (increase(briqyard_fleet_unschedulable_total{resource=~"memory|disk"}[5m]))'
+              expr: 'sum by (region, resource) (increase(briqyard_fleet_unschedulable_total{resource=~"memory|cpu|disk"}[5m]))'
               instant: true
           - refId: C
             datasourceUid: __expr__
