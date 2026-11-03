@@ -71,7 +71,14 @@ PY
       sleep 1
     done
     [ "$sampled" = 1 ] || { echo 'monitoring machine samples did not arrive'; exit 1; }
-    sudo env PROMETHEUS_URL=http://127.0.0.1:9090 GRAFANA_URL=http://127.0.0.1:3000 GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password CHECK_HOST=local bash hack/monitoring-check.sh
+    if ! sudo env PROMETHEUS_URL=http://127.0.0.1:9090 GRAFANA_URL=http://127.0.0.1:3000 GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password CHECK_HOST=local bash hack/monitoring-check.sh; then
+      echo '== diagnostics (monitoring-check failed)'
+      curl -sS http://127.0.0.1:9090/api/v1/query --data-urlencode 'query=count({__name__=~"briqyard_.*"}) by (__name__)' | jq -c '.data.result | length' || true
+      curl -sS http://127.0.0.1:9090/api/v1/query --data-urlencode 'query=briqyard_machines' | head -c 600 || true; echo
+      curl -sS http://127.0.0.1:9090/api/v1/targets | jq -c '.data.activeTargets[] | {host:.labels.host,health,lastError}' || true
+      sudo journalctl -u briqyard-grafana --no-pager -n 30 | cut -c1-300 || true
+      exit 1
+    fi
     ;;
   *) echo 'expected stress or monitoring' >&2; exit 2 ;;
 esac
