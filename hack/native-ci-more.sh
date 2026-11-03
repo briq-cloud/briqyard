@@ -63,11 +63,12 @@ PY
     trap cleanup EXIT
     trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
     machine=$(briqyard machine run --namespace native-monitoring --name metrics --image alpine:3.20 --memory 128 --sleep never -- sh -c 'while :; do echo metrics > /root/probe; sync; sleep 1; done' | jq -r .id)
-    # Rate queries require at least two samples of this running machine. Wait on
-    # Prometheus evidence rather than sleeping and hoping the panels have data.
+    # Panels query ranges in 60 s steps with 1 m rates: a series younger than a step or two
+    # (15 s scrapes) has no point yet. Wait for 12 samples (3 minutes) of this running machine
+    # on Prometheus evidence rather than sleeping and hoping the panels have data.
     sampled=0
-    for _ in $(seq 1 90); do
-      if curl -fsS http://127.0.0.1:9090/api/v1/query --data-urlencode 'query=count_over_time(briqyard_machine_cpu_seconds_total{namespace="native-monitoring"}[1m])' | jq -e '.data.result | length > 0 and all(.[]; (.value[1] | tonumber) >= 2)' >/dev/null; then sampled=1; break; fi
+    for _ in $(seq 1 300); do
+      if curl -fsS http://127.0.0.1:9090/api/v1/query --data-urlencode 'query=count_over_time(briqyard_machine_cpu_seconds_total{namespace="native-monitoring"}[10m])' | jq -e '.data.result | length > 0 and all(.[]; (.value[1] | tonumber) >= 12)' >/dev/null; then sampled=1; break; fi
       sleep 1
     done
     [ "$sampled" = 1 ] || { echo 'monitoring machine samples did not arrive'; exit 1; }
