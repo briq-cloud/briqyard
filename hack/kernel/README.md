@@ -44,7 +44,9 @@ version.
 ## Rebuild
 
 Sources are pinned by SHA-256 in `build.sh`; the build identity (`KBUILD_BUILD_*`, file times,
-filesystem UUID) is fixed. On a security release of the kernel or OpenZFS:
+filesystem UUID) is fixed. `vmlinux`, `zfs.ko` and `spl.ko` come out byte for byte the same on
+every run (the log prints the module hashes); `modules.ext4` does not, `mke2fs` records inode
+times of the build. On a security release of the kernel or OpenZFS:
 
 1. Change `LINUX_VERSION`, `LINUX_SHA256` (`https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc`).
    Staying on `6.18.x` keeps `base-x86_64.config`; a new series needs the new Firecracker CI

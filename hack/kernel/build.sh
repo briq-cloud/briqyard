@@ -23,7 +23,8 @@ ZFS_URL=https://github.com/openzfs/zfs/releases/download/zfs-$ZFS_VERSION/zfs-$Z
 # The base config is the pinned kernel's own; its first 5 lines are our header.
 BASE_SHA256=7dbdc7445d01d3dd049b1e653534bde71266d59afaf9c1de50a8a6b8a8c138d0
 
-# Fixed identity, so the same sources build the same bytes.
+# Fixed identity, so the same sources build the same kernel and modules (the ext4 image's
+# inode times still carry the build time: compare the hashes the log prints for the modules).
 export KBUILD_BUILD_TIMESTAMP='Thu Jan  1 00:00:00 UTC 1970'
 export KBUILD_BUILD_USER=briqyard KBUILD_BUILD_HOST=briqyard KBUILD_BUILD_VERSION=1
 export SOURCE_DATE_EPOCH=0 E2FSPROGS_FAKE_TIME=1000000000 ARCH=x86_64 LC_ALL=C TZ=UTC
@@ -109,13 +110,6 @@ truncate -s "${mib}M" "$OUT/nested-modules-x86_64.ext4"
 fakeroot sh -c "chown -R 0:0 '$TREE' && mkfs.ext4 -F -q -L briqyard-modules \
   -U 8c1a3c5e-3b1d-4d1e-9d0a-6a1f0b1d0001 -E hash_seed=8c1a3c5e-3b1d-4d1e-9d0a-6a1f0b1d0002 \
   -O ^has_journal -m 0 -d '$TREE' '$OUT/nested-modules-x86_64.ext4'"
-# mke2fs copies each file's change time, which is when it was last touched: zero them.
-{
-  (cd "$TREE" && find . -mindepth 1 | sed 's|^\.||') | while read -r p; do
-    echo "sif \"$p\" ctime 0"; echo "sif \"$p\" ctime_extra 0"
-  done
-  echo "sif <2> ctime 0"; echo "sif <2> ctime_extra 0"
-} | debugfs -w -f - "$OUT/nested-modules-x86_64.ext4" >/dev/null
 e2fsck -fn "$OUT/nested-modules-x86_64.ext4"
 
 step "versions and sums"
