@@ -14,6 +14,91 @@ fn bounded<T>(
 }
 
 #[tokio::test]
+async fn assigned_provider_resize_remains_fail_closed_without_update_journal() {
+    let (h, entry) = stopped(false).await;
+    let id = entry.snapshot().id;
+    bounded(h.m.start(&id, None)).await.unwrap();
+    let before = entry.snapshot();
+    let current_before: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+    let volume_gb = entry.snapshot().volume.as_ref().unwrap().size_gb + 1;
+    let running_volume_patch = bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                volume: Some(api::VolumeSize { size_gb: volume_gb }),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await;
+    assert!(matches!(running_volume_patch, Err(MError::Conflict(_))));
+    assert_eq!(entry.snapshot().volume, before.volume);
+    assert_eq!(
+        serde_json::to_value(h.m.inner.store.get::<Current>(RUNS, &id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(current_before).unwrap(),
+        "a refused live volume update must not change current-run evidence"
+    );
+
+    bounded(h.m.stop(&id, Duration::from_secs(1), false, None))
+        .await
+        .unwrap();
+    let first: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+    assert_eq!(first.reference.phase, Phase::Settled);
+
+    let stopped_size_patch = bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                size: Some(api::Size {
+                    vcpus: 1,
+                    memory_mb: 512,
+                    cpu_millis: None,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await;
+    assert!(matches!(stopped_size_patch, Err(MError::Conflict(_))));
+
+    let stopped_image_patch = bounded(h.m.update(
+        &id,
+        api::UpdateMachineRequest {
+            spec: api::SpecChange {
+                image: Some("alpine:3.20".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+    ))
+    .await;
+    assert!(matches!(stopped_image_patch, Err(MError::Conflict(_))));
+    assert_eq!(
+        serde_json::to_value(h.m.inner.store.get::<Current>(RUNS, &id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(first.clone()).unwrap(),
+        "refused stopped resize patches must not rewrite settled run evidence"
+    );
+
+    restart(&h).unwrap();
+    let recovered = h.m.entry(&id).unwrap();
+    assert!(recovered.snapshot().pending.is_none());
+    let next = bounded(h.m.start(&id, None)).await.unwrap();
+    assert_eq!(next.state, state::RUNNING);
+    assert_eq!(next.size, before.size);
+    assert_eq!(next.volume, before.volume);
+    assert!(next.pending.is_none());
+    let current: Current = h.m.inner.store.get(RUNS, &id).unwrap().unwrap();
+    assert_eq!(current.reference.phase, Phase::Observed);
+    assert_eq!(current.reference.sequence, first.reference.sequence + 1);
+    assert_eq!(current.target.image, before.image);
+}
+
+#[tokio::test]
 async fn fresh_start_stop_start_publishes_only_current_run_and_coalesces_running_requests() {
     let (h, entry) = stopped(false).await;
     let id = entry.snapshot().id;
