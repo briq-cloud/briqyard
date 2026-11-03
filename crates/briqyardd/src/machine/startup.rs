@@ -123,6 +123,7 @@ impl Manager {
             pool: Mutex::new(None),
             conditions: Mutex::new(Conditions::new(Utc::now())),
             memory_host: Mutex::new(None),
+            recovery_fault: Mutex::new(None),
             memory_condition: Mutex::new(None),
             started: Mutex::new(api::DaemonStart::default()),
         });
@@ -168,12 +169,16 @@ impl Manager {
                 "swept": swept,
             })),
         );
+        let watch = m.clone();
+        tokio::spawn(async move { watch.storage_watch().await });
+        if m.recovery_fault().is_some() {
+            // Nothing is reconciled against records that recovery could not settle.
+            return Ok(m);
+        }
         m.resume_recovery_workers().await;
         m.start_stopped_by_host();
         let sleeper = m.clone();
         tokio::spawn(async move { sleeper.sleeper().await });
-        let watch = m.clone();
-        tokio::spawn(async move { watch.storage_watch().await });
         Ok(m)
     }
 
@@ -194,11 +199,9 @@ impl Manager {
                 }
             })
             .collect();
-        self.inner
-            .vmm
-            .initialize_recovery(&recovered)
-            .await
-            .context("native recovery barrier")?;
+        if let Err(err) = self.inner.vmm.initialize_recovery(&recovered).await {
+            self.recovery_failed("native recovery barrier", err);
+        }
         self.refresh_memory_host().await;
         self.recover_assigned_update_backing().await?;
         self.prepare_assigned_reboot_exits().await?;
@@ -209,10 +212,32 @@ impl Manager {
 
     pub(super) async fn recover_and_sweep_at_start(&self) -> Result<(usize, usize, usize, usize)> {
         self.recover_warm_names()?;
-        let (adopted, stopped, gone) = self.recover().await?;
-        let swept = self.sweep_orphans().await?;
-        self.inner.vmm.open_recovery()?;
-        Ok((adopted, stopped, gone, swept))
+        if self.recovery_fault().is_some() {
+            return Ok((0, 0, 0, 0));
+        }
+        let recovered = async {
+            let (adopted, stopped, gone) = self.recover().await?;
+            let swept = self.sweep_orphans().await?;
+            self.inner.vmm.open_recovery()?;
+            Ok::<_, anyhow::Error>((adopted, stopped, gone, swept))
+        }
+        .await;
+        Ok(recovered.unwrap_or_else(|err| {
+            self.recovery_failed("startup recovery", err);
+            (0, 0, 0, 0)
+        }))
+    }
+
+    /// An anomaly in the VMM domain or in what a previous daemon left must not take the host
+    /// down for every namespace (a restart loop): the daemon serves what runs, starts
+    /// nothing, and says why. An operator resolves it and restarts; admission stays refused.
+    pub(super) fn recovery_failed(&self, what: &str, err: anyhow::Error) {
+        tracing::error!(err = %format!("{err:#}"), "{what} unresolved: managed spawning stays closed");
+        *self.inner.recovery_fault.lock().unwrap() = Some("recovery_unresolved");
+    }
+
+    pub(super) fn recovery_fault(&self) -> Option<&'static str> {
+        *self.inner.recovery_fault.lock().unwrap()
     }
 
     pub fn host_id(&self) -> &str {

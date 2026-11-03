@@ -854,6 +854,9 @@ struct Inner {
     pool: Mutex<Option<crate::zfs::Pool>>,
     conditions: Mutex<Conditions>,
     memory_host: Mutex<Option<&'static str>>,
+    /// Why startup recovery stopped short: the spawn gate stays closed, no machine is started,
+    /// stopped or reconciled, and the host says so in its `memory_protection` condition.
+    recovery_fault: Mutex<Option<&'static str>>,
     memory_condition: Mutex<Option<api::Condition>>,
     /// This daemon's start and what it did with what the previous one left (ADR 0027).
     started: Mutex<api::DaemonStart>,

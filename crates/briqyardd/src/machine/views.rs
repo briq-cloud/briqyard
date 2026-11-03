@@ -207,7 +207,7 @@ impl Manager {
             match over_quota(&namespace, &quota, &held, &need) {
                 Some(x) => Some(x),
                 None => {
-                    self.memory_admission(&machines)?;
+                    self.memory_admission_for(&machines, own.memory_mb > 0)?;
                     let (used, _) = committed(&machines);
                     admit_cpu(
                         used.cpu_millis().saturating_sub(own.cpu_millis()),

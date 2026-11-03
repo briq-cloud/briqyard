@@ -313,6 +313,13 @@ What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it i
 | Back | `briqyardd --version` over SSH, then a heartbeat from a new start of that version that stopped nothing, within 5 minutes |
 | Undrained | The host is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
 
+The install is also what sets the memory prerequisites (ADR 0065): the unit's
+`OOMScoreAdjust=-900` before the new daemon starts, then swap off, KSM and `systemd-oomd`
+stopped and masked, `zfs_arc_max` set. A binary replaced without it (by hand) leaves
+`memory_protection` true (`supervisor_oom_preference_unset`, `host_swap_enabled`,
+`arc_ceiling_unverified`, …): the host serves its machines, takes nothing new, and the fleet
+places nothing there. Run the bootstrap, or the missing step, and the condition clears on the next tick.
+
 A failure leaves the host `draining` with the reason in its note: fix it, then
 `briqyard host undrain <id>`. `--all` stops at the first failure and names the hosts left. One
 upgrade at a time per fleet. A static host (`hosts:`) needs the fleet's SSH key in root's
@@ -548,7 +555,9 @@ registry backups, operator archives and local backing/reference scopes are exclu
   durations remain absent until observed. Host readiness does not measure a public API call.
 - `briqyard top [--namespace T]`: running machines by CPU, with memory, disk and network rates over
   the last 15 s (`GET /v1/top`; through the fleet, a namespace's host or every host).
-- Conditions (ADR 0021): `memory_pressure`, `disk_pressure`, `storage_stalled` (ADR 0046) in
+- Conditions (ADR 0021): `memory_pressure`, `disk_pressure`, `storage_stalled` (ADR 0046) and
+  `memory_protection` (ADR 0065; true names the unmet host prerequisite or an unsettled startup in
+  its message, and the host takes nothing new) in
   `/v1/status` and `briqyard host ls`; each change is a `host_condition` event (`briqyard
   events`), a warning when it turns true. Under disk pressure the daemon removes unused images
   itself (`image_removed` events).

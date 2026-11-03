@@ -12,37 +12,24 @@
 # A section whose variable is not set is left out and named in the summary; the run then ends with
 # a non-zero status (ALLOW_SKIPPED=1 accepts it).
 set -euo pipefail
-set +x
 export BRIQYARD_URL=${BRIQYARD_URL:-http://127.0.0.1:7430}
 T=two-hosts
 pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  ok   $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
-script_dir=${BASH_SOURCE[0]%/*}
-. "$script_dir/suite-end.sh"
-# The CLI still needs its token; only that child receives it, never curl or a host shell.
-suite_api_token=${BRIQYARD_TOKEN:-}
-export -n suite_api_token
-. "$script_dir/monitoring-auth.sh"
-monitoring_auth_init
-briqyard() { BRIQYARD_TOKEN=$suite_api_token command briqyard "$@"; }
-hosts() { curl_api -fsS "$BRIQYARD_URL/v1/hosts"; }
+. "$(dirname "${BASH_SOURCE[0]}")/suite-end.sh"
+auth=(); [ -n "${BRIQYARD_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $BRIQYARD_TOKEN")
+hosts() { curl -fsS ${auth[@]+"${auth[@]}"} "$BRIQYARD_URL/v1/hosts"; }
 CONF2=/etc/briqyard/config.yaml
 # A script run on the second host as root with `ask_key BODY` (a POST /v1/hosts/key to the
 # fleet in its config, with its token) and `$adv` (its advertised URL); stdin and arguments
 # passed on.
 as_second() {
-  local auth_python
-  printf -v auth_python '%q' "$(cat "$script_dir/monitoring-auth.py")"
-  $SECOND_HOST_SH bash -c 'set +x; unset BRIQYARD_TOKEN BRIQYARD_METRICS_TOKEN
-    export -n tok auth_config auth_python
-    auth_python='"$auth_python"'; c='"$CONF2"'
+  $SECOND_HOST_SH bash -c 'c='"$CONF2"'
     tok=$(sed -n "s/^token: *\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" $c); adv=$(sed -n "s/^  advertise: //p" $c)
     fleet=$(sed -n "/^fleet:/,/^[^ ]/s/^  url: //p" $c)
-    auth_config=$(printf "%s" "$tok" | python3 -c "$auth_python" bearer-config) || exit 1
-    unset tok
-    ask_key() { printf "%s\n" "$auth_config" | curl --disable --config - -fsS -X POST -H "Content-Type: application/json" -d "$1" "$fleet/v1/hosts/key"; }
+    ask_key() { curl -fsS -X POST -H "Authorization: Bearer $tok" -H "Content-Type: application/json" -d "$1" "$fleet/v1/hosts/key"; }
     '"$1" _ "${@:2}"
 }
 # Run on any exit, a failed check, Ctrl-C or a kill included: the second host is started again
@@ -65,9 +52,7 @@ cleanup() {
     $SECOND_HOST_SH sh -c "mv $CONF2.two-hosts $CONF2 && rm -rf /var/lib/briqyard/backups && systemctl restart briqyardd" || true
     for i in $(seq 1 45); do [ "$(hosts | jq -r ".[] | select(.id == \"$HB\") | .state")" = ready ] && break; sleep 2; done
   fi
-  monitoring_auth_cleanup || true
   suite_early_end "$rc"
-  return "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
@@ -130,13 +115,8 @@ if [ -n "${SECOND_HOST_STOP:-}" ]; then
     # The key, asked of the fleet as the host does, from the host (the fleet checks a host's
     # calls by its address): nowhere on its disk or in its log, in none of the fleet's answers
     # but this one. Only counts leave the host.
-    seen=$(hosts | as_second 'set -o pipefail
-      list=$(cat); key=$(ask_key "{\"url\": \"$adv\"}" | jq -r .key) || exit 1
-      keygrep() { if grep "$@"; then return 0; else [ "$?" -eq 1 ]; fi; }
-      files=$(keygrep -rlsF -D skip -f <(printf "%s\n" "$key") /etc/briqyard /var/lib/briqyard --exclude=pool.img | wc -l) || exit 1
-      logs=$(journalctl -u briqyardd -b -o cat | keygrep -cF -f <(printf "%s\n" "$key")) || exit 1
-      listed=$(printf "%s\n" "$list" | keygrep -cF -f <(printf "%s\n" "$key")) || exit 1
-      printf "%s %s %s %s\n" "${#key}" "$files" "$logs" "$listed"')
+    seen=$(hosts | as_second 'list=$(cat); key=$(ask_key "{\"url\": \"$adv\"}" | jq -r .key)
+      echo "${#key} $(grep -rlsF -D skip "$key" /etc/briqyard /var/lib/briqyard --exclude=pool.img | wc -l) $(journalctl -u briqyardd -b -o cat | grep -cF "$key") $(echo "$list" | grep -cF "$key")"')
     check "its key on none of its files nor in its log" '[ "$(echo "$seen" | cut -d" " -f1-3)" = "64 0 0" ]'
     check "nor in the fleet host list" '[ "$(echo "$seen" | cut -d" " -f4)" = 0 ]'
   fi

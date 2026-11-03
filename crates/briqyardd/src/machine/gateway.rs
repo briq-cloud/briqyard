@@ -254,11 +254,21 @@ impl Manager {
             }
             return Ok(());
         };
-        if gw.live.lock().unwrap().as_ref().map(|l| l.pid) == Some(live.pid) {
-            self.end_process(gw, &live, Duration::ZERO).await?;
-        }
+        // A process that cannot be proven ended stays live and charged (`unresolved_launch`);
+        // the gateway still fails its boot, with that said.
+        let unended = if gw.live.lock().unwrap().as_ref().map(|l| l.pid) == Some(live.pid) {
+            self.end_process(gw, &live, Duration::ZERO).await.err()
+        } else {
+            None
+        };
         let tail = self.last_console_lines(&r, 5);
-        Err(self.boot_failed(gw, format!("{why}: {tail}")))
+        Err(self.boot_failed(
+            gw,
+            match unended {
+                None => format!("{why}: {tail}"),
+                Some(err) => format!("{why}: {tail} (its process could not be ended: {err:#})"),
+            },
+        ))
     }
 
     /// What a machine that needs the gateway answers when the gateway did not come up:

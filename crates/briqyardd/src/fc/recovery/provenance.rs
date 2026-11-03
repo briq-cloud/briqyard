@@ -16,7 +16,6 @@ pub(in crate::fc) struct Jailer {
     name: std::ffi::CString,
     file: File,
     path: PathBuf,
-    stamp: (u64, i64, i64, i64, i64),
     digest: [u8; 32],
 }
 pub(in crate::fc) struct LaunchExecutable {
@@ -75,13 +74,6 @@ impl Jailer {
             name,
             file,
             path: path.into(),
-            stamp: (
-                m.len(),
-                m.mtime(),
-                m.mtime_nsec(),
-                m.ctime(),
-                m.ctime_nsec(),
-            ),
             digest,
         };
         // Execute the held ELF inode. CLOEXEC closes its descriptor only after the kernel
@@ -108,18 +100,10 @@ impl Jailer {
         {
             return Err(invalid());
         }
+        // The content digest is the identity: a touch, a copy or a backup tool changes a time
+        // and nothing else, and must not stop every launch until a restart.
         let m = self.file.metadata()?;
-        if (
-            m.len(),
-            m.mtime(),
-            m.mtime_nsec(),
-            m.ctime(),
-            m.ctime_nsec(),
-        ) != self.stamp
-            || m.uid() != 0
-            || m.gid() != 0
-            || m.mode() & 0o022 != 0
-        {
+        if m.uid() != 0 || m.gid() != 0 || m.mode() & 0o022 != 0 {
             return Err(invalid());
         }
         if hash(&self.file)? != self.digest {

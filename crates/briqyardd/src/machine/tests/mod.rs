@@ -258,6 +258,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             pool: Mutex::new(None),
             conditions: Mutex::new(Conditions::new(Utc::now())),
             memory_host: Mutex::new(None),
+            recovery_fault: Mutex::new(None),
             memory_condition: Mutex::new(None),
             started: Mutex::new(api::DaemonStart::default()),
         }),

@@ -16,10 +16,11 @@ pub(super) fn host_memory(guest_mb: u32) -> Result<u32, MError> {
 }
 
 impl Entry {
-    pub(super) fn unresolved_launch(&self, rec: &Record) -> bool {
+    pub(super) fn unresolved_launch(&self) -> bool {
+        // A live handle in a state that holds no memory (a machine between its process's
+        // end and the record catching up) is a known charge: `commits_memory` counts it.
         self.launch_unproven
             .load(std::sync::atomic::Ordering::SeqCst)
-            || (self.live.lock().unwrap().is_some() && !holds_memory(&rec.state))
     }
     pub(super) fn commits_memory(&self, rec: &Record) -> bool {
         commits_memory(rec)
@@ -100,6 +101,20 @@ impl Manager {
         &self,
         machines: &HashMap<String, Arc<Entry>>,
     ) -> Result<(), MError> {
+        self.memory_admission_for(machines, false)
+    }
+
+    /// `admitted`: the machine's own memory is counted already (a create's start, ADR 0048).
+    /// It was admitted against this host a moment ago, and a charge somebody else cannot state
+    /// must not strand it in `error`; the host-level refusals still apply.
+    pub(super) fn memory_admission_for(
+        &self,
+        machines: &HashMap<String, Arc<Entry>>,
+        admitted: bool,
+    ) -> Result<(), MError> {
+        if let Some(reason) = self.recovery_fault() {
+            return Err(MError::Capacity(format!("startup: {reason}")));
+        }
         if let Some(reason) = *self.inner.memory_host.lock().unwrap() {
             return Err(MError::Capacity(format!(
                 "host memory prerequisite: {reason}"
@@ -108,15 +123,17 @@ impl Manager {
         // A boot in flight or a destroy in its grace has a known charge, already counted by
         // `committed`. Only a charge nobody can state refuses every admission: a launch that
         // failed with no proof its VMM never started, a ceiling that overflows.
-        if machines.values().any(|e| {
-            e.unresolved_launch(&e.snapshot())
-                || (e.commits_memory(&e.snapshot())
-                    && e.memory_protection
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .is_some_and(|p| p.charge_mb == u32::MAX))
-        }) {
+        if !admitted
+            && machines.values().any(|e| {
+                e.unresolved_launch()
+                    || (e.commits_memory(&e.snapshot())
+                        && e.memory_protection
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .is_some_and(|p| p.charge_mb == u32::MAX))
+            })
+        {
             return Err(MError::Capacity(
                 "live VMM memory protection unresolved".into(),
             ));

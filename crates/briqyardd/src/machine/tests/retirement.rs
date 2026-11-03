@@ -490,3 +490,65 @@ async fn a_failed_launch_without_proof_still_fences_admission() {
         Err(MError::Capacity(message)) if message.contains("unresolved")
     ));
 }
+
+/// A recovery anomaly must not crash-loop the host: it closes admission and says why.
+#[tokio::test]
+async fn a_recovery_anomaly_closes_admission_and_is_reported_instead_of_ending_the_daemon() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    let running = h.add("m_serving", state::RUNNING, 256);
+    h.m.recovery_failed(
+        "startup recovery",
+        anyhow::anyhow!("unsettled VMM cgroup candidates"),
+    );
+    assert_eq!(
+        h.m.recover_and_sweep_at_start().await.unwrap(),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(running.snapshot().state, state::RUNNING);
+    assert!(matches!(
+        h.m.memory_admission(&h.m.inner.machines.lock().unwrap()),
+        Err(MError::Capacity(message)) if message.contains("recovery_unresolved")
+    ));
+    let condition =
+        h.m.conditions()
+            .into_iter()
+            .find(|c| c.kind == "memory_protection")
+            .unwrap();
+    assert!(condition.status);
+    assert_eq!(condition.message, "recovery_unresolved");
+}
+
+/// Churn: another machine's suspend leaves its handle for a moment on a stopped record, and a
+/// create's own start is already counted. Neither refuses a resume or errors the create.
+#[tokio::test]
+async fn a_machine_between_process_end_and_record_does_not_fence_a_resume_or_a_creates_start() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.namespace("t1");
+    let leaving = h.add("m_suspending", state::RUNNING, 512);
+    let pid = h.host.left_running(
+        "m_suspending",
+        &h.m.inner.cfg.run_dir().join("m_suspending"),
+    );
+    leaving.rec.lock().unwrap().pid = pid;
+    h.m.recover().await.unwrap();
+    assert!(leaving.live.lock().unwrap().is_some());
+    leaving.set_state(state::STOPPED, |_| None);
+    assert!(h
+        .m
+        .memory_admission(&h.m.inner.machines.lock().unwrap())
+        .is_ok());
+    let resumed = h.add("m_resumed", state::STOPPED, 512);
+    h.m.reserve(&resumed, None).unwrap();
+    // A create's start is admitted by its create, even beside a charge nobody can state.
+    let creating = h.add("m_creating", state::CREATING, 512);
+    creating.rec.lock().unwrap().start = true;
+    leaving
+        .launch_unproven
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(h
+        .m
+        .memory_admission(&h.m.inner.machines.lock().unwrap())
+        .is_err());
+    h.m.reserve(&creating, None).unwrap();
+    assert_eq!(creating.snapshot().state, state::STARTING);
+}

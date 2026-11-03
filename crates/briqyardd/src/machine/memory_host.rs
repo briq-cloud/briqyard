@@ -75,9 +75,11 @@ impl Manager {
     }
 
     pub(super) fn memory_condition(&self) -> api::Condition {
-        let host = *self.inner.memory_host.lock().unwrap();
+        let host = self
+            .recovery_fault()
+            .or(*self.inner.memory_host.lock().unwrap());
         let live_degraded = self.inner.machines.lock().unwrap().values().any(|e| {
-            e.unresolved_launch(&e.snapshot())
+            e.unresolved_launch()
                 || (e.commits_memory(&e.snapshot())
                     && e.memory_protection
                         .lock()
