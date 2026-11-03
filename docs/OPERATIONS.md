@@ -80,7 +80,7 @@ PRIVATE_ADDRESS=10.42.0.11/16 ALLOWED_CLIENTS=10.42.0.0/16 \
 bash bootstrap-host.sh
 ```
 
-It installs the packages (ZFS, nftables, conntrack-tools, e2fsprogs, gdisk), caps the ZFS cache, turns swap off
+It installs the packages (ZFS, nftables, conntrack-tools, e2fsprogs, gdisk), caps the ZFS cache, loads KVM with `nested` off from the next boot (ADR 0087; `briqyard doctor` warns while it is on, the daemon logs `kvm_nested`), turns swap off
 for good, puts the API on the private network and closes the public interface when
 `PRIVATE_ADDRESS` is set, makes the pool encrypted (on the devices given, or on a file for a
 trial; ADR 0026), downloads Firecracker, its jailer and a guest kernel, installs the binaries
@@ -297,6 +297,11 @@ briqyard host upgrade h_123456 --release 0.2.0            # or a release URL
 briqyard host upgrade --all --release 0.2.0               # every ready or draining host, by id, one at a time
 briqyard host ls                                          # VERSION, and each host's note
 ```
+
+A release that changes the boot identity (ADR 0087: the CPU template) makes every seed sealed
+before it refused by name. With a control plane that names seeds in its creates: it stops naming
+them first (its creates boot cold), then the hosts upgrade and the seeds are sealed and qualified
+again, then it names the new ones.
 
 What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it is done):
 

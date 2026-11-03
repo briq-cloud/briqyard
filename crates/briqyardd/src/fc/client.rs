@@ -101,6 +101,12 @@ impl Client {
         .await
     }
 
+    /// The CPUID the guest boots with, before the boot (ADR 0087). A snapshot load restores
+    /// its own.
+    pub async fn cpu_config(&self, template: &serde_json::Value) -> Result<()> {
+        self.put("/cpu-config", template).await
+    }
+
     pub async fn boot_source(&self, kernel: &Path, args: &str) -> Result<()> {
         self.put(
             "/boot-source",

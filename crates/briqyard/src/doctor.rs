@@ -118,6 +118,16 @@ pub(super) fn doctor() {
              set Unattended-Upgrade::Automatic-Reboot \"false\" and reboot after a drain",
         );
     }
+    if let Some(nested) =
+        briqyard_api::kvm::nested(std::path::Path::new(briqyard_api::kvm::SYS_MODULE))
+    {
+        warn(
+            "KVM nested virtualization off",
+            !nested,
+            "guests may be given virtualization extensions of their own (ADR 0087): \
+             hack/bootstrap-host.sh writes /etc/modprobe.d/briqyard-kvm.conf, applied at the next boot",
+        );
+    }
     if bad > 0 {
         eprintln!("{bad} missing");
         std::process::exit(1);
