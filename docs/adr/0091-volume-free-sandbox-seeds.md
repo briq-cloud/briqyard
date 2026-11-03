@@ -1,4 +1,4 @@
-# ADR 0089: Volume-free sandbox seeds
+# ADR 0091: Volume-free sandbox seeds
 
 2026-11-03 · Proposed; native qualification required before enablement
 

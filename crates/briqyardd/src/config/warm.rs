@@ -14,7 +14,28 @@ mod tests {
         assert!(!default.templates.warm_pools);
         assert!(!default.templates.unbound_warm_pools);
         assert!(default.templates.warm_policy.catalog.is_empty());
-        load(POLICY).unwrap();
+        assert_eq!(
+            load(POLICY)
+                .unwrap()
+                .templates
+                .warm_policy
+                .budget
+                .data_disk_gb,
+            0
+        );
+        let with_data = POLICY.replace("root_disk_gb: 16", "root_disk_gb: 16, data_disk_gb: 32");
+        let configured = load(&with_data).unwrap();
+        assert_eq!(configured.templates.warm_policy.budget.data_disk_gb, 32);
+        let round_trip = serde_yaml::to_string(&configured.templates.warm_policy).unwrap();
+        let restored: WarmPolicy = serde_yaml::from_str(&round_trip).unwrap();
+        assert_eq!(restored.budget.data_disk_gb, 32);
+        for invalid in ["-1", "4294967296"] {
+            assert!(load(&POLICY.replace(
+                "root_disk_gb: 16",
+                &format!("root_disk_gb: 16, data_disk_gb: {invalid}")
+            ))
+            .is_err());
+        }
         for (from, to) in [
             ("memory_mb: 2048", "memory_mb: 0"),
             ("max_fills: 1", "max_fills: 0"),

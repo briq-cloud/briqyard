@@ -10,7 +10,7 @@ device is never mounted and is charged to the operator namespace. It is not a te
 
 A recipe is image, size, init and volume. The same image and size may be approved with and
 without a volume (`volume_gb: 2` and `volume_gb: 0`); each shape is its own builder, seed and
-pool (ADR 0089). The builder names its shape as a create does: `volume: {size_gb, mount: "/work"}`
+pool (ADR 0091). The builder names its shape as a create does: `volume: {size_gb, mount: "/work"}`
 for the recipe with a volume, no `volume` for the volume-free one. A volume-free seed has two
 drives (root, config) and its guest has no `/dev/vdc`.
 

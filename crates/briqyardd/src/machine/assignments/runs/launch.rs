@@ -163,6 +163,9 @@ impl Manager {
         // Cache exact target before uncertain writes; launch_assigned_run never retries an
         // already reserved machine, even if the first transition write is uncertain.
         self.inner.store.ensure_assigned_run_lifecycle_floor()?;
+        // The intent is checked against the machine file at once (a guest exit settles with
+        // the memory record): repair a file a failed update write left at its predecessor.
+        self.repair_outstanding_update_record(&current.machine)?;
         if current.reference.phase != Phase::Settled {
             let merged = projection::preserve_advisory(&current.target, &entry.snapshot())?;
             *entry.rec.lock().unwrap() = merged;

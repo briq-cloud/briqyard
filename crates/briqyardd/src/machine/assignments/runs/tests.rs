@@ -62,6 +62,16 @@ fn restart(h: &crate::machine::tests::Harness) -> Result<()> {
     h.m.load()
 }
 
+async fn full_startup(h: &crate::machine::tests::Harness) -> Result<()> {
+    h.m.inner.machines.lock().unwrap().clear();
+    h.m.inner.namespaces.lock().unwrap().clear();
+    h.m.inner.launch_holds.lock().unwrap().clear();
+    *h.m.inner.assignments.lock().unwrap() = State::default();
+    h.m.load_backing_at_start().await?;
+    h.m.recover_and_sweep_at_start().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn run_reservation_freezes_exact_current_bundle_and_reserves_once_without_launch() {
     let (h, entry) = stopped(false).await;

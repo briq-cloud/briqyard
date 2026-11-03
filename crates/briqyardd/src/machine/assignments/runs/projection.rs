@@ -21,7 +21,6 @@ const ADVISORY: &[&str] = &[
     "version",
     "backup_bytes",
     "init_version",
-    "pending_since",
 ];
 
 pub(super) fn authority(record: &Record) -> Result<serde_json::Value> {
