@@ -38,6 +38,10 @@ pub struct CreateMachineRequest {
     /// machines stay in its host's (ADR 0025). Empty: any region. A daemon ignores it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub region: String,
+    /// The runtime class it runs under (ADR 0088); absent: `default`. A host serves the
+    /// classes its configuration lists; a fork and a restore take their source's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime_class: String,
     /// Where its traffic may go; absent is `open` (a restore takes the backup's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<Egress>,
@@ -228,6 +232,10 @@ pub struct Machine {
     pub hostname: String,
     pub machine_host: String,
     pub size: Size,
+    /// The runtime class it runs under: `default`, or one the host's configuration names
+    /// (ADR 0088). Fixed for its life.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime_class: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<VolumeSpec>,
     #[serde(default)]

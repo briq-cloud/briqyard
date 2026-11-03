@@ -148,6 +148,7 @@
         restart: { $ref: "#/components/schemas/RestartPolicy" }
         metadata: { type: object, additionalProperties: { type: string }, description: "kept as is; the labels `?label=` selects on" }
         region: { type: string, description: "fleet: a new namespace is placed on a host of this region (a host's `region`); a namespace's machines stay in its host's (ADR 0025). Absent: any. A daemon ignores it" }
+        runtime_class: { type: string, description: "the runtime class it runs under (ADR 0088): `default` (absent), or one the host serves (`GET /v1/status`, `runtime_classes`). Fixed for its life; a fork and a restore take their source's, and naming another is 400. 400 `invalid` for a class the host does not serve; through the fleet a new namespace is placed on a host that serves it. A warm slot, a seed and a template build are `default`" }
         egress: { allOf: [{ $ref: "#/components/schemas/Egress" }], description: "absent: open, or for a restore the backup's" }
         limits: { allOf: [{ $ref: "#/components/schemas/EgressLimits" }], description: "over the host's, field by field; absent: the host's, or for a restore the backup's" }
         disk_limits: { allOf: [{ $ref: "#/components/schemas/DiskLimits" }], description: "over the host's for its size, field by field; absent: the host's, or for a restore the backup's" }
@@ -182,6 +183,7 @@
         hostname: { type: string, description: "`<name>.internal`, follows the name" }
         machine_host: { type: string, description: "`<id>.vm.internal`, this exact machine" }
         size: { $ref: "#/components/schemas/Size" }
+        runtime_class: { type: string, description: "`default`, or the class it was created under (ADR 0088); a `nested` machine is stopped the plain way when a stop asks to suspend (the event says `suspend: refused (runtime class nested)`)" }
         volume: { $ref: "#/components/schemas/VolumeSpec" }
         ports: { type: array, items: { type: integer } }
         sleep: { type: string }
