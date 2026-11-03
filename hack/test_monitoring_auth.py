@@ -16,6 +16,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -329,7 +330,6 @@ while :; do read -r -t 0.05 _ || :; done
             ready = Path(tmp) / "child-ready"
             terminated = Path(tmp) / "child-terminated"
             survived = Path(tmp) / "child-survived"
-            parent_pid = Path(tmp) / "parent-pid"
             child_code = "\n".join(
                 (
                     "import pathlib, signal, sys, time",
@@ -345,15 +345,11 @@ while :; do read -r -t 0.05 _ || :; done
             )
             parent_code = "\n".join(
                 (
-                    "import os, pathlib, subprocess, sys, time",
-                    "ready, terminated, survived, parent_pid = map(pathlib.Path, sys.argv[1:5])",
-                    "parent_pid.write_text(str(os.getpid()), encoding='utf-8')",
+                    "import pathlib, subprocess, sys, time",
+                    "ready, terminated, survived = map(pathlib.Path, sys.argv[1:4])",
                     "child = subprocess.Popen(",
-                    "    [sys.executable, '-c', sys.argv[5], str(ready), str(terminated), str(survived)]",
+                    "    [sys.executable, '-c', sys.argv[4], str(ready), str(terminated), str(survived)]",
                     ")",
-                    "deadline = time.monotonic() + 2",
-                    "while not ready.exists() and time.monotonic() < deadline: time.sleep(0.01)",
-                    "if not ready.exists(): raise SystemExit(7)",
                     "time.sleep(30)",
                 )
             )
@@ -364,21 +360,16 @@ while :; do read -r -t 0.05 _ || :; done
                 str(ready),
                 str(terminated),
                 str(survived),
-                str(parent_pid),
                 child_code,
             ]
-            with self.assertRaises(subprocess.TimeoutExpired):
-                _run_bounded(args, env=os.environ.copy(), timeout=0.2)
+            self._timeout_after_child_ready(args, ready)
             self.assertEqual(terminated.read_text(encoding="utf-8"), "terminated")
             self.assertFalse(survived.exists())
-            with self.assertRaises(ProcessLookupError):
-                os.killpg(int(parent_pid.read_text(encoding="utf-8")), 0)
 
     def test_timeout_kills_term_ignoring_descendant_with_redirected_streams(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ready = Path(tmp) / "child-ready"
             survived = Path(tmp) / "child-survived"
-            parent_pid = Path(tmp) / "parent-pid"
             child_code = "\n".join(
                 (
                     "import pathlib, signal, sys, time",
@@ -391,29 +382,49 @@ while :; do read -r -t 0.05 _ || :; done
             )
             parent_code = "\n".join(
                 (
-                    "import os, pathlib, subprocess, sys, time",
-                    "ready, survived, parent_pid = map(pathlib.Path, sys.argv[1:4])",
-                    "parent_pid.write_text(str(os.getpid()), encoding='utf-8')",
+                    "import pathlib, subprocess, sys, time",
+                    "ready, survived = map(pathlib.Path, sys.argv[1:3])",
                     "child = subprocess.Popen(",
-                    "    [sys.executable, '-c', sys.argv[4], str(ready), str(survived)],",
+                    "    [sys.executable, '-c', sys.argv[3], str(ready), str(survived)],",
                     "    stdout=subprocess.DEVNULL,",
                     "    stderr=subprocess.DEVNULL,",
                     ")",
-                    "deadline = time.monotonic() + 2",
-                    "while not ready.exists() and time.monotonic() < deadline: time.sleep(0.01)",
-                    "if not ready.exists(): raise SystemExit(7)",
                     "time.sleep(30)",
                 )
             )
-            args = [sys.executable, "-c", parent_code, str(ready), str(survived), str(parent_pid), child_code]
-            with self.assertRaises(subprocess.TimeoutExpired):
-                _run_bounded(args, env=os.environ.copy(), timeout=0.2)
+            args = [sys.executable, "-c", parent_code, str(ready), str(survived), child_code]
+            self._timeout_after_child_ready(args, ready)
             self.assertFalse(survived.exists())
-            with self.assertRaises(ProcessLookupError):
-                os.killpg(int(parent_pid.read_text(encoding="utf-8")), 0)
+
+    def _timeout_after_child_ready(self, args: list[str], ready: Path) -> None:
+        real_popen = subprocess.Popen
+        process = None
+
+        def start_ready(*popen_args, **kwargs):
+            nonlocal process
+            process = real_popen(*popen_args, **kwargs)
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                if process.poll() is not None:
+                    self.fail("timeout fixture parent exited before child readiness")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.fail("timeout fixture child did not become ready before deadline")
+                time.sleep(min(0.01, remaining))
+            return process
+
+        try:
+            # Start the actual timeout only after the child's signal handler is installed.
+            with mock.patch.object(subprocess, "Popen", side_effect=start_ready):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    _run_bounded(args, env=os.environ.copy(), timeout=0.2)
+            self.assertFalse(_process_group_exists(process), "timeout left an owned process group alive")
+        finally:
+            if process is not None:
+                self._cleanup_test_process(process)
 
     def _cleanup_test_process(self, process: subprocess.Popen[str]) -> None:
-        if process.poll() is None:
+        if _process_group_exists(process):
             _terminate_process_group(process)
         else:
             process.communicate(timeout=5)
