@@ -51,7 +51,7 @@ def main():
     print(f"Grafana source binding: {count} expression expectations", flush=True)
     if args.promtool:
         executable = args.promtool.resolve(strict=True)
-        subprocess.run([str(executable), "test", "rules", str(FIXTURE)], check=True)
+        subprocess.run([str(executable), "test", "rules", str(FIXTURE)], check=True, timeout=30)
 
 
 if __name__ == "__main__":

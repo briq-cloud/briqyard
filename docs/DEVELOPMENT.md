@@ -445,7 +445,8 @@ python3 hack/monitoring-alert-check.py --promtool /opt/briqyard-monitoring/prome
 
 Requires Python 3 and PyYAML (`python3-yaml` on the native host). This runs
 `promtool test rules hack/monitoring/alert-tests.yaml` after binding every fixture
-expression and threshold to the Grafana source. No download or running service is needed.
+expression and threshold to the Grafana source. The tool has a 30-second execution
+timeout; a timeout is a failed check. No download or running service is needed.
 The 12 synthetic scenarios have 26 expectations: CPU, memory and disk refusals,
 pressure excluded, zero/first-sample baselines, window expiration, the first backup
 failure and second unchanged sample, reset, stale/absent series and other event reasons.
