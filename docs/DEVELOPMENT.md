@@ -402,6 +402,9 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   resume, destroy, and reads the daemon's `process_resident_memory_bytes` 12 s after each:
   growth over the second half past `--rss-growth-mb` (32) is a break (ADR 0052). Through a
   fleet it needs `--invariants-url` (the daemon's), else the check is skipped and says so.
+  The capacity race fails on missing start responses, worker or sampler errors, no valid
+  sample, or interruption after the phase begins. Its maximum is sampled guest quota
+  across the host, not continuous physical RAM usage.
   Against a daemon on TLS, the invariants' curl trusts the daemon's certificate with
   `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
 - `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
