@@ -19,7 +19,13 @@ fn run_reference_is_explicit_and_rejects_unknown_fields() {
 }
 
 async fn stopped(checkpoint: bool) -> (crate::machine::tests::Harness, Arc<Entry>) {
-    let (h, entry, request) = super::super::tests::fixture().await;
+    stopped_with(checkpoint, Some(2)).await
+}
+async fn stopped_with(
+    checkpoint: bool,
+    volume: Option<u32>,
+) -> (crate::machine::tests::Harness, Arc<Entry>) {
+    let (h, entry, request) = super::super::tests::fixture_with(volume).await;
     let digest = templates::sandbox::request_digest(&request).unwrap();
     h.m.stage_destination_assignment(request, &entry, 2)
         .await
@@ -54,6 +60,16 @@ fn restart(h: &crate::machine::tests::Harness) -> Result<()> {
     h.m.inner.launch_holds.lock().unwrap().clear();
     *h.m.inner.assignments.lock().unwrap() = State::default();
     h.m.load()
+}
+
+async fn full_startup(h: &crate::machine::tests::Harness) -> Result<()> {
+    h.m.inner.machines.lock().unwrap().clear();
+    h.m.inner.namespaces.lock().unwrap().clear();
+    h.m.inner.launch_holds.lock().unwrap().clear();
+    *h.m.inner.assignments.lock().unwrap() = State::default();
+    h.m.load_backing_at_start().await?;
+    h.m.recover_and_sweep_at_start().await?;
+    Ok(())
 }
 
 #[tokio::test]

@@ -69,6 +69,11 @@ impl Manager {
         if !key.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(MError::NotFound);
         }
+        if self.assigned_update_images()?.contains(key) {
+            return Err(MError::Conflict(
+                "pending assigned update still uses this image".into(),
+            ));
+        }
         match self.inner.images.remove(key, Removal::Request).await? {
             true => Ok(()),
             false => Err(MError::Conflict("machines still use this image".into())),
@@ -77,10 +82,21 @@ impl Manager {
 
     /// Removes images unused for `keep`; runs hourly from the daemon.
     pub async fn gc_images(&self, keep: chrono::Duration) -> usize {
-        self.inner.images.gc(keep).await.unwrap_or_else(|e| {
-            tracing::warn!(err = %e, "image gc");
-            0
-        })
+        let named = match self.assigned_update_images() {
+            Ok(named) => named,
+            Err(error) => {
+                tracing::warn!(err = %error, "assigned updates unreadable: image gc deferred");
+                return 0;
+            }
+        };
+        self.inner
+            .images
+            .gc(keep, &named)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(err = %e, "image gc");
+                0
+            })
     }
 
     /// What the machine uses now: CPU and memory from its cgroup when jailed, disk from ZFS.

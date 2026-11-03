@@ -3,9 +3,13 @@
 use super::*;
 use std::os::unix::fs::OpenOptionsExt;
 
-pub(super) fn prepare(expected: &guest::SandboxDevice) -> Result<()> {
-    expected.check().map_err(|e| anyhow!(e))?;
+/// `None` is the volume-free topology: the guest must have no data drive at all.
+pub(super) fn prepare(expected: Option<&guest::SandboxDevice>) -> Result<()> {
     let sys = Path::new("/sys/class/block/vdc");
+    let Some(expected) = expected else {
+        return check_absent(sys);
+    };
+    expected.check().map_err(|e| anyhow!(e))?;
     check_no_partitions(sys)?;
     anyhow::ensure!(
         fs::read_dir(sys.join("holders"))?.next().is_none(),
@@ -74,6 +78,13 @@ pub(super) fn prepare(expected: &guest::SandboxDevice) -> Result<()> {
     drop(file);
     Ok(())
 }
+fn check_absent(sys: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !sys.try_exists()?,
+        "volume-free sandbox guest has a data drive"
+    );
+    Ok(())
+}
 // Sysfs mixes ordinary attributes with directories and directory symlinks.
 // Follow symlinks when classifying candidates, and propagate metadata failures.
 fn check_no_partitions(sys: &Path) -> Result<()> {
@@ -134,6 +145,14 @@ mod tests {
         fs::create_dir(sys.path().join("queue")).unwrap();
         std::os::unix::fs::symlink("queue", sys.path().join("subsystem")).unwrap();
         check_no_partitions(sys.path()).unwrap();
+    }
+
+    #[test]
+    fn volume_free_topology_has_no_data_drive() {
+        let sys = tempfile::tempdir().unwrap();
+        check_absent(&sys.path().join("vdc")).unwrap();
+        fs::create_dir(sys.path().join("vdc")).unwrap();
+        assert!(check_absent(&sys.path().join("vdc")).is_err());
     }
 
     #[test]
