@@ -28,6 +28,12 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      # Keep the harness from the workflow revision when dispatch tests an older source ref.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .native-harness
+          persist-credentials: false
       - name: Record tested identity and host
         run: |
           git rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
@@ -46,15 +52,18 @@ jobs:
           cargo build --release --locked --workspace --exclude briqyard-init
           cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl
       - name: Install isolated native host and fleet
-        run: bash hack/native-ci.sh
+        run: bash .native-harness/hack/native-ci.sh "$GITHUB_WORKSPACE"
       - name: e2e
         id: e2e
         run: |
           mkdir -p native-logs
           set -o pipefail
           start=$SECONDS
+          set +e
           bash hack/e2e.sh 2>&1 | tee native-logs/e2e.log
+          rc=${PIPESTATUS[0]}
           echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
+          exit "$rc"
       - name: fleet-smoke
         if: ${{ !cancelled() && steps.e2e.outcome != 'skipped' }}
         id: fleet
@@ -62,8 +71,11 @@ jobs:
           mkdir -p native-logs
           set -o pipefail
           start=$SECONDS
+          set +e
           bash hack/fleet-smoke.sh 2>&1 | tee native-logs/fleet-smoke.log
+          rc=${PIPESTATUS[0]}
           echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
+          exit "$rc"
       - name: Suite counts
         if: always()
         env:

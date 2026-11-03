@@ -6,6 +6,13 @@ run on Linux only. The init's test that changes users needs root, so it is `#[ig
 runs its test binary as root (`--ignored run_as`, `.github/workflows/ci.yml`); in the VM, the
 same step.
 
+Native PR evidence comes from the `native` GitHub Actions workflow on `ubuntu-24.04`
+with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head;
+manual dispatch accepts a ref. The job summary contains e2e and fleet-smoke counts
+and durations; `native-suite-logs` contains their complete output. These checks are
+not required checks yet. Two-host suites still need independent Linux hosts
+([ADR 0089](adr/0089-native-suites-in-ci.md)).
+
 ## On a Linux host with KVM
 
 ```bash

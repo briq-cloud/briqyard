@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Fresh, disposable Linux KVM host only. No Lima or shared host state.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+HARNESS=$(cd "$(dirname "$0")" && pwd)
+cd "${1:-$HARNESS/..}"
 TARGET=${CARGO_TARGET_DIR:-$PWD/target}
 R=$PWD/native-release
 mkdir -p "$R"
@@ -24,7 +25,7 @@ c['network']['host_ports']=[9443]
 c['ingress'].update(tcp_ports='30000-32767', http='127.0.0.1:8080', advertise='127.0.0.1')
 c['registry_mirrors']={'docker.io':'http://127.0.0.1:7440'}
 c['capacity']={'memory_mb':12288,'vcpus':24}
-p.write_text(yaml.safe_dump(c,sort_keys=False))
+p.write_text(yaml.safe_dump(c,sort_keys=False).replace('  host_ports:\n  - 9443\n', '  host_ports: [9443]\n'))
 PY
 # The dev installer uses these legacy aliases only when absent; config keeps immutable paths.
 sudo ln -s "$(sudo python3 -c 'import yaml;print(yaml.safe_load(open("/etc/briqyard/config.yaml"))["firecracker"])')" /usr/local/bin/firecracker
@@ -41,7 +42,11 @@ placement:
   fill_ceiling: 0.85
   down_after_sec: 60
 YAML
-sudo env FLEET_CONFIG="$RUNNER_TEMP/native-fleet.yaml" bash hack/install-dev.sh "$TARGET"
+sudo systemctl stop briqyardd
+sudo systemctl start ssh
+sudo env FLEET_CONFIG="$RUNNER_TEMP/native-fleet.yaml" bash "$HARNESS/install-dev.sh" "$TARGET" "$PWD"
+sudo cp "$R/$B" /var/lib/briqyard-fleet/release/
+sudo sh -c 'cd /var/lib/briqyard-fleet/release && sha256sum briq*-linux-* firecracker-checked-linux-*.tar.gz > SHA256SUMS-x86_64'
 for i in $(seq 1 60); do
   briqyard status >/dev/null 2>&1 && curl -fsS http://127.0.0.1:7430/v1/hosts | jq -e 'length == 1 and all(.state == "ready")' >/dev/null && exit 0
   sleep 1

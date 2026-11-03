@@ -2,8 +2,7 @@
 # Install a development build on Linux; shared by Lima and native CI. Run as root.
 set -euo pipefail
 TARGET=${1:?target directory}
-SRC=$(cd "$(dirname "$0")/.." && pwd)
-set -e
+SRC=${2:-$(cd "$(dirname "$0")/.." && pwd)}
 command -v conntrack >/dev/null || { apt-get update -qq; apt-get install -y -qq conntrack; }
 T=$TARGET/release
 install -m 0755 "$T/briqyardd" /usr/local/bin/briqyardd
