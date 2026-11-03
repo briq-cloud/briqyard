@@ -19,7 +19,13 @@ fn run_reference_is_explicit_and_rejects_unknown_fields() {
 }
 
 async fn stopped(checkpoint: bool) -> (crate::machine::tests::Harness, Arc<Entry>) {
-    let (h, entry, request) = super::super::tests::fixture().await;
+    stopped_with(checkpoint, Some(2)).await
+}
+async fn stopped_with(
+    checkpoint: bool,
+    volume: Option<u32>,
+) -> (crate::machine::tests::Harness, Arc<Entry>) {
+    let (h, entry, request) = super::super::tests::fixture_with(volume).await;
     let digest = templates::sandbox::request_digest(&request).unwrap();
     h.m.stage_destination_assignment(request, &entry, 2)
         .await

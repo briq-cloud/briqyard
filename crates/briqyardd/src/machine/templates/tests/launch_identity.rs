@@ -2,6 +2,10 @@
 use super::*;
 
 pub(in crate::machine) async fn reserved() -> (Harness, Arc<Entry>) {
+    reserved_with(Some(2)).await
+}
+/// A reserved unbound slot whose sealed topology has this `/work` volume (none: two drives).
+pub(in crate::machine) async fn reserved_with(volume: Option<u32>) -> (Harness, Arc<Entry>) {
     let (h, source, snapshot, _) = source().await;
     h.namespace("t1");
     let mut record = crate::machine::tests::record();
@@ -25,13 +29,9 @@ pub(in crate::machine) async fn reserved() -> (Harness, Arc<Entry>) {
         .unwrap();
     record.clone_origin.as_mut().unwrap().artifact.profile = guest::SANDBOX_READY_V1.into();
     record.clone_origin.as_mut().unwrap().artifact.recipe.config =
-        crate::machine::templates::sandbox::builder_config(guest::SandboxDevice {
-            bytes: 2 << 30,
-            logical_sector_bytes: 512,
-            drive_id: "data".into(),
-        });
-    record.volume = Some(api::VolumeSpec {
-        size_gb: 2,
+        crate::machine::templates::sandbox::builder_config(volume.map(guest::SandboxDevice::of_gb));
+    record.volume = volume.map(|size_gb| api::VolumeSpec {
+        size_gb,
         mount: "/work".into(),
     });
     record.state = state::CREATING.into();
@@ -157,8 +157,8 @@ async fn settled_paused_exit_can_finish_cleanup_but_unknown_exit_cannot() {
     h.m.validate_launch_record(&saved).unwrap();
 }
 
-pub(in crate::machine) async fn prepared() -> (Harness, Arc<Entry>) {
-    let (h, entry) = reserved().await;
+pub(in crate::machine) async fn prepared_with(volume: Option<u32>) -> (Harness, Arc<Entry>) {
+    let (h, entry) = reserved_with(volume).await;
     h.m.inner
         .machines
         .lock()

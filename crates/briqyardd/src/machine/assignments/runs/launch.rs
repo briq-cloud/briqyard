@@ -59,7 +59,10 @@ impl Manager {
             boot_args: self.boot_args(),
             config_drive,
             root: self.inner.zfs.device(&rec.root_dataset()).await?,
-            data: Some(self.inner.zfs.device(&rec.data_dataset()).await?),
+            data: match &rec.volume {
+                Some(_) => Some(self.inner.zfs.device(&rec.data_dataset()).await?),
+                None => None,
+            },
             tap,
             mac: netw::mac_for(rec.ip.parse()?),
             resume: matches!(current.mode, Mode::Checkpoint { .. }),
