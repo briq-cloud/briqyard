@@ -39,7 +39,13 @@ PY
       if curl -fsS http://127.0.0.1:7430/v1/hosts | jq -e 'length == 2 and any(.id == "local" and .state == "ready") and any(.id == "unreachable" and .state == "down")' >/dev/null; then ready=1; break; fi
       sleep 1
     done
-    [ "$ready" = 1 ] || { echo 'monitoring host states did not settle'; exit 1; }
+    if [ "$ready" != 1 ]; then
+      echo 'monitoring host states did not settle'
+      sudo systemctl --no-pager status briqyard-fleet || true
+      sudo journalctl -u briqyard-fleet --no-pager -n 80 || true
+      sudo cat /etc/briqyard/fleet.yaml || true
+      exit 1
+    fi
     # Ephemeral credential stays outside artifacts and command arguments.
     sudo sh -c 'umask 077; openssl rand -hex 24 > /etc/briqyard-monitoring-password'
     sudo env GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password bash hack/install-monitoring.sh
