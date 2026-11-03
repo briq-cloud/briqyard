@@ -2,6 +2,7 @@ import json
 import os
 import unittest
 import threading
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch, MagicMock
 import stress
@@ -217,6 +218,127 @@ class SafetyTest(unittest.TestCase):
             self.assertEqual(exit_result.exception.code, expected)
             calls = [call[0] for call in run.mock_calls]
             self.assertLess(calls.index('destroy_all'), calls.index('report'))
+
+
+
+class CapacityObservationTest(unittest.TestCase):
+    def fixture(self, *, sampler_failure=False, start_failure=False, missing_response=False, no_sample=False, cutoff=False):
+        done = threading.Event()
+        sampler = SimpleNamespace(joined=False, unhandled=[])
+        def thread(target):
+            def start():
+                try:
+                    if no_sample:
+                        done.set()
+                    target()
+                except Exception as error:
+                    sampler.unhandled.append(error)
+            sampler.start = start
+            sampler.join = lambda: setattr(sampler, 'joined', True)
+            return sampler
+        run = object.__new__(stress.Run)
+        run.a = SimpleNamespace(image='fixed-test-image', boot_timeout=1)
+        run.namespaces = ['fixed-test-namespace']
+        run.broken = []
+        run.phase = MagicMock()
+        run.log = MagicMock()
+        run.invariants = MagicMock()
+        run.destroy_all = MagicMock()
+        run.report = MagicMock()
+        run.safety = SimpleNamespace(sleep=lambda _: done.set(), begin_cleanup=MagicMock(),
+                                     unresolved=False, owned={})
+        def call(method, path, body=None, **kwargs):
+            if path == '/v1/status':
+                if cutoff == 'status':
+                    raise BudgetExpired('stress time budget exhausted')
+                return {'capacity': {'memory_mb': 100}, 'used': {'memory_mb': 10}}
+            if method == 'POST':
+                if cutoff == 'create' and body['name'] == 'cap2':
+                    raise BudgetExpired('stress time budget exhausted')
+                return {'id': body['name']}
+        def request(method, path, **kwargs):
+            if start_failure and '/cap3/' in path:
+                raise RuntimeError('UNSAFE_SYNTHETIC_START_ERROR')
+            return (200, '{}') if '/cap0/' in path else (503, '{"code":"capacity"}')
+        run.api = SimpleNamespace(call=call, request=request, failures=[])
+        def wait(mid, want, **kwargs):
+            if (cutoff is True and want == {'running'}) or (cutoff == 'created' and want == {'created'}):
+                raise BudgetExpired('stress time budget exhausted')
+        run.wait_state = wait
+        if sampler_failure:
+            run.mlist = MagicMock(side_effect=RuntimeError('UNSAFE_SYNTHETIC_SAMPLE_ERROR'))
+        else:
+            run.mlist = MagicMock(return_value=[{'state': 'running', 'size': {'memory_mb': 10}},
+                                               {'state': 'running', 'size': {'memory_mb': 31}}])
+        run.mget = MagicMock(return_value={'state': 'created'}, side_effect=BudgetExpired('stress time budget exhausted') if cutoff == 'refused_state' else None)
+        parallel_calls = 0
+        def parallel(items, fn, workers):
+            nonlocal parallel_calls
+            parallel_calls += 1
+            results, errors = {}, {}
+            for i, item in enumerate(items):
+                if missing_response and parallel_calls == 2 and i == 3:
+                    continue
+                try:
+                    results[i] = fn(item)
+                except Exception as error:
+                    errors[i] = error
+            return results, errors
+        return run, sampler, done, thread, parallel
+
+    def exercise(self, **kwargs):
+        run, sampler, done, thread, parallel = self.fixture(**kwargs)
+        with patch('stress.threading.Event', return_value=done), \
+                patch('stress.threading.Thread', side_effect=thread), \
+                patch('stress.parallel', side_effect=parallel):
+            run.starts_past_capacity()
+        self.assertTrue(sampler.joined)
+        return run, sampler
+
+    def test_sampler_get_failure_cannot_pass_capacity_phase(self):
+        run, sampler = self.exercise(sampler_failure=True)
+        self.assertTrue(run.broken, 'sampler failure must fail capacity observation')
+        self.assertFalse(sampler.unhandled)
+        self.assertNotIn('UNSAFE_SYNTHETIC', str(run.log.call_args_list))
+
+    def test_start_exception_cannot_hide_behind_acceptance_and_refusal(self):
+        run, _ = self.exercise(start_failure=True)
+        self.assertTrue(run.broken, 'one accepted and two refused do not cover a failed worker')
+        self.assertNotIn('UNSAFE_SYNTHETIC', str(run.log.call_args_list))
+
+    def test_begun_capacity_phase_cutoff_is_not_successful_duration_completion(self):
+        for cutoff in (True, 'status', 'create', 'created', 'refused_state'):
+            with self.subTest(cutoff=cutoff):
+                run, sampler, done, thread, parallel = self.fixture(cutoff=cutoff)
+                run.run = lambda: run.starts_past_capacity()
+                with patch('stress.threading.Event', return_value=done), \
+                        patch('stress.threading.Thread', side_effect=thread), \
+                        patch('stress.parallel', side_effect=parallel), \
+                        patch('stress.Run', return_value=run), patch('sys.argv', ['stress']), \
+                        patch('stress.signal.signal'):
+                    with self.assertRaises(SystemExit) as result:
+                        stress.main()
+                if hasattr(sampler, 'start'):
+                    self.assertTrue(sampler.joined)
+                self.assertEqual(result.exception.code, 1)
+                self.assertTrue(run.broken)
+                self.assertIn('capacity_phase_incomplete', str(run.log.call_args_list))
+
+    def test_missing_start_response_cannot_pass_capacity_phase(self):
+        run, _ = self.exercise(missing_response=True)
+        self.assertTrue(run.broken)
+        self.assertIn('start_response_missing', str(run.log.call_args_list))
+
+    def test_no_sampler_observation_cannot_use_zero_as_a_valid_maximum(self):
+        run, _ = self.exercise(no_sample=True)
+        self.assertTrue(run.broken)
+        self.assertIn('sample_missing', str(run.log.call_args_list))
+
+    def test_complete_observations_keep_host_wide_guest_budget_sampling(self):
+        run, sampler = self.exercise()
+        self.assertEqual(run.broken, [])
+        self.assertFalse(sampler.unhandled)
+        self.assertIn('sampled guest quota max 41 MB of 100', str(run.log.call_args_list))
 
 
 if __name__ == '__main__':

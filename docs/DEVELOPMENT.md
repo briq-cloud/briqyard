@@ -419,6 +419,9 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   resume, destroy, and reads the daemon's `process_resident_memory_bytes` 12 s after each:
   growth over the second half past `--rss-growth-mb` (32) is a break (ADR 0052). Through a
   fleet it needs `--invariants-url` (the daemon's), else the check is skipped and says so.
+  The capacity race fails on missing start responses, worker or sampler errors, no valid
+  sample, or interruption after the phase begins. Its maximum is sampled guest quota
+  across the host, not continuous physical RAM usage.
   Against a daemon on TLS, the invariants' curl trusts the daemon's certificate with
   `CURL_CA_BUNDLE=<data_dir>/api-cert.pem`.
 - `hack/chaos.py`: owners keep a machine each and a counter on its disks through writes, stops,
@@ -452,6 +455,28 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   `GRAFANA_URL` and `GRAFANA_PASSWORD_FILE`, every query of the three dashboards returning data
   (`CHECK_HOST=local`). 18 checks with fc and fc2 and the stack installed. Changes
   nothing: start a few machines on `local` first so the per-machine panels have data.
+
+Before the live monitoring checks, qualify the capacity and backup-failure expressions
+with the already installed, checksum-verified Prometheus 3.15.1 tool (ADR 0054):
+
+```bash
+python3 hack/monitoring-alert-check.py --promtool /opt/briqyard-monitoring/prometheus/promtool
+```
+
+Requires Python 3 and PyYAML (`python3-yaml` on the native host). This runs
+`promtool test rules hack/monitoring/alert-tests.yaml` after binding every fixture
+expression and threshold to the Grafana source. The tool has a 30-second execution
+timeout; a timeout is a failed check. No download or running service is needed.
+The 12 synthetic scenarios have 26 expectations: CPU, memory and disk refusals,
+pressure excluded, zero/first-sample baselines, window expiration, the first backup
+failure and second unchanged sample, reset, stale/absent series and other event reasons.
+Only fixed synthetic labels are used. The CPU case must fail with the old
+`memory|disk` selector; the second backup observation must fail if `increase()` takes
+precedence over the no-baseline branch. `--check-source` checks binding alone (also in
+CI); it does not execute PromQL. On a Mac without PyYAML or the pinned promtool, run the
+expression checks on the native monitoring host. These query tests do not qualify
+Grafana firing/resolution, operator notification delivery or physical saturation;
+those remain separate live checks.
 
 ### Fuzzing
 
