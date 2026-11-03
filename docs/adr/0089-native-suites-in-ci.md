@@ -112,8 +112,8 @@ Monitoring installs the source's digest-pinned Prometheus/Grafana stack. Its fle
 registers the local daemon and an explicitly unreachable loopback endpoint, then waits
 for ready/down states. This exercises all 18 existing checks, including down-host
 503 and Prometheus up=0. The unreachable entry is not a simulated second daemon.
-A running local machine provides disk/CPU observations; checking waits for two actual
-Prometheus samples before querying the dashboards. Credentials stay outside artifacts.
+A running local machine provides disk/CPU observations; checking waits for at least 12
+Prometheus samples (3 minutes at the 15 s scrape interval, capped at 300 s) before querying the dashboards. Credentials stay outside artifacts.
 
 The two-host gate above remains: a second daemon's own state, pool, ports and unit
 are insufficient because the unmodified suites address the same absolute config,
