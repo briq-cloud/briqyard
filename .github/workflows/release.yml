@@ -62,8 +62,12 @@ jobs:
         with:
           name: dist-${{ matrix.arch }}
           path: dist/*
+  # The `nested` runtime class's kernel and ZFS modules (ADR 0088), x86_64 only.
+  nested-kernel:
+    needs: notes
+    uses: ./.github/workflows/nested-kernel.yml
   publish:
-    needs: build
+    needs: [build, nested-kernel]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +76,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: dist-*
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: nested-kernel-x86_64
+          path: dist
+      - name: Pin the class files in the x86_64 sums
+        run: (cd dist && sha256sum nested-vmlinux-x86_64 nested-modules-x86_64.ext4 nested-versions-x86_64.json >> SHA256SUMS-x86_64)
       - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --latest=false --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
         env:
           GH_TOKEN: ${{ github.token }}
