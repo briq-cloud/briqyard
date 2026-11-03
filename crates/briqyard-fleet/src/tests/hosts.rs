@@ -877,7 +877,9 @@ async fn backed_keys_remain_available_during_daily_and_latest_publication() {
                 },
             )
             .await;
-            let refusal = result.err().expect("unbacked key must be refused");
+            let Err(refusal) = result else {
+                panic!("unbacked key must be refused");
+            };
             assert_eq!(refusal.status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(refusal.code, "backup");
             assert!(!refusal.error.contains("fixture-two"));
@@ -914,7 +916,9 @@ async fn key_admission_deadline_refuses_without_mutation() {
         || async { panic!("busy key gate published") },
     )
     .await;
-    let refusal = result.err().expect("key admission must fail");
+    let Err(refusal) = result else {
+        panic!("key admission must fail");
+    };
     assert_eq!(refusal.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(refusal.code, "registry");
     assert!(f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty());
@@ -962,9 +966,9 @@ async fn key_response_rechecks_ack_identity_token_address_and_current_key() {
             },
         )
         .await;
-        let refusal = result
-            .err()
-            .expect("changed identity/key must not receive a key");
+        let Err(refusal) = result else {
+            panic!("changed identity/key must not receive a key");
+        };
         assert_ne!(refusal.status, StatusCode::OK);
         assert!(!refusal.error.contains("fixture-one"));
         assert!(!refusal.error.contains("fixture-rotated"));
@@ -1015,7 +1019,9 @@ async fn failed_local_key_save_rolls_back_before_publication() {
         || async { panic!("failed local save published a key") },
     )
     .await;
-    let refusal = result.err().expect("local save must fail");
+    let Err(refusal) = result else {
+        panic!("local save must fail");
+    };
     assert_eq!(refusal.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(refusal.code, "registry");
     assert!(f.st.reg.lock().unwrap().hosts["s1"].pool_key.is_empty());
