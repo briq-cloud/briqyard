@@ -155,7 +155,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 
 | Kubernetes | briqyard | Gap | Scope |
 |---|---|---|---|
-| RuntimeClass (gVisor, Kata) | ★ every machine is a microVM under the jailer | | |
+| RuntimeClass (gVisor, Kata) | ✓ a host declares classes (a kernel, modules, `nested`), a machine names one, the fleet places by it; `nested` machines have `/dev/kvm` (ADR 0088). Every machine of every class is a microVM under the jailer | another VMM per class, per-class overhead, tolerations | yard |
 | Pod security, seccomp | ★ Firecracker's own seccomp; the guest is root in its VM only | | |
 | ResourceQuota, LimitRange per namespace | ◐ a quota per namespace: machines, memory, vCPUs, disk, set by briq (ADR 0025) | LimitRange (a size per machine): the control plane's check | yard (values from briq) |
 | Egress abuse (outside core) | ✓ blocked ports, a connection rate, a bandwidth cap per machine, drops counted (ADR 0018) | | yard; the response to abuse is briq's |

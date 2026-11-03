@@ -81,3 +81,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0089](0089-native-suites-in-ci.md) | Native e2e and fleet-smoke on disposable hosted KVM runners, checked runtime installation, exact source identities and retained suite evidence |
 | [0090](0090-app-console-ownership.md) | The app owns the console it writes to: the init hands it to the app user before dropping privileges, mode kept 0600 |
 | [0091](0091-volume-free-sandbox-seeds.md) | A sandbox recipe may declare no data volume (`volume_gb: 0`): its seed seals two drives and serves only volume-free creates, a volume seed only matching `/work` volumes; the builder and the request name the volume, unbound pools key on the shape |
+| [0088](0088-runtime-classes.md) | Runtime classes: a host declares kernels and a machine names one; the `nested` class boots without ADR 0087's template and has `/dev/kvm`, takes no memory snapshot, and is placed on hosts that serve it |

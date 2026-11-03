@@ -378,6 +378,8 @@ under another Firecracker or host kernel (the machine's `vmm_version`), or with 
 
 Every x86_64 cold boot sends Firecracker a CPU template that clears VMX and SVM from the guest's CPUID (ADR 0087): no guest runs a hypervisor.
 
+A host can serve **runtime classes** (ADR 0088): named kernels in its configuration, one per `runtime_classes` entry. A machine names its class when it is created (`runtime_class`, absent: `default`, the host's `kernel`) and keeps it for life; a fork, a restore and a backup carry their source's. A class has a kernel, optionally a modules image (attached read-only as the last drive and mounted at `/lib/modules/<release>`), and `nested`. A `nested` class boots without the CPU template, so its machines see `/dev/kvm`; Firecracker saves no nested-virtualization state, so such a machine takes no memory snapshot: a stop that asks to suspend is a plain stop (`suspend: refused (runtime class nested)`), a memory snapshot or memory fork is 409 `bad_state`, and it is never a warm slot or a seed. The boot identity is per class. Each host lists its classes in its status and heartbeat; the fleet places a new namespace naming a class only on a host that serves it, refuses a namespace pinned to one that does not (400), and puts a `default` namespace on a host without `nested` when one has room.
+
 ### Versions and upgrades
 
 Every binary says its version, the release and the commit (`0.1.0+fdad892eeefa`, ADR 0027):
