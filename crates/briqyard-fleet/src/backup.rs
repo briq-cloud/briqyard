@@ -58,6 +58,19 @@ impl Backup {
     /// day's copy, encrypted. `false` when there was nothing to write. The registry is read
     /// once this write has its turn, so a write never lands an older registry over a newer one.
     pub async fn push(&self, reg: &std::sync::Mutex<Registry>) -> Result<bool> {
+        self.push_with(reg, |object, sealed| async move {
+            self.store.put_bytes(&object, &sealed).await
+        })
+        .await
+    }
+
+    // Keep the publication transaction shared with stand-ins whose blocking work can
+    // outlive the awaited PUT future, just as the local object store's writer can.
+    async fn push_with<P, F>(&self, reg: &std::sync::Mutex<Registry>, mut put: P) -> Result<bool>
+    where
+        P: FnMut(String, std::sync::Arc<[u8]>) -> F,
+        F: std::future::Future<Output = Result<()>>,
+    {
         let mut last = self.last.lock().await;
         let reg = reg.lock().unwrap().clone();
         let data = encode(&reg);
@@ -65,10 +78,12 @@ impl Backup {
         if last.digest == Some(digest) {
             return Ok(false);
         }
-        let sealed = age::encrypt(&self.recipient, &data).context("encrypt the registry")?;
+        let sealed: std::sync::Arc<[u8]> = age::encrypt(&self.recipient, &data)
+            .context("encrypt the registry")?
+            .into();
         let day = chrono::Utc::now().format("%Y-%m-%d");
         for object in [format!("fleet/registry-{day}.json.age"), LATEST.to_string()] {
-            tokio::time::timeout(PUT_WITHIN, self.store.put_bytes(&object, &sealed))
+            tokio::time::timeout(PUT_WITHIN, put(object.clone(), sealed.clone()))
                 .await
                 .map_err(|_| anyhow!("{object}: no answer within {} s", PUT_WITHIN.as_secs()))?
                 .context("write the registry's backup")?;
@@ -185,6 +200,258 @@ pub async fn run(st: std::sync::Arc<crate::AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    const CLEANUP_WITHIN: Duration = Duration::from_secs(10);
+
+    type Worker = Arc<Mutex<Option<tokio::task::JoinHandle<Result<()>>>>>;
+
+    struct BlockingPut {
+        objects: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        release: Option<std::sync::mpsc::Sender<()>>,
+        workers: Vec<(Worker, std::sync::mpsc::Receiver<()>)>,
+    }
+
+    // Signals even if the blocking writer unwinds. The retained JoinHandle separately
+    // reports whether it completed successfully.
+    struct Terminal(std::sync::mpsc::Sender<()>);
+
+    impl Drop for Terminal {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    impl BlockingPut {
+        fn new() -> Self {
+            Self {
+                objects: Default::default(),
+                release: None,
+                workers: Vec::new(),
+            }
+        }
+
+        fn put(
+            &mut self,
+            object: String,
+            sealed: Arc<[u8]>,
+            gate: Option<tokio::sync::oneshot::Sender<()>>,
+        ) -> impl std::future::Future<Output = Result<()>> + use<> {
+            let objects = self.objects.clone();
+            let (release, released) = std::sync::mpsc::channel();
+            if gate.is_some() {
+                assert!(self.release.replace(release).is_none());
+            }
+            let (terminal, ended) = std::sync::mpsc::channel();
+            let worker = tokio::task::spawn_blocking(move || {
+                let _terminal = Terminal(terminal);
+                if let Some(entered) = gate {
+                    let _ = entered.send(());
+                    released
+                        .recv_timeout(CLEANUP_WITHIN)
+                        .context("blocking PUT gate was not released")?;
+                }
+                objects.lock().unwrap().insert(object, sealed.to_vec());
+                Ok(())
+            });
+            let worker = Arc::new(Mutex::new(Some(worker)));
+            self.workers.push((worker.clone(), ended));
+            // Await the real JoinHandle, not an earlier completion notification. The
+            // fixture retains it if this future is dropped while the writer runs.
+            async move { Self::joined(&worker).await }
+        }
+
+        async fn joined(worker: &Worker) -> Result<()> {
+            futures::future::poll_fn(|cx| {
+                let mut task = worker.lock().unwrap();
+                let Some(handle) = task.as_mut() else {
+                    return std::task::Poll::Ready(Ok(()));
+                };
+                let result =
+                    futures::ready!(std::future::Future::poll(std::pin::Pin::new(handle), cx));
+                task.take();
+                std::task::Poll::Ready(
+                    result
+                        .context("blocking PUT panicked")
+                        .and_then(|result| result),
+                )
+            })
+            .await
+        }
+
+        fn release(&mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+        }
+
+        async fn join(&mut self) {
+            self.release();
+            let deadline = tokio::time::Instant::now() + CLEANUP_WITHIN;
+            // Retain the handle if the cleanup deadline expires; Drop still waits for
+            // its independent terminal signal, without replaying any write.
+            while let Some((worker, _)) = self.workers.last_mut() {
+                tokio::time::timeout_at(deadline, Self::joined(worker))
+                    .await
+                    .expect("blocking PUT cleanup deadline")
+                    .expect("blocking PUT failed");
+                self.workers.pop();
+            }
+        }
+    }
+
+    impl Drop for BlockingPut {
+        fn drop(&mut self) {
+            self.release();
+            let deadline = Instant::now() + CLEANUP_WITHIN;
+            for (_, terminal) in &self.workers {
+                let ended = terminal
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .is_ok();
+                assert!(
+                    ended || std::thread::panicking(),
+                    "blocking PUT drop deadline"
+                );
+            }
+            // Every gate also has its own finite wait if the test/runtime disappears.
+        }
+    }
+
+    async fn caller_abort_keeps_publication_turn(gate_latest: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let b = backup(dir.path(), &identity.to_public().to_string());
+        let mut initial = Registry::default();
+        initial.hosts.insert(
+            "h1".into(),
+            crate::static_host(
+                &crate::config::StaticHost {
+                    id: "h1".into(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            ),
+        );
+        initial.pool_key("h1").unwrap();
+        let reg = Mutex::new(initial);
+        reg.lock()
+            .unwrap()
+            .namespaces
+            .insert("snapshot-a".into(), "h1".into());
+        let mut writes = Mutex::new(BlockingPut::new());
+        let objects = writes.lock().unwrap().objects.clone();
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        // Both callers run the same transaction as push, including its borrowed guard,
+        // snapshot, encryption, daily/LATEST order, deadlines and Written commit.
+        let mut a = Box::pin(b.push_with(&reg, |object, sealed| {
+            let gate = if (object == LATEST) == gate_latest {
+                entered.take()
+            } else {
+                None
+            };
+            writes.lock().unwrap().put(object, sealed, gate)
+        }));
+        tokio::time::timeout(CLEANUP_WITHIN, async {
+            tokio::select! {
+                result = &mut a => panic!("A ended before its blocking gate: {}", result.is_ok()),
+                result = entering => result.expect("A entered the blocking writer"),
+            }
+        })
+        .await
+        .expect("A did not enter the blocking writer");
+        drop(a);
+        // A's real blocking writer remains gated after its async caller is dropped.
+        reg.lock()
+            .unwrap()
+            .namespaces
+            .insert("snapshot-b".into(), "h1".into());
+        let expected_key = {
+            let mut reg = reg.lock().unwrap();
+            reg.hosts.get_mut("h1").unwrap().pool_key = PoolKey::default();
+            reg.pool_key("h1").unwrap().0
+        };
+        let expected = encode(&reg.lock().unwrap());
+        let attempts = Mutex::new(Vec::new());
+        let mut b_call = Box::pin(b.push_with(&reg, |object, sealed| {
+            attempts.lock().unwrap().push(object.clone());
+            writes.lock().unwrap().put(object, sealed, None)
+        }));
+        // One explicit poll reaches the admission wait. No scheduler delay is used as
+        // evidence: entering the callable proves the borrowed turn was released early.
+        let pending = match futures::poll!(&mut b_call) {
+            std::task::Poll::Pending => true,
+            std::task::Poll::Ready(result) => {
+                result.expect("B publication failed");
+                false
+            }
+        };
+        let entered_early = !attempts.lock().unwrap().is_empty();
+        let mut committed_early = false;
+        if entered_early {
+            if pending {
+                tokio::time::timeout(CLEANUP_WITHIN, &mut b_call)
+                    .await
+                    .expect("B completion deadline")
+                    .expect("B publication failed");
+            }
+            committed_early = b.last.lock().await.digest == Some(Sha256::digest(&expected).into());
+        }
+        writes.lock().unwrap().release();
+        if !entered_early && pending {
+            tokio::time::timeout(CLEANUP_WITHIN, &mut b_call)
+                .await
+                .expect("B completion deadline")
+                .expect("B publication failed");
+        }
+        drop(b_call);
+        writes.get_mut().unwrap().join().await;
+        let final_is_b = {
+            let final_objects = objects.lock().unwrap();
+            // Track B's actual daily name so crossing UTC midnight does not change
+            // the oracle. An earlier day's object is outside B's two destinations.
+            let targets = attempts.lock().unwrap();
+            targets.len() == 2
+                && targets.iter().any(|object| object == LATEST)
+                && targets.iter().all(|object| {
+                    let sealed = final_objects.get(object).expect("B's object exists");
+                    let restored = open(sealed, &identity).expect("fake object decrypts");
+                    restored.namespaces.contains_key("snapshot-b")
+                        && restored
+                            .hosts
+                            .get("h1")
+                            .is_some_and(|host| host.pool_key == expected_key)
+                })
+        };
+        let ack_is_b = {
+            let last = b.last.lock().await;
+            last.digest == Some(Sha256::digest(&expected).into())
+                && last.keys.get("h1") == Some(&expected_key)
+        };
+        assert!(
+            !entered_early,
+            "B entered PUT before A's blocking writer was terminal"
+        );
+        assert!(pending, "B must wait for publication admission");
+        assert!(
+            !committed_early,
+            "B committed before A's blocking writer was terminal"
+        );
+        assert!(final_is_b, "both final objects must contain snapshot B");
+        assert!(ack_is_b, "Written must acknowledge snapshot B");
+    }
+
+    #[tokio::test]
+    async fn caller_abort_during_daily_keeps_publication_turn() {
+        caller_abort_keeps_publication_turn(false).await;
+    }
+
+    #[tokio::test]
+    async fn caller_abort_during_latest_keeps_publication_turn() {
+        caller_abort_keeps_publication_turn(true).await;
+    }
 
     /// A write reads the registry once it has its turn: one that waited behind another
     /// writes the registry as it is then, never the one it was called with.
