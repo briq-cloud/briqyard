@@ -24,6 +24,7 @@ impl Manager {
             headroom: api::WarmResources {
                 memory_mb: policy.headroom.memory_mb,
                 cpu_millis: policy.headroom.cpu_millis,
+                data_disk_gb: 0,
                 root_disk_gb: policy.headroom.disk_free_gb,
             },
             memory_floor_mb: policy.min_mem_available_mb,
@@ -84,7 +85,7 @@ impl Manager {
                 2
             } else if record.state == state::DESTROYING {
                 3
-            } else if ready_slot(&record) {
+            } else if ready_slot(&record) || unbound_ready_slot(&record) {
                 1
             } else if matches!(record.state.as_str(), state::CREATING | state::STARTING) {
                 0

@@ -27,11 +27,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
 
+mod assignments;
 mod backups;
 mod create;
 mod endpoints;
 mod exec;
 mod gateway;
+mod launch_identity;
 mod moves;
 mod namespaces;
 mod network;
@@ -299,6 +301,12 @@ pub struct Record {
     pub clone_origin: Option<templates::CloneOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warm_slot: Option<warm::Slot>,
+    /// Host identity stays fixed when an unbound slot changes tenant ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_identity: Option<launch_identity::LaunchIdentity>,
+    /// Current assigned-run authority; creation provenance remains on clone_origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_run: Option<assignments::runs::RunRef>,
     /// What a newer daemon wrote and this one does not know: kept as it is, so a rollback that
     /// rewrites the record does not drop it (ADR 0027).
     #[serde(flatten)]
@@ -409,6 +417,9 @@ fn holds_memory(state: &str) -> bool {
 /// Whether the host counts this machine's memory as taken: it holds it, or its create will
 /// start it (ADR 0048: room is taken when the machine is recorded, not when it boots).
 fn commits_memory(r: &Record) -> bool {
+    if let Some(run) = &r.assigned_run {
+        return run.schema != 3 || run.phase != assignments::runs::Phase::Settled;
+    }
     holds_memory(&r.state)
         || r.warm_slot
             .as_ref()
@@ -775,6 +786,7 @@ struct Inner {
     warm_lock: tokio::sync::Mutex<()>,
     sandbox_create_lock: tokio::sync::Mutex<()>,
     warm_names: Mutex<HashMap<(String, String), String>>,
+    assignments: Mutex<assignments::State>,
     // Validated operator configuration; requests may change only pool desired counts.
     warm_policy: Mutex<crate::config::WarmPolicy>,
     warm_sample: Mutex<Option<warm::Sample>>,
@@ -799,6 +811,7 @@ struct Inner {
     machines: Mutex<HashMap<String, Arc<Entry>>>,
     /// Destination slots reserved by moves before their record commits. Allocated under machines.
     address_holds: Mutex<std::collections::HashSet<(u32, u8)>>,
+    launch_holds: Mutex<BTreeMap<String, launch_identity::LaunchIdentity>>,
     namespaces: Mutex<HashMap<String, Namespace>>,
     endpoints: Mutex<HashMap<String, EndpointRec>>,
     endpoint_events: broadcast::Sender<(EndpointRec, bool)>,
@@ -839,6 +852,8 @@ pub struct Manager {
 
 /// What a create makes the machine's disks from (ADR 0048).
 enum Make {
+    /// Ownership is durable; the existing assigned binder owns all remaining publication.
+    Assigned,
     /// Identical accepted sandbox request; never launch a second worker.
     Existing,
     /// Its image, pulled when the host has not seen it.

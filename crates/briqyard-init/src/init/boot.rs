@@ -76,11 +76,13 @@ pub(super) fn read_config_drive() -> Result<(Config, Vec<BootFile>)> {
 pub(super) fn read_config_archive<R: Read>(r: R) -> Result<(Config, Vec<BootFile>)> {
     let mut archive = tar::Archive::new(r);
     let mut cfg: Option<Config> = None;
+    let mut configs = 0;
     let mut files = Vec::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
         let name = entry.path()?.to_string_lossy().into_owned();
         if name == guest::CONFIG_NAME {
+            configs += 1;
             let mut s = String::new();
             entry.read_to_string(&mut s)?;
             cfg = Some(serde_json::from_str(&s).context("config.json")?);
@@ -103,6 +105,10 @@ pub(super) fn read_config_archive<R: Read>(r: R) -> Result<(Config, Vec<BootFile
                 f.mode = m.mode;
             }
         }
+    }
+    if cfg.assigned_run_generation.is_some() {
+        anyhow::ensure!(configs == 1, "assigned boot has duplicate config.json");
+        boot_bundle_bytes(&cfg, &files)?;
     }
     Ok((cfg, files))
 }
@@ -244,24 +250,74 @@ pub(super) fn write_files(files: &[BootFile]) -> Result<()> {
 
 /// Writes the boot files, each at its absolute path under `root`.
 pub(super) fn write_files_under(root: &Path, files: &[BootFile]) -> Result<()> {
+    write_files_with_permissions(root, files, false, |path, mode| {
+        fs::set_permissions(path, mode)
+    })
+}
+
+pub(super) fn write_boot_files(cfg: &Config, files: &[BootFile]) -> Result<()> {
+    if cfg.assigned_run_generation.is_some() {
+        boot_bundle_bytes(cfg, files)?;
+        write_files_with_permissions(Path::new("/"), files, true, |path, mode| {
+            fs::set_permissions(path, mode)
+        })
+    } else {
+        write_files(files)
+    }
+}
+fn write_files_with_permissions(
+    root: &Path,
+    files: &[BootFile],
+    strict: bool,
+    chmod: impl Fn(&Path, fs::Permissions) -> std::io::Result<()>,
+) -> Result<()> {
     for f in files {
         let target = root.join(f.path.trim_start_matches('/'));
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(&target, &f.data).with_context(|| f.path.clone())?;
-        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(file_mode(f.mode)));
+        let result = chmod(&target, fs::Permissions::from_mode(file_mode(f.mode)));
+        if strict {
+            result.with_context(|| format!("assigned boot file mode {}", f.path))?;
+        }
     }
     Ok(())
 }
 
-/// The mode a file is written with: 0644 when none was given, else the permission bits.
-pub(super) fn file_mode(mode: u32) -> u32 {
-    if mode & 0o777 == 0 {
-        0o644
-    } else {
-        mode & 0o7777
+pub(super) fn boot_bundle_bytes(cfg: &Config, files: &[BootFile]) -> Result<Vec<u8>> {
+    let tuples: Vec<_> = files
+        .iter()
+        .map(|file| (file.path.clone(), file.mode, file.data.clone()))
+        .collect();
+    guest::boot_bundle_fingerprint_bytes(cfg, &tuples).map_err(|error| anyhow!(error))
+}
+/// Verify immediately after installation. Later trusted setup may overwrite hosts,
+/// resolver or hostname files; this historical installation proof is never rehashed.
+pub(super) fn verified_boot_bundle(
+    root: &Path,
+    cfg: &Config,
+    files: &[BootFile],
+) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = boot_bundle_bytes(cfg, files)?;
+    for file in files {
+        let target = root.join(file.path.trim_start_matches('/'));
+        let actual =
+            fs::read(&target).with_context(|| format!("verify installed {}", file.path))?;
+        let mode = fs::metadata(&target)?.mode() & 0o7777;
+        anyhow::ensure!(
+            actual == file.data
+                && mode == guest::effective_boot_file_mode(cfg, &file.path, file.mode),
+            "installed assigned boot file differs"
+        );
     }
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+/// The installation rule is shared with host-side bundle measurement.
+pub(super) fn file_mode(mode: u32) -> u32 {
+    guest::boot_file_mode(mode)
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -359,6 +415,75 @@ mod tests {
         assert_eq!(files[1].path, "/bin/run.sh");
         assert_eq!(files[1].mode, 0o755);
         assert_eq!(files[1].data, b"#!");
+    }
+
+    #[test]
+    fn assigned_archive_rejects_duplicate_config_and_file_authority() {
+        let cfg = serde_json::to_vec(&Config {
+            assigned_run_generation: Some("a".repeat(64)),
+            ..Default::default()
+        })
+        .unwrap();
+        let duplicate_config = tar_with(&[
+            (guest::CONFIG_NAME, &cfg, 0o600),
+            (guest::CONFIG_NAME, &cfg, 0o600),
+        ]);
+        assert!(read_config_archive(&duplicate_config[..]).is_err());
+        let duplicate_files = tar_with(&[
+            (guest::CONFIG_NAME, &cfg, 0o600),
+            ("files/a", b"one", 0o600),
+            ("files/a", b"two", 0o600),
+        ]);
+        assert!(read_config_archive(&duplicate_files[..]).is_err());
+    }
+
+    #[test]
+    fn assigned_installed_bundle_checks_bytes_modes_and_keeps_historical_digest() {
+        let cfg = serde_json::to_vec(&Config {
+            assigned_run_generation: Some("a".repeat(64)),
+            files: vec![guest::FileMeta {
+                path: "/app".into(),
+                mode: 0o600,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let archive = tar_with(&[
+            (guest::CONFIG_NAME, &cfg, 0o600),
+            ("files/app", b"original", 0o755),
+        ]);
+        let (cfg, files) = read_config_archive(&archive[..]).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        write_files_with_permissions(root.path(), &files, true, |path, mode| {
+            fs::set_permissions(path, mode)
+        })
+        .unwrap();
+        let measured = verified_boot_bundle(root.path(), &cfg, &files).unwrap();
+        assert_eq!(
+            fs::metadata(root.path().join("app")).unwrap().mode() & 0o7777,
+            0o600
+        );
+        fs::write(root.path().join("app"), b"modified").unwrap();
+        assert!(verified_boot_bundle(root.path(), &cfg, &files).is_err());
+        assert_eq!(measured.len(), 64); // cached evidence remains historical after main.
+        fs::write(root.path().join("app"), b"original").unwrap();
+        fs::set_permissions(root.path().join("app"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(verified_boot_bundle(root.path(), &cfg, &files).is_err());
+    }
+
+    #[test]
+    fn assigned_chmod_failure_prevents_publication_legacy_keeps_old_behavior() {
+        let root = tempfile::tempdir().unwrap();
+        let files = vec![BootFile {
+            path: "/app".into(),
+            mode: 0o600,
+            data: vec![1],
+        }];
+        let denied = |_: &Path, _: fs::Permissions| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        };
+        assert!(write_files_with_permissions(root.path(), &files, true, denied).is_err());
+        assert!(write_files_with_permissions(root.path(), &files, false, denied).is_ok());
     }
 
     #[test]
