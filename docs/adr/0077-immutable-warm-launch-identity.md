@@ -52,8 +52,14 @@ not merely desired zero; preserving unknown JSON fields alone is insufficient.
 
 Resource accounting exposes full data-volume capacity separately from logical roots,
 checks each configured budget and subtracts their sum before the disk free-space floor.
-Zero data charge retains the legacy resource wire shape. Record-level tests cover these
-logical liabilities; native disk creation and durable assignment consumption remain unqualified.
+Zero data charge retains the legacy resource wire shape. Enabling unbound pools requires a
+positive data-volume budget; otherwise startup refuses the configuration rather than letting
+zero silently drain all unused warm slots. Record-level tests cover these logical liabilities;
+native disk creation and durable assignment consumption remain unqualified.
+
+Live egress `via` resolution applies the same assignment-publication predicate used when
+rebuilding host rules. An unverified assigned target is treated as absent until its identity
+and durable publication state are proven.
 
 The source candidate integrates unbound preparation, durable destination assignment with
 the full create identity, assignment/reader ownership transfer, quota transfer and

@@ -48,6 +48,22 @@ mod tests {
                 cpu_millis: None
             })
             .is_err());
+
+        let unbound = POLICY.replace(
+            "warm_pools: true",
+            "warm_pools: true\n  unbound_warm_pools: true",
+        );
+        assert!(
+            load(&unbound).is_err(),
+            "unbound slots need a data-disk budget"
+        );
+        let budgeted = unbound.replace("root_disk_gb: 16}", "root_disk_gb: 16, data_disk_gb: 2}");
+        assert!(load(&budgeted).is_ok());
+        let missing_parent = budgeted.replace("\n  warm_pools: true", "\n  warm_pools: false");
+        assert!(
+            load(&missing_parent).is_err(),
+            "unbound pools need the warm policy"
+        );
     }
 }
 

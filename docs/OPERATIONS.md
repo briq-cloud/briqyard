@@ -34,8 +34,9 @@ Apply YAML through the usual validated daemon handover. Bootstrap preserves oper
 configuration. Invalid configuration prevents handover; an API request cannot raise
 budgets or catalog ceilings. Budget plus RAM/CPU headroom must fit resolved host capacity.
 The optional `budget.data_disk_gb` defaults to zero and limits full data-volume capacity
-separately from roots. Admission subtracts both logical root and data reservations from
-sampled pool free space before enforcing the disk floor; neither receives a sharing discount.
+separately from roots. It must be positive when `unbound_warm_pools` is enabled. Admission
+subtracts both logical root and data reservations from sampled pool free space before
+enforcing the disk floor; neither receives a sharing discount.
 A usable sample retains each slot's disk liability through a claim until a fresh measurement,
 so claiming cannot erase allocation that the sample predates.
 Configured `init-ready-v1` slots have no data volumes and retain zero data charges.

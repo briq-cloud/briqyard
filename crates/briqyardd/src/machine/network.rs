@@ -174,13 +174,12 @@ impl Manager {
         if id == me {
             return Err(invalid("egress.via names the machine itself"));
         }
-        let target = self
-            .inner
-            .machines
-            .lock()
-            .unwrap()
-            .get(&id)
-            .map(|entry| entry.snapshot());
+        let entry = self.inner.machines.lock().unwrap().get(&id).cloned();
+        let target = entry.and_then(|entry| {
+            let record = entry.snapshot();
+            self.assignment_publication_allowed(&record, entry.identity_trusted.load(Relaxed))
+                .then_some(record)
+        });
         checked_via_target(&id, target, namespace, me)
     }
 
