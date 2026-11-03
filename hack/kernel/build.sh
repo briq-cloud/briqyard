@@ -26,7 +26,7 @@ BASE_SHA256=7dbdc7445d01d3dd049b1e653534bde71266d59afaf9c1de50a8a6b8a8c138d0
 # Fixed identity, so the same sources build the same bytes.
 export KBUILD_BUILD_TIMESTAMP='Thu Jan  1 00:00:00 UTC 1970'
 export KBUILD_BUILD_USER=briqyard KBUILD_BUILD_HOST=briqyard KBUILD_BUILD_VERSION=1
-export SOURCE_DATE_EPOCH=0 E2FSPROGS_FAKE_TIME=0 ARCH=x86_64 LC_ALL=C TZ=UTC
+export SOURCE_DATE_EPOCH=0 E2FSPROGS_FAKE_TIME=1000000000 ARCH=x86_64 LC_ALL=C TZ=UTC
 
 [ "$(uname -m)" = x86_64 ] || { echo "build.sh builds x86_64 on x86_64, this is $(uname -m)" >&2; exit 1; }
 
