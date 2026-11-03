@@ -433,7 +433,8 @@ async fn volume_free_builder_seals_two_drives_and_serves_only_volume_free_create
     assert!(artifact.recipe.config.sandbox_device.is_none());
     assert!(pristine_config(&artifact.recipe.config));
     // The builder's own config drive carries the profile and no data device.
-    let drive = crate::machine::start::config_drive(&record, Ipv4Addr::new(10, 64, 0, 1)).unwrap();
+    let drive =
+        crate::machine::start::config_drive(&record, Ipv4Addr::new(10, 64, 0, 1), None).unwrap();
     assert!(!String::from_utf8_lossy(&drive).contains("sandbox_device"));
     // A create naming a volume, of any capacity, is refused and consumes nothing.
     for size_gb in [1, 2, 3] {
