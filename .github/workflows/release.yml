@@ -84,6 +84,10 @@ jobs:
           path: dist
       - name: Pin the class files in the x86_64 sums
         run: (cd dist && sha256sum nested-vmlinux-x86_64 nested-modules-x86_64.ext4 nested-versions-x86_64.json >> SHA256SUMS-x86_64)
+      - name: Link the corresponding source of the kernel and the modules
+        run: |
+          jq -r '"\n## Kernel and ZFS source\n\nThe `nested` class kernel is Linux \(.kernel) and its modules are OpenZFS \(.openzfs), built with `hack/kernel/` at this tag.\n\n- \(.linux_source) (SHA-256 `\(.linux_source_sha256)`)\n- \(.openzfs_source) (SHA-256 `\(.openzfs_source_sha256)`)"' \
+            dist/nested-versions-x86_64.json >> "$RUNNER_TEMP/release-notes.md"
       - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --latest=false --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
         env:
           GH_TOKEN: ${{ github.token }}

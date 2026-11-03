@@ -3,8 +3,10 @@
 # second, read-only drive, and prints what the guest reports (lines starting with SMOKE):
 #   smoke.sh <dir with nested-vmlinux-x86_64 and nested-modules-x86_64.ext4> [work dir]
 # Needs /dev/kvm on this machine, curl, e2fsprogs. Exit 0 when the guest booted, mounted the
-# modules, loaded zfs and took the nftables ruleset; the SMOKE lines are in $WORK/console.log.
-# Whether the guest sees VMX or SVM depends on the machine under it: reported, not required.
+# modules, loaded the pinned OpenZFS with `modprobe zfs` and took the nftables ruleset; the
+# SMOKE lines are in $WORK/console.log. Any download or checksum failure fails the script.
+# Whether the guest sees VMX or SVM depends on the machine under it: when it does, /dev/kvm
+# must be there too.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -46,17 +48,12 @@ fetch "$ALPINE/releases/x86_64/$ALPINE_ROOTFS" "$ALPINE_ROOTFS_SHA256" "$WORK/dl
 ROOT=$WORK/rootfs
 rm -rf "$ROOT"; mkdir -p "$ROOT"
 tar -xzf "$WORK/dl/$ALPINE_ROOTFS" -C "$ROOT"
-nft_ok=1
 while read -r sum name; do
   [ -n "$name" ] || continue
-  if fetch "$ALPINE/main/x86_64/$name.apk" "$sum" "$WORK/dl/$name.apk" 2>"$WORK/dl/$name.err"; then
-    tar -xzf "$WORK/dl/$name.apk" -C "$ROOT" --exclude='.*' 2>/dev/null || tar -xzf "$WORK/dl/$name.apk" -C "$ROOT"
-  else
-    nft_ok=0; cat "$WORK/dl/$name.err" >&2
-  fi
+  fetch "$ALPINE/main/x86_64/$name.apk" "$sum" "$WORK/dl/$name.apk"
+  tar -xzf "$WORK/dl/$name.apk" -C "$ROOT" --exclude='.*' 2>/dev/null || tar -xzf "$WORK/dl/$name.apk" -C "$ROOT"
 done <<<"$APKS"
 rm -f "$ROOT"/.PKGINFO "$ROOT"/.SIGN.* "$ROOT"/.post-* "$ROOT"/.pre-* 2>/dev/null || true
-[ "$nft_ok" = 1 ] || echo "SMOKE-HOST nft packages unavailable: the nftables step is skipped"
 cp "$HERE/smoke-init.sh" "$ROOT/init"
 chmod 0755 "$ROOT/init"
 mkdir -p "$ROOT/lib/modules"
@@ -65,11 +62,13 @@ truncate -s 192M "$WORK/rootfs.ext4"
 mkfs.ext4 -F -q -O ^has_journal -E root_owner=0:0 -d "$ROOT" "$WORK/rootfs.ext4"
 
 RELEASE=$(sed -n 's/.*"kernel_release": "\(.*\)".*/\1/p' "$DIR/nested-versions-x86_64.json")
+OPENZFS=$(sed -n 's/.*"openzfs": "\(.*\)".*/\1/p' "$DIR/nested-versions-x86_64.json")
+[ -n "$RELEASE" ] && [ -n "$OPENZFS" ] || { echo "nested-versions-x86_64.json names no kernel release or OpenZFS version" >&2; exit 1; }
 cat > "$WORK/vm.json" <<JSON
 {
   "boot-source": {
     "kernel_image_path": "$DIR/nested-vmlinux-x86_64",
-    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/init briqyard.release=$RELEASE briqyard.nft=$nft_ok"
+    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/init briqyard.release=$RELEASE"
   },
   "drives": [
     {"drive_id": "rootfs", "path_on_host": "$WORK/rootfs.ext4", "is_root_device": true, "is_read_only": false},
@@ -91,6 +90,9 @@ want() { grep -a -q -F -x "$1" <<<"$log" || { echo "missing: $1"; fail=1; }; }
 want "SMOKE kernel=$RELEASE"
 want "SMOKE modules_mount=ok"
 want "SMOKE zfs=loaded"
-[ "$nft_ok" = 0 ] || want "SMOKE nft=ok"
+want "SMOKE zfs_version=$OPENZFS-1"   # the module is the pinned release: the userland must match it
+want "SMOKE nft=ok"
 want "SMOKE done"
+cpus=$(sed -n 's/^SMOKE vmx_svm_cpus=//p' <<<"$log")
+if [ "${cpus:-0}" -gt 0 ]; then want "SMOKE kvm_dev=present"; fi
 if [ "$fail" = 1 ]; then echo "--- console tail"; tail -n 80 "$WORK/console.log"; exit 1; fi

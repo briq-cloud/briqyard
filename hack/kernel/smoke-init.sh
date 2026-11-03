@@ -11,8 +11,10 @@ echo "SMOKE vmx_svm_cpus=$(grep -c -E 'vmx|svm' /proc/cpuinfo)"
 echo "SMOKE kvm_dmesg=$(dmesg | grep -i -E 'kvm|vmx|svm' | tr '\n' '|')"
 
 mkdir -p "/lib/modules/$release"
+# The second drive here (/dev/vdb); a machine has more drives, so its modules drive is /dev/vdd.
 if mount -t ext4 -o ro /dev/vdb "/lib/modules/$release"; then echo "SMOKE modules_mount=ok"; else echo "SMOKE modules_mount=failed"; fi
-if modprobe zfs || { insmod "/lib/modules/$release/extra/spl.ko" && insmod "/lib/modules/$release/extra/zfs.ko"; }; then
+# Through the drive's modules.dep, as the sandbox image does.
+if modprobe zfs; then
   if [ -d /sys/module/zfs ]; then echo "SMOKE zfs=loaded"; else echo "SMOKE zfs=missing"; fi
   echo "SMOKE zfs_version=$(cat /sys/module/zfs/version)"
 else

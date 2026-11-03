@@ -41,12 +41,19 @@ module). Its `META` says `Linux-Maximum: 6.19`. It is built against this tree as
 read-only (ADR 0088). `nested-versions-x86_64.json` records the kernel release and the OpenZFS
 version.
 
+## Source
+
+`vmlinux` is GPL-2.0 and `zfs.ko` is CDDL-1.0. The release notes link the exact Linux and OpenZFS
+source tarballs and their SHA-256 (also in `nested-versions-x86_64.json`); the kernel
+configuration is `base-x86_64.config` plus `nested.config` here, at the release tag.
+
 ## Rebuild
 
 Sources are pinned by SHA-256 in `build.sh`; the build identity (`KBUILD_BUILD_*`, file times,
-filesystem UUID) is fixed. `vmlinux`, `zfs.ko` and `spl.ko` come out byte for byte the same on
-every run (the log prints the module hashes); `modules.ext4` does not, `mke2fs` records inode
-times of the build. On a security release of the kernel or OpenZFS:
+filesystem UUID) is fixed. With the same toolchain, `vmlinux`, `zfs.ko` and `spl.ko` come out
+byte for byte the same on every run (the log prints the module hashes; the runner image's
+compiler is not pinned, so an update of it changes them); `modules.ext4` does not, `mke2fs`
+records inode times of the build. On a security release of the kernel or OpenZFS:
 
 1. Change `LINUX_VERSION`, `LINUX_SHA256` (`https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc`).
    Staying on `6.18.x` keeps `base-x86_64.config`; a new series needs the new Firecracker CI

@@ -40,8 +40,8 @@ jobs:
         run: |
           echo "runner CPUs with vmx or svm: $(grep -c -E 'vmx|svm' /proc/cpuinfo || true)"
           if [ ! -e /dev/kvm ]; then
-            echo "::notice::this runner has no /dev/kvm: the Firecracker smoke is skipped"
-            exit 0
+            echo "::error::this runner has no /dev/kvm: the kernel cannot be booted, so it is not released"
+            exit 1
           fi
           sudo chmod 666 /dev/kvm
           hack/kernel/smoke.sh "$RUNNER_TEMP/nested-out" "$RUNNER_TEMP/nested-smoke" | tee "$RUNNER_TEMP/smoke.txt"

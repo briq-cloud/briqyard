@@ -23,8 +23,9 @@ ZFS_URL=https://github.com/openzfs/zfs/releases/download/zfs-$ZFS_VERSION/zfs-$Z
 # The base config is the pinned kernel's own; its first 5 lines are our header.
 BASE_SHA256=7dbdc7445d01d3dd049b1e653534bde71266d59afaf9c1de50a8a6b8a8c138d0
 
-# Fixed identity, so the same sources build the same kernel and modules (the ext4 image's
-# inode times still carry the build time: compare the hashes the log prints for the modules).
+# Fixed identity, so the same sources build the same kernel and modules with the same toolchain
+# (a compiler update changes them; the ext4 image's inode times still carry the build time:
+# compare the hashes the log prints for the modules).
 export KBUILD_BUILD_TIMESTAMP='Thu Jan  1 00:00:00 UTC 1970'
 export KBUILD_BUILD_USER=briqyard KBUILD_BUILD_HOST=briqyard KBUILD_BUILD_VERSION=1
 export SOURCE_DATE_EPOCH=0 E2FSPROGS_FAKE_TIME=1000000000 ARCH=x86_64 LC_ALL=C TZ=UTC
@@ -118,7 +119,11 @@ cat > "$OUT/nested-versions-x86_64.json" <<JSON
   "kernel_release": "$RELEASE",
   "kernel": "$LINUX_VERSION",
   "openzfs": "$ZFS_VERSION",
-  "arch": "x86_64"
+  "arch": "x86_64",
+  "linux_source": "$LINUX_URL",
+  "linux_source_sha256": "$LINUX_SHA256",
+  "openzfs_source": "$ZFS_URL",
+  "openzfs_source_sha256": "$ZFS_SHA256"
 }
 JSON
 (cd "$OUT" && sha256sum nested-vmlinux-x86_64 nested-modules-x86_64.ext4 nested-versions-x86_64.json > SHA256SUMS && cat SHA256SUMS)
