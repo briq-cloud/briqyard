@@ -271,6 +271,8 @@ pub struct Firecracker {
     /// [`vmm_version`] of `binary`, read once at the daemon's start.
     pub version: String,
     pub identity: BootIdentity,
+    /// The CPU template of every cold boot, built once at the daemon's start (ADR 0087).
+    pub cpu_template: Option<serde_json::Value>,
 }
 
 /// `<Firecracker's version>/<the host kernel's release>`, `v1.17.0/6.8.0-45-generic`: what a
@@ -529,6 +531,9 @@ impl Vmm for Firecracker {
                 let config = proc.expose_file(&b.config_drive, "config.tar")?;
                 let root = proc.expose_block(&b.root, "root")?;
                 c.machine_config(b.vcpus, b.memory_mb).await?;
+                if let Some(template) = &self.cpu_template {
+                    c.cpu_config(template).await?;
+                }
                 c.boot_source(&kernel, &b.boot_args).await?;
                 c.drive("rootfs", &root, true, false, "Writeback", Some(&b.disk))
                     .await?;

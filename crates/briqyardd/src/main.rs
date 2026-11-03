@@ -255,6 +255,7 @@ async fn run(args: Args) -> Result<()> {
         version = briqyard_api::VERSION,
         host_id = mgr.host_id(),
         pool = cfg.storage.pool,
+        kvm_nested = ?briqyard_api::kvm::nested(std::path::Path::new(briqyard_api::kvm::SYS_MODULE)),
         "briqyardd listening"
     );
     // What a client saw of the hand-over that started this daemon: from the previous one's

@@ -234,7 +234,8 @@ impl Manager {
                                     r.vmm_version == vmm && saved.compatible(&host)
                                 }
                                 (Some(_), None) => false,
-                                (None, _) => r.vmm_version == vmm,
+                                (None, Some(_)) => false,
+                                (None, None) => r.vmm_version == vmm,
                             };
                         if r.suspended && !compatible {
                             r.suspended = false;

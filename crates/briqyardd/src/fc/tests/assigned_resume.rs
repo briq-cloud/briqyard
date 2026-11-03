@@ -17,6 +17,7 @@ fn owned(dir: &Path, api: &Path) -> (Firecracker, Vm, watch::Sender<bool>) {
             console_max: 0,
             version: String::new(),
             identity: BootIdentity::ambiguous(LEGACY_PROFILE),
+            cpu_template: None,
         },
         Vm {
             #[cfg(target_os = "linux")]

@@ -51,8 +51,30 @@ impl Manager {
             if wake && record.state == state::ERROR {
                 return Err(MError::BadState(record.state));
             }
-            if record.pending.is_some() || record.restoring.is_some() {
-                return Err(MError::Conflict("assigned continuation has pending update/restore; intent retained for explicit integration".into()));
+            if record.restoring.is_some() {
+                return Err(MError::Conflict(
+                    "assigned continuation has an unfinished restore".into(),
+                ));
+            }
+            if record.pending.is_some() {
+                let current: Current = self
+                    .inner
+                    .store
+                    .get(RUNS, &record.id)?
+                    .ok_or_else(|| MError::Conflict("assigned current run missing".into()))?;
+                let update: UpdateIntent =
+                    self.inner.store.get(UPDATES, &record.id)?.ok_or_else(|| {
+                        MError::Conflict("assigned pending update lacks durable intent".into())
+                    })?;
+                update.check(&current).map_err(public_error)?;
+                let matches = updates::matches_update_target(&record, &update.target)
+                    || updates::matches_current_target(&record, &current, &update)
+                        .map_err(public_error)?;
+                if !matches {
+                    return Err(MError::Conflict(
+                        "assigned pending update differs from its durable intent".into(),
+                    ));
+                }
             }
             if record.state == state::RUNNING
                 && self
@@ -94,10 +116,21 @@ impl Manager {
                 } else {
                     None
                 };
-                let checkpoint = record.suspended && self.resume_compatible(&record);
+                let checkpoint =
+                    record.pending.is_none() && record.suspended && self.resume_compatible(&record);
                 self.reserve_assigned_run_version(entry, checkpoint, at)
                     .await
                     .map_err(public_error)?;
+                if let Some(current) = self
+                    .inner
+                    .store
+                    .get::<Current>(RUNS, &record.id)
+                    .map_err(public_error)?
+                {
+                    if let Some(update) = current.consumed_update.as_deref() {
+                        self.cleanup_consumed_image_update(entry, update);
+                    }
+                }
                 drop(gateway);
                 self.boot_reserved_assigned_run(entry)
                     .await
@@ -118,6 +151,15 @@ impl Manager {
         at: Option<u64>,
     ) -> Result<(), MError> {
         let _turn = entry.backup_turn.clone().lock_owned().await;
+        let suspend = if suspend {
+            !self
+                .inner
+                .store
+                .get::<UpdateIntent>(UPDATES, &entry.snapshot().id)?
+                .is_some_and(|update| update.change.volume.is_some())
+        } else {
+            false
+        };
         let grace = if grace.is_zero() {
             Duration::from_secs(10)
         } else {

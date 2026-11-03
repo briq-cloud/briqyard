@@ -187,6 +187,16 @@ echo "options zfs zfs_arc_max=$((ARC_GB << 30))" > /etc/modprobe.d/briqyard-zfs.
 echo "$((ARC_GB << 30))" > /sys/module/zfs/parameters/zfs_arc_max
 echo "   at most $ARC_GB GB"
 
+# No guest runs a hypervisor of its own (ADR 0087): KVM keeps the extensions out of its
+# supported CPUID, and the daemon clears them from every guest as well. The parameter is
+# read-only while the module is loaded: it applies from the next boot.
+echo "== kvm nested off"
+cat > /etc/modprobe.d/briqyard-kvm.conf <<'EOF'
+options kvm_amd nested=0
+options kvm_intel nested=0
+EOF
+echo "   from the next boot"
+
 echo "== no swap"
 # Guest memory the kernel pages out would land on a disk in clear (ADR 0026): swap goes, and
 # stays gone across reboots (fstab lines commented out, swap units masked).

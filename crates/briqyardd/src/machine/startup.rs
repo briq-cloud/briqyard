@@ -74,15 +74,24 @@ impl Manager {
             #[cfg(test)]
             warm_probe_override: Mutex::new(None),
             verified_templates: Mutex::new(std::collections::HashSet::new()),
-            vmm: Arc::new(fc::Firecracker {
-                launches: Default::default(),
-                startup: tokio::sync::Mutex::new(Some(startup)),
-                jailer: cfg.jailer.clone(),
-                binary: cfg.firecracker.clone(),
-                pci: cfg.pci,
-                console_max: (cfg.console_max_mb as u64) << 20,
-                version: fc::vmm_version(&cfg.firecracker)?,
-                identity: fc::BootIdentity::read(&cfg.kernel, &cfg.firecracker, cfg.pci)?,
+            vmm: Arc::new({
+                let cpu_template = fc::host_template();
+                fc::Firecracker {
+                    launches: Default::default(),
+                    startup: tokio::sync::Mutex::new(Some(startup)),
+                    jailer: cfg.jailer.clone(),
+                    binary: cfg.firecracker.clone(),
+                    pci: cfg.pci,
+                    console_max: (cfg.console_max_mb as u64) << 20,
+                    version: fc::vmm_version(&cfg.firecracker)?,
+                    identity: fc::BootIdentity::read(
+                        &cfg.kernel,
+                        &cfg.firecracker,
+                        cfg.pci,
+                        fc::digest(cpu_template.as_ref()),
+                    )?,
+                    cpu_template,
+                }
             }),
             guest: Arc::new(guestc::Vsock),
             net: Arc::new(host::HostNet::new().await?),
@@ -125,31 +134,7 @@ impl Manager {
                 .warm_policy
                 .check_capacity(m.capacity())?;
         }
-        m.load()?;
-        let recovered: Vec<_> = m
-            .inner
-            .machines
-            .lock()
-            .unwrap()
-            .values()
-            .map(|entry| {
-                let rec = entry.snapshot();
-                fc::RecoveryMachine {
-                    id: rec.id,
-                    pid: rec.pid,
-                }
-            })
-            .collect();
-        m.inner
-            .vmm
-            .initialize_recovery(&recovered)
-            .await
-            .context("native recovery barrier")?;
-        m.refresh_memory_host().await;
-
-        m.prepare_assigned_reboot_exits().await?;
-        m.verify_assigned_run_backing().await?;
-        m.verify_clone_artifacts();
+        m.load_backing_at_start().await?;
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
             .inner
@@ -164,10 +149,7 @@ impl Manager {
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
-        m.recover_warm_names()?;
-        let (adopted, stopped, gone) = m.recover().await?;
-        let swept = m.sweep_orphans().await?;
-        m.inner.vmm.open_recovery()?;
+        let (adopted, stopped, gone, swept) = m.recover_and_sweep_at_start().await?;
         let machines = m.inner.machines.lock().unwrap().len();
         *m.inner.started.lock().unwrap() = api::DaemonStart {
             at: Utc::now(),
@@ -193,6 +175,44 @@ impl Manager {
         let watch = m.clone();
         tokio::spawn(async move { watch.storage_watch().await });
         Ok(m)
+    }
+
+    // Shared by new and the fake-host startup tests; keep all durable backing recovery here.
+    pub(super) async fn load_backing_at_start(&self) -> Result<()> {
+        self.load()?;
+        let recovered: Vec<_> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .map(|entry| {
+                let rec = entry.snapshot();
+                fc::RecoveryMachine {
+                    id: rec.id,
+                    pid: rec.pid,
+                }
+            })
+            .collect();
+        self.inner
+            .vmm
+            .initialize_recovery(&recovered)
+            .await
+            .context("native recovery barrier")?;
+        self.refresh_memory_host().await;
+        self.recover_assigned_update_backing().await?;
+        self.prepare_assigned_reboot_exits().await?;
+        self.verify_assigned_run_backing().await?;
+        self.verify_clone_artifacts();
+        Ok(())
+    }
+
+    pub(super) async fn recover_and_sweep_at_start(&self) -> Result<(usize, usize, usize, usize)> {
+        self.recover_warm_names()?;
+        let (adopted, stopped, gone) = self.recover().await?;
+        let swept = self.sweep_orphans().await?;
+        self.inner.vmm.open_recovery()?;
+        Ok((adopted, stopped, gone, swept))
     }
 
     pub fn host_id(&self) -> &str {
@@ -518,6 +538,12 @@ impl Manager {
                 tracing::error!(err = %error, "clone references unreadable: orphan cleanup deferred");
                 return Err(error.context("clone references before orphan settlement"));
             }
+        }
+        // Every update names a machine that load kept (it refuses a journal without its record),
+        // so only an unreadable journal matters here.
+        if let Err(error) = self.assigned_update_machines() {
+            tracing::error!(err = %error, "assigned updates unreadable: orphan cleanup deferred");
+            return Err(error.context("assigned updates before orphan settlement"));
         }
         let known_ids: Vec<_> = known.iter().cloned().collect();
         let mut swept = self.inner.vmm.prepare_orphans(&known_ids).await?;

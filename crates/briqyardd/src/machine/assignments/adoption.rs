@@ -55,7 +55,7 @@ impl Manager {
         let expected = &origin.artifact.boot_identity;
         anyhow::ensure!(
             origin.artifact.schema == 1
-                && expected.schema == 1
+                && expected.known()
                 && record.boot_identity.as_ref() == Some(expected),
             "assigned sealed boot identity is unavailable"
         );

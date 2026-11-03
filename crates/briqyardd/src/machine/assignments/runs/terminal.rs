@@ -43,6 +43,10 @@ pub(super) struct Settlement {
     pub disposition: Disposition,
     pub exit: ExitProof,
     pub checkpoint: Option<Checkpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<Box<UpdateIntent>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_sha256: Option<String>,
 }
 fn workload(record: &Record) -> Result<String> {
     let origin = record
@@ -181,6 +185,24 @@ impl Settlement {
                 == self.checkpoint.is_some(),
             "terminal disposition/manifest differs"
         );
+        anyhow::ensure!(
+            self.update.is_some() == self.update_sha256.is_some(),
+            "terminal update digest differs"
+        );
+        if let (Some(update), Some(digest)) = (&self.update, &self.update_sha256) {
+            update.check_shape()?;
+            let mut target = update.target.as_ref().clone();
+            target.assigned_run = current.target.assigned_run.clone();
+            target.pid = current.target.pid;
+            target.suspended = current.target.suspended;
+            anyhow::ensure!(
+                update.machine == current.machine
+                    && update.change.volume.is_some()
+                    && update.digest()? == *digest
+                    && projection::authority(&target)? == projection::authority(&current.target)?,
+                "terminal update differs from settled target"
+            );
+        }
         if let Some(checkpoint) = &self.checkpoint {
             checkpoint.check(current)?;
         }
@@ -219,9 +241,20 @@ impl Manager {
             .context("run missing")?;
         prior.check()?;
         self.check_run_creation_authority(&prior)?;
+        let update = self.inner.store.get::<UpdateIntent>(UPDATES, &record.id)?;
+        if let Some(update) = &update {
+            update.check(&prior)?;
+            anyhow::ensure!(
+                updates::matches_update_target(&record, &update.target),
+                "terminal machine differs from its update target"
+            );
+            self.ensure_assigned_volume_update(update).await?;
+        }
         anyhow::ensure!(
             prior.reference.phase == Phase::Observed
-                && prior.record_fingerprint(&record)? == prior.record_fingerprint(&prior.target)?,
+                && (update.is_some()
+                    || prior.record_fingerprint(&record)?
+                        == prior.record_fingerprint(&prior.target)?),
             "only exact observed run can settle"
         );
         let reader: Reader = self
@@ -238,6 +271,13 @@ impl Manager {
         anyhow::ensure!(
             root == prior.root && data == prior.data,
             "terminal CURRENT disks changed"
+        );
+        anyhow::ensure!(
+            !update
+                .as_ref()
+                .is_some_and(|update| update.change.volume.is_some())
+                || !matches!(disposition, Disposition::CheckpointAvailable),
+            "a live data-volume update must end in a cold stop"
         );
         let checkpoint = if matches!(disposition, Disposition::CheckpointAvailable) {
             let live = entry
@@ -328,6 +368,8 @@ impl Manager {
             disposition,
             exit,
             checkpoint,
+            update: update.clone().map(Box::new),
+            update_sha256: update.as_ref().map(UpdateIntent::digest).transpose()?,
         }));
         self.unplug(&current.machine, &current.target.ip).await?;
         self.inner.net.quarantine(&current.machine).await?;

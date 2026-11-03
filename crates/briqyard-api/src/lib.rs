@@ -6,6 +6,7 @@ pub mod files;
 pub mod guest;
 #[cfg(feature = "host-process")]
 pub mod host_process;
+pub mod kvm;
 #[cfg(feature = "listeners")]
 pub mod listeners;
 pub mod metrics;
