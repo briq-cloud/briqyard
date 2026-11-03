@@ -3,16 +3,24 @@
 `templates.sandbox_recipes` defaults to an empty list. Keep it empty until native
 Firecracker/kernel qualification in ADR 0076 passes. A recipe pins `image` (explicit
 registry and manifest digest), `image_config_digest`, `init_sha256`, exact `size` and
-`volume_gb`. API authentication, the jailer and matching boot/CPU identities are required;
+`volume_gb` (required; `0` is a recipe without a data volume, see below). API authentication, the jailer and matching boot/CPU identities are required;
 private registry credentials are rejected for its registry. The operator builder is
 `template_build: sandbox-ready-v1` without caller configuration. Its internal raw data
 device is never mounted and is charged to the operator namespace. It is not a team source.
 
+A recipe is image, size, init and volume. The same image and size may be approved with and
+without a volume (`volume_gb: 2` and `volume_gb: 0`); each shape is its own builder, seed and
+pool (ADR 0091). The builder names its shape as a create does: `volume: {size_gb, mount: "/work"}`
+for the recipe with a volume, no `volume` for the volume-free one. A volume-free seed has two
+drives (root, config) and its guest has no `/dev/vdc`.
+
 After qualification, seal the builder with the existing full-memory template operation.
 Snapshot status includes `clone_generation`; the CLI displays it. Normal create may
 select `sandbox_seed: {machine_id, snapshot, generation, request_id}` with the exact
-approved image/size, `start:true` and a fresh volume at `/work` whose capacity matches
-the recipe. Other capacities need separately qualified topology. The admin bearer owns
+approved image/size, `start:true` and the seed's own volume shape: a fresh volume at `/work`
+whose capacity matches the recipe, or no `volume` for a volume-free seed. A volume request
+never claims a volume-free seed, and a create without one never claims a volume seed; both
+are refused. Other capacities need separately qualified topology. The admin bearer owns
 destination assignment; metadata does not establish tenant authorization.
 
 A request ID is durable within its destination namespace. Preserve it on retries and

@@ -706,16 +706,11 @@ pub(super) fn config_drive(r: &Record, gateway: Ipv4Addr) -> Result<Vec<u8>> {
     let (mut cfg, files) = resolved_guest_config(r, gateway)?;
     if let Some(birth) = &r.template_birth {
         cfg = if birth.profile == guest::SANDBOX_READY_V1 {
-            templates::sandbox::builder_config(guest::SandboxDevice {
-                bytes: (r
-                    .volume
+            templates::sandbox::builder_config(
+                r.volume
                     .as_ref()
-                    .context("sandbox placeholder missing")?
-                    .size_gb as u64)
-                    << 30,
-                logical_sector_bytes: 512,
-                drive_id: "data".into(),
-            })
+                    .map(|v| guest::SandboxDevice::of_gb(v.size_gb)),
+            )
         } else {
             templates::builder_config()
         };

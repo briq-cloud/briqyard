@@ -13,7 +13,10 @@ fn bounded<T>(
 }
 
 async fn pool() -> (Harness, api::SandboxSeed, Arc<Entry>) {
-    let (h, source, seed) = bounded(source_with_unbound(true)).await;
+    pool_shaped(Some(2)).await
+}
+async fn pool_shaped(volume: Option<u32>) -> (Harness, api::SandboxSeed, Arc<Entry>) {
+    let (h, source, seed) = bounded(source_shaped(true, volume)).await;
     let artifact = source
         .snapshot()
         .snapshots
@@ -283,4 +286,40 @@ async fn busy_unused_slot_is_a_seed_restore_miss_without_transferring_the_slot()
     );
     assert!(slot.snapshot().warm_slot.unwrap().claimed.is_none());
     drop(guard);
+}
+
+#[tokio::test]
+async fn volume_free_pool_slot_is_claimed_by_a_volume_free_create_only() {
+    let (h, seed, slot) = bounded(pool_shaped(None)).await;
+    let before = slot.snapshot();
+    // The factory made the slot from the sealed topology: no data volume at all.
+    assert!(before.volume.is_none());
+    let artifact = &before.clone_origin.as_ref().unwrap().artifact;
+    assert!(artifact.recipe.config.sandbox_device.is_none());
+    // The pool's fingerprint is part of its key: the same artifact with a data drive is another one.
+    let mut with_drive = artifact.clone();
+    with_drive.recipe.config.sandbox_device = Some(guest::SandboxDevice::of_gb(2));
+    assert_ne!(
+        crate::machine::warm::fingerprint(artifact).unwrap(),
+        crate::machine::warm::fingerprint(&with_drive).unwrap()
+    );
+    // A create naming the volume is refused before it can reach the slot.
+    let count = h.m.inner.machines.lock().unwrap().len();
+    assert!(bounded(h.m.create(destination(seed.clone())))
+        .await
+        .is_err());
+    assert_eq!(h.m.inner.machines.lock().unwrap().len(), count);
+    assert!(slot.snapshot().warm_slot.unwrap().claimed.is_none());
+    let request = volume_free(destination(seed));
+    let accepted = bounded(h.m.create(request.clone())).await.unwrap();
+    assert_eq!(accepted.id, before.id);
+    let running =
+        h.m.wait(&accepted.id, Until::Ready, Duration::from_secs(10))
+            .await
+            .unwrap();
+    assert_eq!(running.state, state::RUNNING);
+    let current = slot.snapshot();
+    assert!(current.volume.is_none());
+    assert_eq!(current.launch_identity, before.launch_identity);
+    assert_eq!(bounded(h.m.create(request)).await.unwrap().id, accepted.id);
 }
