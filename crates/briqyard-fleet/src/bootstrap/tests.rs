@@ -38,7 +38,7 @@ fn bootstrap_config_creation_preserves_existing_operator_warm_policy() {
             .args([
                 "-c",
                 &format!(
-                    "set -eu\nruntime_config() {{ cmp -s \"$EXPECTED\" \"$1\"; }}\nfail() {{ exit 1; }}\n{script}"
+                    "set -eu\nruntime_config() {{ cmp -s \"$EXPECTED\" \"$1\"; }}\nruntime_assignment_compatible() {{ test \"$#\" -eq 3 && test \"$1\" = \"$new/briqyardd\" && cmp -s \"$EXPECTED\" \"$2\" && cmp -s \"$EXPECTED\" \"$3\"; }}\nfail() {{ exit 1; }}\n{script}"
                 ),
             ])
             .env("new", &staged)

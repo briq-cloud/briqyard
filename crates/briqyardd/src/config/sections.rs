@@ -17,6 +17,8 @@ pub struct Templates {
     pub init_ready_init_sha256: String,
     /// Paused pool rollout, requiring the same exact qualified template inputs.
     pub warm_pools: bool,
+    /// Default-off pristine unbound factory, catalog advertisement and create selection.
+    pub unbound_warm_pools: bool,
     pub warm_policy: WarmPolicy,
     /// Operator-approved pristine public sandbox recipes; empty is disabled.
     pub sandbox_recipes: Vec<SandboxRecipe>,

@@ -326,6 +326,11 @@ impl Manager {
             let live = e.live.lock().unwrap().clone();
             let (who, used) = {
                 let current = e.rec.lock().unwrap();
+                // A measurement begun under another ownership/address cannot cross its
+                // admission commit and seed the new owner's usage baselines.
+                if current.namespace != r.namespace || current.ip != r.ip {
+                    continue;
+                }
                 let same_run = resident
                     && current.pid == r.pid
                     && current.boot_incarnation == r.boot_incarnation

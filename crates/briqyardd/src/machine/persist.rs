@@ -57,7 +57,13 @@ impl Manager {
     /// Deletes the record for good, under the lock every write of it checks.
     pub(super) fn forget(&self, e: &Entry) -> Result<()> {
         let mut removed = e.removed.lock().unwrap();
-        self.inner.store.delete("machines", &e.snapshot().id)?;
+        let record = e.snapshot();
+        if record.launch_identity.is_some() {
+            // The record unlink must survive a crash before its source hold is released.
+            self.inner.store.delete_durable("machines", &record.id)?;
+        } else {
+            self.inner.store.delete("machines", &record.id)?;
+        }
         *removed = true;
         Ok(())
     }
@@ -93,7 +99,30 @@ impl Manager {
             .is_some_and(|m| Arc::ptr_eq(m, e))
     }
 
-    /// Suspends every running machine (a stop when Firecracker refuses): the daemon is going
+    /// Preservation is deliberately weaker than ownership: incomplete or unreadable
+    /// assignment authority must never become permission to suspend an original VMM.
+    fn preserve_assignment_on_close(&self, record: &Record) -> bool {
+        if record.launch_identity.is_some()
+            || self
+                .inner
+                .launch_holds
+                .lock()
+                .unwrap()
+                .contains_key(&record.id)
+        {
+            return true;
+        }
+        match self.destination_assignment_owns(&record.id) {
+            Ok(assigned) => assigned,
+            Err(error) => {
+                tracing::warn!(machine = record.id, err = %error,
+                    "assignment authority unconfirmed; process and reservations preserved");
+                true
+            }
+        }
+    }
+
+    /// Suspends every ordinary running machine (a stop when Firecracker refuses): the daemon is going
     /// down, the host perhaps with it (a reboot). Stopped by the host, not idle: the next
     /// daemon starts each one again (ADR 0027), resumed when nothing under it changed. Then
     /// what the next daemon goes on from is written.
@@ -109,8 +138,23 @@ impl Manager {
             .cloned()
             .collect();
         let mut tasks = Vec::new();
+        let mut preserved = Vec::new();
         for e in entries {
+            let turn = e.settled_lock().await;
             let record = e.snapshot();
+            let verified_assigned = self.assigned_lifecycle(&record)
+                && self.assignment_publication_allowed(&record, e.identity_trusted.load(Relaxed));
+            if self.preserve_assignment_on_close(&record) && !verified_assigned {
+                // No stop, suspend, reconciliation or readiness interpretation. Keep
+                // transitions fenced until the last usage write has finished.
+                if e.unsaved_use.load(Relaxed) {
+                    if let Err(err) = self.write_use(&e) {
+                        tracing::warn!(machine = record.id, err = %err, "last use not written");
+                    }
+                }
+                preserved.push(turn);
+                continue;
+            }
             // Already paused, durably owned slots survive a same-version restart. New
             // claims/refills are closed and drained by the existing owned scope gate.
             if warm::ready_slot(&record)
@@ -122,6 +166,7 @@ impl Manager {
                 continue;
             }
             let st = record.state;
+            drop(turn);
             if st == state::RUNNING || st == state::STARTING {
                 let m = self.clone();
                 tasks.push(tokio::spawn(async move {
@@ -186,7 +231,12 @@ impl Manager {
     fn write_handed_ready(&self, entries: &[Arc<Entry>]) {
         let ready: Vec<String> = entries
             .iter()
-            .filter(|e| e.snapshot().state == state::RUNNING && e.probe.lock().unwrap().ready)
+            .filter(|e| {
+                let record = e.snapshot();
+                !self.preserve_assignment_on_close(&record)
+                    && record.state == state::RUNNING
+                    && e.probe.lock().unwrap().ready
+            })
             .map(|e| e.snapshot().id)
             .collect();
         let path = self.handed_ready_path();

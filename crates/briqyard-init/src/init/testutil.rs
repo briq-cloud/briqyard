@@ -17,8 +17,10 @@ pub(super) fn spawn_tracked(cmd: &mut std::process::Command) -> std::process::Ch
 pub(super) fn state_with(cfg: Config) -> Arc<State> {
     let env = build_env(&cfg.env);
     let gate = clone::Gate::from_config(&cfg).unwrap();
+    let assigned_run = assigned_run::boot_proof(&cfg, &[]).unwrap();
     Arc::new(State {
         cfg,
+        assigned_run,
         destination: OnceLock::new(),
         env,
         main_pid: Mutex::new(None),

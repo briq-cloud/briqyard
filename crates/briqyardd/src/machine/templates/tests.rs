@@ -425,3 +425,5 @@ async fn index_and_config_digest_levels_are_not_interchangeable_at_seal() {
 mod recovery;
 
 mod warm;
+
+pub(in crate::machine) mod launch_identity;

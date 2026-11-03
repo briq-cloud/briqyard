@@ -45,6 +45,7 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 
 impl Store {
     pub fn open(root: &Path) -> Result<Self> {
+        let assignment_required = crate::assignment_compatibility::requirement(root)?;
         private_dir(root)?;
         for d in [
             "machines",
@@ -57,10 +58,20 @@ impl Store {
             "clone-readers",
             "warm-pools",
             "sandbox-requests",
+            "launch-holds",
+            "launch-transitions",
+            "unbound-requests",
+            "unbound-assignments",
+            "assigned-run-intents",
+            "assigned-runs",
+            "assigned-run-readers",
         ] {
             private_dir(&root.join(d))?;
         }
         std::fs::File::open(root)?.sync_all()?;
+        if assignment_required != crate::assignment_compatibility::Requirement::None {
+            crate::assignment_compatibility::ensure_floor_at(root, assignment_required)?;
+        }
         Ok(Self {
             root: root.to_path_buf(),
         })
@@ -82,7 +93,34 @@ impl Store {
     }
 
     pub fn put<T: Serialize>(&self, kind: &str, key: &str, v: &T) -> Result<()> {
-        write_private(&self.path(kind, key)?, &serde_json::to_vec_pretty(v)?)
+        anyhow::ensure!(
+            kind != "meta" || key != "required-assignment-protocol",
+            "permanent assignment floor cannot be overwritten"
+        );
+        let path = self.path(kind, key)?;
+        let bytes = serde_json::to_vec_pretty(v)?;
+        let mut minimum = crate::assignment_compatibility::record_requirement(
+            kind,
+            &serde_json::from_slice(&bytes)?,
+        )?;
+        // Replacing the last machine link must not erase evidence after marker loss.
+        if kind == "machines" || crate::assignment_compatibility::RUN_COLLECTIONS.contains(&kind) {
+            if let Some(previous) = self.get::<serde_json::Value>(kind, key)? {
+                minimum = minimum.max(crate::assignment_compatibility::record_requirement(
+                    kind, &previous,
+                )?);
+            }
+        }
+        if minimum != crate::assignment_compatibility::Requirement::None {
+            crate::assignment_compatibility::ensure_floor_at(&self.root, minimum)?;
+        }
+        write_private(&path, &bytes)
+    }
+
+    /// Raise the durable downgrade fence before reserving incompatible lifecycle work.
+    /// An error is uncertain durability and must retain all existing reservations.
+    pub fn ensure_assigned_run_lifecycle_floor(&self) -> Result<()> {
+        crate::assignment_compatibility::ensure_assigned_run_lifecycle_floor(&self.root)
     }
 
     /// Crash-durable record boundary for immutable snapshot publication and read intents.
@@ -110,6 +148,22 @@ impl Store {
     }
 
     pub fn delete(&self, kind: &str, key: &str) -> Result<()> {
+        anyhow::ensure!(
+            kind != "unbound-requests"
+                && !(kind == "meta" && key == "required-assignment-protocol"),
+            "permanent assignment authority cannot be deleted"
+        );
+        // Preserve evidence before deleting its last surviving copy after marker loss.
+        if matches!(kind, "machines" | "unbound-assignments")
+            || crate::assignment_compatibility::RUN_COLLECTIONS.contains(&kind)
+        {
+            if let Some(value) = self.get::<serde_json::Value>(kind, key)? {
+                let required = crate::assignment_compatibility::record_requirement(kind, &value)?;
+                if required != crate::assignment_compatibility::Requirement::None {
+                    crate::assignment_compatibility::ensure_floor_at(&self.root, required)?;
+                }
+            }
+        }
         match std::fs::remove_file(self.path(kind, key)?) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -153,6 +207,10 @@ impl Store {
     }
 
     pub fn put_meta(&self, key: &str, value: &str) -> Result<()> {
+        anyhow::ensure!(
+            key != "required-assignment-protocol",
+            "permanent assignment floor cannot be overwritten"
+        );
         write_private(&self.path("meta", key)?, value.as_bytes())
     }
 }
@@ -196,6 +254,13 @@ mod tests {
             "clone-readers",
             "warm-pools",
             "sandbox-requests",
+            "launch-holds",
+            "launch-transitions",
+            "unbound-requests",
+            "unbound-assignments",
+            "assigned-run-intents",
+            "assigned-runs",
+            "assigned-run-readers",
         ] {
             assert!(dir.path().join("state").join(d).is_dir(), "{d}");
         }
@@ -309,6 +374,13 @@ mod tests {
             "clone-readers",
             "warm-pools",
             "sandbox-requests",
+            "launch-holds",
+            "launch-transitions",
+            "unbound-requests",
+            "unbound-assignments",
+            "assigned-run-intents",
+            "assigned-runs",
+            "assigned-run-readers",
         ] {
             assert_eq!(mode(&state.join(d)), 0o700, "{d}");
         }

@@ -180,6 +180,14 @@ impl Manager {
     }
 
     pub(in crate::machine) fn ordinary_operation(&self, r: &Record) -> Result<(), MError> {
+        if r.launch_identity.is_some() {
+            let entry = self.entry(&r.id)?;
+            if !self.assignment_publication_allowed(r, entry.identity_trusted.load(Relaxed)) {
+                return Err(MError::Conflict(
+                    "assigned VMM ownership and continuity are not verified".into(),
+                ));
+            }
+        }
         if r.template_birth.is_some() {
             return Err(MError::Conflict(
                 "sealed template builder permits status, memory seal and destroy only".into(),

@@ -201,6 +201,7 @@ pub fn render(out: &mut String, snapshot: &Snapshot, operations: &Operations) {
         for (name, help, field) in [
             ("briqyard_warm_pool_reserved_memory_bytes", "Full recipe RAM reservation, including failed or unreleased slots; not resident usage.", 0),
             ("briqyard_warm_pool_reserved_cpu_millis", "Full CPU millis reserved by unclaimed slots.", 1),
+            ("briqyard_warm_pool_reserved_data_disk_bytes", "Full logical data-volume reservation without a sharing discount; not physical usage.", 3),
             ("briqyard_warm_pool_reserved_root_disk_bytes", "Full logical root reservation without a copy-on-write discount; not physical usage.", 2),
         ] {
             family(out, name, "gauge", help, snapshot.pools.iter().map(|p| (p.labels(), resource(p.charged, field).to_string())).collect());
@@ -209,6 +210,7 @@ pub fn render(out: &mut String, snapshot: &Snapshot, operations: &Operations) {
     for (name, help, field) in [
         ("briqyard_warm_memory_bytes", "Full RAM reservations and configured budget/headroom, distinct from measured availability.", 0),
         ("briqyard_warm_cpu_millis", "Full CPU millis reservations and configured budget/headroom.", 1),
+        ("briqyard_warm_data_disk_bytes", "Full logical data-volume reservations and configured data-volume budget.", 3),
         ("briqyard_warm_root_disk_bytes", "Full logical root reservations and budget; headroom is the absolute free-space floor.", 2),
     ] {
         let mut values = vec![("kind=\"budget\"".into(), resource(snapshot.budget, field).to_string()), ("kind=\"headroom\"".into(), resource(snapshot.headroom, field).to_string())];
@@ -309,7 +311,8 @@ fn resource(value: api::WarmResources, field: usize) -> u64 {
     match field {
         0 => u64::from(value.memory_mb) << 20,
         1 => u64::from(value.cpu_millis),
-        _ => u64::from(value.root_disk_gb) << 30,
+        2 => u64::from(value.root_disk_gb) << 30,
+        _ => u64::from(value.data_disk_gb) << 30,
     }
 }
 
@@ -322,6 +325,7 @@ mod tests {
         let resources = api::WarmResources {
             memory_mb: 768,
             cpu_millis: 1500,
+            data_disk_gb: 6,
             root_disk_gb: 24,
         };
         let snapshot = Snapshot {
@@ -346,11 +350,13 @@ mod tests {
             budget: api::WarmResources {
                 memory_mb: 2048,
                 cpu_millis: 3000,
+                data_disk_gb: 0,
                 root_disk_gb: 64,
             },
             headroom: api::WarmResources {
                 memory_mb: 512,
                 cpu_millis: 1000,
+                data_disk_gb: 0,
                 root_disk_gb: 16,
             },
             memory_floor_mb: 1024,
@@ -393,6 +399,8 @@ mod tests {
             "briqyard_warm_memory_bytes{kind=\"reserved\"} 805306368\n".into(),
             "briqyard_warm_memory_available_bytes 3221225472\n".into(),
             "briqyard_warm_root_disk_bytes{kind=\"reserved\"} 25769803776\n".into(),
+            "briqyard_warm_data_disk_bytes{kind=\"reserved\"} 6442450944\n".into(),
+            format!("briqyard_warm_pool_reserved_data_disk_bytes{{{labels}}} 6442450944\n"),
             "briqyard_warm_operations_total{operation=\"claim\",outcome=\"miss\"} 1\n".into(),
             "briqyard_warm_operation_seconds_total{operation=\"claim\",outcome=\"success\"} 0.08\n"
                 .into(),

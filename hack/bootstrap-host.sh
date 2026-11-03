@@ -520,12 +520,167 @@ else:
     print("/var/lib/briqyard/vmlinux")
 PYKERNEL
 }
+# The parent shell keeps fd 9 open until EXIT cleanup finishes. flock is attached
+# to its shared open file description, so the Python child can acquire it for us.
+# This script requires root; its private directory and lock are therefore root-owned.
+runtime_install_lock() {
+  python3 - "$1" <<'PYLOCK' || return
+import os, pathlib, stat, sys
+root = pathlib.Path(sys.argv[1])
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
+info = root.lstat()
+if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+    raise ValueError("runtime install directory must be owned by installer")
+root.chmod(0o700)
+fd = os.open(root / "runtime-install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+        raise ValueError("invalid runtime install lock")
+    os.fchmod(fd, 0o600)
+finally:
+    os.close(fd)
+PYLOCK
+  exec 9<>"$1/runtime-install.lock" || return
+  python3 - <<'PYFLOCK'
+import fcntl
+fcntl.flock(9, fcntl.LOCK_EX)
+PYFLOCK
+}
+# Inspect both the installed and candidate roots without opening or changing host state.
+# Kept standalone: this gate must also protect stopped daemons and custom data_dir.
+runtime_assignment_compatible() {
+  python3 - "$@" <<'PYASSIGNMENT'
+import json, os, pathlib, selectors, subprocess, sys, time
+import yaml
+
+def required(config):
+    path = pathlib.Path(config)
+    try:
+        source = path.read_text()
+    except FileNotFoundError:
+        if path.is_symlink():
+            raise ValueError("dangling configuration")
+        return False
+    value = yaml.safe_load(source)
+    if not isinstance(value, dict):
+        raise ValueError("invalid configuration mapping")
+    # Do not let duplicate data_dir entries select an apparently empty root.
+    node = yaml.compose(source)
+    if sum(key.value == "data_dir" for key, _ in node.value) > 1:
+        raise ValueError("duplicate data_dir")
+    data = value.get("data_dir", "/var/lib/briqyard")
+    if not isinstance(data, str) or not pathlib.Path(data).is_absolute():
+        raise ValueError("invalid data_dir")
+    root = pathlib.Path(data) / "state"
+    floor = root / "meta/required-assignment-protocol.json"
+    needed = 0
+    try:
+        marker = json.loads(floor.read_bytes())
+    except FileNotFoundError:
+        if floor.is_symlink():
+            raise ValueError("dangling assignment floor")
+    else:
+        if marker == {"schema": 1, "protocol": "destination-assignment-v1"} and type(marker["schema"]) is int:
+            needed = 1
+        elif marker == {"schema": 2, "protocol": "assigned-run-v1"} and type(marker["schema"]) is int:
+            needed = 2
+        elif marker == {"schema": 3, "protocol": "assigned-run-lifecycle-v1"} and type(marker["schema"]) is int:
+            needed = 3
+        else:
+            raise ValueError("invalid assignment protocol floor")
+    runs = ("assigned-run-intents", "assigned-runs", "assigned-run-readers")
+    for kind in ("unbound-assignments", "unbound-requests", "machines") + runs:
+        try:
+            entries = list((root / kind).iterdir())
+        except FileNotFoundError:
+            if (root / kind).is_symlink():
+                raise ValueError("dangling assignment state directory")
+            continue
+        for entry in entries:
+            if entry.suffix != ".json":
+                continue
+            record = json.loads(entry.read_bytes())
+            if not isinstance(record, dict):
+                raise ValueError("invalid assignment state record")
+            if kind in runs:
+                if type(record.get("schema")) is not int or record["schema"] not in (1, 3):
+                    raise ValueError("unsupported assigned run evidence schema")
+                needed = max(needed, 3 if record["schema"] == 3 else 2)
+            elif kind != "machines":
+                receipt = record.get("receipt") if kind == "unbound-assignments" else record
+                if not isinstance(receipt, dict) or type(receipt.get("schema")) is not int or receipt["schema"] != 1:
+                    raise ValueError("invalid assignment receipt schema")
+                needed = max(needed, 1)
+            elif record.get("assigned_run") is not None:
+                run = record["assigned_run"]
+                if (not isinstance(run, dict) or set(run) != {"schema", "sequence", "phase"}
+                        or type(run.get("schema")) is not int or run["schema"] not in (1, 3)
+                        or type(run.get("sequence")) is not int or run["sequence"] <= 0
+                        or run.get("phase") not in (("reserved", "observed", "settled") if run["schema"] == 3 else ("reserved", "observed"))):
+                    raise ValueError("unsupported assigned run record link")
+                needed = max(needed, 3 if run["schema"] == 3 else 2)
+            elif record.get("launch_identity") is not None:
+                warm = record.get("warm_slot")
+                if warm is not None and not isinstance(warm, dict):
+                    raise ValueError("invalid warm slot")
+                if isinstance(warm, dict) and warm.get("claimed") is not None:
+                    needed = max(needed, 1)
+    return needed
+
+def probe(binary, command, expected):
+    child = subprocess.Popen([binary, command], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        selector = selectors.DefaultSelector()
+        selector.register(child.stdout, selectors.EVENT_READ)
+        output = b""
+        deadline = time.monotonic() + 5
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise ValueError("assignment capability probe timeout")
+            chunk = os.read(child.stdout.fileno(), 128 - len(output))
+            if not chunk:
+                break
+            output += chunk
+            if len(output) >= 128:
+                raise ValueError("assignment capability output too long")
+        if output != expected or child.wait(timeout=max(.001, deadline - time.monotonic())) != 0:
+            raise ValueError("candidate lacks destination assignment support")
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+        child.stdout.close()
+        selector.close()
+try:
+    # Evaluate every root even after one requires support: malformed roots fail closed.
+    states = [required(config) for config in sys.argv[2:] if config]
+    # Every managed replacement needs the complete current protocol. State can
+    # advance after this inspection, including while the daemon starts or restarts.
+    probe(sys.argv[1], "assignment-capabilities", b"destination-assignment-v1\n")
+    probe(sys.argv[1], "assigned-run-capabilities", b"assigned-run-v1\n")
+    probe(sys.argv[1], "assigned-run-lifecycle-capabilities", b"assigned-run-lifecycle-v1\n")
+except Exception:
+    print("assignment compatibility inspection/probe refused replacement", file=sys.stderr)
+    sys.exit(1)
+PYASSIGNMENT
+}
 # A failed activation restores installed executables before leaving the old daemon running.
 # The verified rollback directory also remains available for an explicit later rollback.
 cleanup_runtime_install() {
-  local result=$? b restored=1
+  local result=$? b restored=1 retained_sha
   trap - EXIT
   if [ "$result" != 0 ] && [ "$activation_pending" = 1 ] && [ "$rollback_ready" = 1 ]; then
+    retained_sha=$(sha256sum "$rollback/briqyardd" | awk '{print $1}') || retained_sha=""
+    if [ -z "$retained_sha" ] || ! runtime_assignment_compatible "$rollback/briqyardd" "$config_path" "$rollback/config.yaml" ||
+       ! echo "$retained_sha  $rollback/briqyardd" | sha256sum -c --quiet -; then
+      echo "   activation failed; retained daemon is incompatible with current state; compatible replacement left installed ($rollback)" >&2
+      rm -rf "$new"
+      [ -z "$candidate" ] || rm -f "$candidate"
+      exit "$result"
+    fi
     for b in briqyard briqyard-fleet briqyardd; do
       if [ -f "$rollback/$b" ]; then
         cp -p "$rollback/$b" "$binary_dir/$b.rollback" && mv -f "$binary_dir/$b.rollback" "$binary_dir/$b" || restored=0
@@ -562,7 +717,10 @@ release_file() {
 }
 
 echo "== binaries${RELEASE:+ from $RELEASE}"
+# Serialize preflight, rollback capture, replacement, handover and EXIT cleanup.
+runtime_install_lock /etc/briqyard
 new=$(mktemp -d)
+chmod 0700 "$new"
 candidate=""
 rollback=""
 rollback_ready=0
@@ -653,6 +811,8 @@ fi
 # One candidate contains all changed launch paths. Validate it with the staged daemon.
 runtime_config "$candidate" "$firecracker" "$jailer" "$kernel" "$init"
 chmod 0600 "$candidate"
+daemon_sha=$(sha256sum "$new/briqyardd" | awk '{print $1}')
+runtime_assignment_compatible "$new/briqyardd" "$config_path" "$candidate" || fail "assignment state requires a compatible daemon: nothing activated"
 fingerprint=$("$new/briqyardd" --config "$candidate" tls-fingerprint) || fail "the new briqyardd refuses the staged configuration: nothing activated"
 # Retain a complete rollback set before the first installed executable changes. Its
 # checksums cover the exact prior configuration and executables, including the daemon.
@@ -680,6 +840,7 @@ if [ -f "$config_path" ]; then
   echo "   previous executables and configuration retained at $rollback"
 fi
 # Init and runtime inputs stay immutable. The old daemon may still read them.
+echo "$daemon_sha  $new/briqyardd" | sha256sum -c --quiet - || fail "staged daemon changed after compatibility checks: nothing activated"
 activation_pending=1
 for b in briqyard briqyard-fleet briqyardd; do put "$new/$b" "$binary_dir/$b"; done
 # The rename is on the configuration filesystem, before the existing SIGUSR2 handover.
@@ -741,15 +902,16 @@ systemctl enable briqyardd >/dev/null
 # starts the new one at once, the listeners kept (ADR 0051); the new one adopts the machines. The
 # start below covers a daemon from before ADR 0051, which exits 0. `systemctl restart` would
 # suspend every machine instead.
-# Once handover can begin, recovery uses the retained rollback set explicitly.
+# Keep automatic recovery armed until the old daemon exits: a refused handover
+# must restore a currently compatible executable before this installer returns.
 pid=$(systemctl show -p MainPID --value briqyardd)
-activation_pending=0
 if [ "${pid:-0}" != 0 ]; then
   echo "== handing the machines over to the new daemon"
   systemctl kill --kill-whom=main --signal=SIGUSR2 briqyardd
   for _ in $(seq 1 120); do [ "$(systemctl show -p MainPID --value briqyardd)" = "$pid" ] || break; sleep 1; done
   [ "$(systemctl show -p MainPID --value briqyardd)" != "$pid" ] || { echo "   briqyardd (pid $pid) did not exit within 120 s"; exit 1; }
 fi
+activation_pending=0
 systemctl start briqyardd
 sleep 1
 systemctl --no-pager --lines=2 status briqyardd | grep -E "Active|listening" || true

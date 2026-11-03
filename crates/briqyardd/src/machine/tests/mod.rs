@@ -4,6 +4,7 @@
 use super::*;
 use chrono::TimeZone;
 
+mod assignment_close;
 mod balloon;
 mod event_log;
 mod gateway;
@@ -114,6 +115,8 @@ pub(in crate::machine) fn record() -> Record {
         template_birth: None,
         clone_origin: None,
         warm_slot: None,
+        launch_identity: None,
+        assigned_run: None,
         rest: Default::default(),
         snapshots: Vec::new(),
         restoring: None,
@@ -216,6 +219,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             warm_lock: tokio::sync::Mutex::new(()),
             sandbox_create_lock: tokio::sync::Mutex::new(()),
             warm_names: Mutex::new(HashMap::new()),
+            assignments: Mutex::new(assignments::State::default()),
             warm_policy: Mutex::new(cfg.templates.warm_policy.clone()),
             warm_sample: Mutex::new(None),
             warm_pool_cache: Mutex::new(None),
@@ -235,6 +239,7 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             advertise: "127.0.0.1".into(),
             machines: Mutex::new(HashMap::new()),
             address_holds: Mutex::new(std::collections::HashSet::new()),
+            launch_holds: Mutex::new(BTreeMap::new()),
             namespaces: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
             endpoint_events,
@@ -294,6 +299,46 @@ impl Harness {
         *self.host.host_boot_id.lock().unwrap() = value.map(str::to_string);
     }
 
+    pub(in crate::machine) fn assigned_run_fault(&self, fault: u32) {
+        self.host.run_fault.store(fault, Relaxed);
+    }
+    pub(in crate::machine) fn assigned_guest_status(
+        &self,
+        vsock: &Path,
+        status: guest::CloneStatus,
+    ) {
+        self.host
+            .clone_status
+            .lock()
+            .unwrap()
+            .insert(vsock.into(), status);
+    }
+    pub(in crate::machine) fn assigned_guest_init(&self, vsock: &Path, digest: &str) {
+        self.host
+            .init_digests
+            .lock()
+            .unwrap()
+            .insert(vsock.into(), digest.into());
+    }
+    pub(in crate::machine) fn assigned_adoption_profile(&self, profile: &str) {
+        *self.host.adoption_profile.lock().unwrap() = Some(profile.into());
+    }
+    pub(in crate::machine) fn change_assigned_credentials_on_resume(&self) {
+        self.host.assigned_resume_credentials.store(true, Relaxed);
+    }
+    pub(in crate::machine) fn assigned_first_exec_code(&self, code: i32) {
+        self.host
+            .exec_codes
+            .lock()
+            .unwrap()
+            .insert("/bin/true".into(), code);
+    }
+    pub(in crate::machine) fn lose_assigned_resume(&self) {
+        self.host.assigned_resume_loss.store(true, Relaxed);
+    }
+    pub(in crate::machine) fn lose_destination_ack(&self) {
+        self.host.destination_ack_loss.store(true, Relaxed);
+    }
     pub(in crate::machine) fn refuse_destination(&self, response_loss: bool, bad_ack: bool) {
         self.host.destination_refuse.store(response_loss, Relaxed);
         self.host.destination_bad_ack.store(bad_ack, Relaxed);

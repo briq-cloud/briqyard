@@ -6,6 +6,14 @@ impl Config {
         self.templates
             .warm_policy
             .check(self.templates.warm_pools)?;
+        if self.templates.unbound_warm_pools {
+            if !self.templates.warm_pools {
+                bail!("templates.unbound_warm_pools requires templates.warm_pools");
+            }
+            if self.templates.warm_policy.budget.data_disk_gb == 0 {
+                bail!("templates.warm_policy.budget.data_disk_gb must be positive when unbound warm pools are enabled");
+            }
+        }
         if self.templates.warm_pools {
             self.templates
                 .warm_policy

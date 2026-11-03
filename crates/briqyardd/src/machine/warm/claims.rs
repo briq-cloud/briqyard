@@ -190,6 +190,11 @@ impl Manager {
         // stays held through both durable receipt publication and activation.
         {
             let machines = self.inner.machines.lock().unwrap();
+            if self.assignment_name_held(namespace, &request.name, &before.id) {
+                return Err(MError::Conflict(
+                    "claim name is reserved by a pending assignment".into(),
+                ));
+            }
             if machines.values().any(|other| {
                 let r = other.snapshot();
                 r.namespace == namespace
