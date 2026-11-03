@@ -21,6 +21,7 @@ jobs:
       - name: Install build prerequisites
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bc bison flex libelf-dev libssl-dev kmod fakeroot xz-utils
       - name: Build the kernel, OpenZFS and the modules image
+        shell: bash
         run: hack/kernel/build.sh 2>&1 | tee "$RUNNER_TEMP/build.log"
         env:
           BUILD: ${{ runner.temp }}/nested-build
@@ -35,6 +36,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Boot it in Firecracker
+        shell: bash
         run: |
           echo "runner CPUs with vmx or svm: $(grep -c -E 'vmx|svm' /proc/cpuinfo || true)"
           if [ ! -e /dev/kvm ]; then

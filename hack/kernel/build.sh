@@ -96,8 +96,8 @@ find "$ZDIR/module" -name '*.ko' | sort | while read -r ko; do
   install -D -m 0644 "$ko" "$TREE/extra/$(basename "$ko")"
   strip --strip-debug "$TREE/extra/$(basename "$ko")"
 done
-(cd "$TREE" && sha256sum extra/*.ko modules.dep)
 depmod -e -F "$KDIR/System.map" -b "$STAGE" "$RELEASE"
+(cd "$TREE" && sha256sum extra/*.ko modules.dep)
 grep -q '^extra/zfs.ko:' "$TREE/modules.dep" || { echo "zfs.ko is not in modules.dep" >&2; exit 1; }
 
 step "modules.ext4"
