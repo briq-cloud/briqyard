@@ -1,0 +1,26 @@
+name: two-host-probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/two-hosts]
+    paths: ['hack/native-two-host-probe.sh', '.github/workflows/two-host-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: bash hack/native-two-host-probe.sh
+      - name: Summary
+        if: always()
+        run: |
+          grep -E 'nested before:|nested after:|QEMU SSH boot seconds:|KVM API version:|Nested KVM_CREATE_VM seconds:|ENVIRONMENT GATE:' native-logs/two-host-probe.log >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-two-host-probe
+          path: native-logs/
