@@ -476,7 +476,16 @@ async fn assigned_early_pong_waits_for_main_and_rejects_marker_change() {
 
 #[tokio::test]
 async fn assigned_run_admission_reserves_physical_overhead() {
-    let (h, entry) = stopped(false).await;
+    physical_overhead_admission(Some(2)).await;
+}
+
+#[tokio::test]
+async fn volume_free_assigned_run_admission_reserves_physical_overhead() {
+    physical_overhead_admission(None).await;
+}
+
+async fn physical_overhead_admission(volume: Option<u32>) {
+    let (h, entry) = stopped_with(false, volume).await;
     let guest = entry.snapshot().size.memory_mb;
     let used = h.m.usage().0.memory_mb;
     let remaining = h.m.capacity().memory_mb - used;

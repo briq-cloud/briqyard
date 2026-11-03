@@ -13,6 +13,7 @@ undercharges an assigned continuation by the fixed 256 MiB VMM overhead.
 - **Use physical charges for host admission.** Under the machine-map lock, subtract
   the prior entry's physical charge only when it commits memory, then admit the
   target guest size plus VMM overhead. Namespace quotas continue using guest memory.
+  The charge does not depend on a data disk: a volume-free run (ADR 0091) pays the same VMM ceiling.
   A stopped assigned resize (ADR 0080) is journaled as the next run's pending size, so its
   memory is charged when that run is reserved, with this rule; `check_host_size` already
   refuses a guest size whose VMM ceiling overflows.
