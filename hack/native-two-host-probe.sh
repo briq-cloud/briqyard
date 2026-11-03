@@ -9,7 +9,7 @@ qemu_pid=
 cleanup() {
   rc=$?
   trap - EXIT
-  if [ -n "$qemu_pid" ]; then sudo kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" || true; fi
+  if [ -n "$qemu_pid" ] && [ "${KEEP_SECOND_HOST:-0}" != 1 ]; then sudo kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" || true; fi
   cp "$WORK/serial.log" native-logs/qemu-serial.log 2>/dev/null || true
   exit "$rc"
 }
@@ -59,8 +59,9 @@ sudo qemu-system-x86_64 -enable-kvm -cpu host -smp 2 -m 6144 -display none \
   -serial "file:$WORK/serial.log" -monitor none \
   -drive "file=$WORK/root.qcow2,if=virtio,format=qcow2" \
   -drive "file=$WORK/seed.img,if=virtio,format=raw,readonly=on" \
-  -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=net0 &
+  -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:27420-:7420 -device virtio-net-pci,netdev=net0 &
 qemu_pid=$!
+printf '%s\n' "$qemu_pid" > "$WORK/pid"
 ready=0
 for _ in $(seq 1 180); do
   if ssh "${ssh_opts[@]}" ubuntu@127.0.0.1 true 2>/dev/null; then ready=1; break; fi
@@ -89,3 +90,14 @@ except OSError as e:
     sys.exit(1)
 PY
 GUEST
+
+printf '%s\n' "$qemu_pid" > "$WORK/pid"
+# Suite shell adapter: preserve every argument through SSH's command string.
+cat > "$WORK/second-host" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+WORK=${RUNNER_TEMP:?}/two-host-probe
+printf -v remote '%q ' "$@"
+exec ssh -i "$WORK/key" -p 2222 -o UserKnownHostsFile="$WORK/known_hosts" -o StrictHostKeyChecking=yes -o BatchMode=yes ubuntu@127.0.0.1 "sudo $remote"
+SH
+chmod 700 "$WORK/second-host"

@@ -1,9 +1,6 @@
 name: two-host-probe
 on:
   workflow_dispatch:
-  push:
-    branches: [ci/two-hosts]
-    paths: ['hack/native-two-host-probe.sh', '.github/workflows/two-host-probe.yml']
 permissions:
   contents: read
 jobs:

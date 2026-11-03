@@ -125,3 +125,25 @@ each added job and its summary; neither two-host suite is invoked partially or
 reported as passing. The existing 29 and 10 checks remain unchanged.
 
 Qualification of the added jobs against main is pending the first dispatch.
+
+## Independent QEMU second-host probe
+
+The [two-host probe](https://github.com/briq-cloud/briqyard/actions/runs/41734138767)
+booted the checksum-pinned Ubuntu 24.04 cloud image dated 20261017 with QEMU/KVM,
+`-cpu host`, two vCPUs and 6144 MiB on `ubuntu-24.04`. The runner's
+`kvm_intel.nested` was `Y`; no reload was needed. SSH was ready after 14 s.
+Inside QEMU, `/dev/kvm` exposed API version 12 and `KVM_CREATE_VM` took 0.006195 s.
+This establishes a usable VM creation interface, not Firecracker boot qualification.
+
+The native `two-hosts` job now attempts both complete suites with this independent
+root, systemd and identically named encrypted `byard` pool. It reuses bootstrap and
+`install-dev.sh`; the second host gets its pool key from the runner's fleet.
+QEMU user networking forwards its API to runner loopback port 27420 and reaches the
+fleet through 10.0.2.2. SSH authenticates with an ephemeral key and a pre-pinned
+host key. No external rendezvous, secret or service account is used. The runtime
+is built once from the selected source and transferred with its verified release
+assets. Suite assertions and counts remain unchanged. A cold Alpine create and
+exec on the nested host measure actual Firecracker usability before the suites.
+
+Qualification of Firecracker and the 29/10-check suites is pending the native run.
+The existing two-host gate remains until both suites actually execute.
