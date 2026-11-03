@@ -6,6 +6,15 @@ run on Linux only. The init's test that changes users needs root, so it is `#[ig
 runs its test binary as root (`--ignored run_as`, `.github/workflows/ci.yml`); in the VM, the
 same step.
 
+Native PR evidence comes from the `native` GitHub Actions workflow on `ubuntu-24.04`
+with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head;
+manual dispatch accepts a ref. The job summaries contain e2e, fleet-smoke, stress and monitoring counts
+and durations; the `native-*-log` artifacts contain their complete output. These checks are
+not required checks yet. Stress and monitoring run on separate runners in parallel. Monitoring covers a
+ready daemon and an explicitly unreachable registered host (18 checks). Two-host
+suites still need independent Linux hosts
+([ADR 0089](adr/0089-native-suites-in-ci.md)).
+
 ## On a Linux host with KVM
 
 ```bash
@@ -390,7 +399,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   into another namespace and a fork into one (ADR 0056: a rename with the address, the
   uptime marker and the disk kept; into a namespace that exists a new address, a boot and the
   neighbour reached by name; a `moved` event in each namespace; the fork on a network of its own
-  with its source's disk). 264 checks, 260 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  with its source's disk). 280 checks, 276 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
