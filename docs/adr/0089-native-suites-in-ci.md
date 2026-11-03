@@ -161,3 +161,28 @@ Bootstrap initially binds guest loopback as fc2 does; the development configurat
 then explicitly sets `api_tls: false` and binds the guest interface for QEMU's
 forward. Allowed clients remain the private QEMU network and loopback. No daemon
 validation or authentication rule is changed.
+
+## Two-host qualification, 2026-11-04
+
+The [completed main-ref run](https://github.com/briq-cloud/briqyard/actions/runs/41737106165)
+tested source `fd9ec193c6b512a214c99cc1a07555c08870fdf8` with harness
+`a00b57607d7f3e0b2e3d7910198202a4324bb905`. Both complete suites passed:
+
+| Suite | Passed/total | Duration |
+|---|---:|---:|
+| fleet-two-hosts | 29/29 | 106 s |
+| fleet-restore | 10/10 | 4 s |
+
+This runner used `kvm_amd.nested=1`, unchanged by the probe. The independent
+Ubuntu host reached SSH in 11 s, exposed KVM API 12 and created a KVM VM in
+0.009144 s. Its first real Firecracker Alpine create plus exec took 15 s,
+including the cold image pull, disk preparation and two SSH commands: this is
+not a boot-only benchmark. The earlier Intel probe established API availability;
+this run establishes actual nested Firecracker boot and full suite execution on AMD.
+The 7m12s job completed successfully and retained `native-two-host-logs`.
+
+**Remove the two-host environment gate.** This qualification supersedes the
+single-runner restriction above: QEMU supplies the independent root, systemd and
+pool that a second daemon alone could not. No assertions were skipped, weakened
+or relabeled, and no `ALLOW_SKIPPED` override was used. The only dispatch selection
+in this validation omitted unrelated jobs, not any two-host suite checks.

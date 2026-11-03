@@ -2,7 +2,6 @@
 # Harness from the workflow revision; suites and monitoring stack from the tested source.
 set -euo pipefail
 [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || { echo 'requires a disposable GitHub-hosted runner' >&2; exit 2; }
-echo 'ENVIRONMENT GATE: two-hosts (29) and restore (10) require independent root filesystems, systemd and ZFS pools; unavailable on this single hosted runner (ADR 0089).'
 case "${1:-}" in
   stress)
     # Four physical cores; 8 ordinary guests (1 GiB), plus feature forks and races.
