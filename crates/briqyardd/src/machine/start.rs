@@ -458,7 +458,10 @@ impl Manager {
                 rec.vmm_version == self.inner.vmm.version() && saved.compatible(&host)
             }
             (Some(_), None) => false,
-            (None, _) => rec.vmm_version == self.inner.vmm.version(),
+            // Memory written before boot identities existed carries the CPUID it was taken
+            // with: on a host that has an identity it never loads (ADR 0087).
+            (None, Some(_)) => false,
+            (None, None) => rec.vmm_version == self.inner.vmm.version(),
         }
     }
 
@@ -678,6 +681,7 @@ pub(super) fn resolved_guest_config(
             device: "/dev/vdc".into(),
             path: v.mount.clone(),
             fstype: "ext4".into(),
+            read_only: false,
         });
     }
     let mut files: Vec<(String, u32, Vec<u8>)> = Vec::new();

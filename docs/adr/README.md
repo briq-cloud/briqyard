@@ -73,4 +73,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0075](0075-sandbox-destination-binding.md) | One-way complete sandbox guest configuration before main, with durable consumption and replay fencing |
 | [0076](0076-operator-sandbox-seeds.md) | Operator-produced pristine sandbox topology, ordinary-create receipts and exact destination acknowledgment; native qualification gates enablement |
 | [0077](0077-immutable-warm-launch-identity.md) | Immutable warm-slot launch identity and durable source allocations; unbound consumption remains disabled |
+| [0087](0087-no-virtualization-extensions-in-guests.md) | VMX and SVM cleared from every x86_64 guest's CPUID by a custom CPU template, its digest part of the boot identity; KVM loaded with `nested` off |
 | [0090](0090-app-console-ownership.md) | The app owns the console it writes to: the init hands it to the app user before dropping privileges, mode kept 0600 |

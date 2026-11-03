@@ -374,7 +374,9 @@ A stop can keep a memory snapshot instead (`POST /machines/{id}/stop {"suspend":
 and state into its jail (on the pool), and the next start loads them into a fresh Firecracker and
 resumes, in about a quarter of a second under nested virtualization, without a boot: processes,
 connections and uptime carry on. The snapshot is used once; if it cannot be loaded, or was taken
-under another Firecracker or host kernel (the machine's `vmm_version`), the start is a cold boot.
+under another Firecracker or host kernel (the machine's `vmm_version`), or with another CPU template (the boot identity's `cpu_config`), the start is a cold boot.
+
+Every x86_64 cold boot sends Firecracker a CPU template that clears VMX and SVM from the guest's CPUID (ADR 0087): no guest runs a hypervisor.
 
 ### Versions and upgrades
 

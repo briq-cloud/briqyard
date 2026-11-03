@@ -12,7 +12,7 @@ impl Manager {
                 .inner
                 .vmm
                 .boot_identity(false)
-                .is_some_and(|i| i.schema == 1 && i.compatible(&i))
+                .is_some_and(|i| i.compatible(&i))
             && cfg
                 .templates
                 .sandbox_recipes

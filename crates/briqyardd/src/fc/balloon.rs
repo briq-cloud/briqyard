@@ -31,7 +31,7 @@ impl BalloonConfig {
 }
 
 /// Independent of the historical memory-spec digest, so old snapshots remain readable.
-/// Unknown schemas deserialize but never qualify for a memory load.
+/// Unknown and older schemas deserialize but never qualify for a memory load.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootIdentity {
     pub schema: u32,
@@ -40,11 +40,21 @@ pub struct BootIdentity {
     pub vmm_sha256: String,
     pub host_kernel: String,
     pub transport: String,
+    /// SHA-256 of the CPU template the guest booted with, `none` without one (ADR 0087).
+    /// A record written before the field was the generation without a template: it reads as
+    /// empty and is written back the same, so what an older daemon hashed or compared of it
+    /// (an assigned run's authority) stays equal.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cpu_config: String,
 }
 
 impl BootIdentity {
+    /// Schema 2 added `cpu_config`: a snapshot of schema 1 resumes with the CPUID it was taken
+    /// with, so it never qualifies for a memory load.
+    pub const SCHEMA: u32 = 2;
+
     /// Hash immutable artifacts once at daemon startup, without buffering entire files.
-    pub fn read(kernel: &Path, vmm: &Path, pci: bool) -> Result<Self> {
+    pub fn read(kernel: &Path, vmm: &Path, pci: bool, cpu_config: String) -> Result<Self> {
         use sha2::{Digest, Sha256};
         use std::io::Read;
         fn digest(path: &Path) -> Result<String> {
@@ -62,7 +72,7 @@ impl BootIdentity {
             Ok(hex::encode(hash.finalize()))
         }
         Ok(Self {
-            schema: 1,
+            schema: Self::SCHEMA,
             device_profile: LEGACY_PROFILE.into(),
             kernel_sha256: digest(kernel)?,
             vmm_sha256: digest(vmm)?,
@@ -70,6 +80,7 @@ impl BootIdentity {
                 .trim()
                 .into(),
             transport: if pci { "pci" } else { "mmio" }.into(),
+            cpu_config,
         })
     }
 
@@ -85,7 +96,7 @@ impl BootIdentity {
     }
 
     pub fn compatible(&self, host: &Self) -> bool {
-        self.schema == 1
+        self.schema == Self::SCHEMA
             && matches!(
                 self.device_profile.as_str(),
                 REPORTING_PROFILE | LEGACY_PROFILE
@@ -105,7 +116,7 @@ impl BootIdentity {
         let profile = observed.map_or(LEGACY_PROFILE, |i| i.device_profile.as_str());
         match saved {
             Some(identity)
-                if identity.schema > 1
+                if identity.schema > Self::SCHEMA
                     || profile == UNAVAILABLE_PROFILE
                     || (bound && identity.device_profile == profile) =>
             {
@@ -114,6 +125,12 @@ impl BootIdentity {
             Some(_) => Some(Self::ambiguous(profile)),
             None => observed.cloned(),
         }
+    }
+
+    /// A schema this daemon wrote or an earlier one: the identity of a live or recorded run,
+    /// not a claim that its memory may load.
+    pub fn known(&self) -> bool {
+        (1..=Self::SCHEMA).contains(&self.schema)
     }
 
     /// Observed live device with no durable artifact provenance: keep it alive, refuse
@@ -126,6 +143,7 @@ impl BootIdentity {
             vmm_sha256: String::new(),
             host_kernel: String::new(),
             transport: String::new(),
+            cpu_config: String::new(),
         }
     }
 }
