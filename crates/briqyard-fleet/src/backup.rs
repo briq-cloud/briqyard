@@ -599,6 +599,9 @@ pub(super) mod tests {
     }
 
     async fn cleanup(b: &Backup, writes: &Arc<Mutex<BlockingPut>>) {
+        // The worker owns the publication lease until its blocking PUT finishes.
+        // Release the fixture gate before waiting for that lease, then join the PUTs.
+        writes.lock().unwrap().release();
         let turn = tokio::time::timeout(CLEANUP_WITHIN, b.turn.lock())
             .await
             .expect("publication worker cleanup deadline");
