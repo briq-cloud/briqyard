@@ -6,7 +6,7 @@
 //! without landing on the host's disk or in its memory.
 
 use anyhow::{anyhow, Context, Result};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
 use object_store::buffered::BufWriter;
 use object_store::client::{
@@ -45,6 +45,38 @@ pub struct ObjectStore {
     /// `s3` or `file`, for errors.
     scheme: &'static str,
     url: String,
+}
+
+/// A bounded listing observation, not a snapshot or proof of object contents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedObject {
+    pub key: String,
+    pub bytes: u64,
+    identity: String,
+}
+
+/// Exhaustion is explicit: reaching a limit must never look like an empty remainder.
+pub struct BoundedList {
+    pub objects: Vec<ListedObject>,
+    pub complete: bool,
+}
+
+impl ListedObject {
+    fn of(meta: &object_store::ObjectMeta) -> Result<Self> {
+        let key = meta.location.to_string();
+        // Bound retained path and provider identity data as well as object count.
+        anyhow::ensure!(key.len() <= 1024, "listing key exceeds census limit");
+        anyhow::ensure!(
+            meta.e_tag.as_ref().is_none_or(|s| s.len() <= 1024)
+                && meta.version.as_ref().is_none_or(|s| s.len() <= 1024),
+            "listing identity exceeds census limit"
+        );
+        Ok(Self {
+            key,
+            bytes: meta.size,
+            identity: format!("{:?}/{:?}/{}", meta.e_tag, meta.version, meta.last_modified),
+        })
+    }
 }
 
 pub type Reader = Box<dyn AsyncRead + Unpin + Send>;
@@ -218,6 +250,51 @@ impl ObjectStore {
         Ok(out)
     }
 
+    /// Streams only a nonempty prefix, retaining at most `limit` observations. An extra
+    /// item is inspected to distinguish exact exhaustion from truncation. Backend page
+    /// buffering is owned by the SDK; callers must also impose a deadline.
+    pub async fn list_bounded(&self, prefix: &str, limit: usize) -> Result<BoundedList> {
+        anyhow::ensure!((1..=4096).contains(&limit), "invalid census object limit");
+        let p = Self::path(prefix.trim_end_matches('/'))?;
+        let mut stream = self.inner.list(Some(&p));
+        let mut objects = Vec::new();
+        while let Some(meta) = stream.next().await {
+            let meta = meta.map_err(|e| self.failed("list", prefix, e))?;
+            if objects.len() == limit {
+                return Ok(BoundedList {
+                    objects,
+                    complete: false,
+                });
+            }
+            objects.push(ListedObject::of(&meta)?);
+        }
+        Ok(BoundedList {
+            objects,
+            complete: true,
+        })
+    }
+
+    /// Strict bounded metadata read. Missing, oversized or changed-since-list objects fail;
+    /// no caller may interpret those cases as an absent reference or a valid empty record.
+    /// The provider identity check detects some races, not an atomic inventory.
+    pub async fn get_bytes_bounded(&self, listed: &ListedObject, limit: usize) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            (1..=65536).contains(&limit),
+            "invalid census metadata limit"
+        );
+        anyhow::ensure!(listed.bytes <= limit as u64, "census metadata too large");
+        let got = self
+            .inner
+            .get(&Self::path(&listed.key)?)
+            .await
+            .map_err(|e| self.failed("get", &listed.key, e))?;
+        anyhow::ensure!(
+            ListedObject::of(&got.meta)? == *listed,
+            "census metadata changed"
+        );
+        read_bounded(self.reader(got, &listed.key), listed.bytes, limit).await
+    }
+
     /// Removes an object; missing is success. For the pruning of old backups.
     pub async fn delete(&self, key: &str) -> Result<()> {
         match self.inner.delete(&Self::path(key)?).await {
@@ -225,6 +302,17 @@ impl ObjectStore {
             Err(e) => Err(self.failed("delete", key, e)),
         }
     }
+}
+
+async fn read_bounded(reader: Reader, expected: u64, limit: usize) -> Result<Vec<u8>> {
+    let mut reader = reader.take(limit as u64 + 1);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await?;
+    anyhow::ensure!(
+        bytes.len() <= limit && bytes.len() as u64 == expected,
+        "census metadata length changed"
+    );
+    Ok(bytes)
 }
 
 async fn read_all(mut r: Reader) -> Result<Vec<u8>> {
@@ -460,6 +548,75 @@ mod tests {
         // No escaping the root.
         assert!(store.get("../etc/passwd").await.is_err());
         assert!(store.put_bytes("a//b", b"").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn census_listing_and_metadata_are_bounded_and_detect_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ObjectStore::open(&format!("file://{}", dir.path().display()), "", "", "", "").unwrap();
+        store.put_bytes("backups/m/a.json", b"123").await.unwrap();
+        store.put_bytes("backups/m/b.json", b"4567").await.unwrap();
+        store
+            .put_bytes("backups-other/protected", b"keep")
+            .await
+            .unwrap();
+        assert!(store.list_bounded("", 1).await.is_err());
+        assert!(store.list_bounded("backups", 0).await.is_err());
+        assert!(store.list_bounded("backups", 4097).await.is_err());
+        let truncated = store.list_bounded("backups", 1).await.unwrap();
+        assert_eq!(truncated.objects.len(), 1);
+        assert!(!truncated.complete);
+        let exact = store.list_bounded("backups", 2).await.unwrap();
+        assert!(exact.complete);
+        assert_eq!(exact.objects.len(), 2);
+        let a = exact
+            .objects
+            .iter()
+            .find(|o| o.key.ends_with("a.json"))
+            .unwrap();
+        assert_eq!(store.get_bytes_bounded(a, 3).await.unwrap(), b"123");
+        assert!(store.get_bytes_bounded(a, 2).await.is_err());
+        assert!(store.get_bytes_bounded(a, 0).await.is_err());
+        assert!(store.get_bytes_bounded(a, 65537).await.is_err());
+        let mut meta = store
+            .inner
+            .head(&ObjectStore::path(&a.key).unwrap())
+            .await
+            .unwrap();
+        meta.e_tag = Some("x".repeat(1025));
+        assert!(ListedObject::of(&meta).is_err());
+        meta.e_tag = None;
+        meta.location = Path::parse("x".repeat(1025)).unwrap();
+        assert!(ListedObject::of(&meta).is_err());
+        let mut changed_identity = a.clone();
+        changed_identity.identity.push('x');
+        assert!(store.get_bytes_bounded(&changed_identity, 3).await.is_err());
+        store.put_bytes(&a.key, b"changed-size").await.unwrap();
+        assert!(store.get_bytes_bounded(a, 64).await.is_err());
+        store.delete(&a.key).await.unwrap();
+        assert!(store.get_bytes_bounded(a, 64).await.is_err());
+        assert!(
+            store
+                .list_bounded("backups/missing", 1)
+                .await
+                .unwrap()
+                .complete
+        );
+        assert_eq!(
+            store.get_bytes("backups-other/protected").await.unwrap(),
+            b"keep"
+        );
+    }
+
+    #[tokio::test]
+    async fn census_metadata_rejects_truncated_and_oversized_bodies() {
+        for body in [b"12".as_slice(), b"1234".as_slice()] {
+            let reader: Reader = Box::new(std::io::Cursor::new(body.to_vec()));
+            assert!(read_bounded(reader, 3, 3).await.is_err());
+        }
+        let reader: Reader = Box::new(std::io::Cursor::new(b"123".to_vec()));
+        assert_eq!(read_bounded(reader, 3, 3).await.unwrap(), b"123");
     }
 
     /// Removing the last object prunes only its empty ancestors, never the store root.

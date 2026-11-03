@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 
 /// A harness whose host backs up to a directory, after `f`; namespace `t1` and the image in
 /// place.
-async fn harness(f: impl FnOnce(&mut config::Backup)) -> Harness {
+pub(super) async fn harness(f: impl FnOnce(&mut config::Backup)) -> Harness {
     let h = harness_config(|cfg| {
         cfg.network.range = "10.64.0.0/22".into();
         cfg.capacity = config::Capacity {
@@ -37,7 +37,7 @@ fn every(e: &str, keep: u32) -> Option<Option<api::BackupPolicy>> {
 
 impl Harness {
     /// A machine of `t1` with this schedule, running or only created.
-    async fn machine(
+    pub(super) async fn machine(
         &self,
         name: &str,
         backup: Option<Option<api::BackupPolicy>>,

@@ -9,6 +9,7 @@ use futures::{StreamExt, TryStreamExt};
 use std::collections::HashSet;
 use tokio::sync::OwnedMutexGuard;
 
+mod census;
 mod chain;
 mod holders;
 mod jobs;
@@ -154,6 +155,7 @@ impl Holder {
 /// holders of destroyed machines' backups.
 pub(super) struct Backups {
     store: Option<ObjectStore>,
+    census: census::Census,
     gate: Arc<tokio::sync::Semaphore>,
     jobs: Arc<jobs::Jobs>,
     /// Listings' store reads (`READS_AT_ONCE`).
@@ -268,6 +270,7 @@ impl Backups {
             .map(|r| (r.machine_id.clone(), Holder::new(r, Turn::default(), now)))
             .collect();
         Ok(Self {
+            census: census::Census::default(),
             store,
             gate: Arc::new(tokio::sync::Semaphore::new(cfg.at_once.max(1) as usize)),
             jobs: jobs::Jobs::new(cfg.at_once.max(1) as usize),
