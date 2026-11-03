@@ -231,6 +231,7 @@ pub(super) async fn put_on_namespace(
         let chosen = reg.place(
             id,
             region,
+            "",
             need_mb,
             need_disk_mb,
             need_cpu_millis,

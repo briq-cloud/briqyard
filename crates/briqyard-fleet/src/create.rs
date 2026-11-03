@@ -236,11 +236,19 @@ pub(super) async fn create_machine(
                 ));
             }
             refuse_outside(&reg, bound.as_deref(), &req.namespace, &req.region)?;
+            refuse_class(
+                &reg,
+                bound.as_deref(),
+                &req.namespace,
+                &req.runtime_class,
+                &req.region,
+            )?;
             refuse_under_pressure(&st, &reg, bound.as_deref(), &ask)?;
             let chosen = source.or_else(|| {
                 reg.place(
                     &req.namespace,
                     &req.region,
+                    &req.runtime_class,
                     ask.memory_mb,
                     ask.disk_mb,
                     ask.cpu_millis,
@@ -436,6 +444,33 @@ pub(super) fn refuse_outside(
         .and_then(|id| reg.hosts.get(id))
         .and_then(|h| h.outside(namespace, region))
     {
+        Some(why) => Err(err(StatusCode::BAD_REQUEST, "invalid", why)),
+        None => Ok(()),
+    }
+}
+
+/// A create naming a runtime class (ADR 0088) bound to a host that does not serve it, or with
+/// no host to be placed on that does: 400, a configuration is not a shortage a retry cures.
+pub(super) fn refuse_class(
+    reg: &Registry,
+    host: Option<&str>,
+    namespace: &str,
+    class: &str,
+    region: &str,
+) -> Result<(), Refusal> {
+    let why = match host.and_then(|id| reg.hosts.get(id)) {
+        Some(h) => h.without_class(namespace, class),
+        None if host.is_some() => None,
+        None => (!reg.hosts.values().any(|h| {
+            (region.is_empty() || h.region == region)
+                && api::serves_class(&h.runtime_classes, class)
+        }))
+        .then(|| match region {
+            "" => format!("no host serves runtime class {class}"),
+            r => format!("no host in region {r} serves runtime class {class}"),
+        }),
+    };
+    match why {
         Some(why) => Err(err(StatusCode::BAD_REQUEST, "invalid", why)),
         None => Ok(()),
     }

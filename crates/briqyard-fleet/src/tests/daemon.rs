@@ -41,6 +41,8 @@ pub(super) struct Daemon {
     pub(super) snapshots: Mutex<Vec<api::Snapshot>>,
     pub(super) status_body_failure: std::sync::atomic::AtomicBool,
     pub(super) status_reply: Mutex<Option<(StatusCode, serde_json::Value)>>,
+    /// The runtime classes its status lists besides `default`.
+    pub(super) runtime_classes: Mutex<Vec<api::RuntimeClassInfo>>,
     pub(super) backup_records: Mutex<Vec<serde_json::Value>>,
 }
 
@@ -172,6 +174,7 @@ pub(super) async fn start_daemon_on(
         sandbox_lookups: Mutex::new(vec![]),
         snapshots: Mutex::new(vec![]),
         status_reply: Mutex::new(None),
+        runtime_classes: Mutex::new(vec![]),
         status_body_failure: std::sync::atomic::AtomicBool::new(false),
         backup_records: Mutex::new(vec![]),
     });
@@ -191,6 +194,7 @@ pub(super) async fn start_daemon_on(
             named_memory_fork_v1: false,
             named_memory_profiles: Vec::new(),
             warm_pool_profiles: Vec::new(),
+            runtime_classes: d.runtime_classes.lock().unwrap().clone(),
             version: "0.1-stub".into(),
             host_id: d.id.clone(),
             capacity: api::Capacity {

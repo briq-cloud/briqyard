@@ -85,7 +85,7 @@ async fn admission_gateway_and_consumer_follow_source_when_normal_placement_pref
     {
         let mut hypothetical = f.st.reg.lock().unwrap().clone();
         assert_eq!(
-            hypothetical.place("normal", "fsn", 256, 0, 1000, &f.st.policy),
+            hypothetical.place("normal", "fsn", "", 256, 0, 1000, &f.st.policy),
             Some(ds[0].stub.id.clone())
         );
     }

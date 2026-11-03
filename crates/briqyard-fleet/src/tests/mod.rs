@@ -230,6 +230,7 @@ fn heartbeat(url: &str, memory_mb: u32, namespaces: &[&str]) -> serde_json::Valu
 mod admin;
 mod admissions;
 mod backups;
+mod classes;
 mod daemon;
 mod endpoints;
 mod events;
