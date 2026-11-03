@@ -26,8 +26,18 @@ build() {
 }
 
 install() {
+  : "${BRIQYARD_CHECKED_BUNDLE:?set a checked release bundle path visible in the VM}"
+  : "${BRIQYARD_CHECKED_BUNDLE_SHA256:?set its trusted release manifest SHA256}"
+  local arch
+  arch=$(limactl shell "$VM" uname -m | tr -d '\r')
+  python3 hack/dev-release.py verify "$BRIQYARD_CHECKED_BUNDLE" "$BRIQYARD_CHECKED_BUNDLE_SHA256" \
+    --arch "$arch"
+  # The source mount may expose different paths or bytes in the guest. Refuse before build
+  # or replacing installed files; staging checks the copied bundle again before publication.
+  limactl shell "$VM" python3 "$SRC/hack/dev-release.py" verify \
+    "$BRIQYARD_CHECKED_BUNDLE" "$BRIQYARD_CHECKED_BUNDLE_SHA256" --arch "$arch"
   build
-  limactl shell "$VM" sudo bash -s <<EOF
+  limactl shell "$VM" sudo bash -s -- "$BRIQYARD_CHECKED_BUNDLE" "$BRIQYARD_CHECKED_BUNDLE_SHA256" <<EOF
 set -e
 command -v conntrack >/dev/null || { apt-get update -qq; apt-get install -y -qq conntrack; }
 T=$TARGET/release
@@ -46,9 +56,8 @@ cp "$SRC/hack/briqyard-fleet.service" /etc/systemd/system/briqyard-fleet.service
 # What hack/fleet-smoke.sh upgrades the VM's host to (ADR 0027): this build under a release's
 # names with its digests, and the fleet's SSH key, authorized for root on the VM itself.
 R=/var/lib/briqyard-fleet/release
-mkdir -p "\$R"
-for b in briqyardd briqyard-init briqyard briqyard-fleet; do cp "/usr/local/bin/\$b" "\$R/\$b-linux-\$(uname -m)"; done
-(cd "\$R" && sha256sum briq*-linux-* > "SHA256SUMS-\$(uname -m)")
+python3 "$SRC/hack/dev-release.py" stage "\$1" "\$2" --arch "\$(uname -m)" \
+  --binaries /usr/local/bin --output "\$R"
 [ -f /etc/briqyard/fleet_ssh_key ] || ssh-keygen -q -t ed25519 -N "" -C briqyard-fleet -f /etc/briqyard/fleet_ssh_key
 install -d -m 0700 /root/.ssh
 grep -qxF "\$(cat /etc/briqyard/fleet_ssh_key.pub)" /root/.ssh/authorized_keys 2>/dev/null || cat /etc/briqyard/fleet_ssh_key.pub >> /root/.ssh/authorized_keys
