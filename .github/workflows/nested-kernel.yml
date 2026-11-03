@@ -1,0 +1,67 @@
+name: nested kernel
+# The guest kernel and ZFS modules of the `nested` runtime class (ADR 0088), built from pinned
+# sources (hack/kernel/README.md), then booted once in Firecracker when the runner has KVM.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/nested-kernel.yml
+      - hack/kernel/**
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bc bison flex libelf-dev libssl-dev kmod fakeroot xz-utils
+      - name: Build the kernel, OpenZFS and the modules image
+        shell: bash
+        run: hack/kernel/build.sh 2>&1 | tee "$RUNNER_TEMP/build.log"
+        env:
+          BUILD: ${{ runner.temp }}/nested-build
+          OUT: ${{ runner.temp }}/nested-out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nested-kernel-x86_64
+          path: |
+            ${{ runner.temp }}/nested-out/nested-vmlinux-x86_64
+            ${{ runner.temp }}/nested-out/nested-modules-x86_64.ext4
+            ${{ runner.temp }}/nested-out/nested-versions-x86_64.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Boot it in Firecracker
+        shell: bash
+        run: |
+          echo "runner CPUs with vmx or svm: $(grep -c -E 'vmx|svm' /proc/cpuinfo || true)"
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::this runner has no /dev/kvm: the kernel cannot be booted, so it is not released"
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+          hack/kernel/smoke.sh "$RUNNER_TEMP/nested-out" "$RUNNER_TEMP/nested-smoke" | tee "$RUNNER_TEMP/smoke.txt"
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '### nested kernel'
+            echo '```'
+            cat "$RUNNER_TEMP/nested-out/nested-versions-x86_64.json" 2>/dev/null || true
+            cat "$RUNNER_TEMP/nested-out/SHA256SUMS" 2>/dev/null || true
+            grep -a '^SMOKE' "$RUNNER_TEMP/smoke.txt" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nested-kernel-evidence
+          path: |
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/nested-smoke/console.log
+          if-no-files-found: ignore
+          retention-days: 7

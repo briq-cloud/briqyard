@@ -730,6 +730,7 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
                 console_max: 0,
                 version: String::new(),
                 identity: BootIdentity::ambiguous(LEGACY_PROFILE),
+                cpu_template: None,
             };
             assert_eq!(vmm.snapshot(&vm, durable).await.is_err(), failed);
             let seen = server.await.unwrap();
