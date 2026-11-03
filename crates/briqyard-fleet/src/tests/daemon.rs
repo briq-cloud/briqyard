@@ -39,6 +39,8 @@ pub(super) struct Daemon {
     pub(super) sandbox_lookup: Mutex<Option<(StatusCode, serde_json::Value)>>,
     pub(super) sandbox_lookups: Mutex<Vec<api::SandboxRequestLookup>>,
     pub(super) snapshots: Mutex<Vec<api::Snapshot>>,
+    /// Override discovery GET while preserving the machine and its other lifecycle routes.
+    pub(super) machine_get_reply: Mutex<Option<(StatusCode, serde_json::Value)>>,
     pub(super) status_body_failure: std::sync::atomic::AtomicBool,
     pub(super) status_reply: Mutex<Option<(StatusCode, serde_json::Value)>>,
     pub(super) backup_records: Mutex<Vec<serde_json::Value>>,
@@ -171,6 +173,7 @@ pub(super) async fn start_daemon_on(
         sandbox_lookup: Mutex::new(None),
         sandbox_lookups: Mutex::new(vec![]),
         snapshots: Mutex::new(vec![]),
+        machine_get_reply: Mutex::new(None),
         status_reply: Mutex::new(None),
         status_body_failure: std::sync::atomic::AtomicBool::new(false),
         backup_records: Mutex::new(vec![]),
@@ -434,6 +437,9 @@ pub(super) async fn start_daemon_on(
         (StatusCode::CREATED, Json(m)).into_response()
     }
     async fn get_machine(State(d): D, Path(id): Path<String>) -> Response {
+        if let Some((status, body)) = d.machine_get_reply.lock().unwrap().clone() {
+            return (status, Json(body)).into_response();
+        }
         let ms = d.machines.lock().unwrap();
         match ms.iter().find(|m| m.id == id) {
             Some(m) => {

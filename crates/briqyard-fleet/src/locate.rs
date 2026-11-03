@@ -168,6 +168,8 @@ pub(super) async fn by_machine(
         .find(|(k, _)| k == "id")
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
+    let own = format!("/v1/machines/{id}");
+    let is_delete = method == Method::DELETE && uri.path() == own;
     // A destroyed machine is its backups alone (ADR 0023): reached on the host that holds
     // them, which a moved namespace left (ADR 0045).
     let host = match locate(&st, Indexed::Machine, &id).await {
@@ -184,6 +186,30 @@ pub(super) async fn by_machine(
                 Err(answer) => return Ok(*answer),
             }
         }
+        None if is_delete => {
+            // Discovery cannot prove absence on a host that failed to answer. An explicit
+            // namespace hint reaches only its registered owner, even when it is down.
+            let namespace = query_namespace(&uri);
+            if namespace.as_deref().is_some_and(|ns| !api::valid_id(ns)) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "invalid",
+                    "invalid namespace hint",
+                ));
+            }
+            let reg = st.reg.lock().unwrap();
+            let host_id = namespace
+                .as_deref()
+                .and_then(|ns| reg.namespaces.get(ns))
+                .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "machine not found"))?;
+            reg.hosts.get(host_id).cloned().ok_or_else(|| {
+                err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "host_unreachable",
+                    format!("namespace owner {host_id} is not registered"),
+                )
+            })?
+        }
         None => return Err(err(StatusCode::NOT_FOUND, "not_found", "machine not found")),
     };
     let path = uri
@@ -191,7 +217,6 @@ pub(super) async fn by_machine(
         .map(|p| p.as_str().to_string())
         .unwrap_or_default();
     // What the call is, by its path alone: a query (`?namespace=`) changes nothing of it.
-    let own = format!("/v1/machines/{id}");
     if method == Method::POST && uri.path() == format!("{own}/move") {
         return moves::move_machine(&st, host, &id, &headers, body).await;
     }
@@ -218,7 +243,6 @@ pub(super) async fn by_machine(
             }
         }
     }
-    let is_delete = method == Method::DELETE && uri.path() == own;
     let plain_get = method == Method::GET && uri.path() == own;
     let adds_endpoint = method == Method::POST && uri.path() == format!("{own}/endpoints");
     // A logs follow (ADR 0025) is streamed through, as a watch is.
