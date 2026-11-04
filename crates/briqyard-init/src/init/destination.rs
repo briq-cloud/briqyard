@@ -18,7 +18,10 @@ pub(super) enum Barrier {
 impl Barrier {
     pub(super) fn allows(&self, op: &str) -> bool {
         matches!(self, Self::Bound { active: true, .. })
-            || matches!(op, "ping" | "destination_bind_v1" | "clone_activate_v1")
+            || matches!(
+                op,
+                "ping" | "fs_sync" | "destination_bind_v1" | "clone_activate_v1"
+            )
     }
     pub(super) fn activating(&self) -> bool {
         matches!(

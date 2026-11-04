@@ -76,6 +76,7 @@ mod destination;
 mod destination_mounts;
 mod exec;
 mod files;
+mod filesystems;
 mod network;
 mod pty;
 mod reap;

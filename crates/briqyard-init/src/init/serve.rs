@@ -127,6 +127,16 @@ where
         return;
     }
     match req.op.as_str() {
+        "fs_sync" | "fs_freeze" => {
+            filesystems::serve(st.config(), input, stream, req).await;
+        }
+        "fs_thaw" => {
+            send(
+                &stream,
+                &Response::error("fs_thaw requires the freeze connection"),
+            )
+            .await
+        }
         "destination_bind_v1" => {
             let response = destination::bind(&st, req.destination_bind).await;
             send(&stream, &response).await;
@@ -179,13 +189,17 @@ where
         "exec" | "exec_stream_v1" => exec_op(&st, input, stream, req).await,
         "put_stream" | "get_stream" => files::serve(input, stream, req).await,
         "put" => {
-            let res = (|| -> std::io::Result<()> {
+            // A frozen filesystem can block writes until thaw; never park a runtime
+            // worker here, because it must continue reading the held freeze connection.
+            let res = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
                 if let Some(parent) = Path::new(&req.path).parent() {
                     fs::create_dir_all(parent)?;
                 }
                 fs::write(&req.path, &req.data)?;
                 fs::set_permissions(&req.path, fs::Permissions::from_mode(file_mode(req.mode)))
-            })();
+            })
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(format!("put worker: {e}"))));
             match res {
                 Ok(()) => send(&stream, &Response::new("ok")).await,
                 Err(e) => send(&stream, &Response::error(e.to_string())).await,

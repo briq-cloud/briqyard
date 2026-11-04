@@ -133,7 +133,8 @@ pub struct FileMeta {
 /// (`cols`, `rows`), `close_stdin`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Request {
-    /// exec, put, get, put_stream, get_stream, ping, shutdown; then stdin, resize, close_stdin
+    /// exec, put, get, put_stream, get_stream, ping, shutdown, fs_sync, fs_freeze;
+    /// fs_thaw uses the held fs_freeze connection; then stdin, resize, close_stdin
     pub op: String,
     #[serde(default)]
     pub cmd: Vec<String>,
@@ -144,7 +145,8 @@ pub struct Request {
     /// Written to the command first; without `interactive` its stdin then ends.
     #[serde(default, with = "b64")]
     pub stdin: Vec<u8>,
-    /// The command's deadline; 0 is none.
+    /// Exec deadline (0: none), or freeze hold time after successful freeze
+    /// (0: 10 seconds, capped at 30 seconds).
     #[serde(default)]
     pub timeout_ms: u64,
     /// Stdin stays open for `stdin` frames until `close_stdin`.
@@ -187,6 +189,12 @@ pub struct Request {
 /// Responses: stdout and stderr chunks then exit; or ok, file, pong, ready, error.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Response {
+    /// Filesystems held by fs_freeze.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frozen: Vec<String>,
+    /// fs_thaw completion: host or deadline (the latter is an error).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub thawed_by: String,
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(default, with = "b64")]

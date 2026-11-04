@@ -63,6 +63,14 @@ impl Manager {
         if status.ram_marker.len() != 32 {
             return Err(invalid("template init RAM marker unavailable"));
         }
+        // A seal is reused for a whole generation: no crash-consistent fallback.
+        tokio::time::timeout(
+            crate::guestc::CONTROL_TIMEOUT,
+            self.inner.guest.fs_sync(&live.vsock),
+        )
+        .await
+        .context("template seal fs_sync timeout")?
+        .context("template seal fs_sync")?;
         Ok(Some(status.ram_marker))
     }
 

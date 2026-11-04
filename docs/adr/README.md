@@ -77,10 +77,12 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0079](0079-dev-checked-release-bundle.md) | Local upgrade releases verify and include the checked runtime bundle |
 | [0080](0080-assigned-run-resize-journal.md) | Assigned-run resize journals the provider lifecycle; startup replays only durable root targets and retains pending backing |
 | [0081](0081-registry-publication-test-boundary.md) | Registry publication owns its work through terminal completion |
+| [0082](0082-registry-backup-observations.md) | Fixed process-local registry backup observations separate caller outcomes from worker ACKs and compare existing caches with observation-only durable validity |
 | [0083](0083-backup-object-census.md) | Bounded read-only backup-object observations; local owner evidence, never global ownership or deletion authority |
 | [0087](0087-no-virtualization-extensions-in-guests.md) | VMX and SVM cleared from every x86_64 guest's CPUID by a custom CPU template, its digest part of the boot identity; KVM loaded with `nested` off |
 | [0088](0088-runtime-classes.md) | Runtime classes: a host declares kernels and a machine names one; the `nested` class boots without ADR 0087's template and has `/dev/kvm`, takes no memory snapshot, and is placed on hosts that serve it |
 | [0089](0089-native-suites-in-ci.md) | Native e2e and fleet-smoke on disposable hosted KVM runners, checked runtime installation, exact source identities and retained suite evidence |
 | [0090](0090-app-console-ownership.md) | The app owns the console it writes to: the init hands it to the app user before dropping privileges, mode kept 0600 |
 | [0091](0091-exec-retries-before-the-request-only.md) | A guest call is retried before its request is written, never after: a reset afterwards is Closed (409) |
+| [0092](0092-filesystem-consistent-copies.md) | Filesystem-consistent copies: guest sync and connection-held freeze; sync before sealing |
 | [0093](0093-quiet-boot-and-fast-readiness.md) | The kernel boots `quiet` (errors and panics on the console, the ring buffer keeps the rest, `loglevel=7` in `kernel_args` undoes it) and `wait_ready` polls every 5 ms for 5 s, then every 100 ms, with the same deadline and error; a guest-side ready signal rejected |

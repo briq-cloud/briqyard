@@ -5,10 +5,15 @@ use super::*;
 /// Prometheus text: hosts by state, each region's room and the creates refused for want of
 /// it (ADR 0042).
 pub(super) async fn metrics(State(st): S) -> Response {
-    let text = {
+    let mut text = {
         let reg = st.reg.lock().unwrap();
         signals::render(&reg, &signals::regions(&reg, &st.policy, &st.refusals))
     };
+    text.push_str(&signals::render_backup(&backup::observe(
+        st.backup.as_ref(),
+        &st.written,
+        &st.durable_observed_valid,
+    )));
     (
         [(
             header::CONTENT_TYPE,

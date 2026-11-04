@@ -172,3 +172,23 @@ pub fn render(reg: &Registry, regions: &[RegionRoom]) -> String {
     );
     out
 }
+
+/// Fixed registry-backup exposition; accepts only scalar cache observations.
+pub fn render_backup(observation: &crate::backup::Observation) -> String {
+    let mut out = String::new();
+    let mut scalar = |suffix: &str, help: &str, value: String| {
+        family(
+            &mut out,
+            &format!("briqyard_fleet_registry_backup_{suffix}"),
+            "gauge",
+            help,
+            vec![(String::new(), value)],
+        );
+    };
+    scalar("configured", "Registry backup instance configured in this process; not reachability or recovery assurance.", u8::from(observation.configured).to_string());
+    scalar("publication_observed", "Process-local observation of a fully acknowledged registry snapshot; NaN when the ACK cache is unavailable, not current store coverage.", observation.publication_observed.map_or_else(|| "NaN".into(), |v| u8::from(v).to_string()));
+    scalar("last_ack_timestamp_seconds", "Process-local receipt time of the last fully acknowledged registry snapshot; NaN when absent or unavailable, not data age or remote commit time.", observation.last_ack_timestamp_seconds.map_or_else(|| "NaN".into(), |v| v.to_string()));
+    family(&mut out, "briqyard_fleet_registry_backup_caller_outcomes_total", "counter", "Process-local settled registry push caller outcomes; failed or canceled callers may still have a worker commit a later ACK.", ["acknowledged", "unchanged", "failed", "canceled"].into_iter().zip(observation.caller_outcomes).map(|(outcome, value)| (format!("outcome=\"{outcome}\""), value.to_string())).collect());
+    family(&mut out, "briqyard_fleet_registry_backup_last_ack_current_durable_match", "gauge", "Process-local comparison of the last acknowledged snapshot with the valid cached durable-file digest; assumes exclusive file ownership, not current store or recovery coverage.", ["match", "mismatch", "unknown"].into_iter().enumerate().map(|(i, state)| (format!("state=\"{state}\""), u8::from(i == observation.durable_match).to_string())).collect());
+    out
+}

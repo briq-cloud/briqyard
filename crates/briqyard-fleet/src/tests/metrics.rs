@@ -448,3 +448,312 @@ async fn a_machine_made_is_answered_when_the_write_after_it_fails() {
     poll_static_hosts_once(&g.st).await;
     assert_eq!(saved(&g.st).machines[&id], "d1", "the next write has it");
 }
+
+const OBSERVATION_PREFIX: &str = "briqyard_fleet_registry_backup_";
+
+fn observation_fleet() -> Fleet {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config::Config {
+        backup: config::Backup {
+            store: format!("file://{}", dir.path().join("synthetic-store").display()),
+            recipient: age::x25519::Identity::generate().to_public().to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let path = dir.path().join("registry.json");
+    fleet_at(cfg, dir, path)
+}
+
+fn durable_match(st: &AppState) -> usize {
+    backup::observe(st.backup.as_ref(), &st.written, &st.durable_observed_valid).durable_match
+}
+
+fn check_backup_contract(text: &str) {
+    api::metrics::check_exposition(text);
+    for (suffix, kind, help) in [
+        ("configured", "gauge", "Registry backup instance configured in this process; not reachability or recovery assurance."),
+        ("publication_observed", "gauge", "Process-local observation of a fully acknowledged registry snapshot; NaN when the ACK cache is unavailable, not current store coverage."),
+        ("last_ack_timestamp_seconds", "gauge", "Process-local receipt time of the last fully acknowledged registry snapshot; NaN when absent or unavailable, not data age or remote commit time."),
+        ("caller_outcomes_total", "counter", "Process-local settled registry push caller outcomes; failed or canceled callers may still have a worker commit a later ACK."),
+        ("last_ack_current_durable_match", "gauge", "Process-local comparison of the last acknowledged snapshot with the valid cached durable-file digest; assumes exclusive file ownership, not current store or recovery coverage."),
+    ] {
+        assert!(text.contains(&format!("# HELP {OBSERVATION_PREFIX}{suffix} {help}\n# TYPE {OBSERVATION_PREFIX}{suffix} {kind}\n")));
+    }
+    let lines: Vec<_> = text
+        .lines()
+        .filter(|line| line.starts_with(OBSERVATION_PREFIX))
+        .collect();
+    assert_eq!(lines.len(), 10);
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with(&format!("# HELP {OBSERVATION_PREFIX}")))
+            .count(),
+        5
+    );
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with(&format!("# TYPE {OBSERVATION_PREFIX}")))
+            .count(),
+        5
+    );
+    let expected: std::collections::BTreeSet<String> = [
+        "configured",
+        "publication_observed",
+        "last_ack_timestamp_seconds",
+        "caller_outcomes_total{outcome=\"acknowledged\"}",
+        "caller_outcomes_total{outcome=\"unchanged\"}",
+        "caller_outcomes_total{outcome=\"failed\"}",
+        "caller_outcomes_total{outcome=\"canceled\"}",
+        "last_ack_current_durable_match{state=\"match\"}",
+        "last_ack_current_durable_match{state=\"mismatch\"}",
+        "last_ack_current_durable_match{state=\"unknown\"}",
+    ]
+    .map(|suffix| format!("{OBSERVATION_PREFIX}{suffix}"))
+    .into_iter()
+    .collect();
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| line.rsplit_once(' ').unwrap().0.to_string())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+    let mut one_hot = 0;
+    for line in lines {
+        let (name, value) = line.rsplit_once(' ').unwrap();
+        let value: f64 = value.parse().unwrap();
+        if name.contains("last_ack_current_durable_match") {
+            assert!(value == 0.0 || value == 1.0);
+            one_hot += value as u8;
+        }
+    }
+    assert_eq!(one_hot, 1);
+}
+
+#[tokio::test]
+async fn registry_backup_exposition_is_fixed_and_scrapes_do_not_infer_startup_ack() {
+    for configured in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config::Config::default();
+        if configured {
+            cfg.backup.store = format!("file://{}", dir.path().join("synthetic-store").display());
+            cfg.backup.recipient = age::x25519::Identity::generate().to_public().to_string();
+        }
+        let state_path = dir.path().join("registry.json");
+        std::fs::write(&state_path, b"{\"private-path-sentinel\":true}").unwrap();
+        let f = fleet_at(cfg, dir, state_path);
+        // Even a populated durable cache cannot infer a process-local ACK.
+        *f.st.written.lock().await = Some([7; 32]);
+        f.st.durable_observed_valid.store(true, Ordering::Release);
+        let standalone = signals::render_backup(&backup::observe(
+            f.st.backup.as_ref(),
+            &f.st.written,
+            &f.st.durable_observed_valid,
+        ));
+        check_backup_contract(&standalone);
+        assert!(standalone.contains(&format!(
+            "{OBSERVATION_PREFIX}configured {}\n",
+            u8::from(configured)
+        )));
+        assert!(standalone.contains(&format!("{OBSERVATION_PREFIX}publication_observed 0\n")));
+        assert!(standalone.contains(&format!(
+            "{OBSERVATION_PREFIX}last_ack_timestamp_seconds NaN\n"
+        )));
+        for outcome in ["acknowledged", "unchanged", "failed", "canceled"] {
+            assert!(standalone.contains(&format!(
+                "{OBSERVATION_PREFIX}caller_outcomes_total{{outcome=\"{outcome}\"}} 0\n"
+            )));
+        }
+        assert!(standalone.contains("last_ack_current_durable_match{state=\"unknown\"} 1\n"));
+        for _ in 0..2 {
+            let (status, _, text) = call(&f.st, "GET", "/metrics", "", None).await;
+            assert_eq!(status, StatusCode::OK);
+            check_backup_contract(&text);
+            assert!(text.ends_with(&standalone));
+            for sentinel in [
+                "private-path-sentinel",
+                "synthetic-store",
+                "synthetic-key",
+                "synthetic-token",
+                "synthetic-endpoint",
+                "synthetic-error",
+            ] {
+                assert!(!text.contains(sentinel));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn durable_observation_failure_dedup_and_repair_preserve_save_semantics() {
+    for fault in 0..3 {
+        let f = observation_fleet();
+        assert!(!f.st.durable_observed_valid.load(Ordering::Acquire));
+        f.st.save().await.unwrap();
+        backup::tests::acknowledge(&f.st).await;
+        assert_eq!(durable_match(&f.st), 0);
+        let prior = *f.st.written.lock().await;
+        assert!(f.st.durable_observed_valid.load(Ordering::Acquire));
+        f.st.reg
+            .lock()
+            .unwrap()
+            .namespaces
+            .insert("changed".into(), "h1".into());
+        let result =
+            f.st.save_with(move |path, data| match fault {
+                0 => Err(std::io::Error::other("synthetic pre-rename fault")),
+                1 => write_registry_with_sync(path, data, |_| {
+                    Err(std::io::Error::other("synthetic directory sync fault"))
+                }),
+                _ => panic!("synthetic write panic"),
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(*f.st.written.lock().await, prior);
+        assert!(!f.st.durable_observed_valid.load(Ordering::Acquire));
+        assert_eq!(durable_match(&f.st), 2);
+        assert_eq!(saved(&f.st).namespaces.contains_key("changed"), fault == 1);
+        f.st.reg.lock().unwrap().namespaces.remove("changed");
+        f.st.save_with(|_, _| panic!("unchanged save forced a rewrite"))
+            .await
+            .unwrap();
+        assert!(!f.st.durable_observed_valid.load(Ordering::Acquire));
+        f.st.reg
+            .lock()
+            .unwrap()
+            .namespaces
+            .insert("repair".into(), "h1".into());
+        f.st.save().await.unwrap();
+        assert_ne!(*f.st.written.lock().await, prior);
+        assert!(f.st.durable_observed_valid.load(Ordering::Acquire));
+        assert_eq!(durable_match(&f.st), 1);
+    }
+}
+
+struct SaveGate {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    terminal: Option<std::sync::mpsc::Receiver<()>>,
+}
+
+impl SaveGate {
+    fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+
+    fn wait_for_terminal(&mut self) -> bool {
+        self.terminal.take().is_none_or(|terminal| {
+            terminal
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok()
+        })
+    }
+}
+
+impl Drop for SaveGate {
+    fn drop(&mut self) {
+        self.release();
+        let ended = self.wait_for_terminal();
+        assert!(
+            ended || std::thread::panicking(),
+            "owned save cleanup deadline"
+        );
+    }
+}
+
+struct SaveTerminal(std::sync::mpsc::Sender<()>);
+impl Drop for SaveTerminal {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+#[tokio::test]
+async fn owned_save_settles_observation_after_parent_wait_is_dropped() {
+    for fault in 0..3 {
+        let f = observation_fleet();
+        f.st.save().await.unwrap();
+        backup::tests::acknowledge(&f.st).await;
+        assert_eq!(durable_match(&f.st), 0);
+        let prior = *f.st.written.lock().await;
+        f.st.reg
+            .lock()
+            .unwrap()
+            .namespaces
+            .insert("changed".into(), "h1".into());
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let (terminal, ended) = std::sync::mpsc::channel();
+        let mut gate = SaveGate {
+            release: Some(release),
+            terminal: Some(ended),
+        };
+        let mut parent = Box::pin(f.st.save_with(move |path, data| {
+            let _terminal = SaveTerminal(terminal);
+            let _ = entered.send(());
+            released
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("save release deadline");
+            match fault {
+                0 => write_registry(path, data),
+                1 => Err(std::io::Error::other("synthetic save fault")),
+                _ => panic!("synthetic save panic"),
+            }
+        }));
+        assert!(futures::poll!(&mut parent).is_pending());
+        tokio::time::timeout(std::time::Duration::from_secs(10), entering)
+            .await
+            .unwrap()
+            .unwrap();
+        // Drop the actual save caller, which owns the worker's JoinHandle.
+        drop(parent);
+        assert!(f.st.written.try_lock().is_err());
+        let observation = backup::observe(
+            f.st.backup.as_ref(),
+            &f.st.written,
+            &f.st.durable_observed_valid,
+        );
+        assert_eq!(observation.last_ack_timestamp_seconds, Some(99));
+        assert_eq!(observation.durable_match, 2);
+        assert!(!f.st.durable_observed_valid.load(Ordering::Acquire));
+        gate.release();
+        // The writer's terminal signal covers its I/O; the owned turn is released
+        // only after the surrounding save closure settles or unwinds.
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(10), f.st.written.lock())
+            .await
+            .expect("owned save settlement deadline");
+        let unchanged = *settled == prior;
+        drop(settled);
+        assert!(gate.wait_for_terminal(), "owned save writer deadline");
+        assert_eq!(
+            f.st.durable_observed_valid.load(Ordering::Acquire),
+            fault == 0
+        );
+        assert_eq!(unchanged, fault != 0);
+        assert_eq!(durable_match(&f.st), if fault == 0 { 1 } else { 2 });
+    }
+}
+
+#[test]
+fn registry_backup_renderer_preserves_nan_and_each_one_hot_state() {
+    for durable_match in 0..3 {
+        let observation = backup::Observation {
+            configured: true,
+            publication_observed: None,
+            last_ack_timestamp_seconds: None,
+            caller_outcomes: [1, 2, 3, 4],
+            durable_match,
+        };
+        let text = signals::render_backup(&observation);
+        check_backup_contract(&text);
+        assert!(text.contains("publication_observed NaN\n"));
+        for (i, state) in ["match", "mismatch", "unknown"].into_iter().enumerate() {
+            assert!(text.contains(&format!(
+                "last_ack_current_durable_match{{state=\"{state}\"}} {}\n",
+                u8::from(i == durable_match)
+            )));
+        }
+    }
+}

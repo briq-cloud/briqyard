@@ -21,6 +21,14 @@ pub trait Guest: Send + Sync {
     /// Waits for the init to answer; its version (ADR 0027), empty from an init older than
     /// the report.
     async fn wait_ready(&self, vsock: &Path, timeout: Duration) -> Result<String>;
+    /// Bounded sync, including EOF proving the guest handler has closed.
+    async fn fs_sync(&self, _vsock: &Path) -> Result<()> {
+        Err(anyhow!("filesystem sync unavailable"))
+    }
+    /// No lifecycle caller until ADR 0092 slice C. Drop closes and thaws.
+    async fn fs_freeze(&self, _vsock: &Path, _hold: Duration) -> Result<Frozen> {
+        Err(anyhow!("filesystem freeze unavailable"))
+    }
     async fn shutdown(&self, vsock: &Path, grace: Duration) -> Result<()>;
     /// Starts a command and hands its connection over: [`collect`] reads it to the exit.
     async fn session(&self, vsock: &Path, req: Request) -> Result<Box<dyn Conn>>;
@@ -53,6 +61,45 @@ pub struct Vsock;
 
 #[async_trait]
 impl Guest for Vsock {
+    async fn fs_sync(&self, vsock: &Path) -> Result<()> {
+        tokio::time::timeout(CONTROL_TIMEOUT, async {
+            let mut conn = dial(vsock).await?;
+            write_request(
+                &mut conn,
+                &Request {
+                    op: "fs_sync".into(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            sync_answer(Box::new(conn)).await
+        })
+        .await
+        .context("guest fs_sync timeout")?
+    }
+    async fn fs_freeze(&self, vsock: &Path, hold: Duration) -> Result<Frozen> {
+        tokio::time::timeout(CONTROL_TIMEOUT, async {
+            let mut conn = dial(vsock).await?;
+            write_request(
+                &mut conn,
+                &Request {
+                    op: "fs_freeze".into(),
+                    timeout_ms: hold.as_millis().min(30_000) as u64,
+                    ..Default::default()
+                },
+            )
+            .await?;
+            let answer: Response = read_frame(&mut conn).await?;
+            check_fs_answer("fs_freeze", &answer)?;
+            Ok(Frozen {
+                conn: Box::new(conn),
+                filesystems: answer.frozen,
+            })
+        })
+        .await
+        .context("guest fs_freeze timeout")?
+    }
+
     async fn destination_control(&self, vsock: &Path, request: Request) -> Result<Response> {
         let exchange = async {
             let mut connection = dial(vsock).await?;
@@ -436,6 +483,71 @@ pub async fn wait_ready(uds: &Path, timeout: Duration) -> Result<String> {
     }
 }
 
+/// Every guest control exchange is bounded independently of other machines.
+pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn check_fs_answer(op: &str, r: &Response) -> Result<()> {
+    if r.kind == "error" {
+        return Err(answered(op, &r.message));
+    }
+    anyhow::ensure!(r.kind == "ok", "guest {op} answered {}", r.kind);
+    Ok(())
+}
+async fn sync_answer(mut conn: Box<dyn Conn>) -> Result<()> {
+    let answer: Response = read_frame(&mut conn).await?;
+    check_fs_answer("fs_sync", &answer)?;
+    let mut byte = [0];
+    anyhow::ensure!(
+        conn.read(&mut byte).await? == 0,
+        "fs_sync omitted terminal EOF"
+    );
+    Ok(())
+}
+/// A connection-scoped freeze; cancellation or Drop closes the connection.
+pub struct Frozen {
+    conn: Box<dyn Conn>,
+    pub filesystems: Vec<String>,
+}
+#[derive(Debug, thiserror::Error)]
+#[error("freeze_expired")]
+pub struct FreezeExpired;
+
+impl Frozen {
+    pub async fn thaw(mut self) -> Result<Response> {
+        tokio::time::timeout(CONTROL_TIMEOUT, async {
+            // The deadline terminal can already be buffered when the peer closes.
+            // Even if the write sees EPIPE, read it before classifying the freeze.
+            let sent = write_request(
+                &mut self.conn,
+                &Request {
+                    op: "fs_thaw".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+            let answer: Response = match read_frame(&mut self.conn).await {
+                Ok(answer) => answer,
+                Err(error) => {
+                    sent?;
+                    return Err(error);
+                }
+            };
+            if answer.thawed_by == "deadline" {
+                return Err(FreezeExpired.into());
+            }
+            sent?;
+            check_fs_answer("fs_thaw", &answer)?;
+            anyhow::ensure!(
+                answer.thawed_by == "host",
+                "fs_thaw omitted host acknowledgment"
+            );
+            Ok(answer)
+        })
+        .await
+        .context("guest fs_thaw timeout")?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +603,38 @@ mod tests {
     }
 
     const OK: &str = "OK 7421\n";
+
+    #[tokio::test]
+    async fn filesystem_controls_preserve_the_op_on_the_real_wire() {
+        for answer in [Response::new("ok"), Response::error("unknown op fs_sync")] {
+            let (_dir, path) = socket();
+            let server = serve(&path, OK, vec![frame(&answer)]);
+            let result = Vsock.fs_sync(&path).await;
+            assert_eq!(server.await.unwrap().op, "fs_sync");
+            if answer.kind == "ok" {
+                result.unwrap();
+            } else {
+                assert!(result.unwrap_err().is::<UnknownOp>());
+            }
+        }
+        let (_dir, path) = socket();
+        let server = serve(
+            &path,
+            OK,
+            vec![frame(&Response {
+                frozen: vec!["/".into()],
+                ..Response::new("ok")
+            })],
+        );
+        let frozen = Vsock
+            .fs_freeze(&path, Duration::from_secs(21))
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        assert_eq!(request.op, "fs_freeze");
+        assert_eq!(request.timeout_ms, 21_000);
+        assert_eq!(frozen.filesystems, ["/"]);
+    }
 
     #[tokio::test]
     async fn dial_does_the_vsock_handshake() {
@@ -1055,5 +1199,100 @@ mod tests {
             .unwrap();
         assert!(err.is::<FileTransferBusy>());
         server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod filesystem_tests {
+    use super::*;
+    #[tokio::test]
+    async fn sync_requires_eof_and_preserves_old_init_unknown_op() {
+        for kind in ["ok", "unknown", "error"] {
+            let (client, mut server) = tokio::io::duplex(4096);
+            let answer = match kind {
+                "ok" => Response::new("ok"),
+                "unknown" => Response::error("unknown op fs_sync"),
+                _ => Response::error("disk failed"),
+            };
+            server
+                .write_all(&guest::encode_frame(&answer).unwrap())
+                .await
+                .unwrap();
+            drop(server);
+            let result = sync_answer(Box::new(client)).await;
+            if kind == "ok" {
+                result.unwrap();
+            } else if kind == "unknown" {
+                assert!(result.unwrap_err().is::<UnknownOp>());
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        let (client, mut server) = tokio::io::duplex(4096);
+        server
+            .write_all(&guest::encode_frame(&Response::new("ok")).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), sync_answer(Box::new(client)))
+                .await
+                .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn deadline_terminal_survives_a_broken_pipe_on_thaw() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        server
+            .write_all(
+                &guest::encode_frame(&Response {
+                    thawed_by: "deadline".into(),
+                    ..Response::error("freeze expired")
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        drop(server); // The next write is EPIPE, but the terminal is buffered.
+        let error = Frozen {
+            conn: Box::new(client),
+            filesystems: vec![],
+        }
+        .thaw()
+        .await
+        .unwrap_err();
+        assert!(error.is::<FreezeExpired>(), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn thaw_deadline_is_an_error_and_drop_closes() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let host = tokio::spawn(async move {
+            let request: Request = read_frame(&mut server).await.unwrap();
+            assert_eq!(request.op, "fs_thaw");
+            server
+                .write_all(
+                    &guest::encode_frame(&Response {
+                        thawed_by: "deadline".into(),
+                        ..Response::error("freeze expired")
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        assert!(Frozen {
+            conn: Box::new(client),
+            filesystems: vec!["/".into()]
+        }
+        .thaw()
+        .await
+        .is_err());
+        host.await.unwrap();
+        let (client, mut server) = tokio::io::duplex(4096);
+        drop(Frozen {
+            conn: Box::new(client),
+            filesystems: vec![],
+        });
+        assert_eq!(server.read(&mut [0]).await.unwrap(), 0);
     }
 }
