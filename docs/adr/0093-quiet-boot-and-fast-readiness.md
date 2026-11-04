@@ -1,4 +1,4 @@
-# ADR 0092: A quiet kernel console and a readiness wait that polls every 5 ms
+# ADR 0093: A quiet kernel console and a readiness wait that polls every 5 ms
 
 Date: 2026-11-04 · Status: accepted
 

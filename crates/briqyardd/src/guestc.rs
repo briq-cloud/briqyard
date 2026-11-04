@@ -402,7 +402,7 @@ pub async fn shutdown(uds: &Path, grace: Duration) -> Result<()> {
 /// How long `wait_ready` sleeps after a refused or unanswered ping, `elapsed` into the wait.
 /// The init is listening some 500 ms after the machine starts and a ping that finds nobody
 /// listening costs one local connect, so the first seconds are polled every few milliseconds:
-/// readiness is noticed within that, not within a hundred (ADR 0092). A guest that stays
+/// readiness is noticed within that, not within a hundred (ADR 0093). A guest that stays
 /// silent past them is slow or wedged, and costs the VMM a connect every 100 ms.
 fn poll_interval(elapsed: Duration) -> Duration {
     if elapsed < FAST_POLL_FOR {
