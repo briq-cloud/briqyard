@@ -589,6 +589,8 @@ registry backups, operator archives and local backing/reference scopes are exclu
   | `briqyard_host_condition` | `condition` | 1 while true |
   | `briqyard_events_total` | `type`, `reason` | events since the daemon started, folded repeats included |
   | `briqyard_{boots,resumes,suspends,execs,starts_failed,backups}_total`, `briqyard_namespaces`, `briqyard_endpoints` | | counts (`execs`: exec sessions included) |
+  | `briqyard_cgroup_leaves`, `_idle` | | VMM cgroup leaves on the host, and those no running VMM explains (0 when nothing leaks; ADR 0098) |
+  | `briqyard_cgroup_leaves_{retired,retire_failed}_total` | | leaves removed after their VMM went, and removals the kernel refused (retried 15 s later) |
   | `process_resident_memory_bytes` | | the daemon's own resident memory |
   | `briqyard_machine_cpu_seconds_total` | `machine`, `namespace`, `name`, `role` (a gateway's) | its cgroup's CPU time |
   | `briqyard_machine_memory_bytes`, `_memory_limit_bytes` | same | its cgroup's memory, its size |

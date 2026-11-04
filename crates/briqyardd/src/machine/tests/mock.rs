@@ -500,6 +500,9 @@ impl fc::Vmm for Mock {
             fc::LaunchSettlement::Settled
         }
     }
+    async fn cgroup_leaves(&self) -> Result<Vec<String>> {
+        Ok(self.cgroups.lock().unwrap().keys().cloned().collect())
+    }
     fn retire_cgroup(&self, id: &str, _jailed: bool) -> Result<()> {
         self.record(format!("retire-cgroup {id}"));
         if self.refuse_retirement.load(Relaxed)

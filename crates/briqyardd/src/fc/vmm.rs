@@ -169,6 +169,12 @@ pub trait Vmm: Send + Sync {
         Err(anyhow!("VMM factory does not implement checked retirement"))
     }
 
+    /// The machines that have a VMM cgroup leaf now, by original id; one read of the parent
+    /// directory. An error when it cannot tell.
+    async fn cgroup_leaves(&self) -> Result<Vec<String>> {
+        Err(anyhow!("cgroup leaf listing unsupported"))
+    }
+
     fn host_memory_checks(&self) -> bool {
         false
     }
@@ -462,6 +468,16 @@ impl Vmm for Firecracker {
             return Err(anyhow!("jailed cgroup retirement requires Linux"));
         }
         Ok(())
+    }
+    async fn cgroup_leaves(&self) -> Result<Vec<String>> {
+        #[cfg(target_os = "linux")]
+        {
+            Ok(super::retirement::leaves().context("list VMM cgroup leaves")?)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(anyhow!("cgroup leaf listing requires Linux"))
+        }
     }
     fn host_memory_checks(&self) -> bool {
         true

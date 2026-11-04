@@ -250,7 +250,18 @@ impl Manager {
                 "Backups sent to the store.",
                 st.backups.load(Relaxed),
             ),
+            (
+                "briqyard_cgroup_leaves_retired_total",
+                "VMM cgroup leaves removed after their VMM went.",
+                st.leaves_retired.load(Relaxed),
+            ),
+            (
+                "briqyard_cgroup_leaves_retire_failed_total",
+                "VMM cgroup leaves a removal was refused for.",
+                st.leaves_retire_failed.load(Relaxed),
+            ),
         ];
+        host.cgroup_leaves = *st.leaves.lock().unwrap();
         metrics::render(&host, &machines)
     }
 
