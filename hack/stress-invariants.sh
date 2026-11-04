@@ -91,6 +91,9 @@ stray=$(comm -23 <(echo "$leaves") <(echo "$ids"))
 if [ "$pending" = 0 ]; then
   nolive=$(comm -23 <(echo "$fcs") <(echo "$leaves"))
   [ -z "$nolive" ] && ok "every live firecracker has its cgroup leaf" || fail "firecrackers without a cgroup leaf: $(echo "$nolive" | tr '\n' ' ')"
+  # A known machine that is not running (stopped, suspended, in error) keeps no leaf.
+  lingering=$(comm -23 <(echo "$leaves") <(echo "$fcs"))
+  [ -z "$lingering" ] && ok "no cgroup leaf of a machine that is not running" || fail "cgroup leaves of machines without a Firecracker: $(echo "$lingering" | tr '\n' ' ')"
 fi
 
 # --- namespaces: a bridge per namespace the daemon knows, none else ---

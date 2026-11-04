@@ -122,7 +122,10 @@ kill_when() {
     if "$pred"; then crash_daemon; hit=0; break; fi
     sleep 0.05
   done
-  wait "$bg" 2>/dev/null || true
+  local rc=0
+  wait "$bg" 2>/dev/null || rc=$?
+  # KILL_NEEDS_FAILURE=1: the kill counts only when the client then failed, work was cut and not finished.
+  [ "${KILL_NEEDS_FAILURE:-0}" = 1 ] && [ "$rc" = 0 ] && hit=1
   return "$hit"
 }
 fork_in_motion() { case "$(settled_state "$T-c" fk)" in creating|starting) true;; *) false;; esac; }
@@ -228,6 +231,13 @@ nft_fwd=$(sudo nft list chain inet briqyard forward)
 check "IPv6 from a bridge: the forward chain drops it (policy drop and the nfproto ipv6 rule)" 'grep -qF "policy drop" <<<"$nft_fwd" && grep -qF "meta nfproto ipv6 iifname \"by*\" drop" <<<"$nft_fwd"'
 out=$(on "$A2" "wget -qO- -T 4 'http://[2606:4700:4700::1111]/' 2>&1; echo rc=\$?" || true)
 echo "   an IPv6 address from the guest: $(echo "$out" | head -c 120) (the runner has no IPv6 route: this proves a guest cannot reach one, the rule above proves why)"
+br=$(ip -o -4 addr show | awk -v g="$gw1" '{ split($4, a, "/"); if (a[1] == g) { print $2; exit } }')
+hostll=$(ip -6 -o addr show dev "$br" scope link | awk '{ split($4, a, "/"); print a[1]; exit }')
+nft_in=$(sudo nft list chain inet briqyard input)
+out=$(on "$A2" "ip -6 addr show dev $dev | grep -c 'inet6 fe80'; ping -6 -c2 -W2 -I $dev $hostll 2>&1 || ping6 -c2 -W2 -I $dev $hostll 2>&1; echo rc=\$?" || true)
+echo "   link-local ping from the guest to the bridge $br ($hostll): $(echo "$out" | tr '\n' '|' | head -c 220)"
+check "IPv6 on the input path: the chain accepts no ICMPv6 or IPv6 beyond what it names" '[ -n "$hostll" ] && ! grep -qF icmpv6 <<<"$nft_in" && grep -qF "policy drop" <<<"$nft_in"'
+check "IPv6 on the input path: a link-local ping to the host's bridge address gets no answer (100% loss)" 'grep -qF "100% packet loss" <<<"$out"'
 check "IPv6 from the guest: nothing is read" '! grep -qF rc=0 <<<"$out"'
 out=$(get "$A2" http://169.254.169.254/latest/meta-data/)
 check "the metadata address: times out" 'grep -qF "timed out" <<<"$out" && grep -qF "rc=1" <<<"$out"'
@@ -444,10 +454,10 @@ touch "$LOGS/b0.mark"; sleep 1
 backup_streaming() { sudo find "$bkdir" -name '*.zfs' -newer "$LOGS/b0.mark" 2>/dev/null | grep -q . && ! sudo find "$bkdir" -name '*.json' -newer "$LOGS/b0.mark" 2>/dev/null | grep -q .; }
 caught=0
 for attempt in 1 2 3; do
-  if kill_when backup_streaming briqyard machine backup "$BK"; then caught=1; break; fi
+  if KILL_NEEDS_FAILURE=1 kill_when backup_streaming briqyard machine backup "$BK"; then caught=1; break; fi
   touch "$LOGS/b0.mark"; sleep 1
 done
-check "a backup was killed while its stream was being written (attempt $attempt)" '[ "$caught" = 1 ]'
+check "a backup was cut: killed while its stream was being written, its client failed (attempt $attempt)" '[ "$caught" = 1 ]'
 check "mid-backup: the source runs on, its counter whole" 'recovered "$BK"'
 listed=$(briqyard machine backups "$BK" | jq -r '.[].id' | sort -u)
 echo "   listed after the crash: $(echo $listed); records in the store: $(echo $(store_ids json)); streams: $(echo $(store_ids zfs))"
@@ -461,7 +471,7 @@ echo "   streams with no record: ${orphans:-none}"
 # interrupted backup's one id, never listed. When the daemon cleans it, this prints FIXED and the
 # check below becomes `[ -z "$orphans" ]`.
 check "mid-backup: an interrupted backup leaves at most its own stream behind, unlisted (known defect: not removed)" '[ "$(echo $orphans | wc -w)" -le 1 ] && ! grep -qxF "$orphans" <<<"$listed"'
-[ -z "$orphans" ] && echo "   FIXED: no orphan stream left; tighten the check above"
+[ "$caught" = 1 ] && [ -z "$orphans" ] && echo "   FIXED: a kill cut a backup (its client failed) and no orphan stream is left; tighten the check above"
 [ -z "$orphans" ] || echo "   KNOWN DEFECT: stream $orphans has no record in the store"
 for b in $listed; do
   RB=$(briqyard machine restore --from "$BK" --backup "$b" --namespace "$T-c" --name "bk-r-${b//[^0-9]/}" | jq -r .id)
