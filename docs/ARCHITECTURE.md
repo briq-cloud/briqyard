@@ -396,8 +396,9 @@ A host can serve **runtime classes** (ADR 0088): named kernels in its configurat
 ### Versions and upgrades
 
 Every binary says its version, the release and the commit (`0.1.0+fdad892eeefa`, ADR 0027):
-`/v1/status`, the heartbeat, `host ls`; the init in its `pong`, kept as the machine's
-`init_version`. The wire between versions is additive: a field added has a default, nothing is
+`/v1/status`, the heartbeat, `host ls`; the init says its guest version in its `pong` (ADR
+0101: a release at or after every gate the daemon checks, fixed so the init's bytes do not follow the release), kept as
+the machine's `init_version`. The wire between versions is additive: a field added has a default, nothing is
 renamed or removed, unknown fields and values are ignored. The daemon's stop (SIGTERM) suspends
 every running machine, and its next start boots each one again; SIGUSR2 hands them over instead,
 once every transition under way has ended:

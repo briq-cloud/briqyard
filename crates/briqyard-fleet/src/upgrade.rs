@@ -136,10 +136,10 @@ async fn run(
     let version = bootstrap::installed_version(st, &ip)
         .await
         .map_err(|e| format!("{e:#}"))?;
-    if api::version::newer(&version, api::VERSION) {
+    if api::version::newer(&version, briqyard_version::VERSION) {
         return Err(format!(
             "the host now runs {version}, newer than this fleet ({}): upgrade the fleet first",
-            api::VERSION
+            briqyard_version::VERSION
         ));
     }
     let before = was.started.map(|s| s.at);

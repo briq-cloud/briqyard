@@ -38,7 +38,7 @@ pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, m
             used,
             machines: total,
             namespaces: mgr.namespaces().into_iter().map(|t| t.id).collect(),
-            version: api::VERSION.into(),
+            version: briqyard_version::VERSION.into(),
             disk_free_mb: mgr.disk_free_mb().await,
             tls_fingerprint: tls_fingerprint.clone(),
             conditions: mgr.conditions(),

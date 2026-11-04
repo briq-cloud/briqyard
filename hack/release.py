@@ -17,10 +17,13 @@ def run(*args):
 
 def workspace():
     manifest = tomllib.loads(Path("Cargo.toml").read_text())
-    names = {
-        tomllib.loads(Path(member, "Cargo.toml").read_text())["package"]["name"]
-        for member in manifest["workspace"]["members"]
-    }
+    names = set()
+    for member in manifest["workspace"]["members"]:
+        package = tomllib.loads(Path(member, "Cargo.toml").read_text())["package"]
+        # The init's crates keep their own version, so the init's bytes do not follow the
+        # release (ADR 0101).
+        if package["version"] == {"workspace": True}:
+            names.add(package["name"])
     return manifest["workspace"]["package"]["version"], names
 
 

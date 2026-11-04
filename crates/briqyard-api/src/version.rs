@@ -1,8 +1,18 @@
-//! What a binary says it is (ADR 0027): the workspace's version and the commit it was built
-//! from, `0.1.0+fdad892eeefa`. Every binary of one build says the same.
+//! Versions and their order (ADR 0027). A host binary says its release and commit
+//! (`briqyard_version::VERSION`, `0.1.0+fdad892eeefa`). The guest init says [`GUEST_VERSION`],
+//! which is not the release: the init's bytes do not follow the release or the commit (ADR 0101).
 
-/// This build's version.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("BRIQYARD_COMMIT"));
+/// The version the guest init reports in its `pong` and its exit report: a release at or
+/// after every gate the daemon checks (today [`SESSIONS`]), not the release the init was
+/// built in. Set it to the workspace release in the change that adds a version gate; leave it
+/// otherwise, so a release that does not touch the init keeps the init's digest, and the seeds
+/// bound to it. A forgotten bump fails closed: a gate above `GUEST_VERSION` makes the daemon
+/// refuse the new init (409, naming it), never accept an old one.
+///
+/// A new daemon gate should be a capability flag in the `pong` (as `file_stream_v1` and
+/// `exec_stream_v1` are), which needs no version. A version gate, if ever, gets an assert
+/// beside the one on [`SESSIONS`] below, that `GUEST_VERSION` is not before it.
+pub const GUEST_VERSION: &str = "0.1.20";
 
 /// The release part of a version (`0.1.0` of `0.1.0+fdad892eeefa`), as numbers; None when it
 /// is not `major.minor.patch`.
@@ -39,11 +49,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn this_build() {
-        let (rel, commit) = VERSION.split_once('+').unwrap();
-        assert_eq!(rel, env!("CARGO_PKG_VERSION"));
-        assert!(!commit.is_empty());
-        assert!(release(VERSION).is_some());
+    fn the_guest_version_is_a_release_this_build_has_reached() {
+        let build = briqyard_version::VERSION;
+        assert!(release(GUEST_VERSION).is_some());
+        assert!(
+            !newer(GUEST_VERSION, build),
+            "{GUEST_VERSION} is ahead of {build}"
+        );
     }
 
     #[test]
@@ -53,7 +65,7 @@ mod tests {
         assert!(!before("0.2.0", SESSIONS));
         assert!(before("", SESSIONS), "no version: older than the report");
         assert!(before("garbage", SESSIONS));
-        assert!(!before(VERSION, SESSIONS), "this build runs sessions");
+        assert!(!before(GUEST_VERSION, SESSIONS), "this init runs sessions");
     }
 
     #[test]

@@ -31,7 +31,7 @@ const HANDED_OVER: i32 = 75;
 #[derive(Parser)]
 #[command(
     name = "briqyardd",
-    version = briqyard_api::VERSION,
+    version = briqyard_version::VERSION,
     about = "briqyard host daemon: machines in Firecracker microVMs"
 )]
 struct Args {
@@ -252,7 +252,7 @@ async fn run(args: Args) -> Result<()> {
     tracing::info!(
         addr = cfg.listen,
         tls_fingerprint = fingerprint,
-        version = briqyard_api::VERSION,
+        version = briqyard_version::VERSION,
         host_id = mgr.host_id(),
         pool = cfg.storage.pool,
         kvm_nested = ?briqyard_api::kvm::nested(std::path::Path::new(briqyard_api::kvm::SYS_MODULE)),
