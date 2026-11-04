@@ -335,7 +335,7 @@ impl Leaf {
             (value("oom")?, value("oom_kill")?, value("oom_group_kill")?);
         // These are final local totals, not fabricated per-incarnation deltas. The exit
         // watcher separately records a delta only when it captured a valid baseline.
-        tracing::info!(
+        tracing::debug!(
             machine = id,
             oom_total = oom,
             oom_kill_total = killed,

@@ -387,7 +387,9 @@ impl Vmm for Firecracker {
                 .final_cgroup_use(&id, true)?
                 .reading()
                 .context("orphan leaf disappeared before final counters")?;
-            tracing::info!(
+            // Debug: a host can hold thousands of orphans, and one line each would pass
+            // journald's rate limit and drop the lines that matter. The startup line counts them.
+            tracing::debug!(
                 machine = id,
                 cpu_usec = usage.cpu_usec,
                 "orphan final VMM counters"

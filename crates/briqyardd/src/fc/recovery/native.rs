@@ -64,9 +64,9 @@ impl Barrier {
         jailer: &Path,
         vmm: &str,
     ) -> Result<Recovered> {
-        if machines.len() > 4096 {
+        if machines.len() > MAX_LEAVES {
             return Err(anyhow!(
-                "{} recorded machines exceed the recovery bound of 4096",
+                "{} recorded machines exceed the recovery bound of {MAX_LEAVES}",
                 machines.len()
             ));
         }
@@ -277,9 +277,16 @@ impl Barrier {
                     if leaf.identity()? != identity {
                         return Err(anyhow!("VMM cgroup of {id} was replaced during recovery"));
                     }
-                    leaf.check(&id).with_context(|| {
-                        format!("VMM cgroup of {id} gained a member during recovery")
+                    let members = leaf.inventory(&id).with_context(|| {
+                        format!(
+                            "VMM cgroup of {id} is no longer a settled leaf (shape, populated or frozen)"
+                        )
                     })?;
+                    if !members.is_empty() {
+                        return Err(anyhow!(
+                            "VMM cgroup of {id} gained a member during recovery"
+                        ));
+                    }
                 }
                 Held::Absent => {
                     if super::super::retirement::Leaf::capture(&id)?.is_some() {
@@ -302,9 +309,8 @@ impl Barrier {
     }
 }
 
-/// Room for the leaves a host accumulates (every machine since the last cleanup) and the
-/// parent's own control files. Past it the listing is refused, never truncated.
-const MAX_LEAVES: usize = 65_536;
+/// `MAX_LEAVES` plus the parent's own control files. Past it the listing is refused, never
+/// truncated.
 const PARENT_ENTRIES: usize = MAX_LEAVES + 1024;
 
 /// What the barrier keeps of a machine's cgroup between its first look and its last.
