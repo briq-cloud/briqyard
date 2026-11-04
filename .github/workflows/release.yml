@@ -66,8 +66,15 @@ jobs:
   nested-kernel:
     needs: notes
     uses: ./.github/workflows/nested-kernel.yml
+  # The upgrade from the previous release to these candidate artifacts, on a host with state and
+  # history (ADR 0105). A draft release is not created without it.
+  upgrade:
+    needs: build
+    uses: ./.github/workflows/native-upgrade.yml
+    with:
+      candidate: true
   publish:
-    needs: [build, nested-kernel]
+    needs: [build, nested-kernel, upgrade]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

@@ -1,0 +1,148 @@
+name: native-upgrade
+# The upgrade a production host goes through (ADR 0105): the previous release's own artifacts,
+# a host with state and history, an in-place upgrade to this head through the fleet. Not on
+# every PR: on version PRs (`chore/v*`, or a changed workspace version), on a PR that changes
+# the test itself, on dispatch, and from the release workflow before a draft is created.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      previous:
+        description: Release tag installed first (empty uses the latest published release that is not the head)
+        required: false
+        type: string
+      ref:
+        description: Source ref to build and upgrade to (empty uses the workflow ref)
+        required: false
+        type: string
+      runner:
+        description: Runner label (ubuntu-24.04 or ubuntu-26.04)
+        required: false
+        default: ubuntu-24.04
+        type: string
+  workflow_call:
+    inputs:
+      previous:
+        required: false
+        default: ''
+        type: string
+      candidate:
+        description: Upgrade to the dist-x86_64 artifact this run built, not to a build from source
+        required: false
+        default: false
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: native-upgrade-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+jobs:
+  upgrade:
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      # Keep the harness from the workflow revision when dispatch tests another source ref.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: .native-harness
+          persist-credentials: false
+      - name: Decide whether this change needs the upgrade test
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          run=true
+          if [ "$EVENT" = pull_request ]; then
+            run=false
+            case "$HEAD_REF" in chore/v*) run=true ;; esac
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            changed=$(git diff --name-only "$BASE_SHA" HEAD)
+            echo "$changed" | grep -qxE '\.github/workflows/native-upgrade\.yml|hack/native-ci-upgrade\.sh|docs/adr/0105-.*' && run=true
+            # The workspace version, as a version PR changes it.
+            ver() { python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])'; }
+            [ "$(git show "$BASE_SHA:Cargo.toml" | ver)" != "$(ver < Cargo.toml)" ] && run=true
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "native-upgrade runs: $run" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Record tested identity and host
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          git -C "$GITHUB_WORKSPACE" rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          { uname -a; lsb_release -ds; ls -l /dev/kvm; free -m; df -h /; modinfo zfs 2>/dev/null | grep -m1 '^version' || echo 'zfs module: not loaded or not installed yet (the bootstrap installs it)'; } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Pick the previous release
+        if: steps.gate.outputs.run == 'true'
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIVEN: ${{ inputs.previous }}
+        run: |
+          if [ -n "$GIVEN" ]; then
+            prev=$GIVEN
+          else
+            head_sha=$(git rev-parse HEAD)
+            # Published releases, newest version first; the one the head is, if it is one, is skipped.
+            for tag in $(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft | not) | .tag_name' | grep -E '^v[0-9]+[.][0-9]+[.][0-9]+$' | sort -rV); do
+              sha=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$tag^{}" | cut -f1)
+              [ "$sha" = "$head_sha" ] && continue
+              prev=$tag; break
+            done
+          fi
+          [ -n "${prev:-}" ] || { echo 'no previous release found' >&2; exit 1; }
+          echo "prev=$prev" >> "$GITHUB_OUTPUT"
+          echo "Previous release: $prev" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Download the candidate's artifacts
+        if: steps.gate.outputs.run == 'true' && inputs.candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist-x86_64
+          path: native-release
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: steps.gate.outputs.run == 'true' && !inputs.candidate
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: steps.gate.outputs.run == 'true' && !inputs.candidate
+      - name: Build the head
+        if: steps.gate.outputs.run == 'true' && !inputs.candidate
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools pkg-config libssl-dev
+          cargo build --release --locked -p briqyardd -p briqyard -p briqyard-fleet
+          cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl
+          # A release's names, its checked bundle and its sums, as hack/native-ci.sh makes them.
+          R=native-release; mkdir -p "$R"
+          for b in briqyardd briqyard briqyard-fleet; do cp "target/release/$b" "$R/$b-linux-x86_64"; done
+          cp target/x86_64-unknown-linux-musl/release/briqyard-init "$R/briqyard-init-linux-x86_64"
+          B=$(sed -n 's/^B=//p' .native-harness/hack/native-ci.sh)
+          BSHA=$(sed -n 's/^BSHA=//p' .native-harness/hack/native-ci.sh)
+          curl -fsSL "https://github.com/briq-cloud/briqyard/releases/download/v0.1.17/$B" -o "$R/$B"
+          echo "$BSHA  $R/$B" | sha256sum -c -
+          (cd "$R" && sha256sum -- briq*-linux-* firecracker-checked-linux-*.tar.gz > SHA256SUMS-x86_64)
+      - name: Install what the host needs
+        if: steps.gate.outputs.run == 'true'
+        run: sudo apt-get install -y jq openssl postgresql-client openssh-server python3-yaml bc
+      - name: Upgrade ${{ steps.previous.outputs.prev }} to the head
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          mkdir -p native-logs
+          set -o pipefail
+          bash .native-harness/hack/native-ci-upgrade.sh "${{ steps.previous.outputs.prev }}" native-release 2>&1 | tee native-logs/upgrade.log
+      - name: Result
+        if: always() && steps.gate.outputs.run == 'true'
+        run: |
+          echo '### upgrade' >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^passed |^ENDED EARLY|^NOT A FULL RUN|^result:|^   (API|endpoint|host upgrade|init digest)' native-logs/upgrade.log >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && steps.gate.outputs.run == 'true'
+        with:
+          name: native-upgrade-log
+          path: native-logs/upgrade.log
+          if-no-files-found: ignore
