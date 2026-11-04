@@ -167,3 +167,17 @@ async fn startup_orphans_wait_for_collection_and_backlog_stays_visible() {
     h.m.sweep_leaves().await;
     assert_eq!(h.m.inner.stats.leaves.lock().unwrap().unwrap().idle, 0);
 }
+
+#[tokio::test]
+async fn orphan_counter_reads_are_deferred_but_still_required_before_removal() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    leaf(&h, "m_orphan", 1);
+    h.host.refuse_final_meter.store(true, Relaxed);
+    h.m.sweep_orphans().await.unwrap();
+    h.m.sweep_leaves().await;
+    assert!(has_leaf(&h, "m_orphan"));
+    assert_eq!(h.m.inner.stats.leaves.lock().unwrap().unwrap().idle, 1);
+    h.host.refuse_final_meter.store(false, Relaxed);
+    h.m.sweep_leaves().await;
+    assert!(!has_leaf(&h, "m_orphan"));
+}

@@ -138,6 +138,11 @@ async fn run(args: Args) -> Result<()> {
     }
     // Fixed-domain ownership is acquired before host helpers, not after recovery begins.
     let startup = briqyardd::fc::Startup::acquire().await?;
+    tracing::info!(
+        phase = "service settlement",
+        elapsed_ms = began.elapsed().as_millis() as u64,
+        "startup phase"
+    );
     let unresolved = startup.unresolved();
     let recovery_retry = startup.retry()?;
     for p in [&cfg.firecracker, &cfg.kernel, &cfg.init] {

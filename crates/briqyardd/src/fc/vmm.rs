@@ -154,6 +154,8 @@ pub trait Vmm: Send + Sync {
         Ok(false)
     }
 
+    fn log_leaf_read_times(&self, _phase: &'static str) {}
+
     /// Distinguishes authoritative no-leaf from unavailable data on an existing leaf.
     fn final_cgroup_use(&self, _id: &str, _jailed: bool) -> Result<FinalCgroupUse> {
         Err(anyhow!("checked final VMM counters unsupported"))
@@ -396,6 +398,7 @@ impl Vmm for Firecracker {
             elapsed_ms = began.elapsed().as_millis() as u64,
             "recovery inventory checked"
         );
+        self.log_leaf_read_times("barrier");
         self.launches.initialize(recovered)
     }
     fn open_recovery(&self) -> Result<()> {
@@ -423,17 +426,8 @@ impl Vmm for Firecracker {
             .filter(|id| !known.contains(id))
         {
             self.recover_stopped(&id).await?;
-            let usage = self
-                .final_cgroup_use(&id, true)?
-                .reading()
-                .context("orphan leaf disappeared before final counters")?;
-            // Debug: a host can hold thousands of orphans, and one line each would pass
-            // journald's rate limit and drop the lines that matter. The startup line counts them.
-            tracing::debug!(
-                machine = id,
-                cpu_usec = usage.cpu_usec,
-                "orphan final VMM counters"
-            );
+            // Death proof is safety; orphan counters have no surviving usage identity.
+            // Read them in the collector, before removal, rather than before listening.
             self.orphans.lock().unwrap().insert(id);
             prepared += 1;
         }
@@ -442,7 +436,15 @@ impl Vmm for Firecracker {
             elapsed_ms = began.elapsed().as_millis() as u64,
             "orphan leaves queued for retirement"
         );
+        self.log_leaf_read_times("orphan settlement");
         Ok(0)
+    }
+
+    fn log_leaf_read_times(&self, phase: &'static str) {
+        #[cfg(any(target_os = "linux", test))]
+        super::retirement::log_read_times(phase);
+        #[cfg(not(any(target_os = "linux", test)))]
+        let _ = phase;
     }
 
     fn orphan_leaves(&self) -> Vec<String> {
@@ -454,6 +456,7 @@ impl Vmm for Firecracker {
         if !self.orphans.lock().unwrap().contains(id) {
             return Ok(false);
         }
+        self.final_cgroup_use(id, true)?;
         self.retire_cgroup(id, true)?;
         self.orphans.lock().unwrap().remove(id);
         self.forget_machine(id);

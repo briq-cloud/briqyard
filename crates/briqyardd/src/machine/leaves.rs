@@ -181,6 +181,7 @@ impl Manager {
             idle: idle_left as usize,
         });
         if retired > 0 || failed > 0 {
+            self.inner.vmm.log_leaf_read_times("collector");
             tracing::info!(
                 retired,
                 failed,

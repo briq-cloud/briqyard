@@ -485,7 +485,6 @@ impl fc::Vmm for Mock {
         );
         for id in &orphaned {
             self.recover_stopped(id).await?;
-            self.final_cgroup_use(id, false)?;
             self.orphans.lock().unwrap().insert(id.clone());
         }
         Ok(orphaned.len())
@@ -497,6 +496,7 @@ impl fc::Vmm for Mock {
         if !self.orphans.lock().unwrap().contains(id) {
             return Ok(false);
         }
+        self.final_cgroup_use(id, false)?;
         self.retire_cgroup(id, false)?;
         self.orphans.lock().unwrap().remove(id);
         Ok(true)

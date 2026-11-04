@@ -159,6 +159,7 @@ impl Manager {
         if m.recovery_fault().is_some() {
             return Ok(m);
         }
+        let phase = std::time::Instant::now();
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
             .inner
@@ -173,6 +174,11 @@ impl Manager {
             m.refresh_dns(t);
         }
         m.apply_rules().await?;
+        tracing::info!(
+            phase = "network recovery",
+            elapsed_ms = phase.elapsed().as_millis() as u64,
+            "startup phase"
+        );
         let (adopted, stopped, gone, swept) = m.recover_and_sweep_at_start().await?;
         let machines = m.inner.machines.lock().unwrap().len();
         *m.inner.started.lock().unwrap() = api::DaemonStart {
@@ -214,7 +220,13 @@ impl Manager {
 
     // Shared by new and the fake-host startup tests; keep all durable backing recovery here.
     pub(super) async fn load_backing_at_start(&self) -> Result<()> {
+        let phase = std::time::Instant::now();
         self.load()?;
+        tracing::info!(
+            phase = "load",
+            elapsed_ms = phase.elapsed().as_millis() as u64,
+            "startup phase"
+        );
         let recovered: Vec<_> = self
             .inner
             .machines
@@ -235,11 +247,17 @@ impl Manager {
         if self.recovery_fault().is_some() {
             return Ok(());
         }
+        let phase = std::time::Instant::now();
         self.refresh_memory_host().await;
         self.recover_assigned_update_backing().await?;
         self.prepare_assigned_reboot_exits().await?;
         self.verify_assigned_run_backing().await?;
         self.verify_clone_artifacts();
+        tracing::info!(
+            phase = "backing recovery",
+            elapsed_ms = phase.elapsed().as_millis() as u64,
+            "startup phase"
+        );
         Ok(())
     }
 
@@ -249,7 +267,16 @@ impl Manager {
             return Ok((0, 0, 0, 0));
         }
         let recovered = async {
+            let phase = std::time::Instant::now();
             let (adopted, stopped, gone) = self.recover().await?;
+            tracing::info!(
+                phase = "adoption",
+                adopted,
+                stopped,
+                gone,
+                elapsed_ms = phase.elapsed().as_millis() as u64,
+                "startup phase"
+            );
             let swept = self.sweep_orphans().await?;
             self.inner.vmm.open_recovery()?;
             Ok::<_, anyhow::Error>((adopted, stopped, gone, swept))
@@ -619,6 +646,7 @@ impl Manager {
         }
         let known_ids: Vec<_> = known.iter().cloned().collect();
         let mut swept = self.inner.vmm.prepare_orphans(&known_ids).await?;
+        let phase = std::time::Instant::now();
         if let Ok(mut rd) = tokio::fs::read_dir(self.inner.cfg.run_dir()).await {
             while let Ok(Some(e)) = rd.next_entry().await {
                 let name = e.file_name().to_string_lossy().into_owned();
@@ -672,6 +700,11 @@ impl Manager {
         // A restore cut short goes on; a snapshot or a retired disk nothing needs goes: a
         // fork's that outlived the fork, one taken when the daemon died before its record.
         swept += self.tidy_at_start().await;
+        tracing::info!(
+            phase = "orphan artifacts",
+            elapsed_ms = phase.elapsed().as_millis() as u64,
+            "startup phase"
+        );
         if swept > 0 {
             tracing::info!(swept, "orphans swept at start");
         }
