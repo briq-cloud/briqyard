@@ -405,11 +405,12 @@ impl Manager {
             rec.image = req.image.clone();
         }
         self.served_class(&rec.runtime_class)?;
-        if !rec.runtime_class.is_empty() && req.fork.as_ref().is_some_and(|f| f.snapshot.is_some())
-        {
+        if let (true, Some(class)) = (
+            req.fork.as_ref().is_some_and(|f| f.snapshot.is_some()),
+            self.memory_refusal(&rec),
+        ) {
             return Err(MError::Refused(format!(
-                "a memory fork needs a memory snapshot, and runtime class {} takes none",
-                rec.runtime_class
+                "a memory fork needs a memory snapshot, and {class} takes none"
             )));
         }
         if req.sandbox_seed.is_some() {

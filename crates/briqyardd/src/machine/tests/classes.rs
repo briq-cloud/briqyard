@@ -238,6 +238,23 @@ async fn a_memory_fork_of_a_nested_source_and_a_warm_slot_in_a_class_are_refused
     assert!(err.to_string().contains("default runtime class"), "{err}");
 }
 
+/// Only `nested` takes no memory snapshot (ADR 0088): the one rule a memory snapshot, a
+/// suspend and a memory fork all ask, naming the class.
+#[tokio::test]
+async fn only_a_nested_class_refuses_memory() {
+    let h = classes_harness().await;
+    let refusal = |class: &str| {
+        let rec = Record {
+            runtime_class: class.into(),
+            ..super::record()
+        };
+        h.m.memory_refusal(&rec)
+    };
+    assert_eq!(refusal(""), None);
+    assert_eq!(refusal("plain"), None);
+    assert_eq!(refusal("nested").as_deref(), Some("runtime class nested"));
+}
+
 #[test]
 fn a_restore_and_a_fork_inherit_unless_the_request_agrees() {
     assert_eq!(

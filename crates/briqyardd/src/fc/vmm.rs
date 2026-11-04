@@ -35,6 +35,24 @@ pub struct Boot {
     pub disk_io: Arc<DiskIo>,
 }
 
+impl Boot {
+    /// The drives a snapshot's devices open again: the name each has in the jail, its host
+    /// path, and whether it is a block device rather than a file. The same names as at boot.
+    pub(super) fn snapshot_drives(&self) -> Vec<(&'static str, &Path, bool)> {
+        let mut drives = vec![
+            ("config.tar", self.config_drive.as_path(), false),
+            ("root", self.root.as_path(), true),
+        ];
+        if let Some(d) = &self.data {
+            drives.push(("data", d, true));
+        }
+        if let Some(m) = &self.modules {
+            drives.push(("modules", m, false));
+        }
+        drives
+    }
+}
+
 /// A machine's VMM as the manager keeps it: the process, its sockets, and when it is gone.
 #[derive(Clone)]
 pub struct Vm {
@@ -281,10 +299,12 @@ impl Vmm for Firecracker {
                 // same name. Nothing boots: the guest carries on where it was paused.
                 let load = async {
                     // What the snapshot's devices open again: the drives, by the names given at boot.
-                    proc.expose_file(&b.config_drive, "config.tar")?;
-                    proc.expose_block(&b.root, "root")?;
-                    if let Some(d) = &b.data {
-                        proc.expose_block(d, "data")?;
+                    for (name, path, block) in b.snapshot_drives() {
+                        if block {
+                            proc.expose_block(path, name)?;
+                        } else {
+                            proc.expose_file(path, name)?;
+                        }
                     }
                     if let Some(artifact) = &b.memory_clone {
                         let root = proc

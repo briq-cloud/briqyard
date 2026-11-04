@@ -96,16 +96,26 @@ pub(super) async fn create_machine(
         document["fork"]["snapshot"] = snapshot.into();
         body = Bytes::from(serde_json::to_vec(&document).expect("JSON serializes"));
     }
-    if let (true, Some(rs)) = (req.size == api::Size::default(), req.restore.as_mut()) {
-        let (size, backup) = restore_size(&st, rs).await?;
-        req.size = size;
-        rs.backup = backup.clone();
-        // Preserve any fields the forwarding API does not interpret. Pin latest to the exact
-        // record whose size was reserved, so a concurrent backup cannot change the budget.
+    // A restore without a size takes the backup's (ADR 0057), one without a class takes the
+    // backup's too (ADR 0088): both are read from the listing before the placement.
+    if let (true, Some(rs)) = (
+        req.size == api::Size::default() || req.runtime_class.is_empty(),
+        req.restore.as_mut(),
+    ) {
+        let backup = restore_backup(&st, rs).await?;
         let mut document: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|e| err(StatusCode::BAD_REQUEST, "invalid", format!("body: {e}")))?;
-        document["size"] = serde_json::to_value(size).expect("Size serializes");
-        document["restore"]["backup"] = backup.into();
+        if req.size == api::Size::default() {
+            req.size = backup_size(&backup)?;
+            document["size"] = serde_json::to_value(req.size).expect("Size serializes");
+        }
+        if req.runtime_class.is_empty() {
+            req.runtime_class = backup.runtime_class.clone();
+        }
+        // Preserve any fields the forwarding API does not interpret. Pin latest to the exact
+        // record whose size and class were read, so a concurrent backup cannot change them.
+        rs.backup = backup.id.clone();
+        document["restore"]["backup"] = backup.id.into();
         body = Bytes::from(serde_json::to_vec(&document).expect("JSON serializes"));
     }
     req.size
@@ -342,12 +352,9 @@ pub(super) async fn create_machine(
     Ok(Response::from_parts(parts, Body::from(data)))
 }
 
-/// Resolve only an inherited restore size; explicit sizes need no backup lookup.
-/// Listings expose the original backup's size without its environment or sealed contents.
-async fn restore_size(
-    st: &Arc<AppState>,
-    rs: &api::RestoreSpec,
-) -> Result<(api::Size, String), Refusal> {
+/// The backup a restore names (the newest for `latest`), from a listing: its size and class
+/// without its environment or sealed contents.
+async fn restore_backup(st: &Arc<AppState>, rs: &api::RestoreSpec) -> Result<api::Backup, Refusal> {
     if !api::valid_id(&rs.machine_id) {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -367,7 +374,7 @@ async fn restore_size(
     let mut failure = err(
         StatusCode::SERVICE_UNAVAILABLE,
         "no_host",
-        "no ready host can resolve the restore size",
+        "no ready host can resolve the restore's backup",
     );
     for host in hosts {
         let response = forward(
@@ -384,7 +391,7 @@ async fn restore_size(
             failure = err(
                 parts.status,
                 "backup_lookup",
-                "cannot list the restore's backups to resolve its size",
+                "cannot list the restore's backups to resolve its size and class",
             );
             continue;
         }
@@ -415,6 +422,11 @@ async fn restore_size(
                 "restore backup not found",
             )
         })?;
+    Ok(backup)
+}
+
+/// The size a restore inherits from its backup's record.
+fn backup_size(backup: &api::Backup) -> Result<api::Size, Refusal> {
     let size = backup.size.ok_or_else(|| {
         err(
             StatusCode::BAD_REQUEST,
@@ -429,7 +441,7 @@ async fn restore_size(
             format!("backup size: {why}"),
         )
     })?;
-    Ok((size, backup.id))
+    Ok(size)
 }
 
 /// A create bound to a host of another region than it asks: 400, a namespace never spans

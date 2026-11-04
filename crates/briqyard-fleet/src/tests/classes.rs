@@ -156,3 +156,48 @@ async fn a_namespace_on_a_host_without_the_class_is_refused_and_so_is_a_class_no
     assert_eq!(json(&body)["error"], "no host serves runtime class gvisor");
     assert_eq!(pinned(&f.st, "t2"), None);
 }
+
+/// A restore that names no class runs in the backup's: the fleet reads it from the listing,
+/// the size explicit or not, and places the machine on a host that serves it.
+#[tokio::test]
+async fn a_restore_without_a_class_is_placed_by_the_backups_class() {
+    for size in [
+        serde_json::json!({"vcpus":1,"memory_mb":256}),
+        serde_json::json!({"vcpus":0,"memory_mb":0}),
+    ] {
+        let (f, ds) = two_hosts().await;
+        let mut backup = serde_json::json!({
+            "id":"b1", "machine_id":"m_gone", "namespace":"old", "name":"db",
+            "created_at":"2026-10-29T10:00:00Z", "bytes":1, "incremental":false, "disks":[],
+            "size":{"vcpus":1,"memory_mb":512}, "runtime_class":"nested"
+        });
+        for d in &ds {
+            *d.stub.backup_records.lock().unwrap() = vec![backup.clone()];
+        }
+        let request = serde_json::json!({
+            "namespace":"restored", "name":"copy", "size":size,
+            "restore":{"machine_id":"m_gone","backup":"latest"}
+        });
+        let (s, headers, body) = call(&f.st, "POST", "/v1/machines", "api", Some(request)).await;
+        assert_eq!(s, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            headers["x-briqyard-host"], "d1",
+            "the host that serves nested"
+        );
+        // The record without a class is `default`, as before.
+        backup.as_object_mut().unwrap().remove("runtime_class");
+        for d in &ds {
+            *d.stub.backup_records.lock().unwrap() = vec![backup.clone()];
+        }
+        let request = serde_json::json!({
+            "namespace":"plain", "name":"copy", "size":{"vcpus":1,"memory_mb":256},
+            "restore":{"machine_id":"m_gone","backup":"latest"}
+        });
+        let (s, headers, body) = call(&f.st, "POST", "/v1/machines", "api", Some(request)).await;
+        assert_eq!(s, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            headers["x-briqyard-host"], "d2",
+            "a default restore avoids it"
+        );
+    }
+}

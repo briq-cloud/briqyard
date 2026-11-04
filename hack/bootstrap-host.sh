@@ -174,6 +174,22 @@ echo "options zfs zfs_arc_max=$((ARC_GB << 30))" > /etc/modprobe.d/briqyard-zfs.
 echo "$((ARC_GB << 30))" > /sys/module/zfs/parameters/zfs_arc_max
 echo "   at most $ARC_GB GB"
 
+# A run that does not name the nested class must not turn it off for a host whose configuration
+# serves it: KVM would load with `nested` off at the next boot and the daemon would refuse to
+# start. It fails before anything is changed; the fleet's upgrade names the class itself.
+refuse_dropped_nested() {
+  [ "$NESTED" = 0 ] && [ -f "$1" ] || return 0
+  python3 - "$1" <<'PYDROPPED' || { echo "$1 serves the nested class: set BRIQYARD_RUNTIME_CLASSES=nested (and BRIQYARD_RELEASE), or remove the class from the configuration first"; exit 1; }
+from pathlib import Path
+import sys
+import yaml
+
+classes = (yaml.safe_load(Path(sys.argv[1]).read_text()) or {}).get("runtime_classes") or {}
+sys.exit(1 if any(isinstance(c, dict) and c.get("nested") for c in classes.values()) else 0)
+PYDROPPED
+}
+refuse_dropped_nested /etc/briqyard/config.yaml
+
 # No guest runs a hypervisor of its own (ADR 0087): KVM keeps the extensions out of its
 # supported CPUID, and the daemon clears them from every guest as well. Only a host that serves
 # the nested class (ADR 0088) loads KVM with `nested` on. The parameter is read-only while the

@@ -20,6 +20,7 @@ from test_package import fixture
 SCRIPT = (Path(__file__).parent / "bootstrap-host.sh").read_text()
 HELPERS = SCRIPT.split("# Runtime installation helpers.", 1)[1].split("# End runtime installation helpers.", 1)[0]
 HELPERS = HELPERS[HELPERS.index("checked_bundle()") :]
+DROPPED = "refuse_dropped_nested() {" + SCRIPT.split("refuse_dropped_nested() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
 INSTALL = SCRIPT.split('echo "== binaries', 1)[1].split('echo "== api certificate"', 1)[0]
 INSTALL = 'echo "== binaries' + INSTALL
 
@@ -430,6 +431,33 @@ fetch() { cp "$KERNEL_URL" "$3"; echo "$2  $3" | sha256sum -c --quiet -; }
         current = yaml.safe_load(self.config.read_text())
         self.assertEqual(Path(current["kernel"]).parent.name, self.kernel_sha)
         self.assertEqual(self.old_paths["kernel"].read_text(), "kernel old\n")
+
+
+class DroppedNestedClass(unittest.TestCase):
+    """A run that does not name the class must not turn it off (ADR 0088)."""
+
+    def check(self, config, nested):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.yaml"
+            if config is not None:
+                path.write_text(yaml.safe_dump(config))
+            return subprocess.run(["bash", "-c", DROPPED + 'refuse_dropped_nested "$1"; echo ok', "x", str(path)],
+                                  env=dict(os.environ, NESTED=nested), text=True, capture_output=True)
+
+    def test_a_configuration_that_serves_nested_refuses_a_run_without_the_variable(self):
+        served = {"token": "t", "runtime_classes": {"nested": {"kernel": "/k", "modules": "/m", "nested": True}}}
+        result = self.check(served, "0")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("BRIQYARD_RUNTIME_CLASSES=nested", result.stdout)
+        self.assertNotIn("ok", result.stdout)
+
+    def test_the_variable_a_plain_config_or_no_config_pass(self):
+        served = {"runtime_classes": {"nested": {"kernel": "/k", "modules": "/m", "nested": True}}}
+        for config, nested in ((served, "1"), ({"token": "t"}, "0"), (None, "0"),
+                               ({"runtime_classes": {"other": {"kernel": "/k", "modules": "/m"}}}, "0")):
+            result = self.check(config, nested)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("ok", result.stdout)
 
 
 class InstallerLock(unittest.TestCase):

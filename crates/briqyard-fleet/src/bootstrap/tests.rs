@@ -174,16 +174,46 @@ fn ssh_command() {
     assert!(args[13].contains("FLEET_URL='https://fleet.example'"));
     // An upgrade gives the release alone: the host's configuration says the rest, and the
     // fleet's own address (`0.0.0.0` in development) is never offered as its fleet.
-    let args = ssh_args(&b, "10.0.0.9", &upgrade_env("file:///r/it's", ""), kh, true);
+    let args = ssh_args(
+        &b,
+        "10.0.0.9",
+        &upgrade_env("file:///r/it's", "", &[]),
+        kh,
+        true,
+    );
     assert_eq!(
         args[13],
         "env BRIQYARD_RELEASE='file:///r/it'\\''s' bash -s"
     );
     // A private repository's release: its token too, and still nothing of the host's.
     assert_eq!(
-        upgrade_env("https://github.com/o/r/releases/download/v1", "gh-t"),
+        upgrade_env("https://github.com/o/r/releases/download/v1", "gh-t", &[]),
         "BRIQYARD_RELEASE='https://github.com/o/r/releases/download/v1' BRIQYARD_RELEASE_TOKEN='gh-t'"
     );
+}
+
+#[test]
+fn an_upgrade_names_the_class_the_host_serves() {
+    let class = |name: &str| api::RuntimeClassInfo {
+        name: name.into(),
+        nested: name == "nested",
+        ..Default::default()
+    };
+    // The script keeps KVM's `nested` on and installs the release's class files only when told.
+    assert_eq!(
+        upgrade_env("v1", "", &[class("nested")]),
+        "BRIQYARD_RELEASE='v1' BRIQYARD_RUNTIME_CLASSES='nested'"
+    );
+    // A class the release does not build is the configuration's own, never named.
+    assert_eq!(
+        upgrade_env("v1", "", &[class("custom")]),
+        "BRIQYARD_RELEASE='v1'"
+    );
+    // A re-bootstrap of a host that serves it says so as well.
+    let mut h = rec("https://10.0.0.9:7420", "t", None);
+    h.runtime_classes = vec![class("nested")];
+    let env = bootstrap_env(&crate::config::Bootstrap::default(), "https://f", &h, "v1");
+    assert!(env.contains("BRIQYARD_RUNTIME_CLASSES='nested'"), "{env}");
 }
 
 #[test]

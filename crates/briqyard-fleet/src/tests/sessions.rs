@@ -130,6 +130,11 @@ async fn a_forwarded_restore_is_open_during_its_create_alone() {
         machine_id: "m_src".into(),
         backup: "b1".into(),
     };
+    // The fleet reads the backup's class before placing a restore that names none.
+    *ds[0].stub.backup_records.lock().unwrap() = vec![serde_json::json!({
+        "id":"b1", "machine_id":"m_src", "namespace":"old", "name":"db",
+        "created_at":"2026-10-29T10:00:00Z", "bytes":1, "incremental":false, "disks":[]
+    })];
     let restore = |name: &str| {
         let mut body = create_body("t1", name, 256);
         body["restore"] = serde_json::to_value(&rs).unwrap();

@@ -46,8 +46,13 @@ KVM's `nested` parameter is off.
 **A `nested: true` class boots without ADR 0087's template.** Its machines see VMX or SVM; every
 other machine on the host keeps the template, so the host's KVM loads with `nested` on only
 where the operator chose to serve the class: `hack/bootstrap-host.sh` writes `nested=0`
-(ADR 0087) unless `BRIQYARD_RUNTIME_CLASSES` names `nested`, and `briqyard doctor` does not warn
-about `nested` on a host configured with a `nested: true` class. The class's identity
+(ADR 0087) unless `BRIQYARD_RUNTIME_CLASSES` names `nested`, and refuses to run, before it
+changes anything, on a host whose configuration lists a `nested: true` class while the variable
+is unset: a run never turns the class off by omission. The fleet's host upgrade (ADR 0027) names
+the class itself, from the classes the host reports, so a routine upgrade keeps `nested=1`,
+installs the release's class files, and loads nothing again when the parameter is already right
+(no machine is stopped). `briqyard doctor` reads the configuration's classes, and does not warn
+about `nested` on a host whose configuration lists a `nested: true` class. The class's identity
 (`cpu_config: none`, its kernel's SHA-256) is its own.
 
 **A class's modules reach the guest as a read-only drive.** `modules` is an ext4 image of one
@@ -72,8 +77,16 @@ Its disks fork, back up and restore as any machine's.
 new namespace only on a host serving it; a namespace already pinned to a host without it is
 refused 400 `invalid` (`namespace n1 is on host h1, which does not serve runtime class nested`),
 as a region is (ADR 0025). A `default` namespace goes to a host that does not serve `nested`
-when one has room (fact 5: a host that serves it shares the risk with every machine on it). The
+when one has room (fact 5: a host that serves it shares the risk with every machine on it). A
+restore that names no class is placed by its backup's: the backup's record carries the
+`runtime_class` (public, as `size`, ADR 0057) and the fleet reads it from the listing, before
+placing, for every restore without a class. The
 dedicated host is the intended deployment; no taint primitive, this one rule.
+
+**The class name is not authorized per namespace.** The daemon and the fleet accept a class a
+host serves from any caller of their API, as they accept the other create fields: the caller
+gates it. The API's token holder is the operator or the control plane, which decides who may
+ask for `nested`; the namespace quota (ADR 0025) has no field for it.
 
 **The `nested` class's kernel is built here.** Firecracker's 6.18 guest configuration (the one
 upstream validates) plus `hack/kernel/nested.config`: `VIRTUALIZATION`, `KVM`, `KVM_AMD`,
