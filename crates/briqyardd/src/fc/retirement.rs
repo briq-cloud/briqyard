@@ -88,6 +88,25 @@ fn open_ancestry(root: &Path) -> io::Result<File> {
     Ok(root_fd)
 }
 
+/// The machines whose leaf exists under the VMM parent: one directory read, no leaf opened.
+/// A name that does not decode to a machine id is not ours and is left out.
+#[cfg(target_os = "linux")]
+pub(super) fn leaves() -> io::Result<Vec<String>> {
+    let entries = match std::fs::read_dir("/sys/fs/cgroup/firecracker") {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let name = entry?.file_name();
+        if let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("m-")) {
+            ids.push(format!("m_{rest}"));
+        }
+    }
+    Ok(ids)
+}
+
 impl Leaf {
     #[cfg(target_os = "linux")]
     pub(super) fn capture(id: &str) -> io::Result<Option<Self>> {

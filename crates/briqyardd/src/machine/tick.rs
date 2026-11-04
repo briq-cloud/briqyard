@@ -69,6 +69,7 @@ impl Manager {
         }
         self.refresh_memory_host().await;
         self.measure(now).await;
+        self.sweep_leaves().await;
         self.assess(now).await;
         if let Err(err) =
             self.inner

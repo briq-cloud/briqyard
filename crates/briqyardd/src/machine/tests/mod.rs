@@ -9,6 +9,7 @@ mod balloon;
 mod classes;
 mod event_log;
 mod gateway;
+mod leaves;
 mod lifecycle;
 mod memory;
 mod metering;

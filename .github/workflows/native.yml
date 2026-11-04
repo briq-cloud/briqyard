@@ -93,13 +93,21 @@ jobs:
           if [ "${statuses[1]}" != 0 ]; then rc=${statuses[1]}; fi
           echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
           exit "$rc"
+      # Thousands of idle machine cgroups, a daemon restart: the case of an in-place upgrade
+      # (ADR 0099). Harness from the workflow revision, so a dispatch on an older ref fails it.
+      - name: scale
+        if: ${{ !cancelled() && steps.e2e.outcome != 'skipped' }}
+        run: |
+          mkdir -p native-logs
+          set -o pipefail
+          bash .native-harness/hack/native-ci-scale.sh 2>&1 | tee native-logs/scale.log
       - name: Suite counts
         if: always()
         env:
           E2E_SECONDS: ${{ steps.e2e.outputs.duration }}
           FLEET_SECONDS: ${{ steps.fleet.outputs.duration }}
         run: |
-          for suite in e2e fleet-smoke; do
+          for suite in e2e fleet-smoke scale; do
             echo "### $suite" >> "$GITHUB_STEP_SUMMARY"
             if [ -f "native-logs/$suite.log" ]; then
               grep -E '^passed |^ENDED EARLY|^NOT A FULL RUN' "native-logs/$suite.log" >> "$GITHUB_STEP_SUMMARY" || echo 'No final summary' >> "$GITHUB_STEP_SUMMARY"
@@ -119,6 +127,12 @@ jobs:
         with:
           name: native-fleet-smoke-log
           path: native-logs/fleet-smoke.log
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-scale-log
+          path: native-logs/scale.log
           if-no-files-found: ignore
   more-suites:
     if: ${{ !inputs.two_hosts_only && !inputs.measure_freeze }}
