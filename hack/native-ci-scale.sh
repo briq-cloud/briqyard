@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A host upgraded in place holds thousands of idle machine cgroups left by earlier versions
-# (ADR 0068, 0098). A fresh runner holds a handful, so only this suite makes the case the
+# (ADR 0068, 0099). A fresh runner holds a handful, so only this suite makes the case the
 # startup barrier once failed on (a 4096-leaf cap met 6404 and 5234 leaves): more leaves than
 # that cap, a daemon restart, and the daemon must come up, report its memory protection healthy,
 # retire the leaves and accept a create, within a bound. Harness from the workflow revision, so
