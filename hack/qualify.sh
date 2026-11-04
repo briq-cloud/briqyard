@@ -234,6 +234,7 @@ echo "   an IPv6 address from the guest: $(echo "$out" | head -c 120) (the runne
 br=$(ip -o -4 addr show | awk -v g="$gw1" '{ split($4, a, "/"); if (a[1] == g) { print $2; exit } }')
 hostll=$(ip -6 -o addr show dev "$br" scope link | awk '{ split($4, a, "/"); print a[1]; exit }')
 nft_in=$(sudo nft list chain inet briqyard input)
+dev=$(on "$A2" 'ls /sys/class/net | grep -v "^lo$" | head -1')
 out=$(on "$A2" "ip -6 addr show dev $dev | grep -c 'inet6 fe80'; ping -6 -c2 -W2 -I $dev $hostll 2>&1 || ping6 -c2 -W2 -I $dev $hostll 2>&1; echo rc=\$?" || true)
 echo "   link-local ping from the guest to the bridge $br ($hostll): $(echo "$out" | tr '\n' '|' | head -c 220)"
 check "IPv6 on the input path: the chain accepts no ICMPv6 or IPv6 beyond what it names" '[ -n "$hostll" ] && ! grep -qF icmpv6 <<<"$nft_in" && grep -qF "policy drop" <<<"$nft_in"'
