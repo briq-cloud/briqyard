@@ -37,7 +37,7 @@ alert's five-minute windows are waited out.
 |---|---|---|---|
 | Backup failure observed | the backup store path is a file: `briqyard machine backup` fails and the daemon records `backup_failed` | the store put back (a backup succeeds); the alert resolves when the ten-minute window passes | no |
 | Creates refused: no room | a create of 20000 MB on a host of 12288 | the five-minute window passes | no |
-| Host condition | one machine commits 11800 of 12288 MB: `memory_pressure` | the machine destroyed | no |
+| Host condition | one machine of 10600 MB commits, with the others and their overhead, over 95 % of the host's 12288 MB: `memory_pressure` | the machine destroyed | no |
 | Creates refused: host under pressure | a create in that machine's namespace, refused under the condition | the five-minute window passes | no |
 | Largest slot too small | the same machine: the host is over the fill ceiling and takes no new namespace | the machine destroyed | no |
 | Machine in a crash loop | a machine that exits at once, restarted by its policy | the machine destroyed | no |

@@ -422,16 +422,16 @@ def rules_set():
         f"a create of 20000 MB is refused for capacity ({(p.stderr or p.stdout).strip()[-120:]!r})")
     namespaces.append("alert-room")
 
-    # Host condition, host pressure and the largest slot: one machine takes 11800 of 12288 MB.
+    # Host condition, host pressure and the largest slot: one machine of 10600 MB, with the others and their overhead, commits over 95 % of 12288 MB.
     # A new namespace is not placed on a host over the fill ceiling (0.85), so the namespace
     # is made small first and grown into the host it is pinned to.
     machine("alert-big", "anchor", 128)
-    big = machine("alert-big", "big", 11800)
+    big = machine("alert-big", "big", 10600)
     t_big = time.time()
     if not wait_for("memory_pressure", lambda: prom('briqyard_host_condition{condition="memory_pressure"} == 1'), 240, 5):
-        bad("the host reported memory_pressure with 11800 MB committed")
+        bad("the host reported memory_pressure with 10600 MB machine added")
         raise RuntimeError("no memory_pressure")
-    ok("the host reported memory_pressure with 11800 MB committed")
+    ok("the host reported memory_pressure with 10600 MB machine added")
     t_pressure = time.time()
     p = run("briqyard", "machine", "run", "--image", "alpine:3.20", "--namespace", "alert-big", "--name", "second",
             "--memory", "128", "--detach", "--", "sleep", "60", timeout=120)
