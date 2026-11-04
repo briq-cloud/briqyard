@@ -224,10 +224,13 @@ class Receiver:
                     doc["alerts"] = parse_slack(doc)
                 with outer.lock:
                     outer.events.append({"t": time.time(), "path": self.path, "body": doc})
+                # Slack's incoming webhook answers the text "ok"; Grafana treats any other body as
+                # a failed delivery and sends the group again at every flush.
                 self.send_response(200)
+                self.send_header("content-type", "text/plain")
                 self.send_header("content-length", "2")
                 self.end_headers()
-                self.wfile.write(b"{}")
+                self.wfile.write(b"ok")
 
             def log_message(self, *a):
                 pass
