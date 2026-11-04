@@ -14,7 +14,8 @@
 
 </div>
 
-> <img src="docs/images/briq.svg" alt="briq" width="20" height="20" align="absmiddle"> **Sponsored by [briq.cloud](https://briq.cloud)**: managed sandboxes and microVMs for your agents, without running servers.
+> <img src="docs/images/briq.svg" alt="briq" width="20" height="20" align="absmiddle"> **Sponsored by [briq.cloud](https://briq.cloud)**<br>
+> Managed sandboxes and microVMs for your agents, without running servers.
 
 ## Why briqyard
 
