@@ -216,9 +216,11 @@ impl Manager {
                     Ev::warning(reason::EXITED, format!("exited with code {code}"))
                 }
             };
-            Some(ev.data(json!({
-                "code": code, "oom": oom, "vmm_oom": vmm_oom, "restarting": again
-            })))
+            let mut data = json!({ "code": code, "oom": oom, "restarting": again });
+            if vmm_oom {
+                data["vmm_oom"] = json!(true);
+            }
+            Some(ev.data(data))
         });
         if let Some((attempt, recent, delay, policy)) = &restart {
             let secs = delay.as_secs();
