@@ -112,6 +112,15 @@ PY
     trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
     GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password python3 -u hack/monitoring-alerts-check.py rules
     ;;
+  restore)
+    python3 -m unittest discover -s hack -p test_restore_qualify.py
+    set +e
+    sudo -E python3 -u hack/restore-qualify.py --allow-daemon-kill --require failure --rounds 3 --output native-logs/restore
+    rc=$?
+    set -e
+    sudo chown -R "$(id -u):$(id -g)" native-logs/restore
+    exit "$rc"
+    ;;
   qualification)
     # Chaos, isolation and OOM on the isolated host (ADR 0095). The suite kills the daemon,
     # the fleet and every VMM and fills the pool: only on this disposable runner.
@@ -122,5 +131,5 @@ PY
     set -e
     exit "$rc"
     ;;
-  *) echo 'expected stress, monitoring, alerts or qualification' >&2; exit 2 ;;
+  *) echo 'expected stress, monitoring, alerts, qualification or restore' >&2; exit 2 ;;
 esac

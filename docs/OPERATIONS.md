@@ -549,6 +549,64 @@ In the store, per machine: `backups/<machine>/<id>.json` (the record) and
 `backups/<machine>/<disk>/<id>.zfs` (a stream, `root` or `data`). Ids are times to the
 millisecond, `20261021T101500.123Z`. A deletion removes the streams first, then the record.
 
+### Qualify workload restores
+
+Run from a checkout matching the installed runtime. Requires Python 3, a reachable
+API, permission to create and destroy machines, a configured backup store and the
+host's registry mirror. It uses stock digest-pinned Postgres and Python images,
+512 MiB guests, 1 GiB data volumes and the host's normal root disk size. Up to three
+guests coexist. It writes only into fresh `restore-q-…` namespaces. It deletes its
+machines and backup chains on success, failure and handled signals. An unreachable
+API can prevent cleanup: use the namespace and machine ids in `results.jsonl` to
+finish it; never delete another run's namespace. Do not kill the harness with SIGKILL.
+
+```bash
+BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN="$BRIQYARD_TOKEN" \
+  python3 hack/restore-qualify.py --rounds 3 --output restore-evidence
+```
+
+Use `--cafile /path/to/ca.pem` for a private CA. Tokens can stay in the environment;
+never put one into a report. The output directory must not already exist. Keep its
+`ledger.jsonl`, `results.jsonl`, file manifest and guest logs together. Exit 0 requires
+all selected checks and cleanup. A fallback to `unsynced`, missing pre-request data,
+a hole, a failed integrity check or an inconclusive loss control fails the run.
+Files, synced copies, three ordered two-disk samples, the unsynced fork control,
+Python startup, Postgres and the chain are always required. `--require` adds named
+checks; a skip never satisfies one. `--rounds` defaults to one; three gives
+independent Postgres ledgers and chains, with per-round settings, payload and
+amcheck evidence. Each backup is one sampled snapshot instant.
+Read `lost_ack_ids`, `loss_window_seconds` and `backup_start_to_last_ack_seconds`
+together: the window is the span of missing acknowledgements, not a promised RPO.
+
+For two hosts, use a fleet with distinct existing regions and a shared backup store:
+
+```bash
+BRIQYARD_URL=https://fleet.example.com BRIQYARD_TOKEN="$BRIQYARD_TOKEN" \
+  python3 hack/restore-qualify.py --source-region source --destination-region target \
+  --require offhost --rounds 3 --output restore-offhost-evidence
+```
+
+The source must use a fleet-held pool key (`storage.key: fleet`). The harness
+destroys its source machine after backup, then requires the restored ledger on a
+different host in a new namespace. Choose regions that identify the intended
+hosts; the harness does not change placement or host settings. Omit
+`--store-transfer`: that option belongs to the disposable CI directory-store fixture.
+Run without `--allow-daemon-kill` on shared hosts. The kill check is disabled by
+default and additionally requires the disposable native CI environment; it kills
+only the daemon and this run's exact ZFS sender, never a name pattern. The CI-only
+`--source-offline-hook` additionally stops the source daemon for off-host restore
+and restarts it for cleanup. Omit that option on shared hosts.
+Native CI requires `failure` in its single-host run and `offhost` in two-hosts.
+Interruption output distinguishes removed published streams from temporary uploads
+and local snapshots allowed to remain by ADR 0100, and verifies a new backup after
+recovery. The CI source outage stops only the daemon, leaving its pool up. The
+destination shares a registry mirror, so this does not prove an absent image cache.
+
+Collect real allocated disk sizes, object-store latency, restore-to-first-query times
+and seconds per stream GiB on the real hardware. CI uses small workloads and a
+QEMU second host; it provides no real-host performance or capacity qualification.
+There are no performance pass thresholds. See ADR 0103 for the consistency promise.
+
 The state itself (`state/`) is small and lives only on the host; a lost host loses the records
 of machines that were never backed up, and their disks. A machine's own `POST
 /v1/machines/{id}/snapshots` is a local snapshot of its disks: instant, copy-on-write, not a
