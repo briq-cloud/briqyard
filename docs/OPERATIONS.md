@@ -900,7 +900,7 @@ GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitor
 | Pool over 80 % | for 5 minutes |
 | Machine in a crash loop | restarted at least twice in 10 minutes by its policy (a first restart can predate the first sample), held 3 minutes after |
 | Backup failure observed | a host's `backup_failed` counter grew in 10 minutes, or is positive without a ten-minute baseline; one observed failure is enough |
-| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|cpu\|disk"}` grew: check regional capacity and host compatibility |
+| Creates refused: no room | `briqyard_fleet_unschedulable_total{resource=~"memory\|cpu\|disk"}` grew (the fleet's refusal, or a pinned namespace's full host): check regional capacity and host compatibility |
 | Creates refused: host under pressure | `{resource="pressure"}` grew: free the namespace's host |
 | Largest slot too small | a region's largest memory slot under `LARGEST_SLOT_MB` for 10 minutes |
 

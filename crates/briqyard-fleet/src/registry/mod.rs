@@ -792,6 +792,30 @@ impl Registry {
         v
     }
 
+    /// What one host lacks for an ask by the fleet's own figures: `None` when it shows room
+    /// for all three (a refusal then came from something else, such as a namespace's quota or
+    /// a used-up address or port).
+    pub fn host_shortage(
+        &self,
+        host: &str,
+        need_mb: u32,
+        need_disk_mb: u64,
+        need_cpu_millis: u32,
+    ) -> Option<Resource> {
+        let h = self.hosts.get(host)?;
+        if h.reservation_mb(need_mb)
+            .is_none_or(|need| h.free_memory_mb() < need)
+        {
+            Some(Resource::Memory)
+        } else if !h.has_cpu(need_cpu_millis) {
+            Some(Resource::Cpu)
+        } else if !h.has_disk(need_disk_mb) {
+            Some(Resource::Disk)
+        } else {
+            None
+        }
+    }
+
     /// What ran out when `place` found no host for a new namespace's machine: memory when no host
     /// of the region is ready and under its ceiling with `need_mb` free; else disk when none of
     /// those has `need_disk_mb`; else (those that have both are under a condition) what the

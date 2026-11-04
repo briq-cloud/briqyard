@@ -157,7 +157,7 @@
         largest_slot: { $ref: "#/components/schemas/Room", description: "absent as `free` is" }
         unschedulable:
           type: object
-          description: "creates refused 503 `capacity` since the fleet started, by what ran out"
+          description: "creates refused 503 `capacity` since the fleet started, by the fleet or by a pinned namespace's full host, by what ran out"
           properties:
             memory: { type: integer, description: "no host of the region had the memory free under its fill ceiling, or those with the room are under memory_pressure: a new host fixes it" }
             cpu: { type: integer, description: "hosts had memory but insufficient CPU capacity or no precise CPU accounting" }

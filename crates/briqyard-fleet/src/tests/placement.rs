@@ -502,3 +502,79 @@ async fn cpu_reservations_survive_reports_and_release_exactly_once() {
         "a completed hold incorporated by the host must not be subtracted again"
     );
 }
+
+/// The `briqyard_fleet_unschedulable_total` lines with their values, and the sum over
+/// `/v1/status` regions.
+async fn refused_counts(st: &Arc<AppState>) -> (Vec<String>, u64) {
+    let (s, _, text) = call(st, "GET", "/metrics", "", None).await;
+    assert_eq!(s, StatusCode::OK, "{text}");
+    let lines = text
+        .lines()
+        .filter(|l| l.starts_with("briqyard_fleet_unschedulable_total"))
+        .map(String::from)
+        .collect();
+    let (_, _, body) = call(st, "GET", "/v1/status", "api", None).await;
+    let regions: Vec<api::RegionRoom> =
+        serde_json::from_value(json(&body)["regions"].clone()).unwrap();
+    let sum = regions
+        .iter()
+        .map(|r| {
+            let u = &r.unschedulable;
+            u.memory + u.cpu + u.disk + u.pressure
+        })
+        .sum();
+    (lines, sum)
+}
+
+#[tokio::test]
+async fn a_full_pinned_host_refusing_a_create_is_counted_once_as_memory() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    ds[0].stub.add("t0", "big", 50_000);
+    poll_static_hosts_once(&f.st).await;
+    assert_eq!(pinned(&f.st, "t0").as_deref(), Some("d1"));
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t0", "more", 20_000)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "capacity", "the answer passes through");
+    assert_eq!(ds[0].stub.calls().last().unwrap(), "POST /v1/machines");
+    let (lines, sum) = refused_counts(&f.st).await;
+    assert_eq!(sum, 1, "{lines:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains(r#"resource="memory""#) && l.ends_with(" 1")),
+        "{lines:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_capacity_answer_from_a_host_with_room_is_not_counted_as_memory() {
+    let (f, ds) = fleet_with_daemons(1).await;
+    // The fleet sees d1 empty (no poll since the machine was added): the refusal is not for
+    // want of memory, cpu or disk in its figures (a quota, a used-up address or port).
+    ds[0].stub.add("t0", "big", 50_000);
+    let (s, _, body) = call(
+        &f.st,
+        "POST",
+        "/v1/machines",
+        "api",
+        Some(create_body("t1", "web", 20_000)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(json(&body)["code"], "capacity");
+    let (lines, sum) = refused_counts(&f.st).await;
+    assert_eq!(sum, 0, "{lines:#?}");
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.contains(r#"resource="memory""#) && !l.ends_with(" 0")),
+        "{lines:#?}"
+    );
+}

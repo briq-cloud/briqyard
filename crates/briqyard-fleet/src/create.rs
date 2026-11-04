@@ -351,6 +351,7 @@ pub(super) async fn create_machine(
         ));
     }
     drop(hold);
+    host_refused(&st, &host.id, &ask, &data);
     first_refused(&st, &req.namespace, first, &host.id, version, &data).await;
     Ok(Response::from_parts(parts, Body::from(data)))
 }
@@ -589,6 +590,22 @@ pub(super) fn unschedulable(
         largest_disk_mb = largest.disk_mb,
         "unschedulable"
     );
+}
+
+/// A host that answered a forwarded create `capacity`: counted like a refusal of the fleet's
+/// own (ADR 0042), once, by what the fleet's figures say the host lacks for the ask. A pinned
+/// namespace's host is not checked for room before the forward, so this is the only place its
+/// full host is seen. A host that shows room (a quota, no address or port left) is not counted:
+/// that is not memory, cpu or disk.
+pub(super) fn host_refused(st: &AppState, host: &str, ask: &Ask, answer: &[u8]) {
+    if error_code(answer) != "capacity" {
+        return;
+    }
+    let reg = st.reg.lock().unwrap();
+    if let Some(resource) = reg.host_shortage(host, ask.memory_mb, ask.disk_mb, ask.cpu_millis) {
+        let region = reg.hosts.get(host).map_or("", |h| h.region.as_str());
+        unschedulable(st, &reg, region, resource, ask, Some(host));
+    }
 }
 
 /// The disk a machine is placed for: root disks are thin, a volume takes what it says, plus
