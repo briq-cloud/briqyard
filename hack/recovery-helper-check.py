@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 
 IMAGE = 'alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+SOURCE_IMAGE = 'python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8'
 NS = f'recovery-helper-{os.getpid()}'
 
 def interrupted(signum, _frame):
@@ -27,7 +28,7 @@ for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
     signal.signal(sig, interrupted)
 
 def cli(*args, timeout=60):
-    return subprocess.check_output(['briqyard', *args], timeout=timeout, text=True, stderr=subprocess.DEVNULL)
+    return subprocess.check_output(['briqyard', *args], timeout=timeout, text=True)
 
 def mainpid():
     return int(subprocess.check_output(['systemctl', 'show', '-p', 'MainPID', '--value', 'briqyardd'], text=True, timeout=5))
@@ -196,11 +197,18 @@ machine = None
 kinds = ['kill'] if '--kill-only' in sys.argv else ['kill', 'late', 'handover']
 passed = 0
 try:
-    machine = json.loads(cli('machine', 'run', '--namespace', NS, '--name', 'source', '--image', IMAGE,
+    machine = json.loads(cli('machine', 'run', '--namespace', NS, '--name', 'source', '--image', SOURCE_IMAGE,
         '--memory', '256', '--volume', '1G:/data', '--sleep', 'never', '--', 'sh', '-c',
-        'echo helper-alive > /data/marker; exec httpd -f -p 8080 -h /data'))['id']
+        'echo helper-alive > /data/marker; exec python3 -m http.server 8080 --directory /data'))['id']
     cli('machine', 'wait', '--for', 'running', machine)
     endpoint = json.loads(cli('endpoint', 'add', machine, '8080'))
+    def fixture_serves():
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{endpoint['host_port']}/marker", timeout=2) as response:
+                return response.status == 200 and response.read().strip() == b'helper-alive'
+        except (urllib.error.URLError, TimeoutError):
+            return False
+    until(fixture_serves, 15, 'fixture endpoint never served before the crash')
     for kind in kinds:
         run_case(machine, endpoint, kind)
         passed += 1
