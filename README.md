@@ -12,10 +12,9 @@
 
 [**Install**](docs/INSTALL.md) &nbsp;&bull;&nbsp; [Architecture](docs/ARCHITECTURE.md) &nbsp;&bull;&nbsp; [Operations](docs/OPERATIONS.md) &nbsp;&bull;&nbsp; [Releases](https://github.com/briq-cloud/briqyard/releases) &nbsp;&bull;&nbsp; [Contributing](CONTRIBUTING.md)
 
-<sub>SPONSORED BY</sub><br>
-**[briq.cloud](https://briq.cloud)**: managed sandboxes and microVMs for your agents, without running servers.
-
 </div>
+
+> <img src="docs/images/briq.svg" alt="briq" width="20" height="20" align="absmiddle"> **Sponsored by [briq.cloud](https://briq.cloud)**: managed sandboxes and microVMs for your agents, without running servers.
 
 ## Why briqyard
 
@@ -23,7 +22,7 @@ Agents need real machines: their own kernel, a disk that lasts, a private networ
 
 A container shares its host's kernel. A Kubernetes pod keeps no identity. A VM left running wastes its memory.
 
-briqyard runs any OCI image in a Firecracker microVM, on servers you own. A machine sleeps when unused, wakes on the next connection or command, and forks in one call. Its disk and address stay. With a memory snapshot, it resumes in about a quarter of a second ([ADR 0005](docs/adr/0005-sleep-and-suspend.md)).
+briqyard runs any OCI image in a Firecracker microVM, on servers you own. A machine sleeps when unused, wakes on the next connection or command, and forks in one call. Its disk and address stay. With a memory snapshot, it resumes in about a quarter of a second.
 
 ## Key features
 
