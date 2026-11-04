@@ -32,7 +32,7 @@ fn host(id: &str, cap: u32, used: u32, machines: usize) -> HostRec {
         namespaces: vec![],
         last_seen: Utc::now(),
         version: "0.1".into(),
-        disk_free_mb: 0,
+        disk_free_mb: None,
         note: String::new(),
         bootstrap_attempts: 0,
         public_tcp_ports: None,
@@ -120,7 +120,7 @@ fn a_host_under_pressure_takes_no_new_namespace() {
 fn roomy(id: &str, region: &str, free: u32, disk: u64) -> HostRec {
     let mut h = host(id, 100_000, 100_000 - free, 1);
     h.region = region.into();
-    h.disk_free_mb = disk;
+    h.disk_free_mb = Some(disk);
     h
 }
 
@@ -419,7 +419,7 @@ fn placement_pins_namespaces_and_picks_the_emptiest_host() {
         None,
         "nothing has room"
     );
-    reg.hosts.get_mut("c").unwrap().disk_free_mb = 1000;
+    reg.hosts.get_mut("c").unwrap().disk_free_mb = Some(1000);
     assert_eq!(
         reg.place("t4", "", 512, 5000, 0, &p),
         None,
@@ -448,10 +448,10 @@ fn a_hold_counts_until_a_report_after_the_create_or_its_failure() {
     assert_eq!(reg.hosts["a"].used.memory_mb, 60_000);
     assert_eq!(placed(&mut reg, "t2", 50_000, 0).unwrap().0, "b");
     // A pinned namespace's machine holds too, memory and disk.
-    reg.hosts.get_mut("a").unwrap().disk_free_mb = 10_000;
+    reg.hosts.get_mut("a").unwrap().disk_free_mb = Some(10_000);
     let (_, t1b) = placed(&mut reg, "t1", 10_000, 4000).unwrap();
     assert_eq!(reg.hosts["a"].used.memory_mb, 70_000);
-    assert_eq!(reg.hosts["a"].disk_free_mb, 6000);
+    assert_eq!(reg.hosts["a"].disk_free_mb, Some(6000));
     let (free, largest) = reg.room(&p)["fsn"];
     assert_eq!(
         (free.memory_mb, largest.memory_mb),
@@ -462,38 +462,114 @@ fn a_hold_counts_until_a_report_after_the_create_or_its_failure() {
     // A report while both creates are under way: they still count, on its figures.
     let t2 = t0 + Duration::seconds(15);
     let mut report = host("a", 100_000, 1000, 0);
-    report.disk_free_mb = 20_000;
+    report.disk_free_mb = Some(20_000);
     reg.heartbeat(report, t2);
     assert_eq!(reg.hosts["a"].used.memory_mb, 71_000);
-    assert_eq!(reg.hosts["a"].disk_free_mb, 13_000);
+    assert_eq!(reg.hosts["a"].disk_free_mb, Some(13_000));
     // The first failed: what it held is back at once, not at the next report.
     reg.release("a", t1);
     reg.release("a", t1);
     assert_eq!(reg.hosts["a"].used.memory_mb, 11_000, "released once");
-    assert_eq!(reg.hosts["a"].disk_free_mb, 16_000);
+    assert_eq!(reg.hosts["a"].disk_free_mb, Some(16_000));
     // The second was made: counted until a report received after it, then the host's.
     reg.made("a", t1b, t2 + Duration::seconds(1));
     let mut report = host("a", 100_000, 1000, 0);
-    report.disk_free_mb = 20_000;
+    report.disk_free_mb = Some(20_000);
     reg.heartbeat(report.clone(), t2 + Duration::milliseconds(500));
     assert_eq!(
         reg.hosts["a"].used.memory_mb, 11_000,
         "a report from before"
     );
     report.used.memory_mb = 11_000;
-    report.disk_free_mb = 16_000;
+    report.disk_free_mb = Some(16_000);
     reg.heartbeat(report, t2 + Duration::seconds(2));
     assert_eq!(
         reg.hosts["a"].used.memory_mb, 11_000,
         "the host's figure, once"
     );
-    assert_eq!(reg.hosts["a"].disk_free_mb, 16_000);
+    assert_eq!(reg.hosts["a"].disk_free_mb, Some(16_000));
     assert!(reg.hosts["a"].holds.is_empty());
     // A hold never takes disk a host does not report, nor gives back more than it took.
     let t3 = reg.hold("b", 1000, 50_000, 0);
-    assert_eq!(reg.hosts["b"].disk_free_mb, 0, "b reports no disk figure");
+    assert_eq!(
+        reg.hosts["b"].disk_free_mb, None,
+        "b reports no disk figure"
+    );
     reg.release("b", t3);
-    assert_eq!(reg.hosts["b"].disk_free_mb, 0);
+    assert_eq!(reg.hosts["b"].disk_free_mb, None);
+}
+
+/// A host whose pool is fully reserved by holds, or that reports 0 free, takes no new
+/// namespace that needs disk; one that reports no figure is not held to it.
+#[test]
+fn a_full_disk_is_not_an_unreported_one() {
+    let now = Utc::now();
+    let p = Policy::default();
+    let mut reg = Registry::default();
+    reg.heartbeat(roomy("held", "fsn", 50_000, 5000), now);
+    let (h, _) = placed(&mut reg, "t1", 512, 5000).unwrap();
+    assert_eq!(h, "held");
+    assert_eq!(reg.hosts["held"].disk_free_mb, Some(0), "fully reserved");
+    assert_eq!(reg.place("t2", "", 512, 1, 0, &p), None);
+    assert_eq!(
+        reg.shortage("", 512, 1, 0, &p),
+        Resource::Disk,
+        "disk ran out"
+    );
+    assert_eq!(reg.host_shortage("held", 512, 1, 0), Some(Resource::Disk));
+    let (free, largest) = reg.room(&p)["fsn"];
+    assert_eq!((free.disk_mb, largest.disk_mb), (0, 0));
+
+    // The same for a host that reports a full pool; its report gives room back.
+    reg.heartbeat(roomy("zero", "fsn", 90_000, 0), now);
+    assert_eq!(reg.hosts["zero"].disk_free_mb, Some(0));
+    assert_eq!(reg.place("t3", "", 512, 1, 0, &p), None, "0 free refuses");
+    reg.heartbeat(roomy("zero", "fsn", 90_000, 100), now);
+    assert_eq!(reg.place("t3", "", 512, 1, 0, &p).as_deref(), Some("zero"));
+
+    // A host with no figure is not held to disk, and a hold neither takes nor returns any.
+    reg.heartbeat(host("none", 100_000, 0, 0), now);
+    assert_eq!(reg.hosts["none"].disk_free_mb, None);
+    reg.hosts.get_mut("zero").unwrap().disk_free_mb = Some(0);
+    assert_eq!(
+        reg.place("t4", "", 512, 1_000_000, 0, &p).as_deref(),
+        Some("none")
+    );
+    let hold = reg.hold("none", 512, 1_000_000, 0);
+    assert_eq!(reg.hosts["none"].disk_free_mb, None);
+    reg.release("none", hold);
+    assert_eq!(reg.hosts["none"].disk_free_mb, None);
+}
+
+/// A registry saved before `disk_free_mb` could tell a full pool from no figure kept 0 for
+/// both, and the number only when there was one: it loads, the 0 as no figure.
+#[test]
+fn a_registry_saved_by_the_previous_fleet_still_loads() {
+    let mut reg = Registry::default();
+    reg.heartbeat(roomy("figure", "fsn", 1000, 7000), Utc::now());
+    reg.heartbeat(host("zero", 1000, 0, 0), Utc::now());
+    let mut saved = serde_json::to_value(&reg).unwrap();
+    assert_eq!(saved["hosts"]["figure"]["disk_free_mb"], 7000);
+    assert!(
+        saved["hosts"]["zero"].get("disk_free_mb").is_none(),
+        "no figure is not written"
+    );
+    // The previous fleet always wrote the field, `0` for no figure.
+    saved["hosts"]["zero"]["disk_free_mb"] = 0.into();
+    let path = std::env::temp_dir().join(format!("briqyard-registry-{}.json", std::process::id()));
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let loaded = Registry::load(&path);
+    std::fs::remove_file(&path).unwrap();
+    let loaded = loaded.unwrap();
+    assert_eq!(loaded.hosts["figure"].disk_free_mb, Some(7000));
+    assert_eq!(loaded.hosts["zero"].disk_free_mb, None);
+    // A record written without the field at all (older still) loads the same.
+    saved["hosts"]["zero"]
+        .as_object_mut()
+        .unwrap()
+        .remove("disk_free_mb");
+    let loaded: Registry = serde_json::from_value(saved).unwrap();
+    assert_eq!(loaded.hosts["zero"].disk_free_mb, None);
 }
 
 #[test]

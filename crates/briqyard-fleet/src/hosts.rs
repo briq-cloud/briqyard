@@ -645,7 +645,7 @@ pub(super) fn new_added_host(
         namespaces: vec![],
         last_seen: now,
         version: String::new(),
-        disk_free_mb: 0,
+        disk_free_mb: None,
         note: "added; waiting for the bootstrap".into(),
         bootstrap_attempts: 0,
         public_tcp_ports,

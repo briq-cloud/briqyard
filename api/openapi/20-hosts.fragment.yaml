@@ -142,7 +142,7 @@
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer, description: the namespaces' machines, gateways not counted }
         running: { type: integer, description: machines up on the host, gateways included }
-        disk_free_mb: { type: integer }
+        disk_free_mb: { type: integer, description: "free space in the pool, in MB; absent when the host cannot read it (0 is a full pool)" }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate, 64 hex digits; empty on plain HTTP (ADR 0020)" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
         started: { $ref: "#/components/schemas/DaemonStart" }
@@ -316,7 +316,7 @@
         machines: { type: integer }
         namespaces: { type: array, items: { type: string } }
         version: { type: string }
-        disk_free_mb: { type: integer }
+        disk_free_mb: { type: integer, description: "free space in the pool, in MB; absent when the host cannot read it (0 is a full pool)" }
         tls_fingerprint: { type: string, description: "SHA-256 of the API's certificate; a fingerprint other than the pinned one is refused (403 tls_mismatch)" }
         conditions: { type: array, items: { $ref: "#/components/schemas/Condition" } }
         started: { $ref: "#/components/schemas/DaemonStart" }
