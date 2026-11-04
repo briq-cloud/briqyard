@@ -113,3 +113,8 @@ The three missing areas are checks in CI per relevant PR, in a job of its own so
 others. The suite is destructive by design: it is only for an installed disposable host and asserts that at
 the start. Timing-sampled kills mean a rare window can still be missed; the suite fails if no attempt lands
 instead of passing quietly.
+
+## Two checks made deterministic (2026-11-04)
+
+- **Memory pressure refusal.** The fleet names a host under pressure (`memory_pressure`) only to a create bound to it (a pinned namespace, ADR 0042). A new namespace is told "no host has room" and counted as `memory`, by design. The check used a new namespace, so it passed only when the fleet's view was stale for one poll (the create was placed and the host refused it, which pinned the namespace). Not a product defect; the check now pins the namespace through the fleet first, asserts `memory_pressure` there, and asserts "no host has room" for a new namespace.
+- **Backup cut.** The second backup is incremental, so on a volume that changed by a few KB its stream lasts milliseconds. Each attempt now writes 300 MB first, and the `zfs send` is paused the moment the stream is seen, so the daemon kill lands inside it. The kill and the failed client are still required.

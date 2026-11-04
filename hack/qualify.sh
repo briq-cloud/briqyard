@@ -86,6 +86,8 @@ crash_daemon() {
   local pid i; pid=$(daemon_pid)
   sudo kill -9 "$pid"
   for i in $(seq 1 50); do [ "$(daemon_pid)" != "$pid" ] && break; sleep 0.1; done
+  # A `zfs send` paused by a check outlives the daemon; it must be gone before recovery runs.
+  sudo pkill -KILL -f '[z]fs send -w' || true
   sudo systemctl start briqyardd
   wait_api
 }
@@ -369,7 +371,11 @@ check "OOM: nothing leaked" 'invariants'
 echo "== physical admission: guest memory plus 256 MiB, to the megabyte"
 cap=$(statusq .capacity.memory_mb); used0=$(statusq .used.memory_mb)
 check "an empty host commits nothing ($used0 of $cap MB)" '[ "$used0" = 0 ] && [ "$cap" = 12288 ]'
-P1=$(run --image $ALPINE --name adm-1 --namespace "$T-adm" --memory 4096 -- sleep 7200)
+# P1 is placed through the fleet, which pins the namespace to the host. A refusal for a host under
+# pressure is for a namespace bound to it (ADR 0042); a new namespace is told "no host has room"
+# (counted as memory), which is right and not what this check is about.
+P1=$(fleet machine run --sleep never --image $ALPINE --name adm-1 --namespace "$T-adm" --memory 4096 -- sleep 7200 | jq -r .id)
+briqyard machine wait --for running "$P1" >/dev/null
 P2=$(run --image $ALPINE --name adm-2 --namespace "$T-adm" --memory 4096 -- sleep 7200)
 check "two 4096 MB machines commit 2 x (4096 + 256) MB" '[ "$(statusq .used.memory_mb)" = 8704 ]'
 before=$(api /v1/machines | jq length)
@@ -382,7 +388,8 @@ check "the exact remainder ($fit + 256 MB) is admitted: committed == capacity" '
 set +e; out=$(briqyard machine run --sleep never --image $ALPINE --name adm-4 --namespace "$T-adm" --memory 128 -- sleep 60 2>&1); rc=$?; set -e
 check "one machine of 128 MB (384 MB charged) more is refused" '[ "$rc" != 0 ] && grep -qi capacity <<<"$out"'
 check "memory_pressure turns true on the host" 'wait_cond memory_pressure'
-check "memory pressure: the fleet places nothing new on the host" 'fleet_refuses memory_pressure adm-5 "$T-adm-fleet"'
+check "memory pressure: the fleet places nothing new in a namespace on the host, for that reason" 'fleet_refuses memory_pressure adm-5 "$T-adm"'
+check "memory pressure: a new namespace finds no host with room" 'fleet_refuses "no host has room" adm-7 "$T-adm-new"'
 briqyard machine stop "$P1" >/dev/null
 check "a stop releases its memory at once" '[ "$(statusq .used.memory_mb)" = $(( cap - 4096 - 256 )) ]'
 P4=$(run --image $ALPINE --name adm-6 --namespace "$T-adm" --memory 128 -- sleep 7200)
@@ -452,13 +459,21 @@ B0=$(briqyard machine backup "$BK" | jq -r .id)
 check "real helper: crash and hand-over recover and accept creates" 'sudo -E python3 "$HERE/recovery-helper-check.py" "$BK" "$T-helper" "$ALPINE"'
 bkdir=$STORE/backups/$BK
 store_ids() { sudo find "$bkdir" -name "*.$1" 2>/dev/null | sed 's|.*/||; s|\.[a-z]*$||' | sort -u; }
-touch "$LOGS/b0.mark"; sleep 1
 # The second backup is under way once a stream newer than the first is on disk and its record is not.
 backup_streaming() { sudo find "$bkdir" -name '*.zfs' -newer "$LOGS/b0.mark" 2>/dev/null | grep -q . && ! sudo find "$bkdir" -name '*.json' -newer "$LOGS/b0.mark" 2>/dev/null | grep -q .; }
+# The second backup is incremental: it sends what changed since the first, and on a volume that
+# changed by a few KB that stream lasts a few milliseconds, shorter than the poll that waits for it.
+# So each attempt first writes 300 MB of new data (a stream of that size), and the moment the stream
+# is seen the `zfs send` is paused (SIGSTOP), so the stream cannot finish before the kill lands. The
+# kill is real, on the daemon; the paused send is killed afterwards.
+backup_streaming_paused() { backup_streaming && { sudo pkill -STOP -f '[z]fs send -w' || true; }; }
 caught=0
-for attempt in 1 2 3 4 5 6; do
-  if KILL_NEEDS_FAILURE=1 kill_when backup_streaming briqyard machine backup "$BK"; then caught=1; break; fi
+for attempt in 1 2 3; do
+  on "$BK" "head -c 300000000 /dev/urandom > /data/cut$attempt; sync" || true
   touch "$LOGS/b0.mark"; sleep 1
+  if KILL_NEEDS_FAILURE=1 kill_when backup_streaming_paused briqyard machine backup "$BK"; then caught=1; fi
+  sudo pkill -KILL -f '[z]fs send -w' || true
+  [ "$caught" = 1 ] && break
 done
 check "a backup was cut: killed while its stream was being written, its client failed (attempt $attempt)" '[ "$caught" = 1 ]'
 check "mid-backup: the source runs on, its counter whole" 'recovered "$BK"'
