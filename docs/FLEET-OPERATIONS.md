@@ -216,7 +216,7 @@ Prometheus text:
 | `briqyard_fleet_hosts` | `state` | hosts in the registry |
 | `briqyard_fleet_free_mb` | `resource="memory\|disk"`, `region` | free on the region's hosts that take a new namespace (ready, under `fill_ceiling`, no condition), summed |
 | `briqyard_fleet_largest_slot_mb` | same | the most free on one of them: the largest machine (memory) or volume plus 2 GB (disk) the region still takes |
-| `briqyard_fleet_unschedulable_total` | `resource="memory\|disk\|pressure"`, `region` | creates refused 503 `capacity` since the fleet started |
+| `briqyard_fleet_unschedulable_total` | `resource="memory\|disk\|pressure"`, `region` | creates refused 503 `capacity` since the fleet started, by the fleet or by a host (a pinned namespace's full host: counted by what the fleet's figures say it lacks, not for a quota or a used-up address or port) |
 
 `memory`: no host had the memory free, or those with the room are under `memory_pressure`;
 `disk`: hosts had the memory, none the disk, or those with both are under `disk_pressure`. A
