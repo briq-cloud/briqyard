@@ -48,7 +48,7 @@ use namespaces::*;
 use warm::*;
 
 #[derive(Parser)]
-#[command(name = "briqyard-fleet", version = api::VERSION, about = "briqyard across hosts")]
+#[command(name = "briqyard-fleet", version = briqyard_version::VERSION, about = "briqyard across hosts")]
 struct Args {
     #[arg(long, default_value = "/etc/briqyard/fleet.yaml")]
     config: PathBuf,
@@ -388,7 +388,7 @@ async fn run(args: Args) -> Result<()> {
     tracing::info!(
         addr = cfg.listen,
         tls = matches!(cfg.tls, config::Tls::Files { .. }),
-        version = api::VERSION,
+        version = briqyard_version::VERSION,
         "briqyard-fleet listening"
     );
     match &cfg.tls {

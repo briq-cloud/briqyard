@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 briqyard-api = { workspace = true, features = ["tls"] }
+briqyard-version = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

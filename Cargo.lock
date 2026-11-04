@@ -351,6 +351,7 @@ dependencies = [
  "axum",
  "briqyard-api",
  "briqyard-testing",
+ "briqyard-version",
  "chrono",
  "clap",
  "ctor",
@@ -369,9 +370,10 @@ dependencies = [
 
 [[package]]
 name = "briqyard-api"
-version = "0.1.20"
+version = "0.0.0"
 dependencies = [
  "briqyard-testing",
+ "briqyard-version",
  "chrono",
  "ctor",
  "hex",
@@ -398,6 +400,7 @@ dependencies = [
  "briqyard-api",
  "briqyard-objstore",
  "briqyard-testing",
+ "briqyard-version",
  "chrono",
  "clap",
  "ctor",
@@ -421,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-init"
-version = "0.1.20"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "briqyard-api",
@@ -467,6 +470,10 @@ name = "briqyard-testing"
 version = "0.1.20"
 
 [[package]]
+name = "briqyard-version"
+version = "0.1.20"
+
+[[package]]
 name = "briqyardd"
 version = "0.1.20"
 dependencies = [
@@ -478,6 +485,7 @@ dependencies = [
  "briqyard-api",
  "briqyard-objstore",
  "briqyard-testing",
+ "briqyard-version",
  "chrono",
  "clap",
  "ctor",

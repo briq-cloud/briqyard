@@ -22,7 +22,6 @@ pub mod version;
 pub use auth::constant_eq;
 pub use openapi::OPENAPI;
 pub use types::*;
-pub use version::VERSION;
 
 /// A test binary ends with its parent, and in bounded time (briqyard-testing).
 #[cfg(test)]

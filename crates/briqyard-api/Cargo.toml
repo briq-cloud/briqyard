@@ -1,7 +1,10 @@
 [package]
 name = "briqyard-api"
 description = "briqyard's API types and the host–guest protocol"
-version.workspace = true
+# Not the workspace version: the init is built from this crate and briqyard-api, and cargo
+# hashes a package's version into its symbols, so a release would change the init's bytes
+# (ADR 0101). `hack/release.py` leaves it alone; `hack/init-digest-check.sh` keeps it true.
+version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -27,6 +30,7 @@ tls = ["dep:rustls", "dep:sha2", "dep:hex"]
 listeners = ["dep:nix", "dep:socket2"]
 
 [dev-dependencies]
+briqyard-version = { workspace = true }
 briqyard-testing = { workspace = true }
 ctor = { workspace = true }
 rcgen = { workspace = true }
