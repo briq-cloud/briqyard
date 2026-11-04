@@ -49,6 +49,7 @@ impl Manager {
             Mode::Checkpoint { .. } => {} // Preserve exactly the frozen CURRENT drive.
         }
         let boot = fc::Boot {
+            oom_class: rec.oom_class(),
             id: id.clone(),
             dir,
             jail: self.jail_for(rec),
@@ -76,7 +77,11 @@ impl Manager {
         self.check_run_creation_authority(&current)?;
         self.verify_run_prelaunch_backing(&current).await?;
         // No ResumeFailed fallback: a different boot requires different explicit authority.
-        let live = self.inner.vmm.boot(&boot).await?;
+        let live = self.boot_reserved(entry, &boot).await?;
+        self.retain_memory_policy(entry, &live);
+        entry
+            .launch_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         *entry.live.lock().unwrap() = Some(live.clone());
         anyhow::ensure!(
             live.resumed == matches!(current.mode, Mode::Checkpoint { .. }),

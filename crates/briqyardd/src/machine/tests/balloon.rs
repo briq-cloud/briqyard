@@ -37,7 +37,10 @@ async fn a_new_cold_boot_persists_reporting_identity_and_keeps_full_reservation(
         rec.boot_identity.unwrap().device_profile,
         fc::REPORTING_PROFILE
     );
-    assert_eq!(h.m.usage().0.memory_mb, machine.size.memory_mb);
+    assert_eq!(
+        h.m.usage().0.memory_mb,
+        api::vmm_memory_mb(machine.size.memory_mb).unwrap()
+    );
     let stats = h.m.stats(&machine.id).await.unwrap();
     assert_eq!(stats.boot_profile.as_deref(), Some(fc::REPORTING_PROFILE));
     assert!(stats.balloon.is_none(), "no tick has sampled yet");

@@ -4,6 +4,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+OOMScoreAdjust=-900
+OOMPolicy=continue
 ExecStart=/usr/local/bin/briqyard-fleet --config /etc/briqyard/fleet.yaml
 Restart=on-failure
 RestartSec=2

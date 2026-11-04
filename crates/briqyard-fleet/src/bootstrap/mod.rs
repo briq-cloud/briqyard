@@ -241,7 +241,7 @@ async fn ssh(
     input: &[u8],
     limit: Duration,
 ) -> anyhow::Result<std::process::Output> {
-    let mut child = tokio::process::Command::new("ssh")
+    let mut child = tokio::process::Command::from(briqyard_api::host_process::command("ssh"))
         .args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -410,7 +410,7 @@ pub fn bootstrap_settings(
             ("FLEET_ADDRESS", b.fleet_address.clone()),
         ]);
     }
-    if let Some(classes) = runtime_classes_setting(&h.runtime_classes) {
+    if let Some(classes) = runtime_classes_setting(&h.runtime_classes, &[]) {
         env.push(("BRIQYARD_RUNTIME_CLASSES", classes));
     }
     env
@@ -435,30 +435,38 @@ pub fn bootstrap_env(
 /// private repository's. The host's configuration says the rest (its fleet, its token, its
 /// pool's key), and is not written again; but not the class it serves, which the script
 /// installs and keeps KVM's `nested` on for only when told (ADR 0088): `classes` are the
-/// host's reported ones.
+/// host's reported ones, `asked` the ones the upgrade enables besides (the script refuses a
+/// name the release does not build, before it changes anything).
 pub fn upgrade_env(
     release: &str,
     release_token: &str,
     classes: &[api::RuntimeClassInfo],
+    asked: &[String],
 ) -> String {
     let mut env = format!("BRIQYARD_RELEASE={}", shq(release));
     if !release_token.is_empty() {
         env += &format!(" BRIQYARD_RELEASE_TOKEN={}", shq(release_token));
     }
-    if let Some(classes) = runtime_classes_setting(classes) {
+    if let Some(classes) = runtime_classes_setting(classes, asked) {
         env += &format!(" BRIQYARD_RUNTIME_CLASSES={}", shq(&classes));
     }
     env
 }
 
-/// The classes of the host's report that the release builds, as the script's
-/// `BRIQYARD_RUNTIME_CLASSES`; none when the host serves none of them.
-fn runtime_classes_setting(classes: &[api::RuntimeClassInfo]) -> Option<String> {
-    let names: Vec<&str> = classes
+/// The classes of the host's report that the release builds, then those `asked`, each once,
+/// as the script's `BRIQYARD_RUNTIME_CLASSES`; none when there are none (an upgrade never drops
+/// a class the host serves).
+fn runtime_classes_setting(classes: &[api::RuntimeClassInfo], asked: &[String]) -> Option<String> {
+    let mut names: Vec<&str> = Vec::new();
+    let reported = classes
         .iter()
         .map(|c| c.name.as_str())
-        .filter(|n| *n == "nested")
-        .collect();
+        .filter(|n| *n == "nested");
+    for name in reported.chain(asked.iter().map(String::as_str)) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
     (!names.is_empty()).then(|| names.join(","))
 }
 

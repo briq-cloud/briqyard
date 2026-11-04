@@ -288,7 +288,8 @@ async fn closed_recovery_cannot_destroy_partial_create_before_reserving_make() {
     let dataset = entry.snapshot().root_dataset();
     h.pool.zfs.create(&dataset, 1 << 20).await.unwrap();
     h.m.close_backup_admission();
-    h.m.recover().await;
+    h.m.recover().await.unwrap();
+    h.m.resume_recovery_workers().await;
     assert!(
         h.pool.zfs.exists(&dataset).await.unwrap(),
         "refused recovery must retain partial source"

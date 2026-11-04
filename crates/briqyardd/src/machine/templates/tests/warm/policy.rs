@@ -21,7 +21,7 @@ async fn a_sample_keeps_fill_liability_after_completion_or_claim_until_a_fresh_m
         let boundary = initial_boundary.unwrap_or_else(|| h.m.warm_probe_boundary().unwrap());
         let sample = crate::machine::warm::Sample {
             at: std::time::Instant::now(),
-            memory_mb: 1024,
+            memory_mb: 1280,
             pool: crate::zfs::Pool {
                 used: 1 << 30,
                 free: 1024 << 30,
@@ -55,7 +55,7 @@ async fn a_sample_keeps_fill_liability_after_completion_or_claim_until_a_fresh_m
         // the old conservative liability, but cannot admit more than one fill at a time.
         *h.m.inner.warm_probe_override.lock().unwrap() = Some(Some(crate::machine::warm::Sample {
             at: std::time::Instant::now(),
-            memory_mb: 1024,
+            memory_mb: 1280,
             pool: crate::zfs::Pool {
                 used: 1 << 30,
                 free: 1024 << 30,
@@ -416,8 +416,11 @@ async fn ordinary_admission_racing_fill_can_consume_headroom_and_refill_rechecks
     h.wait_warm_barrier().await;
     let mut request = h.request("ordinary");
     request.image = ALPINE.into();
-    request.size.memory_mb = 3456;
+    // Source: 512 MiB physical; ordinary: 3072 + 256 MiB. Both fit the host,
+    // but the remaining 256 MiB cannot cover a fill plus its reserved headroom.
+    request.size.memory_mb = 3072;
     let ordinary = h.m.create_made(request).await.unwrap();
+    assert_eq!(h.m.usage().0.memory_mb, 3840);
     h.release_warm_barriers();
     settle(&h).await;
     let view = h.m.warm_pools("t1").unwrap().remove(0);
@@ -483,9 +486,13 @@ async fn data_volumes_are_fully_budgeted_and_subtracted_from_disk_floor() {
         .any(|reason| reason.reason == "pressure"));
     entry.rec.lock().unwrap().state = state::ERROR.into();
     assert_eq!(
-        h.m.warm_catalog("t1").await.unwrap().charged.data_disk_gb,
+        h.m.warm_metrics().charged.data_disk_gb,
         2,
         "failed/unknown cleanup retains its full data reservation"
+    );
+    assert!(
+        matches!(h.m.warm_catalog("t1").await, Err(MError::Capacity(_))),
+        "the still-live VMM in error state must also block protected admission"
     );
 }
 

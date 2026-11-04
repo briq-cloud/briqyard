@@ -41,7 +41,15 @@ pub mod condition {
     pub const DISK_PRESSURE: &str = "disk_pressure";
     /// A `zfs` command of the daemon's running for over a minute: the pool may be hung.
     pub const STORAGE_STALLED: &str = "storage_stalled";
-    pub const ALL: &[&str] = &[MEMORY_PRESSURE, DISK_PRESSURE, STORAGE_STALLED];
+    pub const MEMORY_PROTECTION: &str = "memory_protection";
+    pub const MEMORY_ACCOUNTING: &str = "memory_accounting";
+    pub const ALL: &[&str] = &[
+        MEMORY_PRESSURE,
+        DISK_PRESSURE,
+        STORAGE_STALLED,
+        MEMORY_PROTECTION,
+        MEMORY_ACCOUNTING,
+    ];
 }
 
 /// A host condition as the daemon's tick last found it.
@@ -121,6 +129,8 @@ pub struct Host {
     pub state: String,
     pub capacity: Capacity,
     pub used: Capacity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_policy: Option<MemoryPolicy>,
     pub machines: usize,
     #[serde(default, alias = "tenants")]
     pub namespaces: Vec<String>,
@@ -172,6 +182,11 @@ pub struct UpgradeHostRequest {
     /// A release URL (where `briqyardd-linux-<arch>` and its siblings are), or a version
     /// (`0.2.0`, `v0.2.0`) of the project's releases.
     pub release: String,
+    /// Runtime classes (ADR 0088) the host serves from this upgrade on, besides the ones it
+    /// already reports: the upgrade enables a class on a host that is running. Absent or
+    /// empty: the host's classes as they are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_classes: Vec<String>,
 }
 
 /// POST /v1/hosts (fleet only): a server bought by hand, for the fleet to bootstrap.
@@ -217,6 +232,8 @@ pub struct RegisterHostRequest {
     pub region: String,
     pub capacity: Capacity,
     pub used: Capacity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_policy: Option<MemoryPolicy>,
     pub machines: usize,
     #[serde(default, alias = "tenants")]
     pub namespaces: Vec<String>,
@@ -283,6 +300,8 @@ pub struct Status {
     pub host_id: String,
     pub capacity: Capacity,
     pub used: Capacity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_policy: Option<MemoryPolicy>,
     pub machines: usize,
     pub running: usize,
     /// Free space for disks, in MB.

@@ -9,8 +9,22 @@ impl Manager {
         cfg: Config,
         store: Store,
         zfs: Zfs,
+        images: Builder,
+        dns: Resolver,
+    ) -> Result<Self> {
+        let startup = fc::Startup::acquire().await?;
+        Self::new_with_startup(cfg, store, zfs, images, dns, startup).await
+    }
+
+    /// Startup ownership acquired before the executable launches host helpers.
+    #[doc(hidden)]
+    pub async fn new_with_startup(
+        cfg: Config,
+        store: Store,
+        zfs: Zfs,
         mut images: Builder,
         dns: Resolver,
+        startup: fc::Startup,
     ) -> Result<Self> {
         let range = Range::parse(&cfg.network.range).context("network.range")?;
         let host_id = match store.get_meta("host_id")? {
@@ -64,6 +78,9 @@ impl Manager {
                 cfg.check_runtime_classes(&crate::config::ClassHost::read())?;
                 let cpu_template = fc::host_template();
                 fc::Firecracker {
+                    launches: Default::default(),
+                    startup: tokio::sync::Mutex::new(Some(startup)),
+                    jailer: cfg.jailer.clone(),
                     binary: cfg.firecracker.clone(),
                     pci: cfg.pci,
                     console_max: (cfg.console_max_mb as u64) << 20,
@@ -107,6 +124,9 @@ impl Manager {
             events,
             pool: Mutex::new(None),
             conditions: Mutex::new(Conditions::new(Utc::now())),
+            memory_host: Mutex::new(None),
+            recovery_fault: Mutex::new(None),
+            memory_condition: Mutex::new(None),
             started: Mutex::new(api::DaemonStart::default()),
         });
         let m = Self { inner };
@@ -151,17 +171,40 @@ impl Manager {
                 "swept": swept,
             })),
         );
+        let watch = m.clone();
+        tokio::spawn(async move { watch.storage_watch().await });
+        if m.recovery_fault().is_some() {
+            // Nothing is reconciled against records that recovery could not settle.
+            return Ok(m);
+        }
+        m.resume_recovery_workers().await;
         m.start_stopped_by_host();
         let sleeper = m.clone();
         tokio::spawn(async move { sleeper.sleeper().await });
-        let watch = m.clone();
-        tokio::spawn(async move { watch.storage_watch().await });
         Ok(m)
     }
 
     // Shared by new and the fake-host startup tests; keep all durable backing recovery here.
     pub(super) async fn load_backing_at_start(&self) -> Result<()> {
         self.load()?;
+        let recovered: Vec<_> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .map(|entry| {
+                let rec = entry.snapshot();
+                fc::RecoveryMachine {
+                    id: rec.id,
+                    pid: rec.pid,
+                }
+            })
+            .collect();
+        if let Err(err) = self.inner.vmm.initialize_recovery(&recovered).await {
+            self.recovery_failed("native recovery barrier", err);
+        }
+        self.refresh_memory_host().await;
         self.recover_assigned_update_backing().await?;
         self.prepare_assigned_reboot_exits().await?;
         self.verify_assigned_run_backing().await?;
@@ -171,9 +214,32 @@ impl Manager {
 
     pub(super) async fn recover_and_sweep_at_start(&self) -> Result<(usize, usize, usize, usize)> {
         self.recover_warm_names()?;
-        let (adopted, stopped, gone) = self.recover().await;
-        let swept = self.sweep_orphans().await;
-        Ok((adopted, stopped, gone, swept))
+        if self.recovery_fault().is_some() {
+            return Ok((0, 0, 0, 0));
+        }
+        let recovered = async {
+            let (adopted, stopped, gone) = self.recover().await?;
+            let swept = self.sweep_orphans().await?;
+            self.inner.vmm.open_recovery()?;
+            Ok::<_, anyhow::Error>((adopted, stopped, gone, swept))
+        }
+        .await;
+        Ok(recovered.unwrap_or_else(|err| {
+            self.recovery_failed("startup recovery", err);
+            (0, 0, 0, 0)
+        }))
+    }
+
+    /// An anomaly in the VMM domain or in what a previous daemon left must not take the host
+    /// down for every namespace (a restart loop): the daemon serves what runs, starts
+    /// nothing, and says why. An operator resolves it and restarts; admission stays refused.
+    pub(super) fn recovery_failed(&self, what: &str, err: anyhow::Error) {
+        tracing::error!(err = %format!("{err:#}"), "{what} unresolved: managed spawning stays closed");
+        *self.inner.recovery_fault.lock().unwrap() = Some("recovery_unresolved");
+    }
+
+    pub(super) fn recovery_fault(&self) -> Option<&'static str> {
+        *self.inner.recovery_fault.lock().unwrap()
     }
 
     pub fn host_id(&self) -> &str {
@@ -262,7 +328,7 @@ impl Manager {
     /// killed: after a reboot the pid is someone else's) and marked stopped by the host, so
     /// the next use wakes them. A create it left is failed (ADR 0048). Destroys cut short are
     /// resumed by the sleeper's tick. How many were adopted, and how many marked stopped.
-    pub(super) async fn recover(&self) -> (usize, usize, usize) {
+    pub(super) async fn recover(&self) -> Result<(usize, usize, usize)> {
         let entries: Vec<Arc<Entry>> = self
             .inner
             .machines
@@ -299,6 +365,16 @@ impl Manager {
                 }
                 continue;
             }
+            if !matches!(
+                rec.state.as_str(),
+                state::RUNNING | state::STARTING | state::STOPPING
+            ) || rec
+                .clone_origin
+                .as_ref()
+                .is_some_and(|o| o.stage != templates::CloneStage::Active)
+            {
+                self.inner.vmm.recover_stopped(&rec.id).await?;
+            }
             // Its create's task went with the previous daemon. One from an image is taken up
             // again, its partial disks gone first: the record holds what it needs. What a fork
             // or a restore was made from is not on the record: failed, for the caller to create
@@ -312,7 +388,7 @@ impl Manager {
                 continue;
             }
             if rec.state == state::CREATING {
-                self.recover_create(&e).await;
+                // Resume admitted create work only after the startup gate opens.
                 continue;
             }
             if !matches!(
@@ -329,6 +405,7 @@ impl Manager {
                 continue;
             }
             if rec.warm_slot.is_some() {
+                self.inner.vmm.recover_stopped(&rec.id).await?;
                 self.recover_incomplete_clone(&e).await;
                 stopped += 1;
                 continue;
@@ -340,7 +417,6 @@ impl Manager {
             let why = match alive {
                 true => {
                     stopped += 1;
-                    self.inner.vmm.kill(rec.pid);
                     "left running by a previous daemon that could not hand it over: stopped"
                 }
                 false => {
@@ -348,6 +424,7 @@ impl Manager {
                     "its process ended while no daemon ran: stopped"
                 }
             };
+            self.inner.vmm.recover_stopped(&rec.id).await?;
             let _ = self.unplug(&rec.id, &rec.ip).await;
             e.set_state(state::STOPPED, |r| {
                 r.stopped_reason = stop::HOST.into();
@@ -361,8 +438,48 @@ impl Manager {
             );
             let _ = self.save(&e);
         }
-        // An adopted machine that sends through its namespace's gateway needs it, and the
-        // gateway's own process may not have survived: it starts as a start would start it.
+        Ok((adopted, stopped, gone))
+    }
+
+    /// No create or gateway start is dispatched until native recovery and orphan teardown
+    /// are complete and the factory opens its managed-spawn gate.
+    pub(super) async fn resume_recovery_workers(&self) {
+        let adopted: Vec<_> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for entry in adopted {
+            let pending = entry.pending_adoption.lock().unwrap().take();
+            if let Some((vm, ready)) = pending {
+                self.watch(&entry, &vm);
+                if !warm::ready_slot(&entry.snapshot()) && !*vm.exited.borrow() {
+                    let (_, _, generation) = self.reset_probes(&entry);
+                    if ready {
+                        entry.probe.lock().unwrap().ready = true;
+                    }
+                    self.spawn_probes(&entry, &vm, generation, false);
+                }
+            }
+        }
+        let creates: Vec<_> = self
+            .inner
+            .machines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| {
+                let rec = entry.snapshot();
+                rec.state == state::CREATING && rec.clone_origin.is_none()
+            })
+            .cloned()
+            .collect();
+        for entry in creates {
+            self.recover_create(&entry).await;
+        }
         for gw in self.gateways_out_of_step(false) {
             let (m, namespace) = (self.clone(), gw.snapshot().namespace);
             tokio::spawn(async move {
@@ -371,7 +488,6 @@ impl Manager {
                 }
             });
         }
-        (adopted, stopped, gone)
     }
 
     /// Admission precedes partial-disk cleanup; closed startup work leaves its source alone.
@@ -427,7 +543,7 @@ impl Manager {
     /// and its record, or a destroy cut short. A Firecracker nobody knows is ended; its run
     /// directory, jail, TAP and disks go. Done once at start, so nothing leaks for good. How
     /// many it found.
-    pub(super) async fn sweep_orphans(&self) -> usize {
+    pub(super) async fn sweep_orphans(&self) -> Result<usize> {
         let mut known: std::collections::HashSet<String> = self
             .inner
             .machines
@@ -447,23 +563,17 @@ impl Manager {
             }
             Err(error) => {
                 tracing::error!(err = %error, "clone references unreadable: orphan cleanup deferred");
-                return 0;
+                return Err(error.context("clone references before orphan settlement"));
             }
         }
         // Every update names a machine that load kept (it refuses a journal without its record),
         // so only an unreadable journal matters here.
         if let Err(error) = self.assigned_update_machines() {
             tracing::error!(err = %error, "assigned updates unreadable: orphan cleanup deferred");
-            return 0;
+            return Err(error.context("assigned updates before orphan settlement"));
         }
-        let mut swept = 0;
-        for (pid, id) in self.inner.vmm.processes() {
-            if !known.contains(&id) {
-                self.inner.vmm.kill(pid);
-                tracing::warn!(machine = id, pid, "firecracker with no record, ended");
-                swept += 1;
-            }
-        }
+        let known_ids: Vec<_> = known.iter().cloned().collect();
+        let mut swept = self.inner.vmm.prepare_orphans(&known_ids).await?;
         if let Ok(mut rd) = tokio::fs::read_dir(self.inner.cfg.run_dir()).await {
             while let Ok(Some(e)) = rd.next_entry().await {
                 let name = e.file_name().to_string_lossy().into_owned();
@@ -520,7 +630,7 @@ impl Manager {
         if swept > 0 {
             tracing::info!(swept, "orphans swept at start");
         }
-        swept
+        Ok(swept)
     }
 
     /// Takes over a VMM a previous daemon left running (it crashed; a shutdown suspends
@@ -561,15 +671,9 @@ impl Manager {
             }
         }
         *e.live.lock().unwrap() = Some(vm.clone());
+        self.retain_memory_policy(e, &vm);
         *e.stop_req.lock().unwrap() = None;
-        self.watch(e, &vm);
-        // Its probes run again from the top; nobody waits on this run, so a startup that
-        // fails is a crash for the restart policy, not a failed boot.
-        let (_, _, generation) = self.reset_probes(e);
-        if ready {
-            e.probe.lock().unwrap().ready = true;
-        }
-        self.spawn_probes(e, &vm, generation, false);
+        *e.pending_adoption.lock().unwrap() = Some((vm, ready));
         e.note(
             Ev::normal(
                 reason::ADOPTED,
@@ -590,8 +694,14 @@ impl Manager {
     pub(super) fn watch(&self, e: &Arc<Entry>, vm: &fc::Vm) {
         let (m, e, pid, mut exited) = (self.clone(), e.clone(), vm.pid, vm.exited.clone());
         tokio::spawn(async move {
-            let _ = exited.wait_for(|gone| *gone).await;
-            m.settle_exit(&e, pid).await;
+            if exited.wait_for(|gone| *gone).await.is_ok() {
+                m.settle_exit(&e, pid).await;
+            } else {
+                tracing::warn!(
+                    machine = e.snapshot().id,
+                    "VMM exit proof unavailable; live ownership retained"
+                );
+            }
         });
     }
 
@@ -657,7 +767,7 @@ pub(super) fn advertise_address(advertise: &str, bind: &str, host_ip: Option<Ipv
 
 /// The first IPv4 address of an interface.
 async fn host_ip(interface: &str) -> Option<Ipv4Addr> {
-    let out = tokio::process::Command::new("ip")
+    let out = crate::host_process::command("ip")
         .args(["-4", "-o", "addr", "show", "dev", interface])
         .output()
         .await
@@ -686,12 +796,11 @@ pub(super) fn meminfo_total_mb(text: &str) -> Option<u32> {
 
 /// What the host hands out when the configuration does not say: its memory less what it
 /// keeps for itself and its other services (`capacity.reserved_memory_mb`, 2 GB) and less the
-/// ZFS cache's ceiling when one is set (ADR 0028), at least 1 GB.
+/// ZFS cache's ceiling when one is set (ADR 0028); zero means no allocatable memory.
 pub(super) fn default_memory_mb(host_mb: u32, reserved_mb: u32, arc_max_mb: u32) -> u32 {
     host_mb
         .saturating_sub(reserved_mb)
         .saturating_sub(arc_max_mb)
-        .max(1024)
 }
 
 /// Four shared vCPUs a hardware thread, less the threads kept for the host's other services

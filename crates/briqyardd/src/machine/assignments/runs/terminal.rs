@@ -316,7 +316,7 @@ impl Manager {
                     }
                 },
             };
-            self.inner.vmm.kill(live.pid);
+            self.inner.vmm.kill_checked(&live)?;
             let mut exited = live.exited.clone();
             tokio::time::timeout(Duration::from_secs(15), exited.wait_for(|gone| *gone)).await??;
             Some(saved)

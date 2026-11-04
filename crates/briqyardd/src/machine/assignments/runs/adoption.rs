@@ -61,6 +61,7 @@ impl Manager {
             )
             .await
             .context("exact observed VMM is not confirmed Running")?;
+        self.retain_memory_policy(entry, &vm);
         self.verify_recorded_run_process(&current)?;
         // Same actual API device-profile contract as assigned creation adoption. The
         // remaining boot identity comes from this exact run's durable observation.

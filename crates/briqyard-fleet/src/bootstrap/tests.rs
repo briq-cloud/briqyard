@@ -177,7 +177,7 @@ fn ssh_command() {
     let args = ssh_args(
         &b,
         "10.0.0.9",
-        &upgrade_env("file:///r/it's", "", &[]),
+        &upgrade_env("file:///r/it's", "", &[], &[]),
         kh,
         true,
     );
@@ -187,7 +187,7 @@ fn ssh_command() {
     );
     // A private repository's release: its token too, and still nothing of the host's.
     assert_eq!(
-        upgrade_env("https://github.com/o/r/releases/download/v1", "gh-t", &[]),
+        upgrade_env("https://github.com/o/r/releases/download/v1", "gh-t", &[], &[]),
         "BRIQYARD_RELEASE='https://github.com/o/r/releases/download/v1' BRIQYARD_RELEASE_TOKEN='gh-t'"
     );
 }
@@ -201,12 +201,12 @@ fn an_upgrade_names_the_class_the_host_serves() {
     };
     // The script keeps KVM's `nested` on and installs the release's class files only when told.
     assert_eq!(
-        upgrade_env("v1", "", &[class("nested")]),
+        upgrade_env("v1", "", &[class("nested")], &[]),
         "BRIQYARD_RELEASE='v1' BRIQYARD_RUNTIME_CLASSES='nested'"
     );
     // A class the release does not build is the configuration's own, never named.
     assert_eq!(
-        upgrade_env("v1", "", &[class("custom")]),
+        upgrade_env("v1", "", &[class("custom")], &[]),
         "BRIQYARD_RELEASE='v1'"
     );
     // A re-bootstrap of a host that serves it says so as well.
@@ -214,6 +214,34 @@ fn an_upgrade_names_the_class_the_host_serves() {
     h.runtime_classes = vec![class("nested")];
     let env = bootstrap_env(&crate::config::Bootstrap::default(), "https://f", &h, "v1");
     assert!(env.contains("BRIQYARD_RUNTIME_CLASSES='nested'"), "{env}");
+}
+
+#[test]
+fn an_upgrade_enables_the_classes_asked_besides_the_reported_ones() {
+    let class = |name: &str| api::RuntimeClassInfo {
+        name: name.into(),
+        nested: name == "nested",
+        ..Default::default()
+    };
+    let asked = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    // Asked on a host that serves none: the first enabling.
+    assert_eq!(
+        upgrade_env("v1", "", &[], &asked(&["nested"])),
+        "BRIQYARD_RELEASE='v1' BRIQYARD_RUNTIME_CLASSES='nested'"
+    );
+    // Reported and asked: the class once, never dropped, never twice.
+    assert_eq!(
+        upgrade_env("v1", "", &[class("nested")], &asked(&["nested", "nested"])),
+        "BRIQYARD_RELEASE='v1' BRIQYARD_RUNTIME_CLASSES='nested'"
+    );
+    // A name the release does not build is passed on: the script refuses it, before it
+    // changes anything. The configuration's own class is still not named.
+    assert_eq!(
+        upgrade_env("v1", "", &[class("custom")], &asked(&["bogus"])),
+        "BRIQYARD_RELEASE='v1' BRIQYARD_RUNTIME_CLASSES='bogus'"
+    );
+    // Nothing asked: as before.
+    assert_eq!(upgrade_env("v1", "", &[], &[]), "BRIQYARD_RELEASE='v1'");
 }
 
 #[test]

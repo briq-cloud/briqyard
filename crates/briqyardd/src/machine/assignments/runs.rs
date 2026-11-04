@@ -426,11 +426,17 @@ impl Manager {
         if let Some(error) = over_quota(&quota.rec.id, &quota.rec.quota, &held, &need) {
             return Err(anyhow!(MError::Quota(error.to_string())));
         }
+        self.memory_admission(&machines)?;
+        let prior_memory = if entry.commits_memory(&intent.current.prior) {
+            entry.memory_charge(&intent.current.prior)
+        } else {
+            0
+        };
         let (physical, _) = committed(&machines);
         admit(
-            physical.memory_mb.saturating_sub(prior_charge.memory_mb),
+            physical.memory_mb.saturating_sub(prior_memory),
             self.capacity().memory_mb,
-            need.memory_mb,
+            host_memory(need.memory_mb)?,
         )?;
         admit_cpu(
             physical

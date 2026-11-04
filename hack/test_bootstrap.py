@@ -460,6 +460,19 @@ class DroppedNestedClass(unittest.TestCase):
             self.assertIn("ok", result.stdout)
 
 
+class UnknownClass(unittest.TestCase):
+    """A class the release does not build is refused first, before the script touches the host."""
+
+    def test_an_unknown_class_name_refuses_before_anything_runs(self):
+        for classes in ("bogus", "nested,bogus"):
+            result = subprocess.run(["bash", str(Path(__file__).parent / "bootstrap-host.sh")],
+                                    env=dict(os.environ, BRIQYARD_RUNTIME_CLASSES=classes),
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("bogus is not a class the release builds", result.stdout)
+            self.assertNotIn("==", result.stdout)
+
+
 class InstallerLock(unittest.TestCase):
     def test_installers_serialize_through_handover_and_failure_cleanup(self):
         with tempfile.TemporaryDirectory() as root:

@@ -600,6 +600,10 @@ fn the_jailer_is_told_the_cgroup_parent_and_the_limits() {
             "cpu.weight=200",
             "--cgroup",
             "memory.max=805306368",
+            "--cgroup",
+            "memory.oom.group=1",
+            "--cgroup",
+            "memory.swap.max=0",
         ]
     );
     // No limit, no cgroup argument.
@@ -627,6 +631,7 @@ fn the_pid_file_is_read_once_and_must_be_there() {
 #[test]
 fn a_snapshot_load_opens_every_drive_again_the_modules_included() {
     let mut b = Boot {
+        oom_class: briqyard_api::host_process::OomClass::Machine,
         id: "bq_1".into(),
         dir: PathBuf::from("/run/bq_1"),
         jail: None,
@@ -750,6 +755,8 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
             let (_gone, exited) = watch::channel(false);
             let (_report, exit) = watch::channel(None);
             let vm = Vm {
+                #[cfg(target_os = "linux")]
+                identity: None,
                 pid: 42,
                 api: path,
                 vsock: dir.path().join("vsock"),
@@ -765,7 +772,10 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
                 std::fs::write(dir.path().join(name), b"partial").unwrap();
             }
             let vmm = Firecracker {
+                launches: Default::default(),
+                startup: Default::default(),
                 binary: PathBuf::new(),
+                jailer: PathBuf::new(),
                 pci: false,
                 console_max: 0,
                 version: String::new(),

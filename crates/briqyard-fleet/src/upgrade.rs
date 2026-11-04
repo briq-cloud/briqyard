@@ -36,6 +36,17 @@ pub async fn upgrade_host(
             ),
         )
     })?;
+    if let Some(bad) = req
+        .runtime_classes
+        .iter()
+        .find(|c| !api::valid_class_name(c))
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid",
+            format!("runtime class {bad:?}: a class name such as nested"),
+        ));
+    }
     let key = &st.cfg.bootstrap.ssh_key;
     if !key.exists() {
         return Err(err(
@@ -82,9 +93,10 @@ pub async fn upgrade_host(
         }
         return Err(registry_error(e));
     }
+    let classes = req.runtime_classes;
     let task = tokio::spawn(async move {
         let _turn = turn;
-        let outcome = run(&st, &was, &release).await;
+        let outcome = run(&st, &was, &release, &classes).await;
         finish(&st, &was, &release, outcome).await
     });
     match task.await {
@@ -103,6 +115,7 @@ async fn run(
     st: &AppState,
     was: &crate::registry::HostRec,
     release: &str,
+    classes: &[String],
 ) -> Result<(String, api::DaemonStart), String> {
     // Over SSH where the bootstrap reached it: a host added by hand has an SSH address of its
     // own, the API on the private network.
@@ -112,6 +125,7 @@ async fn run(
         release,
         &st.cfg.bootstrap.release_token,
         &was.runtime_classes,
+        classes,
     );
     let installed = bootstrap::install(st, &was.id, &ip, &env)
         .await

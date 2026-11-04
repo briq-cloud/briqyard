@@ -9,7 +9,10 @@ fn owned(dir: &Path, api: &Path) -> (Firecracker, Vm, watch::Sender<bool>) {
     let (_, exit) = watch::channel(None);
     (
         Firecracker {
+            launches: Default::default(),
+            startup: Default::default(),
             binary: PathBuf::new(),
+            jailer: PathBuf::new(),
             pci: false,
             console_max: 0,
             version: String::new(),
@@ -18,6 +21,8 @@ fn owned(dir: &Path, api: &Path) -> (Firecracker, Vm, watch::Sender<bool>) {
             cpu_template: None,
         },
         Vm {
+            #[cfg(target_os = "linux")]
+            identity: None,
             pid: 42,
             api: api.into(),
             vsock: dir.join("vsock"),

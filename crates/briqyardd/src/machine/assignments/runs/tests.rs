@@ -473,3 +473,33 @@ async fn assigned_early_pong_waits_for_main_and_rejects_marker_change() {
         assert!(!entry.identity_trusted.load(Relaxed));
     }
 }
+
+#[tokio::test]
+async fn assigned_run_admission_reserves_physical_overhead() {
+    physical_overhead_admission(Some(2)).await;
+}
+
+#[tokio::test]
+async fn volume_free_assigned_run_admission_reserves_physical_overhead() {
+    physical_overhead_admission(None).await;
+}
+
+async fn physical_overhead_admission(volume: Option<u32>) {
+    let (h, entry) = stopped_with(false, volume).await;
+    let guest = entry.snapshot().size.memory_mb;
+    let used = h.m.usage().0.memory_mb;
+    let remaining = h.m.capacity().memory_mb - used;
+    // Leave exactly guest memory free: the VMM ceiling must still refuse admission.
+    h.add("capacity-filler", state::RUNNING, remaining - guest - 256);
+    let before = entry.snapshot();
+    let error = h.m.reserve_assigned_run(&entry, false).await.unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<MError>(),
+        Some(MError::Capacity(_))
+    ));
+    assert_eq!(entry.snapshot().assigned_run, before.assigned_run);
+    h.m.inner.machines.lock().unwrap().remove("capacity-filler");
+    h.m.reserve_assigned_run(&entry, false).await.unwrap();
+    assert_eq!(h.m.usage().0.memory_mb, used + guest + 256);
+    assert_eq!(h.m.quota("destination").unwrap().used.memory_mb, guest);
+}

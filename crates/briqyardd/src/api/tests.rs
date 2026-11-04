@@ -46,6 +46,20 @@ fn the_description_lists_the_reasons_the_daemon_has() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert_eq!(listed, api::reason::ALL);
+    let conditions: Vec<&str> = doc["components"]["schemas"]["Condition"]["properties"]["type"]
+        ["enum"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(conditions, api::condition::ALL);
+    for schema in ["Status", "Host", "RegisterHostRequest"] {
+        assert_eq!(
+            doc["components"]["schemas"][schema]["properties"]["memory_policy"]["$ref"].as_str(),
+            Some("#/components/schemas/MemoryPolicy")
+        );
+    }
 }
 
 #[test]

@@ -446,21 +446,40 @@ pub async fn shutdown(uds: &Path, grace: Duration) -> Result<()> {
     Ok(())
 }
 
+/// How long `wait_ready` sleeps after a refused or unanswered ping, `elapsed` into the wait.
+/// The init is listening some 500 ms after the machine starts and a ping that finds nobody
+/// listening costs one local connect, so the first seconds are polled every few milliseconds:
+/// readiness is noticed within that, not within a hundred (ADR 0093). A guest that stays
+/// silent past them is slow or wedged, and costs the VMM a connect every 100 ms.
+fn poll_interval(elapsed: Duration) -> Duration {
+    if elapsed < FAST_POLL_FOR {
+        FAST_POLL
+    } else {
+        SLOW_POLL
+    }
+}
+
+const FAST_POLL: Duration = Duration::from_millis(5);
+const FAST_POLL_FOR: Duration = Duration::from_secs(5);
+const SLOW_POLL: Duration = Duration::from_millis(100);
+
 /// Polls `ping` until the init answers or the timeout passes; the version its `pong` says.
 pub async fn wait_ready(uds: &Path, timeout: Duration) -> Result<String> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let start = tokio::time::Instant::now();
+    let deadline = start + timeout;
     loop {
         let last = match tokio::time::timeout(Duration::from_secs(2), ping(uds)).await {
             Ok(Ok(pong)) => return Ok(pong.version),
             Ok(Err(e)) => e.to_string(),
             Err(_) => "timeout".to_string(),
         };
-        if tokio::time::Instant::now() > deadline {
+        let now = tokio::time::Instant::now();
+        if now > deadline {
             return Err(anyhow!(
                 "guest init did not answer within {timeout:?} (last: {last})"
             ));
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(poll_interval(now - start)).await;
     }
 }
 
@@ -965,6 +984,108 @@ mod tests {
         // An init older than the version report answers none: an empty version.
         let _server = serve(&path, OK, vec![frame(&Response::new("pong"))]);
         assert_eq!(wait_ready(&path, Duration::from_secs(5)).await.unwrap(), "");
+    }
+
+    #[test]
+    fn polling_is_fast_while_a_guest_boots_and_slow_when_it_is_silent() {
+        assert_eq!(poll_interval(Duration::ZERO), FAST_POLL);
+        assert_eq!(poll_interval(Duration::from_millis(900)), FAST_POLL);
+        assert_eq!(poll_interval(FAST_POLL_FOR), SLOW_POLL);
+        assert_eq!(poll_interval(Duration::from_secs(60)), SLOW_POLL);
+        assert!(FAST_POLL <= Duration::from_millis(5));
+    }
+
+    /// Answers connection after connection as scripted: `None` hangs up at once, as a
+    /// guest with nobody listening does; `Some(handshake)` answers the `CONNECT` line and,
+    /// when it is `OK`, the ping with a pong. Returns how many connections it served.
+    fn serve_script(
+        uds: &Path,
+        script: Vec<Option<&'static str>>,
+        version: &'static str,
+    ) -> tokio::task::JoinHandle<usize> {
+        let ln = UnixListener::bind(uds).unwrap();
+        tokio::spawn(async move {
+            let n = script.len();
+            for step in script {
+                let (s, _) = ln.accept().await.unwrap();
+                let Some(handshake) = step else { continue };
+                let mut r = BufReader::new(s);
+                let mut line = String::new();
+                r.read_line(&mut line).await.unwrap();
+                let mut s = r.into_inner();
+                s.write_all(handshake.as_bytes()).await.unwrap();
+                if handshake == OK {
+                    let mut hdr = [0u8; 4];
+                    s.read_exact(&mut hdr).await.unwrap();
+                    let mut body = vec![0u8; u32::from_be_bytes(hdr) as usize];
+                    s.read_exact(&mut body).await.unwrap();
+                    let pong = Response {
+                        kind: "pong".into(),
+                        version: version.into(),
+                        ..Default::default()
+                    };
+                    s.write_all(&frame(&pong)).await.unwrap();
+                }
+            }
+            n
+        })
+    }
+
+    #[tokio::test]
+    async fn wait_ready_notices_a_guest_that_comes_up_late_without_a_polling_delay() {
+        let (_dir, path) = socket();
+        let late = path.clone();
+        // Nothing listens for 300 ms, as before the VMM has made its socket.
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            serve_script(&late, vec![Some(OK)], "0.1.0+late")
+                .await
+                .unwrap()
+        });
+        let t0 = std::time::Instant::now();
+        let version = wait_ready(&path, Duration::from_secs(5)).await.unwrap();
+        let took = t0.elapsed();
+        assert_eq!(version, "0.1.0+late");
+        assert!(took >= Duration::from_millis(300), "{took:?}");
+        // Generous for a loaded runner; a 100 ms sleep alone could not pass this bound
+        // together with the startup of the stand-in.
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn wait_ready_goes_on_through_refusals_and_a_guest_that_restarts() {
+        let (_dir, path) = socket();
+        // The init restarts under it: a hang-up mid-handshake, a refusal, then the pong.
+        let server = serve_script(
+            &path,
+            vec![None, Some("REFUSED\n"), None, Some(OK)],
+            "0.1.0+again",
+        );
+        let version = wait_ready(&path, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(version, "0.1.0+again");
+        assert_eq!(server.await.unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_never_answers_ends_at_the_timeout_with_its_last_error() {
+        let (_dir, path) = socket();
+        let _server = serve_script(&path, vec![Some("REFUSED vsock\n"); 1_000], "");
+        let t0 = std::time::Instant::now();
+        let err = wait_ready(&path, Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(t0.elapsed() >= Duration::from_millis(300));
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("guest init did not answer within 300ms"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("vsock connect refused: REFUSED vsock"),
+            "{msg}"
+        );
     }
 
     #[tokio::test]

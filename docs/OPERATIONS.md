@@ -133,19 +133,26 @@ The CLI trusts the daemon's certificate by that fingerprint alone. To read it ag
 
 A machine that runs a hypervisor of its own (a sandbox that tests briqyard, an emulator) needs
 `/dev/kvm`: it is created in the `nested` class (`--runtime-class nested`). Enable the class on
-an x86_64 host by adding `BRIQYARD_RUNTIME_CLASSES=nested` to the bootstrap, with
-`BRIQYARD_RELEASE` (set it on every run, upgrades included):
+an x86_64 host through its upgrade (the host keeps running; the release must build the class,
+and a repeat of `--runtime-class` adds more). The upgrade also keeps every class the host already
+serves, and it runs for the version the host already has:
 
 ```
-BRIQYARD_RELEASE=https://github.com/briq-cloud/briqyard/releases/download/v0.1.19 \
-BRIQYARD_RUNTIME_CLASSES=nested ... bash bootstrap-host.sh
+briqyard host upgrade h_123456 --release 0.1.19 --runtime-class nested
 ```
 
-It downloads the release's `nested-vmlinux-x86_64`, `nested-modules-x86_64.ext4` and
-`nested-versions-x86_64.json` (checked against `SHA256SUMS-x86_64`), keeps them by digest under
-`/var/lib/briqyard/classes/nested/`, writes the class into the config and leaves KVM's `nested`
-on. A loaded KVM keeps its setting: the script reloads the module when no machine runs, and
-otherwise stops with "reboot the host, then run this again", before it activates anything.
+One host per call (`--all` refuses the flag). The bootstrap then downloads the release's
+`nested-vmlinux-x86_64`, `nested-modules-x86_64.ext4` and `nested-versions-x86_64.json` (checked
+against `SHA256SUMS-x86_64`), keeps them by digest under `/var/lib/briqyard/classes/nested/`,
+writes the class into the config and leaves KVM's `nested` on.
+
+A loaded KVM keeps its setting. With `nested` off, the script reloads the module when no machine
+runs, and otherwise stops with "reboot the host, then run this again". The upgrade fails before
+the binaries, the configuration or the machines are touched (the packages and the module's options
+file are already written), and the host is `draining` with that message in its note. Follow
+[A reboot](#upgrade) (a reboot stops the machines: drain first, and stop the daemon so they
+suspend), upgrade again, then `host undrain`. A class name the release does not build fails the
+same way, first.
 
 ```yaml
 runtime_classes:
@@ -200,7 +207,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `firecracker`, `jailer`, `kernel`, `init` | `/usr/local/bin/...`, `/var/lib/briqyard/vmlinux` | The binaries and the guest kernel. No `jailer`: Firecracker runs as root (development only) |
 | `jail_dir`, `jail_uid_base` | `<data_dir>/jail`, `100000` | Where chroots and memory snapshots go: the daemon mounts `<pool>/jail` there, so they land on the pool, not on `/` (ADR 0014). Each machine gets a uid of its own from this base |
 | `runtime_classes` | none | Kernels served besides `kernel` (the `default` class), by name (ADR 0088); see [Runtime classes](#runtime-classes-adr-0088) |
-| `kernel_args` | none | Appended to the boot arguments |
+| `kernel_args` | none | Appended to the boot arguments, which start with `console=ttyS0 quiet`: the console carries the kernel's errors and panics only. `loglevel=7` brings every boot message back (ADR 0093) |
 | `pci` | `false` | Firecracker's PCI transport (needs a guest kernel with PCI) |
 | `root_disk_gb` | `8` | Size of every root disk (thin) |
 | `image_keep_days` | `14` | An image no machine uses is removed this long after it was built; under disk pressure, sooner (ADR 0021) |
@@ -240,7 +247,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `ingress.advertise` | the host's primary address | The address endpoints are reported at (`address` on an endpoint): what a router on another machine dials, a private address when the host has one |
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
 | `capacity.memory_mb`, `capacity.vcpus` | host memory − `reserved_memory_mb` − the ZFS cache's ceiling (`zfs_arc_max`, when set), (threads − `reserved_threads`) × 4 | What the host hands out; shared vCPUs oversubscribe |
-| `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the default capacity leaves to the host and its other services (an edge: 3072); unused when `memory_mb` or `vcpus` is set |
+| `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the host keeps for itself and its other services (an edge: 3072). `memory_mb` plus this plus the ZFS cache ceiling must fit in physical memory, else the host takes nothing new (`memory_protection`: `capacity_exceeds_physical_memory`; the daemon logs the figures): lower `memory_mb` or this, or leave `memory_mb` unset |
 | `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start. An `http://` `url` must be a loopback or private address (ADR 0026) |
 
 ## A proxy in front
@@ -333,6 +340,7 @@ the hosts: a host is never newer than its fleet.
 briqyard-fleet --version                                  # on the fleet's server: upgrade it first
 briqyard host upgrade h_123456 --release 0.2.0            # or a release URL
 briqyard host upgrade --all --release 0.2.0               # every ready or draining host, by id, one at a time
+briqyard host upgrade h_123456 --release 0.2.0 --runtime-class nested   # and start serving a class (ADR 0088)
 briqyard host ls                                          # VERSION, and each host's note
 ```
 
@@ -350,6 +358,13 @@ What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it i
 | Hand-over | The script sends the running daemon SIGUSR2: it stops accepting, drains for up to 2 s, exits 75 and leaves every machine running; the unit starts the new one at once, which adopts them. Its listeners stay in systemd's store meanwhile (ADR 0051) |
 | Back | `briqyardd --version` over SSH, then a heartbeat from a new start of that version that stopped nothing, within 5 minutes |
 | Undrained | The host is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
+
+The install is also what sets the memory prerequisites (ADR 0065): the unit's
+`OOMScoreAdjust=-900` before the new daemon starts, then swap off, KSM and `systemd-oomd`
+stopped and masked, `zfs_arc_max` set. A binary replaced without it (by hand) leaves
+`memory_protection` true (`supervisor_oom_preference_unset`, `host_swap_enabled`,
+`arc_ceiling_unverified`, …): the host serves its machines, takes nothing new, and the fleet
+places nothing there. Run the bootstrap, or the missing step, and the condition clears on the next tick.
 
 A failure leaves the host `draining` with the reason in its note: fix it, then
 `briqyard host undrain <id>`. `--all` stops at the first failure and names the hosts left. One
@@ -586,7 +601,9 @@ registry backups, operator archives and local backing/reference scopes are exclu
   durations remain absent until observed. Host readiness does not measure a public API call.
 - `briqyard top [--namespace T]`: running machines by CPU, with memory, disk and network rates over
   the last 15 s (`GET /v1/top`; through the fleet, a namespace's host or every host).
-- Conditions (ADR 0021): `memory_pressure`, `disk_pressure`, `storage_stalled` (ADR 0046) in
+- Conditions (ADR 0021): `memory_pressure`, `disk_pressure`, `storage_stalled` (ADR 0046) and
+  `memory_protection` (ADR 0065; true names the unmet host prerequisite or an unsettled startup in
+  its message, and the host takes nothing new) in
   `/v1/status` and `briqyard host ls`; each change is a `host_condition` event (`briqyard
   events`), a warning when it turns true. Under disk pressure the daemon removes unused images
   itself (`image_removed` events).
