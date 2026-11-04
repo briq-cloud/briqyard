@@ -830,3 +830,22 @@ fn legacy_snapshot_metadata_preserves_record_fingerprints() {
     assert_eq!(record.copy_consistency.consistency, "crash");
     assert_eq!(serde_json::to_value(record).unwrap(), value);
 }
+
+#[tokio::test]
+async fn a_copy_during_a_plain_stop_does_not_claim_clean_stopped_disks() {
+    let h = harness().await;
+    let e = h.add("m_stopping_copy", state::STOPPED, 256);
+    h.disks(&e).await;
+    h.m.start("m_stopping_copy", None).await.unwrap();
+    e.set_state(state::STOPPING, |_| None);
+    h.host_calls();
+    let s =
+        h.m.snapshot("m_stopping_copy", named("stopping"))
+            .await
+            .unwrap();
+    assert_eq!(s.copy_consistency.consistency, "filesystem");
+    let calls = h.host_calls();
+    assert!(calls[0].starts_with("fs_sync "));
+    assert!(calls[1].starts_with("fs_freeze "));
+    assert_eq!(h.thaw_count(), 1);
+}

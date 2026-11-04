@@ -934,6 +934,7 @@ async fn checkpoint_suspend_start_preserves_current_files_guest_lineage_and_publ
             .unwrap();
         assert_eq!(paused.state, state::STOPPED);
         assert!(entry.snapshot().suspended);
+        assert!(entry.snapshot().suspend_synced);
         assert!(!entry.identity_trusted.load(Relaxed));
         assert!(entry.live.lock().unwrap().is_none());
         assert!(h.m.namespace_dns_names("destination").is_empty());

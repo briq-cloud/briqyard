@@ -593,6 +593,8 @@ registry backups, operator archives and local backing/reference scopes are exclu
   | `briqyard_warm_pool_{desired,max_ready,shortfall,slots,blocked}`, `_reserved_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | namespace, pool, catalog, type, exact numeric size; bounded state/reason | actual warm counts, upper targets and full unclaimed reservations |
   | `briqyard_warm_{memory_bytes,cpu_millis,root_disk_bytes,data_disk_bytes}` | `kind="reserved\|budget\|headroom"` | full recipe charges and configured limits; root headroom is the shared absolute free-space floor; data headroom is zero |
   | `briqyard_warm_{memory_available_bytes,disk_free_bytes,probe_age_seconds,probe_available,probe_valid,accounting_available}` | | cached physical availability, sample age/validity and accounting availability; a scrape runs no probe |
+  | `briqyard_copies_total` | `operation="snapshot\|backup\|fork"`, `consistency="filesystem\|synced\|crash"` | successful copies by achieved consistency, including explicit crash opt-outs |
+  | `briqyard_fs_freeze_seconds` | histogram buckets | host-observed freeze acknowledgment through thaw acknowledgment, including failed storage operations |
   | `briqyard_warm_operations_total`, `_operation_seconds_total`, `_operation_last_seconds` | `operation="prepare\|claim"`, `outcome="success\|miss\|failure"` | host prepare-worker and claim-to-host-readiness observations; excludes fleet and public API transport |
   | `briqyard_warm_fill_blocked_total` | bounded `reason` | actual refused refill attempts |
 

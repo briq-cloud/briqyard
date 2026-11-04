@@ -218,10 +218,19 @@ impl Manager {
         let mut snapped = Vec::new();
         let copy_consistency = {
             let _lock = e.lock.lock().await;
+            if !self.holds(&e) {
+                return Err(MError::NotFound);
+            }
+            if e.snapshot().state == state::DESTROYING {
+                return Err(MError::BadState(state::DESTROYING.into()));
+            }
             for ds in [rec.root_dataset(), rec.data_dataset()] {
                 if z.exists(&ds).await? {
                     snapped.push(ds);
                 }
+            }
+            if snapped.is_empty() {
+                return Err(anyhow!("backup source has no disks").into());
             }
             self.frozen_copy(&e, &snapped, &snap, "backup", opt).await?
         };
@@ -229,7 +238,7 @@ impl Manager {
         let disks = async {
             let mut disks = Vec::new();
             for (disk, ds) in [("root", rec.root_dataset()), ("data", rec.data_dataset())] {
-                if !z.exists(&ds).await? {
+                if !snapped.contains(&ds) {
                     continue;
                 }
                 // The base must be a backup of this machine in the store, sent raw under this

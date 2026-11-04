@@ -47,10 +47,11 @@ def wait(mid,state):
     raise TimeoutError(state)
 def measure(fn):
     t=time.monotonic();fn();return (time.monotonic()-t)*1000
+def summary(xs):
+    xs=sorted(xs);return {'n':len(xs),'p50_ms':statistics.median(xs),'p95_ms':xs[max(0,__import__('math').ceil(.95*len(xs))-1)],'max_ms':max(xs),'samples_ms':xs}
 samples={}
 def record(name,fn,n=20): samples[name]=[measure(fn) for _ in range(n)]
 ns='freeze-measure-'+str(os.getpid());ids=[]
-api('POST','/namespaces',{'name':ns})
 def create(cmd=None):
     m=api('POST','/machines',{'namespace':ns,'image':'python:3.12-alpine','size':{'vcpus':1,'memory_mb':512},'cmd':cmd or ['sleep','3600'],'sleep':'never','disk_limits':{'bandwidth_mb':32,'burst_sec':0} if cmd else None})
     ids.append(m['id']);wait(m['id'],'running');return m['id']
@@ -92,11 +93,11 @@ try:
             samples.setdefault(f'stop_{dirty}MiB_ms',[]).append((time.monotonic()-t)*1000)
             api('POST','/machines/'+source+'/start',{});wait(source,'running')
         for _ in range(20):sleep_once()
-    # Create control: same script on baseline and candidate. Warm claim needs an operator's
-    # qualified catalog; report unavailable rather than invent a synthetic substitute.
+    # Creation ends at running; cleanup is outside the timed interval.
     def create_control():
-        mid=create();api('DELETE','/machines/'+mid);ids.remove(mid)
-    record('create_ms',create_control)
+        t=time.monotonic();mid=create();elapsed=(time.monotonic()-t)*1000
+        api('DELETE','/machines/'+mid);ids.remove(mid);return elapsed
+    samples['create_ms']=[create_control() for _ in range(20)]
     builder=api('POST','/machines',{'namespace':ns,'name':'warm-builder','image':'docker.io/library/alpine@sha256:85f2b723e106c34644cd5851d7e81ee87da98ac54672b29947c052a45d31dc2f','size':{'vcpus':1,'memory_mb':256},'template_build':'init-ready-v1','sleep':'never'})
     ids.append(builder['id']);wait(builder['id'],'running')
     sealed=api('POST','/machines/'+builder['id']+'/snapshots',{'memory':True,'template':True})
@@ -128,9 +129,10 @@ try:
     api('DELETE','/namespaces/'+ns+'/warm-pools/freeze-control')
     for load in ('idle','busy'):
         samples[load+'_fork_added_ms']=[f-c for f,c in zip(samples[load+'_frozen_fork_ms'],samples[load+'_crash_fork_ms'])]
-    def summary(xs):
-        xs=sorted(xs);return {'n':len(xs),'p50_ms':statistics.median(xs),'p95_ms':xs[max(0,__import__('math').ceil(.95*len(xs))-1)],'max_ms':max(xs),'samples_ms':xs}
     print(json.dumps({'runner':platform.machine(),'cpus':os.cpu_count(),'shared_hosted_runner':True,'measurements':{k:summary(v) if v else {'n':0} for k,v in samples.items()},'warm_claim':'qualified init-ready-v1, admission through host readiness'},indent=2))
+except Exception as error:
+    print(json.dumps({'runner':platform.machine(),'cpus':os.cpu_count(),'complete':False,'error':type(error).__name__,'measurements':{k:summary(v) if v else {'n':0} for k,v in samples.items()}},indent=2),flush=True)
+    raise
 finally:
     try:api('DELETE','/namespaces/'+ns+'/warm-pools/freeze-control')
     except Exception:pass

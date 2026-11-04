@@ -46,6 +46,7 @@ pub fn check_exposition(text: &str) {
         HashSet::new(),
     );
     let mut current = String::new();
+    let mut histograms = HashSet::new();
     // A family begins: the one before it is done.
     let enter = |name: &str, current: &mut String, done: &mut HashSet<String>| {
         assert!(!done.contains(name), "{name} again, apart from its samples");
@@ -63,8 +64,14 @@ pub fn check_exposition(text: &str) {
             match kw {
                 "HELP" => assert!(helped.insert(name.to_string()), "HELP twice: {line}"),
                 "TYPE" => {
-                    assert!(["counter", "gauge", "untyped"].contains(&arg), "{line}");
+                    assert!(
+                        ["counter", "gauge", "untyped", "histogram"].contains(&arg),
+                        "{line}"
+                    );
                     assert!(typed.insert(name.to_string()), "TYPE twice: {line}");
+                    if arg == "histogram" {
+                        histograms.insert(name.to_owned());
+                    }
                 }
                 _ => panic!("not a comment of the format: {line}"),
             }
@@ -80,8 +87,15 @@ pub fn check_exposition(text: &str) {
             None => (head, ""),
         };
         assert!(name_ok(name), "{line}");
-        assert!(typed.contains(name), "a sample before its TYPE: {line}");
-        enter(name, &mut current, &mut done);
+        let family = ["_bucket", "_sum", "_count"]
+            .iter()
+            .find_map(|suffix| {
+                name.strip_suffix(*suffix)
+                    .filter(|base| histograms.contains(*base))
+            })
+            .unwrap_or(name);
+        assert!(typed.contains(family), "a sample before its TYPE: {line}");
+        enter(family, &mut current, &mut done);
         let mut names = HashSet::new();
         let mut rest = labels;
         while !rest.is_empty() {
@@ -109,6 +123,11 @@ pub fn check_exposition(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn histogram_samples_belong_to_the_declared_family() {
+        check_exposition("# HELP hold Hold.\n# TYPE hold histogram\nhold_bucket{le=\"1\"} 1\nhold_bucket{le=\"+Inf\"} 1\nhold_sum 0.5\nhold_count 1\n");
+    }
 
     #[test]
     fn the_check_refuses_what_is_not_the_format() {

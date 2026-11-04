@@ -195,6 +195,7 @@ impl Settlement {
             target.assigned_run = current.target.assigned_run.clone();
             target.pid = current.target.pid;
             target.suspended = current.target.suspended;
+            target.suspend_synced = current.target.suspend_synced;
             anyhow::ensure!(
                 update.machine == current.machine
                     && update.change.volume.is_some()

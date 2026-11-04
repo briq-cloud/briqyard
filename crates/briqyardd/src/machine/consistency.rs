@@ -21,6 +21,7 @@ fn fallback(error: &anyhow::Error) -> api::CopyConsistency {
     } else {
         "freeze_refused"
     };
+    tracing::warn!(reason, error = %error, "guest copy consistency fallback");
     achieved("crash", Some(reason))
 }
 impl Manager {
@@ -76,7 +77,10 @@ impl Manager {
             } else {
                 achieved("crash", Some("unsynced_suspend"))
             }
-        } else if r.state == state::RUNNING {
+        } else if matches!(
+            r.state.as_str(),
+            state::RUNNING | state::STARTING | state::STOPPING
+        ) {
             let synced = self.sync_copy(e, None).await;
             if synced.consistency == "synced" {
                 if let Some(live) = live {

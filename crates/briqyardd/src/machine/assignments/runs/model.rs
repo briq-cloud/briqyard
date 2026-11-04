@@ -463,6 +463,7 @@ impl Current {
             }
             projected.pid = 0;
             projected.suspended = settled.checkpoint.is_some();
+            projected.suspend_synced = settled.checkpoint.is_some() && self.target.suspend_synced;
         } else {
             anyhow::ensure!(self.settlement.is_none(), "unsettled run claims settlement");
         }
