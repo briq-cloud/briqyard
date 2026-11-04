@@ -51,9 +51,12 @@ counts; the start logs `orphans swept at start`.
 **Startup cost follows the leaves present.** With the leaves gone as machines stop, a host
 holds about one per running VMM, so a restart no longer pays for history. An upgrade from a
 version that leaked still pays once (the 118 to 168 s above, for about 6000 leaves) and never
-again: **the daemon does not answer for 2 to 4 minutes at the first start after such an upgrade**
-(CI saw 244 s once and 173 s once, for 6500 leaves). That is #134's synchronous sweep, which this
-change does not shorten. The barrier keeps its cap of 65536 and says so when it is passed.
+again. The first start after such an upgrade is **linear in the leaves, about 50 ms a leaf, up
+to 5 minutes observed** (173, 244 and 317 s for 6560 leaves on the CI VM): each `rmdir` of a
+memcg leaf costs a kernel offline and an RCU grace period, and `prepare_orphans`
+(`fc/vmm.rs`) removes them one at a time before the barrier opens. The API and the in-process
+ingress are down throughout; the VMMs keep running. It is paid once, after an upgrade from a
+leaking version: a fresh host never pays it. This change does not shorten it (#134's sweep). The barrier keeps its cap of 65536 and says so when it is passed.
 
 ## Tests
 
