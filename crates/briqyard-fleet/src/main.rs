@@ -90,8 +90,8 @@ struct AppState {
     upgrade: Arc<tokio::sync::Mutex<()>>,
     /// The registry's backup, when `backup.store` is set (ADR 0032).
     backup: Option<backup::Backup>,
-    /// Key requests take turns: a key just made is answered, to its host or any other ask,
-    /// only once it is written, and taken back when it could not be (ADR 0026).
+    /// Key creation and local save/rollback take turns (ADR 0026). Publication
+    /// waits release this gate; exact ACK and authenticated identity are rechecked.
     key_turn: tokio::sync::Mutex<()>,
     /// How long a host has to answer a list built from several (`LIST_TIMEOUT`).
     list_timeout: std::time::Duration,

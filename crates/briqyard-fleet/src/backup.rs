@@ -10,6 +10,8 @@ use briqyard_objstore::ObjectStore;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// The newest backup; one more per UTC day (`registry-<day>.json.age`), the last of that day.
 pub const LATEST: &str = "fleet/registry.json.age";
@@ -21,8 +23,10 @@ const PUT_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 pub struct Backup {
     store: ObjectStore,
     recipient: age::x25519::Recipient,
-    /// What the store holds, as of the last write: held across a write, so writes take turns.
-    last: tokio::sync::Mutex<Written>,
+    turn: Arc<tokio::sync::Mutex<()>>,
+    /// Historical ACK state; never held across I/O or an await.
+    last: Arc<Mutex<Written>>,
+    blocked: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -30,6 +34,46 @@ struct Written {
     digest: Option<[u8; 32]>,
     /// The pool key of each host in it.
     keys: HashMap<String, PoolKey>,
+}
+
+// Field drop follows Drop::drop: block admission BEFORE releasing the owned lease.
+struct Publication {
+    _turn: tokio::sync::OwnedMutexGuard<()>,
+    blocked: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl Publication {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Publication {
+    fn drop(&mut self) {
+        if self.armed {
+            self.blocked.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn respond(reply: &mut Option<tokio::sync::oneshot::Sender<Result<bool>>>, result: Result<bool>) {
+    if let Some(reply) = reply.take() {
+        let _ = reply.send(result);
+    }
+}
+
+/// Bound admission only; dropping a waiter starts no worker.
+pub(super) async fn admit<F, D>(future: F, deadline: D) -> Result<F::Output>
+where
+    F: std::future::Future,
+    D: std::future::Future<Output = ()>,
+{
+    tokio::select! {
+        biased;
+        result = future => Ok(result),
+        _ = deadline => Err(anyhow!("registry admission: no turn within {} s", PUT_WITHIN.as_secs())),
+    }
 }
 
 /// The registry as written: the same bytes as `registry.json`.
@@ -46,7 +90,9 @@ impl Backup {
         Ok(Some(Backup {
             store: store(cfg)?,
             recipient: recipient(&cfg.recipient)?,
+            turn: Default::default(),
             last: Default::default(),
+            blocked: Default::default(),
         }))
     }
 
@@ -54,26 +100,61 @@ impl Backup {
         self.store.describe()
     }
 
-    /// Writes the registry when it differs from what the store holds: the newest and the
-    /// day's copy, encrypted. `false` when there was nothing to write. The registry is read
-    /// once this write has its turn, so a write never lands an older registry over a newer one.
-    pub async fn push(&self, reg: &std::sync::Mutex<Registry>) -> Result<bool> {
-        let mut last = self.last.lock().await;
-        let reg = reg.lock().unwrap().clone();
+    /// Snapshot after admission, then publish daily and LATEST as one owned transaction.
+    /// Caller cancellation or timeout never drops the worker's PUT future or lease.
+    pub async fn push(&self, reg: &Mutex<Registry>) -> Result<bool> {
+        let store = self.store.clone();
+        self.push_with(reg, move |object, sealed| {
+            let store = store.clone();
+            async move { store.put_bytes(&object, &sealed).await }
+        })
+        .await
+    }
+
+    async fn push_with<P, F>(&self, reg: &Mutex<Registry>, put: P) -> Result<bool>
+    where
+        P: FnMut(String, Arc<[u8]>) -> F + Send + 'static,
+        F: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        self.push_with_deadlines(reg, put, || tokio::time::sleep(PUT_WITHIN))
+            .await
+    }
+
+    async fn push_with_deadlines<P, F, D, T>(
+        &self,
+        reg: &Mutex<Registry>,
+        mut put: P,
+        mut deadline: D,
+    ) -> Result<bool>
+    where
+        P: FnMut(String, Arc<[u8]>) -> F + Send + 'static,
+        F: std::future::Future<Output = Result<()>> + Send + 'static,
+        D: FnMut() -> T + Send + 'static,
+        T: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let turn = admit(self.turn.clone().lock_owned(), deadline()).await?;
+        if self.blocked.load(Ordering::Acquire) {
+            bail!("registry publication blocked after unexpected worker exit");
+        }
+        let reg = reg
+            .lock()
+            .map_err(|_| anyhow!("registry unavailable"))?
+            .clone();
         let data = encode(&reg);
         let digest: [u8; 32] = Sha256::digest(&data).into();
-        if last.digest == Some(digest) {
+        if self
+            .last
+            .lock()
+            .map_err(|_| anyhow!("backup ACK cache unavailable"))?
+            .digest
+            == Some(digest)
+        {
             return Ok(false);
         }
-        let sealed = age::encrypt(&self.recipient, &data).context("encrypt the registry")?;
-        let day = chrono::Utc::now().format("%Y-%m-%d");
-        for object in [format!("fleet/registry-{day}.json.age"), LATEST.to_string()] {
-            tokio::time::timeout(PUT_WITHIN, self.store.put_bytes(&object, &sealed))
-                .await
-                .map_err(|_| anyhow!("{object}: no answer within {} s", PUT_WITHIN.as_secs()))?
-                .context("write the registry's backup")?;
-        }
-        *last = Written {
+        let sealed: Arc<[u8]> = age::encrypt(&self.recipient, &data)
+            .context("encrypt the registry")?
+            .into();
+        let written = Written {
             digest: Some(digest),
             keys: reg
                 .hosts
@@ -82,12 +163,65 @@ impl Backup {
                 .map(|h| (h.id.clone(), h.pool_key.clone()))
                 .collect(),
         };
-        Ok(true)
+        let objects = [
+            format!(
+                "fleet/registry-{}.json.age",
+                chrono::Utc::now().format("%Y-%m-%d")
+            ),
+            LATEST.to_string(),
+        ];
+        let last = self.last.clone();
+        let mut guard = Publication {
+            _turn: turn,
+            blocked: self.blocked.clone(),
+            armed: true,
+        };
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        // No await between the snapshot and launch. The guard is owned even if the
+        // spawned future is destroyed before its first poll.
+        let worker = tokio::spawn(async move {
+            let mut reply = Some(reply);
+            let result = async {
+                for object in objects {
+                    let future = put(object.clone(), sealed.clone());
+                    tokio::pin!(future);
+                    tokio::select! {
+                        biased;
+                        result = &mut future => result,
+                        _ = deadline() => {
+                            respond(&mut reply, Err(anyhow!(
+                                "{object}: no answer within {} s", PUT_WITHIN.as_secs()
+                            )));
+                            // Await the SAME future. Neither a lost caller nor its
+                            // deadline permits cancellation, replacement or replay.
+                            future.await
+                        }
+                    }
+                    .context("write the registry's backup")?;
+                }
+                *last
+                    .lock()
+                    .map_err(|_| anyhow!("backup ACK cache unavailable"))? = written;
+                Ok(true)
+            }
+            .await;
+            // Returned backend errors are terminal client work. Unexpected destruction
+            // instead leaves this armed, blocking later publication before lease drop.
+            guard.disarm();
+            respond(&mut reply, result);
+        });
+        drop(worker); // Detach: request cleanup must never abort publication.
+        answer
+            .await
+            .map_err(|_| anyhow!("registry publication worker ended unexpectedly"))?
     }
 
-    /// Whether the last write holds this host's key as it is.
+    /// Historical exact-key ACK eligibility; poisoning refuses eligibility.
     pub async fn holds(&self, host: &str, key: &PoolKey) -> bool {
-        self.last.lock().await.keys.get(host) == Some(key)
+        self.last
+            .lock()
+            .map(|last| last.keys.get(host) == Some(key))
+            .unwrap_or(false)
     }
 
     /// A backup read back: fetched, decrypted with the identity, parsed.
@@ -183,8 +317,745 @@ pub async fn run(st: std::sync::Arc<crate::AppState>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    const CLEANUP_WITHIN: Duration = Duration::from_secs(10);
+
+    struct WorkerState {
+        handle: Option<tokio::task::JoinHandle<Result<()>>>,
+        failed: bool,
+    }
+
+    type Worker = Arc<Mutex<WorkerState>>;
+
+    struct BlockingPut {
+        objects: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        release: Option<std::sync::mpsc::Sender<()>>,
+        workers: Vec<(Worker, std::sync::mpsc::Receiver<()>)>,
+    }
+
+    // The test owns release independently of the Arc retained by the transaction.
+    // Unwinding must release the gate even while that transaction still owns state.
+    struct PutFixture(Arc<Mutex<BlockingPut>>);
+
+    impl PutFixture {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(BlockingPut::new())))
+        }
+    }
+
+    impl std::ops::Deref for PutFixture {
+        type Target = Arc<Mutex<BlockingPut>>;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for PutFixture {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().release();
+        }
+    }
+
+    // Signals even if the blocking writer unwinds. The retained JoinHandle separately
+    // reports whether it completed successfully.
+    struct Terminal(std::sync::mpsc::Sender<()>);
+
+    impl Drop for Terminal {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    impl BlockingPut {
+        fn new() -> Self {
+            Self {
+                objects: Default::default(),
+                release: None,
+                workers: Vec::new(),
+            }
+        }
+
+        fn put(
+            &mut self,
+            object: String,
+            sealed: Arc<[u8]>,
+            gate: Option<tokio::sync::oneshot::Sender<()>>,
+        ) -> impl std::future::Future<Output = Result<()>> + use<> {
+            let objects = self.objects.clone();
+            let (release, released) = std::sync::mpsc::channel();
+            if gate.is_some() {
+                assert!(self.release.replace(release).is_none());
+            }
+            let (terminal, ended) = std::sync::mpsc::channel();
+            let worker = tokio::task::spawn_blocking(move || {
+                let _terminal = Terminal(terminal);
+                if let Some(entered) = gate {
+                    let _ = entered.send(());
+                    released
+                        .recv_timeout(CLEANUP_WITHIN)
+                        .context("blocking PUT gate was not released")?;
+                }
+                objects.lock().unwrap().insert(object, sealed.to_vec());
+                Ok(())
+            });
+            let worker = Arc::new(Mutex::new(WorkerState {
+                handle: Some(worker),
+                failed: false,
+            }));
+            self.workers.push((worker.clone(), ended));
+            // Await the real JoinHandle, not an earlier completion notification. The
+            // fixture retains it if this future is dropped while the writer runs.
+            async move { Self::joined(&worker).await }
+        }
+
+        async fn joined(worker: &Worker) -> Result<()> {
+            futures::future::poll_fn(|cx| {
+                let mut task = worker.lock().unwrap();
+                let Some(handle) = task.handle.as_mut() else {
+                    return std::task::Poll::Ready(if task.failed {
+                        Err(anyhow!("blocking PUT previously failed"))
+                    } else {
+                        Ok(())
+                    });
+                };
+                let result =
+                    futures::ready!(std::future::Future::poll(std::pin::Pin::new(handle), cx));
+                let result = result
+                    .context("blocking PUT panicked")
+                    .and_then(|result| result);
+                task.failed = result.is_err();
+                drop(task.handle.take());
+                // Cleanup must still fail if a canceled caller's join already
+                // consumed a gate-timeout or writer failure.
+                std::task::Poll::Ready(result)
+            })
+            .await
+        }
+
+        fn release(&mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+        }
+
+        async fn join(&mut self) {
+            self.release();
+            let deadline = tokio::time::Instant::now() + CLEANUP_WITHIN;
+            // Retain the handle if the cleanup deadline expires; Drop still waits for
+            // its independent terminal signal, without replaying any write.
+            while let Some((worker, _)) = self.workers.last_mut() {
+                tokio::time::timeout_at(deadline, Self::joined(worker))
+                    .await
+                    .expect("blocking PUT cleanup deadline")
+                    .expect("blocking PUT failed");
+                drop(self.workers.pop());
+            }
+        }
+    }
+
+    impl Drop for BlockingPut {
+        fn drop(&mut self) {
+            self.release();
+            let deadline = Instant::now() + CLEANUP_WITHIN;
+            for (_, terminal) in &self.workers {
+                let ended = terminal
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .is_ok();
+                assert!(
+                    ended || std::thread::panicking(),
+                    "blocking PUT drop deadline"
+                );
+            }
+            // Every gate also has its own finite wait if the test/runtime disappears.
+        }
+    }
+
+    fn manual_deadline(
+        target: usize,
+    ) -> (
+        tokio::sync::oneshot::Sender<()>,
+        impl FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send,
+    ) {
+        let (fire, fired) = tokio::sync::oneshot::channel();
+        let mut fired = Some(fired);
+        let mut index = 0;
+        (
+            fire,
+            move || -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                let current = index;
+                index += 1;
+                if current == target {
+                    let fired = fired.take().unwrap();
+                    Box::pin(async move {
+                        let _ = fired.await;
+                    })
+                } else {
+                    Box::pin(std::future::pending())
+                }
+            },
+        )
+    }
+
+    async fn cleanup(b: &Backup, writes: &Arc<Mutex<BlockingPut>>) {
+        let turn = tokio::time::timeout(CLEANUP_WITHIN, b.turn.lock())
+            .await
+            .expect("publication worker cleanup deadline");
+        drop(turn);
+        let mut writes = std::mem::replace(&mut *writes.lock().unwrap(), BlockingPut::new());
+        writes.join().await;
+    }
+
+    pub(crate) async fn with_stalled_publication<F: std::future::Future<Output = ()>>(
+        st: &crate::AppState,
+        latest: bool,
+        action: F,
+    ) {
+        let b = st.backup.as_ref().unwrap();
+        st.reg
+            .lock()
+            .unwrap()
+            .namespaces
+            .insert("unrelated-change".into(), "h2".into());
+        let writes = PutFixture::new();
+        let actual = writes.clone();
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let mut caller = Box::pin(b.push_with(&st.reg, move |object, sealed| {
+            let gate = if (object == LATEST) == latest {
+                entered.take()
+            } else {
+                None
+            };
+            actual.lock().unwrap().put(object, sealed, gate)
+        }));
+        bounded(async {
+            tokio::select! {
+                _ = &mut caller => panic!("publication ended before gate"),
+                result = entering => result.unwrap(),
+            }
+        })
+        .await;
+        drop(caller);
+        assert!(st.key_turn.try_lock().is_ok());
+        bounded(action).await;
+        writes.lock().unwrap().release();
+        cleanup(b, &writes).await;
+    }
+
+    pub(crate) async fn refuse_busy(b: &Backup, reg: &Mutex<Registry>) -> Result<bool> {
+        b.push_with_deadlines(
+            reg,
+            |_, _| async { panic!("publication admitted while blocking writer was active") },
+            || std::future::ready(()),
+        )
+        .await
+    }
+
+    async fn caller_keeps_publication_turn(gate_latest: bool, timeout_caller: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let b = backup(dir.path(), &identity.to_public().to_string());
+        let mut initial = Registry::default();
+        initial.hosts.insert(
+            "h1".into(),
+            crate::static_host(
+                &crate::config::StaticHost {
+                    id: "h1".into(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            ),
+        );
+        initial.pool_key("h1").unwrap();
+        let reg = Mutex::new(initial);
+        reg.lock()
+            .unwrap()
+            .namespaces
+            .insert("snapshot-a".into(), "h1".into());
+        let writes = PutFixture::new();
+        let objects = writes.lock().unwrap().objects.clone();
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let (fire, deadline) = manual_deadline(if gate_latest { 2 } else { 1 });
+        let a_writes = writes.clone();
+        // Both callers use the production ownership and transaction boundary.
+        let mut a = Box::pin(b.push_with_deadlines(
+            &reg,
+            move |object, sealed| {
+                let gate = if (object == LATEST) == gate_latest {
+                    entered.take()
+                } else {
+                    None
+                };
+                a_writes.lock().unwrap().put(object, sealed, gate)
+            },
+            deadline,
+        ));
+        tokio::time::timeout(CLEANUP_WITHIN, async {
+            tokio::select! {
+                result = &mut a => panic!("A ended before its blocking gate: {}", result.is_ok()),
+                result = entering => result.expect("A entered the blocking writer"),
+            }
+        })
+        .await
+        .expect("A did not enter the blocking writer");
+        if timeout_caller {
+            fire.send(()).expect("stage deadline receiver");
+            assert!(tokio::time::timeout(CLEANUP_WITHIN, &mut a)
+                .await
+                .expect("caller timeout result deadline")
+                .is_err());
+        }
+        drop(a);
+        // A's real blocking writer remains gated after its async caller is dropped.
+        reg.lock()
+            .unwrap()
+            .namespaces
+            .insert("snapshot-b".into(), "h1".into());
+        let expected_key = {
+            let mut reg = reg.lock().unwrap();
+            reg.hosts.get_mut("h1").unwrap().pool_key = PoolKey::default();
+            reg.pool_key("h1").unwrap().0
+        };
+        let expected = encode(&reg.lock().unwrap());
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let b_attempts = attempts.clone();
+        let b_writes = writes.clone();
+        let admission_polled = Arc::new(AtomicBool::new(false));
+        let observed = admission_polled.clone();
+        let mut first_deadline = true;
+        let mut b_call = Box::pin(b.push_with_deadlines(
+            &reg,
+            move |object, sealed| {
+                b_attempts.lock().unwrap().push(object.clone());
+                b_writes.lock().unwrap().put(object, sealed, None)
+            },
+            move || {
+                let admission = first_deadline;
+                first_deadline = false;
+                let observed = observed.clone();
+                async move {
+                    // admit's biased select polls this only if lease acquisition
+                    // returned Pending. This distinguishes admission from awaiting
+                    // an already launched worker's reply in the same manual poll.
+                    if admission {
+                        observed.store(true, Ordering::SeqCst);
+                    }
+                    std::future::pending::<()>().await;
+                }
+            },
+        ));
+        // One explicit poll reaches the admission wait. No scheduler delay is used as
+        // evidence: entering the callable proves the borrowed turn was released early.
+        let pending = match futures::poll!(&mut b_call) {
+            std::task::Poll::Pending => true,
+            std::task::Poll::Ready(result) => {
+                result.expect("B publication failed");
+                false
+            }
+        };
+        let waited_on_admission = admission_polled.load(Ordering::SeqCst);
+        let entered_early = !attempts.lock().unwrap().is_empty();
+        let mut committed_early = false;
+        if entered_early {
+            if pending {
+                tokio::time::timeout(CLEANUP_WITHIN, &mut b_call)
+                    .await
+                    .expect("B completion deadline")
+                    .expect("B publication failed");
+            }
+            committed_early =
+                b.last.lock().unwrap().digest == Some(Sha256::digest(&expected).into());
+        }
+        writes.lock().unwrap().release();
+        if !entered_early && pending {
+            tokio::time::timeout(CLEANUP_WITHIN, &mut b_call)
+                .await
+                .expect("B completion deadline")
+                .expect("B publication failed");
+        }
+        drop(b_call);
+        cleanup(&b, &writes).await;
+        let final_is_b = {
+            let final_objects = objects.lock().unwrap();
+            // Track B's actual daily name so crossing UTC midnight does not change
+            // the oracle. An earlier day's object is outside B's two destinations.
+            let targets = attempts.lock().unwrap();
+            targets.len() == 2
+                && targets.iter().any(|object| object == LATEST)
+                && targets.iter().all(|object| {
+                    let sealed = final_objects.get(object).expect("B's object exists");
+                    let restored = open(sealed, &identity).expect("fake object decrypts");
+                    restored.namespaces.contains_key("snapshot-b")
+                        && restored
+                            .hosts
+                            .get("h1")
+                            .is_some_and(|host| host.pool_key == expected_key)
+                })
+        };
+        let ack_is_b = {
+            let last = b.last.lock().unwrap();
+            last.digest == Some(Sha256::digest(&expected).into())
+                && last.keys.get("h1") == Some(&expected_key)
+        };
+        assert!(
+            !entered_early,
+            "B entered PUT before A's blocking writer was terminal"
+        );
+        assert!(
+            pending && waited_on_admission,
+            "B must wait for publication admission"
+        );
+        assert!(
+            !committed_early,
+            "B committed before A's blocking writer was terminal"
+        );
+        assert!(final_is_b, "both final objects must contain snapshot B");
+        assert!(ack_is_b, "Written must acknowledge snapshot B");
+    }
+
+    #[tokio::test]
+    async fn caller_abort_during_daily_keeps_publication_turn() {
+        caller_keeps_publication_turn(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn caller_abort_during_latest_keeps_publication_turn() {
+        caller_keeps_publication_turn(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn caller_timeout_during_daily_keeps_publication_turn() {
+        caller_keeps_publication_turn(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn caller_timeout_during_latest_keeps_publication_turn() {
+        caller_keeps_publication_turn(true, true).await;
+    }
+
+    async fn bounded<F: std::future::Future>(future: F) -> F::Output {
+        tokio::time::timeout(CLEANUP_WITHIN, future)
+            .await
+            .expect("test completion deadline")
+    }
+
+    fn fixture() -> (tempfile::TempDir, Backup, Mutex<Registry>) {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let b = backup(dir.path(), &identity.to_public().to_string());
+        let mut reg = Registry::default();
+        reg.hosts.insert(
+            "h1".into(),
+            crate::static_host(
+                &crate::config::StaticHost {
+                    id: "h1".into(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            ),
+        );
+        reg.pool_key("h1").unwrap();
+        (dir, b, Mutex::new(reg))
+    }
+
+    #[tokio::test]
+    async fn admission_deadline_and_unpolled_cancellation_start_no_work() {
+        assert_eq!(PUT_WITHIN, Duration::from_secs(30));
+        let (_dir, b, reg) = fixture();
+        let turn = b.turn.lock().await;
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancel_calls = attempts.clone();
+        let mut cancelled = Box::pin(b.push_with(&reg, move |_, _| {
+            cancel_calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        }));
+        assert!(futures::poll!(&mut cancelled).is_pending());
+        drop(cancelled);
+        let calls = attempts.clone();
+        let (fire, deadline) = manual_deadline(0);
+        let mut waiting = Box::pin(b.push_with_deadlines(
+            &reg,
+            move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(()))
+            },
+            deadline,
+        ));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        fire.send(()).unwrap();
+        assert!(bounded(&mut waiting).await.is_err());
+        drop(waiting);
+        drop(b.push_with(&reg, |_, _| async {
+            panic!("unpolled caller started a PUT")
+        }));
+        drop(turn);
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert!(b.last.lock().unwrap().digest.is_none());
+    }
+
+    #[tokio::test]
+    async fn caller_abort_after_launch_before_first_io_keeps_owned_worker() {
+        let (_dir, b, reg) = fixture();
+        let writes = PutFixture::new();
+        let actual = writes.clone();
+        let objects = writes.lock().unwrap().objects.clone();
+        let mut caller = Box::pin(b.push_with(&reg, move |object, sealed| {
+            actual.lock().unwrap().put(object, sealed, None)
+        }));
+        // The current-thread test has launched, but has not scheduled, the worker.
+        assert!(futures::poll!(&mut caller).is_pending());
+        assert!(objects.lock().unwrap().is_empty());
+        drop(caller);
+        cleanup(&b, &writes).await;
+        assert_eq!(objects.lock().unwrap().len(), 2);
+        assert!(b.last.lock().unwrap().digest.is_some());
+    }
+
+    #[tokio::test]
+    async fn returned_backend_errors_leave_no_ack_and_allow_retry() {
+        for (fail_latest, seeded) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (_dir, b, reg) = fixture();
+            if seeded {
+                bounded(b.push_with(&reg, |_, _| async { Ok(()) }))
+                    .await
+                    .unwrap();
+                reg.lock()
+                    .unwrap()
+                    .namespaces
+                    .insert("next-snapshot".into(), "h1".into());
+            }
+            let prior_digest = b.last.lock().unwrap().digest;
+            let writes = PutFixture::new();
+            let actual = writes.clone();
+            let result = bounded(b.push_with(&reg, move |object, sealed| {
+                let fail = (object == LATEST) == fail_latest;
+                let future = actual.lock().unwrap().put(object, sealed, None);
+                async move {
+                    future.await?;
+                    // Model an error after the real publication, including sync failure.
+                    if fail {
+                        bail!("synthetic post-publication error");
+                    }
+                    Ok(())
+                }
+            }))
+            .await;
+            assert!(result.is_err());
+            assert!(b.last.lock().unwrap().digest == prior_digest);
+            assert!(!b.blocked.load(Ordering::Acquire));
+            cleanup(&b, &writes).await;
+            assert!(bounded(b.push_with(&reg, |_, _| async { Ok(()) }))
+                .await
+                .unwrap());
+            assert!(!bounded(b.push_with(&reg, |_, _| async {
+                panic!("deduplicated snapshot issued a PUT")
+            }))
+            .await
+            .unwrap());
+        }
+    }
+
+    fn synthetic_panic() -> Result<()> {
+        panic!("synthetic publication worker panic")
+    }
+
+    #[tokio::test]
+    async fn worker_panic_before_io_blocks_publication_but_keeps_historical_ack() {
+        let (_dir, b, reg) = fixture();
+        assert!(bounded(b.push_with(&reg, |_, _| async { Ok(()) }))
+            .await
+            .unwrap());
+        reg.lock()
+            .unwrap()
+            .namespaces
+            .insert("changed".into(), "h1".into());
+        let result = bounded(b.push_with(&reg, |_, _| std::future::ready(synthetic_panic()))).await;
+        assert!(result.is_err());
+        let turn = bounded(b.turn.lock()).await;
+        assert!(b.blocked.load(Ordering::Acquire));
+        assert!(b.last.lock().unwrap().digest.is_some());
+        drop(turn);
+        let key = reg.lock().unwrap().hosts["h1"].pool_key.clone();
+        assert!(b.holds("h1", &key).await);
+        assert!(bounded(b.push_with(&reg, |_, _| async {
+            panic!("blocked publication reached backend")
+        }))
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn worker_panic_with_live_blocking_writer_blocks_the_next_turn() {
+        let (_dir, b, reg) = fixture();
+        let writes = PutFixture::new();
+        let actual = writes.clone();
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let (panic_now, panicking) = tokio::sync::oneshot::channel::<()>();
+        let mut panicking = Some(panicking);
+        let mut caller = Box::pin(b.push_with(&reg, move |object, sealed| {
+            let future = actual.lock().unwrap().put(object, sealed, entered.take());
+            let panicking = panicking.take().expect("first PUT");
+            async move {
+                tokio::select! {
+                    _ = panicking => synthetic_panic(),
+                    result = future => result,
+                }
+            }
+        }));
+        bounded(async {
+            tokio::select! {
+                _ = &mut caller => panic!("worker ended before blocking entry"),
+                result = entering => result.expect("blocking writer entered"),
+            }
+        })
+        .await;
+        panic_now.send(()).unwrap();
+        assert!(bounded(&mut caller).await.is_err());
+        drop(caller);
+        assert!(b.blocked.load(Ordering::Acquire));
+        assert!(b.last.lock().unwrap().digest.is_none());
+        assert!(bounded(b.push_with(&reg, |_, _| async {
+            panic!("new publication passed the panic guard")
+        }))
+        .await
+        .is_err());
+        writes.lock().unwrap().release();
+        cleanup(&b, &writes).await;
+    }
+
+    #[tokio::test]
+    async fn poisoned_ack_cache_refuses_publication_and_key_eligibility() {
+        let (_dir, b, reg) = fixture();
+        bounded(b.push_with(&reg, |_, _| async { Ok(()) }))
+            .await
+            .unwrap();
+        let key = reg.lock().unwrap().hosts["h1"].pool_key.clone();
+        assert!(b.holds("h1", &key).await);
+        let last = b.last.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _last = last.lock().unwrap();
+            panic!("synthetic ACK cache poison");
+        });
+        assert!(!b.holds("h1", &key).await);
+        assert!(bounded(b.push_with(&reg, |_, _| async {
+            panic!("poisoned ACK cache reached backend")
+        }))
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn timeout_can_later_ack_once_and_deduplicate_without_replay() {
+        for (latest, fail) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (_dir, b, reg) = fixture();
+            let writes = PutFixture::new();
+            let actual = writes.clone();
+            let objects = writes.lock().unwrap().objects.clone();
+            let (entered, entering) = tokio::sync::oneshot::channel();
+            let mut entered = Some(entered);
+            let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls = attempts.clone();
+            let (fire, deadline) = manual_deadline(if latest { 2 } else { 1 });
+            let mut caller = Box::pin(b.push_with_deadlines(
+                &reg,
+                move |object, sealed| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let fail = fail && object == LATEST;
+                    let gate = if (object == LATEST) == latest {
+                        entered.take()
+                    } else {
+                        None
+                    };
+                    let future = actual.lock().unwrap().put(object, sealed, gate);
+                    async move {
+                        future.await?;
+                        if fail {
+                            bail!("synthetic late backend error");
+                        }
+                        Ok(())
+                    }
+                },
+                deadline,
+            ));
+            bounded(async {
+                tokio::select! {
+                    _ = &mut caller => panic!("caller ended before gate"),
+                    result = entering => result.unwrap(),
+                }
+            })
+            .await;
+            fire.send(()).unwrap();
+            assert!(bounded(&mut caller).await.is_err());
+            drop(caller);
+            assert!(b.last.lock().unwrap().digest.is_none());
+            assert!(b.turn.try_lock().is_err());
+            writes.lock().unwrap().release();
+            cleanup(&b, &writes).await;
+            assert_eq!(objects.lock().unwrap().len(), 2);
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+            assert_eq!(b.last.lock().unwrap().digest.is_some(), !fail);
+            if fail {
+                continue;
+            }
+            assert!(
+                !bounded(b.push_with(&reg, |_, _| async { panic!("late ACK was replayed") }))
+                    .await
+                    .unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unexpected_destruction_blocks_before_another_turn_is_admitted() {
+        let turn = Arc::new(tokio::sync::Mutex::new(()));
+        let blocked = Arc::new(AtomicBool::new(false));
+        let guard = Publication {
+            _turn: turn.clone().lock_owned().await,
+            blocked: blocked.clone(),
+            armed: true,
+        };
+        let mut waiting = Box::pin(turn.lock());
+        assert!(futures::poll!(&mut waiting).is_pending());
+        // Also covers a spawned transaction destroyed before its first poll.
+        let unpolled = async move {
+            let mut guard = guard;
+            guard.disarm();
+        };
+        drop(unpolled);
+        let _next = bounded(waiting).await;
+        assert!(blocked.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn a_large_registry_uses_real_sdk_multipart_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let b = backup(dir.path(), &identity.to_public().to_string());
+        let mut reg = Registry::default();
+        // Above the object store's 32 MiB part boundary after age encryption.
+        reg.unknown.insert(
+            "multipart-marker".into(),
+            serde_json::Value::String("m".repeat(33 << 20)),
+        );
+        reg.namespaces
+            .insert("multipart-snapshot".into(), "h1".into());
+        let reg = Mutex::new(reg);
+        assert!(b.push(&reg).await.unwrap());
+        let latest = b.fetch(LATEST, &identity).await.unwrap();
+        assert!(latest.namespaces.contains_key("multipart-snapshot"));
+        assert_eq!(
+            latest.unknown["multipart-marker"].as_str().unwrap().len(),
+            33 << 20
+        );
+        assert!(!b.push(&reg).await.unwrap());
+    }
 
     /// A write reads the registry once it has its turn: one that waited behind another
     /// writes the registry as it is then, never the one it was called with.
@@ -194,18 +1065,15 @@ mod tests {
         let key = dir.path().join("backup.key");
         let b = std::sync::Arc::new(backup(&dir.path().join("store"), &keygen(&key).unwrap()));
         let reg = std::sync::Arc::new(std::sync::Mutex::new(Registry::default()));
-        let turn = b.last.lock().await;
-        let waiting = {
-            let (b, reg) = (b.clone(), reg.clone());
-            tokio::spawn(async move { b.push(&reg).await })
-        };
-        tokio::task::yield_now().await;
+        let turn = b.turn.lock().await;
+        let mut waiting = Box::pin(b.push(&reg));
+        assert!(futures::poll!(&mut waiting).is_pending());
         reg.lock()
             .unwrap()
             .namespaces
             .insert("t-newer".into(), "h1".into());
         drop(turn);
-        assert!(waiting.await.unwrap().unwrap());
+        assert!(waiting.await.unwrap());
         let back = b.fetch(LATEST, &identity(&key).unwrap()).await.unwrap();
         assert!(
             back.namespaces.contains_key("t-newer"),
