@@ -32,6 +32,8 @@ fn status_of(e: &MError) -> (StatusCode, &'static str) {
         MError::Moved(_) => (StatusCode::CONFLICT, "conflict"),
         MError::NotReady(_) => (StatusCode::CONFLICT, "not_ready"),
         MError::Gone { .. } => (StatusCode::GONE, "gone"),
+        MError::KeyUnavailable(_) => (StatusCode::CONFLICT, "key_unavailable"),
+        MError::KeyUnreachable(_) => (StatusCode::SERVICE_UNAVAILABLE, "key_unreachable"),
         MError::Capacity(_) => (StatusCode::SERVICE_UNAVAILABLE, "capacity"),
         MError::Quota(_) => (StatusCode::FORBIDDEN, "quota"),
         MError::NamespaceInUse => (StatusCode::CONFLICT, "namespace_in_use"),

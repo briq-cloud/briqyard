@@ -229,6 +229,24 @@ fn error_codes() {
         (StatusCode::SERVICE_UNAVAILABLE, "capacity")
     );
     assert!(e.machine.is_none());
+    // A backup's key the fleet cannot give: the backup is named, no address is.
+    for (e, status, code) in [
+        (
+            MError::KeyUnavailable("b1".into()),
+            StatusCode::CONFLICT,
+            "key_unavailable",
+        ),
+        (
+            MError::KeyUnreachable("b1".into()),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "key_unreachable",
+        ),
+    ] {
+        let e = AppError::from(e);
+        assert_eq!((e.status, e.code), (status, code));
+        assert!(e.error.contains("backup b1"), "{}", e.error);
+        assert!(!e.error.contains("http"), "{}", e.error);
+    }
     let e = AppError::from(MError::Other(anyhow::anyhow!("boom")));
     assert_eq!(
         (e.status, e.code),

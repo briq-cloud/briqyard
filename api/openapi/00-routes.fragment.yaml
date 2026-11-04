@@ -56,8 +56,8 @@ paths:
               schema: { $ref: "#/components/schemas/Machine" }
         "400": { description: "`invalid`: a bad field, named; a fork's or a restore's `volume` smaller than its source's (`a volume never shrinks`; a larger one grows the disk, ADR 0040); a fork's source without disks (creating, or its create failed); through the fleet, a `region` other than the namespace's (its host's: a namespace never spans regions), or a fork into a namespace pinned to another host than its source's (a fork is made on its source's host, ADR 0056); a `runtime_class` the host does not serve (`runtime class nested is not served by this host`), another than a fork's or a restore's source's, or on a warm slot or a seed; through the fleet, a namespace pinned to a host that does not serve it, or no host that does" }
         "403": { description: "`quota`: past a limit of the namespace's quota, the limit and the use in `error`; nothing made" }
-        "409": { description: "`conflict`: a machine with that name exists in the namespace, the body's `machine` is it: a create sent again after no answer finds the one it made" }
-        "503": { description: "`capacity`: the host has no room (its memory, or for a volume its pool's free space); through the fleet, no host (of `region`, when given) has room" }
+        "409": { description: "`conflict`: a machine with that name exists in the namespace, the body's `machine` is it: a create sent again after no answer finds the one it made; `key_unavailable`: a restore's backup is under a key the fleet does not hold or would not serve, the backup named in `error`" }
+        "503": { description: "`capacity`: the host has no room (its memory, or for a volume its pool's free space); through the fleet, no host (of `region`, when given) has room; `key_unreachable`: a restore's backup key is held by the fleet, which did not answer: try again" }
   /v1/sandbox-requests/lookup:
     post:
       summary: "Daemon-only authenticated read of an accepted sandbox create; no reservation, source lookup or worker"

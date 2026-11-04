@@ -99,3 +99,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0100](0100-backup-in-flight-marker.md) | A backup is written down in the local store before its first stream; at the next start a marker with no record in the store gives its streams away, and anything doubtful stays |
 | [0102](0102-wait-for-service-members-before-recovery.md) | Wait for singleton service membership before reconciliation and VMM inventory; timeout retains closed admission and actionable diagnostics |
 | [0103](0103-real-workload-restore-qualification.md) | Real workload restore qualification: Postgres acknowledgements, closed files, startup bytecode, two disks, incremental chain, off-host restore and an opt-in interrupted backup |
+| [0104](0104-errors-name-the-resource-not-the-address.md) | An API error names the resource, never an address; a backup's key the fleet cannot give is 409 `key_unavailable` or 503 `key_unreachable`, the detail in the log |
