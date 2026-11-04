@@ -39,6 +39,11 @@ fn ancestor_policy_safe(text: &str, units: usize) -> bool {
     values.len() == units && values.iter().all(|s| *s == "auto")
 }
 
+/// `capacity.memory_mb`, `capacity.reserved_memory_mb` and the ZFS cache ceiling do not fit in the
+/// host's memory: the operator lowers one of the first two, or leaves the first unset (the default
+/// is what is left after the other two).
+pub(super) const CAPACITY_EXCEEDS_PHYSICAL: &str = "capacity_exceeds_physical_memory";
+
 impl Manager {
     pub(super) async fn refresh_memory_host(&self) {
         if !self.inner.vmm.host_memory_checks() {
@@ -60,7 +65,19 @@ impl Manager {
             {
                 None
             }
-            _ => Some("physical_capacity_unverified"),
+            Some(mb) => {
+                if *self.inner.memory_host.lock().unwrap() != Some(CAPACITY_EXCEEDS_PHYSICAL) {
+                    tracing::warn!(
+                        physical_mb = mb,
+                        capacity_mb = self.capacity().memory_mb,
+                        reserved_mb = c.reserved_memory_mb,
+                        arc_mb = arc_max_mb(),
+                        "capacity.memory_mb + capacity.reserved_memory_mb + the ZFS cache ceiling exceed physical memory: lower capacity.memory_mb or capacity.reserved_memory_mb (or leave capacity.memory_mb unset)"
+                    );
+                }
+                Some(CAPACITY_EXCEEDS_PHYSICAL)
+            }
+            None => Some("physical_memory_unreadable"),
         };
         let reason = if reason.is_none() && !cfg.jailer.as_os_str().is_empty() {
             if arc_max_mb() == 0 {

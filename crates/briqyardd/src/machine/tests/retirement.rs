@@ -552,3 +552,36 @@ async fn a_machine_between_process_end_and_record_does_not_fence_a_resume_or_a_c
     h.m.reserve(&creating, None).unwrap();
     assert_eq!(creating.snapshot().state, state::STARTING);
 }
+
+/// A destroy racing a VMM's exit: the settlement channel closes. After `true` the death is
+/// proven and the process ends cleanly; after `false` it is not, and the machine stays with a
+/// clear reason for the next attempt.
+#[tokio::test]
+async fn a_closed_exit_channel_is_success_only_with_a_proven_death() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.namespace("t1");
+    for (name, proven) in [("m_proven", true), ("m_unproven", false)] {
+        let e = h.add(name, state::RUNNING, 256);
+        let pid = h
+            .host
+            .left_running(name, &h.m.inner.cfg.run_dir().join(name));
+        e.rec.lock().unwrap().pid = pid;
+        h.m.recover().await.unwrap();
+        let mut live = e.live.lock().unwrap().clone().unwrap();
+        let (gone, exited) = tokio::sync::watch::channel(false);
+        live.exited = exited;
+        if proven {
+            gone.send_replace(true);
+        }
+        drop(gone);
+        let ended = h.m.end_process(&e, &live, Duration::ZERO).await;
+        if proven {
+            ended.unwrap();
+            assert!(e.live.lock().unwrap().is_none());
+        } else {
+            let error = ended.unwrap_err().to_string();
+            assert!(error.contains("VMM exit unconfirmed"), "{error}");
+            assert!(e.live.lock().unwrap().is_some());
+        }
+    }
+}

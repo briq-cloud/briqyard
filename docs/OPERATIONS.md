@@ -202,7 +202,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `ingress.advertise` | the host's primary address | The address endpoints are reported at (`address` on an endpoint): what a router on another machine dials, a private address when the host has one |
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
 | `capacity.memory_mb`, `capacity.vcpus` | host memory − `reserved_memory_mb` − the ZFS cache's ceiling (`zfs_arc_max`, when set), (threads − `reserved_threads`) × 4 | What the host hands out; shared vCPUs oversubscribe |
-| `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the default capacity leaves to the host and its other services (an edge: 3072); unused when `memory_mb` or `vcpus` is set |
+| `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the host keeps for itself and its other services (an edge: 3072). `memory_mb` plus this plus the ZFS cache ceiling must fit in physical memory, else the host takes nothing new (`memory_protection`: `capacity_exceeds_physical_memory`; the daemon logs the figures): lower `memory_mb` or this, or leave `memory_mb` unset |
 | `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start. An `http://` `url` must be a loopback or private address (ADR 0026) |
 
 ## A proxy in front

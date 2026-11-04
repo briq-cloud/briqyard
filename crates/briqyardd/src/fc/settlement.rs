@@ -307,6 +307,20 @@ impl Attempt {
         namespace.check()?;
         Ok(())
     }
+    /// `confirm_empty_scope` for a process already seen dead. Its zombie stays in the leaf's
+    /// `cgroup.procs` until it is reaped, a moment after the exit is visible, so a single look
+    /// can fail on a death that is real: wait for the leaf to empty, up to a deadline.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn confirm_empty_scope_after_death(&self, id: &str) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match self.confirm_empty_scope(id) {
+                Ok(()) => return Ok(()),
+                Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+    }
     #[cfg(target_os = "linux")]
     pub(super) fn jailer_program(&self, configured: &Path) -> Result<PathBuf> {
         self.jailer

@@ -281,10 +281,17 @@ impl Manager {
                     .is_ok_and(|r| r.is_ok());
             if !gone {
                 self.inner.vmm.kill_checked(live)?;
-                tokio::time::timeout(Duration::from_secs(10), exited.wait_for(|x| *x))
-                    .await
-                    .context("VMM termination deadline")?
-                    .context("VMM termination proof channel closed")?;
+                let confirmed =
+                    tokio::time::timeout(Duration::from_secs(10), exited.wait_for(|x| *x))
+                        .await
+                        .context("VMM termination deadline")?;
+                // A channel closed after `true` answers `Ok` above. Closed on `false`, its
+                // settlement ended without confirming the death: the machine, its backing and
+                // its charge stay, and the next attempt (the reconciler's) settles it.
+                anyhow::ensure!(
+                    confirmed.is_ok(),
+                    "VMM exit unconfirmed: its settlement ended without proof; machine retained"
+                );
             }
         }
         if e.snapshot().clone_origin.is_some() {

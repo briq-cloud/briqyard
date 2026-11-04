@@ -16,11 +16,14 @@ pub(super) fn host_memory(guest_mb: u32) -> Result<u32, MError> {
 }
 
 impl Entry {
+    /// Nobody can state what this machine holds: a launch that failed with no proof its VMM
+    /// never started, or a handle still live on a record that says `error` (its process could
+    /// not be ended). A live handle on a stopped or leaving record is a transient with a known
+    /// charge, which `commits_memory` counts.
     pub(super) fn unresolved_launch(&self) -> bool {
-        // A live handle in a state that holds no memory (a machine between its process's
-        // end and the record catching up) is a known charge: `commits_memory` counts it.
         self.launch_unproven
             .load(std::sync::atomic::Ordering::SeqCst)
+            || (self.live.lock().unwrap().is_some() && self.snapshot().state == state::ERROR)
     }
     pub(super) fn commits_memory(&self, rec: &Record) -> bool {
         commits_memory(rec)
@@ -116,8 +119,13 @@ impl Manager {
             return Err(MError::Capacity(format!("startup: {reason}")));
         }
         if let Some(reason) = *self.inner.memory_host.lock().unwrap() {
+            let hint = if reason == memory_host::CAPACITY_EXCEEDS_PHYSICAL {
+                " (capacity.memory_mb + capacity.reserved_memory_mb + the ZFS cache ceiling must fit in physical memory: lower capacity.memory_mb or capacity.reserved_memory_mb)"
+            } else {
+                ""
+            };
             return Err(MError::Capacity(format!(
-                "host memory prerequisite: {reason}"
+                "host memory prerequisite: {reason}{hint}"
             )));
         }
         // A boot in flight or a destroy in its grace has a known charge, already counted by

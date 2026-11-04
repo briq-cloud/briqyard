@@ -611,7 +611,7 @@ impl Process {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .context("machine identity")?;
-            self.settlement.confirm_empty_scope(id)?;
+            self.settlement.confirm_empty_scope_after_death(id).await?;
         }
         let mut done = self.done.clone();
         while !*done.borrow() {

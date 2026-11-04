@@ -999,7 +999,8 @@ impl Firecracker {
                 return;
             }
             #[cfg(target_os = "linux")]
-            if settlement.confirm_empty_scope(&machine).is_err() {
+            if let Err(err) = settlement.confirm_empty_scope_after_death(&machine).await {
+                tracing::error!(machine, err = %format!("{err:#}"), "adopted VMM is dead but its scope is not empty");
                 return;
             }
 
