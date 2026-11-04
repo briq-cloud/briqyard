@@ -293,6 +293,11 @@ impl Manager {
             let was: Record = serde_json::from_value(backups::spec_of(&b, key.as_deref())?)
                 .map_err(|e| invalid(format!("backup {}: machine record: {e}", b.id)))?;
             // The request says what it says; the backup fills the rest.
+            inherit_run_config(&mut rec, &was);
+            // A restore writes the backup's boot files again; a disk fork keeps the copied disk's.
+            if rec.files.is_empty() {
+                rec.files = was.files.clone();
+            }
             rec.image = was.image;
             rec.image_key = was.image_key;
             rec.image_digest = was.image_digest;
@@ -306,21 +311,6 @@ impl Manager {
                 "a restore",
                 "the backup's",
             )?;
-            if rec.entrypoint.is_none() {
-                rec.entrypoint = was.entrypoint;
-            }
-            if rec.cmd.is_none() {
-                rec.cmd = was.cmd;
-            }
-            let mut env = was.env;
-            env.extend(rec.env.clone());
-            rec.env = env;
-            if rec.files.is_empty() {
-                rec.files = was.files;
-            }
-            if req.ports.is_empty() {
-                rec.ports = was.ports;
-            }
             if req.egress.is_none() {
                 rec.egress = was.egress;
                 self.check_egress(&rec.egress, &rec.namespace, &rec.id)?;
@@ -387,6 +377,8 @@ impl Manager {
                 rec.image_digest = sr.image_digest.clone();
                 rec.image_config_digest = sr.image_config_digest.clone();
                 rec.image_config = sr.image_config.clone();
+                // A fork runs what its source ran unless the request says otherwise (ADR 0097).
+                inherit_run_config(&mut rec, &sr);
                 match (&req.volume, &sr.volume) {
                     (None, v) => rec.volume = v.clone(),
                     (Some(a), Some(b)) if a.mount != b.mount => {
@@ -1021,5 +1013,25 @@ pub(super) fn check_disk_limits(l: Option<&api::DiskLimits>) -> Result<(), MErro
     match l.map(|l| l.check()) {
         Some(Err(e)) => Err(invalid(format!("disk_limits.{e}"))),
         _ => Ok(()),
+    }
+}
+
+/// What a machine made from another (a restore, a disk fork) runs when its request leaves
+/// that out: the source's entrypoint, command and ports, and its environment under the
+/// request's own variables. Not the files: every boot writes them again from the record, so a
+/// fork that inherited them would undo what the guest changed after the copy. A value the request sets always wins, an empty command included
+/// (`Some([])` is the image's own). Called with `rec` still holding only the request's values.
+fn inherit_run_config(rec: &mut Record, from: &Record) {
+    if rec.entrypoint.is_none() {
+        rec.entrypoint = from.entrypoint.clone();
+    }
+    if rec.cmd.is_none() {
+        rec.cmd = from.cmd.clone();
+    }
+    let mut env = from.env.clone();
+    env.extend(std::mem::take(&mut rec.env));
+    rec.env = env;
+    if rec.ports.is_empty() {
+        rec.ports = from.ports.clone();
     }
 }

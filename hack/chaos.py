@@ -294,7 +294,7 @@ class Chaos:
                         continue
                     f = j["id"]
                     adopt(f)
-                    # A fork takes the disks, not the command: set it and restart.
+                    # The fork keeps its source's command (ADR 0097); this one sets its own and restarts.
                     self.api.req("PATCH", f"/v1/machines/{f}", {"cmd": ["sleep", "infinity"]})
                     self.api.req("POST", f"/v1/machines/{f}/restart")
                     if running(f, f"fork {f}"):

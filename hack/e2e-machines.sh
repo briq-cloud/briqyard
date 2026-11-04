@@ -137,10 +137,22 @@ check "move: booted again, its disk kept" '! briqyard machine exec "$MV" -- test
 check "move: a moved event in each namespace" 'for t in "$T-mv2" "$T-mv3"; do briqyard events --namespace "$t" --machine "$MV" | awk "\$4 == \"moved\"" | grep -q . || exit 1; done'
 MF=$(briqyard machine fork "$MV" --name mvfork --namespace "$T-mv4" | jq -r .id)
 check "fork into another namespace: in it, on a network of its own" '[ "$(briqyard machine get "$MF" | jq -r .namespace)" = "$T-mv4" ] && [ "$(briqyard machine get "$MF" | jq -r .ip | cut -d. -f3)" != "$(briqyard machine get "$MV" | jq -r .ip | cut -d. -f3)" ]'
-briqyard machine set "$MF" -- sleep 3600 >/dev/null && briqyard machine restart "$MF" >/dev/null   # a fork takes the disks, not the command
+briqyard machine wait "$MF" >/dev/null
+check "fork keeps its source's command and keeps running (ADR 0097)" '[ "$(briqyard machine get "$MF" | jq -r ".state, .exit")" = "$(printf "running\nnull")" ] && [ "$(briqyard machine get "$MF" | jq -c .cmd)" = "$(briqyard machine get "$MV" | jq -c .cmd)" ]'
 check "fork into another namespace: its source's disk" '[ "$(briqyard machine exec "$MF" -- cat /root/moved)" = kept ]'
 for id in "$MF" "$MV" "$MN"; do briqyard machine rm "$id" >/dev/null; done
 for t in mv2 mv3 mv4; do briqyard namespace rm "$T-$t" >/dev/null 2>&1 || true; done
+# Boot files are rewritten at every boot from the record: a fork that inherited them would undo
+# what the guest changed after creation (ADR 0097).
+echo original > /tmp/by-e2e-boot.txt; echo deleted > /tmp/by-e2e-gone.txt
+BF=$(briqyard machine run --image alpine:3.20 --name bootfile --namespace "$T-bf" --memory 256 --file /root/boot.txt=/tmp/by-e2e-boot.txt --file /root/gone.txt=/tmp/by-e2e-gone.txt -- sleep 3600 | jq -r .id)
+briqyard machine exec "$BF" -- sh -c "echo edited > /root/boot.txt; rm /root/gone.txt; sync" >/dev/null
+BFF=$(briqyard machine fork "$BF" --name bootfork --namespace "$T-bf" | jq -r .id)
+briqyard machine wait "$BFF" >/dev/null
+check "fork: the source's edited boot file, not the record's" '[ "$(briqyard machine exec "$BFF" -- cat /root/boot.txt)" = edited ]'
+check "fork: a deleted boot file stays deleted" '! briqyard machine exec "$BFF" -- test -e /root/gone.txt'
+for id in "$BFF" "$BF"; do briqyard machine rm "$id" >/dev/null; done
+briqyard namespace rm "$T-bf" >/dev/null 2>&1 || true; rm -f /tmp/by-e2e-boot.txt /tmp/by-e2e-gone.txt
 
 echo "== egress: via a gateway machine, none, open again"
 E="$T-eg"
