@@ -263,7 +263,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ matrix.revision == 'baseline' && '5e4d04a0a21e842203d0d5251ca8a1e8bf477aa8' || inputs.ref }}
+          ref: ${{ matrix.revision == 'baseline' && 'fca50022bf3888887827f078035610f277197987' || inputs.ref }}
           persist-credentials: false
       # Keep the harness from the workflow revision when dispatch tests an older source ref.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
