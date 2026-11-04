@@ -208,6 +208,7 @@ probe endpoint "http://$WEBADDR/"
 probe api -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7420/v1/status
 sleep 5
 BEFORE_START=$(hostf .started.at)
+SINCE=$(date '+%Y-%m-%d %H:%M:%S')
 # The fleet first, then the host (docs/OPERATIONS.md#upgrade).
 sudo install -m 0755 "$HEAD_DIR/briqyard-fleet-linux-x86_64" /usr/local/bin/briqyard-fleet
 sudo install -m 0755 "$HEAD_DIR/briqyard-linux-x86_64" /usr/local/bin/briqyard
@@ -223,6 +224,9 @@ UPGRADE_SECONDS=$((SECONDS - t0))
 echo "$out" | sed 's/^/       /'
 echo "   host upgrade took ${UPGRADE_SECONDS} s (rc $urc)"
 sleep 10
+echo '--- the daemon journal through the upgrade (requests left out)'
+sudo journalctl -u briqyardd --since "$SINCE" --no-pager -o cat | grep -v '"message":"request"\|Got notification' | cut -c1-330 | head -150
+echo '---'
 for p in "${PROBES[@]}"; do kill "$p" 2>/dev/null; done; PROBES=()
 sleep 1
 
