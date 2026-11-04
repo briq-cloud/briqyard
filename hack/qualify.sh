@@ -86,6 +86,8 @@ crash_daemon() {
   local pid i; pid=$(daemon_pid)
   sudo kill -9 "$pid"
   for i in $(seq 1 50); do [ "$(daemon_pid)" != "$pid" ] && break; sleep 0.1; done
+  # A `zfs send` paused by a check outlives the daemon; it must be gone before recovery runs.
+  sudo pkill -KILL -f '[z]fs send -w' || true
   sudo systemctl start briqyardd
   wait_api
 }
