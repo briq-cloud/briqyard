@@ -197,12 +197,56 @@ pub(super) async fn host_key(
     headers: HeaderMap,
     Json(req): Json<api::HostKeyRequest>,
 ) -> Result<Response, Refusal> {
+    let publishing = st.clone();
+    host_key_with(
+        st,
+        info,
+        headers,
+        req,
+        tokio::time::sleep(KEY_TURN_WITHIN),
+        move || async move {
+            publishing
+                .backup
+                .as_ref()
+                .expect("configured backup")
+                .push(&publishing.reg)
+                .await
+        },
+    )
+    .await
+}
+
+const KEY_TURN_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+// Keep authentication, local durability and final revalidation shared with callers
+// exercising a publication that outlives its wait.
+pub(super) async fn host_key_with<D, P, F>(
+    st: Arc<AppState>,
+    info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
+    req: api::HostKeyRequest,
+    deadline: D,
+    publish: P,
+) -> Result<Response, Refusal>
+where
+    D: std::future::Future<Output = ()>,
+    P: FnOnce() -> F,
+    F: std::future::Future<Output = anyhow::Result<bool>>,
+{
     let caller = Caller::of(&st, info, &headers);
     // A backup's key is only read: it never waits behind a key being made.
     if let Some(want) = &req.key_id {
         return backup_key(&st, &req, &headers, caller, want);
     }
-    let _turn = st.key_turn.lock().await;
+    let turn = backup::admit(st.key_turn.lock(), deadline)
+        .await
+        .map_err(|_| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "registry",
+                "registry key admission is busy",
+            )
+        })?;
     let (id, key, made) = {
         let mut reg = st.reg.lock().unwrap();
         let id = the_host(&reg, &req.url, &headers, caller, "pool key")?
@@ -220,10 +264,11 @@ pub(super) async fn host_key(
             return Err(registry_error(e));
         }
     }
+    drop(turn);
     // A key in use is in the backup: written now when the store does not hold it yet.
     if let Some(b) = &st.backup {
         if !b.holds(&id, &key).await {
-            if let Err(e) = b.push(&st.reg).await {
+            if let Err(e) = publish().await {
                 tracing::error!(
                     host = id,
                     err = format!("{e:#}"),
@@ -236,13 +281,32 @@ pub(super) async fn host_key(
                 ));
             }
         }
+        if !b.holds(&id, &key).await {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "backup",
+                "the registry backup has not acknowledged this key",
+            ));
+        }
     }
+    let response = {
+        let reg = st.reg.lock().unwrap();
+        let current = the_host(&reg, &req.url, &headers, caller, "pool key")?;
+        if current.id != id || current.pool_key != key {
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "registry",
+                "the host identity or key changed during publication",
+            ));
+        }
+        Json(api::HostKey {
+            key: key.expose().to_string(),
+        })
+        .into_response()
+    };
     let peer = caller.peer.map(|p| p.to_string()).unwrap_or_default();
     tracing::info!(host = id, made, peer, "pool key served");
-    Ok(Json(api::HostKey {
-        key: key.expose().to_string(),
-    })
-    .into_response())
+    Ok(response)
 }
 
 /// The pool key of a backup (ADR 0035): the host's own at any ask, as `host_key` serves it
