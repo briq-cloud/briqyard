@@ -88,8 +88,5 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0090](0090-app-console-ownership.md) | The app owns the console it writes to: the init hands it to the app user before dropping privileges, mode kept 0600 |
 | [0091](0091-exec-retries-before-the-request-only.md) | A guest call is retried before its request is written, never after: a reset afterwards is Closed (409) |
 | [0092](0092-filesystem-consistent-copies.md) | Filesystem-consistent copies: guest sync and connection-held freeze; sync before sealing |
-<<<<<<< HEAD
-| [0094](0094-alerts-fire-and-resolve-in-ci.md) | The alerts fire and resolve in native CI: real causes, a local webhook, the production rule file |
-=======
 | [0093](0093-quiet-boot-and-fast-readiness.md) | The kernel boots `quiet` (errors and panics on the console, the ring buffer keeps the rest, `loglevel=7` in `kernel_args` undoes it) and `wait_ready` polls every 5 ms for 5 s, then every 100 ms, with the same deadline and error; a guest-side ready signal rejected |
->>>>>>> origin/main
+| [0094](0094-alerts-fire-and-resolve-in-ci.md) | The alerts fire and resolve in native CI: real causes, a local webhook, the production rule file |
