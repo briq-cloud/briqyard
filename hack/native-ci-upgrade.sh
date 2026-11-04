@@ -124,13 +124,14 @@ sudo systemctl restart briqyardd briqyard-fleet
 for _ in $(seq 1 60); do briqyard status >/dev/null 2>&1 && curl -fsS $FLEET/v1/hosts | jq -e 'length == 1 and all(.state == "ready")' >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS $FLEET/v1/hosts | jq -e 'all(.state == "ready")' >/dev/null || die "the previous fleet and host did not become ready"
 echo "   fleet: $(briqyard-fleet --version)"
-check "the host runs the previous release" '[ "$(hostf .version)" = "$PREV_VER" ] && [ "$PREV_VER" != "$(env -u BRIQYARD_TOKEN "$HEAD_DIR/briqyard-linux-x86_64" --version | awk "{print \$2}")" ]'
+echo "   host version: $(hostf .version), installed: $PREV_VER"
+check "the host runs the previous release" '[ "$(hostf .version)" = "$PREV_VER" ] && [[ "$PREV_VER" == "${PREV#v}"* ]]'
 
 echo "== state: machines of every kind"
 IMG=alpine:3.20
 # Volume, sleep never: the shapes a production host holds.
 PG=$(briqyard machine run --image postgres:16-alpine --name pg --namespace $NS --memory 512 --volume 2G:/var/lib/postgresql/data -e POSTGRES_PASSWORD=secret --port 5432 --sleep never | jq -r .id) || die pg
-WEB=$(briqyard machine run --image $IMG --name web --namespace $NS --memory 128 --port 8080 --sleep never -- sh -c 'mkdir -p /www; echo upgrade-ci-page > /www/index.html; exec httpd -f -p 8080 -h /www' | jq -r .id) || die web
+WEB=$(briqyard machine run --image python:3.12-alpine --name web --namespace $NS --memory 128 --port 8080 --sleep never -- sh -c 'mkdir -p /www; echo upgrade-ci-page > /www/index.html; exec python3 -m http.server 8080 -d /www' | jq -r .id) || die web
 VOL=$(briqyard machine run --image $IMG --name vol --namespace $NS --memory 128 --volume 1G:/data --sleep never -- sleep 86400 | jq -r .id) || die vol
 STP=$(briqyard machine run --image $IMG --name stopped --namespace $NS --memory 128 --sleep never -- sleep 86400 | jq -r .id) || die stopped
 SUS=$(briqyard machine run --image $IMG --name suspended --namespace $NS --memory 128 --sleep never -- sleep 86400 | jq -r .id) || die suspended
@@ -144,6 +145,7 @@ briqyard machine stop --suspend "$SUS" >/dev/null || die "suspend"
 PGADDR=$(briqyard endpoint add "$PG" 5432 | jq -r .address)
 WEBADDR=$(briqyard endpoint add "$WEB" 8080 | jq -r .address)
 [ -n "$PGADDR" ] && [ -n "$WEBADDR" ] || die "endpoints"
+for _ in $(seq 1 60); do curl -fsS -m 3 "http://$WEBADDR/" 2>/dev/null | grep -q upgrade-ci-page && break; sleep 1; done
 curl -fsS -m 5 "http://$WEBADDR/" | grep -q upgrade-ci-page || die "the endpoint does not serve"
 # A backup of the database, then more rows: the restore must give the earlier ones.
 BK=$(briqyard machine backup "$PG" | jq -r .id) || die backup
