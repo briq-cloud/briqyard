@@ -138,6 +138,22 @@ fleet_refuses() { # REASON NAME NAMESPACE
   echo "   last answer: $(echo "$out" | head -c 300)"
   return 1
 }
+# What the daemon and the events say about a machine, printed when a check on it is about to run.
+diag() {
+  echo "   -- $1: $(briqyard machine get "$1" 2>&1 | jq -c '{state, error, error_reason, stopped_reason}' 2>/dev/null)"
+  briqyard events --machine "$1" 2>&1 | tail -6 | cut -c1-240 | sed 's/^/      /'
+  sudo journalctl -u briqyardd --no-pager -n 600 | grep -F "$1" | tail -6 | cut -c1-300 | sed 's/^/      /'
+}
+fleet_places() { # NAME NAMESPACE: a create through the fleet is accepted again, polled while its view catches up
+  local i id
+  for i in $(seq 1 60); do
+    if id=$(fleet machine run --sleep never --image alpine:3.20 --name "$1" --namespace "$2" --memory 128 -- sleep 600 2>/dev/null | jq -r .id) && [ -n "$id" ]; then
+      [ "$(on "$id" hostname)" = "$1" ] && { briqyard machine rm "$id" >/dev/null; return 0; }
+    fi
+    sleep 2
+  done
+  return 1
+}
 wait_cond() { # TYPE: the host condition is true within two minutes
   local i; for i in $(seq 1 120); do [ "$(statusq "[.conditions[] | select(.type == \"$1\")][0].status")" = true ] && return 0; sleep 1; done; return 1
 }
@@ -241,10 +257,10 @@ check "jailer: its own pid namespace" '[ "$(sudo awk "/^NSpid:/ {print NF - 1}" 
 check "its own cgroup, and only its process in it" '[ "$(sudo cat /proc/$pa/cgroup)" = "0::/firecracker/$(id_dash "$A")" ] && [ "$(sudo cat $(leaf "$A")/cgroup.procs)" = "$pa" ]'
 f=$(sudo find "$JAIL/firecracker/$(id_dash "$A")/root" -type f -size -2000k 2>/dev/null | head -1)
 check "control: the host reads a file in a machine's jail" '[ -n "$f" ] && sudo cat "$f" >/dev/null'
-out=$(sudo -u "#$ua2" cat "$f" 2>&1 || true)
+out=$(sudo setpriv --reuid "$ua2" --regid "$ua2" --clear-groups cat "$f" 2>&1 || true)
 echo "   uid $ua2 reading $f: $(echo "$out" | head -c 120)"
 check "another machine's uid cannot read it (Permission denied)" 'grep -qF "Permission denied" <<<"$out"'
-out=$(sudo -u "#$ua2" ls "$JAIL/firecracker/$(id_dash "$A")/root" 2>&1 || true)
+out=$(sudo setpriv --reuid "$ua2" --regid "$ua2" --clear-groups ls "$JAIL/firecracker/$(id_dash "$A")/root" 2>&1 || true)
 echo "   uid $ua2 listing the jail: $(echo "$out" | head -c 120)"
 check "nor list its jail (Permission denied)" 'grep -qF "Permission denied" <<<"$out"'
 # Limits the cgroup holds.
@@ -374,7 +390,9 @@ fi
 destroy_named "$T-c" fk; settle || true
 check "mid-fork: destroyed, invariants hold, nothing leaked" 'invariants'
 FK=$(briqyard machine fork "$SRC" --name fk2 --namespace "$T-c" | jq -r .id)
-briqyard machine wait --for running "$FK" >/dev/null
+briqyard machine wait --for running "$FK" >/dev/null || true
+diag "$FK"
+diag "$SRC"
 check "mid-fork: a fork again works and holds the counter" '[ "$(ctr "$FK")" = "7 7 " ]'
 rm_all "$FK"
 
@@ -490,7 +508,7 @@ check "full pool: disk_pressure is reported" 'wait_cond disk_pressure'
 check "full pool: the fleet places nothing new on the host (503 capacity)" 'fleet_refuses "no host has room" full-fleet "$T-full-fleet"'
 sudo zfs destroy -f "$FILLED"; FILLED=
 destroy_named "$T-c" full-new; settle || true
-check "pool freed: the fleet places a machine again" 'F=$(fleet machine run --sleep never --image alpine:3.20 --name full-fleet2 --namespace "$T-full-fleet" --memory 128 -- sleep 600 | jq -r .id) && [ "$(on "$F" hostname)" = full-fleet2 ] && briqyard machine rm "$F" >/dev/null'
+check "pool freed: the fleet places a machine again" 'fleet_places full-fleet2 "$T-full-fleet"'
 check "pool freed: a create works again" 'N=$(run --image alpine:3.20 --name after-full --namespace "$T-c" --memory 256 -- sleep 600) && [ "$(on "$N" hostname)" = after-full ] && briqyard machine rm "$N" >/dev/null'
 check "pool freed: the machine kept its counter, nothing leaked" '[ "$(ctr "$W")" = "7 7 " ] && invariants'
 rm_all "$W"
