@@ -185,10 +185,11 @@ def parse_slack(doc):
             alerts.append(cur)
             in_labels = True
         elif in_labels and cur is not None:
-            m = re.match(r"[-*\u2022]\s*([A-Za-z_][\w.]*)\s*=\s*(.*)$", l)
-            if m:
-                if m.group(2).strip():  # Grafana drops empty labels
-                    cur["labels"][m.group(1)] = m.group(2).strip()
+            key, eq, value = l[1:].partition("=")
+            key, value = key.strip(), value.strip()
+            if l[:1] in ("-", "*", "\u2022") and eq and re.fullmatch(r"[A-Za-z_][\w.]*", key):
+                if value:  # Grafana drops empty labels
+                    cur["labels"][key] = value
             else:
                 in_labels = False
     return alerts
