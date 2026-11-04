@@ -139,6 +139,7 @@ async fn run(args: Args) -> Result<()> {
     // Fixed-domain ownership is acquired before host helpers, not after recovery begins.
     let startup = briqyardd::fc::Startup::acquire().await?;
     let unresolved = startup.unresolved();
+    let recovery_retry = startup.retry()?;
     for p in [&cfg.firecracker, &cfg.kernel, &cfg.init] {
         std::fs::metadata(p).with_context(|| p.display().to_string())?;
     }
@@ -299,6 +300,25 @@ async fn run(args: Args) -> Result<()> {
             }
         })
     };
+    if let Some(retry) = recovery_retry {
+        tokio::spawn(async move {
+            match retry.wait().await {
+                Ok(()) => {
+                    // This manager never adopted a VMM or started a worker. Do not call
+                    // close()/hand_over(): they reconcile or persist unreconciled records.
+                    // process::exit skips drops; KillMode=process preserves the VMMs and
+                    // the listeners already stored with systemd. Restart inventories anew.
+                    tracing::warn!(
+                        "previous service members exited; restarting for full native recovery"
+                    );
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    tracing::error!(err = %err, "service settlement observation failed; operator restart required")
+                }
+            }
+        });
+    }
     // SIGTERM (a stop, a reboot) suspends the machines; SIGUSR2 (an upgrade) leaves them
     // running for the next daemon to adopt (ADR 0027).
     let mut handover_admission = None;

@@ -26,13 +26,35 @@ A timeout is retained in the startup authority. Diagnostic startup skips pool
 setup, network reconciliation, adoption, sweep and background recovery workers;
 the inert ZFS handle exists only to construct the existing manager/API. It does
 not validate the pool. Existing mounted state and host identity must be readable to serve diagnostics.
-Machine/namespace inventory is withheld; disk availability reports zero while
-unreconciled. Diagnostic startup never creates a replacement host identity.
+Namespaces, machine records and endpoints load read-only: no journal replay,
+cleanup or on-disk migration. Listeners retain the ADR 0051 sockets and forward
+to recorded running machines without waking or adopting them. Assigned identities
+still require their existing publication proof. Disk availability reports zero
+while unreconciled. Diagnostic startup never creates a replacement host identity.
 The API is not serving during the wait (up to ten extra seconds). Stored systemd
 listeners can queue connections; request deadlines can expire. After a timeout,
 status reports `memory_protection`, admissions return `startup: recovery_unresolved`.
 Only health, status, metrics and OpenAPI routes serve in the fault state; other
 routes return 503 rather than observing or mutating unreconciled records.
+After a service timeout only, a background observer repeats the same closed
+membership wait. It never clears the latch or opens spawning. Once membership is
+exactly the daemon, it exits non-zero. `Restart=on-failure` runs the entire barrier
+from inventory in a fresh process, including the final identity recheck. A member
+that joined the VMM domain during either wait must therefore be inventoried.
+Observation errors stay latched and require operator recovery.
+
+This diagnostic manager has adopted no VMM and started no workers. Exit bypasses
+`close` and hand-over, which would persist or reconcile unrecovered records.
+`KillMode=process` leaves VMMs alive and systemd retains the stored listeners.
+The next daemon adopts them normally. The initial ten-second wait bounds even
+clean/dirty flapping to at most one restart per ten seconds, below the official
+five-starts-in-ten-seconds limit. This bounds the rate, not the total: an
+external source continually adding members can repeat it indefinitely. A permanently
+dirty service does not restart;
+the same condition timestamp persists, so the one-minute host-condition alert
+still fires. Existing endpoint connections can be cut at process exit; new
+connections queue across restart as in ADR 0051.
+
 The existing host-condition alert covers this condition. Its message directs the
 operator to journald and the recovery runbook. Exe and process-state observations name up
 to 32 survivors; they are diagnostics, never authority to signal a process.
@@ -61,10 +83,17 @@ still refuse the entire host. Unknown launchers retain exactly the same fence.
 Unit tests retain singleton rejection and cover exit, a newly forked member,
 unreadable membership and exact timeout. A Linux check observes an exited but
 unreaped child: zombies leave `cgroup.procs`; reaping is not required for this test.
-The native qualification check pauses a real daemon-owned send, kills or hands
-over the daemon, observes the new daemon waiting, resumes that exact send via a
-pidfd, and requires create acceptance within 30 seconds. Old code cannot satisfy
-the wait observation and latches its final-barrier failure instead.
+The native qualification check pauses a real daemon-owned send and kills the
+daemon. It resumes that exact send via a pidfd after observing recovery, then
+requires admission within 35 seconds. The same check is dispatched against
+pre-fix main: it must fail actual admission, not a candidate-only log assertion.
+A second cut holds the send beyond the ten-second timeout and for another
+65 seconds, verifies stable fault age and endpoint requests within a 25-second transport
+retry budget (accepted connections can reset at process exit), then
+resumes it and requires automatic restart, adoption and a successful create.
+A SIGUSR2 control resumes the send while the old daemon drains backups, before
+its 60-second shutdown bound. It proves graceful hand-over with a helper in
+flight; it does not claim to distinguish old code.
 
 PR #143 edits `crash_daemon`; this check does not use that function. Its broad
 `pkill` workaround is unnecessary for naturally exiting helpers after this fix;

@@ -1145,8 +1145,18 @@ Recovery waits up to 10 seconds for previous service members before reconciliati
 It never exempts or signals an unknown process. The API does not serve during
 that wait; queued connections can reach their request deadline. After timeout,
 only health, status, metrics and OpenAPI routes serve; other routes return 503
-until an operator resolves the fault and
-restarts the daemon. It needs the existing state filesystem mounted and readable.
+while the fault remains. Read-only machine records retain endpoint listeners:
+recorded running machines keep forwarding traffic, without wake or adoption.
+It needs the existing state filesystem mounted and readable.
+
+After a service-membership timeout, the daemon continues observing membership.
+Once only the daemon remains, it exits non-zero and systemd restarts full recovery
+automatically. Existing VMMs survive and are adopted. The fault never clears in
+that process; persistent members retain one fault timestamp and trigger the alert.
+Other barrier errors, including a failed background observation, need operator
+recovery. Flapping membership can cause at most one recovery restart per ten
+seconds, below the official five-starts-in-ten-seconds limit. Continued external
+interference can repeat this indefinitely; spawning remains closed each time.
 
 1. Read `sudo journalctl -u briqyardd -o cat`. Find `startup service settlement
    failed` or `native recovery barrier unresolved`. The timeout lists PIDs, exe
@@ -1163,6 +1173,8 @@ restarts the daemon. It needs the existing state filesystem mounted and readable
    Restore the underlying I/O; if it cannot complete, arrange host maintenance
    and reboot. Admission remains refused for the whole host while it survives.
 4. Once unexplained members are gone and any state changes are understood,
-   `sudo systemctl restart briqyardd`. Check `briqyard status`: `memory_protection`
+   wait for `previous service members exited; restarting for full native recovery`
+   and the automatic restart. If observation failed or another barrier error stays
+   latched, run `sudo systemctl restart briqyardd`. Check `briqyard status`: `memory_protection`
    must clear, then verify a create. Never remove the domain lock, move unknown
    PIDs to another cgroup, or edit membership to force the barrier open.

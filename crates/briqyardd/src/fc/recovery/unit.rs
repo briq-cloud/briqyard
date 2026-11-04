@@ -324,3 +324,16 @@ pub(super) async fn wait_service(
         .await;
     }
 }
+
+/// A timeout keeps the same daemon serving, so a permanent survivor cannot restart-loop.
+pub(super) async fn await_service_settlement(
+    pid: u32,
+    mut observe: impl FnMut() -> io::Result<(Vec<u32>, bool)>,
+) -> io::Result<()> {
+    loop {
+        match wait_service(pid, &mut observe).await {
+            Err(err) if err.kind() == io::ErrorKind::TimedOut => {}
+            result => return result,
+        }
+    }
+}

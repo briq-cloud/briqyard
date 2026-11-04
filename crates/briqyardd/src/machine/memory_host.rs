@@ -116,7 +116,7 @@ impl Manager {
             })
         };
         let message = if message == "recovery_unresolved" {
-            "recovery_unresolved: inspect journalctl -u briqyardd and docs/OPERATIONS.md#unresolved-startup; resolve the named process or cgroup, then restart briqyardd"
+            "recovery_unresolved: inspect journalctl -u briqyardd and docs/OPERATIONS.md#unresolved-startup; resolve the named process or cgroup; service timeouts restart automatically after settlement; other faults: restart briqyardd"
         } else {
             message
         };

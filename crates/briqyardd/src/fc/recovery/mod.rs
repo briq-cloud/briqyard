@@ -15,6 +15,16 @@ pub(super) mod namespace;
 #[cfg(target_os = "linux")]
 mod native;
 #[cfg(target_os = "linux")]
+pub use native::Retry;
+#[cfg(not(target_os = "linux"))]
+pub struct Retry;
+#[cfg(not(target_os = "linux"))]
+impl Retry {
+    pub async fn wait(self) -> Result<()> {
+        anyhow::bail!("native recovery requires Linux")
+    }
+}
+#[cfg(target_os = "linux")]
 pub(super) mod provenance;
 #[cfg(test)]
 mod tests;
@@ -56,6 +66,18 @@ impl Startup {
         #[cfg(not(target_os = "linux"))]
         {
             true
+        }
+    }
+
+    /// Retain the observation guards for a timed-out service. Start after listeners serve.
+    pub fn retry(&self) -> Result<Option<Retry>> {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.retry()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(None)
         }
     }
 

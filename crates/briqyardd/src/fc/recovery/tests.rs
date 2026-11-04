@@ -248,3 +248,38 @@ fn exited_unreaped_children_are_absent_from_cgroup_procs() {
         assert!(!super::fs::pids(&members).unwrap().contains(&pid));
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn background_service_wait_survives_timeouts_without_clearing_or_restarting() {
+    let began = tokio::time::Instant::now();
+    unit::await_service_settlement(42, || {
+        Ok((
+            if began.elapsed() < std::time::Duration::from_secs(75) {
+                vec![42, 43]
+            } else {
+                vec![42]
+            },
+            false,
+        ))
+    })
+    .await
+    .unwrap();
+    assert_eq!(began.elapsed(), std::time::Duration::from_secs(75));
+    assert!(unit::await_service_settlement(42, || Ok((vec![42], true)))
+        .await
+        .is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_timeout_then_clean_restarts_cannot_exhaust_five_starts_in_ten_seconds() {
+    let began = tokio::time::Instant::now();
+    for _ in 0..5 {
+        assert!(unit::wait_service(42, || Ok((vec![42, 43], false)))
+            .await
+            .is_err());
+        unit::await_service_settlement(42, || Ok((vec![42], false)))
+            .await
+            .unwrap();
+    }
+    assert_eq!(began.elapsed(), std::time::Duration::from_secs(50));
+}
