@@ -38,7 +38,11 @@ concurrency:
   cancel-in-progress: true
 jobs:
   upgrade:
-    runs-on: ${{ inputs.runner || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.runner && format('["{0}"]', inputs.runner) || '["ubuntu-24.04","ubuntu-26.04"]') }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
