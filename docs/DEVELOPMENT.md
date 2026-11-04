@@ -8,9 +8,9 @@ same step.
 
 Native PR evidence comes from the `native` GitHub Actions workflow on `ubuntu-24.04`
 with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head, except a draft (marking it ready starts the run);
-manual dispatch accepts a ref. Main's `native-cache` job in `ci.yml` writes the build cache these jobs read ([ADR 0108](adr/0108-ci-builds-once-per-cache.md)). The job summaries contain e2e, fleet-smoke, stress, monitoring, two-hosts and restore counts
+manual dispatch accepts a ref. Main's `native-cache` job in `ci.yml` writes the build cache these jobs read ([ADR 0108](adr/0108-ci-builds-once-per-cache.md)). The job summaries contain e2e, fleet-smoke, scale, stress, monitoring, two-hosts and restore counts
 and durations; the `native-*-log` artifacts contain their complete output. These checks are
-not required checks yet. Stress, monitoring, alerts, qualification and restore run on separate runners in parallel. The qualification suite (`hack/qualify.sh`, [ADR 0095](adr/0095-qualification-batch.md)) kills the daemon, the fleet and the VMMs mid-operation, checks isolation and OOM containment against real attempts, and fills the pool. The alerts suite drives the production Grafana rules to firing and resolved against a local webhook, and the monitoring suite does so for Not answering ([ADR 0094](adr/0094-alerts-fire-and-resolve-in-ci.md)). Monitoring covers a
+not required checks yet. Stress, monitoring, alerts, qualification, restore and scale run on separate runners in parallel. The qualification suite (`hack/qualify.sh`, [ADR 0095](adr/0095-qualification-batch.md)) kills the daemon, the fleet and the VMMs mid-operation, checks isolation and OOM containment against real attempts, and fills the pool. The alerts suite drives the production Grafana rules to firing and resolved against a local webhook, and the monitoring suite does so for Not answering ([ADR 0094](adr/0094-alerts-fire-and-resolve-in-ci.md)). Monitoring covers a
 ready daemon and an explicitly unreachable registered host (18 checks). The two-host job boots
 an independent Ubuntu 24.04 QEMU/KVM host (2 vCPUs, 6 GiB), provisions it through the shared
 bootstrap and development installer, and runs all 29 two-host and 10 restore checks.
@@ -24,7 +24,7 @@ interruption and off-host results respectively; a skipped required check fails.
 dispatch can select `two_hosts_only` for targeted validation
 ([ADR 0089](adr/0089-native-suites-in-ci.md)).
 
-After the fleet smoke, the `suites` job runs `hack/native-ci-scale.sh` (9 checks, [ADR 0099](adr/0099-leaf-goes-with-its-vmm.md)): 6500 idle machine cgroups with no record and 60 of stopped machines, a daemon restart; the daemon must open its barrier, report memory protection healthy, accept a create and retire the leaves within 480 s. It runs from the workflow revision, so a manual dispatch with an older `ref` runs it against that source.
+The `scale` job of the `more-suites` matrix runs `hack/native-ci-scale.sh` on its own runner (9 checks, [ADR 0099](adr/0099-leaf-goes-with-its-vmm.md), [ADR 0109](adr/0109-scale-on-its-own-runner.md)): 6500 idle machine cgroups with no record and 60 of stopped machines, a daemon restart; the daemon must open its barrier, report memory protection healthy, accept a create and retire the leaves within 480 s. It runs from the workflow revision, so a manual dispatch with an older `ref` runs it against that source.
 
 ## On a Linux host with KVM
 

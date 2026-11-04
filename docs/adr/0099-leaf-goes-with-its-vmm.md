@@ -62,7 +62,7 @@ leaking version: a fresh host never pays it. This change does not shorten it (#1
 
 Mock VMM: a killed and an exited VMM leave no leaf and their last CPU is counted; a running
 and a busy machine keep theirs; a refused removal is the next pass's and counts the CPU once;
-a pass is bounded and publishes the counts; refused leaves ahead of good ones do not starve them. `hack/native-ci-scale.sh` (the `scale` step of the
-`suites` job): 6500 idle leaves, a daemon restart, the barrier open, memory protection healthy,
+a pass is bounded and publishes the counts; refused leaves ahead of good ones do not starve them. `hack/native-ci-scale.sh` (the `scale` job of the
+`more-suites` matrix, ADR 0109): 6500 idle leaves, a daemon restart, the barrier open, memory protection healthy,
 a create accepted and the leaves retired within 480 s. It runs from the workflow revision, so
 `workflow_dispatch` with an older `ref` shows it failing without #134.
