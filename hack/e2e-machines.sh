@@ -137,6 +137,7 @@ check "move: booted again, its disk kept" '! briqyard machine exec "$MV" -- test
 check "move: a moved event in each namespace" 'for t in "$T-mv2" "$T-mv3"; do briqyard events --namespace "$t" --machine "$MV" | awk "\$4 == \"moved\"" | grep -q . || exit 1; done'
 MF=$(briqyard machine fork "$MV" --name mvfork --namespace "$T-mv4" | jq -r .id)
 check "fork into another namespace: in it, on a network of its own" '[ "$(briqyard machine get "$MF" | jq -r .namespace)" = "$T-mv4" ] && [ "$(briqyard machine get "$MF" | jq -r .ip | cut -d. -f3)" != "$(briqyard machine get "$MV" | jq -r .ip | cut -d. -f3)" ]'
+briqyard machine wait "$MF" >/dev/null
 check "fork keeps its source's command and keeps running (ADR 0097)" '[ "$(briqyard machine get "$MF" | jq -c "[.state, .cmd, .exit]")" = "[\"running\",[\"sleep\",\"3600\"],null]" ]'
 check "fork into another namespace: its source's disk" '[ "$(briqyard machine exec "$MF" -- cat /root/moved)" = kept ]'
 for id in "$MF" "$MV" "$MN"; do briqyard machine rm "$id" >/dev/null; done
