@@ -126,11 +126,12 @@ async fn a_backup_is_raw_and_its_restore_takes_the_pools_key() {
         .await
         .unwrap();
     let err = h.m.create_made(restore_of(&m.id, &other.id, "r2")).await;
-    let msg = match err {
-        Ok(r) => h.m.get(&r.id).unwrap().error,
-        Err(e) => format!("{e:#}"),
-    };
-    assert!(msg.contains("no fleet to ask"), "{msg}");
+    // A typed refusal naming the backup; the reason stays in the log.
+    match err {
+        Err(MError::KeyUnavailable(id)) => assert_eq!(id, other.id),
+        Err(e) => panic!("{e:#}"),
+        Ok(r) => panic!("restored: {}", h.m.get(&r.id).unwrap().error),
+    }
 }
 
 /// A key from the source that is not the pool's (a key file replaced, a registry restored

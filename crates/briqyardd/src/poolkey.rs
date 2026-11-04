@@ -58,6 +58,18 @@ async fn load(zfs: &Zfs, source: &KeySource, root: &str) -> Result<()> {
     zfs.load_key(root, &own(source).await?).await
 }
 
+/// Why a key could not be had from the fleet: what the caller maps to a status, with the
+/// detail (the fleet's address included) for the log only.
+#[derive(Debug, thiserror::Error)]
+pub enum KeyError {
+    /// The fleet answered and has no such key, refuses to serve it, or there is no fleet to ask.
+    #[error("key not available: {0}")]
+    Unavailable(String),
+    /// The fleet could not be reached or did not answer properly.
+    #[error("fleet unreachable: {0}")]
+    Unreachable(String),
+}
+
 /// The pool's key from its source, checked.
 async fn own(source: &KeySource) -> Result<String> {
     let key = match source {
@@ -93,7 +105,10 @@ pub async fn by_id(cfg: &Config, key_id: &str, restore: &api::RestoreSpec) -> Re
         .as_ref()
         .filter(|f| !f.url.is_empty() && !f.advertise.is_empty() && !cfg.token.is_empty())
     else {
-        bail!("pool key {key_id} is not this host's, and the host has no fleet to ask for it");
+        return Err(KeyError::Unavailable(format!(
+            "pool key {key_id} is not this host's, and the host has no fleet to ask for it"
+        ))
+        .into());
     };
     let key = from_fleet(
         &fleet.url,
@@ -146,7 +161,7 @@ async fn from_fleet(
         })
         .send()
         .await
-        .with_context(|| format!("ask {url}"))?;
+        .map_err(|e| KeyError::Unreachable(format!("ask {url}: {e:#}")))?;
     let status = resp.status();
     if !status.is_success() {
         let why = resp
@@ -154,12 +169,19 @@ async fn from_fleet(
             .await
             .map(|e| format!("{}: {}", e.code, e.error))
             .unwrap_or_default();
-        bail!("{url} answered {status} {why}");
+        let detail = format!("{url} answered {status} {why}");
+        // A refusal is the fleet's answer about this key; anything else is the fleet failing.
+        return Err(if status.is_client_error() {
+            KeyError::Unavailable(detail)
+        } else {
+            KeyError::Unreachable(detail)
+        }
+        .into());
     }
     let key: api::HostKey = resp
         .json()
         .await
-        .with_context(|| format!("read {url}'s answer"))?;
+        .map_err(|e| KeyError::Unreachable(format!("read {url}'s answer: {e:#}")))?;
     Ok(key.key)
 }
 
@@ -354,6 +376,10 @@ mod tests {
         assert_eq!(by_id(&alone, &own, &rs()).await.unwrap(), key());
         let err = by_id(&alone, &theirs, &rs()).await.unwrap_err();
         assert!(format!("{err:#}").contains("no fleet to ask"), "{err:#}");
+        assert!(matches!(
+            err.downcast_ref::<KeyError>(),
+            Some(KeyError::Unavailable(_))
+        ));
         // A key file on a host of a fleet: its own key, or the fleet's for another's.
         let mut filed = with_fleet(&url, "host-token");
         filed.storage.key = format!("file:{}", path.display());
@@ -361,6 +387,10 @@ mod tests {
         assert_eq!(by_id(&filed, &theirs, &rs()).await.unwrap(), other());
         let err = by_id(&filed, &"0".repeat(32), &rs()).await.unwrap_err();
         assert!(format!("{err:#}").contains("404"), "{err:#}");
+        assert!(matches!(
+            err.downcast_ref::<KeyError>(),
+            Some(KeyError::Unavailable(_))
+        ));
         // A host keyed by the fleet asks it: another's key for a restore the fleet forwarded.
         let keyed = with_fleet(&url, "host-token");
         assert_eq!(pool_key(&keyed).await.unwrap(), key());
@@ -371,6 +401,17 @@ mod tests {
         };
         let err = by_id(&keyed, &theirs, &elsewhere).await.unwrap_err();
         assert!(format!("{err:#}").contains("403"), "{err:#}");
+        assert!(matches!(
+            err.downcast_ref::<KeyError>(),
+            Some(KeyError::Unavailable(_))
+        ));
+        // A fleet that does not answer is another thing: the caller may try again.
+        let dead = with_fleet("http://127.0.0.1:1", "host-token");
+        let err = by_id(&dead, &theirs, &rs()).await.unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<KeyError>(),
+            Some(KeyError::Unreachable(_))
+        ));
         // Its own key needs no restore of the fleet's: a restore sent to the host itself.
         assert_eq!(by_id(&keyed, &own, &elsewhere).await.unwrap(), key());
     }
