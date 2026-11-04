@@ -368,9 +368,14 @@ fn host_add_takes_its_public_ports() {
 #[test]
 fn host_upgrade_takes_a_host_or_all() {
     match parse(&["host", "upgrade", "h_a", "--release", "0.2.0"]).cmd {
-        Cmd::Host(HostCmd::Upgrade { id, all, release }) => assert_eq!(
-            (id.as_deref(), all, release.as_str()),
-            (Some("h_a"), false, "0.2.0")
+        Cmd::Host(HostCmd::Upgrade {
+            id,
+            all,
+            release,
+            runtime_classes,
+        }) => assert_eq!(
+            (id.as_deref(), all, release.as_str(), runtime_classes.len()),
+            (Some("h_a"), false, "0.2.0", 0)
         ),
         _ => panic!("not an upgrade"),
     }
@@ -390,6 +395,43 @@ fn host_upgrade_takes_a_host_or_all() {
     fails(&["host", "upgrade", "--release", "0.2.0"]);
     fails(&["host", "upgrade", "h_a", "--all", "--release", "0.2.0"]);
     fails(&["host", "upgrade", "h_a"]);
+}
+
+#[test]
+fn host_upgrade_enables_runtime_classes_on_one_host() {
+    match parse(&[
+        "host",
+        "upgrade",
+        "h_a",
+        "--release",
+        "0.2.0",
+        "--runtime-class",
+        "nested",
+        "--runtime-class",
+        "other",
+    ])
+    .cmd
+    {
+        Cmd::Host(HostCmd::Upgrade {
+            id,
+            runtime_classes,
+            ..
+        }) => assert_eq!(
+            (id.as_deref(), runtime_classes),
+            (Some("h_a"), vec!["nested".to_string(), "other".to_string()])
+        ),
+        _ => panic!("not an upgrade"),
+    }
+    // A class is an operator's choice per host: never with --all.
+    fails(&[
+        "host",
+        "upgrade",
+        "--all",
+        "--release",
+        "0.2.0",
+        "--runtime-class",
+        "nested",
+    ]);
 }
 
 #[test]

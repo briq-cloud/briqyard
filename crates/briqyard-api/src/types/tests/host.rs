@@ -111,7 +111,11 @@ fn status() {
 fn upgrade_request() {
     let r: UpgradeHostRequest = same(json!({"release": "0.2.0"}));
     assert_eq!(r.release, "0.2.0");
+    assert!(r.runtime_classes.is_empty());
     assert!(serde_json::from_value::<UpgradeHostRequest>(json!({})).is_err());
+    // Classes to enable travel with the release; none are left out of the body.
+    let r: UpgradeHostRequest = same(json!({"release": "0.2.0", "runtime_classes": ["nested"]}));
+    assert_eq!(r.runtime_classes, ["nested"]);
 }
 
 #[test]

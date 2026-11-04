@@ -746,6 +746,10 @@ enum HostCmd {
         /// A release URL, or a version of the project's releases (0.2.0)
         #[arg(long)]
         release: String,
+        /// Serve a runtime class from this upgrade on (nested), besides the host's own; repeat
+        /// for several. One host only: a class is chosen per host
+        #[arg(long = "runtime-class", conflicts_with = "all")]
+        runtime_classes: Vec<String>,
     },
     /// Take no new namespace on a host and forget it once nothing runs on it (the server is yours
     /// to give back)

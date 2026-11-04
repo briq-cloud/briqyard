@@ -101,6 +101,15 @@ for x86_64 and pins their SHA-256 in `SHA256SUMS-x86_64`: `nested-vmlinux-x86_64
 `openzfs`, the sources and their SHA-256). The bootstrap installs them when
 `BRIQYARD_RUNTIME_CLASSES` names `nested`.
 
+**A class is enabled on a running host through its upgrade.** `briqyard host upgrade <id>
+--release <v> --runtime-class nested` (`runtime_classes` in the request) runs the bootstrap with
+the host's reported classes plus the ones asked: an upgrade never drops a class. The same version
+is not skipped: the bootstrap always hands over to a new daemon, and the fleet waits for that new
+start. A name that is not a class name is a `400`; one the release does not build is refused by
+the script before it changes anything, and so is a host with machines running whose KVM has
+`nested` off ("reboot the host, then run this again"): the binaries, configuration and machines stay as they were, the host `draining` with
+the reason in its note. One host per call, never with `--all`: a class is chosen per host.
+
 **Acceptance.** On an x86_64 host serving `nested`: a `nested` machine lists `/dev/kvm`, and inside
 it `cargo test --workspace` (the root test included), `hack/e2e.sh` and `hack/fleet-smoke.sh`
 against daemons started there. aarch64 cannot run it (fact 4): the Mac dev loop does not cover it.
