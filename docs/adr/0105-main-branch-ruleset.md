@@ -13,7 +13,7 @@ Ruleset `main` (id 26546765), on the default branch, active.
 | Rule | Setting |
 |---|---|
 | Deletion, force push | Refused |
-| Pull request | Required, 0 approvals |
+| Pull request | Required, 0 approvals; `require_extra_approval_for_unattributed_changes` stays at GitHub's default, `true` |
 | Merge method | Squash only |
 | Required checks | `check` (GitHub Actions), `CodeQL` (GitHub Advanced Security) |
 | Branch up to date before merge | Not required |
