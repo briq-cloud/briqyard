@@ -162,3 +162,20 @@ async fn a_start_outside_the_official_unit_names_the_check_that_failed() {
     assert!(chain.len() >= 2, "no context on {chain:?}");
     assert!(!chain[0].contains("os error"), "bare errno: {chain:?}");
 }
+
+#[test]
+fn a_host_with_thousands_of_idle_leaves_lists_and_a_runaway_directory_says_so() {
+    // The barrier refused a host that held 6408 empty machine cgroups left by earlier
+    // versions with a bare EINVAL: the listing cap was 4096 and said nothing.
+    let temp = tempfile::tempdir().unwrap();
+    for i in 0..5000 {
+        fs::create_dir(temp.path().join(format!("m-{i:012x}"))).unwrap();
+    }
+    let dir = Dir::absolute(&temp.path().canonicalize().unwrap()).unwrap();
+    let error = dir.children(4096).unwrap_err();
+    assert!(
+        error.to_string().contains("more than 4096 entries"),
+        "no reason on {error}"
+    );
+    assert_eq!(dir.children(65_536 + 1024).unwrap().len(), 5000);
+}

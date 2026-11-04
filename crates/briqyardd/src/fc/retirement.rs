@@ -266,6 +266,12 @@ impl Leaf {
         Ok(())
     }
 
+    /// The leaf's device and inode, to tell at the end of a look that it is the same group.
+    pub(super) fn identity(&self) -> io::Result<(u64, u64)> {
+        let m = self.dir.metadata()?;
+        Ok((m.dev(), m.ino()))
+    }
+
     pub(super) fn inventory(&self, id: &str) -> io::Result<Vec<u32>> {
         self.check_shape(id)?;
         let members = super::recovery::fs::pids(&self.read(c"cgroup.procs")?)?;
