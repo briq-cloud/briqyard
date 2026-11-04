@@ -210,9 +210,12 @@ rx = None
 class Case:
     """One alert: a real cause, `firing` expected, a recovery, `resolved` expected."""
 
-    def __init__(self, name, uid, title, labels, fire_within, resolve_within, action=None):
+    def __init__(self, name, uid, title, labels, fire_within, resolve_within, action=None, window=0):
         self.name, self.uid, self.title, self.labels = name, uid, title, labels
         self.fire_within, self.resolve_within, self.action = fire_within, resolve_within, action
+        # An alert over a window of events cannot truly resolve before the window has passed:
+        # an earlier `resolved` is a flap, noted but not counted as the recovery.
+        self.window = window
         self.caused = None      # when the cause was made
         self.recovery = None    # when the recovery was made (or the window began to expire)
         self.fired = self.resolved = None
@@ -275,7 +278,7 @@ def drive(cases, actions, total):
         for c in cases:
             if c.done or c.fired is None or c.recovery is None:
                 continue
-            hit = c.seen("resolved", c.fired)
+            hit = c.seen("resolved", max(c.fired, c.caused + max(c.window - 60, 0)))
             if hit:
                 c.resolved = hit[0]
                 ok(f"{c.name}: resolved received {int(c.resolved - c.recovery)} s after its recovery")
@@ -293,6 +296,10 @@ def drive(cases, actions, total):
     for c in cases:
         if not c.done:
             bad(f"{c.name}: overall bound of {total} s passed")
+        flaps = [a.get("status") for _, a in sorted(rx.alerts(), key=lambda x: x[0])
+                 if a.get("labels", {}).get("alertname") == c.title and subset(c.labels, a.get("labels", {}))]
+        if "resolved" in flaps and "firing" in flaps[flaps.index("resolved"):]:
+            print(f"  note {c.name}: notifications {flaps}: it resolved and fired again", flush=True)
 
 
 # ---- setup, and what the rules under test are -------------------------------------------------
@@ -478,11 +485,11 @@ def rules_set():
     (ok if p.returncode != 0 and "memory_pressure" in text else bad)(
         f"a create into that namespace is refused under pressure ({(p.stderr or p.stdout).strip()[-140:]!r})")
 
-    crash = Case("Machine in a crash loop", "briqyard-crash-loop", "Machine in a crash loop", {"namespace": "alert-crash", "host": "local"}, 240, 840)
-    backup = Case("Backup failure observed", "briqyard-backup-failed", "Backup failure observed", {"host": "local"}, 240, 540)
-    room = Case("Creates refused: no room", "briqyard-out-of-room", "Creates refused: no room", {"region": "dev", "resource": "memory"}, 240, 300)
+    crash = Case("Machine in a crash loop", "briqyard-crash-loop", "Machine in a crash loop", {"namespace": "alert-crash", "host": "local"}, 240, 840, window=600)
+    backup = Case("Backup failure observed", "briqyard-backup-failed", "Backup failure observed", {"host": "local"}, 240, 540, window=600)
+    room = Case("Creates refused: no room", "briqyard-out-of-room", "Creates refused: no room", {"region": "dev", "resource": "memory"}, 240, 300, window=300)
     cond = Case("Host condition", "briqyard-host-condition", "Host condition", {"host": "local", "condition": "memory_pressure"}, 360, 300)
-    press = Case("Creates refused: host under pressure", "briqyard-host-pressure", "Creates refused: host under pressure", {"region": "dev"}, 240, 300)
+    press = Case("Creates refused: host under pressure", "briqyard-host-pressure", "Creates refused: host under pressure", {"region": "dev"}, 240, 300, window=300)
     slot = Case("Largest slot too small", "briqyard-slots-small", "Largest slot too small", {"region": "dev"}, 420, 300)
     crash.caused, backup.caused, room.caused = t_crash, t_backup, t_room
     cond.caused, slot.caused, press.caused = t_big, t_big, t_pressure
