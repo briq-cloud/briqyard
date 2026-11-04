@@ -60,13 +60,13 @@ docs/                    architecture, operations, development, mesh design, adr
 - **Native primitives, not another platform's workarounds.** Nothing here exists to match another platform's limitation or to keep a workaround for one working; when the control plane above carries such a workaround, briqyard offers the native primitive and the control plane drops it.
 - **This repo is public: no strategy, marketing, competitor names or business internals** in files, comments, commit messages, PR titles or PR bodies. No pricing, plans, billing or cost decisions, rollout plans, or another platform named as a comparison: describe the technique or the number instead of who does it. No personal paths or private locations. Open-source components (Firecracker, ZFS, Cloud Hypervisor, Kubernetes as the reference model) may be named, and a hosting provider in a factual runbook step (a server bought by hand, OVH's vRack).
 
-## Agent costs
+## Agent work
 
-- **Smallest model that fits.** Mechanical work (running a suite, rebases, cleanups) goes to the cheapest model; implementation and ordinary reviews to the mid tier; the most expensive only for a new ADR, architecture or security decisions. Set the model explicitly on every subagent.
-- **Never wait inside an agent.** For anything over ~5 minutes (the VM lock, a suite, CI), record state in the PR body or a file and stop, or use one background command and its completion signal. No sleep loops or polling.
+- **Smallest model that fits.** Mechanical work (running a suite, rebases, cleanups) goes to the smallest model; implementation and ordinary reviews to the mid tier; the largest only for a new ADR, architecture or security decisions. Set the model explicitly on every subagent.
+- **Never wait inside an agent.** For anything over ~5 minutes (a suite, CI, `hack/vm-lock.sh` behind another holder), use one background command and its completion signal, or record state in the PR body or a file and stop. No sleep loops or polling of your own.
 - **One job, one short agent.** Report and stop when blocked, after ~150 tool calls, or when a run would take over 30 minutes. Review rounds go to a fresh agent with the findings and the diff.
 - **Small context.** Briefs point to files. Pipe command output through `tail` or `grep`. Grep, then read line ranges; never read a whole file over 1,000 lines. Split a source file over ~1,000 lines with a pure-move PR.
-- **Test where it pays.** Unit tests first, then one combined VM run per batch of PRs. No VM run for docs, test-only or pure-move changes; CI covers them.
+- **Test where it pays.** Unit tests first, then the VM runs under Commands; PRs in one batch can share a run. A docs-only change needs no VM run; CI covers it.
 
 ## Git
 
