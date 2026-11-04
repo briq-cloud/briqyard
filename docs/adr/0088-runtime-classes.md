@@ -107,7 +107,7 @@ the host's reported classes plus the ones asked: an upgrade never drops a class.
 is not skipped: the bootstrap always hands over to a new daemon, and the fleet waits for that new
 start. A name that is not a class name is a `400`; one the release does not build is refused by
 the script before it changes anything, and so is a host with machines running whose KVM has
-`nested` off ("reboot the host, then run this again"): the host stays as it was, `draining` with
+`nested` off ("reboot the host, then run this again"): the binaries, configuration and machines stay as they were, the host `draining` with
 the reason in its note. One host per call, never with `--all`: a class is chosen per host.
 
 **Acceptance.** On an x86_64 host serving `nested`: a `nested` machine lists `/dev/kvm`, and inside
