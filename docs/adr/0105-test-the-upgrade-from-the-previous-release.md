@@ -17,7 +17,7 @@ v0.1.19 passed native CI and then failed closed on real hosts. CI's hosts are fr
 
 **When it runs.** It is slow, so not on every PR: on version PRs (`chore/v*` or a changed workspace version), on a PR that changes the test, on dispatch (`previous`, `ref` and `runner` inputs, so any pair can be tried), and in `release.yml` against the candidate's own artifacts (`dist-x86_64`), before `publish` creates the draft. `previous` defaults to the newest published release that is not the head (its tag's commit is not the head's).
 
-**The runner.** `ubuntu-26.04` exists as a hosted label. See Results.
+**The runner.** `ubuntu-26.04` (Ubuntu 26.04.1, kernel 7.0 azure) is a hosted label with `/dev/kvm` and OpenZFS 2.4.1, and the whole job runs on it, as on 24.04, so the job uses it: it is what staging and production run. `runner` on dispatch picks another. What remains different from a real host: a file-backed pool on the runner's disk, no NVMe, no reboot history, a machine that is 4 vCPUs.
 
 ## What this does not cover
 
@@ -28,4 +28,13 @@ v0.1.19 passed native CI and then failed closed on real hosts. CI's hosts are fr
 
 ## Results
 
-See the pull request that introduced this ADR.
+First pair, v0.1.23 to this head (PR #152), identical on 24.04 and 26.04: 26 checks pass, 2 fail.
+
+| Runner | Host upgrade | API silent | Endpoint gap | Adopted after | Orphan sweep |
+|---|---|---|---|---|---|
+| ubuntu-24.04 | 195 s | 190.6 s | 190.6 s | 4.6 s | 6500 leaves, ends 190 s after the hand-over |
+| ubuntu-26.04 | 248 s | 244.8 s | 245.9 s | about 5 s | 6500 leaves, ends 245 s after the hand-over |
+
+**Defect found (not fixed here):** after SIGUSR2 the new daemon adopts the running machines within five seconds, then runs the start's orphan sweep over the idle cgroup leaves before it serves anything: `orphans swept at start` (6500) is logged 186 s later, and only then the API, the HTTP ingress and every TCP endpoint listen (`serving again`, `gap_ms 190513`, `adopted_ms 190379`). The machines never stopped (same VMM pids, no reboot, data intact), but nothing could reach them for three to four minutes, against ADR 0027's 2 s drain. Staging's 5000 to 6000 leaves meant the same. The check fails above 30 s (API) and 10 s (endpoint) and stays red until the sweep no longer holds the listeners; the bounds are not to be raised to pass it.
+
+The seed check ran its refusal branch: the previous init digest is `7f39e6645c96`, the head's `cee0c0323a8d` (CI builds the init with the `stable` toolchain, not the release pin), the templates turned off, and the clone was refused with HTTP 400 `operator sandbox seed profile unavailable`.

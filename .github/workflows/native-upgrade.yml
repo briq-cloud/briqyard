@@ -16,9 +16,9 @@ on:
         required: false
         type: string
       runner:
-        description: Runner label (ubuntu-24.04 or ubuntu-26.04)
+        description: Runner label (ubuntu-26.04 or ubuntu-24.04)
         required: false
-        default: ubuntu-24.04
+        default: ubuntu-26.04
         type: string
   workflow_call:
     inputs:
@@ -38,11 +38,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   upgrade:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: ${{ fromJSON(inputs.runner && format('["{0}"]', inputs.runner) || '["ubuntu-24.04","ubuntu-26.04"]') }}
-    runs-on: ${{ matrix.runner }}
+    # Staging and production hosts run Ubuntu 26.04 (ADR 0105).
+    runs-on: ${{ inputs.runner || 'ubuntu-26.04' }}
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
