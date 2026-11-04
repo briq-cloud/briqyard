@@ -79,6 +79,13 @@ for _ in $(seq 1 90); do
   sleep 1
 done
 [ "$ready" = 1 ] || { echo 'two hosts did not become ready and empty'; exit 1; }
+# The fleet's view can still be the daemon from before install-dev restarted it: ask the daemon.
+ready=0
+for _ in $(seq 1 60); do
+  if "$WORK/second-host" env BRIQYARD_TOKEN=fc2-token briqyard status >/dev/null 2>&1; then ready=1; break; fi
+  sleep 1
+done
+[ "$ready" = 1 ] || { echo 'the second host daemon did not answer'; exit 1; }
 # Measure real nested Firecracker boot through the daemon (includes cold image pull).
 start=$SECONDS
 id=$("$WORK/second-host" env BRIQYARD_TOKEN=fc2-token briqyard machine run --image alpine:3.20 --name boot-probe --namespace native-boot --memory 128 -- sleep 3600 | jq -r .id)
