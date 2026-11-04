@@ -31,7 +31,7 @@ Two of these make and retire idle machine cgroups, the leaves an in-place upgrad
 
 See [ADR 0089](0089-native-suites-in-ci.md) for how the native suites run and [ADR 0099](0099-leaf-goes-with-its-vmm.md) for what `scale` proves.
 
-- Projected, to be read on this change's own `native` run: `suites` loses 5.2 min of `scale` and about 203 s of leaves (200 x 42 ms is 8 s, down from 211 s), from 23.4 to about 15 min. `scale` runs in parallel on a runner that pays its own build (about 2.6 min) and takes about 8 min in all, well under the longest job.
+- Measured with a warm cache (run 41929432686): `suites` took 13.6 min, from 23.4 (build 2.5, `hack/e2e.sh` 9.4, `hack/fleet-smoke.sh` 1.0). `scale` took 6.0 min in parallel, build included.
 - **The trade-off.** The count past the old 4096 cap (ADR 0068, 0099: 6404 and 5234 leaves met a 4096 cap) is no longer exercised through the hand-over path. Only `scale` covers it, and it covers a restart, not a SIGUSR2 hand-over. A defect that needs both a large count and the hand-over would not be seen by either suite. The hand-over path itself, with idle leaves, stays covered at 200.
 - `scale` uses one more runner per PR.
 - The check counts in `docs/DEVELOPMENT.md` do not move: the hand-over block keeps its four checks, `scale` its nine.

@@ -32,3 +32,4 @@ Run 41902737735 (`ci`) and 41902737838 (`native`) on PR #156:
 - One 367 MB entry per `main` commit that changes the dependencies replaces three per PR; the cache stays under its limit longer.
 - `main` pays one release build per push in `native-cache`. It is not a required check.
 - A draft PR has no native evidence; marking it ready starts the run (`AGENTS.md`).
+- Measured after the merge: every native job of a PR hit the one entry (full match). A warm build takes 2.5 min, about what a job's own cache gave when it survived; a cold one takes 5 min. So the gain is a cache that stays, not a faster build. `check` took 5.9 to 7.2 min on warm runs, from 7.9.
