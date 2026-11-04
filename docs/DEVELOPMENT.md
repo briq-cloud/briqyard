@@ -10,7 +10,7 @@ Native PR evidence comes from the `native` GitHub Actions workflow on `ubuntu-24
 with KVM and a disposable encrypted ZFS pool. Relevant PRs test their exact head;
 manual dispatch accepts a ref. The job summaries contain e2e, fleet-smoke, stress, monitoring, two-hosts and restore counts
 and durations; the `native-*-log` artifacts contain their complete output. These checks are
-not required checks yet. Stress and monitoring run on separate runners in parallel. Monitoring covers a
+not required checks yet. Stress, monitoring and alerts run on separate runners in parallel. The alerts suite drives the production Grafana rules to firing and resolved against a local webhook, and the monitoring suite does so for Not answering ([ADR 0094](adr/0094-alerts-fire-and-resolve-in-ci.md)). Monitoring covers a
 ready daemon and an explicitly unreachable registered host (18 checks). The two-host job boots
 an independent Ubuntu 24.04 QEMU/KVM host (2 vCPUs, 6 GiB), provisions it through the shared
 bootstrap and development installer, and runs all 29 two-host and 10 restore checks.
