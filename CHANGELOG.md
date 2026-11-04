@@ -1,5 +1,112 @@
 # Changelog
 
+## 0.1.19 — 2026-11-04
+
+### Upgrade notes
+
+Read these before rolling the release. The procedure is [Upgrade](https://github.com/briq-cloud/briqyard/blob/v0.1.19/docs/OPERATIONS.md#upgrade).
+
+- **Every root disk, seed and warm template is made again.** The guest init changes (the CPU template, ADR 0087, and filesystem sync and freeze, ADR 0092), and its digest is part of the image key. Suspended machines, warm slots and seeds made before the upgrade are cold-only: no warm hit until the pools refill with the new identity.
+- **A seed sealed before this release is refused, not booted cold.** A create naming an old-generation seed fails until the seed is sealed again (ADR 0087, ADR 0076). A control plane that names seeds rolls in three steps: stop naming them (its creates boot cold), upgrade the hosts and seal and qualify the seeds again, then name the new ones. Order and commands: [Upgrade](https://github.com/briq-cloud/briqyard/blob/v0.1.19/docs/OPERATIONS.md#upgrade) and [Sandbox seeds](https://github.com/briq-cloud/briqyard/blob/v0.1.19/docs/SANDBOX-SEEDS.md).
+- **Guests have no virtualization extensions** (ADR 0087). A guest that used VMX or SVM loses it at its next cold boot. A machine that needs `/dev/kvm` asks for the `nested` runtime class.
+- **Runtime classes are off by default** (ADR 0088). A host serves only the `default` class until it is upgraded with `--runtime-class nested`, which also needs KVM's `nested` parameter on (a reboot when it was off). A nested machine resumes nothing: every start is a cold boot. Existing configurations are unchanged. The release workflow builds the class's kernel and ZFS modules for x86_64 and attaches them with their source links.
+- **Memory prerequisites and the unit change** (ADR 0084, ADR 0065). A VMM's memory is contained in its own cgroup and the host reserves the VMM's physical ceiling for every machine, assigned runs included. The installer (the upgrade path) rewrites `briqyardd.service` and `briqyard-fleet.service` with `OOMScoreAdjust=-900` and `OOMPolicy=continue`, turns swap off, stops and masks KSM and `systemd-oomd`, and sets the ZFS ARC ceiling. It refuses to continue while swap or KSM holds pages: drain the host first. A binary replaced by hand without the installer leaves the host with `memory_protection` true: it serves its machines and takes nothing new.
+- **`physical capacity` refusal.** `memory_mb` plus `capacity.reserved_memory_mb` plus the ZFS cache ceiling must fit in physical memory; otherwise the host takes nothing new (`memory_protection`: `capacity_exceeds_physical_memory`, with the figures in the daemon log). Lower `memory_mb` or the reservation, or leave `memory_mb` unset.
+- **Quiet boot.** The guest kernel console shows errors, panics and the OOM kill line only. Add `loglevel=7` to the kernel arguments to restore the rest on a host being debugged (ADR 0093). Readiness is noticed within 5 ms instead of 100 ms. Saved snapshots resume with the command line they were taken with.
+- **Volume-free seeds** (ADR 0091). A recipe may declare `volume_gb: 0`; one image and size can be approved with and without a volume. The builder request now names its volume (`volume: {size_gb, mount: "/work"}`), and omitting it builds the volume-free shape: a request that relied on the recipe's volume is refused until it names one. Run journals of volume-free machines cannot be loaded by a previous-release daemon.
+- **Filesystem-consistent copies, first part** (ADR 0092). The guest init gains freeze, thaw and sync operations, and a seed is sealed after a sync. Snapshots, backups and forks do not use them yet and still take crash-consistent copies.
+- **Rollback.** Use the installer's retained set (`/etc/briqyard/rollback.<suffix>`) with a compatible release, as described in [Upgrade](https://github.com/briq-cloud/briqyard/blob/v0.1.19/docs/OPERATIONS.md#upgrade).
+
+### Documentation
+
+- 0088 runtime classes, and a nested class with /dev/kvm ([fdcc6751](https://github.com/briq-cloud/briqyard/commit/fdcc67514e729d2c8807080c09903906283303c0))
+
+- 0088 matches the kernel build and the code (kernel options, drive slot, bad_state) ([2cbeb952](https://github.com/briq-cloud/briqyard/commit/2cbeb952994ef5cb0199dbc1deedbab6a4db3f4a))
+
+- runtime classes (ARCHITECTURE, OPERATIONS, KUBERNETES-MAP, ADR index, counts) ([7321bb05](https://github.com/briq-cloud/briqyard/commit/7321bb05c110964083f3288f8006f779085b3be2))
+
+- the index in order ([f8518e06](https://github.com/briq-cloud/briqyard/commit/f8518e063ab496593e2d4e361838b49bcbe650f3))
+
+- enabling a class with KVM's nested off, the reboot's steps ([425c7e6b](https://github.com/briq-cloud/briqyard/commit/425c7e6bfc58ddde6429fdb109d604ce5f999ec6))
+
+
+### Features
+
+- build the nested class's guest kernel and ZFS modules ([7cca2cdb](https://github.com/briq-cloud/briqyard/commit/7cca2cdbf0b9a49486b14f0a5617da28ab4bda1a))
+
+- no virtualization extensions in guests ([53f174ef](https://github.com/briq-cloud/briqyard/commit/53f174ef00ffe6fd23653645bb0dc9c42f468735))
+
+- reconcile PR101 changes with v0.1.18 (#108) ([6eb7c20e](https://github.com/briq-cloud/briqyard/commit/6eb7c20ef8b34ef5f288ee1a3aa795dade5e6718))
+
+- sandbox seeds without a data volume (#116) ([90cbcba5](https://github.com/briq-cloud/briqyard/commit/90cbcba580d43fd0a4b15cd960a80390f431abd4))
+
+- report backup failures and capacity refusals (#103) ([853d1144](https://github.com/briq-cloud/briqyard/commit/853d1144164b0bda2e139f8634d70510599fee76))
+
+- add bounded read-only object census (#109) ([6847144a](https://github.com/briq-cloud/briqyard/commit/6847144a0e6a02672e33c1cde96de9878a9eb390))
+
+- runtime_class on machines, runtime_classes on hosts ([2933cab0](https://github.com/briq-cloud/briqyard/commit/2933cab07d3a0fbe89a402e0a891fb6ccb7bc02c))
+
+- runtime classes, and a nested class booted without the CPU template ([aacc4a7b](https://github.com/briq-cloud/briqyard/commit/aacc4a7b63bd198342dc1cf319a76d1c0329e78d))
+
+- place by runtime class ([05333171](https://github.com/briq-cloud/briqyard/commit/053331718c5aa1ac8731692004292d00c72fb847))
+
+- CLASS in machine ls, --runtime-class, classes in host ls; doctor allows nested on a nested host ([2a669b87](https://github.com/briq-cloud/briqyard/commit/2a669b8723225d63a297a62540b3dd2aaebefe63))
+
+- BRIQYARD_RUNTIME_CLASSES=nested in the bootstrap, a runtime classes section in the e2e suite ([1ee18bdd](https://github.com/briq-cloud/briqyard/commit/1ee18bdd44f6c8c14969961dfd815df47e87d1c4))
+
+- expose cached registry backup observations (#105) ([440be328](https://github.com/briq-cloud/briqyard/commit/440be328eef1a4267f82eafc863c0df4bc3a0905))
+
+- sync and freeze a guest's filesystems, sync before a seal (#122) ([5e4d04a0](https://github.com/briq-cloud/briqyard/commit/5e4d04a0a21e842203d0d5251ca8a1e8bf477aa8))
+
+- first-enable a runtime class through a host upgrade ([341173da](https://github.com/briq-cloud/briqyard/commit/341173dae8e7eca7fffd24d16771b2d54a1ebf39))
+
+- contain VMM memory and reserve physical capacity (#102) ([fca50022](https://github.com/briq-cloud/briqyard/commit/fca50022bf3888887827f078035610f277197987))
+
+
+### Fixes
+
+- zero the change times in the modules image ([077c0c28](https://github.com/briq-cloud/briqyard/commit/077c0c289508f998857973486ed6df90e89a8ee3))
+
+- fail the workflow when the build or the smoke fails ([c31083fc](https://github.com/briq-cloud/briqyard/commit/c31083fc9ac90f944bd1ee0c77ed4d9205e6277c))
+
+- give mke2fs a non-zero fake time ([dd537d09](https://github.com/briq-cloud/briqyard/commit/dd537d09aed7730e92a225b711650ea48792019c))
+
+- the smoke gates the release, source links in the notes ([4c12969c](https://github.com/briq-cloud/briqyard/commit/4c12969cb65474066b8e6aaca24daab7f75fc47d))
+
+- CPUID read builds on every toolchain; e2e negates inside the guest ([72eabe09](https://github.com/briq-cloud/briqyard/commit/72eabe09a204a3e93146bf5c19796c4ebaaf52fe))
+
+- let a non-root app open its console (#115) ([d943ee1d](https://github.com/briq-cloud/briqyard/commit/d943ee1d1ab7a93892b0497de9b72910c06dfb68))
+
+- retry a vsock handshake that is reset, answer 409 when it stays reset (#117) ([81fe6490](https://github.com/briq-cloud/briqyard/commit/81fe649092f56b572da70da58fc414ca43fea8d7))
+
+- retain registry publication ownership (#104) ([68fe1d48](https://github.com/briq-cloud/briqyard/commit/68fe1d48c4f1947c03aaca8b6dfc61ae739ac0cc))
+
+- review of the runtime classes (upgrade keeps nested, modules on resume, restore by class) ([291b6c9e](https://github.com/briq-cloud/briqyard/commit/291b6c9e9cb844fb3304f7f1a0ed612b71d554af))
+
+
+### Maintenance
+
+- drop the change-time rewrite of the modules image ([8fd9fdad](https://github.com/briq-cloud/briqyard/commit/8fd9fdada05c0c868780482badb925668fabb08c))
+
+- run the native suites on hosted KVM runners (#112) ([fd9ec193](https://github.com/briq-cloud/briqyard/commit/fd9ec193c6b512a214c99cc1a07555c08870fdf8))
+
+- run the two-host suites on hosted KVM runners (#119) ([3139cae4](https://github.com/briq-cloud/briqyard/commit/3139cae4a682e6cc63be766ff6c73d1c2d9432f3))
+
+- print the machines' consoles when a churn cycle fails (#121) ([c92b6dab](https://github.com/briq-cloud/briqyard/commit/c92b6dab02a7b61ea0a11493604e3ba0dbe443e6))
+
+- the runtime class is part of the placement policy ([ca66f043](https://github.com/briq-cloud/briqyard/commit/ca66f04358fb14dfb0b49f6a4c13976c52f5a8dd))
+
+- runtime class fixes (default class in the table, no class for a fork naming default, bootstrap installer tests) ([cd7d5ae7](https://github.com/briq-cloud/briqyard/commit/cd7d5ae70ad53889c3d43101ffd68370013fd578))
+
+- config_drive takes the class's modules mount ([4bbfe8a2](https://github.com/briq-cloud/briqyard/commit/4bbfe8a2d7dc862677195c66c642b50c594a68c1))
+
+- wait for the second host's own daemon before probing it (#124) ([9b947f82](https://github.com/briq-cloud/briqyard/commit/9b947f82f87461f4ec3002fbea4653111a8deb27))
+
+
+### Performance
+
+- notice guest readiness without polling delay and keep kernel messages off the serial console (#123) ([4825d4e7](https://github.com/briq-cloud/briqyard/commit/4825d4e7ba719507cb278a321b8987f87f67dd9a))
+
 ## 0.1.18 — 2026-11-03
 
 ### Documentation
