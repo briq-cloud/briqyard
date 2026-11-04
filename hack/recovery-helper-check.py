@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import select
 import subprocess
 import sys
 import threading
@@ -92,6 +93,7 @@ def run_case(machine, endpoint, kind):
     cursor = subprocess.check_output(['journalctl', '-u', 'briqyardd', '-n', '0', '--show-cursor'], text=True, timeout=5).split('-- cursor: ')[1].strip()
     client = subprocess.Popen(['briqyard', 'machine', 'backup', machine], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     held = None
+    vmfd = None
     created = None
     stop = threading.Event()
     samples = []
@@ -124,6 +126,12 @@ def run_case(machine, endpoint, kind):
             stop.wait(0.1)
     probe = threading.Thread(target=traffic)
     try:
+        group = Path('/sys/fs/cgroup/firecracker') / machine.replace('_', '-') / 'cgroup.procs'
+        vmm = int(group.read_text().strip())  # Exactly one existing VMM.
+        vmfd = os.pidfd_open(vmm)
+        exited = select.poll()
+        exited.register(vmfd, select.POLLIN)
+        assert group.read_text().split() == [str(vmm)] and not exited.poll(0)
         held = paused_send(daemon)
         probe.start()
         os.kill(daemon, signal.SIGUSR2 if kind == 'handover' else signal.SIGKILL)
@@ -156,6 +164,7 @@ def run_case(machine, endpoint, kind):
             until(waiting_or_faulted, 30, 'replacement daemon did not reach recovery')
             resume(held)
         until(lambda: mainpid() not in (0, daemon) and (s := status()) and not any(c['type'] == 'memory_protection' and c['status'] for c in s['conditions']), 35, 'host stayed fenced after helper exit')
+        assert not exited.poll(0) and group.read_text().split() == [str(vmm)], 'original VMM did not survive recovery'
         assert json.loads(cli('machine', 'get', machine))['state'] == 'running', 'source VM was not adopted'
         created = json.loads(cli('machine', 'run', '--namespace', NS, '--name', f'create-{kind}', '--image', IMAGE, '--sleep', 'never', '--', 'sleep', '60', timeout=30))
         cli('machine', 'wait', '--for', 'running', created['id'], timeout=30)
@@ -164,6 +173,8 @@ def run_case(machine, endpoint, kind):
         assert samples and not failures, 'endpoint traffic failed across recovery'
         print(f'helper check passed: {kind}; endpoint samples={len(samples)}', flush=True)
     finally:
+        if vmfd is not None:
+            os.close(vmfd)
         if held is not None:
             resume(held)
             os.close(held)
