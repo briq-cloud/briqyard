@@ -54,7 +54,7 @@ port forwards, so it sees Lima's forwarder, not fc2): a host's calls are checked
 alone there, not by their address (ADR 0026); the address check is in the unit tests. The dev VMs are aarch64, where OpenZFS's AES-GCM has no
 accelerated code: their disks are about 3.5 times slower encrypted (ADR 0026).
 
-Then `sudo briqyardd --config hack/config.dev.yaml`, and `briqyard status`.
+Then install the build with `hack/install-dev.sh` (as `hack/vm.sh install` does) and start `briqyardd.service`, and `briqyard status`. The daemon does not start by hand (`sudo briqyardd --config …` stops with the name of the check that failed): its startup barrier (ADR 0068) accepts only the process of the official unit, the `Id`, `ControlGroup`, `FragmentPath`, `MainPID` and command line that systemd reports for `briqyardd.service`, because a host's recovery after a crash must know that nothing else of the daemon's cgroup can still be running.
 
 ## On a Mac
 
@@ -222,8 +222,40 @@ plus `apt-get purge docker.io` and the edge's files.
 
 ## In a briq kvm sandbox
 
-TODO: filled after the acceptance run (ADR 0088): `cargo test --workspace`, `hack/e2e.sh` and
-`hack/fleet-smoke.sh` inside a `nested` machine on an x86_64 host that serves the class.
+The suites run in a `kvm-sandbox` briq (`xlarge`: 4 vCPUs, 16 GB, 40 GB at `/work`) on an x86_64 host that serves the `nested` class (ADR 0088). No Lima, no Mac. In the sandbox, as root:
+
+```bash
+cd /work
+git clone --depth 1 https://github.com/briq-cloud/briqyard src
+cp src/hack/native-ci-nested-inner.sh inner.sh
+B=https://github.com/briq-cloud/briqyard/releases/download/v0.1.21
+curl -fsSL "$B/SHA256SUMS-x86_64" -o sums
+curl -fsSL "$B/firecracker-checked-linux-x86_64.tar.gz" -o fc-bundle.tgz
+D=$(awk '$2 == "firecracker-checked-linux-x86_64.tar.gz" {print $1}' sums)
+echo "$D  fc-bundle.tgz" | sha256sum -c -
+echo "BUNDLE_SHA256=$D" > inner.env
+```
+
+Then one stage at a time, detached, so that a command's own limit does not end it. Each leaves `/work/logs/STAGE.log` and `/work/logs/STAGE.rc`:
+
+```bash
+setsid bash /work/inner.sh run build > /dev/null 2>&1 < /dev/null &
+```
+
+| Stage | What it does | Result, 2026-11-04, source `f4939302`, AMD EPYC, one level of nesting, to within 30 s |
+|---|---|---|
+| `build` | release workspace and the musl init | 141 s, from nothing |
+| `systemd` | systemd as PID 1 of namespaces of its own, for the units and the startup barrier (ADR 0068) | under 30 s |
+| `host` | `hack/bootstrap-host.sh`, `hack/install-dev.sh`, `briqyardd` under its unit | under 30 s |
+| `fleet` | `hack/fleet-smoke.sh` | 33 passed, 80 s |
+| `cargotest` | `cargo test --workspace` and the init's root tests | 1422 passed, 242 s |
+| `e2e` | `hack/e2e.sh` | 294 passed, 626 s |
+
+`hack/native-ci-more.sh stress` passed 635 of 635 checks with no invariant break in 514 s, and `monitoring` passed its 18 and 9 checks in 455 s. Run them inside the namespaces with `nsenter -t "$(cat /work/logs/systemd.pid)" -a`, with `capacity` raised to `memory_mb: 12288, vcpus: 24` as in `hack/native-ci.sh`, `RUNNER_ENVIRONMENT=github-hosted` for the script's guard, and each on a fresh host: `monitoring` leaves a second host in `fleet.yaml`. `fleet-two-hosts` and `fleet-restore` need a second host: they stay on `fc` and `fc2` and on the hosted two-hosts job.
+
+- **Not on a hosted runner:** the `native nested` workflow adds a level of virtualization. There a guest took 17 s to start and `e2e` stopped after an hour at 262 ok, 4 failed. It rehearses the install path, by hand; it is not the acceptance.
+- **A guest boots cold every time:** a machine of the class has no memory snapshot, so the sandbox's own sleep ends its daemons and guests.
+- **`/` is shared in the namespaces:** systemd leaves it private in a container. A sandboxed unit (the mirror) would then keep a copy of a machine's mount, and its destroy answers `dataset is busy`.
 
 ## Tests
 

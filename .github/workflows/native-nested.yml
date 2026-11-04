@@ -1,0 +1,101 @@
+name: native nested
+# A rehearsal of the acceptance of the `nested` runtime class (ADR 0088) on a disposable hosted
+# runner with /dev/kvm: the runner is the host, a `nested` machine is the sandbox, and briqyard
+# runs inside it with Firecracker microVMs of its own (hack/native-ci-nested.sh).
+# By hand only: the runner is a VM already, so a guest takes about 17 s to start and the e2e does
+# not finish. Acceptance runs in a kvm sandbox (docs/DEVELOPMENT.md).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Source ref to build and test (empty uses workflow ref)
+        required: false
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: native-nested-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  rehearsal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      # Keep the harness from the workflow revision when dispatch tests an older source ref.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: .native-harness
+          persist-credentials: false
+      # The inner e2e suite runs last and takes the time the job has left (the job limit, 6 hours,
+      # less the steps after the rehearsal).
+      - name: Note the deadline of the rehearsal
+        run: echo "NATIVE_DEADLINE=$(( $(date +%s) + 355 * 60 - 600 ))" >> "$GITHUB_ENV"
+      - name: Record tested identity and host
+        run: |
+          git -C "$GITHUB_WORKSPACE" rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          uname -a | tee -a "$GITHUB_STEP_SUMMARY"
+          ls -l /dev/kvm
+          grep -m1 '^model name' /proc/cpuinfo | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "runner CPUs with vmx or svm: $(grep -c -E 'vmx|svm' /proc/cpuinfo || true)"
+          cat /sys/module/kvm_intel/parameters/nested || true
+          free -m
+          df -h /
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools pkg-config libssl-dev bc jq openssl openssh-server python3-yaml \
+            bison flex libelf-dev kmod fakeroot xz-utils
+      # The class's kernel and modules, keyed by the inputs of hack/kernel/build.sh.
+      - name: Restore the nested kernel
+        id: kernel-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/nested-out
+          key: nested-kernel-${{ hashFiles('hack/kernel/**') }}
+      - name: Build the nested kernel and OpenZFS modules
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          start=$SECONDS
+          hack/kernel/build.sh 2>&1 | tee "$RUNNER_TEMP/kernel-build.log" | tail -n 40
+          echo "nested kernel build: $((SECONDS-start)) s" | tee -a "$GITHUB_STEP_SUMMARY"
+          rm -rf "$RUNNER_TEMP/nested-build"
+        env:
+          BUILD: ${{ runner.temp }}/nested-build
+          OUT: ${{ runner.temp }}/nested-out
+      - name: Keep the nested kernel
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/nested-out
+          key: nested-kernel-${{ hashFiles('hack/kernel/**') }}
+      - name: Build the head
+        run: |
+          start=$SECONDS
+          cargo build --release --locked --workspace --exclude briqyard-init
+          cargo build --release --locked -p briqyard-init --target x86_64-unknown-linux-musl
+          echo "head build on the runner: $((SECONDS-start)) s" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Rehearse briqyard inside a nested machine
+        run: |
+          set -o pipefail
+          mkdir -p native-logs
+          export NATIVE_E2E_LIMIT=20000
+          bash .native-harness/hack/native-ci-nested.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/nested-out" 2>&1 | tee native-logs/rehearsal.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-nested-logs
+          path: |
+            native-logs/
+            ${{ runner.temp }}/nested-out/nested-versions-x86_64.json
+          if-no-files-found: ignore
