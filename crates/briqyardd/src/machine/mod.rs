@@ -83,6 +83,12 @@ pub enum MError {
     NotFound,
     #[error("backup {0} not found")]
     NoBackup(String),
+    /// The key a backup is under is not held by the fleet or was refused (the backup's id).
+    #[error("the key of backup {0} is not available")]
+    KeyUnavailable(String),
+    /// The fleet that holds the key could not be reached (the backup's id).
+    #[error("the key of backup {0} could not be fetched: the fleet did not answer")]
+    KeyUnreachable(String),
     #[error("snapshot {0} not found")]
     NoSnapshot(String),
     #[error("invalid request: {0}")]

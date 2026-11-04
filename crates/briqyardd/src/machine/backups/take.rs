@@ -37,10 +37,22 @@ impl Manager {
         let Some(id) = &b.key_id else {
             return Ok(None);
         };
-        let key = crate::poolkey::by_id(&self.inner.cfg, id, rs)
-            .await
-            .with_context(|| format!("the key of backup {}", b.id))?;
-        Ok(Some(key))
+        match crate::poolkey::by_id(&self.inner.cfg, id, rs).await {
+            Ok(key) => Ok(Some(key)),
+            Err(e) => {
+                // The detail names the fleet's address: the log has it, the caller does not.
+                tracing::warn!(backup = b.id, err = format!("{e:#}"), "the key of a backup");
+                Err(match e.downcast_ref::<crate::poolkey::KeyError>() {
+                    Some(crate::poolkey::KeyError::Unavailable(_)) => {
+                        MError::KeyUnavailable(b.id.clone())
+                    }
+                    Some(crate::poolkey::KeyError::Unreachable(_)) => {
+                        MError::KeyUnreachable(b.id.clone())
+                    }
+                    None => MError::Other(e.context(format!("the key of backup {}", b.id))),
+                })
+            }
+        }
     }
 
     pub(super) fn holder(&self, id: &str) -> Option<Arc<Holder>> {
