@@ -33,6 +33,7 @@ jobs:
           bash -n hack/native-ci-more.sh
           bash -n hack/render-alerting.sh
           bash -n hack/install-monitoring.sh
+          python3 -m py_compile hack/monitoring-webhook-check.py hack/monitoring-alerts-check.py
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings

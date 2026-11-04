@@ -19,6 +19,12 @@
 #   GRAFANA_URL            where your proxy serves Grafana (root_url), e.g. https://grafana.example.com
 #   GRAFANA_PASSWORD_FILE  a 0600 file with the admin password, instead of stdin
 #   LARGEST_SLOT_MB        the alert when a region's largest slot is under it (16384)
+#   ALLOW_INSECURE_WEBHOOK 1 accepts an http:// webhook (a receiver on loopback in CI); by
+#                          default SLACK_WEBHOOK_URL must be an https:// URL
+#
+# Changing the webhook: edit SLACK_WEBHOOK_URL in alerting.env, run this again (Grafana is
+# restarted, and re-provisions its contact point from the new value), then
+# hack/monitoring-webhook-check.py proves what Grafana will post to, without sending anything.
 #
 # Memory: about 700 MB for both with a few hosts, Grafana 600 MB of it (Prometheus grows with
 # series: about 12 per machine). On a server that also runs machines, add it to
@@ -63,6 +69,24 @@ elif [ ! -t 0 ]; then
 fi
 if [ -z "$password" ] && [ ! -f "$VAR/grafana/grafana.db" ]; then
   echo "the first install needs Grafana's admin password: on stdin, or GRAFANA_PASSWORD_FILE"; exit 1
+fi
+
+# The webhook in alerting.env, checked before anything changes: the unit reads the file at each
+# start, Grafana keeps what it read, and a value that is not a URL fails only when an alert
+# is sent. Never printed.
+webhook= webhook_stamp=off
+if [ -f "$ETC/alerting.env" ] && grep -q '^SLACK_WEBHOOK_URL=.' "$ETC/alerting.env"; then
+  private "$ETC/alerting.env"
+  webhook=$(sed -n 's/^SLACK_WEBHOOK_URL=//p' "$ETC/alerting.env" | tail -n1)
+  case $webhook in \"*\") webhook=${webhook#\"}; webhook=${webhook%\"} ;; \'*\') webhook=${webhook#\'}; webhook=${webhook%\'} ;; esac
+  case $webhook in
+    https://?*) ;;
+    http://?*) [ "${ALLOW_INSECURE_WEBHOOK:-}" = 1 ] || { echo "SLACK_WEBHOOK_URL in $ETC/alerting.env must be an https:// URL (ALLOW_INSECURE_WEBHOOK=1 accepts http://, for a test receiver)"; exit 1; } ;;
+    *) echo "SLACK_WEBHOOK_URL in $ETC/alerting.env must be an https:// URL (the value is not shown)"; exit 1 ;;
+  esac
+  case $webhook in *[[:space:]]*) echo "SLACK_WEBHOOK_URL in $ETC/alerting.env has whitespace in it"; exit 1 ;; esac
+  # In the unit as a comment: a changed webhook changes the unit, so Grafana restarts and reads it.
+  webhook_stamp=$(printf '%s' "$webhook" | sha256sum | cut -c1-16)
 fi
 
 # fetch NAME URL SHA256 DIR: the archive checked against its pin, unpacked into DIR.
@@ -230,6 +254,7 @@ After=network-online.target briqyard-prometheus.service
 Wants=network-online.target
 
 [Service]
+# alerting.env: $webhook_stamp (a changed webhook is a changed unit: Grafana restarts and reads it)
 User=briqyard-grafana
 Environment=PROMETHEUS_URL=http://$PROMETHEUS_LISTEN
 EnvironmentFile=-$ETC/alerting.env
@@ -264,6 +289,15 @@ if [ -n "$password" ]; then
   # On stdin, never in argv or a file of ours. Grafana made its admin at its first start.
   printf '%s\n' "$password" | runuser -u briqyard-grafana -- "$OPT/grafana/bin/grafana" cli \
     --homepath "$OPT/grafana" --config "$ETC/grafana.ini" admin reset-admin-password --password-from-stdin >/dev/null
+fi
+if [ "$alerting" = on ]; then
+  # What Grafana will post to, read from Grafana and compared with alerting.env; nothing is sent.
+  # Needs the admin password: given to this run, else run the check yourself.
+  if [ -n "$password" ]; then
+    printf '%s\n' "$password" | GRAFANA_LISTEN=$GRAFANA_LISTEN python3 hack/monitoring-webhook-check.py
+  else
+    echo "== webhook not checked (no admin password given to this run): python3 hack/monitoring-webhook-check.py"
+  fi
 fi
 echo "$PROMETHEUS_VERSION" > "$OPT/prometheus/VERSION"
 echo "$GRAFANA_VERSION" > "$OPT/grafana/VERSION"

@@ -893,6 +893,9 @@ install -m 0600 /dev/null /etc/briqyard-monitoring/alerting.env && nano /etc/bri
 GRAFANA_URL=https://grafana.example.com bash /root/briqyard/hack/install-monitoring.sh
 ```
 
+To change the webhook, edit `SLACK_WEBHOOK_URL` (an `https://` URL; the install refuses anything else) and run the script again: it restarts Grafana when the value changed.
+To verify delivery without an alert, `python3 hack/monitoring-webhook-check.py` (asks the admin password) compares what Grafana will post to with `alerting.env`, sending nothing; `--send` has Grafana send one test message.
+
 | Alert | When |
 |---|---|
 | Not answering | a target's `up == 0` for 2 minutes: a host down, or the fleet itself |

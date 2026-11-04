@@ -47,6 +47,8 @@ STORE = "/var/lib/briqyard/backups"
 # labels, thresholds, states and annotations, and the Slack contact point, are the install's.
 LARGEST_SLOT_MB = 8192  # given to the install (its knob, 16384 by default); the fixture holds 12288 MB
 RECEIVER_PORT = int(os.environ.get("ALERT_RECEIVER_PORT", "18199"))  # in alerting.env, written by the CI script
+NEW_RECEIVER_PORT = int(os.environ.get("ALERT_NEW_RECEIVER_PORT", "18198"))  # the webhook this script changes it to
+INSTALL_ENV = ("GRAFANA_PASSWORD_FILE=" + os.environ.get("GRAFANA_PASSWORD_FILE", ""), f"LARGEST_SLOT_MB={LARGEST_SLOT_MB}")
 EVALUATION_INTERVAL = "10s"  # the rules' 1m
 NOTIFY = {"group_wait": "5s", "group_interval": "10s"}  # the policy's 30s and 5m; repeat_interval stays
 FOR_OVERRIDES = {"briqyard-slots-small": "1m"}  # 10m
@@ -210,7 +212,7 @@ def episodes(seq):
 # ---- the receiver --------------------------------------------------------------------------
 
 class Receiver:
-    def __init__(self):
+    def __init__(self, port=RECEIVER_PORT):
         self.events = []
         self.lock = threading.Lock()
         outer = self
@@ -237,8 +239,8 @@ class Receiver:
             def log_message(self, *a):
                 pass
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", RECEIVER_PORT), H)
-        self.url = f"http://127.0.0.1:{RECEIVER_PORT}/"
+        self.server = ThreadingHTTPServer(("127.0.0.1", port), H)
+        self.url = f"http://127.0.0.1:{port}/"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def alerts(self):
@@ -256,6 +258,8 @@ class Receiver:
 
 
 rx = None
+old_rx = None  # the webhook the first install was given; nothing may reach it once it is changed
+old_rx_seen = 0
 
 
 class Case:
@@ -359,10 +363,57 @@ def drive(cases, actions, total):
 
 # ---- setup, and what the rules under test are -------------------------------------------------
 
+def send_test_notification():
+    """Grafana's own test of the contact point: one Slack message to whatever URL it holds now."""
+    rid = b64encode(b"briqyard slack").decode().rstrip("=")
+    req = urllib.request.Request(
+        f"{GRAFANA}/apis/notifications.alerting.grafana.app/v1beta1/namespaces/default/receivers/{rid}/test", method="POST",
+        data=json.dumps({"integration": {"uid": "briqyard-slack", "type": "slack", "version": "v1", "settings": {},
+                                         "secureFields": {"url": True}}}).encode())
+    req.add_header("Authorization", "Basic " + b64encode(f"admin:{password}".encode()).decode())
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r).get("status") == "success"
+    except urllib.error.HTTPError:
+        return False
+
+
+def install(*extra_env):
+    """The documented install again, as an operator reruns it after editing alerting.env."""
+    return sudo("env", *INSTALL_ENV, *extra_env, "bash", str(ROOT / "hack/install-monitoring.sh"), timeout=600)
+
+
+def webhook_change():
+    """alerting.env changed to another webhook and the install rerun on the installed host: the next
+    notification goes to the new one, and not to the old (what Grafana reads at its start)."""
+    global rx, old_rx, old_rx_seen
+    old_rx, rx = rx, Receiver(NEW_RECEIVER_PORT)
+    send_test_notification()
+    (ok if wait_for("old webhook", lambda: len(old_rx.events) >= 1, 30, 1) else bad)(
+        "before the change, Grafana's test notification reaches the webhook the install was given")
+    # An http:// webhook is refused unless the escape is given, before anything changes.
+    sudo("sh", "-c", f"umask 077; echo SLACK_WEBHOOK_URL={rx.url} > /etc/briqyard-monitoring/alerting.env", check=True)
+    p = install()
+    (ok if p.returncode != 0 and "https://" in p.stdout else bad)("the install refuses a webhook that is not https:// without ALLOW_INSECURE_WEBHOOK=1")
+    p = install("ALLOW_INSECURE_WEBHOOK=1")
+    (ok if p.returncode == 0 else bad)(f"the install rerun with the new webhook succeeds ({(p.stdout + p.stderr)[-200:].strip()!r})")
+    old_rx_seen, new_seen = len(old_rx.events), len(rx.events)
+    send_test_notification()
+    (ok if wait_for("new webhook", lambda: len(rx.events) > new_seen, 30, 1) else bad)(
+        "after the change and the install, Grafana's test notification reaches the new webhook")
+    time.sleep(3)
+    (ok if len(old_rx.events) == old_rx_seen else bad)("... and not the old one")
+    p = sudo("env", "ALLOW_INSECURE_WEBHOOK=1", f"GRAFANA_PASSWORD_FILE={os.environ['GRAFANA_PASSWORD_FILE']}",
+             "python3", str(ROOT / "hack/monitoring-webhook-check.py"))
+    (ok if p.returncode == 0 else bad)(f"hack/monitoring-webhook-check.py finds Grafana holding the webhook of alerting.env ({p.stdout.strip()[-120:]!r})")
+
+
 def setup():
     global rx, password
     password = sudo("cat", os.environ["GRAFANA_PASSWORD_FILE"], check=True).stdout.strip()
     rx = Receiver()
+    webhook_change()
     prod = production_rules()
     for g in prod["groups"]:
         for r in g["rules"]:
@@ -615,6 +666,8 @@ def main():
             cleanup()
         except Exception as e:
             print(f"cleanup: {e}", flush=True)
+    if old_rx is not None:
+        (ok if len(old_rx.events) == old_rx_seen else bad)("no alert reached the webhook that alerting.env had before the change")
     print("== notifications received", flush=True)
     for line in rx.summary() if rx else []:
         print("   ", line, flush=True)
