@@ -173,10 +173,12 @@ for i in $(seq 1 20); do
   h=$(briqyard machine run --image $IMG --name "hist$i" --namespace $NS --memory 128 -- sleep 3600 | jq -r .id) && wait_running "$h" && briqyard machine rm "$h" >/dev/null
 done
 for i in 1 2 3 4 5; do
-  k=$(briqyard machine run --image $IMG --name "killed$i" --namespace $NS --memory 128 --restart no -- sleep 3600 | jq -r .id) || die killed
+  k=$(briqyard machine run --image $IMG --name "killed$i" --namespace $NS --memory 128 -- sleep 3600 | jq -r .id) || die killed
   wait_running "$k" || die "killed$i did not run"
   for p in $(sudo cat "$(cgdir "$k")/cgroup.procs"); do sudo kill -9 "$p"; done
-  for _ in $(seq 1 30); do [ "$(briqyard machine get "$k" | jq -r .state)" != running ] && break; sleep 1; done
+  # Down before the restart policy brings it back (10 s): the killed VMM stays behind it.
+  briqyard machine stop "$k" >/dev/null 2>&1
+  for _ in $(seq 1 30); do [ "$(briqyard machine get "$k" | jq -r .state)" = stopped ] && break; sleep 1; done
   [ $i -le 2 ] && briqyard machine rm "$k" >/dev/null
 done
 sudo sh -c "cd $PARENT && awk 'BEGIN{for(i=0;i<$LEAVES;i++)printf \"m-5ca1%08x\\n\", i}' | xargs mkdir"
