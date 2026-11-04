@@ -119,14 +119,19 @@ groups:
               type: threshold
               expression: A
               conditions:
-                - evaluator: { type: gt, params: [2] }
+                - evaluator: { type: gt, params: [1] }
         noDataState: OK
         execErrState: Error
         for: 0s
+        # increase() over ten minutes reads a restart count from about N-1 (the series was first
+        # seen after a restart) to 1.2 N: three restarts read 2.0 to 3.6. Rounded, "> 1" fires at
+        # two restarts seen or more, so a loop of three never goes unseen; keepFiringFor holds the
+        # alert through the readings that cross the threshold (ADR 0094).
+        keepFiringFor: 3m
         labels:
           severity: warning
         annotations:
-          summary: "Machine {{ .Labels.name }} ({{ .Labels.machine }}) of namespace {{ .Labels.namespace }} on host {{ .Labels.host }} restarted three times or more in ten minutes."
+          summary: "Machine {{ .Labels.name }} ({{ .Labels.machine }}) of namespace {{ .Labels.namespace }} on host {{ .Labels.host }} restarted at least twice in ten minutes (a first restart can come before the first sample)."
       - uid: briqyard-backup-failed
         title: "Backup failure observed"
         condition: C
