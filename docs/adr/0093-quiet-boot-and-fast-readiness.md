@@ -83,4 +83,12 @@ of the 19 KB console time `quiet` saves there) is a measurement to take after re
 - A guest that boots in half a second is noticed within 5 ms of the init serving instead of
   within 100 ms.
 - The poll costs up to 200 local connects a second per machine for the first 5 s of a boot,
-  against the VMM's vsock listener, and nothing after.
+  and nothing after. One attempt is in flight per machine at a time. The VMM does not see them
+  before the guest's vsock driver activates; after that each one is a guest round trip, until
+  the init listens.
+- A silent hang before the init no longer shows the last kernel line in the "guest did not come
+  up" error. `loglevel=7` brings it back. A loud failure (a panic, a missing root device, a
+  failed init exec) still prints.
+- Nothing already saved is invalidated. A snapshot resumes with the command line it was taken
+  with, since a resume does not set the boot source, and the boot identity does not include
+  the boot arguments, so templates and warm slots stay compatible.
