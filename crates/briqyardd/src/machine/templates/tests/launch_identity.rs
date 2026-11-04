@@ -254,6 +254,8 @@ async fn saved_fields_alone_cannot_authorize_unbound_activation() {
     *entry.rec.lock().unwrap() = record.clone();
     h.m.validate_launch_record(&record).unwrap();
     let live = fc::Vm {
+        #[cfg(target_os = "linux")]
+        identity: None,
         pid: record.pid,
         api: PathBuf::new(),
         vsock: PathBuf::new(),

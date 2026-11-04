@@ -20,6 +20,10 @@ impl Conditions {
         Self {
             list: condition::ALL
                 .iter()
+                // Live process protection and fleet holds are derived separately.
+                .filter(|k| {
+                    ![condition::MEMORY_PROTECTION, condition::MEMORY_ACCOUNTING].contains(k)
+                })
                 .map(|k| api::Condition {
                     kind: k.to_string(),
                     status: false,

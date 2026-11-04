@@ -63,7 +63,7 @@ fn deleted_nothing(status: ExitStatus, diagnostic: &Diagnostic) -> bool {
 }
 
 async fn run(args: &[&str]) -> Result<()> {
-    let mut cmd = Command::new("conntrack");
+    let mut cmd = crate::host_process::command("conntrack");
     cmd.args(args).env("LC_ALL", "C");
     execute(cmd, Duration::from_secs(10)).await
 }

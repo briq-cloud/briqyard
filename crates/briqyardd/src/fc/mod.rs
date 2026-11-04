@@ -22,8 +22,13 @@ mod client;
 mod clone;
 mod cpu_config;
 mod incarnation;
+mod memory;
 mod process;
 mod process_proof;
+mod recovery;
+#[cfg(any(target_os = "linux", test))]
+mod retirement;
+mod settlement;
 #[cfg(test)]
 mod tests;
 mod vmm;
@@ -34,5 +39,9 @@ pub use client::*;
 pub use clone::*;
 pub use cpu_config::*;
 pub use incarnation::*;
+pub use memory::{enforce as enforce_memory, MemoryProtection};
 pub use process::*;
+#[doc(hidden)]
+pub use recovery::RecoveryMachine;
+pub use recovery::Startup;
 pub use vmm::*;

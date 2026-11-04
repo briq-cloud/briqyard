@@ -150,6 +150,7 @@ impl Manager {
             self.activate_clone_network(&entry.snapshot()).await?;
         }
         self.verify_live_launch(entry, &vm)?;
+        self.retain_memory_policy(entry, &vm);
         *entry.live.lock().unwrap() = Some(vm.clone());
         entry.identity_trusted.store(true, Relaxed);
         *entry.stop_req.lock().unwrap() = None;

@@ -55,7 +55,7 @@ async fn assigned_stage_adoption_proves_continuity_before_trust_or_active_public
         h.host_calls();
         let entry = h.m.entry(&id).unwrap();
         assert!(!entry.identity_trusted.load(Relaxed));
-        let (adopted, _, _) = h.m.recover().await;
+        let (adopted, _, _) = h.m.recover().await.unwrap();
         assert_eq!(adopted, 1);
         assert!(entry.identity_trusted.load(Relaxed));
         assert_eq!(entry.live.lock().unwrap().as_ref().unwrap().pid, before.pid);
@@ -135,7 +135,7 @@ async fn assigned_recovery_refuses_fresh_init_marker_protocol_identity_and_devic
         restart_load(&h.m).unwrap();
         h.m.inner.policies.lock().unwrap().clear();
         h.host_calls();
-        h.m.recover().await;
+        h.m.recover().await.unwrap();
         let entry = h.m.entry(&id).unwrap();
         assert!(!entry.identity_trusted.load(Relaxed));
         assert!(entry.live.lock().unwrap().is_none());
@@ -236,7 +236,7 @@ async fn assigned_stopped_loading_and_unknown_incarnation_never_enter_legacy_cle
         restart_load(&h.m).unwrap();
         h.host_calls();
         let recovered = h.m.entry(&id).unwrap();
-        h.m.recover().await;
+        h.m.recover().await.unwrap();
         h.m.start_stopped_by_host();
         assert!(h.m.start_entry(&recovered, false).await.is_err());
         no_cleanup_or_cold_launch(&h.host_calls());

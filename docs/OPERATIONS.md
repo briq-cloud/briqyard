@@ -247,7 +247,7 @@ grep "mirror failed"`); `image_pulled` events say `through <mirror>` when it ser
 | `ingress.advertise` | the host's primary address | The address endpoints are reported at (`address` on an endpoint): what a router on another machine dials, a private address when the host has one |
 | `ingress.http`, `ingress.domain` | off, `byard.localhost` | The shared HTTP listener and the suffix of its host names |
 | `capacity.memory_mb`, `capacity.vcpus` | host memory − `reserved_memory_mb` − the ZFS cache's ceiling (`zfs_arc_max`, when set), (threads − `reserved_threads`) × 4 | What the host hands out; shared vCPUs oversubscribe |
-| `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the default capacity leaves to the host and its other services (an edge: 3072); unused when `memory_mb` or `vcpus` is set |
+| `capacity.reserved_memory_mb`, `capacity.reserved_threads` | `2048`, `0` | What the host keeps for itself and its other services (an edge: 3072). `memory_mb` plus this plus the ZFS cache ceiling must fit in physical memory, else the host takes nothing new (`memory_protection`: `capacity_exceeds_physical_memory`; the daemon logs the figures): lower `memory_mb` or this, or leave `memory_mb` unset |
 | `fleet.url`, `fleet.advertise`, `fleet.region` | none | Register with a fleet every 15 s, presenting `token` and the certificate's fingerprint. `advertise` has the API's scheme (`https://` for TLS), or the daemon refuses to start. An `http://` `url` must be a loopback or private address (ADR 0026) |
 
 ## A proxy in front
@@ -358,6 +358,13 @@ What one upgrade does (`POST /v1/hosts/{id}/upgrade`; the call answers when it i
 | Hand-over | The script sends the running daemon SIGUSR2: it stops accepting, drains for up to 2 s, exits 75 and leaves every machine running; the unit starts the new one at once, which adopts them. Its listeners stay in systemd's store meanwhile (ADR 0051) |
 | Back | `briqyardd --version` over SSH, then a heartbeat from a new start of that version that stopped nothing, within 5 minutes |
 | Undrained | The host is back in its state; its note says `upgraded to <version> at <time>; machines handed over: N` |
+
+The install is also what sets the memory prerequisites (ADR 0065): the unit's
+`OOMScoreAdjust=-900` before the new daemon starts, then swap off, KSM and `systemd-oomd`
+stopped and masked, `zfs_arc_max` set. A binary replaced without it (by hand) leaves
+`memory_protection` true (`supervisor_oom_preference_unset`, `host_swap_enabled`,
+`arc_ceiling_unverified`, …): the host serves its machines, takes nothing new, and the fleet
+places nothing there. Run the bootstrap, or the missing step, and the condition clears on the next tick.
 
 A failure leaves the host `draining` with the reason in its note: fix it, then
 `briqyard host undrain <id>`. `--all` stops at the first failure and names the hosts left. One
@@ -594,7 +601,9 @@ registry backups, operator archives and local backing/reference scopes are exclu
   durations remain absent until observed. Host readiness does not measure a public API call.
 - `briqyard top [--namespace T]`: running machines by CPU, with memory, disk and network rates over
   the last 15 s (`GET /v1/top`; through the fleet, a namespace's host or every host).
-- Conditions (ADR 0021): `memory_pressure`, `disk_pressure`, `storage_stalled` (ADR 0046) in
+- Conditions (ADR 0021): `memory_pressure`, `disk_pressure`, `storage_stalled` (ADR 0046) and
+  `memory_protection` (ADR 0065; true names the unmet host prerequisite or an unsettled startup in
+  its message, and the host takes nothing new) in
   `/v1/status` and `briqyard host ls`; each change is a `host_condition` event (`briqyard
   events`), a warning when it turns true. Under disk pressure the daemon removes unused images
   itself (`image_removed` events).

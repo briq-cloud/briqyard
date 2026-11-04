@@ -220,6 +220,8 @@ async fn slot_is_identity_configured_paused_and_fully_reserved_before_claim() {
     assert!(!h.m.view(&e).ready);
     assert!(commits_memory(&before));
     assert_eq!(quota_need(&before, false).memory_mb, 256);
+    assert_eq!(e.memory_charge(&before), 512);
+    assert_eq!(h.m.usage().0.memory_mb, 1024);
     assert!(!h
         .host_calls()
         .iter()
@@ -234,6 +236,11 @@ async fn slot_is_identity_configured_paused_and_fully_reserved_before_claim() {
     assert_eq!(after.ip, before.ip);
     assert_eq!(after.clone_origin.unwrap().identity.unwrap(), identity);
     assert_eq!(after.name, "worker");
+    assert_eq!(
+        h.m.usage().0.memory_mb,
+        1024,
+        "claim transfers ownership without releasing physical memory"
+    );
     assert_eq!(h.m.quota("t1").unwrap().used.memory_mb, 512);
     h.host_calls();
     let retry =
@@ -270,8 +277,16 @@ async fn paused_adoption_keeps_identity_and_claim_retry_survives_restart_and_des
     let before = e.snapshot();
     *e.live.lock().unwrap() = None;
     h.host_calls();
-    h.m.recover().await;
+    h.m.recover().await.unwrap();
+    h.m.resume_recovery_workers().await;
     assert_eq!(e.snapshot().pid, before.pid);
+    assert!(
+        !h.host_calls()
+            .iter()
+            .any(|call| call == &format!("recover-stopped {}", before.id)),
+        "a ready paused slot must be recovered before generic settlement"
+    );
+    assert_eq!(e.memory_charge(&e.snapshot()), 512);
     assert_eq!(
         e.snapshot().clone_origin.unwrap().identity,
         before.clone_origin.unwrap().identity
@@ -282,7 +297,8 @@ async fn paused_adoption_keeps_identity_and_claim_retry_survives_restart_and_des
             .await
             .unwrap();
     h.m.recover_warm_names().unwrap();
-    h.m.recover().await;
+    h.m.recover().await.unwrap();
+    h.m.resume_recovery_workers().await;
     assert_eq!(
         h.m.claim_warm_pool("t1", "tools", claim("worker", "stable-id"))
             .await
@@ -355,7 +371,8 @@ async fn unconfirmed_paused_ownership_retains_quota_and_blocks_refill() {
     let e = fill(&h).await;
     *e.live.lock().unwrap() = None;
     e.rec.lock().unwrap().boot_incarnation = None;
-    h.m.recover().await;
+    h.m.recover().await.unwrap();
+    h.m.resume_recovery_workers().await;
     assert_eq!(e.snapshot().state, state::ERROR);
     assert!(!e.snapshot().clone_origin.unwrap().mapping_exited);
     assert!(commits_memory(&e.snapshot()));

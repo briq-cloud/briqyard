@@ -108,7 +108,13 @@ impl Listeners {
                 Ok(sock.into())
             }
             None => {
-                let sock = bind(addr)?;
+                // A stored socket on another address was just removed: systemd closes its
+                // copy when it reads that message, a moment after we sent it.
+                let sock = if stale {
+                    bind_while_released(addr, STORE_RELEASE_WAIT)?
+                } else {
+                    bind(addr)?
+                };
                 self.store(name, &sock)?;
                 Ok(sock.into())
             }
@@ -194,6 +200,25 @@ fn notify_addr(path: &str) -> io::Result<nix::sys::socket::UnixAddr> {
             "NOTIFY_SOCKET {path}: abstract sockets are Linux's"
         ))),
         None => nix::sys::socket::UnixAddr::new(path).map_err(bad),
+    }
+}
+
+/// How long a bind waits for systemd to close a stored socket we asked it to remove.
+const STORE_RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `bind`, retried while the address is in use, up to `wait`: the condition is the other
+/// holder (systemd's copy of a removed stored socket) closing it.
+fn bind_while_released(addr: SocketAddr, wait: std::time::Duration) -> io::Result<Socket> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match bind(addr) {
+            Err(e)
+                if e.kind() == io::ErrorKind::AddrInUse && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other,
+        }
     }
 }
 
@@ -466,5 +491,18 @@ mod tests {
         drop(ln);
         assert!(probe.closed(), "the original socket at {addr} closed");
         assert!(l.release_unused().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_bind_waits_for_the_removed_stored_socket_to_close() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap();
+        assert!(bind_while_released(addr, std::time::Duration::from_millis(100)).is_err());
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(held);
+        });
+        bind_while_released(addr, std::time::Duration::from_secs(5)).unwrap();
+        closer.join().unwrap();
     }
 }

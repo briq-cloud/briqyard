@@ -54,6 +54,13 @@
         port: { type: integer }
         machine_id: { type: string, description: "`GET /v1/machines/{id}` and its `/logs` answer for it" }
         error: { type: string, description: why it last failed to come up }
+    MemoryPolicy:
+      type: object
+      required: [version, vmm_overhead_mb]
+      description: "Host physical-memory accounting. Version 1 reserves guest memory plus 256 MiB per committed VMM; namespace quotas retain guest memory. Absent means legacy accounting; unknown policies refuse new placement. This field alone does not establish OOM-protection readiness: inspect conditions."
+      properties:
+        version: { type: integer, minimum: 1 }
+        vmm_overhead_mb: { type: integer, minimum: 0 }
     Capacity:
       type: object
       properties:
@@ -130,6 +137,7 @@
         runtime_classes: { type: array, items: { $ref: "#/components/schemas/RuntimeClass" }, description: "the runtime classes it serves besides `default`, which every host serves (ADR 0088); a create naming one is placed only on a host that lists it" }
         version: { type: string, description: "this build: the release and its commit, `0.1.0+fdad892eeefa` (ADR 0027)" }
         host_id: { type: string }
+        memory_policy: { $ref: "#/components/schemas/MemoryPolicy" }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer, description: the namespaces' machines, gateways not counted }
@@ -183,7 +191,7 @@
       description: "A host condition (ADR 0021), decided by the daemon's tick. Each is a pressure: the fleet places nothing new on a host while one is true"
       required: [type, status, since, message]
       properties:
-        type: { type: string, enum: [memory_pressure, disk_pressure, storage_stalled], description: "`memory_pressure`: committed memory over `conditions.memory_pct` of capacity; `disk_pressure`: the pool's free space under `conditions.disk_free_pct` of its size; `storage_stalled`: a `zfs` command of the daemon's running for over a minute (ADR 0046)" }
+        type: { type: string, enum: [memory_pressure, disk_pressure, storage_stalled, memory_protection, memory_accounting], description: "`memory_pressure`: committed memory over `conditions.memory_pct` of capacity; `disk_pressure`: the pool's free space under `conditions.disk_free_pct` of its size; `storage_stalled`: a `zfs` command of the daemon's running for over a minute (ADR 0046)" }
         status: { type: boolean }
         since: { type: string, format: date-time, description: "when `status` last changed; the daemon's start until it does" }
         message: { type: string, description: the figures it was decided on }
@@ -218,6 +226,7 @@
         region: { type: string }
         provider: { type: string, description: "how the host came: `static` (the fleet's `hosts:`), `manual` (`POST /v1/hosts`) or `join` (`POST /v1/hosts/join`)" }
         state: { type: string, enum: [ready, draining, retiring, upgrading, down, provisioning, bootstrapped, joining, failed, retired], description: "`draining` takes no new namespace; `retiring` neither, and is forgotten once empty (`retired` in the answer to the retire that forgets it); `upgrading` while `host upgrade` runs; `joining` from the join until the host's first heartbeat" }
+        memory_policy: { $ref: "#/components/schemas/MemoryPolicy" }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer }
@@ -300,6 +309,7 @@
         id: { type: string, description: The daemon's own id, for the fleet's log; the fleet keeps the host under its own }
         url: { type: string }
         region: { type: string }
+        memory_policy: { $ref: "#/components/schemas/MemoryPolicy" }
         capacity: { $ref: "#/components/schemas/Capacity" }
         used: { $ref: "#/components/schemas/Capacity" }
         machines: { type: integer }

@@ -14,6 +14,16 @@ Several hosts, one API for the control plane. The control plane reads a machine 
 
 **Hosts register by heartbeat every 15 s**, carrying capacity, tenants and the daemon's own API token. Silent for a minute: `down`. Its machines' calls answer 503 `host_down`; nothing is guessed. Static hosts can be listed in the fleet's config and polled.
 
+**A machine DELETE missing from the index still reaches its namespace's owner.**
+Indexed and discovered machine owners keep priority. If discovery finds no machine, a
+plain `DELETE /v1/machines/{id}?namespace=...` (`tenant=` too) uses that namespace's
+registered pin without placing or repinning it. A down owner returns `host_down`; an
+unreachable owner or a pin whose host record is missing returns `host_unreachable`.
+An invalid fallback hint is refused. No pin retains the machine-not-found answer.
+The hint supplies routing, not namespace authorization or a new machine index entry.
+The owner's DELETE answer is relayed unchanged; only success removes the index and
+refreshes capacity (ADR 0044). Other methods and backup-holder routing are unchanged.
+
 **A listing is never partial.** A tenant's listing asks its host alone; a host down or not answering fails the listing. Every forwarded call has a 5 s connect timeout.
 
 **The registry is one JSON file** (hosts, tenant → host, machine → host), rewritten on change. Enough for tens of hosts; not for hundreds.

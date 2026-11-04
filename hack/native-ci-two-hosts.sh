@@ -60,7 +60,8 @@ c['api_tls']=False
 c['listen']='0.0.0.0:7420'
 c['ingress']['bind']='0.0.0.0'
 c['ingress']['http']='0.0.0.0:8080'
-c['capacity']={'memory_mb':4096,'vcpus':8}
+# The VM has 6 GiB: its budget, the 512 MB it keeps and the 1 GB cache ceiling must fit in it.
+c['capacity']={'memory_mb':3840,'reserved_memory_mb':512,'vcpus':8}
 p.write_text(yaml.safe_dump(c,sort_keys=False))
 # The suites parse these scalars as in the bootstrap output.
 s=p.read_text().replace('token: fc2-token','token: "fc2-token"')

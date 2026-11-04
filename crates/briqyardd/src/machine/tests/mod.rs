@@ -10,6 +10,7 @@ mod classes;
 mod event_log;
 mod gateway;
 mod lifecycle;
+mod memory;
 mod metering;
 mod mock;
 mod move_addresses;
@@ -20,6 +21,7 @@ mod observe;
 mod probing;
 mod quotas;
 mod recovery;
+mod retirement;
 mod sessions;
 mod siblings;
 mod tick;
@@ -263,6 +265,9 @@ pub(super) async fn harness_config(f: impl FnOnce(&mut Config)) -> Harness {
             events,
             pool: Mutex::new(None),
             conditions: Mutex::new(Conditions::new(Utc::now())),
+            memory_host: Mutex::new(None),
+            recovery_fault: Mutex::new(None),
+            memory_condition: Mutex::new(None),
             started: Mutex::new(api::DaemonStart::default()),
         }),
     };

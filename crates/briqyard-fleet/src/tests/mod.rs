@@ -241,6 +241,7 @@ mod hosts;
 mod join;
 mod join_trust;
 mod listings;
+mod locate;
 mod metrics;
 mod placement;
 mod regions;

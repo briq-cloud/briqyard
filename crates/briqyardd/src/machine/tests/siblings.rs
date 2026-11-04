@@ -148,7 +148,8 @@ async fn membership_follows_moves_and_adoption_without_flushing_a_known_owner() 
     let rules = h.m.rules().unwrap();
     assert!(rules.members.contains(&("by2".into(), moved.ip.clone())));
     assert!(!rules.members.iter().any(|(_, ip)| ip == &machine.ip));
-    assert_eq!(h.m.recover().await, (1, 0, 0));
+    assert_eq!(h.m.recover().await.unwrap(), (1, 0, 0));
+    h.m.resume_recovery_workers().await;
     assert_eq!(*h.host.cleared_ips.lock().unwrap(), clears);
 }
 

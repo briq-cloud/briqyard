@@ -1533,7 +1533,7 @@ async fn assigned_unreadable_update_journal_defers_backing_cleanup() {
         .unwrap();
     assert!(h.m.tidy(&entry).await.is_err());
     assert!(h.m.finish_swap(&record, "root").await.is_err());
-    assert_eq!(h.m.sweep_orphans().await, 0);
+    assert!(h.m.sweep_orphans().await.is_err());
     assert!(h.m.delete_image(&cached.key).await.is_err());
     assert_eq!(h.m.gc_images(chrono::Duration::zero()).await, 0);
     let gb = 1u64 << 30;

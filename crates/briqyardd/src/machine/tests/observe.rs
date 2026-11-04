@@ -55,7 +55,7 @@ async fn metrics_hold_every_machine_by_its_labels_from_the_last_measure() {
         // The host's, the names from before included.
         r#"briqyard_machines{state="running"} 2"#.into(),
         "briqyard_machines_total 4".into(),
-        r#"briqyard_memory_mb{kind="used"} 1024"#.into(),
+        r#"briqyard_memory_mb{kind="used"} 1536"#.into(),
         r#"briqyard_pool_bytes{kind="size"} 1000"#.into(),
         r#"briqyard_pool_bytes{kind="free"} 50"#.into(),
         r#"briqyard_host_condition{condition="memory_pressure"} 0"#.into(),
@@ -109,7 +109,7 @@ async fn conditions_turn_true_and_clear_with_their_events() {
         (c[0].kind.as_str(), c[0].status, c[0].since),
         ("memory_pressure", true, t0)
     );
-    assert_eq!(c[0].message, "960 MB of 1000 committed (96%), over 95%");
+    assert_eq!(c[0].message, "1216 MB of 1000 committed (121%), over 95%");
     assert!(!c[1].status, "{:?}", c[1]);
     let evs = h.host_events(reason::HOST_CONDITION);
     assert_eq!(evs.len(), 1, "only a change is an event: {evs:?}");
@@ -117,7 +117,7 @@ async fn conditions_turn_true_and_clear_with_their_events() {
         (evs[0].kind.as_str(), evs[0].message.as_str()),
         (
             "warning",
-            "memory_pressure: 960 MB of 1000 committed (96%), over 95%"
+            "memory_pressure: 1216 MB of 1000 committed (121%), over 95%"
         )
     );
     assert_eq!(

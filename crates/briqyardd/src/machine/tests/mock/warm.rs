@@ -49,6 +49,8 @@ impl Mock {
             .find(|process| process.pid == pid && process.id == id && !*process.exited.borrow())?;
         let (api, _, _, _) = fc::paths(dir);
         Some(fc::Vm {
+            #[cfg(target_os = "linux")]
+            identity: None,
             pid,
             api,
             vsock: process.vsock.clone(),
