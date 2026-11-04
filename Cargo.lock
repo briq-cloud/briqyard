@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "anyhow",
  "axum",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-fleet"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "age",
  "anyhow",
@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "briqyard-objstore"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -467,15 +467,15 @@ dependencies = [
 
 [[package]]
 name = "briqyard-testing"
-version = "0.1.22"
+version = "0.1.23"
 
 [[package]]
 name = "briqyard-version"
-version = "0.1.22"
+version = "0.1.23"
 
 [[package]]
 name = "briqyardd"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "anyhow",
  "async-trait",

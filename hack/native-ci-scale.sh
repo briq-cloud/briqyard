@@ -49,12 +49,14 @@ known=()
 for i in $(seq 1 "$KNOWN"); do
   known+=("$(briqyard machine run --namespace "$NS" --name "k$i" --image alpine:3.20 --memory 128 --no-start -- sleep 60 | jq -r .id)")
 done
+# The daemon stops first: its pass would retire them while this makes and counts them.
+sudo systemctl stop briqyardd
 for id in "${known[@]}"; do sudo mkdir "$PARENT/${id//_/-}"; done
 known_left() { local n=0 id; for id in "${known[@]}"; do sudo test -d "$PARENT/${id//_/-}" && n=$((n + 1)); done; echo "$n"; }
 check "scale: $KNOWN idle leaves of known machines exist" '[ "$(known_left)" = "$KNOWN" ]'
 
 start=$SECONDS
-sudo systemctl restart briqyardd
+sudo systemctl start briqyardd
 up=0
 for _ in $(seq 1 "$BOUND"); do
   briqyard status >/dev/null 2>&1 && { up=1; break; }

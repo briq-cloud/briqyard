@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.23 — 2026-11-04
+
+### Upgrade notes
+
+- The init is unchanged from 0.1.21 (ADR 0101): seeds are not sealed again. Confirm it against the `briqyard-init-linux-<arch>` line of `SHA256SUMS`.
+- A clean start is unaffected. A start that finds a helper left by a crashed daemon waits up to 10 s for it, before inventory (ADR 0102). If a member stays, the host still refuses placement with `recovery_unresolved`, naming its pid, exe and state, and running machines keep serving; when the member goes, the daemon exits so that systemd runs the whole barrier again. A helper stuck in the kernel needs an operator: `docs/OPERATIONS.md`.
+
+### Fixes
+
+- a helper left by a crashed daemon does not refuse the host (#145) ([b64fcb14](https://github.com/briq-cloud/briqyard/commit/b64fcb1425fc3679cc17a739384d94732b51045a))
+
 ## 0.1.22 — 2026-11-04
 
 ### Upgrade notes
