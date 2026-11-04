@@ -93,3 +93,4 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0095](0095-qualification-batch.md) | The qualification batch in native CI: kills mid-operation, isolation with reasons and controls, guest and VMM OOM, exact physical admission, a full pool; what needs real hardware |
 | [0096](0096-vmm-memory-kill-is-reported.md) | A VMM killed over its memory ceiling is reported as `exit.vmm_oom_killed`, apart from the guest's `oom_killed`; a stopped copy stays `crash` |
 | [0097](0097-a-fork-keeps-its-sources-command.md) | A disk fork runs its source's entrypoint, command, files, ports and environment unless the request sets them, as a restore does |
+| [0098](0098-ci-token-permissions.md) | CI workflows grant the GitHub token only read access to repository contents |
