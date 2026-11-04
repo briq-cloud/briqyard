@@ -42,3 +42,13 @@ Not proven here: real disk sizes, physical disk failures, real object-store late
 real-host restore times or production capacity. Run against the real backup store
 and two actual hosts to collect those measurements. Native results are required
 before accepting this candidate; dispatching a run is not passing qualification.
+
+## Postgres initialization readiness
+
+The first candidate failed before any backup: the official image's temporary init
+server answered a socket query, then shut down before the schema write. A single
+`SELECT 1` was not final-server readiness. The bounded probe now requires
+`pg_isready` and a socket query with nonempty `listen_addresses` (the pinned
+image's temporary server sets it empty) and `pg_is_in_recovery()` false. The same
+probe gates restored queries. It retries reads only, never schema writes or commits.
+Timeout identifies the final-server requirement, socket and last probe result.

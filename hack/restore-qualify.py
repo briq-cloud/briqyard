@@ -75,9 +75,9 @@ class Suite:
         require(status in expected, f'{method} {path}: HTTP {status}: {value}')
         return value
 
-    def execute(self, mid, cmd, check=True):
+    def execute(self, mid, cmd, check=True, timeout_ms=30000):
         value = self.api('POST', f'/v1/machines/{mid}/exec',
-                         {'cmd': cmd, 'timeout_ms': 30000, 'wake': False}, timeout=40)
+                         {'cmd': cmd, 'timeout_ms': timeout_ms, 'wake': False}, timeout=timeout_ms/1000+10)
         if check:
             require(value['exit_code'] == 0 and not value['timed_out'],
                     f'exec {mid}: {value}')
@@ -144,18 +144,39 @@ class Suite:
         return m, start
 
     def sql(self, mid, sql, check=True):
-        return self.execute(mid, ['psql', '-U', 'postgres', '-d', 'postgres', '-At',
+        return self.execute(mid, ['psql', '-h', '/var/run/postgresql', '-U', 'postgres', '-d', 'postgres', '-At',
                                   '-v', 'ON_ERROR_STOP=1', '-c', sql], check)
 
-    def query_ready(self, mid):
-        v = self.sql(mid, 'SELECT 1', False)
-        return v['exit_code'] == 0 and v['stdout'].strip() == '1'
+    def postgres_ready(self, mid, seconds=120):
+        # The official image's temporary init server accepts socket queries too,
+        # but starts with listen_addresses=''. Only its final server enables TCP.
+        # Probe the same socket used by the workload, with no mutation to replay.
+        sql = "SELECT 1 WHERE current_setting('listen_addresses') <> '' AND NOT pg_is_in_recovery()"
+        cmd = ['sh', '-c',
+               'export PGCONNECT_TIMEOUT=2 PGOPTIONS="-c statement_timeout=2000"; '
+               'pg_isready -h /var/run/postgresql -U postgres -d postgres -t 2 >/dev/null && '
+               'exec psql -h /var/run/postgresql -U postgres -d postgres -At '
+               '-v ON_ERROR_STOP=1 -c ' + shlex.quote(sql)]
+        start = time.monotonic()
+        deadline = start + seconds
+        last = None
+        while time.monotonic() < deadline:
+            remaining = deadline-time.monotonic()
+            last = self.execute(mid, cmd, check=False,
+                                timeout_ms=max(1, min(5000, int(remaining*1000))))
+            if last['exit_code'] == 0 and not last['timed_out'] and last['stdout'].strip() == '1':
+                self.record('postgres_ready', machine=mid, seconds=time.monotonic()-start,
+                            probe='socket pg_isready and query on final server outside recovery')
+                return
+            time.sleep(min(0.2, max(0, deadline-time.monotonic())))
+        raise Failure(f'Postgres final server not ready on /var/run/postgresql within {seconds}s '
+                      f'(temporary init server excluded); last probe: {last}')
 
     def database(self):
         m = self.create(POSTGRES, env={'POSTGRES_HOST_AUTH_METHOD': 'trust',
                         'PGDATA': '/data/pg'}, volume={'size_gb': 1, 'mount': '/data'})
         mid = m['id']
-        self.wait(lambda: self.query_ready(mid), 'postgres ready')
+        self.postgres_ready(mid)
         self.sql(mid, 'CREATE TABLE ledger (id bigint PRIMARY KEY, payload text NOT NULL)')
 
         def write():
@@ -209,7 +230,7 @@ class Suite:
     def verify_database(self, source, b, before, backup_start, offhost=False, source_host=None):
         m, start = self.restore(source, b, offhost)
         mid = m['id']
-        self.wait(lambda: self.query_ready(mid), 'restored postgres automatic recovery')
+        self.postgres_ready(mid)
         first_query = time.monotonic() - start
         chain = self.api('GET', f'/v1/machines/{source}/backups')
         by_id = {x['id']: x for x in chain}
