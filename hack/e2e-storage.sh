@@ -182,7 +182,9 @@ fresh_detected=0
 for fresh_trial in 1 2 3 4 5; do
   fresh_copy fork "fresh-crash-$fresh_trial" crash
   briqyard machine start "$FRESH_FORK" >/dev/null
-  fresh_bytes=$(briqyard machine exec "$FRESH_FORK" -- sh -c "wc -c < /root/fresh-crash-$fresh_trial" 2>/dev/null | tr -d ' ' || true)
+  # Only a missing file or a short successful read proves lost bytes. A transport
+  # or exec failure must fail the suite, not masquerade as a missing file.
+  fresh_bytes=$(briqyard machine exec "$FRESH_FORK" -- sh -c "if [ -f /root/fresh-crash-$fresh_trial ]; then wc -c < /root/fresh-crash-$fresh_trial; else printf missing; fi" | tr -d ' ')
   echo "27-byte detector control: trial=$fresh_trial elapsed_ms=$FRESH_MS bytes=${fresh_bytes:-missing}"
   if [ "$FRESH_MS" -lt 1000 ] && [ "$fresh_bytes" != 27 ]; then fresh_detected=1; fi
   briqyard machine rm "$FRESH_FORK" >/dev/null
