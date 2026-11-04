@@ -288,3 +288,39 @@ pub(super) fn final_service_pids(members: &[u32], pid: u32, has_children: bool) 
 pub(super) fn final_service_members(text: &str, pid: u32, has_children: bool) -> io::Result<()> {
     final_service_pids(&super::fs::pids(text)?, pid, has_children)
 }
+
+/// Wait for positive singleton membership, never for a quiet-time assumption.
+pub(super) async fn wait_service(
+    pid: u32,
+    mut observe: impl FnMut() -> io::Result<(Vec<u32>, bool)>,
+) -> io::Result<()> {
+    use std::time::Duration;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut announced = false;
+    loop {
+        let (members, children) = observe()?;
+        if children || !members.contains(&pid) {
+            return Err(invalid());
+        }
+        if final_service_pids(&members, pid, false).is_ok() {
+            return Ok(());
+        }
+        if !announced {
+            tracing::warn!(
+                ?members,
+                "waiting for previous daemon service members to exit"
+            );
+            announced = true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("daemon service still contains possible launchers: {members:?}"),
+            ));
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(100)).min(deadline),
+        )
+        .await;
+    }
+}

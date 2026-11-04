@@ -132,6 +132,18 @@ pub enum Key {
 }
 
 impl Zfs {
+    /// Inert handle for diagnostic startup only: no pool reads or writes.
+    #[doc(hidden)]
+    pub fn deferred(pool: &str) -> Self {
+        Self {
+            pool: pool.to_string(),
+            tools: Tools::host(),
+            dev_root: PathBuf::from("/dev/zvol"),
+            running: Arc::default(),
+            owners: Arc::default(),
+        }
+    }
+
     /// Opens the pool. Nothing is made or mounted: its key may not be loaded yet (`key`,
     /// `load_key`, then `layout`).
     pub async fn new(pool: &str) -> Result<Self> {

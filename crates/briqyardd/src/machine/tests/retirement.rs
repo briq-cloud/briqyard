@@ -517,7 +517,38 @@ async fn a_recovery_anomaly_closes_admission_and_is_reported_instead_of_ending_t
             .find(|c| c.kind == "memory_protection")
             .unwrap();
     assert!(condition.status);
-    assert_eq!(condition.message, "recovery_unresolved");
+    assert!(condition.message.contains("recovery_unresolved"));
+    assert!(condition.message.contains("journalctl -u briqyardd"));
+    assert!(condition.message.contains("restart briqyardd"));
+    use tower::ServiceExt;
+    let app = crate::api::router(Arc::new(crate::api::AppState {
+        mgr: h.m.clone(),
+        token: String::new(),
+        metrics_token: String::new(),
+        loopback: true,
+        openapi: "",
+        tls_fingerprint: String::new(),
+    }));
+    for (method, path, status) in [
+        ("POST", "/v1/namespaces", 503),
+        ("POST", "/v1/machines", 503),
+        ("GET", "/v1/machines", 503),
+        ("GET", "/v1/status", 200),
+        ("GET", "/metrics", 200),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status, "{method} {path}");
+    }
 }
 
 /// Churn: another machine's suspend leaves its handle for a moment on a stopped record, and a

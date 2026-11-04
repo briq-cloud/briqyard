@@ -315,6 +315,9 @@ impl Manager {
 
     /// Free space in the pool, in MB.
     pub async fn disk_free_mb(&self) -> u64 {
+        if self.recovery_fault().is_some() {
+            return 0;
+        }
         self.inner.zfs.free().await.unwrap_or(0) >> 20
     }
 

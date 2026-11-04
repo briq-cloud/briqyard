@@ -449,6 +449,7 @@ echo "-- mid-backup"
 BK=$(mkowner bk 256)
 on "$BK" 'head -c 500000000 /dev/urandom > /data/blob; sync' || true
 B0=$(briqyard machine backup "$BK" | jq -r .id)
+check "real helper: crash and hand-over recover and accept creates" 'sudo -E python3 "$HERE/recovery-helper-check.py" "$BK" "$T-helper" "$ALPINE"'
 bkdir=$STORE/backups/$BK
 store_ids() { sudo find "$bkdir" -name "*.$1" 2>/dev/null | sed 's|.*/||; s|\.[a-z]*$||' | sort -u; }
 touch "$LOGS/b0.mark"; sleep 1

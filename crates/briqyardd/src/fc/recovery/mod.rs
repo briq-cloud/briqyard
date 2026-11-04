@@ -47,6 +47,18 @@ impl Startup {
             ))
         }
     }
+    /// A failed early settlement permits diagnostics, without storage/network reconciliation.
+    pub fn unresolved(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.unresolved()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    }
+
     pub(crate) async fn finish(
         self,
         machines: &[RecoveryMachine],

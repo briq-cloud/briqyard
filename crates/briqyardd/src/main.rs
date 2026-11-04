@@ -138,6 +138,7 @@ async fn run(args: Args) -> Result<()> {
     }
     // Fixed-domain ownership is acquired before host helpers, not after recovery begins.
     let startup = briqyardd::fc::Startup::acquire().await?;
+    let unresolved = startup.unresolved();
     for p in [&cfg.firecracker, &cfg.kernel, &cfg.init] {
         std::fs::metadata(p).with_context(|| p.display().to_string())?;
     }
@@ -160,22 +161,28 @@ async fn run(args: Args) -> Result<()> {
     let fingerprint = tls.as_ref().map(|(f, _)| f.clone()).unwrap_or_default();
     // The pool is encrypted (ADR 0026) and everything of the machines is on it: its key is
     // loaded before anything of it is read, and until it is, nothing starts.
-    let zfs = zfs::Zfs::new(&cfg.storage.pool).await?;
-    if !poolkey::unlock(&zfs, &cfg, terminated()).await? {
+    let zfs = if unresolved {
+        zfs::Zfs::deferred(&cfg.storage.pool)
+    } else {
+        zfs::Zfs::new(&cfg.storage.pool).await?
+    };
+    if !unresolved && !poolkey::unlock(&zfs, &cfg, terminated()).await? {
         tracing::info!("stopped before the pool's key was loaded");
         return Ok(());
     }
     let pool_ms = began.elapsed().as_millis() as u64;
     let mounts = cfg.pool_mounts();
-    zfs.layout(
-        &mounts
-            .iter()
-            .map(|(n, d)| (*n, d.as_path()))
-            .collect::<Vec<_>>(),
-    )
-    .await?;
-    for (_, d) in &mounts {
-        store::private_dir(d)?;
+    if !unresolved {
+        zfs.layout(
+            &mounts
+                .iter()
+                .map(|(n, d)| (*n, d.as_path()))
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+        for (_, d) in &mounts {
+            store::private_dir(d)?;
+        }
     }
     let store = store::Store::open(&cfg.state_dir())?;
     let mut images = image::Builder::new(
@@ -215,7 +222,7 @@ async fn run(args: Args) -> Result<()> {
             ));
         }
     }
-    {
+    if !unresolved {
         let gc = mgr.clone();
         let keep = chrono::Duration::days(cfg.image_keep_days as i64);
         tokio::spawn(async move {

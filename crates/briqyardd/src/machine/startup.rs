@@ -26,16 +26,18 @@ impl Manager {
         dns: Resolver,
         startup: fc::Startup,
     ) -> Result<Self> {
+        let unresolved = startup.unresolved();
         let range = Range::parse(&cfg.network.range).context("network.range")?;
         let host_id = match store.get_meta("host_id")? {
             Some(id) => id,
+            None if unresolved => anyhow::bail!("recovery_unresolved: existing host identity is unavailable; mount the state filesystem before diagnostic startup"),
             None => {
                 let id = new_id("h");
                 store.put_meta("host_id", &id)?;
                 id
             }
         };
-        let egress = if cfg.network.egress.is_empty() {
+        let egress = if !unresolved && cfg.network.egress.is_empty() {
             host::default_egress_interface()
                 .await
                 .context("network.egress")?
@@ -60,7 +62,11 @@ impl Manager {
         let advertise = advertise_address(
             &cfg.ingress.advertise,
             &cfg.ingress.bind,
-            host_ip(&egress).await,
+            if unresolved {
+                None
+            } else {
+                host_ip(&egress).await
+            },
         );
         let inner = Arc::new(Inner {
             stats: Stats::default(),
@@ -96,7 +102,11 @@ impl Manager {
                 }
             }),
             guest: Arc::new(guestc::Vsock),
-            net: Arc::new(host::HostNet::new().await?),
+            net: Arc::new(if unresolved {
+                host::HostNet::default()
+            } else {
+                host::HostNet::new().await?
+            }),
             cfg,
             store,
             zfs,
@@ -130,6 +140,12 @@ impl Manager {
             started: Mutex::new(api::DaemonStart::default()),
         });
         let m = Self { inner };
+        if unresolved {
+            if let Err(err) = m.inner.vmm.initialize_recovery(&[]).await {
+                m.recovery_failed("native recovery barrier", err);
+            }
+            return Ok(m);
+        }
         if m.inner.cfg.templates.warm_pools {
             m.inner
                 .cfg
@@ -138,6 +154,9 @@ impl Manager {
                 .check_capacity(m.capacity())?;
         }
         m.load_backing_at_start().await?;
+        if m.recovery_fault().is_some() {
+            return Ok(m);
+        }
         host::enable_forwarding()?;
         let namespaces: Vec<Namespace> = m
             .inner
@@ -204,6 +223,9 @@ impl Manager {
         if let Err(err) = self.inner.vmm.initialize_recovery(&recovered).await {
             self.recovery_failed("native recovery barrier", err);
         }
+        if self.recovery_fault().is_some() {
+            return Ok(());
+        }
         self.refresh_memory_host().await;
         self.recover_assigned_update_backing().await?;
         self.prepare_assigned_reboot_exits().await?;
@@ -238,7 +260,7 @@ impl Manager {
         *self.inner.recovery_fault.lock().unwrap() = Some("recovery_unresolved");
     }
 
-    pub(super) fn recovery_fault(&self) -> Option<&'static str> {
+    pub(crate) fn recovery_fault(&self) -> Option<&'static str> {
         *self.inner.recovery_fault.lock().unwrap()
     }
 

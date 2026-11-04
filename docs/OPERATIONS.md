@@ -1136,3 +1136,33 @@ Upgrade hosts before the fleet: the new fleet will not place work on hosts that 
 report precise CPU reservations. CPU-bearing PATCH requests to old hosts are refused.
 A backup records its captured size for restore placement. For older sealed backups without
 that metadata, provide an explicit restore size when restoring through the fleet.
+
+## Unresolved startup
+
+`memory_protection` with `recovery_unresolved` refuses placement across the host.
+The host-condition alert fires when this condition remains true for a minute.
+Recovery waits up to 10 seconds for previous service members before reconciliation.
+It never exempts or signals an unknown process. The API does not serve during
+that wait; queued connections can reach their request deadline. After timeout,
+only health, status, metrics and OpenAPI routes serve; other routes return 503
+until an operator resolves the fault and
+restarts the daemon. It needs the existing state filesystem mounted and readable.
+
+1. Read `sudo journalctl -u briqyardd -o cat`. Find `startup service settlement
+   failed` or `native recovery barrier unresolved`. The timeout lists PIDs, exe
+   paths and process state observations. Inspect all members with
+   `sudo cat /sys/fs/cgroup/system.slice/briqyardd.service/cgroup.procs`.
+2. Inspect each named process again: `sudo readlink /proc/PID/exe` and
+   `sudo ps -p PID -o pid,ppid,lstart,stat,wchan:32,comm`. PIDs can be reused:
+   the log is an observation, not permission to kill the current numeric PID.
+   Do not signal a possible launcher or an unidentified process. For a verified
+   stopped read-only send, continue it so its closed pipe can end it. Let mutating
+   ZFS/network helpers finish; inspect their outcome before restarting recovery.
+3. A process in `D` is in uninterruptible kernel sleep. SIGKILL does not prove it
+   exited. Investigate storage/pool or device health (`zpool status`, kernel logs).
+   Restore the underlying I/O; if it cannot complete, arrange host maintenance
+   and reboot. Admission remains refused for the whole host while it survives.
+4. Once unexplained members are gone and any state changes are understood,
+   `sudo systemctl restart briqyardd`. Check `briqyard status`: `memory_protection`
+   must clear, then verify a create. Never remove the domain lock, move unknown
+   PIDs to another cgroup, or edit membership to force the barrier open.
