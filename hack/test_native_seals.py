@@ -29,6 +29,7 @@ class NativeSealConfig(unittest.TestCase):
             request = json.loads(subprocess.check_output(command, text=True))
             self.assertIs(request.get("start"), True)
             self.assertEqual(request["volume"], volume)
+            self.assertEqual(request["cmd"], ["/bin/sh", "-ec", "sleep infinity"])
             self.assertEqual(request["sandbox_seed"]["machine_id"], "m_seed")
 
     def test_seals_precede_the_only_final_summary(self):

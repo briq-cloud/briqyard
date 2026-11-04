@@ -56,7 +56,7 @@ for seal_gb in 0 1; do
   seal_snapshot=$(seal_api -H 'Content-Type: application/json' -d '{"memory":true,"template":true}' "$BRIQYARD_URL/v1/machines/$seal_builder/snapshots")
   check "seed $seal_gb sealed" '[ "$(echo "$seal_snapshot" | jq -r .clone_generation)" != null ]'
   seal_machine=$(jq -n --arg ns "$T" --arg image "$seal_image" --arg name "sealed-create-$seal_gb" --arg source "$seal_builder" --arg snap "$(echo "$seal_snapshot" | jq -r .id)" --arg gen "$(echo "$seal_snapshot" | jq -r .clone_generation)" --argjson volume "$seal_volume" \
-    '{namespace:$ns,name:$name,image:$image,size:{vcpus:1,memory_mb:256},sleep:"never",start:true,volume:$volume,cmd:["-ec","sleep infinity"],sandbox_seed:{machine_id:$source,snapshot:$snap,generation:$gen,request_id:$name}}' |
+    '{namespace:$ns,name:$name,image:$image,size:{vcpus:1,memory_mb:256},sleep:"never",start:true,volume:$volume,cmd:["/bin/sh","-ec","sleep infinity"],sandbox_seed:{machine_id:$source,snapshot:$snap,generation:$gen,request_id:$name}}' |
     seal_api -H 'Content-Type: application/json' -d @- "$BRIQYARD_URL/v1/machines" | jq -er .id)
   seal_api -X POST "$BRIQYARD_URL/v1/machines/$seal_machine/wait?for=running&timeout=120" >/dev/null
   check "seed $seal_gb create first command" '[ "$(briqyard machine exec "$seal_machine" -- echo sealed-first-command)" = sealed-first-command ]'
