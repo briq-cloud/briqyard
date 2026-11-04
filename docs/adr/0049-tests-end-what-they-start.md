@@ -35,7 +35,7 @@ that exits (or is killed) runs none: the hold files stay and the fakes spin fore
   pidfd watch is two code paths; a cargo `runner` would wrap `cargo run` too.
 - **What a test spawns ends on its own.** The binary's exit runs no destructor, so a child is
   not killed by it: the fakes' wait loops also stop once their parent is gone
-  (`kill -0 "$PPID"`). No process group (the binary would leave the terminal's foreground
+  (`kill -0 "$PPID"`, and a `$PPID` of 1: a command that starts after its parent exited has read init's pid, which never ends). No process group (the binary would leave the terminal's foreground
   group), no child tracking. The fake tools spawn as production does (no `kill_on_drop`:
   a `zfs` running past its caller is `storage_stalled`, ADR 0046).
 - **A stand-in that never answers fails its test.** The fixtures that own a wait bound it:

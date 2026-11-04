@@ -1,4 +1,4 @@
-//! A VMM's cgroup leaf goes once its VMM is gone (ADR 0098), not when the machine does.
+//! A VMM's cgroup leaf goes once its VMM is gone (ADR 0099), not when the machine does.
 
 use super::*;
 

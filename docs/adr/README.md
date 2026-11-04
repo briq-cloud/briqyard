@@ -90,5 +90,8 @@ Format: `# ADR NNNN: Title`, `Date · Status`, `## Context` (the problem, in a f
 | [0092](0092-filesystem-consistent-copies.md) | Filesystem-consistent copies: guest sync and connection-held freeze; sync before sealing |
 | [0093](0093-quiet-boot-and-fast-readiness.md) | The kernel boots `quiet` (errors and panics on the console, the ring buffer keeps the rest, `loglevel=7` in `kernel_args` undoes it) and `wait_ready` polls every 5 ms for 5 s, then every 100 ms, with the same deadline and error; a guest-side ready signal rejected |
 | [0094](0094-alerts-fire-and-resolve-in-ci.md) | The alerts fire and resolve in native CI: real causes, a local webhook, the production rule file |
+| [0095](0095-qualification-batch.md) | The qualification batch in native CI: kills mid-operation, isolation with reasons and controls, guest and VMM OOM, exact physical admission, a full pool; what needs real hardware |
 | [0096](0096-vmm-memory-kill-is-reported.md) | A VMM killed over its memory ceiling is reported as `exit.vmm_oom_killed`, apart from the guest's `oom_killed`; a stopped copy stays `crash` |
-| [0098](0098-leaf-goes-with-its-vmm.md) | A VMM's cgroup leaf is removed when its VMM is confirmed gone (the exit watcher, then a bounded 15 s pass), after the OOM evidence and the last CPU reading; `briqyard_cgroup_leaves{,_idle}` show a leak |
+| [0097](0097-a-fork-keeps-its-sources-command.md) | A disk fork runs its source's entrypoint, command, files, ports and environment unless the request sets them, as a restore does |
+| [0098](0098-ci-token-permissions.md) | CI workflows grant the GitHub token only read access to repository contents |
+| [0099](0099-leaf-goes-with-its-vmm.md) | A VMM's cgroup leaf is removed when its VMM is confirmed gone (the exit watcher, then a bounded 15 s pass), after the OOM evidence and the last CPU reading; `briqyard_cgroup_leaves{,_idle}` show a leak |

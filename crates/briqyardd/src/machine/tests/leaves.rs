@@ -1,4 +1,4 @@
-//! A VMM's cgroup leaf goes once its VMM is gone (ADR 0098).
+//! A VMM's cgroup leaf goes once its VMM is gone (ADR 0099).
 use super::*;
 
 fn leaf(h: &Harness, id: &str, cpu_usec: u64) {

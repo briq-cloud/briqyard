@@ -810,7 +810,7 @@ pub struct Stats {
     pub execs: std::sync::atomic::AtomicU64,
     pub starts_failed: std::sync::atomic::AtomicU64,
     pub backups: std::sync::atomic::AtomicU64,
-    /// Idle VMM cgroup leaves removed, and refused, since the daemon started (ADR 0098).
+    /// Idle VMM cgroup leaves removed, and refused, since the daemon started (ADR 0099).
     pub leaves_retired: std::sync::atomic::AtomicU64,
     pub leaves_retire_failed: std::sync::atomic::AtomicU64,
     /// The last pass's count; none until one could read the cgroups.

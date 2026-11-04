@@ -1,4 +1,4 @@
-# ADR 0098: A VMM's cgroup leaf goes when the VMM does
+# ADR 0099: A VMM's cgroup leaf goes when the VMM does
 
 2026-11-04 · Status: accepted; extends ADR 0068
 

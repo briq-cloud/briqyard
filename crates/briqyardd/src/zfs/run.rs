@@ -213,6 +213,33 @@ mod tests {
         assert!(s.dev.join("hold.snapshot").exists());
     }
 
+    /// The same when the parent was gone before the command started: its `$PPID` is then
+    /// init's (1), not a pid that ends. (Where the tests run as root, `kill -0 1` succeeds and
+    /// the command spins forever without the check.)
+    #[test]
+    fn a_held_command_started_after_its_parent_is_gone_ends() {
+        let s = Scripts::new();
+        std::fs::write(s.dev.join("hold.snapshot"), "").unwrap();
+        // The parent exits at once; the command starts 0.3 s later, an orphan from its first line.
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(r#"(sleep 0.3; exec sh "$0" snapshot byard/x@s) >/dev/null 2>&1 & echo $!"#)
+            .arg(&s.zfs)
+            .output()
+            .unwrap();
+        let pid: i32 = String::from_utf8(out.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        held_from_now(&s);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "the held command still runs");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[tokio::test]
     async fn a_missing_binary_is_an_error() {
         let tools = Tools {

@@ -112,5 +112,15 @@ PY
     trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
     GRAFANA_PASSWORD_FILE=/etc/briqyard-monitoring-password python3 -u hack/monitoring-alerts-check.py rules
     ;;
-  *) echo 'expected stress, monitoring or alerts' >&2; exit 2 ;;
+  qualification)
+    # Chaos, isolation and OOM on the isolated host (ADR 0095). The suite kills the daemon,
+    # the fleet and every VMM and fills the pool: only on this disposable runner.
+    export QUAL_LOGS=$PWD/native-logs/qualification
+    set +e
+    bash hack/qualify.sh
+    rc=$?
+    set -e
+    exit "$rc"
+    ;;
+  *) echo 'expected stress, monitoring, alerts or qualification' >&2; exit 2 ;;
 esac

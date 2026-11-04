@@ -94,7 +94,7 @@ jobs:
           echo "duration=$((SECONDS-start))" >> "$GITHUB_OUTPUT"
           exit "$rc"
       # Thousands of idle machine cgroups, a daemon restart: the case of an in-place upgrade
-      # (ADR 0098). Harness from the workflow revision, so a dispatch on an older ref fails it.
+      # (ADR 0099). Harness from the workflow revision, so a dispatch on an older ref fails it.
       - name: scale
         if: ${{ !cancelled() && steps.e2e.outcome != 'skipped' }}
         run: |
@@ -141,7 +141,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [stress, monitoring, alerts]
+        suite: [stress, monitoring, alerts, qualification]
     name: ${{ matrix.suite }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

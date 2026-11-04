@@ -21,6 +21,8 @@ else
   echo "SMOKE zfs=failed"
   dmesg | tail -n 20
 fi
+# Built in, br_netfilter makes this file exist from boot; as a module (not loaded) it is absent.
+if [ -e /proc/sys/net/bridge/bridge-nf-call-iptables ]; then echo "SMOKE br_netfilter=builtin"; else echo "SMOKE br_netfilter=module"; fi
 echo "SMOKE modules=$(cut -d: -f1 /proc/modules | tr '\n' ' ')"
 
 if command -v nft >/dev/null; then
