@@ -6,7 +6,11 @@ use tokio::task::JoinHandle;
 const MAX_ADMITTED: usize = 128;
 pub(super) enum Work {
     Census,
-    Requested(Arc<Entry>, DateTime<Utc>),
+    Requested(
+        Arc<Entry>,
+        DateTime<Utc>,
+        Option<api::CopyConsistencyRequest>,
+    ),
     Scheduled(Arc<Entry>, DateTime<Utc>),
     Expire(Arc<Holder>),
     Delete {
@@ -126,7 +130,9 @@ impl Jobs {
         admission: OwnedSemaphorePermit,
     ) -> Result<Ticket, MError> {
         let owner = match &work {
-            Work::Requested(e, _) | Work::Scheduled(e, _) => Some(Owner::Machine(e.clone()).who()),
+            Work::Requested(e, _, _) | Work::Scheduled(e, _) => {
+                Some(Owner::Machine(e.clone()).who())
+            }
             Work::Expire(h) => Some(Owner::Holder(h.clone()).who()),
             Work::Delete { owner, .. } => Some(owner.who()),
             Work::Census => None,
@@ -169,8 +175,8 @@ impl Jobs {
                                     manager.run_backup_census().await;
                                     Reply::Background
                                 }
-                                Work::Requested(entry, now) => Reply::Requested(Box::new(
-                                    manager.backup_entry(&entry, now).await,
+                                Work::Requested(entry, now, opt) => Reply::Requested(Box::new(
+                                    manager.backup_entry_requested(&entry, now, opt).await,
                                 )),
                                 Work::Scheduled(entry, now) => {
                                     manager.scheduled_backup(&entry, now).await;

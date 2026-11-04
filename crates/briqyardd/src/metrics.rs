@@ -7,11 +7,13 @@ use briqyard_api::metrics::{family, label_value};
 use std::collections::BTreeMap;
 
 pub mod backup_census;
+pub mod copies;
 pub mod warm;
 
 /// The host's figures.
 #[derive(Default)]
 pub struct Host {
+    pub copies: copies::Copies,
     pub backup_census: backup_census::Snapshot,
     pub warm: warm::Snapshot,
     pub warm_operations: warm::Operations,
@@ -315,6 +317,7 @@ const MACHINE_SERIES: [Series; 29] = [
 pub fn render(h: &Host, machines: &[Machine]) -> String {
     let mut out = String::new();
     let o = &mut out;
+    h.copies.render(o);
     warm::render(o, &h.warm, &h.warm_operations);
     backup_census::render(o, &h.backup_census);
     let states = h

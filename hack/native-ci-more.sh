@@ -49,7 +49,7 @@ case "${1:-}" in
     # Four physical cores; 8 ordinary guests (1 GiB), plus feature forks and races.
     # Admission race still derives its sizes from the full 12 GiB host capacity.
     set +e
-    python3 -u hack/stress.py --namespaces 4 --per-namespace 2 --workers 4 --memory 128 --rounds 2 --crash --churn 4 2>&1 | tee native-logs/stress-driver.log
+    python3 -u hack/stress.py --namespaces 4 --per-namespace 2 --workers 4 --memory 128 --rounds 2 --crash --churn 8 2>&1 | tee native-logs/stress-driver.log
     statuses=("${PIPESTATUS[@]}")
     set -e
     python3 - <<'PY'

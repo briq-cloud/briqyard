@@ -5,9 +5,11 @@ use super::*;
 pub(super) async fn make_backup(
     State(st): S,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<api::Backup>), AppError> {
+    let req = backup_request(&body)?;
     let m = st.mgr.clone();
-    let b = detached(async move { m.backup(&id).await }).await?;
+    let b = detached(async move { m.backup_requested(&id, req).await }).await?;
     Ok((StatusCode::CREATED, Json(b)))
 }
 
@@ -58,9 +60,9 @@ pub(super) async fn all_backups(
 pub(super) async fn snapshot(
     State(st): S,
     Path(id): Path<String>,
-    body: Option<Json<api::SnapshotRequest>>,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<api::Snapshot>), AppError> {
-    let req = body.map(|b| b.0).unwrap_or_default();
+    let req = optional_request::<api::SnapshotRequest>(&body)?;
     let m = st.mgr.clone();
     let s = detached(async move { m.snapshot(&id, req).await }).await?;
     Ok((StatusCode::CREATED, Json(s)))
@@ -92,4 +94,41 @@ pub(super) async fn delete_snapshot(
     let m = st.mgr.clone();
     detached(async move { m.delete_snapshot(&id, &snap).await }).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn backup_request(body: &[u8]) -> Result<api::BackupRequest, AppError> {
+    optional_request(body)
+}
+
+fn optional_request<T: Default + serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, AppError> {
+    if body.is_empty() {
+        return Ok(T::default());
+    }
+    serde_json::from_slice(body)
+        .map_err(|error| AppError::from(MError::Invalid(format!("copy request: {error}"))))
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    #[test]
+    fn empty_backup_body_is_optional_but_invalid_json_is_not() {
+        for body in [b"".as_slice(), b"{}", br#"{"consistency":"crash"}"#] {
+            assert!(backup_request(body).is_ok());
+        }
+        for body in [
+            br#"{"consistency":"filesystem"}"#.as_slice(),
+            br#"{"consistency":"crsh"}"#,
+            b"{",
+        ] {
+            let error = backup_request(body).unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                optional_request::<api::SnapshotRequest>(body)
+                    .unwrap_err()
+                    .status,
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
 }

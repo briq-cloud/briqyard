@@ -266,6 +266,12 @@ impl Leaf {
         Ok(())
     }
 
+    /// The leaf's device and inode, to tell at the end of a look that it is the same group.
+    pub(super) fn identity(&self) -> io::Result<(u64, u64)> {
+        let m = self.dir.metadata()?;
+        Ok((m.dev(), m.ino()))
+    }
+
     pub(super) fn inventory(&self, id: &str) -> io::Result<Vec<u32>> {
         self.check_shape(id)?;
         let members = super::recovery::fs::pids(&self.read(c"cgroup.procs")?)?;
@@ -329,7 +335,7 @@ impl Leaf {
             (value("oom")?, value("oom_kill")?, value("oom_group_kill")?);
         // These are final local totals, not fabricated per-incarnation deltas. The exit
         // watcher separately records a delta only when it captured a valid baseline.
-        tracing::info!(
+        tracing::debug!(
             machine = id,
             oom_total = oom,
             oom_kill_total = killed,

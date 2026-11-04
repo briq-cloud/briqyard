@@ -30,6 +30,7 @@ use tokio::sync::{broadcast, Notify};
 mod assignments;
 mod backups;
 mod classes;
+mod consistency;
 mod create;
 mod endpoints;
 mod exec;
@@ -275,6 +276,10 @@ pub struct Record {
     /// Stopped with a memory snapshot: the next start resumes where it was.
     #[serde(default)]
     pub suspended: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suspend_synced: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<api::ForkOrigin>,
     /// What this machine's backups take in the store.
     #[serde(default)]
     pub backup_bytes: u64,
@@ -795,6 +800,7 @@ impl Drop for InUse {
 /// Counters since the daemon started, for /metrics.
 #[derive(Default)]
 pub struct Stats {
+    pub copies: Mutex<metrics::copies::Copies>,
     pub warm: Mutex<metrics::warm::Operations>,
     pub boots: std::sync::atomic::AtomicU64,
     pub resumes: std::sync::atomic::AtomicU64,

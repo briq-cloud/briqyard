@@ -17,6 +17,7 @@ async fn pending() -> (Harness, Arc<Entry>, String) {
         namespace: "t1".into(),
         name: "interrupted".into(),
         fork: Some(api::ForkSpec {
+            consistency: None,
             machine_id: builder.id,
             copy: String::new(),
             snapshot: Some(snapshot.id.clone()),
@@ -98,6 +99,7 @@ async fn exact_registered_incarnation_is_settled_without_guest_activation() {
             namespace: "t1".into(),
             name: "interrupted".into(),
             fork: Some(api::ForkSpec {
+                consistency: None,
                 machine_id: builder.id.clone(),
                 copy: String::new(),
                 snapshot: Some(snapshot.id),

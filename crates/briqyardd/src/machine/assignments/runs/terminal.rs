@@ -195,6 +195,7 @@ impl Settlement {
             target.assigned_run = current.target.assigned_run.clone();
             target.pid = current.target.pid;
             target.suspended = current.target.suspended;
+            target.suspend_synced = current.target.suspend_synced;
             anyhow::ensure!(
                 update.machine == current.machine
                     && update.change.volume.is_some()
@@ -279,6 +280,7 @@ impl Manager {
                 || !matches!(disposition, Disposition::CheckpointAvailable),
             "a live data-volume update must end in a cold stop"
         );
+        let mut suspend_synced = false;
         let checkpoint = if matches!(disposition, Disposition::CheckpointAvailable) {
             let live = entry
                 .live
@@ -295,6 +297,16 @@ impl Manager {
                 "checkpoint guest differs from observed lineage"
             );
             self.verify_run_config(&prior)?;
+            let sync_started = std::time::Instant::now();
+            suspend_synced = self.bounded_sync(&live.vsock).await.is_ok();
+            crate::profile::stage(
+                "suspend",
+                "fs_sync",
+                &record.id,
+                live.pid,
+                sync_started,
+                suspend_synced,
+            );
             self.inner.vmm.snapshot(&live, true).await?;
             self.verify_run_process(&prior, &live)?;
             let paths = self.run_checkpoint_paths(&record);
@@ -364,6 +376,7 @@ impl Manager {
         current.target.assigned_run = Some(current.reference.clone());
         current.target.pid = 0;
         current.target.suspended = checkpoint.is_some();
+        current.target.suspend_synced = suspend_synced;
         current.settlement = Some(Box::new(Settlement {
             disposition,
             exit,

@@ -217,6 +217,8 @@ fn parse(key: &str, bytes: &[u8]) -> Option<api::Backup> {
     // understand. Opaque legacy machine contents are never interpreted, opened or exported.
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let allowed = [
+        "consistency",
+        "consistency_reason",
         "size",
         "id",
         "machine_id",
@@ -251,7 +253,10 @@ fn parse(key: &str, bytes: &[u8]) -> Option<api::Backup> {
     drop(value);
     // Deserialize the actual API types: duplicate recognized fields and incorrect types fail.
     let mut b: api::Backup = serde_json::from_slice(bytes).ok()?;
-    if b.machine_id != machine
+    if !matches!(
+        b.copy_consistency.consistency.as_str(),
+        "filesystem" | "synced" | "crash"
+    ) || b.machine_id != machine
         || b.id != id
         || !api::valid_id(&b.namespace)
         || b.disks.is_empty()

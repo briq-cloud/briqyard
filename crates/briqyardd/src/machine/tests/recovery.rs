@@ -173,6 +173,7 @@ async fn the_exit_is_the_inits_report_never_the_console() {
         (state::STOPPED, stop::EXIT)
     );
     assert_eq!(r.exit.as_ref().map(|x| x.code), Some(255));
+    assert!(!r.exit.as_ref().unwrap().vmm_oom_killed);
     // The init's report says what it says: a requested stop is one.
     let m = h.m.create_made(h.request("honest")).await.unwrap();
     let e = h.m.entry(&m.id).unwrap();
@@ -182,7 +183,7 @@ async fn the_exit_is_the_inits_report_never_the_console() {
         (r.state.as_str(), r.stopped_reason.as_str()),
         (state::STOPPED, stop::USER)
     );
-    assert!(r.exit.is_none());
+    assert_eq!(r.exit.as_ref().map(|exit| exit.code), Some(0));
 }
 
 #[tokio::test]
@@ -264,6 +265,7 @@ impl Harness {
         let mut req = self.request(name);
         req.image = String::new();
         req.fork = Some(api::ForkSpec {
+            consistency: None,
             snapshot: None,
             machine_id: src.into(),
             copy: String::new(),
@@ -357,6 +359,7 @@ async fn the_sweep_frees_fork_snapshots_with_no_clone() {
     z.snapshot("m/m_kept/root", "s_mine").await.unwrap();
     z.snapshot("m/m_kept/root", "s_lost").await.unwrap();
     kept.rec.lock().unwrap().snapshots.push(SnapshotRec {
+        copy_consistency: Default::default(),
         id: "s_mine".into(),
         name: None,
         created_at: Utc::now(),
@@ -621,4 +624,40 @@ async fn records_written_before_the_rename_still_load() {
     assert_eq!(back.namespace, ep.namespace);
     // The namespaces' records stay in the directory they were first written to.
     assert_eq!(crate::store::NAMESPACES, "tenants");
+}
+
+#[tokio::test]
+async fn a_vmm_killed_over_its_memory_ceiling_says_so_when_the_init_sent_no_report() {
+    let h = harness("10.64.0.0/22", 4096).await;
+    h.ready().await;
+    // The cgroup's evidence, then the exit, without a report: the host's word, not the guest's.
+    let m = h.m.create_made(h.request("evidence")).await.unwrap();
+    let e = h.m.entry(&m.id).unwrap();
+    h.host.gone_over_memory(1000);
+    let r = settled(&e).await;
+    let exit = r.exit.as_ref().unwrap();
+    assert_eq!(
+        (exit.code, exit.oom_killed, exit.vmm_oom_killed),
+        (255, false, true)
+    );
+    assert_eq!(r.stopped_reason, stop::EXIT);
+    let page =
+        h.m.events_page(0, events::Filter::default(), 5000)
+            .await
+            .unwrap();
+    assert!(
+        page.events
+            .iter()
+            .any(|ev| ev.machine_id == m.id && ev.message == "killed: VMM over its memory ceiling"),
+        "{:?}",
+        page.events
+    );
+    // The same evidence with the init's report: the report is the exit, the flag stays false.
+    let m = h.m.create_made(h.request("reported")).await.unwrap();
+    let e = h.m.entry(&m.id).unwrap();
+    h.host.exit(1001, 3, false);
+    h.host.gone_over_memory(1001);
+    let r = settled(&e).await;
+    let exit = r.exit.as_ref().unwrap();
+    assert_eq!((exit.code, exit.vmm_oom_killed), (3, false));
 }

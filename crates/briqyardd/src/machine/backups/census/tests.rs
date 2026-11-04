@@ -6,6 +6,7 @@ const B: &str = "20261103T020000.000Z";
 const C: &str = "20261103T030000.000Z";
 fn record(id: &str, from: Option<&str>) -> api::Backup {
     api::Backup {
+        copy_consistency: Default::default(),
         id: id.into(),
         machine_id: "m_1".into(),
         namespace: "ns".into(),

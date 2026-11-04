@@ -32,6 +32,10 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from stress_safety import Safety, BudgetExpired
+from stress_trend import floor, settle, handles_verdict, parse_daemon_line, rss_verdict
+
+# Churn reads the daemon every this many seconds until it stops dropping (see settle); the least counts.
+RSS_READING_GAP = 5
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -199,7 +203,7 @@ class Run:
 
     def invariants(self, label):
         if self.a.no_invariants:
-            return
+            return ""
         exp = self.expected()
         env = dict(os.environ, EXPECT=json.dumps(exp), BRIQYARD_URL=self.a.invariants_url or self.a.url)
         p = subprocess.run(
@@ -215,6 +219,7 @@ class Run:
         if p.returncode != 0:
             self.broken.append((label, out.splitlines()[-1] if out else p.stderr[-200:]))
             self.log(f"   INVARIANT BROKEN after {label}")
+        return out
 
     def expected(self):
         mine = self.mine()
@@ -650,7 +655,7 @@ class Run:
         the allocator's pools) is not growth; what keeps growing after it is."""
         self.phase(f"churn: {self.a.churn} cycles of create, exec, files, an endpoint, snapshot and restore, backup and restore, fork, suspend, destroy")
         backups = {"on": True}
-        sizes = []
+        sizes, fd_counts, thread_counts = [], [], []
 
         def cycle(c, t, i):
             body = {
@@ -670,8 +675,7 @@ class Run:
             made = [mid]
             try:
                 self.wait_state(mid, {"running"}, timeout=self.a.boot_timeout)
-                # Synced: a snapshot holds what is on the disk, not in the guest's page cache.
-                self.exec(mid, ["sh", "-c", "echo one > /root/mark; sync"])
+                self.exec(mid, ["sh", "-c", "echo one > /root/mark"])
                 blob = rand_bytes(256 << 10)
                 self.api.call("PUT", f"/v1/machines/{mid}/files", {"path": "/tmp/blob", "base64": base64.b64encode(blob).decode()}, op="put")
                 got = self.api.call("GET", f"/v1/machines/{mid}/files?path=/tmp/blob", op="get_file")
@@ -731,25 +735,33 @@ class Run:
         for c in range(1, self.a.churn + 1):
             _, errs = parallel(list(enumerate(self.namespaces)), lambda it: cycle(c, it[1], it[0]), self.a.workers)
             self.report_errors(f"churn {c}", errs, self.namespaces)
-            # Idle first: jemalloc gives freed pages back after 10 s (ADR 0052).
+            # Idle first: jemalloc gives freed pages back after 10 s (ADR 0052), as requests pass. Then
+            # read until the level stops dropping and take the floor: a leak raises it, the
+            # allocator's timing does not.
             self.safety.sleep(12)
-            mb = self.rss()
+            readings = settle(self.rss, self.safety.sleep, RSS_READING_GAP)
+            mb = floor(readings)
             sizes.append(mb)
-            self.log(f"   cycle {c}: daemon RSS {'unknown' if mb is None else f'{mb:.1f} MB'}")
-        self.invariants("churn")
+            _, fds, threads = parse_daemon_line(self.invariants(f"churn {c}"))
+            fd_counts.append(fds)
+            thread_counts.append(threads)
+            shown = ", ".join("?" if r is None else f"{r:.1f}" for r in readings)
+            self.log(f"   cycle {c}: daemon RSS floor {'unknown' if mb is None else f'{mb:.1f} MB'} (readings {shown}), {fds} fds, {threads} threads")
         if None in sizes:
             self.log("   RSS check skipped: no process_resident_memory_bytes at the daemon (through a fleet, give --invariants-url)")
-            return
-        if len(sizes) < 3:
-            self.log("   RSS check skipped: fewer than 3 cycles")
-            return
-        # Growth after the first cycle, over the second half against the first: a leak keeps
-        # its slope, a pool that settled does not.
-        half = len(sizes) // 2
-        first, second = sizes[half] - sizes[0], sizes[-1] - sizes[half]
-        self.log(f"   RSS {sizes[0]:.1f} MB after cycle 1, {sizes[-1]:.1f} MB after {len(sizes)}: +{first:.1f} MB to cycle {half + 1}, +{second:.1f} MB after it")
-        if second > self.a.rss_growth_mb:
-            self.broken.append(("churn", f"daemon RSS grew {second:.1f} MB over cycles {half + 1}..{len(sizes)} (bound {self.a.rss_growth_mb} MB)"))
+        else:
+            failed, msg = rss_verdict(sizes, self.a.rss_growth_mb)
+            self.log(f"   {msg}")
+            if failed:
+                self.broken.append(("churn", msg))
+        for name, counts in (("fds", fd_counts), ("threads", thread_counts)):
+            if None in counts:
+                self.log(f"   {name} check skipped: the invariants did not report the daemon's process")
+                continue
+            failed, msg = handles_verdict(name, counts, self.a.handle_growth)
+            self.log(f"   {msg}")
+            if failed:
+                self.broken.append(("churn", msg))
 
     # ---- reporting ----
     def report_errors(self, phase, errs, names=None):
@@ -826,7 +838,8 @@ def main():
     p.add_argument("--seed", type=int, default=int(time.time()) % 100000)
     p.add_argument("--crash", action="store_true", help="SIGKILL the daemon in round 1 (needs sudo on the host)")
     p.add_argument("--churn", type=int, default=0, help="then this many cycles of every feature per namespace, the daemon's RSS read after each")
-    p.add_argument("--rss-growth-mb", type=float, default=32, help="churn: the most the daemon's RSS may grow over the second half of the cycles")
+    p.add_argument("--rss-growth-mb", type=float, default=40, help="churn: the most the daemon's settled RSS may grow, as the fitted trend over cycles 2..N (cycle 1 is warm-up)")
+    p.add_argument("--handle-growth", type=int, default=2, help="churn: the most the daemon's open files, and its threads, may grow (least of the second half of cycles 2..N over the least of the first half)")
     p.add_argument("--phases", default="", help=f"comma-separated, of {','.join(PHASES)} (default: all); endpoints_all relies on exec_all's wait for the web servers")
     p.add_argument("--no-invariants", action="store_true")
     p.add_argument("--invariants-url", default="", help="the daemon to check the host against when --url is a fleet")

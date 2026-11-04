@@ -13,6 +13,8 @@ pub(super) const DISKS: [&str; 2] = ["root", "data"];
 /// A snapshot as the machine's record keeps it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotRec {
+    #[serde(flatten, default, skip_serializing_if = "legacy_consistency")]
+    pub copy_consistency: api::CopyConsistency,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -35,9 +37,19 @@ pub struct SnapshotRec {
     pub clone_artifact: Option<templates::CloneArtifact>,
 }
 
+// Existing run-control fingerprints include the serialized record. Preserve the shape
+// of snapshots written before consistency metadata existed.
+fn legacy_consistency(c: &api::CopyConsistency) -> bool {
+    c.consistency == "crash"
+        && c.consistency_reason
+            .as_deref()
+            .is_none_or(|r| r == "legacy_record")
+}
+
 impl SnapshotRec {
     fn view(&self, machine_id: &str) -> api::Snapshot {
         api::Snapshot {
+            copy_consistency: self.copy_consistency.clone(),
             id: self.id.clone(),
             machine_id: machine_id.to_string(),
             name: self.name.clone(),
@@ -237,6 +249,11 @@ impl Manager {
         }
         let _lock = e.lock.lock().await;
         let r = e.snapshot();
+        if req.memory && (r.state != state::RUNNING || e.live.lock().unwrap().is_none()) {
+            return Err(MError::NotRunning(
+                "a snapshot with memory needs the machine running".into(),
+            ));
+        }
         let template_marker = self
             .check_template_seal(&e, req.memory, req.template)
             .await?;
@@ -267,17 +284,33 @@ impl Manager {
         };
         let datasets: Vec<String> = disks.iter().map(|d| r.disk_dataset(d)).collect();
         let snap = new_id("s");
+        let copy_consistency;
         let (memory, vmm_version) = match req.memory {
             true => {
+                copy_consistency = if req.template {
+                    consistency::achieved("synced", None)
+                } else {
+                    self.sync_copy(&e, req.consistency).await
+                };
                 self.snapshot_with_memory(&e, &r, &datasets, &snap).await?;
                 (Some(memory_spec(&r)), r.vmm_version.clone())
             }
             false => {
-                self.inner.zfs.snapshot_all(&datasets, &snap).await?;
+                copy_consistency = self
+                    .frozen_copy(&e, &datasets, &snap, "snapshot", req.consistency)
+                    .await?;
                 (None, String::new())
             }
         };
+        if req.memory {
+            self.inner.stats.copies.lock().unwrap().record(
+                "snapshot",
+                &copy_consistency.consistency,
+                None,
+            );
+        }
         let mut s = SnapshotRec {
+            copy_consistency,
             id: snap,
             name: req.name,
             created_at: Utc::now(),
@@ -304,11 +337,16 @@ impl Manager {
             } else {
                 ""
             };
-            let ev = Ev::normal(
+            let event = if s.copy_consistency.consistency == "crash" {
+                Ev::warning
+            } else {
+                Ev::normal
+            };
+            let ev = event(
                 reason::SNAPSHOT_TAKEN,
                 format!("snapshot {}{named} of {}{with}", s.id, s.disks.join(" and ")),
             )
-            .data(json!({ "snapshot": s.id, "name": s.name, "disks": s.disks, "memory": s.memory.is_some() }));
+            .data(json!({ "consistency": s.copy_consistency.consistency, "consistency_reason": s.copy_consistency.consistency_reason, "snapshot": s.id, "name": s.name, "disks": s.disks, "memory": s.memory.is_some() }));
             e.note_locked(&mut rec, ev);
         }
         self.save(&e)?;
@@ -512,7 +550,11 @@ impl Manager {
         let s = r.snapshots.iter().find(|s| s.id == id).cloned();
         let Some(s) = s else {
             // Not ours to restore any more: nothing a later call could finish.
-            e.rec.lock().unwrap().restoring = None;
+            let mut rec = e.rec.lock().unwrap();
+            rec.restoring = None;
+            // The previous stop described the replaced disks, not this restored lineage.
+            rec.exit = None;
+            drop(rec);
             self.save(e)?;
             return Ok(Vec::new());
         };
@@ -549,6 +591,8 @@ impl Manager {
         {
             let mut rec = e.rec.lock().unwrap();
             rec.restoring = None;
+            // The previous stop described the replaced disks, not this restored lineage.
+            rec.exit = None;
             rec.suspended = resume;
             // Its filesystem is the snapshot's: it grows at the next boot, cold since the
             // memory of a smaller disk is not resumed. A start under way is that boot.
@@ -580,7 +624,7 @@ impl Manager {
                     s.id
                 ),
             )
-            .data(json!({ "snapshot": s.id, "name": s.name, "disks": s.disks, "memory": resume }));
+            .data(json!({ "consistency": s.copy_consistency.consistency, "consistency_reason": s.copy_consistency.consistency_reason, "snapshot": s.id, "name": s.name, "disks": s.disks, "memory": resume }));
             e.note_locked(&mut rec, ev);
         }
         self.save(e)?;

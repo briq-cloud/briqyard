@@ -141,7 +141,8 @@ attached with Firecracker's `Writeback` cache mode, so a guest `fsync` reaches t
 a database on it is as safe as the host's drive. Both disks the guest writes take its discards,
 and both are mounted with `discard` (the root by the kernel, the volume by the init): what a guest
 deletes goes back to the pool, unless a snapshot still holds it (ADR 0037). A fork is a clone of a snapshot of both disks,
-taken while the source runs (crash-consistent for the data volume). That snapshot (`@fork-<id>`
+taken with the running guest’s filesystems frozen; both disks share one ZFS snapshot command.
+The fork reports achieved consistency and any fallback reason (ADR 0092). That snapshot (`@fork-<id>`
 on the source) pins every block the source has since rewritten, so it goes with the last machine
 cloned from it.
 
@@ -263,7 +264,10 @@ exit status is never stolen. When the main process exits, the init connects out 
 `ExitReport` frame (code, oom, requested; with a program it could not start, its reason), waits for the daemon's close, and resets the machine,
 which ends Firecracker; the daemon settles the machine from the report and applies the restart
 policy (ADR 0004). The `[briqyard] exit …` line on the serial console is a trace for a person;
-nothing reads it, so nothing a guest prints can set its exit.
+nothing reads it, so nothing a guest prints can set its exit. A VMM that ends without a report
+reads as code 255. When its cgroup also recorded an OOM group kill during the run, the exit
+carries `vmm_oom_killed: true` (the host's evidence) and the event says "killed: VMM over its
+memory ceiling"; `oom_killed` stays the guest's own word (ADR 0096).
 
 ### Backups
 

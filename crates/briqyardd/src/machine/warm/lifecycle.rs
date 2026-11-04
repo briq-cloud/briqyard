@@ -155,6 +155,7 @@ impl Manager {
                     size: pool.artifact.recipe.size,
                     sleep: "never".into(),
                     fork: Some(api::ForkSpec {
+                        consistency: None,
                         machine_id: pool.source_machine.clone(),
                         snapshot: Some(pool.snapshot.clone()),
                         copy: String::new(),

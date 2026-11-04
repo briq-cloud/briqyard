@@ -4,6 +4,33 @@ use super::*;
 use crate::profile::stage;
 use std::time::Instant;
 
+/// Preserve host-forced termination even if an init report raced the kill. Reports
+/// are emitted before halt's sync, so a host kill cannot be blessed by that report.
+/// `vmm_oom` is the VMM's cgroup evidence of a kill over its memory ceiling; it counts only
+/// when the init sent no report (ADR 0096).
+fn stop_exit(e: &Entry, report: Option<&guest::ExitReport>, forced: bool, vmm_oom: bool) {
+    let mut r = e.rec.lock().unwrap();
+    // A failed boot is settled as an error, not a workload exit (ADR 0011).
+    if r.state == state::STARTING {
+        return;
+    }
+    let forced = forced
+        || r.exit.as_ref().is_some_and(|exit| {
+            exit.code == 255 && r.started_at.is_none_or(|start| exit.at >= start)
+        });
+    r.exit = Some(api::Exit {
+        code: if forced {
+            255
+        } else {
+            report.map_or(255, |report| report.code)
+        },
+        oom_killed: report.is_some_and(|report| report.oom),
+        vmm_oom_killed: vmm_oom && report.is_none(),
+        at: Utc::now(),
+        restarting: false,
+    });
+}
+
 impl Manager {
     /// Settles the state after the Firecracker process exited.
     pub(super) async fn settle_exit(&self, e: &Arc<Entry>, pid: u32) {
@@ -17,10 +44,10 @@ impl Manager {
         let started = Instant::now();
         let _guard = e.lock.lock().await;
         stage("settle", "lock", &machine, pid, started, true);
-        let mut exit = {
+        let (mut exit, vmm_oom) = {
             let live = e.live.lock().unwrap();
             match live.as_ref() {
-                Some(l) if l.pid == pid => l.exit.clone(),
+                Some(l) if l.pid == pid => (l.exit.clone(), l.vmm_oom.clone()),
                 _ => return,
             }
         };
@@ -58,16 +85,20 @@ impl Manager {
         let started = Instant::now();
         let reported = exit.wait_for(|r| r.is_some()).await.is_ok();
         stage("settle", "exit_report", &machine, pid, started, reported);
-        let report = exit.borrow().clone().unwrap_or(guest::ExitReport {
+        // The cgroup's evidence is read before the exit is published (`VmmOom`), so it is here.
+        let reported = exit.borrow().clone();
+        let vmm_oom = vmm_oom.get() && reported.is_none();
+        let report = reported.clone().unwrap_or(guest::ExitReport {
             code: 255,
             ..Default::default()
         });
         let (code, oom, requested) = (report.code, report.oom, report.requested);
         let stop_req = e.stop_req.lock().unwrap().take();
         if stop_req.is_none() && !requested {
-            self.exited(e, code, oom, code != 0);
+            self.exited(e, code, oom, vmm_oom, code != 0);
             return;
         }
+        stop_exit(e, reported.as_ref(), false, vmm_oom);
         let Some(why) = stop_req else {
             e.set_state(state::STOPPED, |r| {
                 r.pid = 0;
@@ -135,7 +166,7 @@ impl Manager {
     /// the exit recorded and the restart policy's decision. A restart waits the backoff (ADR
     /// 0022): 10 s doubling to 5 minutes by `recent_restarts`, which a run of `RESET_AFTER`
     /// clears; from the third in a row it is a crash loop. Under the machine's lock.
-    pub(super) fn exited(&self, e: &Arc<Entry>, code: i32, oom: bool, failed: bool) {
+    pub(super) fn exited(&self, e: &Arc<Entry>, code: i32, oom: bool, vmm_oom: bool, failed: bool) {
         let now = Utc::now();
         let mut restart = None;
         e.set_state(state::STOPPED, |r| {
@@ -148,6 +179,7 @@ impl Manager {
             r.exit = Some(api::Exit {
                 code,
                 oom_killed: oom,
+                vmm_oom_killed: vmm_oom,
                 at: now,
                 restarting: again,
             });
@@ -163,6 +195,7 @@ impl Manager {
                     machine = r.id,
                     code,
                     oom,
+                    vmm_oom,
                     restart = r.restarts,
                     delay_sec = delay.as_secs(),
                     "machine exited, restarting"
@@ -171,14 +204,23 @@ impl Manager {
                 r.restarts = 0;
                 r.recent_restarts = 0;
                 r.restarting_at = None;
-                tracing::info!(machine = r.id, code, oom, "machine exited");
+                tracing::info!(machine = r.id, code, oom, vmm_oom, "machine exited");
             }
-            let ev = match (oom, code) {
-                (true, _) => Ev::warning(reason::EXITED, "killed: out of memory"),
-                (false, 0) if !failed => Ev::normal(reason::EXITED, "exited with code 0"),
-                (false, _) => Ev::warning(reason::EXITED, format!("exited with code {code}")),
+            let ev = match (oom, vmm_oom, code) {
+                (true, _, _) => Ev::warning(reason::EXITED, "killed: out of memory"),
+                (false, true, _) => {
+                    Ev::warning(reason::EXITED, "killed: VMM over its memory ceiling")
+                }
+                (false, false, 0) if !failed => Ev::normal(reason::EXITED, "exited with code 0"),
+                (false, false, _) => {
+                    Ev::warning(reason::EXITED, format!("exited with code {code}"))
+                }
             };
-            Some(ev.data(json!({ "code": code, "oom": oom, "restarting": again })))
+            let mut data = json!({ "code": code, "oom": oom, "restarting": again });
+            if vmm_oom {
+                data["vmm_oom"] = json!(true);
+            }
+            Some(ev.data(data))
         });
         if let Some((attempt, recent, delay, policy)) = &restart {
             let secs = delay.as_secs();
@@ -267,6 +309,7 @@ impl Manager {
         grace: Duration,
     ) -> Result<()> {
         let mut exited = live.exited.clone();
+        let mut forced = false;
         if !*exited.borrow() {
             let asked = !grace.is_zero()
                 && tokio::time::timeout(
@@ -280,6 +323,8 @@ impl Manager {
                     .await
                     .is_ok_and(|r| r.is_ok());
             if !gone {
+                forced = true;
+                stop_exit(e, None, true, false);
                 self.inner.vmm.kill_checked(live)?;
                 let confirmed =
                     tokio::time::timeout(Duration::from_secs(10), exited.wait_for(|x| *x))
@@ -310,6 +355,9 @@ impl Manager {
                 .unwrap()
                 .mapping_exited = true;
             let _ = self.save(e);
+        }
+        if !e.snapshot().suspended {
+            stop_exit(e, live.exit.borrow().as_ref(), forced, live.vmm_oom.get());
         }
         *e.live.lock().unwrap() = None;
         *e.stop_req.lock().unwrap() = None;
@@ -441,6 +489,21 @@ impl Manager {
             );
             // A suspend keeps a memory snapshot: the next start resumes in well under a
             // second. Refused, the machine is stopped the plain way.
+            let synced = if suspend {
+                let sync_started = Instant::now();
+                let synced = self.bounded_sync(&live.vsock).await.is_ok();
+                stage(
+                    operation,
+                    "fs_sync",
+                    &machine,
+                    live.pid,
+                    sync_started,
+                    synced,
+                );
+                synced
+            } else {
+                false
+            };
             let started = Instant::now();
             let suspended = suspend
                 && match self.inner.vmm.snapshot(&live, true).await {
@@ -469,6 +532,7 @@ impl Manager {
                 {
                     let mut rec = e.rec.lock().unwrap();
                     rec.suspended = true;
+                    rec.suspend_synced = synced;
                     rec.boot_identity = identity;
                 }
                 let saved = self.save(e);
@@ -520,6 +584,7 @@ impl Manager {
         .and_then(|r| r)
         {
             tracing::warn!(machine = e.snapshot().id, err = %err, "guest shutdown request failed, killing");
+            stop_exit(e, None, true, false);
             self.inner.vmm.kill(live.pid);
         }
         let mut exited = live.exited.clone();
@@ -532,6 +597,7 @@ impl Manager {
                 machine = e.snapshot().id,
                 "guest did not stop in time, killing"
             );
+            stop_exit(e, None, true, false);
             self.inner.vmm.kill(live.pid);
         }
         let _ = tokio::time::timeout(Duration::from_secs(10), settled).await;
@@ -738,4 +804,24 @@ const CRASH_LOOP_AT: u32 = 3;
 pub(super) fn restart_delay(n: u32) -> Duration {
     let doubled = 10u64 << n.saturating_sub(1).min(5);
     Duration::from_secs(doubled.min(300))
+}
+
+#[cfg(test)]
+mod stop_evidence_tests {
+    use super::*;
+    #[tokio::test]
+    async fn forced_kill_cannot_be_blessed_by_a_racing_init_report() {
+        let h = crate::machine::tests::harness("10.64.0.0/22", 4096).await;
+        let e = h.add("m_stop_evidence", state::STOPPED, 256);
+        let report = guest::ExitReport {
+            code: 143,
+            requested: true,
+            ..Default::default()
+        };
+        stop_exit(&e, Some(&report), false, false);
+        assert_eq!(e.snapshot().exit.as_ref().unwrap().code, 143);
+        stop_exit(&e, None, true, false);
+        stop_exit(&e, Some(&report), false, false);
+        assert_eq!(e.snapshot().exit.as_ref().unwrap().code, 255);
+    }
 }

@@ -61,15 +61,14 @@ leftover is destroyed (nothing leaked), and the same operation succeeds again.
 | VMM OOM | one leaf's `memory.max` lowered under what its VMM holds (a guest cannot push Firecracker past guest + 256 MiB): the kernel group-kills it, the machine is `stopped` with exit 255, `oom_killed` false, the daemon logs `vmm_cgroup_oom_evidence` for it, the daemon and the sibling survive, the next start has the policy ceiling |
 | Physical admission | two 4096 MB machines commit 2 × (4096 + 256); a third is refused `capacity` and changes nothing; the exact remainder is admitted to the megabyte; one more is refused; `memory_pressure` follows and the fleet refuses; a stop releases at once |
 
-**How the daemon reports a VMM's OOM (known defect, fixed separately).** Today a VMM killed by its cgroup ends as
-exit 255 with `oom_killed` false, and the only proof is the daemon's log line `VMM local memory events` with
-`reason: vmm_cgroup_oom_evidence`. This is not pinned as correct. The suite asserts the evidence line and the
-machine's stop, and prints `exit.oom_killed`; when the fix lands (`vmm_oom_killed`) the one check to tighten is
-"VMM over its ceiling: not mistaken for a guest OOM", in `hack/qualify.sh`.
+**How a VMM's OOM is reported.** Since ADR 0096 the exit carries `vmm_oom_killed` for a VMM killed over its
+cgroup ceiling, apart from the guest's `oom_killed`. The suite asserts `vmm_oom_killed` true and `oom_killed` false
+for the lowered-ceiling kill, and `vmm_oom_killed` false for a plain `kill -9` of a VMM. The daemon's
+`vmm_cgroup_oom_evidence` log line is still asserted.
 
 ## Findings
 
-- **Known, being fixed elsewhere:** the VMM OOM report above.
+- **Fixed by ADR 0096:** the VMM OOM report (the suite now asserts the field).
 - **Known, being decided elsewhere:** a fork starts the image's own command, not the source's, so a fork of a
   `sleep` machine exits 0 at once. The suite forks an image whose command keeps running and pins neither behaviour.
 - After a freed pool the fleet keeps refusing for a few seconds (its view follows the heartbeat); the suite polls.
@@ -77,14 +76,14 @@ machine's stop, and prints `exit.oom_killed`; when the fix lands (`vmm_oom_kille
   pressure it names `memory_pressure`.
 - `stress` failed once in validation on its churn bound (`daemon RSS grew 48.3 MB over cycles 3..4`), a job this
   change does not touch.
-- **Known defect, found by this batch:** a backup killed while its stream is being written can leave that stream in
+- **Open defect, found by this batch (a separate PR fixes it):** a backup killed while its stream is being written can leave that stream in
   the store with no record (seen in 2 of 3 runs; the third kill landed after the record). It is listed and restorable
   by nothing, and nothing removes it, not even the next successful backup; the census (ADR 0083) only counts. The
   suite bounds it (at most the interrupted backup's one stream, never listed), prints `KNOWN DEFECT`, and prints
   `FIXED` once the daemon cleans it, when the check should become `[ -z "$orphans" ]`.
-- **Known defect, found by this batch:** a machine whose VMM was killed (`kill -9`) is `stopped` with its empty cgroup
+- **Open defect, found by this batch (a separate PR fixes it):** a machine whose VMM was killed (`kill -9`) is `stopped` with its empty cgroup
   leaf still in place; a stop through the API removes the leaf. Nothing else is left behind, and the leaf goes with
-  the machine's next start or destroy. The suite allows that one line and nothing else in that step. The orphan
+  the machine's next start or destroy. `stress-invariants.sh` allows exactly that case (a `stopped` machine with exit 255), prints `KNOWN DEFECT`, and prints `FIXED` once the leaf is gone; a leaf of any other machine without a Firecracker fails. The orphan
   stream above is timing-dependent: a kill that cuts a backup left one in some runs and none in others, so `FIXED`
   there is evidence only after several runs.
 - Added after review: the invariants now check cgroup leaves (none without a machine, one for every live

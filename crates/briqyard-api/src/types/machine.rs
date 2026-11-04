@@ -140,6 +140,8 @@ impl CreateMachineRequest {
 /// The source of a fork.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ForkSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consistency: Option<CopyConsistencyRequest>,
     pub machine_id: String,
     /// "disk" (both disks, the default) or "config" (nothing: a fresh image).
     #[serde(default)]
@@ -149,11 +151,16 @@ pub struct ForkSpec {
     pub snapshot: Option<String>,
 }
 
-/// How the main process last ended on its own.
+/// Last process exit: 255 when no guest report confirms it or the host forced termination.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Exit {
     pub code: i32,
+    /// The guest's kernel killed the workload (the init's report).
     pub oom_killed: bool,
+    /// The host's kernel killed the VMM over its cgroup's memory ceiling, and the init sent
+    /// no report. Distinct from `oom_killed`, which is the guest's own word (ADR 0096).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vmm_oom_killed: bool,
     pub at: DateTime<Utc>,
     pub restarting: bool,
 }
@@ -287,6 +294,8 @@ pub struct Machine {
     /// Stopped with a memory snapshot: the next start resumes where it was.
     #[serde(default)]
     pub suspended: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkOrigin>,
     /// Its backup schedule (ADR 0023); absent: none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupPolicy>,

@@ -17,6 +17,7 @@ fn source(f: &Fleet, d: &Running, machine: &str) {
         h.named_memory_profiles = vec!["sandbox-ready-v1".into()];
     }
     d.stub.snapshots.lock().unwrap().push(api::Snapshot {
+        copy_consistency: Default::default(),
         id: "s_one".into(),
         machine_id: machine.into(),
         name: None,

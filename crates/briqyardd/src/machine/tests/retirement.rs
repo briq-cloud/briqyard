@@ -81,6 +81,7 @@ async fn a_closed_false_exit_channel_is_not_process_death() {
         boot_identity: None,
         incarnation: None,
         exited,
+        vmm_oom: Default::default(),
         exit,
     };
     *e.live.lock().unwrap() = Some(live);
@@ -114,6 +115,7 @@ async fn a_live_unsettled_process_times_out_without_releasing_ownership() {
         boot_identity: None,
         incarnation: None,
         exited,
+        vmm_oom: Default::default(),
         exit,
     };
     *e.live.lock().unwrap() = Some(live);

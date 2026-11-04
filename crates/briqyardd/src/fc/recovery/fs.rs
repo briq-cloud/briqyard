@@ -127,7 +127,10 @@ impl Dir {
                     continue;
                 }
                 if names.len() == cap {
-                    return Err(invalid());
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("directory holds more than {cap} entries"),
+                    ));
                 }
                 names.push(name.to_owned());
             }

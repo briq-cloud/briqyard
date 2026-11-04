@@ -257,6 +257,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     limits: Some(src.limits.clone()),
                     disk_limits: Some(src.disk_limits.clone()),
                     fork: Some(api::ForkSpec {
+                        consistency: None,
                         snapshot,
                         machine_id: id,
                         copy: String::new(),
@@ -435,6 +436,7 @@ pub(super) async fn run(c: &Client, cmd: Cmd) -> Result<()> {
                     id,
                 } => {
                     let req = api::SnapshotRequest {
+                        consistency: None,
                         name,
                         memory,
                         template,

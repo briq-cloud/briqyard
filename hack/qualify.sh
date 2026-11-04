@@ -359,7 +359,7 @@ echo 150M | sudo tee "$(leaf "$V")/memory.max" >/dev/null
 for i in $(seq 1 60); do [ "$(mstate "$V")" = stopped ] && break; sleep 1; done
 check "VMM over its ceiling: the VMM is gone, the machine stopped, exit 255" '[ "$(mstate "$V")" = stopped ] && [ -z "$(fc_pid "$V")" ] && [ "$(briqyard machine get "$V" | jq -r .exit.code)" = 255 ]'
 check "VMM over its ceiling: the daemon logged the cgroup OOM evidence for it" 'sudo journalctl -u briqyardd --no-pager --since "$mark" | grep -F vmm_cgroup_oom_evidence | grep -qF "$V"'
-check "VMM over its ceiling: not mistaken for a guest OOM (oom_killed false)" '[ "$(briqyard machine get "$V" | jq -r .exit.oom_killed)" = false ]'
+check "VMM over its ceiling: the exit says so (vmm_oom_killed, ADR 0096), and it is not the guest's word (oom_killed false)" '[ "$(briqyard machine get "$V" | jq -r .exit.vmm_oom_killed)" = true ] && [ "$(briqyard machine get "$V" | jq -r .exit.oom_killed)" = false ]'
 check "VMM over its ceiling: same daemon, sibling alive, daemon answers" '[ "$(daemon_pid)" = "$dpid" ] && [ "$(on "$S" "cat /root/s")" = alive ] && [ "$(fc_pid "$S")" = "$spid" ] && briqyard status >/dev/null'
 briqyard machine start "$V" >/dev/null; briqyard machine wait --for running "$V" >/dev/null
 check "VMM over its ceiling: the next start has the policy ceiling again" '[ "$(sudo cat $(leaf "$V")/memory.max)" = "$(( (1024 + 256) * 1048576 ))" ] && [ "$(on "$V" hostname)" = oom-v ]'
@@ -531,17 +531,10 @@ K1=$(mkowner vk1 256); K2=$(mkowner vk2 256)
 k1pid=$(fc_pid "$K1"); k2pid=$(fc_pid "$K2"); dpid=$(daemon_pid)
 sudo kill -9 "$k1pid"
 for i in $(seq 1 60); do [ "$(mstate "$K1")" != running ] && break; sleep 1; done
-check "VMM killed: only that machine stops (stopped, exit 255)" '[ "$(mstate "$K1")" = stopped ] && [ "$(briqyard machine get "$K1" | jq -r .exit.code)" = 255 ]'
+check "VMM killed: only that machine stops (stopped, exit 255, not reported as a memory kill)" '[ "$(mstate "$K1")" = stopped ] && [ "$(briqyard machine get "$K1" | jq -r .exit.code)" = 255 ] && [ "$(briqyard machine get "$K1" | jq -r ".exit.vmm_oom_killed // false")" = false ]'
 check "VMM killed: the other machine, its VMM and the daemon are untouched" '[ "$(fc_pid "$K2")" = "$k2pid" ] && [ "$(daemon_pid)" = "$dpid" ] && [ "$(ctr "$K2")" = "7 7 " ]'
-# KNOWN DEFECT (reported with ADR 0095): the cgroup leaf of a machine whose VMM was killed stays
-# (empty) while the machine is stopped; a stop through the API removes it. The only BAD line
-# allowed here is that one; the strict invariants run after the machine starts again and is destroyed.
-vmm_killed_invariants() {
-  invariants >"$LOGS/vk.out" 2>&1 && return 0
-  grep '^BAD' "$LOGS/vk.out" | grep -vqF "cgroup leaves of machines without a Firecracker" && { cat "$LOGS/vk.out"; return 1; }
-  echo "   KNOWN DEFECT: $(grep '^BAD' "$LOGS/vk.out" | head -1)"
-}
-check "VMM killed: nothing leaked while it is stopped (but for the known leaf, below)" 'vmm_killed_invariants'
+# The invariants allow the one open defect, the empty cgroup leaf of a machine whose VMM was lost, and print it.
+check "VMM killed: nothing leaked while it is stopped (the open leaf defect is printed by the invariants)" 'invariants && { grep -h "KNOWN DEFECT\|FIXED" "$LOGS/inv.out" | sed "s/^/   /" || true; }'
 briqyard machine start "$K1" >/dev/null; briqyard machine wait --for running "$K1" >/dev/null
 check "VMM killed: it starts again with its disks whole" '[ "$(ctr "$K1")" = "7 7 " ]'
 

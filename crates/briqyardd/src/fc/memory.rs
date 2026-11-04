@@ -628,6 +628,9 @@ struct OomEvents {
     killed: u64,
     group_killed: u64,
 }
+/// The reason of a cgroup that killed its VMM over its memory ceiling (ADR 0096).
+#[cfg(any(target_os = "linux", test))]
+pub(super) const VMM_OOM_EVIDENCE: &str = "vmm_cgroup_oom_evidence";
 #[cfg(any(target_os = "linux", test))]
 impl OomEvents {
     fn parse(text: &str) -> Option<Self> {
@@ -652,7 +655,7 @@ impl OomEvents {
     }
     fn reason(self) -> &'static str {
         if self.oom > 0 && self.killed > 0 && self.group_killed > 0 {
-            "vmm_cgroup_oom_evidence"
+            VMM_OOM_EVIDENCE
         } else if self.killed > 0 {
             "vmm_oom_kill_unclassified"
         } else {
@@ -681,7 +684,8 @@ impl OomEvidence {
         let baseline = OomEvents::parse(&group.read(c"memory.events.local").ok()?)?;
         process.in_group(&leaf).then_some(Self { group, baseline })
     }
-    pub fn record(&self, id: &str) {
+    /// Logs the run's memory events and returns their reason, `None` when unreadable.
+    pub fn record(&self, id: &str) -> Option<&'static str> {
         match self
             .group
             .read(c"memory.events.local")
@@ -689,19 +693,25 @@ impl OomEvidence {
             .and_then(|s| OomEvents::parse(&s))
             .and_then(|n| n.delta(self.baseline))
         {
-            Some(delta) => tracing::info!(
-                machine = id,
-                reason = delta.reason(),
-                oom_delta = delta.oom,
-                oom_kill_delta = delta.killed,
-                oom_group_kill_delta = delta.group_killed,
-                "VMM local memory events"
-            ),
-            None => tracing::warn!(
-                machine = id,
-                reason = "vmm_oom_evidence_unavailable",
-                "VMM local memory events unreadable or reset"
-            ),
+            Some(delta) => {
+                tracing::info!(
+                    machine = id,
+                    reason = delta.reason(),
+                    oom_delta = delta.oom,
+                    oom_kill_delta = delta.killed,
+                    oom_group_kill_delta = delta.group_killed,
+                    "VMM local memory events"
+                );
+                Some(delta.reason())
+            }
+            None => {
+                tracing::warn!(
+                    machine = id,
+                    reason = "vmm_oom_evidence_unavailable",
+                    "VMM local memory events unreadable or reset"
+                );
+                None
+            }
         }
     }
 }
@@ -713,7 +723,7 @@ mod event_tests {
     fn local_evidence_is_per_incarnation_and_never_infers_guest_oom() {
         let old = OomEvents::parse("oom 5\noom_kill 3\noom_group_kill 1\n").unwrap();
         let now = OomEvents::parse("oom 6\noom_kill 5\noom_group_kill 2\n").unwrap();
-        assert_eq!(now.delta(old).unwrap().reason(), "vmm_cgroup_oom_evidence");
+        assert_eq!(now.delta(old).unwrap().reason(), VMM_OOM_EVIDENCE);
         assert!(old.delta(now).is_none());
         let global = OomEvents {
             oom: 0,

@@ -119,11 +119,11 @@ async fn the_schedule_fires_when_due_and_not_before() {
 async fn a_backup_racing_a_destroy_answers_not_found() {
     let h = harness(|_| {}).await;
     let m = h.machine("db", every("1h", 3), true).await;
-    let hold = h.pool.dev().join("hold.snapshot");
+    let hold = h.pool.dev().join("hold.send");
     std::fs::write(&hold, "").unwrap();
     let (mm, id) = (h.m.clone(), m.id.clone());
     let backup = tokio::spawn(async move { mm.backup(&id).await });
-    while h.pool.zfs.stalled(Duration::ZERO).is_none() {
+    while h.sends() == 0 {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let (mm, id) = (h.m.clone(), m.id.clone());

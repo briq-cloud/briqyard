@@ -40,6 +40,8 @@ pub(super) struct Proc {
     /// The init's report, sent by `exit`; dropped when the process is `gone`, so the
     /// manager's wait on it ends.
     pub(super) exit: Option<tokio::sync::watch::Sender<Option<guest::ExitReport>>>,
+    /// The cgroup evidence of a VMM killed over its memory ceiling, shared with its `Vm`.
+    pub(super) vmm_oom: fc::VmmOom,
 }
 
 type Attachment = (String, String, Option<nft::Policy>);
@@ -111,6 +113,8 @@ pub(super) struct Mock {
     pub(in crate::machine) destination_requests: Mutex<HashMap<PathBuf, guest::DestinationBind>>,
     pub(in crate::machine) destination_bad_ack: AtomicBool,
     pub(in crate::machine) destination_refuse: AtomicBool,
+    pub(in crate::machine) fs_thaws: Arc<std::sync::atomic::AtomicU32>,
+    pub(in crate::machine) fs_freeze_fault: std::sync::atomic::AtomicU32,
     pub(in crate::machine) fs_sync_fault: std::sync::atomic::AtomicU32,
     pub(in crate::machine) assigned_resume_loss: AtomicBool,
     pub(in crate::machine) assigned_resume_credentials: AtomicBool,
@@ -194,6 +198,8 @@ impl Mock {
             destination_requests: Mutex::new(HashMap::new()),
             destination_bad_ack: AtomicBool::new(false),
             destination_refuse: AtomicBool::new(false),
+            fs_thaws: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            fs_freeze_fault: std::sync::atomic::AtomicU32::new(0),
             fs_sync_fault: std::sync::atomic::AtomicU32::new(0),
             assigned_resume_loss: AtomicBool::new(false),
             assigned_resume_credentials: AtomicBool::new(false),
@@ -303,6 +309,7 @@ impl Mock {
             boot_identity: None,
             exited: tokio::sync::watch::channel(false).0,
             exit: Some(tokio::sync::watch::channel(None).0),
+            vmm_oom: Default::default(),
         });
         pid
     }
@@ -371,6 +378,15 @@ impl Mock {
             p.exit = None;
             p.exited.send_replace(true);
         }
+    }
+
+    /// The VMM is gone and its cgroup recorded a kill over its memory ceiling, in the order
+    /// the real reader keeps: the evidence first, then the exit.
+    pub(in crate::machine) fn gone_over_memory(&self, pid: u32) {
+        if let Some(p) = self.procs.lock().unwrap().iter().find(|p| p.pid == pid) {
+            p.vmm_oom.set();
+        }
+        self.gone(pid);
     }
 
     /// A live process's report channel.
@@ -634,6 +650,7 @@ impl fc::Vmm for Mock {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (exited, rx) = tokio::sync::watch::channel(false);
         let (exit_tx, exit) = tokio::sync::watch::channel(None);
+        let vmm_oom = fc::VmmOom::default();
         self.procs.lock().unwrap().push(Proc {
             pid,
             id: b.id.clone(),
@@ -645,6 +662,7 @@ impl fc::Vmm for Mock {
             boot_identity: b.boot_identity.clone(),
             exited,
             exit: Some(exit_tx),
+            vmm_oom: vmm_oom.clone(),
         });
         match boots {
             Boots::UnsettledLaunch(why) => return Err(anyhow!(why)),
@@ -673,6 +691,7 @@ impl fc::Vmm for Mock {
             incarnation: Some(mock_incarnation(pid)),
             exited: rx,
             exit,
+            vmm_oom,
         })
     }
 

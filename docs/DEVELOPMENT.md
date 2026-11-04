@@ -407,7 +407,7 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   into another namespace and a fork into one (ADR 0056: a rename with the address, the
   uptime marker and the disk kept; into a namespace that exists a new address, a boot and the
   neighbour reached by name; a `moved` event in each namespace; the fork on a network of its own
-  with its source's disk), runtime classes (ADR 0088: the status lists them, an unknown class is refused by name, the default class shown; where the daemon serves `nested`, 8 more: `/dev/kvm` and `vmx|svm` in the guest, its modules mounted read-only, a memory snapshot refused, a suspend a plain stop, a cold wake, a fork in the class). 283 checks, 279 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
+  with its source's disk), runtime classes (ADR 0088: the status lists them, an unknown class is refused by name, the default class shown; where the daemon serves `nested`, 8 more: `/dev/kvm` and `vmx|svm` in the guest, its modules mounted read-only, a memory snapshot refused, a suspend a plain stop, a cold wake, a fork in the class). 290 checks when the first crash control detects loss, up to 4 additional timed trials; 286 without host ports; 5 fewer with a store that is not a directory (the raw-backups section
   reads the store's files), 3 fewer on a host keyed by the fleet (`storage.key: fleet`: the
   key file's checks).
   Against a real host: `BRIQYARD_URL`, `BRIQYARD_TOKEN`, `BRIQYARD_TLS_FINGERPRINT` (its curl
@@ -434,8 +434,11 @@ Every test and suite ends what it starts, however it ends (ADR 0049):
   invariants between phases (ADR 0010; one is no record on disk the daemon does not hold).
   `--namespaces 6 --per-namespace 4 --rounds 2 --crash`. `--churn N` then runs N cycles per namespace of
   create, files, an endpoint, a snapshot restored, a backup restored, a fork, suspend and
-  resume, destroy, and reads the daemon's `process_resident_memory_bytes` 12 s after each:
-  growth over the second half past `--rss-growth-mb` (32) is a break (ADR 0052). Through a
+  resume, destroy, and reads the daemon's `process_resident_memory_bytes` until it stops dropping (every 5 s, 4 to 8 readings) once it has been idle
+  12 s: the least is the cycle's floor. The fitted growth of the floors over cycles 2..N
+  past `--rss-growth-mb` (40) is a break (ADR 0052); so is growth of the daemon's open files or
+  threads past `--handle-growth` (2). The log prints the series and the slope (`hack/stress_trend.py`).
+  CI runs 8 cycles. Through a
   fleet it needs `--invariants-url` (the daemon's), else the check is skipped and says so.
   The capacity race fails on missing start responses, worker or sampler errors, no valid
   sample, or interruption after the phase begins. Its maximum is sampled guest quota
@@ -561,3 +564,10 @@ kill/reap coverage. Each reviewed failure was reproduced before its fix; Linux n
 microVM gates remain required before push.
 
 Native e2e additionally runs `hack/e2e-seals.sh` (4 checks): both sandbox seed disk shapes seal, create and execute their first command. The init root-only `--ignored run_as` filter includes loopback ext4 sync, freeze rollback, thaw, deadline and connection-close tests (ADR 0092).
+
+ADR 0092 checks achieved consistency and two timed unsynced 27-byte regressions
+(snapshot restore and running-source disk fork), plus up to five crash opt-out controls.
+Copy completion must be within one second; a slower trial is inconclusive and fails.
+At least one crash control must lose bytes; the summary counts include each timed trial.
+`hack/measure-freeze.sh`, dispatched with native workflow input `measure_freeze=true`,
+records relative latency and stalls on shared hosted x86_64; its artifacts include all raw samples.
