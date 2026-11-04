@@ -44,6 +44,7 @@ impl Manager {
             }),
             sleep: "never".into(),
             fork: Some(api::ForkSpec {
+                consistency: None,
                 machine_id: pool.source_machine.clone(),
                 snapshot: Some(pool.snapshot.clone()),
                 copy: "disk".into(),

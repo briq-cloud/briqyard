@@ -1,6 +1,41 @@
 use super::*;
 #[async_trait::async_trait]
 impl guestc::Guest for Mock {
+    async fn fs_freeze(&self, vsock: &Path, _hold: Duration) -> Result<guestc::Frozen> {
+        self.record(format!("fs_freeze {}", vsock.display()));
+        let fault = self.fs_freeze_fault.load(Relaxed);
+        match fault {
+            1 => {
+                return Err(guestc::UnknownOp {
+                    op: "fs_freeze".into(),
+                    init: String::new(),
+                }
+                .into())
+            }
+            2 => return Err(anyhow!("freeze / refused")),
+            3 => return std::future::pending().await,
+            _ => {}
+        }
+        let (host, mut guest) = tokio::io::duplex(1024);
+        let thaws = self.fs_thaws.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0; 1024];
+            if guest.read(&mut request).await.unwrap_or(0) == 0 {
+                return;
+            }
+            thaws.fetch_add(1, Relaxed);
+            let response = if fault == 4 {
+                "{\"type\":\"error\",\"thawed_by\":\"deadline\"}"
+            } else {
+                "{\"type\":\"ok\",\"thawed_by\":\"host\"}"
+            };
+            let bytes = response.as_bytes();
+            let _ = guest.write_all(&(bytes.len() as u32).to_be_bytes()).await;
+            let _ = guest.write_all(bytes).await;
+        });
+        Ok(guestc::Frozen::for_test(Box::new(host)))
+    }
     async fn fs_sync(&self, vsock: &Path) -> Result<()> {
         self.record(format!("fs_sync {}", vsock.display()));
         match self.fs_sync_fault.load(Relaxed) {

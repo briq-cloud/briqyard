@@ -577,6 +577,7 @@ fn the_usage_table() {
 fn the_snapshot_table() {
     let ss = [
         api::Snapshot {
+            copy_consistency: Default::default(),
             clone_profile: None,
             source_host: None,
             clone_size: None,
@@ -590,6 +591,7 @@ fn the_snapshot_table() {
             memory: true,
         },
         api::Snapshot {
+            copy_consistency: Default::default(),
             clone_profile: None,
             source_host: None,
             clone_size: None,
@@ -608,9 +610,9 @@ fn the_snapshot_table() {
     assert_eq!(
         lines,
         [
-            "ID               NAME                 CREATED               DISKS      MEMORY",
-            "s_0123456789ab   before-migration     2026-10-19 08:30:00   root,data  yes",
-            "s_ba9876543210   -                    2026-10-19 08:30:00   data       no",
+            "ID               NAME                 CREATED               DISKS      MEMORY CONSISTENCY",
+            "s_0123456789ab   before-migration     2026-10-19 08:30:00   root,data  yes crash",
+            "s_ba9876543210   -                    2026-10-19 08:30:00   data       no crash",
         ]
     );
 }

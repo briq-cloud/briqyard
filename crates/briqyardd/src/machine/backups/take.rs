@@ -57,6 +57,14 @@ impl Manager {
 
     /// A backup now, on request: after any backup of the machine under way.
     pub async fn backup(&self, id: &str) -> Result<api::Backup, MError> {
+        self.backup_requested(id, api::BackupRequest::default())
+            .await
+    }
+    pub async fn backup_requested(
+        &self,
+        id: &str,
+        req: api::BackupRequest,
+    ) -> Result<api::Backup, MError> {
         let e = self.own_entry(id)?;
         self.ordinary_operation(&e.snapshot())?;
         self.backup_store()?;
@@ -67,7 +75,7 @@ impl Manager {
             .jobs
             .start(
                 self.clone(),
-                jobs::Work::Requested(e, Utc::now()),
+                jobs::Work::Requested(e, Utc::now(), req.consistency),
                 turn,
                 admission,
             )?
@@ -84,6 +92,14 @@ impl Manager {
         e: &Arc<Entry>,
         now: DateTime<Utc>,
     ) -> Result<api::Backup, MError> {
+        self.backup_entry_requested(e, now, None).await
+    }
+    pub(super) async fn backup_entry_requested(
+        &self,
+        e: &Arc<Entry>,
+        now: DateTime<Utc>,
+        opt: Option<api::CopyConsistencyRequest>,
+    ) -> Result<api::Backup, MError> {
         let store = self.backup_store()?;
         let rec = e.snapshot();
         if rec.state == state::DESTROYING {
@@ -96,7 +112,7 @@ impl Manager {
         if let Some(snap) = &rec.restoring {
             return Err(snapshots::unfinished(snap));
         }
-        let (b, mut all) = match self.send_backup(store, &rec).await {
+        let (b, mut all) = match self.send_backup(store, &rec, opt).await {
             Ok(made) => made,
             // A destroy took the disks from under it: the destroy is the answer, not a failure.
             Err(_) if !self.holds(e) => return Err(MError::NotFound),
@@ -127,11 +143,16 @@ impl Manager {
         } else {
             "whole"
         };
-        let made = Ev::normal(
+        let event = if b.copy_consistency.consistency == "crash" {
+            Ev::warning
+        } else {
+            Ev::normal
+        };
+        let made = event(
             reason::BACKED_UP,
             format!("backup {}: {} bytes, {kind}", b.id, b.bytes),
         )
-        .data(json!({ "backup": b.id, "bytes": b.bytes, "incremental": b.incremental }));
+        .data(json!({ "consistency": b.copy_consistency.consistency, "consistency_reason": b.copy_consistency.consistency_reason, "backup": b.id, "bytes": b.bytes, "incremental": b.incremental }));
         let deleted = deleted_event(&pruned, "retention");
         // Under its lock and only while it is still here: a destroy in between removed the
         // record, which is not written back; its holder takes the backups.
@@ -180,6 +201,7 @@ impl Manager {
         &self,
         store: &ObjectStore,
         rec: &Record,
+        opt: Option<api::CopyConsistencyRequest>,
     ) -> Result<(api::Backup, Vec<api::Backup>), MError> {
         let mut all = self.backups(&rec.id).await?;
         let seal = self.seal().await?;
@@ -192,11 +214,31 @@ impl Manager {
         let bid = Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
         let snap = format!("bk-{bid}");
         let z = &self.inner.zfs;
-        let (mut snapped, mut sent) = (Vec::new(), Vec::new());
+        let e = self.own_entry(&rec.id)?;
+        let mut snapped = Vec::new();
+        let copy_consistency = {
+            let _lock = e.lock.lock().await;
+            if !self.holds(&e) {
+                return Err(MError::NotFound);
+            }
+            if e.snapshot().state == state::DESTROYING {
+                return Err(MError::BadState(state::DESTROYING.into()));
+            }
+            for ds in [rec.root_dataset(), rec.data_dataset()] {
+                if z.exists(&ds).await? {
+                    snapped.push(ds);
+                }
+            }
+            if snapped.is_empty() {
+                return Err(anyhow!("backup source has no disks").into());
+            }
+            self.frozen_copy(&e, &snapped, &snap, "backup", opt).await?
+        };
+        let mut sent = Vec::new();
         let disks = async {
             let mut disks = Vec::new();
             for (disk, ds) in [("root", rec.root_dataset()), ("data", rec.data_dataset())] {
-                if !z.exists(&ds).await? {
+                if !snapped.contains(&ds) {
                     continue;
                 }
                 // The base must be a backup of this machine in the store, sent raw under this
@@ -204,11 +246,18 @@ impl Manager {
                 // raw increment applies only over a raw stream (ADR 0035).
                 let base = match whole {
                     true => None,
-                    false => newest_backup_snapshot(&z.snapshots(&ds).await?)
-                        .filter(|s| in_store(&all, s, disk, &key_id)),
+                    false => {
+                        let previous: Vec<String> = z
+                            .snapshots(&ds)
+                            .await?
+                            .into_iter()
+                            .filter(|candidate| candidate != &snap)
+                            .collect();
+                        newest_backup_snapshot(&previous)
+                            .filter(|s| in_store(&all, s, disk, &key_id))
+                    }
                 };
-                z.snapshot(&ds, &snap).await?;
-                snapped.push(ds.clone());
+
                 let key = format!("backups/{}/{disk}/{bid}.zfs", rec.id);
                 let target = store.clone();
                 let object_key = key.clone();
@@ -231,6 +280,7 @@ impl Manager {
         .await;
         let b = match disks {
             Ok(disks) => api::Backup {
+                copy_consistency,
                 size: Some(rec.size),
                 runtime_class: rec.runtime_class.clone(),
                 id: bid.clone(),

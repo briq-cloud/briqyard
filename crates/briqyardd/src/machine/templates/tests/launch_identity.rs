@@ -21,6 +21,7 @@ pub(in crate::machine) async fn reserved_with(volume: Option<u32>) -> (Harness, 
         ..Default::default()
     };
     let fork = api::ForkSpec {
+        consistency: None,
         machine_id: source.snapshot().id.clone(),
         snapshot: Some(snapshot),
         copy: String::new(),

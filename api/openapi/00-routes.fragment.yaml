@@ -306,7 +306,15 @@ paths:
       responses:
         "200": { description: backups, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Backup" } } } } }
     post:
-      summary: "Send the machine's disks to the backup store (crash-consistent while it runs), after any backup of it under way: whole the first time and every `keep`-th, else what changed since the last; then, with a schedule, the backups that are neither among the newest `keep` nor a base of one go (ADR 0023). Its schedule's next time is `every` from now"
+      summary: "Send the machine's disks to the backup store (filesystem-consistent by default, with a reported crash-consistent fallback), after any backup of it under way: whole the first time and every `keep`-th, else what changed since the last; then, with a schedule, the backups that are neither among the newest `keep` nor a base of one go (ADR 0023). Its schedule's next time is `every` from now"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                consistency: { type: string, enum: [crash], description: "A disk copy of a running source is frozen by default. A busy source pays more: about 450-600 ms added on our 4-vCPU bench, versus about 42 ms idle. These are relative figures, not hardware guarantees. Set consistency: \"crash\" explicitly to skip guest sync and freeze and accept crash consistency." }
       responses:
         "201": { description: backup made, content: { application/json: { schema: { $ref: "#/components/schemas/Backup" } } } }
         "400": { description: backups are off on this host }

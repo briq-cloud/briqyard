@@ -117,6 +117,9 @@ mod tests {
         changed.suspended = !changed.suspended;
         assert_ne!(before, fingerprint(&changed).unwrap());
         changed = record.clone();
+        changed.suspend_synced = true;
+        assert_ne!(before, fingerprint(&changed).unwrap());
+        changed = record.clone();
         changed.rest.insert("future_authority".into(), true.into());
         assert_ne!(
             before,

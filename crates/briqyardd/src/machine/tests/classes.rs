@@ -163,6 +163,7 @@ async fn a_memory_snapshot_of_a_nested_machine_is_refused_naming_the_class() {
     let h = classes_harness().await;
     let n = h.m.create_made(of_class(&h, "n", "nested")).await.unwrap();
     let req = |memory| api::SnapshotRequest {
+        consistency: None,
         name: None,
         memory,
         template: false,
@@ -180,6 +181,7 @@ async fn a_fork_takes_its_sources_class_and_names_no_other() {
     let n = h.m.create_made(of_class(&h, "n", "nested")).await.unwrap();
     let fork = |name: &str, class: &str| api::CreateMachineRequest {
         fork: Some(api::ForkSpec {
+            consistency: None,
             machine_id: n.id.clone(),
             copy: String::new(),
             snapshot: None,
@@ -208,6 +210,7 @@ async fn a_memory_fork_of_a_nested_source_and_a_warm_slot_in_a_class_are_refused
     let n = h.m.create_made(of_class(&h, "n", "nested")).await.unwrap();
     let memory = api::CreateMachineRequest {
         fork: Some(api::ForkSpec {
+            consistency: None,
             machine_id: n.id.clone(),
             copy: String::new(),
             snapshot: Some("s".into()),

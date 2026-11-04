@@ -110,6 +110,7 @@ async fn unknown_identity_refuses_memory_load_and_keeps_named_snapshot() {
         rec.vmm_version = h.host.version();
         rec.boot_identity = Some(future.clone());
         rec.snapshots.push(SnapshotRec {
+            copy_consistency: Default::default(),
             id: "s_future".into(),
             name: None,
             created_at: Utc::now(),
@@ -216,6 +217,7 @@ async fn named_memory_restore_copies_identity_and_disk_fork_chooses_cold_profile
         h.m.snapshot(
             &machine.id,
             api::SnapshotRequest {
+                consistency: None,
                 template: false,
                 name: None,
                 memory: true,
@@ -357,6 +359,7 @@ async fn failed_observation_retains_metadata_but_unbound_memory_is_ambiguous_and
         h.m.snapshot(
             &machine.id,
             api::SnapshotRequest {
+                consistency: None,
                 template: false,
                 name: None,
                 memory: true,

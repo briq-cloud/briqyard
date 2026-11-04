@@ -119,7 +119,7 @@ Legend: ✓ equivalent · ◐ partial · ✗ missing · ★ briqyard goes furthe
 |---|---|---|---|
 | PV, PVC, StorageClass | ✓ a volume per machine | | |
 | Volume expansion | ✓ a PATCH grows the zvol at once, never smaller, the quota and the pool checked; the init grows the ext4 filesystem online at the next boot, `pending` until then (ADR 0040) | a growth seen by a running guest | |
-| VolumeSnapshot, restore | ★ named snapshots of both disks, restored in place with newer snapshots, forks and the backup chain kept (ADR 0031); fork; backups and restore anywhere | a fork from a named snapshot | yard, later |
+| VolumeSnapshot, restore | ★ named snapshots of both disks, fsfreeze around a live disk copy as a CSI node agent does (ADR 0092), restored in place with newer snapshots, forks and the backup chain kept (ADR 0031); fork; backups and restore anywhere | a fork from a named snapshot | yard, later |
 | Scheduled backups and retention (Velero) | ✓ `backup: { every, keep }` run by the daemon, whole chains pruned, delete, a destroyed machine's kept `keep_destroyed_days` (ADR 0023) | | yard (values from briq) |
 | Encryption at rest (CSI, etcd secrets) | ✓ the pool encrypted at its creation (ZFS, AES-256-GCM), one key per host kept by the fleet and handed to that host at start, or a file on a single host; records, config drives, consoles and the image cache on the pool; no swap (ADR 0026); backups raw, ciphertext in the store, the key asked by its id at a restore (ADR 0035) | key rotation | yard |
 | emptyDir, tmpfs | ✓ `/tmp` | | |

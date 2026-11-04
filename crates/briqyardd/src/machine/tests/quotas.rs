@@ -149,6 +149,7 @@ async fn quotas_hold_a_namespace_at_create_fork_and_start() {
     let mut fork = h.request("f");
     fork.image.clear();
     fork.fork = Some(api::ForkSpec {
+        consistency: None,
         snapshot: None,
         machine_id: a.id.clone(),
         copy: String::new(),

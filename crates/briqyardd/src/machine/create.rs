@@ -243,6 +243,8 @@ impl Manager {
             last_used_at: None,
             console_offset: 0,
             suspended: false,
+            suspend_synced: false,
+            fork: None,
             backup_bytes: 0,
             backup: backups::schedule_of(&req.backup, &self.inner.cfg.backup, now)?,
             version: 0,
@@ -616,8 +618,16 @@ impl Manager {
             .data(json!({ "from": b.machine_id, "backup": b.id })),
             Make::Fork(src, _) => {
                 let from = src.snapshot().id;
-                Ev::normal(reason::FORKED, format!("forked from {from}"))
-                    .data(json!({ "from": from }))
+                (if r
+                    .fork
+                    .as_ref()
+                    .is_some_and(|f| f.copy_consistency.consistency == "crash")
+                {
+                    Ev::warning
+                } else {
+                    Ev::normal
+                })(reason::FORKED, format!("forked from {from}"))
+                .data(json!({ "from": from, "fork": r.fork }))
             }
             Make::Existing | Make::Assigned => return Ok(()),
             Make::Image => Ev::normal(reason::CREATED, format!("created from {}", r.image))
@@ -871,6 +881,15 @@ impl Manager {
                     a.generation == origin.artifact.generation,
                     "named memory artifact generation changed"
                 );
+                e.rec.lock().unwrap().fork = Some(api::ForkOrigin {
+                    machine_id: s.id.clone(),
+                    copy_consistency: s
+                        .snapshots
+                        .iter()
+                        .find(|snap| snap.id == origin.snapshot)
+                        .map(|snap| snap.copy_consistency.clone())
+                        .unwrap_or_default(),
+                });
                 let started = std::time::Instant::now();
                 z.clone_snapshot(&s.root_dataset(), &origin.snapshot, &r.root_dataset())
                     .await?;
@@ -880,11 +899,26 @@ impl Manager {
                 }
             } else {
                 let snap = format!("fork-{}", r.id);
-                z.snapshot(&s.root_dataset(), &snap).await?;
+                let mut datasets = vec![s.root_dataset()];
+                if r.volume.is_some() && z.exists(&s.data_dataset()).await? {
+                    datasets.push(s.data_dataset());
+                }
+                let copy_consistency = self
+                    .frozen_copy(
+                        src,
+                        &datasets,
+                        &snap,
+                        "fork",
+                        fork.and_then(|f| f.consistency),
+                    )
+                    .await?;
+                e.rec.lock().unwrap().fork = Some(api::ForkOrigin {
+                    machine_id: s.id.clone(),
+                    copy_consistency,
+                });
                 z.clone_snapshot(&s.root_dataset(), &snap, &r.root_dataset())
                     .await?;
                 if r.volume.is_some() && z.exists(&s.data_dataset()).await? {
-                    z.snapshot(&s.data_dataset(), &snap).await?;
                     z.clone_snapshot(&s.data_dataset(), &snap, &r.data_dataset())
                         .await?;
                     return Ok(());

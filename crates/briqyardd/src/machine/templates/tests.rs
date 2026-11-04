@@ -249,6 +249,7 @@ async fn reviewed_builder_seals_and_named_clone_crosses_identity_before_network_
         h.m.snapshot(
             &builder.id,
             api::SnapshotRequest {
+                consistency: None,
                 name: Some("ready".into()),
                 memory: true,
                 template: true,
@@ -264,6 +265,7 @@ async fn reviewed_builder_seals_and_named_clone_crosses_identity_before_network_
         namespace: "t1".into(),
         name: "clone".into(),
         fork: Some(api::ForkSpec {
+            consistency: None,
             machine_id: builder.id.clone(),
             copy: String::new(),
             snapshot: Some("ready".into()),
@@ -324,6 +326,7 @@ async fn clone_never_boots_cold_when_backing_disappears_after_reservation() {
         namespace: "t1".into(),
         name: "broken".into(),
         fork: Some(api::ForkSpec {
+            consistency: None,
             machine_id: builder.id,
             copy: String::new(),
             snapshot: Some(snapshot.id.clone()),

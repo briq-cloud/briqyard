@@ -14,6 +14,7 @@ fn disk(name: &str, id: &str, from: Option<&str>) -> api::BackupDisk {
 /// A backup of the root disk, whole or from another.
 fn b(id: &str, from: Option<&str>) -> api::Backup {
     api::Backup {
+        copy_consistency: Default::default(),
         size: None,
         runtime_class: String::new(),
         id: id.into(),

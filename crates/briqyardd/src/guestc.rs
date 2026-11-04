@@ -25,7 +25,7 @@ pub trait Guest: Send + Sync {
     async fn fs_sync(&self, _vsock: &Path) -> Result<()> {
         Err(anyhow!("filesystem sync unavailable"))
     }
-    /// No lifecycle caller until ADR 0092 slice C. Drop closes and thaws.
+    /// Connection-held freeze for disk copies (ADR 0092). Drop closes and thaws.
     async fn fs_freeze(&self, _vsock: &Path, _hold: Duration) -> Result<Frozen> {
         Err(anyhow!("filesystem freeze unavailable"))
     }
@@ -1294,5 +1294,15 @@ mod filesystem_tests {
             filesystems: vec![],
         });
         assert_eq!(server.read(&mut [0]).await.unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+impl Frozen {
+    pub(crate) fn for_test(conn: Box<dyn Conn>) -> Self {
+        Self {
+            conn,
+            filesystems: vec!["/".into()],
+        }
     }
 }

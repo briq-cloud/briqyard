@@ -64,7 +64,8 @@ async fn a_suspend_resumes_on_the_next_start() {
     assert!(slept.suspended);
     assert_eq!(slept.state, state::STOPPED);
     let calls = h.host.calls();
-    assert_eq!(&calls[..2], ["snapshot 1000 synced", "kill 1000"]);
+    assert!(calls[0].starts_with("fs_sync "));
+    assert_eq!(&calls[1..3], ["snapshot 1000 synced", "kill 1000"]);
     let back = h.m.start(&m.id, None).await.unwrap();
     assert!(!back.suspended);
     assert_eq!(back.state, state::RUNNING);

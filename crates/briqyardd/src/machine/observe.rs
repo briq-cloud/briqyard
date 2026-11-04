@@ -168,6 +168,7 @@ impl Manager {
             .collect();
         entries.sort_by_key(|e| e.snapshot().id);
         let mut host = metrics::Host {
+            copies: self.inner.stats.copies.lock().unwrap().clone(),
             warm: self.warm_metrics(),
             warm_operations: self.inner.stats.warm.lock().unwrap().clone(),
             ..Default::default()
