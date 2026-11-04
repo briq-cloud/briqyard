@@ -423,6 +423,9 @@ def rules_set():
     namespaces.append("alert-room")
 
     # Host condition, host pressure and the largest slot: one machine takes 11800 of 12288 MB.
+    # A new namespace is not placed on a host over the fill ceiling (0.85), so the namespace
+    # is made small first and grown into the host it is pinned to.
+    machine("alert-big", "anchor", 128)
     big = machine("alert-big", "big", 11800)
     t_big = time.time()
     if not wait_for("memory_pressure", lambda: prom('briqyard_host_condition{condition="memory_pressure"} == 1'), 240, 5):
