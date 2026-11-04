@@ -85,5 +85,6 @@ handover() {
 
 
 . "$(dirname "${BASH_SOURCE[0]}")/e2e-machines.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/e2e-classes.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/e2e-siblings.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/e2e-storage.sh"

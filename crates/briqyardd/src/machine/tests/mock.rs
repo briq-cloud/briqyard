@@ -87,6 +87,8 @@ pub(super) struct Mock {
     pub(super) http_codes: Mutex<HashMap<(Ipv4Addr, u16), u16>>,
     /// The size each machine last booted with, as Firecracker is given it.
     pub(super) booted: Mutex<HashMap<String, api::Size>>,
+    /// The last boot of each machine, as the manager asked for it.
+    pub(super) boots_seen: Mutex<HashMap<String, fc::Boot>>,
     /// What the VMM says it is (ADR 0027): another value is an upgraded Firecracker.
     pub(super) vmm_version: Mutex<String>,
     /// The version the guests' inits answer with.
@@ -164,6 +166,7 @@ impl Mock {
             probed: Mutex::new(Vec::new()),
             http_codes: Mutex::new(HashMap::new()),
             booted: Mutex::new(HashMap::new()),
+            boots_seen: Mutex::new(HashMap::new()),
             vmm_version: Mutex::new("v1.17.0/test".into()),
             init_version: Mutex::new("0.1.0+init".into()),
             file_stream_v1: AtomicBool::new(false),
@@ -432,6 +435,10 @@ impl fc::Vmm for Mock {
             cpu_millis: None,
         };
         self.booted.lock().unwrap().insert(b.id.clone(), size);
+        self.boots_seen
+            .lock()
+            .unwrap()
+            .insert(b.id.clone(), b.clone());
         self.disks
             .lock()
             .unwrap()
@@ -679,6 +686,19 @@ impl fc::Vmm for Mock {
             }
             .with_reporting(reporting),
         )
+    }
+
+    /// A class named `nested` boots without the template, as the daemon's does when its
+    /// configuration says `nested: true`; any other has its own kernel and the template.
+    fn class_boot_identity(&self, class: &str, reporting: bool) -> Option<fc::BootIdentity> {
+        let mut identity = self.boot_identity(reporting)?;
+        if !class.is_empty() {
+            identity.kernel_sha256 = format!("{class}-kernel-digest");
+        }
+        if class == "nested" {
+            identity.cpu_config = "none".into();
+        }
+        Some(identity)
     }
 
     async fn balloon_statistics(&self, _vm: &fc::Vm) -> Result<Option<fc::BalloonStatistics>> {

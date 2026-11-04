@@ -625,6 +625,46 @@ fn the_pid_file_is_read_once_and_must_be_there() {
 }
 
 #[test]
+fn a_snapshot_load_opens_every_drive_again_the_modules_included() {
+    let mut b = Boot {
+        id: "bq_1".into(),
+        dir: PathBuf::from("/run/bq_1"),
+        jail: None,
+        vcpus: 1,
+        memory_mb: 128,
+        kernel: PathBuf::from("/k"),
+        modules: Some(PathBuf::from("/m.ext4")),
+        virtualization: false,
+        boot_args: String::new(),
+        config_drive: PathBuf::from("/c.tar"),
+        root: PathBuf::from("/dev/zd0"),
+        data: Some(PathBuf::from("/dev/zd16")),
+        tap: "tm1".into(),
+        mac: String::new(),
+        resume: true,
+        memory_clone: None,
+        boot_identity: None,
+        disk: DiskRate::default(),
+        disk_io: Default::default(),
+    };
+    let names = |b: &Boot| -> Vec<(&'static str, bool)> {
+        b.snapshot_drives().iter().map(|d| (d.0, d.2)).collect()
+    };
+    assert_eq!(
+        names(&b),
+        [
+            ("config.tar", false),
+            ("root", true),
+            ("data", true),
+            ("modules", false)
+        ]
+    );
+    b.data = None;
+    b.modules = None;
+    assert_eq!(names(&b), [("config.tar", false), ("root", true)]);
+}
+
+#[test]
 fn placing_a_file_in_the_jail() {
     use std::os::unix::fs::PermissionsExt;
     let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
@@ -730,6 +770,7 @@ async fn snapshot_keeps_its_durability_choice_and_resumes_after_failure() {
                 console_max: 0,
                 version: String::new(),
                 identity: BootIdentity::ambiguous(LEGACY_PROFILE),
+                classes: Default::default(),
                 cpu_template: None,
             };
             assert_eq!(vmm.snapshot(&vm, durable).await.is_err(), failed);

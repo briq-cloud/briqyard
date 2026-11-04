@@ -33,6 +33,7 @@ fn fleet_at(mut cfg: config::Config, dir: tempfile::TempDir, state_path: PathBuf
             require_egress_siblings: false,
             require_named_memory: false,
             named_memory_profile: "init-ready-v1".into(),
+            runtime_class: String::new(),
             fill_ceiling: cfg.placement.fill_ceiling,
             down_after: Duration::seconds(cfg.placement.down_after_sec as i64),
         },
@@ -230,6 +231,7 @@ fn heartbeat(url: &str, memory_mb: u32, namespaces: &[&str]) -> serde_json::Valu
 mod admin;
 mod admissions;
 mod backups;
+mod classes;
 mod daemon;
 mod endpoints;
 mod events;

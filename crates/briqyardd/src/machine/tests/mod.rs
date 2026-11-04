@@ -6,6 +6,7 @@ use chrono::TimeZone;
 
 mod assignment_close;
 mod balloon;
+mod classes;
 mod event_log;
 mod gateway;
 mod lifecycle;
@@ -68,6 +69,7 @@ pub(in crate::machine) fn record() -> Record {
             memory_mb: 512,
             cpu_millis: None,
         },
+        runtime_class: String::new(),
         volume: Some(api::VolumeSpec {
             size_gb: 2,
             mount: "/data".into(),

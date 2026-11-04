@@ -19,6 +19,10 @@ pub struct Backup {
     /// may omit it; their restores through the fleet must supply an explicit size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<Size>,
+    /// The runtime class of the machine when it was backed up, empty for `default`. A restore
+    /// that names no class runs in this one, so the fleet places it on a host that serves it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime_class: String,
     /// A timestamp to the millisecond, `20261019T231500.123Z`; later ids sort later.
     pub id: String,
     pub machine_id: String,

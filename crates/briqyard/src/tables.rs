@@ -15,11 +15,12 @@ pub(super) fn reason_of(m: &api::Machine) -> &str {
 
 pub(super) fn machine_table(ms: &[api::Machine]) -> String {
     let mut out = format!(
-        "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
+        "{:<16} {:<12} {:<14} {:<24} {:<8} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} HOST\n",
         "ID",
         "NAMESPACE",
         "NAME",
         "IMAGE",
+        "CLASS",
         "STATE",
         "READY",
         "IP",
@@ -42,11 +43,12 @@ pub(super) fn machine_table(ms: &[api::Machine]) -> String {
             None => "-".into(),
         };
         out.push_str(&format!(
-            "{:<16} {:<12} {:<14} {:<24} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {}\n",
+            "{:<16} {:<12} {:<14} {:<24} {:<8} {:<18} {:<5} {:<12} {:<9} {:<7} {:<6} {:<18} {:<24} {:<16} {:<8} {:<12} {}\n",
             m.id,
             m.namespace,
             m.name,
             m.image,
+            api::class_name(&m.runtime_class),
             state,
             if m.ready { "yes" } else { "no" },
             m.ip,
@@ -165,6 +167,22 @@ pub(super) fn upgrade_order(hs: &[api::Host]) -> (Vec<String>, Vec<(String, Stri
     )
 }
 
+/// A runtime class as `host ls` and `status` show it: `nested (kernel 6.18.54-briqyard-nested,
+/// OpenZFS 2.4.1)`.
+pub(super) fn class_label(c: &api::RuntimeClassInfo) -> String {
+    let mut parts = Vec::new();
+    if !c.kernel_release.is_empty() {
+        parts.push(format!("kernel {}", c.kernel_release));
+    }
+    if !c.openzfs.is_empty() {
+        parts.push(format!("OpenZFS {}", c.openzfs));
+    }
+    match parts.is_empty() {
+        true => c.name.clone(),
+        false => format!("{} ({})", c.name, parts.join(", ")),
+    }
+}
+
 /// `host ls`: a line per host, and under it its SSH address when it is not the API's, its pin,
 /// each condition that is true and its note when the bootstrap or an upgrade left one.
 pub(super) fn host_table(hs: &[api::Host]) -> String {
@@ -192,6 +210,9 @@ pub(super) fn host_table(hs: &[api::Host]) -> String {
         ));
         if !h.ssh.is_empty() {
             out.push_str(&format!("{:<16} ssh: {}\n", "", h.ssh));
+        }
+        for c in &h.runtime_classes {
+            out.push_str(&format!("{:<16} class: {}\n", "", class_label(c)));
         }
         if !h.tls_fingerprint.is_empty() {
             out.push_str(&format!("{:<16} tls: {}\n", "", h.tls_fingerprint));

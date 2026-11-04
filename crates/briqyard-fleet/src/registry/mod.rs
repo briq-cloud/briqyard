@@ -58,6 +58,9 @@ pub struct HostRec {
     pub named_memory_profiles: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warm_pool_profiles: Vec<String>,
+    /// The runtime classes it serves besides `default`, as its last heartbeat said (ADR 0088).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_classes: Vec<api::RuntimeClassInfo>,
     pub id: String,
     pub url: String,
     /// The address the bootstrap reaches the server at over SSH, when it is not the API's
@@ -210,6 +213,7 @@ impl HostRec {
             named_memory_fork_v1: self.named_memory_fork_v1,
             named_memory_profiles: self.named_memory_profiles.clone(),
             warm_pool_profiles: self.warm_pool_profiles.clone(),
+            runtime_classes: self.runtime_classes.clone(),
             id: self.id.clone(),
             url: self.url.clone(),
             ssh: self.ssh.clone(),
@@ -246,6 +250,22 @@ impl HostRec {
                 self.region, self.id
             )
         })
+    }
+
+    /// Why a machine of runtime class `class` cannot join `namespace` on this host: it does not
+    /// serve the class (ADR 0088). The default class is on every host.
+    pub fn without_class(&self, namespace: &str, class: &str) -> Option<String> {
+        (!api::serves_class(&self.runtime_classes, class)).then(|| {
+            format!(
+                "namespace {namespace} is on host {}, which does not serve runtime class {class}",
+                self.id
+            )
+        })
+    }
+
+    /// Whether its machines may see the CPU's virtualization extensions (ADR 0088).
+    fn serves_nested(&self) -> bool {
+        self.runtime_classes.iter().any(|c| c.nested)
     }
 
     /// Whether a new namespace may be placed here: ready, under the ceiling, no pressure.
@@ -310,6 +330,8 @@ pub struct Policy {
     pub require_egress_siblings: bool,
     pub require_named_memory: bool,
     pub named_memory_profile: String,
+    /// The runtime class the placement serves (ADR 0088); empty: `default`.
+    pub runtime_class: String,
     /// A host above this share of its memory takes no new namespace.
     pub fill_ceiling: f64,
     /// A host silent for this long is down.
@@ -322,6 +344,7 @@ impl Default for Policy {
             require_egress_siblings: false,
             require_named_memory: false,
             named_memory_profile: "init-ready-v1".into(),
+            runtime_class: String::new(),
             fill_ceiling: 0.85,
             down_after: Duration::seconds(60),
         }
@@ -421,6 +444,7 @@ impl Registry {
         entry.named_memory_fork_v1 = h.named_memory_fork_v1;
         entry.named_memory_profiles = h.named_memory_profiles;
         entry.warm_pool_profiles = h.warm_pool_profiles;
+        entry.runtime_classes = h.runtime_classes;
         entry.conditions = h.conditions.clone();
         entry.started = h.started;
         entry.last_seen = now;
@@ -539,7 +563,7 @@ impl Registry {
     }
 
     /// The host of a namespace, or the best host for a new one: of `region` when one is asked
-    /// (ADR 0025), the readiest with the most free memory under the ceiling and no pressure,
+    /// (ADR 0025), serving `class` (ADR 0088), the readiest with the most free memory under the ceiling and no pressure,
     /// with room for `need_mb` of memory and `need_disk_mb` of disk (a host that reports no
     /// disk figure is not held to it). The caller then holds the need on the host (`hold`),
     /// so a burst of creates does not all land on the host the last report showed emptiest.
@@ -569,11 +593,19 @@ impl Registry {
                                         .iter()
                                         .any(|p| p == &policy.named_memory_profile)))
                             && (region.is_empty() || h.region == region)
+                            && api::serves_class(&h.runtime_classes, &policy.runtime_class)
                             && h.free_memory_mb() >= need_mb
                             && h.has_disk(need_disk_mb)
                             && h.has_cpu(need_cpu_millis)
                     })
-                    .max_by_key(|h| h.free_memory_mb())?;
+                    // A default machine goes where nothing runs a hypervisor of its own when
+                    // such a host has room (ADR 0088); then the most free memory.
+                    .max_by_key(|h| {
+                        let shared_with_nested = api::class_name(&policy.runtime_class)
+                            == api::DEFAULT_CLASS
+                            && h.serves_nested();
+                        (!shared_with_nested, h.free_memory_mb())
+                    })?;
                 let id = best.id.clone();
                 self.namespaces.insert(namespace.to_string(), id.clone());
                 self.pinned_at.insert(namespace.to_string(), Utc::now());

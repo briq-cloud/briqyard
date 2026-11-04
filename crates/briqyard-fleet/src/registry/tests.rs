@@ -8,6 +8,7 @@ fn host(id: &str, cap: u32, used: u32, machines: usize) -> HostRec {
         named_memory_fork_v1: false,
         named_memory_profiles: Vec::new(),
         warm_pool_profiles: Vec::new(),
+        runtime_classes: Vec::new(),
         id: id.into(),
         url: format!("http://{id}:7420"),
         ssh: String::new(),
@@ -594,4 +595,53 @@ fn cpu_holds_reserve_fractional_slots_and_cpu_full_hosts_are_not_placed() {
     );
     reg.hosts.get_mut("fraction").unwrap().capacity.cpu_millis = None;
     assert!(reg.place("legacy", "", 128, 0, 250, &policy).is_none());
+}
+
+#[test]
+fn a_class_is_placed_on_a_host_that_serves_it_and_default_avoids_nested() {
+    let now = Utc::now();
+    let mut reg = Registry::default();
+    let mut with = host("with", 100_000, 50_000, 1);
+    with.runtime_classes = vec![api::RuntimeClassInfo {
+        name: "nested".into(),
+        nested: true,
+        ..Default::default()
+    }];
+    reg.heartbeat(with, now);
+    reg.heartbeat(host("without", 100_000, 80_000, 1), now);
+    let with_class = |class: &str| Policy {
+        runtime_class: class.into(),
+        ..Policy::default()
+    };
+    // `with` has the most room, and the only one that serves nested.
+    assert_eq!(
+        reg.place("t1", "", 512, 0, 0, &with_class("nested"))
+            .as_deref(),
+        Some("with")
+    );
+    assert_eq!(reg.place("t2", "", 512, 0, 0, &with_class("gvisor")), None);
+    // A default namespace goes to `without` while it has room, whatever the memory says.
+    assert_eq!(
+        reg.place("t3", "", 512, 0, 0, &with_class("")).as_deref(),
+        Some("without")
+    );
+    assert_eq!(
+        reg.place("t4", "", 512, 0, 0, &with_class("default"))
+            .as_deref(),
+        Some("without")
+    );
+    // And to `with` when `without` has none.
+    assert_eq!(
+        reg.place("t5", "", 30_000, 0, 0, &with_class(""))
+            .as_deref(),
+        Some("with")
+    );
+    let h = &reg.hosts["without"];
+    assert_eq!(h.without_class("t3", ""), None);
+    assert_eq!(h.without_class("t3", "default"), None);
+    assert_eq!(
+        h.without_class("t3", "nested").as_deref(),
+        Some("namespace t3 is on host without, which does not serve runtime class nested")
+    );
+    assert_eq!(reg.hosts["with"].without_class("t1", "nested"), None);
 }

@@ -14,6 +14,7 @@ fn record(id: &str, from: Option<&str>) -> api::Backup {
         bytes: 3,
         incremental: from.is_some(),
         size: None,
+        runtime_class: String::new(),
         disks: vec![api::BackupDisk {
             disk: "root".into(),
             key: format!("backups/m_1/root/{id}.zfs"),

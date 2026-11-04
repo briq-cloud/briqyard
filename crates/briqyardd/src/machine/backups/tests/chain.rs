@@ -15,6 +15,7 @@ fn disk(name: &str, id: &str, from: Option<&str>) -> api::BackupDisk {
 fn b(id: &str, from: Option<&str>) -> api::Backup {
     api::Backup {
         size: None,
+        runtime_class: String::new(),
         id: id.into(),
         machine_id: "m_1".into(),
         namespace: "t".into(),

@@ -29,6 +29,7 @@ pub async fn run(cfg: FleetClient, api_token: String, tls_fingerprint: String, m
             named_memory_fork_v1: !mgr.named_memory_profiles().is_empty(),
             named_memory_profiles: mgr.named_memory_profiles(),
             warm_pool_profiles: mgr.warm_pool_profiles(),
+            runtime_classes: mgr.runtime_classes(),
             id: mgr.host_id().to_string(),
             url: cfg.advertise.clone(),
             region: cfg.region.clone(),
